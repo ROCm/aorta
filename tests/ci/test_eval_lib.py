@@ -97,7 +97,9 @@ def test_serving_metrics_are_gateable():
         "median_tpot_ms",
         "p99_tpot_ms",
         "median_itl_ms",
+        "p99_itl_ms",
         "median_e2el_ms",
+        "p99_e2el_ms",
     ):
         assert eval_lib.metric_policy(name) == "max", name
     for name in ("output_throughput", "total_token_throughput", "request_throughput"):

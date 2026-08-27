@@ -493,9 +493,23 @@ filesystem before TokenSpeed ever saw it.
 
 `ts_bench_serve.sh` decodes the array through a NUL-separated stream — the one
 delimiter that cannot occur inside an argument — into a Bash array, and the
-owned-flag guard above runs over that array, so a flag is matched exactly rather
-than by substring. Setting either variable by hand means writing JSON:
+owned-flag guard above runs over that array, so a flag is matched as an argument
+rather than as text that might appear inside someone's `--extra-body` JSON.
+Setting either variable by hand means writing JSON:
 `TS_BENCH_ARGS='["--foo","bar baz"]'`. Anything else exits 64 saying so.
+
+The guard also rejects **abbreviations**. Python's argparse resolves any
+unambiguous prefix by default, so `--max-conc 1` sets `--max-concurrency`
+without ever matching an exact-spelling denylist — the same green-cell-wrong-run
+outcome as the spaced form, arriving by a spelling the list did not contain. We
+could not confirm the upstream CLI's `allow_abbrev` setting from outside the
+image, so the guard fails closed: any extra argument that is a strict prefix of
+an owned flag is refused. That costs nothing if abbreviation is disabled
+upstream, since such a spelling would then just be an unrecognised flag, and a
+CLI with abbreviation enabled could not offer a strict prefix of an owned flag
+as a distinct option anyway — it would be ambiguous with the owned one. Flags
+that merely *contain* an owned flag as their own prefix, like `--seed-offset`,
+are unaffected.
 
 Reordering would fix the precedence but leave the override silently ignored,
 which is its own trap, so `ts_bench_serve.sh` rejects these by name with exit 64
@@ -711,11 +725,16 @@ failure rather than the staging mistake it is.
 from the conversations. They are not sent to the container, and they are
 published as `null` rather than as the recipe's defaults: reporting them would
 label the result with a shape the run did not have, and a matrix mixing the two
-datasets would compare those labels as though they meant the same thing. The
-TPOT audit follows the same rule — under `random` it asks whether `output_len`
-exceeds 1, and under `sharegpt` it asks the export whether more output tokens
-were produced than requests completed, so a step's validity never depends on a
-field the run ignored.
+datasets would compare those labels as though they meant the same thing.
+
+The TPOT audit follows from the same question — does the configuration actually
+determine the output length? Only `random` **with** `ignore_eos: true` does, and
+there the audit asks whether `output_len` exceeds 1. Everywhere else it asks the
+export whether more output tokens were produced than requests completed. That
+covers `sharegpt`, and it also covers `ignore_eos: false`, where the model stops
+at its first EOS token: for a short prompt that can be immediately, so every
+request may emit exactly one token however large `output_len` is, and TPOT is
+genuinely undefined. Keying off `output_len` there rejected a correct export.
 
 ## Not done yet
 

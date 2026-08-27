@@ -40,10 +40,12 @@ ticket: TOKENSPEED-SERVE-GPTOSS
 workload: tokenspeed_serve
 trials: 1
 
-# Three steps for the same reason as the smoke recipe: model load dominates a
-# single short bench, so one step would mostly measure loading. It matters more
-# here -- this model loads slower, so a one-step trial would be almost entirely
-# load time.
+# Three steps for the same reason as the smoke recipe: variance. Measured steps
+# all run against one already-started server, after the default whole-step
+# warmup, so none of them includes model loading -- startup is measured
+# separately and reported as server_startup_sec. What a single step cannot give
+# is any sense of spread, and it matters more at this size, where MoE routing
+# and KV-cache pressure make step-to-step variation larger than on Qwen3-0.6B.
 steps: 3
 
 workload_config:

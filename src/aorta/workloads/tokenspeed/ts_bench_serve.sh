@@ -168,9 +168,24 @@ for item in json.loads(os.environ["TS_ARGS_RAW"]):
 ')
 }
 
-# reject_owned_flags <label> <flag-list-terminator> -- <arg>... -- <owned>...
+# reject_owned_flags <label> <arg>... -- <owned>...
 # Operates on the decoded argv rather than on a joined string, so a flag can be
 # recognised exactly rather than by substring.
+#
+# Matches abbreviations as well as exact spellings. Python's argparse resolves
+# any unambiguous prefix by default (allow_abbrev=True), so if the upstream CLI
+# is argparse-based then `--max-conc 1` sets --max-concurrency without ever
+# matching an exact-only denylist -- and that is the mislabeled pass this guard
+# exists to stop: the applied load changes while the host still publishes the
+# configured cap, every request completes, and the cell goes green describing a
+# run that did not happen. The count-changing flags fail closed via the
+# shortfall audit; the load-shape ones do not.
+#
+# Failing closed on prefixes costs nothing if the CLI disables abbreviation. The
+# rejected spelling would then simply be an unrecognised flag, and the only
+# extra argument this refuses is one that is a strict prefix of a flag the
+# workload owns -- which a CLI with abbreviation enabled could not offer as a
+# distinct option anyway, since it would be ambiguous with the owned one.
 reject_owned_flags() {
   local label="$1"
   shift
@@ -188,16 +203,27 @@ reject_owned_flags() {
     fi
   done
   for word in "${args[@]+"${args[@]}"}"; do
+    # Split a `--flag=value` form so the flag half can be prefix-matched.
+    local candidate="${word%%=*}"
+    case "${candidate}" in
+      --?*) ;;
+      *) continue ;;
+    esac
     for flag in "${owned[@]}"; do
-      case "${word}" in
-        "${flag}"|"${flag}="*)
-          echo "TS_BENCH_FAIL: usage ${label} may not set ${flag}"
-          echo "  This script and the host agree on it; overriding it here would"
-          echo "  desynchronise them and the run would fail for an unrelated-"
-          echo "  looking reason. Use the corresponding workload_config field."
-          exit 64
-          ;;
-      esac
+      # `--` alone never abbreviates anything, and a bare `--x` is too short to
+      # be worth guessing at; argparse needs at least one character past the
+      # dashes, which "${flag}" always has.
+      if [ "${candidate}" = "${flag}" ] || [ "${flag#"${candidate}"}" != "${flag}" ]; then
+        echo "TS_BENCH_FAIL: usage ${label} may not set ${flag}"
+        if [ "${candidate}" != "${flag}" ]; then
+          echo "  '${candidate}' is a prefix of it, and argparse resolves an"
+          echo "  unambiguous prefix to the full option."
+        fi
+        echo "  This script and the host agree on it; overriding it here would"
+        echo "  desynchronise them and the run would fail for an unrelated-"
+        echo "  looking reason. Use the corresponding workload_config field."
+        exit 64
+      fi
     done
   done
 }
@@ -640,6 +666,13 @@ for step in $(seq 1 "${WARMUP_STEPS}"); do
 done
 
 for step in $(seq 1 "${BENCH_STEPS}"); do
+  # Announced before the step runs, so the host can tell "the measured phase
+  # began" from "the measured phase produced a parseable export". Those are
+  # different facts and main_work_started is defined as the first one: a step
+  # that ran and wrote corrupt JSON is a benchmark failure, not a trial that
+  # never got started, and classifying it as the latter hides it from the
+  # triage matrix.
+  echo "TS_BENCH_STEP_START: ${step}"
   run_bench_step "bench" "${step}" "step ${step}/${BENCH_STEPS}"
   rc=$?
   if [ "${rc}" -ne 0 ]; then

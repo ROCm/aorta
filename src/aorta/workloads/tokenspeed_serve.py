@@ -134,6 +134,11 @@ _GPU_KFD_NODE = Path("/dev/kfd")
 
 _STARTUP_RE = re.compile(r"^TS_BENCH_METRIC: server_startup_sec=(\d+)", re.MULTILINE)
 
+# Emitted by ts_bench_serve.sh as each measured step begins, so the host can
+# distinguish "the measured phase started" from "the measured phase produced a
+# parseable export". Warmup steps deliberately do not emit it.
+_MEASURED_STEP_START_RE = re.compile(r"^TS_BENCH_STEP_START: \d+", re.MULTILINE)
+
 # Exit codes ts_bench_serve.sh uses, mapped to the reason recorded in
 # ``failure_details``. Kept in lockstep with the script's header comment.
 _EXIT_REASONS: dict[int, str] = {
@@ -157,6 +162,8 @@ _KNOWN_KEYS = frozenset(
         "gateway_startup_timeout_sec",
         "input_len",
         "output_len",
+        "dataset",
+        "dataset_path",
         "max_concurrency",
         "request_rate",
         "num_warmups",
@@ -687,6 +694,15 @@ class TokenSpeedServeWorkload(Workload):
         """
         if isinstance(value, str) and value.strip().lower() in {"inf", "+inf", "infinity"}:
             return "inf"
+        # bool is a subclass of int, so float(True) is 1.0: YAML
+        # `request_rate: true` would otherwise be accepted as one request per
+        # second and run a load nobody asked for. Same coercion already rejected
+        # for the integer fields.
+        if isinstance(value, bool):
+            raise ValueError(
+                f"tokenspeed_serve: request_rate ({value!r}) must be a number "
+                'or "inf", not a boolean'
+            )
         rate = float(value)
         if math.isinf(rate) and rate > 0:
             return "inf"
@@ -748,6 +764,15 @@ class TokenSpeedServeWorkload(Workload):
                 raise ValueError(
                     f"tokenspeed_serve: unknown gate {key!r}; supported gates "
                     f"are {sorted(_GATE_SPECS)}"
+                )
+            # Checked before float(), which maps True to 1.0 -- so a YAML typo
+            # like `max_median_ttft_ms: true` installed a real 1 ms gate that
+            # every run breaches, instead of the finite-number error promised
+            # just below.
+            if isinstance(value, bool):
+                raise ValueError(
+                    f"tokenspeed_serve: gate {key!r} bound ({value!r}) must be "
+                    "a finite positive number, not a boolean"
                 )
             bound = float(value)
             if not math.isfinite(bound) or bound <= 0:
@@ -1361,15 +1386,23 @@ class TokenSpeedServeWorkload(Workload):
         # emits a second token. At one output token there are no intervals to
         # average and an absent or zero value is correct, not a fault.
         #
-        # Which source answers that depends on the dataset. `random` pins the
-        # output length in the recipe and `--ignore-eos` holds it there, so
-        # `output_len` is exact. ShareGPT takes its lengths from the
-        # conversations and the bench CLI never sees `output_len` at all, so
-        # deciding from it would make a ShareGPT step's validity hinge on a
-        # field the run ignored. The export is the only source that knows:
-        # more output tokens than completed requests means at least one
-        # request emitted a second token.
-        if self._dataset == _DEFAULT_DATASET:
+        # Which source answers that depends on whether the configuration
+        # actually determines the output length. `random` *with* `--ignore-eos`
+        # does: the recipe pins the length and ignoring EOS holds it there, so
+        # `output_len` is exact.
+        #
+        # Nothing else does. ShareGPT takes its lengths from the conversations
+        # and the bench CLI never sees `output_len` at all. And `ignore_eos:
+        # false` -- a supported setting -- lets the model stop whenever it emits
+        # an EOS token, which for a short prompt can be immediately, so every
+        # request may produce exactly one token however large `output_len` is.
+        # Deciding from `output_len` in either case makes a step's validity
+        # hinge on a number the run was free to ignore, and rejects a correct
+        # export for not carrying a metric that was genuinely undefined.
+        #
+        # The export is the only source that knows: more output tokens than
+        # completed requests means at least one request emitted a second token.
+        if self._dataset == _DEFAULT_DATASET and self._ignore_eos:
             tpot_defined = self._output_len > 1
         else:
             # Required rather than best-effort, so "we could not tell" is never
@@ -1534,7 +1567,13 @@ class TokenSpeedServeWorkload(Workload):
             try:
                 with path.open(encoding="utf-8") as fh:
                     doc = json.load(fh)
-            except (OSError, json.JSONDecodeError) as exc:
+            # UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so
+            # a truncated or non-UTF-8 export used to propagate out of here and
+            # abort the workload -- losing the steps that did parse, and
+            # reporting a crash where the script's own result_json_unusable
+            # verdict is the accurate one. A corrupt export is exactly the case
+            # this handler exists for.
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 log.warning("tokenspeed_serve: unreadable export %s: %s", path, exc)
                 continue
             if not isinstance(doc, dict):
@@ -1706,13 +1745,20 @@ class TokenSpeedServeWorkload(Workload):
         if records:
             failure_details.extend(self._check_gates(metrics))
 
-        # An exported step means the benchmark measured something, even if it
-        # later failed the served-request audit or a gate -- those are real
-        # observations and belong in the matrix. No export means nothing was
-        # measured (the bring-up failures, exits 50-52 and 64, are what usually
-        # land here), which the matrix reports as did-not-run rather than
-        # folding a non-measurement in as a data point.
-        main_work_started = bool(records)
+        # `main_work_started` is about the measured phase *beginning*, not about
+        # it succeeding -- see WorkloadResult in workloads/_base.py. A parsed
+        # export is sufficient evidence but not necessary: a step that ran and
+        # then wrote truncated or non-UTF-8 JSON is dropped by
+        # _collect_step_records, and reporting did-not-run for it would classify
+        # a benchmark failure as a setup failure and hide it from the triage
+        # matrix entirely. So the script announces each measured step as it
+        # starts, and either signal counts.
+        #
+        # With no export and no marker, nothing was measured -- the bring-up
+        # failures, exits 50-52 and 64, are what land here -- and the matrix
+        # correctly reports did-not-run rather than folding a non-measurement in
+        # as a data point.
+        main_work_started = bool(records) or _MEASURED_STEP_START_RE.search(stdout) is not None
 
         step_times_ms = [
             record.scalars["duration"] * 1000.0

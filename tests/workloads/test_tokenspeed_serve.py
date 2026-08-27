@@ -1442,6 +1442,46 @@ def test_a_mitigation_may_still_set_a_knob_the_workload_does_not_own(tmp_path):
     assert wl._container_env()["TS_SOME_UNOWNED_KNOB"] == "1"
 
 
+def test_the_dataset_fields_are_not_reported_as_unknown(tmp_path, caplog):
+    """Both are documented and consumed, so every valid ShareGPT cell was warned
+    that the fields it depends on were being ignored -- which is both false and
+    exactly the kind of message an operator acts on."""
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        wl = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset))
+        wl.setup()
+
+    assert "dataset" not in caplog.text or "unknown workload_config" not in caplog.text
+    assert wl._dataset == "sharegpt"
+    # The mechanism still works for a genuinely unknown key.
+    with caplog.at_level("WARNING"):
+        _make(tmp_path, definitely_not_a_key=1).setup()
+    assert "definitely_not_a_key" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "config,expected",
+    [
+        ({"request_rate": True}, "request_rate"),
+        ({"request_rate": False}, "request_rate"),
+        ({"gates": {"max_median_ttft_ms": True}}, "max_median_ttft_ms"),
+        ({"gates": {"min_output_throughput": True}}, "min_output_throughput"),
+    ],
+)
+def test_booleans_are_rejected_where_a_number_is_required(tmp_path, config, expected):
+    """`bool` subclasses `int`, so `float(True)` is `1.0`.
+
+    A YAML `request_rate: true` therefore ran one request per second, and
+    `max_median_ttft_ms: true` installed a real 1 ms gate that every run
+    breaches -- in both cases a typo silently became a valid, wrong setting
+    instead of the validation error the docstring promises.
+    """
+    with pytest.raises(ValueError, match=expected):
+        _make(tmp_path, **config).setup()
+
+
 @pytest.mark.parametrize("field", ["serve_args", "bench_args"])
 def test_extra_args_reach_the_container_with_their_boundaries_intact(tmp_path, field):
     """The recipe documents these as lists, so they have to arrive as lists.
@@ -1459,6 +1499,78 @@ def test_extra_args_reach_the_container_with_their_boundaries_intact(tmp_path, f
 
     env_key = "TS_SERVE_ARGS" if field == "serve_args" else "TS_BENCH_ARGS"
     assert json.loads(wl._container_env()[env_key]) == items
+
+
+@pytest.mark.parametrize(
+    "env_key,abbreviation,owned",
+    [
+        ("TS_BENCH_ARGS", "--max-conc", "--max-concurrency"),
+        ("TS_BENCH_ARGS", "--request-r", "--request-rate"),
+        ("TS_BENCH_ARGS", "--se", "--seed"),
+        ("TS_BENCH_ARGS", "--num-prom", "--num-prompts"),
+        ("TS_BENCH_ARGS", "--output-f", "--output-file"),
+        ("TS_SERVE_ARGS", "--po", "--port"),
+        ("TS_BENCH_ARGS", "--max-conc=1", "--max-concurrency"),
+    ],
+)
+def test_an_abbreviated_owned_flag_is_rejected_too(tmp_path, env_key, abbreviation, owned):
+    """argparse resolves any unambiguous prefix unless `allow_abbrev=False`.
+
+    An exact-match denylist therefore let `--max-conc 1` through to set
+    `--max-concurrency`, which is the mislabeled pass this guard exists to
+    stop: the applied load changes while the host publishes the configured cap,
+    every request completes, and the cell goes green describing a run that did
+    not happen. Count-changing flags fail closed via the shortfall audit; the
+    load-shape ones do not.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path),
+            env_key: json.dumps([abbreviation, "somevalue"]),
+        },
+    )
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert f"{env_key} may not set {owned}" in proc.stdout, proc.stdout
+    assert "is a prefix of it" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # Not a prefix of anything owned -- the owned flag is a prefix of *it*,
+        # which argparse treats as a different option entirely.
+        "--seed-offset",
+        "--num-prompts-per-user",
+        # Nothing to do with any owned flag.
+        "--extra-body",
+        "--served-model-name",
+    ],
+)
+def test_a_flag_that_merely_resembles_an_owned_one_is_allowed(tmp_path, extra):
+    """The guard must not become a substring match in the other direction.
+
+    Rejecting anything that shares a prefix with an owned flag would forbid
+    legitimate options, which is the failure mode of the joined-string version
+    this replaced.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path),
+            "TS_BENCH_ARGS": json.dumps([extra, "somevalue"]),
+        },
+    )
+    assert "may not set" not in proc.stdout, proc.stdout
+    # Got past the guard: outside a container the next check is what stops it,
+    # which is the evidence that the flag was accepted rather than rejected.
+    assert "not on PATH inside the container" in proc.stdout, proc.stdout
 
 
 @pytest.mark.parametrize("field", ["serve_args", "bench_args"])
@@ -1558,6 +1670,126 @@ def test_sharegpt_requires_tpot_from_the_export_not_from_output_len(tmp_path, mo
     unusable = [d for d in result.failure_details if d["reason"] == "result_json_unusable"]
     assert unusable, result.failure_details
     assert "tpot" in unusable[0]["detail"]
+
+
+def test_tpot_is_not_required_when_eos_may_end_a_request_early(tmp_path, monkeypatch):
+    """`ignore_eos: false` is supported, and it unpins the output length.
+
+    Without `--ignore-eos` the model stops at its first EOS token, which for a
+    short prompt can be immediately -- so every request may emit exactly one
+    token however large `output_len` is, and TPOT is genuinely undefined. The
+    audit keyed off `output_len > 1` and rejected that correct export.
+    """
+    wl = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False)
+    wl.setup()
+
+    doc = _bench_doc(completed=32, failed=0)
+    # One token per request: no inter-token interval exists to report.
+    doc["total_output_tokens"] = 32
+    doc.pop("mean_tpot_ms", None)
+    doc.pop("median_tpot_ms", None)
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+
+    assert result.passed is True, result.failure_details
+
+    # Still required when the export shows a second token was emitted.
+    wl2 = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False)
+    wl2.setup()
+    doc2 = _bench_doc(completed=32, failed=0)
+    doc2["total_output_tokens"] = 4096
+    doc2.pop("mean_tpot_ms", None)
+    doc2.pop("median_tpot_ms", None)
+    _stub_docker(wl2, monkeypatch, docs=[doc2])
+    result2 = wl2.run()
+
+    assert result2.passed is False
+    assert any(d["reason"] == "result_json_unusable" for d in result2.failure_details)
+
+
+def test_a_corrupt_export_is_a_bench_failure_not_a_crash(tmp_path, monkeypatch):
+    """`UnicodeDecodeError` is neither `OSError` nor `JSONDecodeError`.
+
+    A truncated or non-UTF-8 export therefore escaped the handler and aborted
+    the workload, losing the steps that did parse and reporting a crash where
+    the script's own `result_json_unusable` verdict is the accurate answer.
+    """
+    wl = _make(tmp_path, steps=2, num_prompts=32)
+    wl.setup()
+    wl._run_token = "tok"
+
+    good = wl._out_dir / "bench.tok.step1.json"
+    good.write_text(json.dumps(_bench_doc(completed=32, failed=0)), encoding="utf-8")
+    bad = wl._out_dir / "bench.tok.step2.json"
+    bad.write_bytes(b'{"completed": 32, "failed": 0, "note": "\xff\xfe not utf-8"}')
+
+    records = wl._collect_step_records()
+
+    # Returned rather than raised, and the readable step survived.
+    assert [record.step for record in records] == [1], records
+
+
+def test_a_measured_step_that_started_counts_as_main_work(tmp_path, monkeypatch):
+    """`main_work_started` is about the measured phase beginning.
+
+    It was derived from parsed exports, so a step that ran and then wrote
+    unparseable JSON reported `False` -- classifying a benchmark failure as a
+    did-not-run/setup failure and hiding it from the triage matrix, which
+    refuses step-time and confound analysis for such a cell.
+    """
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    # No exports at all, but the script announced the measured step.
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[],
+        exit_code=54,
+        stdout=(
+            "TS_BENCH_METRIC: server_startup_sec=307\n"
+            "TS_BENCH_STEP_START: 1\n"
+            "TS_BENCH_FAIL: step 1 exported no result JSON\n"
+        ),
+    )
+    result = wl.run()
+
+    assert result.passed is False
+    assert result.main_work_started is True, "a step that ran was reported as never started"
+
+
+def test_a_bringup_failure_still_reports_that_nothing_was_measured(tmp_path, monkeypatch):
+    """The other side of the marker: exits 50-52 never reach a measured step, so
+    the matrix should keep reporting did-not-run rather than folding a
+    non-measurement in as a data point."""
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[],
+        exit_code=51,
+        stdout="TS_BENCH_FAIL: readiness timeout after 900s\n",
+    )
+    result = wl.run()
+
+    assert result.passed is False
+    assert result.main_work_started is False, "a bring-up failure measured nothing"
+
+
+def test_the_script_announces_each_measured_step(tmp_path):
+    """The marker above is a contract between the script and the host, so it is
+    checked where it is produced -- and warmup steps must not emit it."""
+    script = (Path(mod.__file__).with_name("tokenspeed") / "ts_bench_serve.sh").read_text()
+    measured = script.index('run_bench_step "bench" "${step}"')
+    warmup = script.index('run_bench_step "bench-warmup"')
+    marker = "TS_BENCH_STEP_START"
+
+    assert marker in script
+    # Emitted in the measured loop, and the host's regex matches what is emitted.
+    assert mod._MEASURED_STEP_START_RE.search("TS_BENCH_STEP_START: 1")
+    # The only occurrence that drives a step is the measured one.
+    emit = script.index(f'echo "{marker}')
+    assert abs(emit - measured) < abs(emit - warmup), "the marker is on the warmup loop"
 
 
 def test_a_failure_without_a_step_still_points_at_an_iteration(tmp_path, monkeypatch):
