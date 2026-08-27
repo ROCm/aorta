@@ -66,16 +66,48 @@ fi
 # upstream stays behind in the staging directory, and because the recipes name
 # their entry script by filename, a stale copy is not just dead weight -- it is
 # still executable, and a run pointed at the old name succeeds against code that
-# no longer exists in the tree. Scoped to *.sh / *.py rather than wiping the
-# directory, which may also hold caller-owned files (an env file, an out dir).
-rm -f "${dest}"/*.sh "${dest}"/*.py
+# no longer exists in the tree.
+#
+# What gets removed is read from a manifest this script wrote on its last run,
+# not from a `*.sh` / `*.py` glob. `dest` is a positional argument, so the glob
+# deleted whatever happened to match in a directory this script does not own:
+# `stage_scripts.sh /tmp` removed every other user's staging scripts before
+# copying. The manifest keeps the mirror property while limiting deletion to
+# files this script actually put there.
+#
+# First run into an existing directory therefore deletes nothing, which is the
+# right default: with no manifest there is no evidence any of those files came
+# from here.
+manifest="${dest}/.aorta-staged"
+
+if [ -f "${manifest}" ]; then
+  while IFS= read -r staged; do
+    # Basenames only, and re-checked here: a hand-edited manifest must not be
+    # able to reach outside the staging directory.
+    case "${staged}" in
+      ''|*/*|.|..) continue ;;
+    esac
+    rm -f "${dest:?}/${staged}"
+  done < "${manifest}"
+fi
 rm -rf "${dest}/__pycache__"
 
 cp "${src}"/*.sh "${src}"/*.py "${dest}/"
 chmod +x "${dest}"/*.sh
 
+# Written after the copy so an interrupted run cannot leave a manifest naming
+# files that were never staged.
+for f in "${src}"/*.sh "${src}"/*.py; do
+  basename "${f}"
+done > "${manifest}"
+
 echo "stage_scripts: staged to ${dest}"
-for f in "${dest}"/*.sh "${dest}"/*.py; do
+# Iterating the manifest rather than globbing `dest`, for the same reason the
+# removal above does: in a shared directory the glob would also pick up files
+# this script never staged, and a syntax error in one of those would fail the
+# staging run with exit 65.
+while IFS= read -r staged; do
+  f="${dest}/${staged}"
   # Syntax-check here rather than discovering a typo inside a container, where
   # the only symptom is a failed trial.
   case "${f}" in
@@ -86,8 +118,8 @@ for f in "${dest}"/*.sh "${dest}"/*.py; do
     echo "stage_scripts: syntax error in ${f}" >&2
     exit 65
   }
-  printf '  %s (%s bytes)\n' "$(basename "${f}")" "$(stat -c%s "${f}")"
-done
+  printf '  %s (%s bytes)\n' "${staged}" "$(stat -c%s "${f}")"
+done < "${manifest}"
 # py_compile drops caches next to the source; they would otherwise be copied
 # into the container on the next run for no reason.
 rm -rf "${dest}/__pycache__"

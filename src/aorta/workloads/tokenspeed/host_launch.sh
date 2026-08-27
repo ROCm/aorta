@@ -211,9 +211,18 @@ echo "host_launch: image=${TS_IMAGE} entry=${ENTRY} gpus=${GPUS} token=${RUN_TOK
 # foreground docker *client* does not stop the daemon-managed container: a
 # timed-out trial could otherwise leave a server holding the GPUs and the
 # gateway port for every later cell. The name gives us a handle to stop it.
+#
+# Minted per launcher process rather than taken from TS_RUN_TOKEN. The token is
+# caller-controlled and may deliberately be reused to correlate artifacts across
+# trials, but the name is what cleanup falls back to when the daemon never wrote
+# the cidfile -- and `docker run` not writing one is exactly what happens when
+# the name is already taken. A reused token would then have this trial's EXIT
+# trap force-remove the *other* trial's container. The token still leads the
+# name so a human reading `docker ps` can tie the two together.
+#
 # Sanitized: a caller-supplied TS_RUN_TOKEN is free-form, and docker only accepts
 # [a-zA-Z0-9][a-zA-Z0-9_.-]* for a name.
-CONTAINER="aorta-ts-$(printf '%s' "${RUN_TOKEN}" | tr -c 'a-zA-Z0-9_.-' '-')"
+CONTAINER="aorta-ts-$(printf '%s' "${RUN_TOKEN}" | tr -c 'a-zA-Z0-9_.-' '-').$$.${RANDOM}"
 
 # The daemon writes the container id here, so cleanup can target the exact
 # container this trial started rather than trusting that a name still refers to
