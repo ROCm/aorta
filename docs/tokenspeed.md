@@ -449,7 +449,7 @@ First provision the RocJITsu binaries (see the
 needs a GitHub token with `actions:read`):
 
 ```bash
-python download_sanitizer_artifacts.py --dest ./rocjitsu-sanitizers
+python3 scripts/sanitizers/download_sanitizer_artifacts.py --dest ./rocjitsu-sanitizers
 export ROCJITSU_PREBUILT="$PWD/rocjitsu-sanitizers"
 ```
 
@@ -653,7 +653,7 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 82 tests (64 functions, the rest
+`tests/probe/test_tokenspeed_probe.py` — 94 tests (70 functions, the rest
 parametrised cases), no GPU or container required. A test asserts this count
 matches the file, since it went stale twice during review.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,

@@ -215,32 +215,55 @@ echo "host_launch: image=${TS_IMAGE} entry=${ENTRY} gpus=${GPUS} token=${RUN_TOK
 # [a-zA-Z0-9][a-zA-Z0-9_.-]* for a name.
 CONTAINER="aorta-ts-$(printf '%s' "${RUN_TOKEN}" | tr -c 'a-zA-Z0-9_.-' '-')"
 
-# Only on the signal paths. If the docker client exits on its own -- pass or
-# fail -- the daemon has already reaped the container via --rm, so an
-# unconditional cleanup would add a pointless `docker rm` to every trial. What
-# needs handling is being killed *before* the client returns, which is exactly
-# when the daemon is left holding the container.
-#
-# A SIGKILL cannot be trapped, so nothing here helps in that case; aorta sends
-# SIGTERM first and escalates 10s later, which is the window this uses. (The
-# same limit applies to a --cidfile approach.)
+# The daemon writes the container id here, so cleanup can target the exact
+# container this trial started rather than trusting that a name still refers to
+# it. mktemp -u only reserves the name: docker refuses to start if the cidfile
+# already exists.
+CID_FILE="$(mktemp -u "${TMPDIR:-/tmp}/aorta-ts-cid.XXXXXXXX")"
+
+# Idempotent, because it runs from both a signal trap and the EXIT trap below.
+cleanup_container() {
+  local cid=""
+  if [ -s "${CID_FILE}" ]; then
+    cid="$(cat "${CID_FILE}" 2>/dev/null || true)"
+  fi
+  # `docker rm -f` covers both the running and already-exited cases, so no
+  # separate stop is needed. Falling back to the name matters when the client
+  # died before the daemon wrote the cidfile.
+  docker rm -f "${cid:-${CONTAINER}}" >/dev/null 2>&1 || true
+  rm -f "${CID_FILE}" 2>/dev/null || true
+}
+
 on_signal() {
   echo "host_launch: received ${1}; stopping container ${CONTAINER}" >&2
-  # `docker rm -f` covers both the running and already-exited cases, so no
-  # separate stop is needed.
-  docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+  cleanup_container
   exit 143
 }
 trap 'on_signal SIGINT' INT
 trap 'on_signal SIGTERM' TERM
+trap 'on_signal SIGHUP' HUP
 
-# --ipc=host + a large shm are needed because tokenspeed's scheduler and
-# detokenizer talk over shared memory; the 64MB default makes the server die
-# during startup with an opaque bus error.
+# EXIT covers what the signal traps cannot: a docker *client* that dies on its
+# own -- an API disconnect, a daemon restart, an OOM-killed client -- returns
+# from `wait` with the daemon still running the container, and `--rm` only
+# fires once the container itself exits. On the ordinary pass/fail path the
+# container is already reaped, so this costs one no-op `docker rm`, which is
+# worth paying to never strand a GPU container.
+#
+# A SIGKILL cannot be trapped, so nothing here helps in that case; aorta sends
+# SIGTERM first and escalates 10s later, which is the window this uses.
+trap 'cleanup_container' EXIT
+
+# A large shm is needed because tokenspeed's scheduler and detokenizer talk over
+# shared memory and the 64MB default makes the server die during startup with an
+# opaque bus error. --shm-size alone supplies that: processes inside one
+# container already share a private IPC namespace, so --ipc=host would only add
+# node-wide shared memory and semaphore visibility for a third-party image.
 docker run --rm \
+  --cidfile "${CID_FILE}" \
   --name "${CONTAINER}" \
   --network "${NETWORK}" \
-  --ipc=host --shm-size=16g \
+  --shm-size=16g \
   --device=/dev/kfd --device=/dev/dri \
   --group-add video --group-add render \
   --security-opt seccomp=unconfined \

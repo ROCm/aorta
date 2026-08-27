@@ -75,6 +75,20 @@ case "${MIN_PASSED}" in
     exit 64
     ;;
 esac
+# All-digits is not enough: `[ -lt ]` evaluates arithmetically, so a leading
+# zero is read as octal (`08` aborts with "invalid octal number" and exit 1
+# rather than the documented 64) and a value past 2^63 wraps back into range.
+case "${MIN_PASSED}" in
+  0) ;;
+  0*)
+    echo "TS_PYTEST_FAIL: usage TS_MIN_PASSED must not have leading zeros, got '${MIN_PASSED}'"
+    exit 64
+    ;;
+esac
+if [ "${#MIN_PASSED}" -gt 10 ]; then
+  echo "TS_PYTEST_FAIL: usage TS_MIN_PASSED is too large to evaluate, got '${MIN_PASSED}'"
+  exit 64
+fi
 if [ "${MIN_PASSED}" -lt 1 ]; then
   echo "TS_PYTEST_FAIL: usage TS_MIN_PASSED must be >= 1, got '${MIN_PASSED}'"
   echo "  0 would disable the all-skipped guard, which is the only check that"
@@ -192,8 +206,21 @@ if [ "${failures}" -gt 0 ] || [ "${errors}" -gt 0 ]; then
   exit 40
 fi
 
-# The silent-pass guard. Reached only when pytest itself was happy, which is
-# exactly the case that needs it: rc=0 with nothing executed.
+# Before the all-skipped guard, because a pytest that failed internally -- a
+# usage error, a collection error, a plugin dying at teardown -- can still write
+# a zero-test report, and the guard below would then call that "nothing_executed"
+# (exit 41, a selection problem) when it is really a pytest failure (exit 40).
+#
+# rc=5 is the one nonzero code that genuinely belongs to the guard: it is
+# pytest's "no tests collected", which is exactly what an over-narrow -k or an
+# all-skipped suite produces. Everything else is a failure of the run itself.
+if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 5 ]; then
+  echo "TS_PYTEST_FAIL: pytest_rc_${rc} with no failures in report"
+  exit 40
+fi
+
+# The silent-pass guard. Reached only when pytest itself was happy (rc=0) or
+# said it collected nothing (rc=5), which is exactly the case that needs it.
 if [ "${passed}" -lt "${MIN_PASSED}" ]; then
   echo "TS_PYTEST_FAIL: nothing_executed passed=${passed} skipped=${skipped} required=${MIN_PASSED}"
   echo "  pytest exits 0 when every test is skipped or deselected. Check the"
@@ -202,9 +229,8 @@ if [ "${passed}" -lt "${MIN_PASSED}" ]; then
   exit 41
 fi
 
-# rc can still be non-zero here for reasons the report does not describe, such
-# as an internal pytest error or a plugin failing at teardown. Surface it rather
-# than declaring a pass on the counts alone.
+# Only rc=5 can still reach here, and only if the report credits passing tests
+# that pytest says it never collected. That disagreement is not a pass.
 if [ "${rc}" -ne 0 ]; then
   echo "TS_PYTEST_FAIL: pytest_rc_${rc} with no failures in report"
   exit 40
