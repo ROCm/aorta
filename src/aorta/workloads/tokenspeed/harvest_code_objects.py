@@ -562,16 +562,28 @@ def _default_consan_loader() -> Path:
 
 
 def _asset_stem(kernel: dict) -> str:
-    """Filename stem for one harvested identity: digest and index only.
+    """Filename stem for one harvested identity.
 
     ``kernel['name']`` is whatever Waitcheck read out of a third-party image's
     code object, so it is untrusted input. Interpolating it into a filename let
     a name containing ``../`` -- or a leading ``/`` -- place the staged object,
-    the shim and the recipe outside the harvest directory. The digest already
-    identifies the object and the index disambiguates kernels sharing one, so
-    the name is carried as recipe data only, never as a path component.
+    the shim and the recipe outside the harvest directory. The name is therefore
+    carried as recipe data only, never as a path component.
+
+    Digest and index alone were not enough to name an identity, though. Several
+    kernels commonly live in one code object at one index and differ only by
+    entry -- which is the case this harvester exists to handle, since it is what
+    ``entry_offset`` is carried for -- so they shared a stem, and each one's
+    shim, staged object and recipe overwrote the previous one's while the
+    manifest still listed them all. The run then reported N recipes of which
+    only the last was the kernel it named. The identity is completed with a
+    digest of the parts that vary within an object: the name, hashed rather than
+    interpolated so it stays out of the path, and the entry offset.
     """
-    return f"{kernel['sha256'][:12]}.{int(kernel['code_object_index'])}"
+    entry = hashlib.sha256(
+        "\0".join((str(kernel["name"]), str(kernel.get("entry_offset")))).encode()
+    ).hexdigest()[:12]
+    return f"{kernel['sha256'][:12]}.{int(kernel['code_object_index'])}.{entry}"
 
 
 def _ensure_within(base: Path, *candidates: Path) -> None:

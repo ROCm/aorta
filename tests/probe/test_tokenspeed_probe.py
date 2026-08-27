@@ -935,6 +935,39 @@ def test_pytest_probe_passes_and_reports_counts(bash: str, tmp_path: Path) -> No
     assert "TS_PYTEST_RESULT: pass" in proc.stdout
 
 
+def test_pytest_probe_extra_args_cannot_redirect_the_report(bash: str, tmp_path: Path) -> None:
+    """`TS_PYTEST_ARGS` used to come after the probe's own `--junit-xml`.
+
+    argparse takes the last occurrence, so a caller-supplied `--junitxml` sent
+    the report elsewhere and the probe read whatever was already at its own
+    path. With a reused `TS_RUN_TOKEN` that is a previous run's XML, and the
+    trial returned that run's verdict -- green, for a suite that just failed.
+    Driven exactly that way: a stale passing report is planted at the path this
+    token resolves to, and the suite underneath it fails.
+    """
+    workspace = _fake_workspace(tmp_path, "def test_bad():\n    assert False\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "pytest.reused-token.xml"
+    stale.write_text(
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" '
+        'errors="0" failures="0" skipped="0" tests="7" time="1.0"/></testsuites>'
+    )
+
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        out,
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+        TS_RUN_TOKEN="reused-token",
+        TS_PYTEST_ARGS=f"--junitxml={tmp_path / 'elsewhere.xml'}",
+    )
+
+    assert proc.returncode == _EXIT_PYTEST_FAILED, proc.stdout + proc.stderr
+    assert "TS_PYTEST_FAIL: tests_failed" in proc.stdout
+    assert "tests_passed=7" not in proc.stdout, "the stale report was read"
+
+
 def test_pytest_probe_fails_the_trial_on_a_test_failure(bash: str, tmp_path: Path) -> None:
     workspace = _fake_workspace(tmp_path, "def test_bad():\n    assert False\n")
     proc = _run_pytest_probe(
@@ -1264,13 +1297,13 @@ def test_harvest_consan_recipe_pins_the_identity_and_the_shim(tmp_path: Path) ->
     assert plan["source"]["kind"] == "kernel"
     assert plan["source"]["kernel"]["name"] == "_fwd_kernel"
     assert plan["source"]["kernel"]["code_object_sha256"] == kernels[0]["sha256"]
-    # Digest and index, never the kernel name: the name is read out of a
-    # third-party binary, so putting it in a path let `../` in a name place the
-    # shim, the staged object or the recipe outside the harvest directory. It
-    # survives as recipe data, which is where it is actually needed.
-    assert plan["source"]["consan_command"].endswith(
-        f"consan_{kernels[0]['sha256'][:12]}.{kernels[0]['code_object_index']}"
-    )
+    # Digests, never the kernel name: the name is read out of a third-party
+    # binary, so putting it in a path let `../` in a name place the shim, the
+    # staged object or the recipe outside the harvest directory. It survives as
+    # recipe data, which is where it is actually needed. The stem also covers
+    # the entry, since kernels sharing an object share the object's digest.
+    assert plan["source"]["consan_command"].endswith(f"consan_{module._asset_stem(kernels[0])}")
+    assert plan["source"]["consan_command"].startswith(str(tmp_path))
     assert plan["policy"]["consan_policy"] == "lenient"
 
 
@@ -1537,6 +1570,45 @@ def test_harvest_clears_staged_objects_on_reharvest(tmp_path: Path) -> None:
     fresh = tmp_path / "fresh" / "code_objects"
     module._reset_dir(fresh)
     assert fresh.is_dir()
+
+
+def test_harvest_keeps_kernels_sharing_one_code_object_apart(tmp_path: Path) -> None:
+    """Digest and index do not identify a kernel; entry does.
+
+    Several kernels commonly sit in one code object at one index and differ only
+    by entry offset and name -- the case `entry_offset` is carried for in the
+    first place. They shared a filename stem, so each one's shim, staged object
+    and recipe overwrote the previous one's, and the harvest reported three
+    recipes of which only the last matched the kernel it named.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    shared = _fake_kernels(1, tmp_path / "cache")[0]
+    kernels = [
+        {**shared, "name": "_fwd_kernel", "entry_offset": 0},
+        {**shared, "name": "_helper_kernel", "entry_offset": 4096},
+        # Same object and index again, and the same name: only the entry differs.
+        {**shared, "name": "_fwd_kernel", "entry_offset": 8192},
+    ]
+    stems = {module._asset_stem(kernel) for kernel in kernels}
+    assert len(stems) == 3, stems
+
+    module._write_consan_assets(dest, kernels, "gfx950", loader, "lenient", None)
+
+    recipes = sorted((dest / "consan").glob("consan-*.yaml"))
+    assert len(recipes) == 3, [p.name for p in recipes]
+    named = [
+        yaml.safe_load(path.read_text())["sanitizer_plan"]["source"]["kernel"]["entry_offset"]
+        for path in recipes
+    ]
+    assert sorted(named) == [0, 4096, 8192], named
+    # The names must stay out of the path even though they now take part in the
+    # identity: the stem carries a digest of them, not the strings.
+    assert not [p for p in recipes if "kernel" in p.name], [p.name for p in recipes]
 
 
 @pytest.mark.parametrize(
@@ -2352,6 +2424,51 @@ def test_stage_scripts_only_deletes_what_it_staged(bash: str, tmp_path: Path) ->
         text=True,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_stage_scripts_writes_the_manifest_without_following_a_symlink(
+    bash: str, tmp_path: Path
+) -> None:
+    """`>` follows a symlink, and `dest` may be a shared directory.
+
+    Another user could pre-create `.aorta-staged` pointing at any file the
+    caller can write, and the manifest write would then truncate it. The
+    manifest goes to a `mktemp` file in the destination and is renamed over the
+    path, and a manifest that is already a symlink is refused rather than read
+    -- its contents drive a deletion loop.
+    """
+    dest = tmp_path / "shared"
+    dest.mkdir()
+    victim = tmp_path / "precious.txt"
+    victim.write_text("do not truncate me\n")
+    (dest / ".aorta-staged").symlink_to(victim)
+
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert "symlink" in proc.stderr
+    assert victim.read_text() == "do not truncate me\n", "the manifest write followed a link"
+
+
+def test_stage_scripts_leaves_no_temporary_manifest_behind(bash: str, tmp_path: Path) -> None:
+    """The rename is what makes the write atomic; the temporary must not linger,
+    or a shared staging directory accumulates one per run and the next glob-free
+    reader has several manifests to choose from."""
+    dest = tmp_path / "staged"
+    dest.mkdir()
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (dest / ".aorta-staged").is_file()
+    assert not list(dest.glob(".aorta-staged.*")), "temporary manifest left behind"
 
 
 @pytest.mark.parametrize("spelling", ["plain", "trailing_slash", "relative", "symlink"])
