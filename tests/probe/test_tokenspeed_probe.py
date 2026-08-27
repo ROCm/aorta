@@ -142,11 +142,18 @@ def _run_host_launch_with_docker_stub(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     record = tmp_path / f"argv.{tag}"
+    calls = tmp_path / f"calls.{tag}"
     stub = bin_dir / "docker"
+    # Only `run` goes to the argv record. host_launch.sh now force-removes the
+    # container from an EXIT trap, so an unfiltered stub would overwrite the
+    # launch argv with the teardown's. Every subcommand is appended to `calls`
+    # so the teardown itself can still be asserted on.
     stub.write_text(
         "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
         'if [ "$1" = "image" ]; then exit 0; fi\n'
-        f'printf "%s\\n" "$@" > "{record}"\n'
+        f'if [ "$1" = "run" ]; then printf "%s\\n" "$@" > "{record}"; fi\n'
+        "exit 0\n"
     )
     stub.chmod(0o755)
 
@@ -435,6 +442,42 @@ def test_host_launch_forwards_a_unique_run_token(bash: str, tmp_path: Path) -> N
     assert first not in ("1", ""), f"token {first!r} is not per-trial"
 
 
+def test_host_launch_removes_the_container_even_without_a_signal(
+    bash: str, tmp_path: Path
+) -> None:
+    """`--rm` only fires once the container exits, so it is not enough.
+
+    The signal traps cover being killed mid-trial, but a docker *client* that
+    dies on its own -- an API disconnect, a daemon restart, an OOM-killed
+    client -- returns normally while the daemon keeps running the container,
+    stranding a GPU for every later cell. An EXIT trap is what closes that gap;
+    on the ordinary path it costs one no-op `docker rm`.
+    """
+    argv = _run_host_launch_with_docker_stub(bash, tmp_path, "exit-cleanup")
+    calls = (tmp_path / "calls.exit-cleanup").read_text().splitlines()
+
+    container = next(
+        argv.splitlines()[index + 1]
+        for index, line in enumerate(argv.splitlines())
+        if line == "--name"
+    )
+    assert any(
+        call.startswith("rm -f ") and container in call for call in calls
+    ), f"no teardown for {container}; docker was called with:\n{calls}"
+
+
+def test_host_launch_does_not_share_the_host_ipc_namespace(bash: str, tmp_path: Path) -> None:
+    """Processes in one container already share a private IPC namespace.
+
+    `--shm-size=16g` is what tokenspeed's scheduler and detokenizer actually
+    need; `--ipc=host` additionally exposed node-wide shared memory and
+    semaphores to a third-party image, which buys nothing.
+    """
+    argv = _run_host_launch_with_docker_stub(bash, tmp_path, "ipc").splitlines()
+    assert "--shm-size=16g" in argv
+    assert not [line for line in argv if line.startswith("--ipc")], argv
+
+
 def test_host_launch_respects_a_caller_supplied_token(bash: str, tmp_path: Path) -> None:
     """An explicit TS_RUN_TOKEN wins, so a caller can correlate artifacts."""
     bin_dir = tmp_path / "bin"
@@ -444,7 +487,8 @@ def test_host_launch_respects_a_caller_supplied_token(bash: str, tmp_path: Path)
     stub.write_text(
         "#!/usr/bin/env bash\n"
         'if [ "$1" = "image" ]; then exit 0; fi\n'
-        f'printf "%s\\n" "$@" > "{record}"\n'
+        f'if [ "$1" = "run" ]; then printf "%s\\n" "$@" > "{record}"; fi\n'
+        "exit 0\n"
     )
     stub.chmod(0o755)
     scripts = tmp_path / "scripts"
@@ -900,12 +944,17 @@ def test_pytest_probe_rejects_an_all_skipped_run(bash: str, tmp_path: Path) -> N
 
 # An empty value is deliberately absent from this list: `${TS_MIN_PASSED:-1}`
 # treats empty as unset, which is the right reading of `TS_MIN_PASSED=`.
-@pytest.mark.parametrize("value", ["0", "abc", "-1", "1.5"])
+@pytest.mark.parametrize("value", ["0", "abc", "-1", "1.5", "08", "9" * 25])
 def test_pytest_probe_rejects_an_unusable_min_passed(bash: str, tmp_path: Path, value: str) -> None:
     """TS_MIN_PASSED is what the all-skipped guard compares against, so an
     unusable value disables the guard rather than being merely wrong: 0 passes
     trivially, and a non-numeric makes `[` error out -- which, because pytest
-    itself returned 0, also falls through to a green trial."""
+    itself returned 0, also falls through to a green trial.
+
+    `08` and the 25-digit value are all-digits, so they clear the character
+    check and reach `[ -lt ]`, which evaluates arithmetically: the first is read
+    as an invalid octal literal and aborts with exit 1, the second wraps past
+    2^63. Both must be usage errors instead."""
     workspace = _fake_workspace(tmp_path, "def test_ok():\n    assert True\n")
     proc = _run_pytest_probe(
         bash,
@@ -915,7 +964,7 @@ def test_pytest_probe_rejects_an_unusable_min_passed(bash: str, tmp_path: Path, 
         TS_MIN_PASSED=value,
     )
     assert proc.returncode == _EXIT_USAGE, proc.stdout
-    assert "TS_MIN_PASSED must be" in proc.stdout
+    assert "usage TS_MIN_PASSED" in proc.stdout
 
 
 def test_pytest_probe_accepts_a_valid_min_passed(bash: str, tmp_path: Path) -> None:
@@ -928,6 +977,41 @@ def test_pytest_probe_accepts_a_valid_min_passed(bash: str, tmp_path: Path) -> N
         TS_MIN_PASSED="1",
     )
     assert proc.returncode == 0, proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("08000", "must not have leading zeros"),
+        ("0" * 3 + "8000", "must not have leading zeros"),
+        ("9" * 23, "too large to evaluate"),
+        ("abc", "must be a positive integer"),
+        ("80", "must be between"),
+    ],
+)
+def test_serve_probe_rejects_a_port_bash_cannot_evaluate(
+    bash: str, tmp_path: Path, value: str, expected: str
+) -> None:
+    """All-digits is not the same as safe to hand to `[ -lt ]`.
+
+    The comparison evaluates its operands arithmetically, so `08000` is read as
+    an invalid octal literal -- the script died with exit 1 and `CONTROL_PORT`
+    unbound, which reads as a broken probe rather than the documented usage exit
+    64 -- and a 23-digit value wraps past 2^63 back into an accepted range.
+    Both are operator mistakes and must say so.
+    """
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "ts_serve_probe.sh")],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_PORT": value,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+        },
+    )
+    assert proc.returncode == _EXIT_USAGE, proc.stdout + proc.stderr
+    assert expected in proc.stdout, proc.stdout
 
 
 def test_pytest_probe_rejects_an_empty_selection(bash: str, tmp_path: Path) -> None:
@@ -1151,10 +1235,73 @@ def test_harvest_consan_recipe_pins_the_identity_and_the_shim(tmp_path: Path) ->
     assert plan["source"]["kind"] == "kernel"
     assert plan["source"]["kernel"]["name"] == "_fwd_kernel"
     assert plan["source"]["kernel"]["code_object_sha256"] == kernels[0]["sha256"]
+    # Digest and index, never the kernel name: the name is read out of a
+    # third-party binary, so putting it in a path let `../` in a name place the
+    # shim, the staged object or the recipe outside the harvest directory. It
+    # survives as recipe data, which is where it is actually needed.
     assert plan["source"]["consan_command"].endswith(
-        f"consan__fwd_kernel.{kernels[0]['sha256'][:12]}"
+        f"consan_{kernels[0]['sha256'][:12]}.{kernels[0]['code_object_index']}"
     )
     assert plan["policy"]["consan_policy"] == "lenient"
+
+
+def test_harvest_keeps_a_hostile_kernel_name_out_of_every_path(tmp_path: Path) -> None:
+    """Kernel names come from a third-party image, so they are untrusted input.
+
+    Waitcheck reads them out of the object it was handed. A name containing
+    `../` used to be interpolated straight into the staged-object, shim and
+    recipe paths, so a crafted image could make the harvester write outside
+    `--dest`. Filenames are digest-and-index now; the name is recipe data only.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    dest = tmp_path / "dest"
+    kernels = _fake_kernels(1, tmp_path / "cache")
+    kernels[0]["name"] = "../../../../tmp/pwned"
+
+    module._write_consan_assets(dest, kernels, "gfx950", loader, "lenient", None)
+
+    consan = dest / "consan"
+    written = [path for path in consan.rglob("*") if path.is_file()]
+    assert written, "the assets were still emitted"
+    for path in written:
+        assert consan.resolve() in path.resolve().parents, path
+    assert not (tmp_path / "tmp").exists(), "nothing escaped dest"
+
+    # The name still reaches the recipe, because that is what ConSan selects on;
+    # it is quoted so it cannot reshape the document either.
+    recipe = yaml.safe_load(next(consan.glob("consan-*.yaml")).read_text())
+    assert recipe["sanitizer_plan"]["source"]["kernel"]["name"] == "../../../../tmp/pwned"
+
+
+def test_harvest_replaces_stale_consan_assets(tmp_path: Path) -> None:
+    """Re-harvesting the same --dest must not leave the previous run's recipes.
+
+    The documented way to run these is `for r in consan/consan-*.yaml`, so a
+    recipe left behind by a wider earlier harvest is executed against an object
+    the current manifest does not list -- reporting on kernels this run never
+    harvested.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+    dest = tmp_path / "dest"
+
+    wide = _fake_kernels(3, tmp_path / "cache")
+    module._write_consan_assets(dest, wide, "gfx950", loader, "lenient", None)
+    assert len(sorted((dest / "consan").glob("consan-*.yaml"))) == 3
+
+    # Narrower second pass: one kernel instead of three.
+    module._write_consan_assets(dest, wide[:1], "gfx950", loader, "lenient", None)
+
+    recipes = sorted((dest / "consan").glob("consan-*.yaml"))
+    manifest = json.loads((dest / "consan" / "manifest.json").read_text())
+    assert len(recipes) == 1, "the glob must match the manifest"
+    assert len(manifest["entries"]) == 1
+    assert len(sorted((dest / "consan" / "bin").glob("consan_*"))) == 1
+    assert len(sorted((dest / "consan" / "isa").glob("*.hsaco"))) == 1
 
 
 def test_harvest_consan_default_policy_explains_itself(tmp_path: Path) -> None:
@@ -1413,9 +1560,24 @@ def test_harvest_aborts_when_a_supplied_waitcheck_rejects_the_object(
     assert "--list-kernels failed" in str(excinfo.value)
     assert "bad code object" in str(excinfo.value)
 
-    # Intentionally omitted stays a soft path: no binary, no inventory, no error.
+    # Only an *omitted* binary is a soft path: no binary, no inventory, no error.
     assert module._inventory(None, obj) == []
-    assert module._inventory(tmp_path / "absent", obj) == []
+
+    # A supplied path that does not exist is a typo, not a request for guessed
+    # identities. Returning [] here silently produced the same unverified recipe
+    # the caller passed --waitcheck to avoid.
+    with pytest.raises(SystemExit) as excinfo:
+        module._inventory(tmp_path / "absent", obj)
+    assert "does not exist" in str(excinfo.value)
+
+    # Nor is a binary that runs cleanly but describes no kernels: rc=0 with an
+    # empty inventory would fall through to the same guess.
+    empty = tmp_path / "rj_waitcheck_empty"
+    empty.write_text("#!/usr/bin/env bash\nexit 0\n")
+    empty.chmod(0o755)
+    with pytest.raises(SystemExit) as excinfo:
+        module._inventory(empty, obj)
+    assert "no kernel records" in str(excinfo.value)
 
 
 def test_harvest_names_its_container_so_a_timeout_is_recoverable() -> None:
@@ -1552,9 +1714,10 @@ def test_coverage_map_counts_entry_not_lookup(monkeypatch) -> None:
 def test_coverage_map_counts_a_triton_launch(monkeypatch) -> None:
     """Triton entry points are invoked as `kernel[grid](...)`.
 
-    Subscripting is the launch decision -- what it returns is the launcher -- so
-    the probe has to record there. This is why a `functools.wraps` wrapper will
-    not do: it forwards neither `__getitem__` nor `__module__`.
+    The record belongs on the call, not the subscript: `kernel[grid]` only binds
+    the grid and returns a launcher, so recording there would credit a launch
+    that never happened. This is also why a `functools.wraps` wrapper will not
+    do: it forwards neither `__getitem__` nor `__module__`.
     """
     from collections import defaultdict
 
@@ -1585,6 +1748,46 @@ def test_coverage_map_counts_a_triton_launch(monkeypatch) -> None:
 
     assert launched == [(4, 1, 1)]
     assert entered["k_triton"] == {"launch"}
+
+
+def test_coverage_map_does_not_count_a_grid_binding_as_a_launch(monkeypatch) -> None:
+    """`kernel[grid]` without a call is a lookup, not a dispatch.
+
+    Triton's `__getitem__` binds the grid and hands back a launcher; nothing has
+    run until that launcher is invoked. Recording at the subscript inflated
+    `covered` with kernels a suite only prepared to run -- the same
+    overstatement as counting candidates instead of dispatches, one layer
+    further in -- so this kernel must stay `lookup_only`.
+    """
+    from collections import defaultdict
+
+    module = _coverage_module()
+    entered: dict = defaultdict(set)
+    dispatched: dict = defaultdict(set)
+
+    launched = []
+
+    class JitKernel:
+        __module__ = "tokenspeed_kernel.gluon.attention"
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launched.append(grid)
+
+            return launch
+
+    with _fake_registry(monkeypatch, {"k_triton": JitKernel()}):
+        module._install_probe(entered, dispatched, defaultdict(set), {})
+        from tokenspeed_kernel.registry import KernelRegistry  # type: ignore
+
+        impl = KernelRegistry().get_impl("k_triton")
+        launcher = impl[(4, 1, 1)]
+        # The launcher exists and is inspectable, but was never invoked.
+        assert callable(launcher)
+
+    assert launched == [], "nothing was dispatched"
+    assert not entered, "binding a grid must not count as coverage"
+    assert set(dispatched) == {"k_triton"}, "the lookup itself still counts"
 
 
 def test_coverage_probe_does_not_disturb_the_suites_it_measures(monkeypatch) -> None:

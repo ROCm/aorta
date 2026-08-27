@@ -226,8 +226,11 @@ def _run_kernel(args: argparse.Namespace, cache_dir: Path) -> None:
         "--network",
         args.network,
         # Some MoE and attention tests move data over shared memory; the 64MB
-        # docker default makes them die with an opaque bus error.
-        "--ipc=host",
+        # docker default makes them die with an opaque bus error. --shm-size is
+        # the whole fix -- processes inside one container already share a
+        # private IPC namespace -- so this deliberately does not pass
+        # --ipc=host, which would expose node-wide shared memory and semaphores
+        # to a third-party image for no gain.
         "--shm-size=16g",
         "-w",
         workdir,
@@ -293,8 +296,21 @@ def _inventory(waitcheck: Path | None, obj: Path) -> list[dict]:
     target and entry offsets consistent with what the sanitizer will later
     select on.
     """
-    if waitcheck is None or not waitcheck.exists():
+    # Only an omitted --waitcheck may fall back to guessed identities. When one
+    # is supplied, a typo in the path used to return the same empty inventory
+    # as omitting it, so the run continued on names and indices that were never
+    # verified against the object -- exactly the outcome the caller asked to
+    # avoid by passing the binary. Fail instead, and say which case this is.
+    if waitcheck is None:
         return []
+    if not waitcheck.exists():
+        raise SystemExit(
+            f"harvest: --waitcheck {waitcheck} does not exist. Omit the option to "
+            "harvest with guessed kernel names, or correct the path; a supplied "
+            "binary is required to resolve exact identities."
+        )
+    if not os.access(waitcheck, os.X_OK):
+        raise SystemExit(f"harvest: --waitcheck {waitcheck} is not executable.")
     proc = subprocess.run(
         [str(waitcheck), "--list-kernels", str(obj)],
         capture_output=True,
@@ -322,6 +338,16 @@ def _inventory(waitcheck: Path | None, obj: Path) -> list[dict]:
             continue
         if record.get("kind") == "kernel":
             entries.append(record)
+    if not entries:
+        # rc was 0 but nothing describable came back. Falling through to the
+        # guessed stem here would silently downgrade a run that asked for exact
+        # identities, so treat an empty inventory from a supplied binary as the
+        # failure it is.
+        raise SystemExit(
+            f"harvest: {waitcheck} --list-kernels reported no kernel records for "
+            f"{obj}. Omit --waitcheck to harvest with guessed names instead of "
+            "continuing without verified identities."
+        )
     return entries
 
 
@@ -381,8 +407,8 @@ def _write_recipe(dest: Path, label: str, target: str, kernels: list[dict]) -> P
     for kernel in kernels:
         lines.extend(
             [
-                f"      - name: {kernel['name']}",
-                f"        code_object: {kernel['code_object']}",
+                f"      - name: {_yaml_scalar(kernel['name'])}",
+                f"        code_object: {_yaml_scalar(kernel['code_object'])}",
                 f"        code_object_sha256: {kernel['sha256']}",
                 f"        code_object_index: {kernel['code_object_index']}",
             ]
@@ -427,6 +453,52 @@ def _default_consan_loader() -> Path:
     )
 
 
+def _asset_stem(kernel: dict) -> str:
+    """Filename stem for one harvested identity: digest and index only.
+
+    ``kernel['name']`` is whatever Waitcheck read out of a third-party image's
+    code object, so it is untrusted input. Interpolating it into a filename let
+    a name containing ``../`` -- or a leading ``/`` -- place the staged object,
+    the shim and the recipe outside the harvest directory. The digest already
+    identifies the object and the index disambiguates kernels sharing one, so
+    the name is carried as recipe data only, never as a path component.
+    """
+    return f"{kernel['sha256'][:12]}.{int(kernel['code_object_index'])}"
+
+
+def _ensure_within(base: Path, *candidates: Path) -> None:
+    """Refuse to write anything that resolves outside ``base``.
+
+    A second line of defence behind :func:`_asset_stem`: filenames are derived
+    from a digest now, but this is the check that keeps that property true if a
+    caller-supplied path or a future field ever reintroduces a name into one.
+    """
+    root = base.resolve()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise SystemExit(
+                f"harvest: refusing to write {resolved}, which is outside {root}"
+            )
+
+
+def _ticket_suffix(name: str) -> str:
+    """A ticket-safe rendering of an untrusted kernel name: ``[A-Z0-9-]`` only."""
+    cleaned = "".join(ch if ch.isalnum() else "-" for ch in str(name)).strip("-").upper()
+    return cleaned or "KERNEL"
+
+
+def _yaml_scalar(value: object) -> str:
+    """Quote a value for YAML, so an odd kernel name cannot reshape the recipe.
+
+    JSON's string form is a valid YAML double-quoted scalar, so this both
+    escapes and quotes in one step. Names come from a third-party binary and
+    may contain ``:``, ``#`` or a newline, any of which would otherwise produce
+    a recipe that parses as something other than what was harvested.
+    """
+    return json.dumps(str(value))
+
+
 def _emit_consan_shim(
     loader: Path,
     kernel: dict,
@@ -441,9 +513,11 @@ def _emit_consan_shim(
     its sidecars out of the Triton cache, which is scratch space: without it the
     recipe would point into a directory that the next harvest deletes.
     """
-    stem = f"{kernel['name']}.{kernel['sha256'][:12]}"
+    stem = _asset_stem(kernel)
     staged_object = isa_dir / f"{stem}.hsaco"
     shim = bin_dir / f"consan_{stem}"
+    _ensure_within(isa_dir, staged_object)
+    _ensure_within(bin_dir, shim)
     proc = subprocess.run(
         [
             sys.executable,
@@ -481,8 +555,9 @@ def _write_consan_recipe(
     policy: str,
 ) -> Path:
     """Emit a single-kernel mode: sanitizer recipe driving ConSan via the shim."""
-    stem = f"{kernel['name']}.{kernel['sha256'][:12]}"
+    stem = _asset_stem(kernel)
     recipe_path = consan_dir / f"consan-{stem}.yaml"
+    _ensure_within(consan_dir, recipe_path)
     lines = [
         "# GENERATED by harvest_code_objects.py --consan -- do not commit.",
         "#",
@@ -521,15 +596,15 @@ def _write_consan_recipe(
         [
             "schema_version: 1",
             "mode: sanitizer",
-            f"ticket: TOKENSPEED-CONSAN-{kernel['name'].strip('_').upper().replace('_', '-')}",
+            f"ticket: TOKENSPEED-CONSAN-{_ticket_suffix(kernel['name'])}",
             "",
             "sanitizer_plan:",
             f"  target: {target}",
             "  source:",
             "    kind: kernel",
             "    kernel:",
-            f"      name: {kernel['name']}",
-            f"      code_object: {staged_object}",
+            f"      name: {_yaml_scalar(kernel['name'])}",
+            f"      code_object: {_yaml_scalar(staged_object)}",
             f"      code_object_sha256: {kernel['sha256']}",
             f"      code_object_index: {kernel['code_object_index']}",
             *(
@@ -537,7 +612,7 @@ def _write_consan_recipe(
                 if kernel.get("entry_offset") is not None
                 else []
             ),
-            f"    consan_command: {shim}",
+            f"    consan_command: {_yaml_scalar(shim)}",
             "    consan_log: true",
             "  scope:",
             "    kind: kernel",
@@ -575,6 +650,15 @@ def _write_consan_assets(
             "packaged into the wheel; pass --consan-loader explicitly."
         )
     consan_dir = dest / "consan"
+    # Replace rather than merge. Re-harvesting the same --dest with fewer
+    # kernels, or a smaller --consan-limit, used to leave the previous run's
+    # consan-*.yaml behind, and the documented `for r in consan/consan-*.yaml`
+    # loop then ran those stale recipes against objects the new manifest does
+    # not list. This directory is generated in full on every run and nothing
+    # else writes into it, so clearing it is safe and makes the glob match the
+    # manifest by construction.
+    if consan_dir.exists():
+        shutil.rmtree(consan_dir)
     isa_dir = consan_dir / "isa"
     bin_dir = consan_dir / "bin"
     for directory in (isa_dir, bin_dir):
@@ -735,9 +819,11 @@ def main() -> int:
             shutil.copy2(obj, staged)
         entries = _inventory(waitcheck, staged)
         if not entries:
-            # No inventory means no verified symbol name; fall back to the
-            # original file stem, which the Triton cache names after the kernel.
-            # (staged.stem now carries the digest suffix, so it is not usable.)
+            # Only reachable with --waitcheck omitted -- a supplied binary now
+            # fails rather than returning nothing. No inventory means no
+            # verified symbol name; fall back to the original file stem, which
+            # the Triton cache names after the kernel. (staged.stem now carries
+            # the digest suffix, so it is not usable.)
             candidates = [{"kernel_name": obj.stem, "code_object_index": 0}]
         else:
             candidates = entries

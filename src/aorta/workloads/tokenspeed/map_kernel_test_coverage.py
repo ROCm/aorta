@@ -51,7 +51,7 @@ Mount the staged copy (``stage_scripts.sh`` puts this file there):
   docker run --rm --device=/dev/kfd --device=/dev/dri \
       --group-add video --group-add render \
       --user "$(id -u):$(id -g)" -e USER="$(id -un)" -e HOME=/tmp \
-      --ipc=host --shm-size=16g --security-opt seccomp=unconfined \
+      --shm-size=16g --security-opt seccomp=unconfined \
       -v /tmp/ts-work/scripts:/tools -v /tmp/ts-work/cov:/cov <image> \
       python3 /tools/map_kernel_test_coverage.py --out /cov/coverage.json
 
@@ -136,6 +136,34 @@ def _registry_inventory() -> dict[str, dict[str, str]]:
     }
 
 
+class _LaunchProbe:
+    """What ``kernel[grid]`` returns: records only once the launcher is called.
+
+    Triton's ``JITFunction.__getitem__`` binds the grid and returns a callable;
+    the dispatch happens in that call. Keeping the record here rather than in
+    ``__getitem__`` is what makes ``covered`` mean "was launched" instead of
+    "someone built a launcher", and it keeps the object transparent for suites
+    that inspect the launcher before calling it.
+    """
+
+    __slots__ = ("_aorta_launcher", "_aorta_name", "_aorta_record")
+
+    def __init__(self, launcher: Any, name: str, record: Any) -> None:
+        object.__setattr__(self, "_aorta_launcher", launcher)
+        object.__setattr__(self, "_aorta_name", name)
+        object.__setattr__(self, "_aorta_record", record)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self._aorta_record(self._aorta_name, "launch")
+        return self._aorta_launcher(*args, **kwargs)
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(object.__getattribute__(self, "_aorta_launcher"), attr)
+
+    def __repr__(self) -> str:
+        return repr(self._aorta_launcher)
+
+
 class _EntryProbe:
     """Transparent proxy that records when a kernel is actually entered.
 
@@ -147,11 +175,16 @@ class _EntryProbe:
     candidates instead of dispatches, one layer down.
 
     Both entry paths are recorded: ``proxy(...)`` for an ordinary callable and
-    ``proxy[grid]`` for a Triton entry point, which is invoked as
-    ``kernel[grid](...)``. Subscripting is the launch decision -- the object it
-    returns is the launcher -- so recording there is what makes this work for
-    Triton kernels, and it is why a plain ``functools.wraps`` wrapper would not
-    do (it forwards neither ``__getitem__`` nor much else).
+    ``proxy[grid](...)`` for a Triton entry point. Subscripting alone is *not*
+    an entry -- ``kernel[grid]`` only binds the grid and hands back a launcher
+    object, and a test is free to build one and never call it -- so
+    ``__getitem__`` returns a :class:`_LaunchProbe` and the record happens when
+    that launcher is invoked. Recording at the subscript would credit the
+    kernel for a launch that never happened, which is the same overstatement
+    this class exists to remove, one step further in.
+
+    This is also why a plain ``functools.wraps`` wrapper would not do: it
+    forwards neither ``__getitem__`` nor much else.
 
     Everything else must reach the wrapped object unchanged, because these suites
     are the measurement: if the proxy alters their behaviour it invalidates the
@@ -186,8 +219,11 @@ class _EntryProbe:
         return self._aorta_impl(*args, **kwargs)
 
     def __getitem__(self, grid: Any) -> Any:
-        self._aorta_record(self._aorta_name, "launch")
-        return self._aorta_impl[grid]
+        return _LaunchProbe(
+            self._aorta_impl[grid],
+            self._aorta_name,
+            self._aorta_record,
+        )
 
     def __getattr__(self, attr: str) -> Any:
         return getattr(object.__getattribute__(self, "_aorta_impl"), attr)

@@ -69,6 +69,30 @@ require_uint() {
       exit 64
       ;;
   esac
+  # All-digits is not yet safe to hand to `[ -lt ]`, which evaluates its
+  # operands arithmetically:
+  #
+  #   TS_PORT=08000    a leading zero means octal, and 8 is not an octal digit,
+  #                    so bash aborts with "invalid octal number" and exit 1 --
+  #                    leaving CONTROL_PORT unbound instead of exiting 64
+  #   TS_PORT=999...9  past 2^63 the value wraps, so a nonsense input can land
+  #                    back inside the accepted range
+  #
+  # Both are usage errors, so reject them here rather than letting arithmetic
+  # decide. Ten digits keeps every value well inside int64 while still covering
+  # any timeout anyone would plausibly write.
+  case "${2}" in
+    0) ;;
+    0*)
+      echo "TS_PROBE_FAIL: usage ${1} must not have leading zeros, got '${2}'"
+      echo "  A leading zero is read as octal by the shell's arithmetic."
+      exit 64
+      ;;
+  esac
+  if [ "${#2}" -gt 10 ]; then
+    echo "TS_PROBE_FAIL: usage ${1} is too large to evaluate, got '${2}'"
+    exit 64
+  fi
   if [ "${2}" -lt "${3}" ] || [ "${2}" -gt "${4}" ]; then
     echo "TS_PROBE_FAIL: usage ${1} must be between ${3} and ${4}, got '${2}'"
     exit 64
