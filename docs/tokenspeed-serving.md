@@ -324,9 +324,15 @@ default the cell would go green having measured no duration, no TTFT and no
 throughput at all. Every measured step must therefore also carry finite values
 for `duration` (greater than zero), `mean_ttft_ms`, `median_ttft_ms`,
 `output_throughput`, `request_throughput` and `total_token_throughput`, plus
-`mean_tpot_ms` / `median_tpot_ms` whenever `output_len > 1` — TPOT averages
-inter-token gaps, of which a single-token response has none. A step missing any
-of them is reported as `result_json_unusable` rather than as a pass.
+`mean_tpot_ms` / `median_tpot_ms` whenever a second output token can exist —
+TPOT averages inter-token gaps, of which a single-token response has none. A step
+missing any of them is reported as `result_json_unusable` rather than as a pass.
+
+"Whenever a second output token can exist" is decided from `output_len > 1` only
+for `random` with `ignore_eos: true`, the one configuration that actually pins
+the output length. Everywhere else it is decided from the export, by comparing
+`total_output_tokens` against `completed` — see
+[Datasets](#datasets) for why.
 
 All of them must be strictly *positive*, not merely finite. A step that served
 requests took time, produced tokens and had a latency, so zero or negative is a
@@ -416,11 +422,17 @@ is what keeps the audit trustworthy independently of the Python layer.
 
 "The same values" has to include the *ranges*, in both directions. Where the host
 was more permissive than the script — explicit ports below 1024, a
-`ready_timeout_sec` above 86400, a `teardown_grace_sec` above 3600 — the recipe
-passed `setup()`, took a GPU node, and then exited 64 inside the container. The
-result read as a workload failure with the violated bound visible only in the
-container log, when it was a configuration error that could have been caught
-before anything was allocated.
+`ready_timeout_sec` above 86400, a `teardown_grace_sec` outside 5–3600 — the
+recipe passed `setup()`, took a GPU node, and then exited 64 inside the
+container. The result read as a workload failure with the violated bound visible
+only in the container log, when it was a configuration error that could have been
+caught before anything was allocated.
+
+The lower bound on `teardown_grace_sec` is a relationship rather than a taste:
+the gateway's `--drain-timeout` is derived from it and has to finish *inside* it,
+or teardown escalates to SIGKILL while the gateway is still draining — the
+delayed-VRAM-release failure the drain exists to prevent, arriving through the
+mechanism meant to prevent it. Below 5 there is no positive drain that fits.
 
 Integer fields are also checked as integers rather than coerced with `int()`,
 which accepted two shapes of malformed recipe and ran a *different* load instead

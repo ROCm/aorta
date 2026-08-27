@@ -306,8 +306,15 @@ CONTROL="http://127.0.0.1:${CONTROL_PORT}"
 # passed as seconds. The grace period bounds a `seq` loop, and at 0 teardown
 # would escalate straight to SIGKILL, handing the next cell a KV cache the kernel
 # is still reclaiming -- and it also derives TS_DRAIN_TIMEOUT below.
+#
+# The grace floor is 5 rather than 1 because it has to *contain* a gateway
+# drain, and the drain is derived from it. Below 5 there is no positive drain
+# that fits inside the window, so the two settings would contradict each other
+# and teardown would SIGKILL a gateway that was still draining. A grace that
+# small cannot do the job it exists for either way: the teardown poll loop ticks
+# once per second.
 require_uint TS_READY_TIMEOUT "${READY_TIMEOUT}" 1 86400
-require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 1 3600
+require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 5 3600
 
 mkdir -p "${OUT_DIR}" || {
   echo "TS_BENCH_FAIL: cannot create out dir ${OUT_DIR}"
@@ -421,8 +428,16 @@ trap 'on_signal SIGTERM' TERM
 # one and a slow start is reported as a slow start.
 GATEWAY_STARTUP_TIMEOUT="${TS_GATEWAY_STARTUP_TIMEOUT:-${READY_TIMEOUT}}"
 # Keep the gateway drain just inside the teardown grace, or `teardown` escalates
-# to SIGKILL while the gateway is still draining.
-DRAIN_TIMEOUT="${TS_DRAIN_TIMEOUT:-$(( TEARDOWN_GRACE > 15 ? TEARDOWN_GRACE - 5 : 10 ))}"
+# to SIGKILL while the gateway is still draining -- which is the delayed-VRAM
+# -release failure this exists to avoid, arriving by the route meant to prevent
+# it.
+#
+# The small-grace branch used to be a flat 10, which broke that invariant for
+# every grace at or below 10: the drain was then equal to or longer than the
+# window it was supposed to fit inside. Derived from the grace in both branches
+# now, so the relationship holds across the whole accepted range. The floor on
+# TEARDOWN_GRACE below is what keeps this positive.
+DRAIN_TIMEOUT="${TS_DRAIN_TIMEOUT:-$(( TEARDOWN_GRACE > 15 ? TEARDOWN_GRACE - 5 : TEARDOWN_GRACE - 2 ))}"
 
 serve_args=( --host 127.0.0.1 --port "${PORT}" --control-port "${CONTROL_PORT}" )
 # Only supply these when the caller has not: `tokenspeed serve` takes the last

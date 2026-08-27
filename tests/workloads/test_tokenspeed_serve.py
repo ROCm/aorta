@@ -1757,6 +1757,73 @@ def test_a_measured_step_that_started_counts_as_main_work(tmp_path, monkeypatch)
     assert result.main_work_started is True, "a step that ran was reported as never started"
 
 
+def test_a_started_step_is_counted_in_total_iterations(tmp_path, monkeypatch):
+    """`first_failure_iteration` has to be an index into `total_iterations`.
+
+    Counting only parsed exports left a step that ran and wrote corrupt JSON
+    with `main_work_started=True` and `first_failure_iteration=0` while
+    `total_iterations` was 0 -- an index outside its own range.
+    `executed_iterations` stays on parsed records, since that is the count a
+    consumer averaging `step_times_ms` needs.
+    """
+    wl = _make(tmp_path, steps=2, num_prompts=32)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[],
+        exit_code=54,
+        stdout=(
+            "TS_BENCH_STEP_START: 1\n"
+            "TS_BENCH_STEP_START: 2\n"
+            "TS_BENCH_FAIL: step 2 exported no result JSON\n"
+        ),
+    )
+    result = wl.run()
+
+    assert result.passed is False
+    assert result.main_work_started is True
+    assert result.total_iterations == 2, result.total_iterations
+    assert result.executed_iterations == 0, result.executed_iterations
+    assert result.first_failure_iteration is not None
+    assert 0 <= result.first_failure_iteration < result.total_iterations
+
+
+@pytest.mark.parametrize("grace", [1, 2, 4])
+def test_a_teardown_grace_too_small_to_hold_a_drain_is_rejected(tmp_path, grace):
+    """The gateway drain is derived from the grace and must fit inside it.
+
+    The script's small-grace branch was a flat 10 seconds, so any grace at or
+    below 10 produced a drain equal to or longer than the window meant to
+    contain it -- teardown escalated to SIGKILL mid-drain, which is the
+    delayed-VRAM-release failure the drain exists to prevent, reached by the
+    mechanism meant to prevent it. Rejected host-side so it fails in setup()
+    rather than after occupying a node.
+    """
+    with pytest.raises(ValueError, match="teardown_grace_sec"):
+        _make(tmp_path, teardown_grace_sec=grace).setup()
+
+
+@pytest.mark.parametrize("grace", [5, 10, 15, 16, 45, 3600])
+def test_the_derived_drain_always_fits_inside_the_grace(tmp_path, grace):
+    """Checked across the whole accepted range, in the script that derives it."""
+    script = (Path(mod.__file__).with_name("tokenspeed") / "ts_bench_serve.sh").read_text()
+    expression = re.search(r"DRAIN_TIMEOUT=\"\$\{TS_DRAIN_TIMEOUT:-\$\(\((.+?)\)\)\}\"", script)
+    assert expression, "could not find the drain derivation"
+
+    drain = int(
+        subprocess.run(
+            ["bash", "-c", f'TEARDOWN_GRACE={grace}; echo $(( {expression.group(1)} ))'],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    )
+
+    assert drain > 0, f"grace {grace} produced a non-positive drain {drain}"
+    assert drain < grace, f"grace {grace} produced a drain of {drain} that does not fit"
+
+
 def test_a_bringup_failure_still_reports_that_nothing_was_measured(tmp_path, monkeypatch):
     """The other side of the marker: exits 50-52 never reach a measured step, so
     the matrix should keep reporting did-not-run rather than folding a
@@ -2092,7 +2159,7 @@ def test_timeouts_above_the_container_ceiling_fail_here(tmp_path, key, value):
     setup(), occupied a GPU node, and then exited 64 inside the container --
     reported as a workload failure with the violated range visible only in the
     container log."""
-    with pytest.raises(ValueError, match="must be <="):
+    with pytest.raises(ValueError, match="must be between"):
         _make(tmp_path, **{key: value}).setup()
 
 

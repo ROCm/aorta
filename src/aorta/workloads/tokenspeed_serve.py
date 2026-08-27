@@ -105,6 +105,9 @@ _DEFAULT_SHM_SIZE = "16g"
 # takes a node first and then fails as a workload error instead of a config one.
 _MAX_READY_TIMEOUT_SEC = 86400
 _MAX_TEARDOWN_GRACE_SEC = 3600
+# Mirrors ts_bench_serve.sh: the grace must contain the gateway drain it derives,
+# and below 5 no positive drain fits inside it.
+_MIN_TEARDOWN_GRACE_SEC = 5
 
 # A few GiB of driver and runtime overhead survives any run, so the check is
 # against growth past a margin rather than against zero. The leak this exists for
@@ -475,6 +478,9 @@ class TokenSpeedServeWorkload(Workload):
             "teardown_grace_sec",
             _DEFAULT_TEARDOWN_GRACE_SEC,
             maximum=_MAX_TEARDOWN_GRACE_SEC,
+            # The grace has to contain a gateway drain derived from it, and
+            # below this there is no positive drain that fits inside it.
+            minimum=_MIN_TEARDOWN_GRACE_SEC,
         )
         # Derive rather than hardcode: a 20B model on a cold HF cache spends
         # minutes in readiness alone, and a fixed default would kill the
@@ -661,20 +667,21 @@ class TokenSpeedServeWorkload(Workload):
             raise ValueError(f"tokenspeed_serve: {key} ({value}) must be >= 0")
         return value
 
-    def _bounded_int(self, key: str, default: int, *, maximum: int) -> int:
+    def _bounded_int(self, key: str, default: int, *, maximum: int, minimum: int = 1) -> int:
         """A positive int the container will also accept.
 
-        ``ts_bench_serve.sh`` caps these, so a value above the ceiling passed
+        ``ts_bench_serve.sh`` bounds these, so a value outside its range passed
         ``setup()``, occupied a GPU node, and then exited 64 inside the container
         -- reported as a workload failure rather than as the configuration error
         it is, with the range that was violated visible only in the container log.
         """
         value = self._positive_int(key, default)
-        if value > maximum:
+        if value > maximum or value < minimum:
             raise ValueError(
-                f"tokenspeed_serve: {key} ({value}) must be <= {maximum}; "
-                "ts_bench_serve.sh rejects anything larger, so this would fail "
-                "inside the container after occupying a node."
+                f"tokenspeed_serve: {key} ({value}) must be between {minimum} "
+                f"and {maximum}; ts_bench_serve.sh rejects anything outside "
+                "that, so this would fail inside the container after occupying "
+                "a node."
             )
         return value
 
@@ -1758,7 +1765,8 @@ class TokenSpeedServeWorkload(Workload):
         # failures, exits 50-52 and 64, are what land here -- and the matrix
         # correctly reports did-not-run rather than folding a non-measurement in
         # as a data point.
-        main_work_started = bool(records) or _MEASURED_STEP_START_RE.search(stdout) is not None
+        started_steps = len(_MEASURED_STEP_START_RE.findall(stdout))
+        main_work_started = bool(records) or started_steps > 0
 
         step_times_ms = [
             record.scalars["duration"] * 1000.0
@@ -1776,7 +1784,15 @@ class TokenSpeedServeWorkload(Workload):
                 else None
             ),
             failure_details=failure_details,
-            total_iterations=len(records),
+            # Steps the script announced starting, which is at least the number
+            # that produced a parseable export. The two differ exactly when a
+            # step ran and its export was corrupt or missing, and in that case
+            # `total_iterations=len(records)` was 0 while
+            # `first_failure_iteration` was 0 -- an index outside its own range.
+            # `executed_iterations` stays on parsed records: that is the count
+            # of steps that produced a result, which is what a consumer
+            # averaging step_times_ms needs.
+            total_iterations=max(started_steps, len(records)),
             step_times_ms=step_times_ms,
             elapsed_sec=elapsed,
             metrics=metrics,
