@@ -186,7 +186,17 @@ docs/sanitizers/repro/consan_4112_repro.sh --hook /path/to/librocjitsu_dbi_hooks
 
 It exits `0` when it reproduces the 4112 rejection, `1` when the defect is fixed,
 `2` when the environment is unusable, and `3` when no verdict could be
-established. `1` requires *both* that the module loaded and that the hook ended
+established.
+
+> **Updated 2026-08-27.** The script used to key "reproduced" off
+> `status=4112` + exit 92 alone. Because 4112 is a shared `transform-error`
+> bucket, the patched-image growth ceiling produces that same signature — so on a
+> modern ROCm base (large Tensile bundle, ~183 MiB object) the script would have
+> reported this *fixed* defect as still present. It now requires the
+> `final validation found partially overlapping patch ranges` diagnostic for a
+> reproduction, and reports a growth-ceiling rejection as inconclusive with the
+> knob to retry under. See
+> [`consan-gemm-patched-image-growth-cap.md`](consan-gemm-patched-image-growth-cap.md). `1` requires *both* that the module loaded and that the hook ended
 the run with its own exit 86 — the load-only driver never dispatches, so strict
 require-records is expected to fail afterwards, and that is the post-fix state
 described above rather than a second defect. Demanding the hook-owned exit code

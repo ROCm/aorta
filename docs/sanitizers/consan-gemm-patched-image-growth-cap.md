@@ -156,6 +156,23 @@ env HSA_TOOLS_LIB="${ROCJITSU_PREBUILT}/lib/librocjitsu_dbi_hooks.so" \
     /tmp/lds_dispatch
 ```
 
-Expect exit 92 and the `first-light probe rejected patched-image file growth`
-line. Drop the `RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_BYTES` override and the same
-command transforms cleanly.
+`ROCJITSU_PREBUILT` must point at an unpacked rocjitsu bundle. Expect exit 92 plus
+**both** hook-owned lines — `installed ConSan hook` (proof the hook engaged at all;
+without it a bare exit code says nothing) and `first-light probe rejected
+patched-image file growth`. Drop the `RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_BYTES`
+override and the same command transforms cleanly.
+
+## Knock-on: the 4112 reproducer could not tell these apart
+
+[`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh) decided "reproduced"
+from `reason=transform-error status=4112` plus exit 92 — a signature this capacity
+rejection produces exactly. On any ROCm shipping a large Tensile bundle it would
+therefore have reported the *fixed* overlapping-anchor defect as still present, to
+an upstream maintainer, which is the worst direction for that script to be wrong
+in. It now requires the `final validation found partially overlapping patch
+ranges` diagnostic for a reproduction and reports the growth ceiling as its own
+inconclusive outcome with the knob to retry under.
+
+The general lesson, which is why it is worth recording: a status code is not a
+defect identity. 4112 is a bucket, and anything that keys a verdict off the bucket
+rather than the hook's stated reason will misattribute one defect to another.

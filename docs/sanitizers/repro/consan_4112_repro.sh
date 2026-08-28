@@ -24,8 +24,14 @@
 #                   extracting one from the local hipBLASLt install
 #   --keep          do not delete the work directory on exit
 #
+# status=4112 is a shared "transform-error" bucket, not a defect identity, so the
+# verdict below discriminates on the hook's stated *reason*: only the "partially
+# overlapping patch ranges" diagnostic counts as a reproduction. A 4112 from the
+# patched-image growth ceiling is a capacity policy and is reported inconclusive.
+#
 # Exit codes:
-#   0  reproduced   -- object rejected with status=4112 (defect still present)
+#   0  reproduced   -- rejected with status=4112 AND the overlapping-patch-range
+#                     diagnostic present (defect still present)
 #   1  fixed        -- the object transformed and the module loaded, AND the hook
 #                     terminated the run with its own exit 86. Both are required:
 #                     this driver never dispatches, so strict require-records is
@@ -34,9 +40,11 @@
 #   2  environment unusable (missing tool, no gfx950 bundle, hook not found,
 #                     bad --timeout value)
 #   3  inconclusive -- no verdict could be established: the ceiling was hit, the
-#                     hook never announced itself, a different rejection status
-#                     came back, or the module loaded without the expected exit
-#                     86. Read the log; deliberately NOT reported as "fixed".
+#                     hook never announced itself, the run was rejected on the
+#                     patched-image growth ceiling or some other transform error,
+#                     a different rejection status came back, or the module loaded
+#                     without the expected exit 86. Read the log; deliberately NOT
+#                     reported as "fixed" or "reproduced".
 set -uo pipefail
 
 HOOK="${HSA_TOOLS_LIB:-}"
@@ -220,18 +228,64 @@ if ! grep -qE "${HOOK_LINE} installed ConSan hook" "${LOG}"; then
     exit 3
 fi
 
-# Match the hook's own rejection line and its exit code, not a bare "status=4112"
-# substring. The loader echoes the object path when hipModuleLoad fails, so an
-# --object argument whose filename contains that substring would otherwise be
-# echoed back into the log and read as a reproduction.
+# status=4112 is a generic "transform-error" bucket, NOT a defect identity: at
+# least two unrelated rejections share it. So the status alone must never decide
+# the verdict -- discriminate on the hook's own explanation of *why* it rejected.
+#
+#   overlapping anchor ranges  -> "final validation found partially overlapping
+#                                  patch ranges"  = the defect this script tests
+#   patched-image growth cap   -> "first-light probe rejected patched-image file
+#                                  growth"        = a capacity policy, not a defect
+#
+# Handle the capacity rejection first, because on any ROCm whose hipBLASLt ships a
+# large Tensile bundle it is the one that fires: the extracted object is ~183 MiB
+# on ROCm 7.2.4 and needs ~1.39 GiB of patched image against a ~400 MiB default
+# ceiling. Reading that as "reproduced" would tell an upstream maintainer their
+# fix did not work, which is the most damaging direction this script can be wrong
+# in.
+GROWTH_LINE='ConSan MOI first-light probe rejected patched-image file growth'
+if grep -qE "${HOOK_LINE} ${GROWTH_LINE}" "${LOG}"; then
+    echo "RESULT: inconclusive -- rejected on the patched-image growth ceiling, which is"
+    echo "        a configurable capacity policy and NOT the overlapping-patch defect."
+    grep -E "${GROWTH_LINE}" "${LOG}" | head -1 | cut -c1-200
+    echo "        The transform never reached final validation, so this run is evidence"
+    echo "        neither for nor against the defect."
+    if grep -qE "${HOOK_LINE} ConSan final validation found partially overlapping" "${LOG}"; then
+        echo "        NOTE: the overlap diagnostic IS present above -- read the log, this"
+        echo "        may still be a reproduction that the ceiling merely truncated."
+    fi
+    echo "        Retry with a ceiling above the required total, e.g."
+    echo "          RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_PERCENT=900"
+    echo "        or pass a smaller --object. Expect a much longer run once it proceeds."
+    echo "        Full log: ${LOG}"
+    trap - EXIT
+    exit 3
+fi
+
+# Match the hook's own rejection line, its explanation, and its exit code -- not a
+# bare "status=4112" substring. The loader echoes the object path when
+# hipModuleLoad fails, so an --object argument whose filename contains that
+# substring would otherwise be echoed back into the log and read as a
+# reproduction.
 if grep -qE "${HOOK_LINE} ConSan load rejection .*reason=transform-error .*status=4112" "${LOG}"; then
+    if ! grep -qE "${HOOK_LINE} ConSan final validation found partially overlapping" "${LOG}"; then
+        echo "RESULT: inconclusive -- a status=4112 transform rejection, but WITHOUT the"
+        echo "        overlapping-patch-range diagnostic this script tests for, and without"
+        echo "        the known growth-ceiling explanation either. 4112 is a shared bucket,"
+        echo "        so this is some third transform error. Read the log before concluding."
+        grep -E "${HOOK_LINE} ConSan (patch end|load rejection)" "${LOG}" | tail -2 | cut -c1-200
+        echo "        Full log: ${LOG}"
+        trap - EXIT
+        exit 3
+    fi
     if [ "${rc}" -eq 92 ]; then
-        echo "RESULT: reproduced -- transform rejected with status=4112"
+        echo "RESULT: reproduced -- transform rejected with status=4112 on overlapping"
+        echo "        patch ranges."
         grep -E "final validation found" "${LOG}" | head -1
         [ "${KEEP}" -eq 1 ] && echo "log: ${LOG}"
         exit 0
     fi
-    echo "RESULT: inconclusive -- the hook logged the 4112 transform rejection, but the"
+    echo "RESULT: inconclusive -- the hook logged the 4112 overlap rejection, but the"
     echo "        process exited ${rc} rather than the 92 that strict policy should give."
     echo "        Full log: ${LOG}"
     trap - EXIT
