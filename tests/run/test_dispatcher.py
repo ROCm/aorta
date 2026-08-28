@@ -817,6 +817,7 @@ class TestRunTrials:
         # value a per-trial anchor would have picked up.
         expected_root = tmp_path.resolve()
 
+        os.environ.pop("AORTA_LEAK_PROBE", None)
         with patch("importlib.metadata.entry_points", return_value=mock_eps):
             req = RunRequest(
                 workload="swap_results_dir",
@@ -824,6 +825,11 @@ class TestRunTrials:
                 results_dir=tmp_path,
                 collect=("layer_numerics",),
                 save_logs=True,
+                # The record write is the one guard here that raises. This file
+                # warns that raising in the wrong place leaks the overlay into
+                # the caller's process and corrupts later triage cells, so pin
+                # that the refusal happens after the env-restore ``finally``.
+                extra_env={"AORTA_LEAK_PROBE": "leaked"},
             )
             # Trial 0's own record write is the first thing to touch the swapped
             # component, so the run stops there rather than tolerating the swap
@@ -845,6 +851,9 @@ class TestRunTrials:
         assert (tmp_path / "swap_results_dir").resolve() == outside.resolve()
         assert raised is not None, "expected the record write to refuse the swap"
         assert "refusing to write the trial record" in str(raised)
+        assert (
+            "AORTA_LEAK_PROBE" not in os.environ
+        ), "env overlay leaked when the record write refused"
 
     def test_results_root_identity_is_pinned_before_the_trial_loop(self, tmp_path):
         """The anchor carries the results directory's inode, not just its path.

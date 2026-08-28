@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 
 from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.instrumentation.environment import collect_env
@@ -706,7 +706,10 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # directory aside and move a *real* directory into its place, leaving every
     # later ``O_NOFOLLOW`` check on that pathname satisfied. Taken after the
     # ``mkdir`` above so the directory exists to be pinned.
-    collector_results_root = (
+    # ``freeze`` always returns an anchor (an unpinnable one degrades to
+    # path-only), so this is non-None exactly when ``should_write`` is -- which
+    # is also exactly when there is anything to create or write.
+    results_anchor = (
         _fsafe.TrustedAnchor.freeze(canonical_results_dir)
         if canonical_results_dir is not None
         else None
@@ -714,10 +717,8 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     results_dir = (
         canonical_results_dir if canonical_results_dir is not None else request.results_dir
     ) / request.workload
-    if collector_results_root is not None:
-        _create_workload_dir(collector_results_root, request.workload)
-    elif should_write:
-        results_dir.mkdir(parents=True, exist_ok=True)
+    if results_anchor is not None:
+        _create_workload_dir(results_anchor, request.workload)
     isolation_generation = (
         _next_isolation_generation()
         if effective_trial_isolation == "process"
@@ -760,7 +761,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                     startup_env=startup_env,
                     isolation_generation=isolation_generation,
                     results_dir=results_dir,
-                    results_root=collector_results_root,
+                    results_root=results_anchor,
                     should_write=should_write,
                 )
             except TrialWorkerError as exc:
@@ -775,7 +776,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                 env_descriptor=env_descriptor,
                 mitigation_env=mitigation_env,
                 results_dir=results_dir,
-                results_root=collector_results_root,
+                results_root=results_anchor,
                 should_write=should_write,
             )
         if should_write:
@@ -992,13 +993,20 @@ def _run_single_trial(
         mitigation_env: Environment variables from mitigations.
         results_dir: Directory for JSON output.
         should_write: Whether to write JSON (rank 0 only).
-        results_root: Canonical collector trust anchor -- path plus pinned
-            inode -- frozen by :func:`run_trials` before the first trial.
-            ``None`` for a caller that runs a single trial directly; this
-            function then freezes ``results_dir`` itself, which is still
-            pre-launch for that one trial. Only a multi-trial loop needs the
-            earlier freeze, because the exposure is one trial's payload
-            rewriting the tree the next trial would resolve.
+        results_root: Canonical trust anchor for everything written below
+            ``--results-dir`` -- path plus pinned inode -- frozen by
+            :func:`run_trials` before the first trial. Guards both the collector
+            artifact tree and this function's *own* output: the trial record and
+            the captured logs go through ``<anchor>/<workload>``, which is
+            payload-writable, so they are opened relative to it rather than by
+            pathname.
+
+            ``None`` for a caller that runs a single trial directly. The
+            collector guards then freeze ``results_dir`` themselves (still
+            pre-launch for that one trial) and the record writes fall back to a
+            plain ``open``; only a multi-trial loop needs the earlier freeze,
+            because the exposure is one trial's payload rewriting the tree the
+            next trial would resolve.
 
     Returns:
         TrialResult with execution outcome.
@@ -1499,7 +1507,7 @@ def _open_record_file(
     anchor: _fsafe.TrustedAnchor | None,
     name: str,
     **text_kwargs: Any,
-) -> Any:
+) -> TextIO:
     """``open(results_dir / name, "w")`` that cannot be redirected by a link.
 
     ``results_dir`` is ``<anchor>/<workload>``, which is below the operator
