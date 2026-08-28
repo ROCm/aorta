@@ -397,15 +397,13 @@ def test_fd_engine_ancestor_swap_after_open_is_inert(tmp_path: Path, monkeypatch
 
 
 @_needs_fd
-def test_fd_engine_refuses_a_results_root_replaced_by_a_real_directory(
-    tmp_path: Path, caplog
-):
+def test_fd_engine_refuses_a_results_root_replaced_by_a_real_directory(tmp_path: Path):
     """A pinned anchor refuses the swap that no ``O_NOFOLLOW`` check can see.
 
     The payload renames the results directory aside and moves a real directory
     into its pathname. Nothing on the way down is a symlink, so only the frozen
-    inode distinguishes the planted tree from the operator's -- without it the
-    prune deletes the planted files.
+    inode distinguishes the planted tree from the operator's own tree -- without
+    it the prune deletes the planted files.
     """
     results = tmp_path / "results"
     trial = results / "wl" / "trial_d0_m0_t0"

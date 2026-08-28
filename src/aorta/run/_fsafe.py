@@ -18,13 +18,26 @@ it. This module is the shared leaf both :mod:`aorta.run.collectors` and
 :mod:`aorta.run.retention` build on; it depends only on the stdlib so retention
 stays dependency-free.
 
-The descent needs one more thing than ``O_NOFOLLOW``, because "no component is a
-symlink" does not mean "this is still the operator's directory": a rename can
-move a *real* directory into the anchor's pathname, and the anchor's parent is
-necessarily opened by pathname (it lives above the operator's boundary and may
-hold the operator's own links). :class:`TrustedAnchor` therefore carries the
-``(st_dev, st_ino)`` the anchor had before the first payload launched, and the
-descent refuses to continue when the directory it opened is a different inode.
+Two things are needed beyond ``O_NOFOLLOW``, because it is a narrower guarantee
+than it looks:
+
+* **It does not say the anchor is still the operator's directory.** A rename can
+  move a *real* directory into the anchor's pathname, and the anchor's parent is
+  necessarily opened by pathname (it lives above the operator's boundary and may
+  hold the operator's own links). :class:`TrustedAnchor` therefore carries the
+  ``(st_dev, st_ino)`` the anchor had before the first payload launched, and the
+  descent refuses to continue when the directory it opened is a different inode.
+* **It only guards the final component, and ``dir_fd`` only applies to a
+  relative path.** So a "component" that is absolute, ``..``, or carries a
+  separator silently converts a guarded descent into an unguarded one. Every
+  name handed to a primitive here is therefore checked to be a single directory
+  entry (:func:`_require_child_name`) before it reaches the kernel.
+
+One property is also *not* obtainable from the descent: the type of a file can
+change between the walk that selected it and the read that consumes it. A
+regular file replaced by a FIFO turns a blocking ``open`` into an indefinite
+hang, so :func:`secure_open_read` opens ``O_NONBLOCK`` and validates the
+*descriptor* rather than trusting the earlier ``lstat``.
 
 Everything here is POSIX-only (``O_NOFOLLOW`` / ``O_DIRECTORY`` / ``dir_fd``).
 :data:`HAVE_FD_TRAVERSAL` is ``False`` on a platform that lacks them; callers
@@ -48,6 +61,7 @@ log = logging.getLogger(__name__)
 
 _O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY: int = getattr(os, "O_DIRECTORY", 0)
+_O_NONBLOCK: int = getattr(os, "O_NONBLOCK", 0)
 
 #: True when the platform exposes the primitives needed for race-free,
 #: fd-relative traversal. False on Windows and anywhere ``O_NOFOLLOW`` /
@@ -57,11 +71,15 @@ HAVE_FD_TRAVERSAL: bool = bool(_O_NOFOLLOW and _O_DIRECTORY and os.open in os.su
 
 
 class UnsafePathError(OSError):
-    """A component below the trusted root was a symlink, missing, or not a dir.
+    """A path could not be used without leaving the trusted tree.
 
-    Raised while descending with :func:`open_dir_nofollow`. It is an
-    :class:`OSError` subclass so existing ``except OSError`` guards in the
-    collector and retention paths keep failing closed without a new import.
+    Covers a component that is a symlink, missing, or not a directory; a name
+    that is not a single directory entry; an anchor that is no longer the frozen
+    inode; and a file that turned into something other than a regular file
+    between the walk and the open. It is an :class:`OSError` subclass so
+    existing ``except OSError`` guards in the collector and retention paths keep
+    failing closed without a new import. Callers that need to tell *absent* from
+    *hostile* read ``errno`` (``ENOENT`` is the only benign one).
     """
 
 
@@ -135,6 +153,44 @@ def as_anchor(trusted_root: TrustedAnchor | Path | str) -> TrustedAnchor:
     return TrustedAnchor(Path(os.fspath(trusted_root)))
 
 
+def _require_child_name(name: str, where: str) -> str:
+    """Refuse a ``name`` that is anything other than one entry of a directory.
+
+    Every fd-relative primitive here promises to act *inside* the descriptor it
+    is handed, but ``dir_fd`` alone does not deliver that: an absolute path
+    makes :func:`os.open` ignore ``dir_fd`` outright, ``..`` walks above it, and
+    ``O_NOFOLLOW`` only guards the **final** component, so a name carrying a
+    separator has its intermediate components resolved with symlinks followed.
+    Each of those turns a guarded descent into an unguarded one, so the name is
+    checked before it reaches the kernel.
+
+    Today's callers cannot trip this -- :func:`relative_components` decomposes a
+    ``relative_to`` result and everything else forwards ``os.listdir`` entries,
+    neither of which can produce such a name -- so this enforces the contract
+    for the next caller rather than fixing a live escape. That is the point: the
+    guarantee belongs to these helpers, not to the discipline of whoever calls
+    them.
+
+    Raises:
+        UnsafePathError: the name is empty, ``.``, ``..``, absolute, or contains
+            a path separator.
+    """
+    separators = [sep for sep in (os.sep, os.altsep) if sep]
+    if (
+        not name
+        or name in (os.curdir, os.pardir)
+        or os.path.isabs(name)
+        or any(sep in name for sep in separators)
+    ):
+        raise UnsafePathError(
+            errno.EINVAL,
+            f"refusing to use {name!r} under {where!r}: expected a single "
+            "directory entry name, not an empty, absolute, relative-traversal "
+            "or multi-component path",
+        )
+    return name
+
+
 def relative_components(trusted_root: Path, target: Path) -> list[str] | None:
     """The lexical path components of ``target`` below ``trusted_root``.
 
@@ -182,8 +238,8 @@ def open_dir_nofollow(
 
     Raises:
         UnsafePathError: a component is a symlink, is missing (and
-            ``create_missing`` is false), is not a directory, or the anchor is
-            no longer the frozen inode.
+            ``create_missing`` is false), is not a directory, is not a single
+            directory entry name, or the anchor is no longer the frozen inode.
     """
     anchor = as_anchor(trusted_root)
     dir_fd = _open_anchor(anchor, create_missing)
@@ -252,7 +308,13 @@ def _open_anchor(anchor: TrustedAnchor, create_missing: bool) -> int:
 def _open_child_dir(
     parent_fd: int, name: str, trusted_root: Path | str, create_missing: bool
 ) -> int:
-    """Open (or optionally create) directory ``name`` under ``parent_fd``, no-follow."""
+    """Open (or optionally create) directory ``name`` under ``parent_fd``, no-follow.
+
+    The single funnel every descent goes through (:func:`open_dir_nofollow`,
+    :func:`open_dir_at`, :func:`_open_anchor`), so the child-name check lives
+    here rather than being repeated at each entry point.
+    """
+    _require_child_name(name, os.fspath(trusted_root))
     try:
         return os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_DIRECTORY, dir_fd=parent_fd)
     except FileNotFoundError:
@@ -300,7 +362,8 @@ def open_dir_at(base_fd: int, components: Sequence[str]) -> Iterator[int]:
     couple of descriptors.
 
     Raises:
-        UnsafePathError: a component is a symlink, missing, or not a directory.
+        UnsafePathError: a component is a symlink, missing, not a directory, or
+            not a single directory entry name.
     """
     dir_fd = os.dup(base_fd)
     try:
@@ -318,7 +381,15 @@ def stat_at(dir_fd: int, name: str) -> os.stat_result | None:
 
     Never follows a final-component symlink (``follow_symlinks=False``), so the
     caller sees the link itself rather than its target.
+
+    ``None`` means *absent*, which is not the same as *unusable*: a name that is
+    not a single directory entry raises instead, because ``stat_at(fd, "..")``
+    would report on the parent and read as a legitimate answer.
+
+    Raises:
+        UnsafePathError: ``name`` is not a single directory entry name.
     """
+    _require_child_name(name, f"fd {dir_fd}")
     try:
         return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -338,6 +409,10 @@ def remove_entry_at(dir_fd: int, name: str) -> tuple[int, int]:
     ``lstat`` before the unlink; a file that vanishes mid-walk contributes 0.
 
     Raises:
+        UnsafePathError: ``name`` is not a single directory entry name. That
+            matters most here of all the primitives in this module:
+            ``remove_entry_at(fd, "..")`` would recursively empty the *parent*
+            of the held directory.
         OSError: the entry could not be removed. Callers decide tolerance.
     """
     info = stat_at(dir_fd, name)
@@ -413,13 +488,61 @@ def secure_open_read(dir_fd: int, name: str, **text_kwargs: object) -> Iterator[
     Refuses a symlink at the final component (``O_NOFOLLOW``). ``text_kwargs``
     are forwarded to :func:`os.fdopen` (e.g. ``encoding="utf-8"``,
     ``newline=""``). The stream (and its fd) is closed on context exit.
+
+    The open is ``O_NONBLOCK`` and the *opened descriptor* is then checked to be
+    a regular file. A caller that saw a regular file in an earlier ``lstat``
+    cannot rely on that here: a surviving payload process can unlink the file
+    and ``mkfifo`` in its place, and a blocking ``O_RDONLY`` on a FIFO with no
+    writer waits forever -- which would hang post-run summarization or the
+    retention sweep rather than degrade it. Checking the fd rather than the name
+    closes the window, because by then the descriptor is the thing we will read.
+    ``O_NONBLOCK`` is cleared once the type is confirmed, so the stream behaves
+    like any other file read.
+
+    Raises:
+        UnsafePathError: ``name`` is not a single directory entry name, or what
+            was opened is not a regular file.
+        OSError: the file could not be opened.
     """
-    fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=dir_fd)
-    stream = os.fdopen(fd, "r", **text_kwargs)  # type: ignore[arg-type]
+    _require_child_name(name, f"fd {dir_fd}")
+    fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafePathError(
+                errno.EINVAL,
+                f"refusing to read {name!r}: it is not a regular file "
+                f"(mode {stat.filemode(info.st_mode)}); it was replaced after "
+                "the directory walk saw it",
+            )
+        _clear_nonblock(fd)
+        stream = os.fdopen(fd, "r", **text_kwargs)  # type: ignore[arg-type]
+    except BaseException:
+        # Nothing owns the fd yet -- ``fdopen`` only adopts it on success -- so
+        # a refusal here (or an interrupt) would otherwise leak it.
+        os.close(fd)
+        raise
     try:
         yield stream
     finally:
         stream.close()
+
+
+def _clear_nonblock(fd: int) -> None:
+    """Drop ``O_NONBLOCK`` from ``fd``, best effort.
+
+    Only reached once ``fd`` is known to be a regular file, where the flag is a
+    no-op for reads on Linux. Cleared anyway so the handle handed to a parser is
+    an ordinary blocking file, and suppressed rather than raised because failing
+    to tidy a flag is not a reason to drop a readable artifact.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - POSIX-only, like the rest of this module
+        return
+    with contextlib.suppress(OSError):
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~_O_NONBLOCK)
 
 
 def prune_empty_dirs(base_fd: int) -> None:

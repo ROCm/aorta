@@ -953,6 +953,16 @@ _needs_proc_fd = pytest.mark.skipif(
 )
 
 
+def _rocprof_capture(subdir: Path, calls: int = 4, name: str = "real") -> Path:
+    """Write one parseable stats CSV, so a skip is observable as a kept metric."""
+    subdir.mkdir(parents=True, exist_ok=True)
+    path = subdir / f"{name}_kernel_stats.csv"
+    path.write_text(
+        f'"Name","Calls","TotalDurationNs"\n"sgemm",{calls},1000\n', encoding="utf-8"
+    )
+    return path
+
+
 def _peak_fds_while_summarizing(tmp_path, monkeypatch, ranks):
     """Highest descriptor count observed while parsing ``ranks`` stats CSVs."""
     results = tmp_path / "results"
@@ -1031,6 +1041,85 @@ def test_summarize_aggregates_every_rank_artifact(profilers_on_path, tmp_path):
     )
     assert metrics.get("rocprof_kernel_count") == 16
     assert metrics.get("rocprof_gpu_time_ms") == pytest.approx(160 / 1_000_000.0)
+
+
+@_needs_fd
+def test_summarize_ignores_a_fifo_that_was_never_a_regular_file(
+    profilers_on_path, tmp_path, no_hang
+):
+    """The walk filters non-regular entries, so a pre-planted FIFO never opens.
+
+    Worth pinning on its own, and it is also why the swap test below has to
+    plant the FIFO *after* the walk: one that is already there when the
+    directory is listed is dropped before any open is attempted, so it cannot
+    demonstrate the blocking-open exposure. My first version of that test made
+    exactly this mistake and passed under mutation.
+    """
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    _rocprof_capture(subdir)
+    os.mkfifo(subdir / "trap_kernel_stats.csv")
+
+    with no_hang(10):
+        metrics = summarize_collectors(
+            _config(
+                ["rocprof"],
+                collect_dir=subdir.parent,
+                results_root=results.resolve(),
+                pin_results_root=True,
+            )
+        )
+    assert metrics.get("rocprof_kernel_count") == 4
+
+
+@_needs_fd
+def test_summarize_skips_an_artifact_swapped_for_a_fifo_after_the_walk(
+    profilers_on_path, tmp_path, monkeypatch, no_hang
+):
+    """A FIFO swapped in after the walk must not hang the post-run summary.
+
+    The walk selects regular files, but the open that follows is a separate
+    syscall -- and bounding descriptor use widened that window on purpose, since
+    artifacts are now listed first and reopened one at a time. A surviving
+    payload process that unlinks a matched CSV and ``mkfifo``s in its place makes
+    a blocking ``O_RDONLY`` wait for a writer that never comes, stalling the
+    trial rather than degrading its metrics.
+
+    The swap is planted at the end of the walk, which is exactly the moment the
+    real race occupies: everything is listed, nothing is open yet.
+    """
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    _rocprof_capture(subdir, calls=4, name="aaa_real")
+    trap = _rocprof_capture(subdir, calls=999, name="zzz_trap")
+
+    real_walk = _fsafe.iter_regular_files
+
+    def swapping_walk(base_fd):
+        yield from real_walk(base_fd)
+        # Both files are in the caller's match list now, and none is open yet.
+        trap.unlink()
+        os.mkfifo(trap)
+
+    monkeypatch.setattr(_fsafe, "iter_regular_files", swapping_walk)
+
+    # A regression here is a hang, not a wrong value, so bound the call. The
+    # alarm raises outside ``Exception`` on purpose: ``summarize_collectors``
+    # swallows ``Exception`` and the artifact reader skips on ``OSError``, and
+    # ``TimeoutError`` is an ``OSError`` -- so a timeout raised as one would be
+    # absorbed into a clean skip and this test would pass while the code hung.
+    with no_hang(10):
+        metrics = summarize_collectors(
+            _config(
+                ["rocprof"],
+                collect_dir=subdir.parent,
+                results_root=results.resolve(),
+                pin_results_root=True,
+            )
+        )
+    # The good capture is still reported; the trap contributes nothing.
+    assert metrics.get("rocprof_kernel_count") == 4
+    assert metrics.get("rocprof_top_kernels") == ["sgemm"]
 
 
 @_needs_fd

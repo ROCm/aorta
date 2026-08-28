@@ -726,12 +726,14 @@ def _open_artifacts(base_fd: int, relative_paths: Sequence[str]) -> Iterator[Tex
     inode: the descent below it is fd-relative and ``O_NOFOLLOW``, so the swap
     the held fd protects against stays defeated.
 
-    A file that cannot be opened at all -- it vanished, or a payload left a
-    symlink where the walk saw a regular file -- is skipped. Descriptor
-    exhaustion is **not** skipped: it means the remaining artifacts would be
-    missing from the totals, and a confidently-wrong ``rocprof_gpu_time_ms``
-    covering a prefix of the ranks is worse than no metric, so it propagates
-    and the caller drops the collector's metrics entirely.
+    A file that cannot be opened at all is skipped: it vanished, or a payload
+    replaced the regular file the walk saw with a symlink or a FIFO (which
+    :func:`~aorta.run._fsafe.secure_open_read` refuses rather than blocking on).
+    Descriptor exhaustion is **not** skipped: it means the remaining artifacts
+    would be missing from the totals, and a confidently-wrong
+    ``rocprof_gpu_time_ms`` covering a prefix of the ranks is worse than no
+    metric, so it propagates and the caller drops the collector's metrics
+    entirely.
     """
     for rel in relative_paths:
         *parents, name = rel.split("/")

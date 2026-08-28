@@ -8,12 +8,14 @@ mid-walk ancestor swap cannot redirect them), and no file descriptor leaks.
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 from pathlib import Path
 
 import pytest
 
 from aorta.run import _fsafe
+from tests.conftest import BlockedTooLong
 
 pytestmark = pytest.mark.skipif(
     not _fsafe.HAVE_FD_TRAVERSAL, reason="fd-relative traversal unsupported here"
@@ -187,6 +189,258 @@ class TestTrustedAnchorIdentity:
                 with _fsafe.open_dir_nofollow(anchor, ["trial"]):
                     pass
         assert _open_fd_count() == before
+
+
+class TestChildNameEnforcement:
+    """``dir_fd`` does not by itself confine an operation to that directory.
+
+    ``os.open`` ignores ``dir_fd`` for an absolute path, ``..`` walks above it,
+    and ``O_NOFOLLOW`` guards only the *final* component -- so a name carrying a
+    separator has its intermediate components resolved with symlinks followed.
+    No current caller can produce such a name (``relative_components`` decomposes
+    a ``relative_to`` result; everything else forwards ``os.listdir`` entries),
+    so these pin the helpers' contract for the next caller.
+    """
+
+    #: Names that must never reach the kernel from one of these helpers.
+    #: The absolute case is built per-test inside ``tmp_path`` rather than
+    #: hard-coded (``/etc``): mutation-testing this class means running it with
+    #: the guard removed, and ``remove_entry_at`` would then genuinely try to
+    #: empty whatever the name points at. A test whose failure mode is
+    #: "recursively deletes a real system directory" is not one to leave lying
+    #: around, so every case is aimed inside the sandbox.
+    RELATIVE_BAD_NAMES = ("", ".", "..", "sub/child", "a/../../b")
+
+    @staticmethod
+    def _sandbox(tmp_path):
+        """A held-fd directory whose parent is also disposable.
+
+        ``..`` has to be able to resolve to *something* for the unguarded case
+        to be meaningful, so the fd is opened one level down and the level above
+        it is sacrificial. A sibling file there is the canary.
+        """
+        sandbox = tmp_path / "sandbox"
+        held = sandbox / "held"
+        (held / "sub" / "child").mkdir(parents=True)
+        canary = sandbox / "canary.txt"
+        canary.write_text("keep me", encoding="utf-8")
+        return held, canary
+
+    def _bad_names(self, held):
+        return (*self.RELATIVE_BAD_NAMES, str(held / "sub"))
+
+    def test_open_dir_at_refuses(self, tmp_path):
+        held, canary = self._sandbox(tmp_path)
+        base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for bad in self._bad_names(held):
+                with pytest.raises(_fsafe.UnsafePathError) as excinfo:
+                    with _fsafe.open_dir_at(base_fd, [bad]):
+                        pass
+                assert excinfo.value.errno == errno.EINVAL, bad
+        finally:
+            os.close(base_fd)
+        assert canary.exists()
+
+    def test_open_dir_nofollow_refuses(self, tmp_path):
+        held, _canary = self._sandbox(tmp_path)
+        for bad in self._bad_names(held):
+            with pytest.raises(_fsafe.UnsafePathError) as excinfo:
+                with _fsafe.open_dir_nofollow(held, [bad]):
+                    pass
+            assert excinfo.value.errno == errno.EINVAL, bad
+
+    def test_stat_at_refuses(self, tmp_path):
+        held, _canary = self._sandbox(tmp_path)
+        base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for bad in self._bad_names(held):
+                with pytest.raises(_fsafe.UnsafePathError):
+                    _fsafe.stat_at(base_fd, bad)
+        finally:
+            os.close(base_fd)
+
+    def test_remove_entry_at_refuses(self, tmp_path):
+        """The worst one: ``remove_entry_at(fd, "..")`` would empty the parent."""
+        held, canary = self._sandbox(tmp_path)
+        base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for bad in self._bad_names(held):
+                with pytest.raises(_fsafe.UnsafePathError):
+                    _fsafe.remove_entry_at(base_fd, bad)
+        finally:
+            os.close(base_fd)
+        # Nothing above the held fd was touched. Without the guard, the ".."
+        # case empties this directory.
+        assert canary.read_text(encoding="utf-8") == "keep me"
+
+    def test_secure_open_read_refuses(self, tmp_path):
+        held, _canary = self._sandbox(tmp_path)
+        base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for bad in self._bad_names(held):
+                with pytest.raises(_fsafe.UnsafePathError):
+                    with _fsafe.secure_open_read(base_fd, bad, encoding="utf-8"):
+                        pass
+        finally:
+            os.close(base_fd)
+
+    def test_the_raw_calls_being_guarded_really_do_escape(self, tmp_path):
+        """Without the check, each bad name reaches outside the held fd.
+
+        Asserted directly against ``os.open`` so the guard's necessity is
+        recorded here rather than in a commit message.
+        """
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        (tmp_path / "outside_marker").mkdir()
+        target = tmp_path / "target"
+        target.mkdir()
+        (inner / "linkdir").symlink_to(target, target_is_directory=True)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+        base_fd = os.open(str(inner), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            # ".." leaves the held directory.
+            up = os.open("..", flags, dir_fd=base_fd)
+            try:
+                assert "outside_marker" in os.listdir(up)
+            finally:
+                os.close(up)
+            # An absolute path makes dir_fd irrelevant -- it names a directory
+            # that is not under the held fd at all.
+            absolute = os.open(str(tmp_path / "outside_marker"), flags, dir_fd=base_fd)
+            os.close(absolute)
+            # A separator gets the INTERMEDIATE component resolved with symlinks
+            # followed -- O_NOFOLLOW only ever guarded the last one.
+            os.close(os.open("linkdir/../target", flags, dir_fd=base_fd))
+        finally:
+            os.close(base_fd)
+
+    def test_legitimate_names_still_work(self, tmp_path):
+        """The check must not reject an ordinary directory entry."""
+        (tmp_path / "sub" / "child").mkdir(parents=True)
+        (tmp_path / "sub" / "child" / "f.txt").write_text("x", encoding="utf-8")
+        with _fsafe.open_dir_nofollow(tmp_path, ["sub", "child"]) as fd:
+            assert "f.txt" in os.listdir(fd)
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            assert _fsafe.stat_at(base_fd, "sub") is not None
+        finally:
+            os.close(base_fd)
+
+    def test_no_fd_leak_when_a_name_is_refused(self, tmp_path):
+        (tmp_path / "sub").mkdir()
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            before = _open_fd_count()
+            for _ in range(50):
+                with pytest.raises(_fsafe.UnsafePathError):
+                    with _fsafe.open_dir_at(base_fd, ["sub", ".."]):
+                        pass
+            assert _open_fd_count() == before
+        finally:
+            os.close(base_fd)
+
+
+class TestSecureOpenReadFileType:
+    """A regular file seen by the walk can be something else by the open.
+
+    The walk's ``lstat`` and the read are separate syscalls, and this PR widened
+    that window on purpose (artifacts are now listed first and reopened one at a
+    time to bound descriptor use). A payload that swaps a matched CSV for a FIFO
+    turns a blocking ``O_RDONLY`` into an indefinite wait, which hangs the sweep
+    rather than degrading it -- strictly worse than any wrong metric.
+    """
+
+    def test_refuses_a_fifo_instead_of_blocking(self, tmp_path, no_hang):
+        os.mkfifo(tmp_path / "stats.csv")
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            # The defect this replaces was a hang, so bound the test itself: a
+            # regression must fail the alarm rather than stall the suite.
+            with no_hang(5):
+                with pytest.raises(_fsafe.UnsafePathError, match="not a regular file"):
+                    with _fsafe.secure_open_read(base_fd, "stats.csv", encoding="utf-8"):
+                        pass
+        finally:
+            os.close(base_fd)
+
+    def test_a_blocking_open_on_that_fifo_really_does_hang(self, tmp_path, no_hang):
+        """Pins the premise: without ``O_NONBLOCK`` the open never returns."""
+        os.mkfifo(tmp_path / "stats.csv")
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pytest.raises(BlockedTooLong):
+                with no_hang(2):
+                    os.close(
+                        os.open("stats.csv", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=base_fd)
+                    )
+        finally:
+            os.close(base_fd)
+
+    def test_refuses_a_directory_where_a_file_was_expected(self, tmp_path):
+        (tmp_path / "stats.csv").mkdir()
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pytest.raises(OSError):
+                with _fsafe.secure_open_read(base_fd, "stats.csv", encoding="utf-8"):
+                    pass
+        finally:
+            os.close(base_fd)
+
+    def test_reads_a_regular_file_normally(self, tmp_path):
+        (tmp_path / "stats.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with _fsafe.secure_open_read(
+                base_fd, "stats.csv", encoding="utf-8", newline=""
+            ) as stream:
+                assert stream.read() == "a,b\n1,2\n"
+        finally:
+            os.close(base_fd)
+
+    def test_the_handle_is_blocking_again(self, tmp_path):
+        """``O_NONBLOCK`` is an open-time trick, not part of the parser's contract."""
+        (tmp_path / "stats.csv").write_text("x", encoding="utf-8")
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with _fsafe.secure_open_read(base_fd, "stats.csv", encoding="utf-8") as stream:
+                flags = fcntl.fcntl(stream.fileno(), fcntl.F_GETFL)
+                assert not flags & os.O_NONBLOCK
+        finally:
+            os.close(base_fd)
+
+    def test_no_fd_leak_when_the_type_check_refuses(self, tmp_path, no_hang):
+        os.mkfifo(tmp_path / "stats.csv")
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            before = _open_fd_count()
+            for _ in range(50):
+                with no_hang(5), pytest.raises(_fsafe.UnsafePathError):
+                    with _fsafe.secure_open_read(base_fd, "stats.csv", encoding="utf-8"):
+                        pass
+            assert _open_fd_count() == before
+        finally:
+            os.close(base_fd)
+
+    def test_no_fd_leak_when_wrapping_the_fd_fails(self, tmp_path, monkeypatch):
+        """``fdopen`` only adopts the fd on success, so a failure must close it."""
+        (tmp_path / "stats.csv").write_text("x", encoding="utf-8")
+
+        def boom(*_args, **_kwargs):
+            raise LookupError("unknown encoding")
+
+        monkeypatch.setattr(os, "fdopen", boom)
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            before = _open_fd_count()
+            for _ in range(50):
+                with pytest.raises(LookupError):
+                    with _fsafe.secure_open_read(base_fd, "stats.csv", encoding="bogus"):
+                        pass
+            assert _open_fd_count() == before
+        finally:
+            os.close(base_fd)
 
 
 class TestOpenDirAt:
