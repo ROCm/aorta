@@ -8,7 +8,6 @@ mid-walk ancestor swap cannot redirect them), and no file descriptor leaks.
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 from pathlib import Path
 
@@ -202,22 +201,24 @@ class TestChildNameEnforcement:
     so these pin the helpers' contract for the next caller.
     """
 
+    #: Stand-in resolved per test to an absolute path *inside* the sandbox.
+    #: Deliberately not a real one like ``/etc``: mutation-testing this class
+    #: means running it with the guard removed, and ``remove_entry_at`` would
+    #: then genuinely try to empty whatever the name points at. A test whose
+    #: failure mode is "recursively deletes a system directory" is not one to
+    #: leave lying around, so every case aims inside the sandbox.
+    ABSOLUTE = "<absolute-inside-sandbox>"
+
     #: Names that must never reach the kernel from one of these helpers.
-    #: The absolute case is built per-test inside ``tmp_path`` rather than
-    #: hard-coded (``/etc``): mutation-testing this class means running it with
-    #: the guard removed, and ``remove_entry_at`` would then genuinely try to
-    #: empty whatever the name points at. A test whose failure mode is
-    #: "recursively deletes a real system directory" is not one to leave lying
-    #: around, so every case is aimed inside the sandbox.
-    RELATIVE_BAD_NAMES = ("", ".", "..", "sub/child", "a/../../b")
+    BAD_NAMES = ("", ".", "..", ABSOLUTE, "sub/child", "a/../../b")
 
     @staticmethod
     def _sandbox(tmp_path):
         """A held-fd directory whose parent is also disposable.
 
-        ``..`` has to be able to resolve to *something* for the unguarded case
-        to be meaningful, so the fd is opened one level down and the level above
-        it is sacrificial. A sibling file there is the canary.
+        ``..`` has to resolve to *something* for the unguarded case to be
+        meaningful, so the fd is opened one level down and the level above it is
+        sacrificial. A sibling file there is the canary.
         """
         sandbox = tmp_path / "sandbox"
         held = sandbox / "held"
@@ -226,62 +227,65 @@ class TestChildNameEnforcement:
         canary.write_text("keep me", encoding="utf-8")
         return held, canary
 
-    def _bad_names(self, held):
-        return (*self.RELATIVE_BAD_NAMES, str(held / "sub"))
+    @classmethod
+    def _name(cls, bad, held):
+        return str(held / "sub") if bad == cls.ABSOLUTE else bad
 
-    def test_open_dir_at_refuses(self, tmp_path):
+    @pytest.mark.parametrize("bad", BAD_NAMES)
+    def test_open_dir_at_refuses(self, tmp_path, bad):
         held, canary = self._sandbox(tmp_path)
         base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            for bad in self._bad_names(held):
-                with pytest.raises(_fsafe.UnsafePathError) as excinfo:
-                    with _fsafe.open_dir_at(base_fd, [bad]):
-                        pass
-                assert excinfo.value.errno == errno.EINVAL, bad
+            with pytest.raises(_fsafe.UnsafePathError) as excinfo:
+                with _fsafe.open_dir_at(base_fd, [self._name(bad, held)]):
+                    pass
+            assert excinfo.value.errno == errno.EINVAL
         finally:
             os.close(base_fd)
         assert canary.exists()
 
-    def test_open_dir_nofollow_refuses(self, tmp_path):
+    @pytest.mark.parametrize("bad", BAD_NAMES)
+    def test_open_dir_nofollow_refuses(self, tmp_path, bad):
         held, _canary = self._sandbox(tmp_path)
-        for bad in self._bad_names(held):
-            with pytest.raises(_fsafe.UnsafePathError) as excinfo:
-                with _fsafe.open_dir_nofollow(held, [bad]):
-                    pass
-            assert excinfo.value.errno == errno.EINVAL, bad
+        with pytest.raises(_fsafe.UnsafePathError) as excinfo:
+            with _fsafe.open_dir_nofollow(held, [self._name(bad, held)]):
+                pass
+        assert excinfo.value.errno == errno.EINVAL
 
-    def test_stat_at_refuses(self, tmp_path):
+    @pytest.mark.parametrize("bad", BAD_NAMES)
+    def test_stat_at_refuses(self, tmp_path, bad):
         held, _canary = self._sandbox(tmp_path)
         base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            for bad in self._bad_names(held):
-                with pytest.raises(_fsafe.UnsafePathError):
-                    _fsafe.stat_at(base_fd, bad)
+            with pytest.raises(_fsafe.UnsafePathError):
+                _fsafe.stat_at(base_fd, self._name(bad, held))
         finally:
             os.close(base_fd)
 
-    def test_remove_entry_at_refuses(self, tmp_path):
+    @pytest.mark.parametrize("bad", BAD_NAMES)
+    def test_remove_entry_at_refuses(self, tmp_path, bad):
         """The worst one: ``remove_entry_at(fd, "..")`` would empty the parent."""
         held, canary = self._sandbox(tmp_path)
         base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            for bad in self._bad_names(held):
-                with pytest.raises(_fsafe.UnsafePathError):
-                    _fsafe.remove_entry_at(base_fd, bad)
+            with pytest.raises(_fsafe.UnsafePathError):
+                _fsafe.remove_entry_at(base_fd, self._name(bad, held))
         finally:
             os.close(base_fd)
         # Nothing above the held fd was touched. Without the guard, the ".."
         # case empties this directory.
         assert canary.read_text(encoding="utf-8") == "keep me"
 
-    def test_secure_open_read_refuses(self, tmp_path):
+    @pytest.mark.parametrize("bad", BAD_NAMES)
+    def test_secure_open_read_refuses(self, tmp_path, bad):
         held, _canary = self._sandbox(tmp_path)
         base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            for bad in self._bad_names(held):
-                with pytest.raises(_fsafe.UnsafePathError):
-                    with _fsafe.secure_open_read(base_fd, bad, encoding="utf-8"):
-                        pass
+            with pytest.raises(_fsafe.UnsafePathError):
+                with _fsafe.secure_open_read(
+                    base_fd, self._name(bad, held), encoding="utf-8"
+                ):
+                    pass
         finally:
             os.close(base_fd)
 
@@ -401,6 +405,11 @@ class TestSecureOpenReadFileType:
 
     def test_the_handle_is_blocking_again(self, tmp_path):
         """``O_NONBLOCK`` is an open-time trick, not part of the parser's contract."""
+        # Imported here rather than at module scope: this module is skipped
+        # wholesale off POSIX, and a top-level import would turn that skip into
+        # a collection error.
+        import fcntl
+
         (tmp_path / "stats.csv").write_text("x", encoding="utf-8")
         base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
         try:

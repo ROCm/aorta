@@ -63,6 +63,15 @@ _O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY: int = getattr(os, "O_DIRECTORY", 0)
 _O_NONBLOCK: int = getattr(os, "O_NONBLOCK", 0)
 
+# Feature detection in the same spirit as the flags above, not an optional
+# third-party dependency: ``fcntl`` is a CPython builtin extension present on
+# every POSIX build and absent on Windows, so ``ImportError`` is the only way
+# this can fail -- there is no half-installed state to fail differently.
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows, where the fd path is off anyway
+    _fcntl = None  # type: ignore[assignment]
+
 #: True when the platform exposes the primitives needed for race-free,
 #: fd-relative traversal. False on Windows and anywhere ``O_NOFOLLOW`` /
 #: ``O_DIRECTORY`` / ``dir_fd`` are unavailable, where callers keep their
@@ -536,13 +545,11 @@ def _clear_nonblock(fd: int) -> None:
     an ordinary blocking file, and suppressed rather than raised because failing
     to tidy a flag is not a reason to drop a readable artifact.
     """
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - POSIX-only, like the rest of this module
+    if _fcntl is None:
         return
     with contextlib.suppress(OSError):
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~_O_NONBLOCK)
+        flags = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+        _fcntl.fcntl(fd, _fcntl.F_SETFL, flags & ~_O_NONBLOCK)
 
 
 def prune_empty_dirs(base_fd: int) -> None:
