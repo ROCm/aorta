@@ -1,10 +1,26 @@
 # ConSan transform rejection `status=4112` — overlapping anchor patches
 
-**Status: fixed upstream and now published.** Fixed in `dc7c8e04`; a bundle
-carrying it (and the #9972 fix) went green on 2026-08-24, so the next nightly
-picks it up. This document is kept as the record of the defect and of what it
-predicted, since the dashboard row it explains only changes once that bundle is
-consumed.
+**Status: fixed upstream, published, and confirmed consumed.** Fixed in
+`dc7c8e04`; a bundle carrying it (and the #9972 fix) went green on 2026-08-24,
+and the nightly has since run on `97c1640b` with no overlapping-patch complaint
+anywhere in its log. This document is kept as the record of the defect and of
+what it predicted.
+
+> ⚠️ **`consan-gemm` on Tab 2 still shows `status=4112` / exit 92 — for an
+> unrelated reason.** `status=4112` is a generic `transform-error` bucket, and the
+> row it produces is indistinguishable from the pre-fix one. The current
+> rejection is ConSan's *patched-image growth* ceiling (400 MiB against a
+> ~1.39 GiB requirement), triggered because the extracted fixture grew from
+> 15.5 MB to 183 MiB with the move to ROCm 7.2.4. That is a configurable
+> capacity policy, not a defect, and it is written up separately in
+> [`consan-gemm-patched-image-growth-cap.md`](consan-gemm-patched-image-growth-cap.md).
+>
+> Consequence for this document: the prediction below — that the fix moves
+> `consan-gemm` to exit 86 on strict require-records — **has not been observed in
+> CI and cannot be**, because the growth ceiling now intervenes before the
+> transform completes. The prediction was verified against the 15.5 MB object on
+> a source build, and it remains correct *for that object*. It is not what the
+> nightly reports.
 
 Found while verifying the upstream fixes claimed for ROCm/rocm-systems#9964,
 #9970 and #9972, and filed as
@@ -123,16 +139,21 @@ No load rejection: the transform succeeded and the failure moved to the
 require-records check. So:
 
 The first column is what the dashboard showed while `db0c47df` was the newest
-bundle. The second is measured from source builds of the fixes, not predicted, and
-is what the nightly should start reporting once it picks up `4227d40fb5`. The
-third remains a projection — it needs work nobody has done yet.
+bundle. The second is measured from source builds of the fixes, not predicted. The
+third is what the nightly **actually** reported once it picked up a bundle with
+both fixes (`97c1640b`, run 32967422099, 2026-08-26). The fourth remains a
+projection — it needs work nobody has done yet.
 
-| Case | On `db0c47df` (through 2026-08-24) | With the `dc7c8e04` / `15275dad` fixes (measured, source build) | Additionally **with a dispatching driver** (not built) |
-|---|---|---|---|
-| `consan-gemm` (Tab 2) | `error`, exit 92 `consan_strict_load_rejection` | `error`, exit 86 `combined_hook_exit_86` — transform now succeeds | could reach a real `pass`/`fail` verdict |
-| `consan-lds-dispatch` (Tab 2) | `error`, exit 86 | records captured, `dynamic_complete=true`, exit 0 at `STRIDE=16` | `pass`/`fail` |
-| `consan-tiny` (Tab 2) | `error`, exit 86 | unchanged (no sites, by design) | unchanged |
-| `consan-clean` / `consan-racy` (Tab 1) | `pass` / `fail` | unchanged | unchanged |
+| Case | On `db0c47df` (through 2026-08-24) | With the `dc7c8e04` / `15275dad` fixes (measured, source build, 15.5 MB object) | Observed in CI on `97c1640b` (183 MiB object) | Additionally **with a dispatching driver** (not built) |
+|---|---|---|---|---|
+| `consan-gemm` (Tab 2) | `error`, exit 92 `consan_strict_load_rejection` | `error`, exit 86 `combined_hook_exit_86` — transform now succeeds | ❌ **still `error`, exit 92** — different cause: patched-image growth ceiling, see [the growth-cap doc](consan-gemm-patched-image-growth-cap.md) | could reach a real `pass`/`fail` verdict |
+| `consan-lds-dispatch` (Tab 2) | `error`, exit 86 | records captured, `dynamic_complete=true`, exit 0 at `STRIDE=16` | ✅ **`pass`**, `access=5/5 barrier=2/2`, `visible_evidence=3216` | already there |
+| `consan-tiny` (Tab 2) | `error`, exit 86 | unchanged (no sites, by design) | `error`, exit 86 — as designed | unchanged; a dispatching driver does **not** help (measured) |
+| `consan-clean` / `consan-racy` (Tab 1) | `pass` / `fail` | unchanged | `pass` / `fail` | unchanged |
+
+The second column's `consan-gemm` prediction is the one entry that CI never
+reached. It was measured against the 15.5 MB ROCm 7.0.2.2 object and holds for it;
+the object CI extracts is 11.8x larger and is rejected earlier, on capacity.
 
 The concrete thing that started working is the **ConSan transform of a large
 production code object**. On `dc7c8e04` the same object patches cleanly —

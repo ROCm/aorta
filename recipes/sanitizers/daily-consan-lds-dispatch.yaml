@@ -5,10 +5,14 @@ description: >
   Informational (non-gating) gfx950 ConSan run over a small, race-free shared-memory
   (LDS) reduction kernel that is actually DISPATCHED (hipModuleLoad + hipModuleLaunch)
   via the source.consan_command path added in #347. The kernel is instrumented and
-  runs, exercising ConSan record/replay end-to-end on a caller-supplied object. On the
-  current rocjitsu build it fails closed (record capture yields zero events -> exit 86;
-  see ROCm/rocm-systems#9972) rather than a false pass. Rendered on the dashboard's
-  Workload survey tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
+  runs, exercising ConSan record/replay end-to-end on a caller-supplied object.
+  ROCm/rocm-systems#9972 (record capture yielded zero events -> exit 86) is fixed in
+  15275dad: on bundle 97c1640b this case observes a clean pass with access=5/5,
+  barrier=2/2 and dynamic_complete=true. It is now the end-to-end control proving the
+  dynamic record/replay path works on a caller-supplied object. Rendered on the
+  dashboard's Workload survey tab (Tab 2) as an observed-only case; it does NOT gate
+  the nightly, so a future regression here shows up as an observation, not a gate
+  failure.
 sanitizer_plan:
   target: gfx950
   source:

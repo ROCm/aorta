@@ -69,6 +69,22 @@ sanitizer_plan:
     # which no lower level emits -- so it is filed upstream as
     # ROCm/rocm-systems#10686. If that lands, this ceiling can drop to roughly a
     # quarter of its current value.
+    #
+    # !! STALE AS A BUDGET, 2026-08-27 !! Everything above was measured against a
+    # 16,265,200-byte (15.5 MB) object on ROCm 7.0.2.2. The object CI extracts on
+    # the 7.2.4 base is 191,935,808 bytes (~183 MiB) with 637,823 access ranges --
+    # 11.8x the bytes and 9.3x the sites -- so these figures no longer describe this
+    # case. See prepare_gemm_isa.py's docstring: the size is a per-release property
+    # of the shipped Tensile libraries, not something this repo pins.
+    #
+    # The ceiling is currently NOT what limits this case. ConSan rejects the object
+    # before instrumenting it, on the patched-image growth policy (needs ~1.39 GiB
+    # against a 400 MiB default), so the run ends at ~730s with exit 92
+    # status=4112. Raising RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_PERCENT past ~778
+    # would let the transform proceed -- and 6000s would then very likely be too
+    # small, because 9.3x the sites is work no measurement here covers. Re-measure
+    # before assuming this number means anything.
+    # See docs/sanitizers/consan-gemm-patched-image-growth-cap.md.
     timeout_seconds: 6000
   output:
     report: sanitizer_report.json
