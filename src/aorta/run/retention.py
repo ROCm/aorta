@@ -40,6 +40,7 @@ is not the record or a known log is heavy).
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -224,7 +225,10 @@ def _manifest_mapping(raw: object) -> dict[str, str]:
 
 
 def apply_retention(
-    trial_dir: Path, level: str, *, trusted_root: Path | None = None
+    trial_dir: Path,
+    level: str,
+    *,
+    trusted_root: _fsafe.TrustedAnchor | Path | None = None,
 ) -> RetentionOutcome:
     """Prune ``trial_dir`` to the artifacts kept by retention ``level``.
 
@@ -251,7 +255,10 @@ def apply_retention(
       that replaces an ancestor between the check and a delete cannot redirect
       it, closing the time-of-check/time-of-use window. ``trusted_root`` is the
       operator's canonical ``--results-dir`` and ``trial_dir`` must be lexically
-      inside it.
+      inside it. Pass a :class:`~aorta.run._fsafe.TrustedAnchor` (rather than a
+      bare path) to also pin the anchor's inode, so a payload that renamed the
+      results directory aside and moved a real directory into its pathname is
+      refused; a bare path keeps the no-follow-only descent.
     * **Omitted** (the operator-written trial record tree, not handed to the
       payload) or on a platform without the fd primitives: the historical
       ``os.walk(..., followlinks=False)`` + ``resolve()``-containment body runs,
@@ -323,7 +330,7 @@ def apply_retention(
 
 
 def _apply_retention_fd(
-    trial_dir: Path, level: str, trusted_root: Path
+    trial_dir: Path, level: str, trusted_root: _fsafe.TrustedAnchor | Path
 ) -> RetentionOutcome:
     """Race-free :func:`apply_retention` for the payload-writable collector tree.
 
@@ -336,12 +343,13 @@ def _apply_retention_fd(
     nor unlinked. Tolerant like the pathname engine: a delete that fails keeps
     the file and warns.
     """
-    components = _fsafe.relative_components(trusted_root, trial_dir)
+    anchor = _fsafe.as_anchor(trusted_root)
+    components = _fsafe.relative_components(anchor.path, trial_dir)
     if components is None:
         log.warning(
             "retention: %s is not inside the trusted root %s; keeping everything",
             trial_dir,
-            trusted_root,
+            anchor.path,
         )
         return RetentionOutcome(level=level, no_op=True)
 
@@ -350,7 +358,7 @@ def _apply_retention_fd(
     kept: list[str] = []
     freed = 0
     try:
-        with _fsafe.open_dir_nofollow(trusted_root, components) as base_fd:
+        with _fsafe.open_dir_nofollow(anchor, components) as base_fd:
             manifest = _load_manifest_fd(base_fd)
             for rel, dir_fd, name, size in _fsafe.iter_regular_files(base_fd):
                 cls = classify_artifact(rel, manifest)
@@ -369,6 +377,13 @@ def _apply_retention_fd(
                 deleted.append(rel)
             _fsafe.prune_empty_dirs(base_fd)
     except _fsafe.UnsafePathError as exc:
+        if exc.errno == errno.ENOENT:
+            # Nothing was written under this tree (a validated-only collector,
+            # or a command that produced no artifacts). The pathname engine
+            # treats a missing ``trial_dir`` as a no-op too, and an operator
+            # warning would read as a refusal where there is nothing to refuse.
+            log.debug("retention: %s does not exist; nothing to prune", trial_dir)
+            return RetentionOutcome(level=level, no_op=True)
         # A component of the collector tree was a symlink after the run: refuse
         # to prune through it, keeping the artifacts. Mirrors the pathname
         # engine's "skip + warn, never abort" tolerance.

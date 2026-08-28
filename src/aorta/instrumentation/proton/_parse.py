@@ -12,10 +12,9 @@ or a Proton build that emitted nothing all degrade to fewer metrics.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -152,15 +151,20 @@ def parse_profile(path: Path | str) -> tuple[dict[str, float], dict[str, int | N
 
 
 def parse_summary_from_streams(
-    artifact_dir: str, profile_streams: Sequence[TextIO]
+    artifact_dir: str, profile_streams: Iterable[TextIO]
 ) -> dict[str, Any]:
     """Summarise pre-opened ``.hatchet`` handles into trial metrics.
 
     The stream-taking core of :func:`parse_summary`. The caller supplies the
-    already-open profile handles -- the collector path opens them ``O_NOFOLLOW``
-    under a directory fd so a payload symlink swapped in after the guard cannot
+    profile handles -- the collector path opens them ``O_NOFOLLOW`` under a
+    directory fd so a payload symlink swapped in after the guard cannot
     redirect the read -- and the display string for ``proton_artifact_dir``.
     Same metrics contract as :func:`parse_summary`; never raises.
+
+    ``profile_streams`` may be a **lazy** iterator that opens one profile at a
+    time (both callers pass one): each handle is aggregated and closed before
+    the next opens, so a run with a profile per rank never needs a descriptor
+    per rank.
     """
     metrics: dict[str, Any] = {"proton_artifact_dir": artifact_dir}
     by_name: dict[str, float] = {}
@@ -199,11 +203,14 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     """Summarise a Proton output directory into trial metrics.
 
     Path-based convenience wrapper over :func:`parse_summary_from_streams`: it
-    globs the ``.hatchet`` profiles and opens them itself. The collector
-    post-run path uses the stream entrypoint instead, opening each file
-    ``O_NOFOLLOW`` under a directory fd so a payload symlink cannot redirect the
-    read; this wrapper follows symlinks like any ``open`` and is for callers
-    that already hold a trusted directory (tests, an operator's own tree).
+    globs the ``.hatchet`` profiles and opens them itself, one at a time -- a
+    run can emit a profile per rank and holding them all open at once could
+    exceed ``RLIMIT_NOFILE``, which would have dropped the later ranks from the
+    totals without saying so. The collector post-run path uses the stream
+    entrypoint instead, opening each file ``O_NOFOLLOW`` under a directory fd so
+    a payload symlink cannot redirect the read; this wrapper follows symlinks
+    like any ``open`` and is for callers that already hold a trusted directory
+    (tests, an operator's own tree).
 
     Args:
         out_dir: The directory Proton's ``-n <out_dir>/<name>`` wrote into.
@@ -225,14 +232,25 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
         profiles = sorted(root.rglob("*.hatchet"))
     except OSError:
         return {}
-    with contextlib.ExitStack() as stack:
-        streams: list[TextIO] = []
-        for profile in profiles:
-            try:
-                streams.append(stack.enter_context(profile.open(encoding="utf-8")))
-            except OSError:
-                continue
-        return parse_summary_from_streams(str(root), streams)
+    return parse_summary_from_streams(str(root), _open_each(profiles))
+
+
+def _open_each(paths: Sequence[Path]) -> Iterator[TextIO]:
+    """Yield each profile as an open handle, closing it before opening the next.
+
+    One descriptor at a time: Proton writes a profile per rank, so a large
+    distributed capture holds more artifacts than the soft fd limit allows, and
+    an ``EMFILE`` partway through a batch open would have left the remaining
+    ranks out of the totals with nothing in the output to say so. A file that
+    cannot be opened is skipped -- this wrapper promises never to raise.
+    """
+    for path in paths:
+        try:
+            handle = path.open(encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            yield handle
 
 
 __all__ = ["TOP_N", "parse_profile", "parse_profile_stream", "parse_summary", "parse_summary_from_streams"]

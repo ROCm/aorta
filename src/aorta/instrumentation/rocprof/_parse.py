@@ -16,10 +16,9 @@ Two verified behaviours drive the shape of this module:
 
 from __future__ import annotations
 
-import contextlib
 import csv
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -81,7 +80,7 @@ def _to_float(value: Any) -> float | None:
 
 
 def _totals_from_stats(
-    streams: Sequence[TextIO],
+    streams: Iterable[TextIO],
 ) -> tuple[dict[str, float], dict[str, int] | None]:
     """Aggregate ``*_kernel_stats.csv`` into per-kernel ns totals + call counts.
 
@@ -120,7 +119,7 @@ def _totals_from_stats(
 
 
 def _totals_from_trace(
-    streams: Sequence[TextIO],
+    streams: Iterable[TextIO],
 ) -> tuple[dict[str, float], dict[str, int] | None]:
     """Aggregate ``*_kernel_trace.csv`` dispatch rows into the same shape.
 
@@ -146,17 +145,22 @@ def _totals_from_trace(
 
 def parse_summary_from_streams(
     artifact_dir: str,
-    stats_streams: Sequence[TextIO],
-    trace_streams: Sequence[TextIO],
+    stats_streams: Iterable[TextIO],
+    trace_streams: Iterable[TextIO],
 ) -> dict[str, Any]:
     """Summarise pre-opened ``rocprofv3`` CSV handles into trial metrics.
 
     The stream-taking core of :func:`parse_summary`. The caller supplies the
-    already-open ``*_kernel_stats.csv`` and ``*_kernel_trace.csv`` handles --
-    the collector path opens them ``O_NOFOLLOW`` under a directory fd so a
-    payload symlink swapped in after the guard cannot redirect the read -- and
-    the display string for ``rocprof_artifact_dir``. Same metrics contract as
+    ``*_kernel_stats.csv`` and ``*_kernel_trace.csv`` handles -- the collector
+    path opens them ``O_NOFOLLOW`` under a directory fd so a payload symlink
+    swapped in after the guard cannot redirect the read -- and the display
+    string for ``rocprof_artifact_dir``. Same metrics contract as
     :func:`parse_summary`; never raises.
+
+    Each group may be a **lazy** iterator that opens one file at a time (both
+    callers pass one), so a multi-rank capture never needs a descriptor per
+    artifact. Each is consumed at most once, and the trace group is not
+    consumed at all when the stats group yielded data.
     """
     metrics: dict[str, Any] = {"rocprof_artifact_dir": artifact_dir}
 
@@ -164,12 +168,10 @@ def parse_summary_from_streams(
     # CSV that exists but yields nothing -- rocprofv3 killed mid-write by a
     # trial timeout, or a future release renaming the columns pinned above --
     # would otherwise suppress a complete kernel trace sitting beside it, and
-    # report no kernels on a host where profiling works.
-    ns_by_kernel: dict[str, float] = {}
-    calls_by_kernel: dict[str, int] | None = {}
-    if stats_streams:
-        ns_by_kernel, calls_by_kernel = _totals_from_stats(stats_streams)
-    if not ns_by_kernel and trace_streams:
+    # report no kernels on a host where profiling works. An empty stats group
+    # aggregates to nothing and falls through the same way.
+    ns_by_kernel, calls_by_kernel = _totals_from_stats(stats_streams)
+    if not ns_by_kernel:
         ns_by_kernel, calls_by_kernel = _totals_from_trace(trace_streams)
     if not ns_by_kernel:
         return metrics
@@ -203,11 +205,14 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     column-renamed stats file must not mask a readable trace.
 
     Path-based convenience wrapper over :func:`parse_summary_from_streams`: it
-    globs the two CSV families and opens them itself. The collector post-run
-    path uses the stream entrypoint instead, opening each file ``O_NOFOLLOW``
-    under a directory fd so a payload symlink cannot redirect the read; this
-    wrapper follows symlinks like any ``open`` and is for callers that already
-    hold a trusted directory (tests, an operator's own ``rocprofv3 -d`` tree).
+    globs the two CSV families and opens them itself, one at a time -- a
+    distributed run emits a CSV pair per rank and holding them all open at once
+    could exceed ``RLIMIT_NOFILE``, which would have dropped the later ranks
+    from the totals without saying so. The collector post-run path uses the
+    stream entrypoint instead, opening each file ``O_NOFOLLOW`` under a
+    directory fd so a payload symlink cannot redirect the read; this wrapper
+    follows symlinks like any ``open`` and is for callers that already hold a
+    trusted directory (tests, an operator's own ``rocprofv3 -d`` tree).
 
     Args:
         out_dir: The directory passed to ``rocprofv3 -d``.
@@ -231,18 +236,28 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
         trace_paths = sorted(root.rglob("*_kernel_trace.csv"))
     except OSError:
         return {}
-    with contextlib.ExitStack() as stack:
-        stats_streams: list[TextIO] = []
-        trace_streams: list[TextIO] = []
-        for paths, streams in ((stats_paths, stats_streams), (trace_paths, trace_streams)):
-            for path in paths:
-                try:
-                    streams.append(
-                        stack.enter_context(path.open(newline="", encoding="utf-8"))
-                    )
-                except OSError:
-                    continue
-        return parse_summary_from_streams(str(root), stats_streams, trace_streams)
+    return parse_summary_from_streams(
+        str(root), _open_each(stats_paths), _open_each(trace_paths)
+    )
+
+
+def _open_each(paths: Sequence[Path]) -> Iterator[TextIO]:
+    """Yield each CSV as an open handle, closing it before opening the next.
+
+    One descriptor at a time: ``rocprofv3`` writes a stats/trace pair per
+    process, so a large distributed capture holds more artifacts than the soft
+    fd limit allows, and an ``EMFILE`` partway through a batch open would have
+    left the remaining ranks out of the totals with nothing in the output to
+    say so. A file that cannot be opened is skipped -- this wrapper promises
+    never to raise.
+    """
+    for path in paths:
+        try:
+            handle = path.open(newline="", encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            yield handle
 
 
 __all__ = ["TOP_N", "parse_summary", "parse_summary_from_streams"]

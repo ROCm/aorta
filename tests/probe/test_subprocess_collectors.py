@@ -411,6 +411,38 @@ def test_collector_subdir_swapped_for_a_symlink_is_refused(
     assert victim.read_text(encoding="utf-8").endswith("7,7000000\n")
 
 
+def test_retention_prunes_rocprof_when_a_sibling_collector_wrote_nothing(
+    tmp_path, rocprofv3_on_path
+):
+    """One never-created collector directory must not retain the others.
+
+    ``layer_numerics`` is validated-only, so nothing in the platform makes its
+    output directory. When absence counted as an unsafe path, the guard reported
+    it, ``_prune_collector_tree`` bailed before pruning anything, and
+    ``retain.on_pass: none`` silently kept the whole rocprof capture -- the
+    hundreds of MB per trial retention exists to drop.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    wl = _make_workload(
+        tmp_path,
+        ["true"],
+        collect=["rocprof", "layer_numerics"],
+        retain={"on_pass": "none"},
+    )
+    wl.setup()
+    _rocprof_artifacts(collect_dir)
+    assert not (collect_dir / "layer_numerics").exists()
+
+    result = wl.run()
+
+    # Parsed before pruning, so the metric survives the trace it came from.
+    assert result.metrics["rocprof_kernel_count"] == 23
+    assert not (collect_dir / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv").exists()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    deleted = doc.get("capture", {}).get("retention", {}).get("deleted", [])
+    assert any(entry.endswith("aorta_kernel_stats.csv") for entry in deleted)
+
+
 def test_retention_full_keeps_the_collector_tree(tmp_path, rocprofv3_on_path):
     """``full`` is the keep-everything default; the collector tree follows it."""
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"

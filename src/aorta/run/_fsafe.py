@@ -18,6 +18,14 @@ it. This module is the shared leaf both :mod:`aorta.run.collectors` and
 :mod:`aorta.run.retention` build on; it depends only on the stdlib so retention
 stays dependency-free.
 
+The descent needs one more thing than ``O_NOFOLLOW``, because "no component is a
+symlink" does not mean "this is still the operator's directory": a rename can
+move a *real* directory into the anchor's pathname, and the anchor's parent is
+necessarily opened by pathname (it lives above the operator's boundary and may
+hold the operator's own links). :class:`TrustedAnchor` therefore carries the
+``(st_dev, st_ino)`` the anchor had before the first payload launched, and the
+descent refuses to continue when the directory it opened is a different inode.
+
 Everything here is POSIX-only (``O_NOFOLLOW`` / ``O_DIRECTORY`` / ``dir_fd``).
 :data:`HAVE_FD_TRAVERSAL` is ``False`` on a platform that lacks them; callers
 fall back to their previous lexical guards there. ``aorta probe`` is Linux-only
@@ -27,12 +35,14 @@ by design, so the fd path is the one that runs in practice.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import errno
 import logging
 import os
 import stat
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import TextIO
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +63,68 @@ class UnsafePathError(OSError):
     :class:`OSError` subclass so existing ``except OSError`` guards in the
     collector and retention paths keep failing closed without a new import.
     """
+
+
+@dataclasses.dataclass(frozen=True)
+class TrustedAnchor:
+    """A canonical directory path plus the inode it named before the payload ran.
+
+    ``O_NOFOLLOW`` answers "is this component a symlink", which is not the same
+    question as "is this still the operator's directory". Two swaps slip past a
+    no-follow-only descent:
+
+    * The anchor's *parent* is opened by pathname, above the operator's
+      boundary, because it may legitimately hold the operator's own links. A
+      payload that can write the grandparent can rename that parent aside and
+      leave a symlink to a planted tree that contains an ordinary ``results``
+      directory; the anchor then opens with no symlink in sight.
+    * The anchor itself can be renamed aside and a *real* directory renamed
+      into its place. Nothing in that pathname is a link, so every no-follow
+      check passes.
+
+    Both are defeated by naming the inode rather than the path: ``identity`` is
+    the ``(st_dev, st_ino)`` pair captured before the first payload launches,
+    and :func:`open_dir_nofollow` refuses to descend when the directory it
+    opened is not that inode. A file descriptor would be the stronger pin, but
+    the anchor has to cross the isolated-worker process boundary, and fds do
+    not.
+
+    ``identity`` is ``None`` for an anchor nobody froze -- a direct
+    programmatic caller, or a platform where the stat failed. The descent then
+    keeps its no-follow-only behaviour rather than inventing a pin.
+    """
+
+    path: Path
+    identity: tuple[int, int] | None = None
+
+    @classmethod
+    def freeze(cls, path: Path | str) -> TrustedAnchor:
+        """Capture ``path``'s current inode identity as the trust anchor.
+
+        The caller must do this *before* any payload runs and after the
+        directory exists, which for the dispatcher means after it has created
+        the results tree. A stat failure yields an unpinned anchor rather than
+        raising: an anchor that cannot be pinned is still worth threading for
+        its no-follow descent.
+        """
+        anchor = Path(os.fspath(path))
+        try:
+            info = os.stat(anchor)
+        except OSError as exc:
+            log.debug("could not pin the trust anchor %s (%s)", anchor, exc)
+            return cls(anchor)
+        return cls(anchor, (info.st_dev, info.st_ino))
+
+
+def as_anchor(trusted_root: TrustedAnchor | Path | str) -> TrustedAnchor:
+    """Coerce a path or an already-frozen anchor into a :class:`TrustedAnchor`.
+
+    Lets every guard take either form, so a caller that has no frozen identity
+    (a test, a direct programmatic caller) keeps passing a plain path.
+    """
+    if isinstance(trusted_root, TrustedAnchor):
+        return trusted_root
+    return TrustedAnchor(Path(os.fspath(trusted_root)))
 
 
 def relative_components(trusted_root: Path, target: Path) -> list[str] | None:
@@ -76,7 +148,7 @@ def relative_components(trusted_root: Path, target: Path) -> list[str] | None:
 
 @contextlib.contextmanager
 def open_dir_nofollow(
-    trusted_root: Path | str,
+    trusted_root: TrustedAnchor | Path | str,
     components: Sequence[str],
     *,
     create_missing: bool = False,
@@ -84,19 +156,15 @@ def open_dir_nofollow(
     """Yield a dir fd for ``trusted_root``/*components*, opened without following
     any symlink below ``trusted_root``.
 
-    The **parent** of ``trusted_root`` is opened plainly (``O_RDONLY |
-    O_DIRECTORY``): it sits *above* the operator's ``--results-dir``, so it is
-    not payload-writable and may legitimately contain the operator's own
-    symlinks (a ``/tmp`` that is really ``/private/tmp``, a mounted scratch
-    path) that the dispatcher already resolved away. The ``--results-dir``
-    inode itself is the *first* payload-swappable component -- the payload can
-    replace the results directory with a symlink after launch -- so it, and
-    every component below it, is opened ``O_RDONLY | O_NOFOLLOW | O_DIRECTORY``
-    relative to its parent fd. A payload-owned symlink at any of them (including
-    the anchor itself) raises :class:`UnsafePathError` instead of redirecting the
-    descent. All intermediate fds are closed as the walk proceeds; the yielded
-    leaf fd is closed on context exit. The caller must not use the fd after the
-    ``with`` block.
+    The anchor directory is opened first (see :func:`_open_anchor`) and, when
+    the caller froze a :class:`TrustedAnchor`, checked to be the inode the
+    operator's ``--results-dir`` named before the payload launched. Every
+    component below it is then opened ``O_RDONLY | O_NOFOLLOW | O_DIRECTORY``
+    relative to its parent fd, so a payload-owned symlink at any of them raises
+    :class:`UnsafePathError` instead of redirecting the descent. All
+    intermediate fds are closed as the walk proceeds; the yielded leaf fd is
+    closed on context exit. The caller must not use the fd after the ``with``
+    block.
 
     When ``create_missing`` is set, a component that does not exist is created
     with ``os.mkdir(dir_fd=...)`` and then opened -- the fd-relative equivalent
@@ -106,30 +174,71 @@ def open_dir_nofollow(
 
     Raises:
         UnsafePathError: a component is a symlink, is missing (and
-            ``create_missing`` is false), or is not a directory.
+            ``create_missing`` is false), is not a directory, or the anchor is
+            no longer the frozen inode.
     """
-    anchor = Path(os.fspath(trusted_root))
-    anchor_name = anchor.name
-    if anchor_name:
-        # Open the parent (above --results-dir, not payload territory) plainly,
-        # then descend the results-dir inode itself no-follow so a swap of it is
-        # caught like any component below it.
-        base = os.fspath(anchor.parent)
-        walk: list[str] = [anchor_name, *components]
-    else:
-        # Degenerate anchor (a filesystem root has no name): nothing above it to
-        # anchor against, so open it plainly and rely on the below-components.
-        base = os.fspath(trusted_root)
-        walk = list(components)
-    dir_fd = os.open(base, os.O_RDONLY | _O_DIRECTORY)
+    anchor = as_anchor(trusted_root)
+    dir_fd = _open_anchor(anchor, create_missing)
     try:
-        for name in walk:
-            child = _open_child_dir(dir_fd, name, trusted_root, create_missing)
+        for name in components:
+            child = _open_child_dir(dir_fd, name, anchor.path, create_missing)
             os.close(dir_fd)
             dir_fd = child
         yield dir_fd
     finally:
         os.close(dir_fd)
+
+
+def _open_anchor(anchor: TrustedAnchor, create_missing: bool) -> int:
+    """Open the trusted root itself and confirm it is the frozen inode.
+
+    The anchor's **parent** is opened plainly (``O_RDONLY | O_DIRECTORY``): it
+    sits *above* the operator's ``--results-dir``, so it may legitimately
+    contain the operator's own symlinks (a ``/tmp`` that is really
+    ``/private/tmp``, a mounted scratch path) that the dispatcher already
+    resolved away. The anchor inode itself is the *first* payload-swappable
+    component -- the payload can replace the results directory after launch --
+    so it is opened ``O_NOFOLLOW`` relative to that parent fd.
+
+    Opening the parent by pathname is what makes the identity check
+    load-bearing rather than belt-and-braces: a payload that can write the
+    grandparent can rename the parent aside and leave a symlink to a planted
+    tree whose own ``results`` directory is perfectly ordinary, and no
+    no-follow check below would notice. Comparing ``fstat`` against
+    :attr:`TrustedAnchor.identity` also catches the reverse trick of renaming
+    the anchor aside and moving a *real* directory into its pathname.
+
+    Raises:
+        UnsafePathError: the anchor is a symlink, is missing (and
+            ``create_missing`` is false), or is not the frozen inode.
+    """
+    name = anchor.path.name
+    if name:
+        parent_fd = os.open(os.fspath(anchor.path.parent), os.O_RDONLY | _O_DIRECTORY)
+        try:
+            dir_fd = _open_child_dir(parent_fd, name, anchor.path, create_missing)
+        finally:
+            os.close(parent_fd)
+    else:
+        # Degenerate anchor (a filesystem root has no name): nothing above it to
+        # descend from, so open it plainly and rely on the below-components.
+        dir_fd = os.open(os.fspath(anchor.path), os.O_RDONLY | _O_DIRECTORY)
+    if anchor.identity is None:
+        return dir_fd
+    try:
+        info = os.fstat(dir_fd)
+        if (info.st_dev, info.st_ino) != anchor.identity:
+            raise UnsafePathError(
+                errno.ESTALE,
+                f"refusing to descend into {os.fspath(anchor.path)!r}: it is no "
+                f"longer the directory frozen before the run "
+                f"(expected inode {anchor.identity}, found "
+                f"{(info.st_dev, info.st_ino)}), so it was renamed or replaced",
+            )
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
 
 
 def _open_child_dir(
@@ -169,6 +278,31 @@ def _open_child_dir(
             f"refusing to descend into {name!r} under {os.fspath(trusted_root)!r}: "
             f"{exc.strerror}",
         ) from exc
+
+
+@contextlib.contextmanager
+def open_dir_at(base_fd: int, components: Sequence[str]) -> Iterator[int]:
+    """Yield a dir fd for *components* under ``base_fd``, no-follow at every step.
+
+    The short form of :func:`open_dir_nofollow` for a caller that already holds
+    a verified directory fd and wants to reach a subdirectory of it. No anchor
+    identity check is needed: ``base_fd`` names an inode directly, so the
+    descent cannot be redirected by any pathname swap. Used to reopen one
+    artifact's directory at a time so a large capture never holds more than a
+    couple of descriptors.
+
+    Raises:
+        UnsafePathError: a component is a symlink, missing, or not a directory.
+    """
+    dir_fd = os.dup(base_fd)
+    try:
+        for name in components:
+            child = _open_child_dir(dir_fd, name, ".", False)
+            os.close(dir_fd)
+            dir_fd = child
+        yield dir_fd
+    finally:
+        os.close(dir_fd)
 
 
 def stat_at(dir_fd: int, name: str) -> os.stat_result | None:
@@ -265,7 +399,7 @@ def _walk(dir_fd: int, prefix: str) -> Iterator[tuple[str, int, str, int]]:
 
 
 @contextlib.contextmanager
-def secure_open_read(dir_fd: int, name: str, **text_kwargs: object) -> Iterator[object]:
+def secure_open_read(dir_fd: int, name: str, **text_kwargs: object) -> Iterator[TextIO]:
     """Open ``name`` under ``dir_fd`` read-only and no-follow as a text stream.
 
     Refuses a symlink at the final component (``O_NOFOLLOW``). ``text_kwargs``
@@ -313,8 +447,11 @@ def _prune(dir_fd: int) -> None:
 
 __all__ = [
     "HAVE_FD_TRAVERSAL",
+    "TrustedAnchor",
     "UnsafePathError",
+    "as_anchor",
     "iter_regular_files",
+    "open_dir_at",
     "open_dir_nofollow",
     "prune_empty_dirs",
     "relative_components",

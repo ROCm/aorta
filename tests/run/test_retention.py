@@ -397,6 +397,57 @@ def test_fd_engine_ancestor_swap_after_open_is_inert(tmp_path: Path, monkeypatch
 
 
 @_needs_fd
+def test_fd_engine_refuses_a_results_root_replaced_by_a_real_directory(
+    tmp_path: Path, caplog
+):
+    """A pinned anchor refuses the swap that no ``O_NOFOLLOW`` check can see.
+
+    The payload renames the results directory aside and moves a real directory
+    into its pathname. Nothing on the way down is a symlink, so only the frozen
+    inode distinguishes the planted tree from the operator's -- without it the
+    prune deletes the planted files.
+    """
+    results = tmp_path / "results"
+    trial = results / "wl" / "trial_d0_m0_t0"
+    _populate(trial)
+    anchor = _fsafe.TrustedAnchor.freeze(results.resolve())
+    assert anchor.identity is not None
+
+    results.rename(tmp_path / "results.moved")
+    planted = tmp_path / "planted"
+    _populate(planted / "wl" / "trial_d0_m0_t0")
+    planted.rename(results)
+    victim = results / "wl" / "trial_d0_m0_t0" / "trace.bin"
+
+    outcome = apply_retention(trial, "none", trusted_root=anchor)
+    assert outcome.no_op
+    assert victim.exists()
+
+    # Unpinned, the same prune goes ahead against the planted tree -- the gap
+    # the pin closes.
+    assert not apply_retention(trial, "none", trusted_root=results.resolve()).no_op
+    assert not victim.exists()
+
+
+@_needs_fd
+def test_fd_engine_treats_a_missing_tree_as_nothing_to_prune(tmp_path: Path, caplog):
+    """An absent collector tree is a no-op, not a refusal.
+
+    A validated-only collector writes no directory at all, and the pathname
+    engine already treats a missing ``trial_dir`` as a no-op; warning about a
+    symlink that is not there would send an operator hunting for one.
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    with caplog.at_level("WARNING"):
+        outcome = apply_retention(
+            results / "wl" / "trial_d0_m0_t0", "none", trusted_root=results.resolve()
+        )
+    assert outcome.no_op
+    assert not any("symlink" in record.getMessage() for record in caplog.records)
+
+
+@_needs_fd
 def test_fd_engine_reads_manifest_no_follow(tmp_path: Path):
     """The fd engine honours a real manifest entry's class."""
     results = tmp_path / "results"

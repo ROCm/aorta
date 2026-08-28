@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -29,11 +30,14 @@ from aorta.run.collectors import (
     CONFIG_KEY_COLLECT_DIR,
     CONFIG_KEY_COLLECT_OPTIONS,
     CONFIG_KEY_RESULTS_ROOT,
+    CONFIG_KEY_RESULTS_ROOT_ID,
     KNOWN_RECIPES,
     WRAP_ORDER,
     CollectorSpec,
     active_collectors,
     summarize_collectors,
+    trusted_results_anchor,
+    unsafe_collector_paths,
     validate_collectors,
     wrap_argv_for_collectors,
 )
@@ -57,7 +61,9 @@ def profilers_on_path(tmp_path, monkeypatch):
     return bin_dir
 
 
-def _config(names, *, collect_dir=None, options=None, results_root=None):
+def _config(
+    names, *, collect_dir=None, options=None, results_root=None, pin_results_root=False
+):
     config = {CONFIG_KEY_COLLECT: list(names)}
     if collect_dir is not None:
         config[CONFIG_KEY_COLLECT_DIR] = str(collect_dir)
@@ -65,6 +71,11 @@ def _config(names, *, collect_dir=None, options=None, results_root=None):
         config[CONFIG_KEY_COLLECT_OPTIONS] = options
     if results_root is not None:
         config[CONFIG_KEY_RESULTS_ROOT] = str(results_root)
+    if pin_results_root:
+        # What the dispatcher threads alongside the path: the anchor's inode as
+        # of before the first trial launched.
+        info = os.stat(results_root)
+        config[CONFIG_KEY_RESULTS_ROOT_ID] = [info.st_dev, info.st_ino]
     return config
 
 
@@ -739,3 +750,281 @@ def test_summarize_swap_after_fd_open_does_not_leak_external_metrics(
     # its count of 999 never appears.
     assert metrics.get("rocprof_top_kernels") == ["real"]
     assert metrics.get("rocprof_kernel_count") == 1
+
+
+# ---- Absent collector directories -----------------------------------------
+
+
+def test_missing_collector_subdir_is_not_unsafe(tmp_path):
+    """A never-created output directory must not read as a hostile path.
+
+    ``layer_numerics`` is validated-only: no platform code makes its
+    subdirectory, so ``collect: [rocprof, layer_numerics]`` leaves it absent.
+    Reporting it here makes the caller keep *every* collector's artifacts, which
+    silently turned ``retain.on_pass: none`` into a no-op for the rocprof
+    capture sitting beside it.
+    """
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    (collect_dir / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
+    config = _config(
+        ["rocprof", "layer_numerics"],
+        collect_dir=collect_dir,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    assert not (collect_dir / "layer_numerics").exists()
+    assert unsafe_collector_paths(config) == []
+
+
+def test_symlinked_collector_subdir_is_still_unsafe(tmp_path):
+    """The absence carve-out must not swallow a planted link.
+
+    Guards the boundary of the test above: a broken link is refused with ELOOP,
+    not mistaken for "nothing is there".
+    """
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    (collect_dir / rocprof.OUTPUT_SUBDIR).symlink_to(tmp_path / "never_existed")
+    config = _config(
+        ["rocprof"],
+        collect_dir=collect_dir,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    assert unsafe_collector_paths(config) == [collect_dir / rocprof.OUTPUT_SUBDIR]
+
+
+def test_summarize_of_a_missing_subdir_yields_no_metrics(profilers_on_path, tmp_path):
+    """An absent collector directory contributes nothing and raises nothing."""
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=collect_dir,
+            results_root=results.resolve(),
+            pin_results_root=True,
+        )
+    )
+    assert metrics == {}
+
+
+# ---- Trust-anchor inode pinning -------------------------------------------
+
+
+def test_trusted_results_anchor_carries_the_threaded_identity(tmp_path):
+    results = tmp_path / "results"
+    results.mkdir()
+    anchor = trusted_results_anchor(
+        _config(["rocprof"], results_root=results, pin_results_root=True)
+    )
+    assert anchor is not None
+    assert anchor.path == results
+    info = os.stat(results)
+    assert anchor.identity == (info.st_dev, info.st_ino)
+
+
+def test_trusted_results_anchor_is_none_without_the_key(tmp_path):
+    assert trusted_results_anchor(_config(["rocprof"])) is None
+
+
+@pytest.mark.parametrize("bad", ["nope", [1], [1, 2, 3], ["a", "b"], 7])
+def test_unparseable_threaded_identity_degrades_to_unpinned(tmp_path, bad):
+    """A malformed pin must not raise inside a guard that has to fail closed."""
+    results = tmp_path / "results"
+    results.mkdir()
+    config = _config(["rocprof"], results_root=results)
+    config[CONFIG_KEY_RESULTS_ROOT_ID] = bad
+    anchor = trusted_results_anchor(config)
+    assert anchor is not None
+    assert anchor.identity is None
+
+
+@_needs_fd
+def test_reset_refuses_a_real_directory_moved_into_the_results_pathname(
+    profilers_on_path, tmp_path
+):
+    """The cross-trial swap that no ``O_NOFOLLOW`` check can see.
+
+    Trial 0's payload renames the results directory aside and moves a real
+    directory into its pathname. Every component of the new path is a genuine
+    directory, so only the frozen inode distinguishes it from the operator's
+    tree -- and without that, trial 1's reset would clear the planted tree.
+    """
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    config = _config(
+        ["rocprof"],
+        collect_dir=collect_dir,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+
+    results.rename(tmp_path / "results.moved")
+    planted = tmp_path / "planted"
+    seeded = planted / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR / "precious.csv"
+    seeded.parent.mkdir(parents=True)
+    seeded.write_text("keep me", encoding="utf-8")
+    planted.rename(results)
+    # The planted tree now answers to the results pathname the guard was given.
+    victim = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR / "precious.csv"
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(config, _INNER)
+    assert victim.read_text(encoding="utf-8") == "keep me"
+
+
+@_needs_fd
+def test_summarize_refuses_a_swapped_results_root(profilers_on_path, tmp_path):
+    """The same swap on the read path publishes no metrics from the planted tree."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    config = _config(
+        ["rocprof"],
+        collect_dir=subdir.parent,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+
+    results.rename(tmp_path / "results.moved")
+    planted = tmp_path / "planted"
+    planted_subdir = planted / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted_subdir.mkdir(parents=True)
+    (planted_subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"leak",999,9\n', encoding="utf-8"
+    )
+    planted.rename(results)
+
+    assert summarize_collectors(config) == {}
+
+
+@_needs_fd
+def test_unpinned_anchor_keeps_working(profilers_on_path, tmp_path):
+    """A config with no threaded pin still parses a clean tree.
+
+    Back-compat for a trial JSON written before the pin existed, and for a
+    direct programmatic caller.
+    """
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    (subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"sgemm",3,1000\n', encoding="utf-8"
+    )
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=subdir.parent,
+            results_root=results.resolve(),
+        )
+    )
+    assert metrics["rocprof_kernel_count"] == 3
+
+
+# ---- Bounded artifact descriptors -----------------------------------------
+
+
+def _peak_fds_while_summarizing(tmp_path, monkeypatch, ranks):
+    """Highest descriptor count observed while parsing ``ranks`` stats CSVs."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    for rank in range(ranks):
+        (subdir / f"rank{rank:03d}_kernel_stats.csv").write_text(
+            '"Name","Calls","TotalDurationNs"\n"sgemm",1,10\n', encoding="utf-8"
+        )
+    config = _config(
+        ["rocprof"],
+        collect_dir=subdir.parent,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    seen = []
+
+    def probe(artifact_dir, stats_streams, trace_streams):
+        # Sample inside the parse, per stream, so an implementation that opens
+        # everything up front is caught as well as one that accumulates.
+        for _stream in stats_streams:
+            seen.append(len(os.listdir("/proc/self/fd")))
+        return {}
+
+    monkeypatch.setattr(rocprof, "parse_summary_from_streams", probe)
+    summarize_collectors(config)  # warm lazy imports before the baseline
+    baseline = len(os.listdir("/proc/self/fd"))
+    seen.clear()
+    summarize_collectors(config)
+    assert len(seen) == ranks
+    return max(seen) - baseline
+
+
+@_needs_fd
+def test_summarize_descriptor_use_does_not_scale_with_artifact_count(
+    profilers_on_path, tmp_path, monkeypatch
+):
+    """Descriptor use must not scale with the number of per-rank artifacts.
+
+    rocprof writes a CSV pair per process, so a large distributed capture can
+    hold more artifacts than ``RLIMIT_NOFILE`` allows. Opening them all up
+    front hit ``EMFILE`` partway through and published totals covering only the
+    ranks before the limit. Comparing an 8-artifact capture against a
+    64-artifact one is what pins the bound: an absolute number would pass for
+    the eager version too on a small enough tree.
+    """
+    small = _peak_fds_while_summarizing(tmp_path / "small", monkeypatch, 8)
+    large = _peak_fds_while_summarizing(tmp_path / "large", monkeypatch, 64)
+    assert small == large
+    # One artifact handle plus the directory fds held across the read.
+    assert large <= 4
+
+
+@_needs_fd
+def test_summarize_aggregates_every_rank_artifact(profilers_on_path, tmp_path):
+    """Bounding the descriptors must not cost a file: all 16 ranks are summed."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    (subdir / "nested").mkdir(parents=True)
+    for rank in range(16):
+        # Half flat, half under a hostname subdirectory -- the layout depends on
+        # whether ``-o`` was passed, and the per-file reopen has to descend for
+        # the nested ones.
+        parent = subdir if rank % 2 else subdir / "nested"
+        (parent / f"rank{rank:02d}_kernel_stats.csv").write_text(
+            '"Name","Calls","TotalDurationNs"\n"sgemm",1,10\n', encoding="utf-8"
+        )
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=subdir.parent,
+            results_root=results.resolve(),
+            pin_results_root=True,
+        )
+    )
+    assert metrics["rocprof_kernel_count"] == 16
+    assert metrics["rocprof_gpu_time_ms"] == pytest.approx(160 / 1_000_000.0)
+
+
+@_needs_fd
+def test_summarize_does_not_leak_fds_across_artifacts(profilers_on_path, tmp_path):
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    for rank in range(12):
+        (subdir / f"rank{rank:02d}_kernel_stats.csv").write_text(
+            '"Name","Calls","TotalDurationNs"\n"sgemm",1,10\n', encoding="utf-8"
+        )
+    config = _config(
+        ["rocprof"],
+        collect_dir=subdir.parent,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    summarize_collectors(config)  # warm any lazy imports first
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(10):
+        summarize_collectors(config)
+    assert len(os.listdir("/proc/self/fd")) == before

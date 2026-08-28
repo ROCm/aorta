@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from aorta.run import _fsafe
 from aorta.run.dispatcher import RunRequest, run_trials
 from aorta.workloads import Workload, WorkloadResult
 
@@ -811,6 +812,76 @@ class TestRunTrials:
         # tree rather than under the symlink the first trial planted.
         assert not Path(collect_dirs[1]).is_relative_to(outside.resolve())
 
+    def test_results_root_identity_is_pinned_before_the_trial_loop(self, tmp_path):
+        """The anchor carries the results directory's inode, not just its path.
+
+        A pathname is not an immutable anchor: a payload can rename the results
+        directory aside and move a *real* directory into its place, which leaves
+        every later ``O_NOFOLLOW`` check on that pathname satisfied. The pinned
+        ``(st_dev, st_ino)`` is what makes that swap detectable, so it has to be
+        read here -- before any trial launches -- and threaded like the path.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "pinned_root"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="pinned_root",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+
+        info = os.stat(tmp_path.resolve())
+        assert captured_config["_aorta_results_root_id"] == [info.st_dev, info.st_ino]
+        # A plain two-element list of ints, so the trial-JSON dump needs no
+        # sanitizer for it (same contract as ``_aorta_collect``).
+        assert json.loads(json.dumps(captured_config["_aorta_results_root_id"])) == [
+            info.st_dev,
+            info.st_ino,
+        ]
+
+    def test_results_root_identity_reaches_an_isolated_worker(self, tmp_path):
+        """The pin has to survive the JSON envelope, where an fd could not.
+
+        An isolated trial runs in a process that starts *after* an earlier
+        trial's payload, so it must inherit the parent's pin rather than take
+        its own -- which means the envelope carries it explicitly.
+        """
+        from aorta.run._trial_worker import _anchor_from_envelope
+
+        anchor = _fsafe.TrustedAnchor.freeze(tmp_path)
+        assert anchor.identity is not None
+        envelope = {
+            "results_root": str(anchor.path),
+            "results_root_id": list(anchor.identity),
+        }
+        assert _anchor_from_envelope(envelope) == anchor
+        # An envelope from a parent that could not pin degrades to the path.
+        assert _anchor_from_envelope({"results_root": str(tmp_path)}) == (
+            _fsafe.TrustedAnchor(tmp_path, None)
+        )
+        assert _anchor_from_envelope({"results_root": None}) is None
+
     def test_collect_dir_absent_without_collector(self, tmp_path):
         """No collector keys for a run with no collector -- back-compat
         (``_aorta_collect_dir`` and ``_aorta_results_root`` only appear when a
@@ -841,6 +912,7 @@ class TestRunTrials:
             run_trials(req)
         assert "_aorta_collect_dir" not in captured_config
         assert "_aorta_results_root" not in captured_config
+        assert "_aorta_results_root_id" not in captured_config
 
     def test_collect_survives_trial_json_roundtrip(self, tmp_path):
         """``_aorta_collect`` is a plain list, so the trial JSON dump needs

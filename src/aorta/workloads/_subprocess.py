@@ -1139,8 +1139,8 @@ class SubprocessWorkload(Workload):
         """
         from aorta.run.collectors import (
             CONFIG_KEY_COLLECT_DIR,
-            CONFIG_KEY_RESULTS_ROOT,
             active_collectors,
+            trusted_results_anchor,
             unsafe_collector_paths,
         )
 
@@ -1158,8 +1158,10 @@ class SubprocessWorkload(Workload):
         # relative to the held directory fds, so a swap of any ancestor after
         # the check cannot redirect the prune outside the results tree -- the
         # time-of-check/time-of-use window the pathname guard could not close.
-        raw_root = self.config.get(CONFIG_KEY_RESULTS_ROOT)
-        trusted_root = Path(raw_root) if isinstance(raw_root, str) and raw_root else None
+        # The anchor carries the inode the results directory had before launch,
+        # so a rename that moved a real directory into that pathname is refused
+        # as well as a symlink.
+        trusted_root = trusted_results_anchor(self.config)
         # Fast pre-filter (and the source of the "kept" log line): on the
         # non-POSIX fallback path there is no fd engine, so this lexical check is
         # the guard; on POSIX it is a cheap probe and the fd engine is

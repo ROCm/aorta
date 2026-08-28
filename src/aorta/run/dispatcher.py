@@ -25,6 +25,7 @@ from typing import Any, Literal
 from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
+from aorta.run import _fsafe
 from aorta.run._process import TrialWorkerError, launch_trial_worker
 from aorta.run.collectors import KNOWN_RECIPES, validate_collectors
 from aorta.run.discovery import (
@@ -680,11 +681,11 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # operator boundary, then append the workload lexically so a pre-existing
     # ``<results>/<workload> -> /outside`` link is visible to the collector
     # guard instead of being folded into its trusted anchor.
-    collector_results_root = (
+    canonical_results_dir = (
         request.results_dir.resolve() if request.collect and should_write else None
     )
     results_dir = (
-        collector_results_root if collector_results_root is not None else request.results_dir
+        canonical_results_dir if canonical_results_dir is not None else request.results_dir
     ) / request.workload
     if should_write:
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -694,6 +695,17 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # a brand-new anchor pointing outside the operator's tree, and
     # ``_reset_output_dir`` would happily clear a planted trial directory
     # there. Every trial receives this same unchanged path.
+    #
+    # The freeze records the directory's inode as well as its path, which is
+    # the part a pathname cannot carry: a payload can rename the results
+    # directory aside and move a *real* directory into its place, leaving every
+    # later ``O_NOFOLLOW`` check on that pathname satisfied. Taken after the
+    # ``mkdir`` above so the directory exists to be pinned.
+    collector_results_root = (
+        _fsafe.TrustedAnchor.freeze(canonical_results_dir)
+        if canonical_results_dir is not None
+        else None
+    )
     isolation_generation = (
         _next_isolation_generation()
         if effective_trial_isolation == "process"
@@ -800,7 +812,7 @@ def _run_single_trial_in_process_worker(
     startup_env: dict[str, str],
     isolation_generation: int,
     results_dir: Path,
-    results_root: Path | None,
+    results_root: _fsafe.TrustedAnchor | None,
     should_write: bool,
 ) -> TrialResult:
     trial_id = (
@@ -868,8 +880,15 @@ def _run_single_trial_in_process_worker(
             # The frozen collector anchor from before the trial loop. Sent
             # explicitly so the worker inherits the parent's canonical path
             # instead of resolving one in a process that starts after an
-            # earlier trial's payload has already run.
-            "results_root": str(results_root) if results_root is not None else None,
+            # earlier trial's payload has already run. The pinned inode travels
+            # as a plain pair because the envelope is JSON and a file
+            # descriptor cannot cross the process boundary.
+            "results_root": str(results_root.path) if results_root is not None else None,
+            "results_root_id": (
+                list(results_root.identity)
+                if results_root is not None and results_root.identity is not None
+                else None
+            ),
             "should_write": should_write,
             "store_prefix": (
                 f"aorta/{os.environ.get('TORCHELASTIC_RUN_ID', 'static')}/"
@@ -943,7 +962,7 @@ def _run_single_trial(
     mitigation_env: dict[str, str],
     results_dir: Path,
     should_write: bool,
-    results_root: Path | None = None,
+    results_root: _fsafe.TrustedAnchor | None = None,
     persist_result: bool = True,
     result_transform: (
         Callable[[WorkloadResult, str], tuple[WorkloadResult, str]] | None
@@ -960,13 +979,13 @@ def _run_single_trial(
         mitigation_env: Environment variables from mitigations.
         results_dir: Directory for JSON output.
         should_write: Whether to write JSON (rank 0 only).
-        results_root: Canonical collector trust anchor, frozen by
-            :func:`run_trials` before the first trial. ``None`` for a caller
-            that runs a single trial directly; this function then resolves
-            ``results_dir`` itself, which is still pre-launch for that one
-            trial. Only a multi-trial loop needs the freeze, because the
-            exposure is one trial's payload rewriting the tree the next trial
-            would resolve.
+        results_root: Canonical collector trust anchor -- path plus pinned
+            inode -- frozen by :func:`run_trials` before the first trial.
+            ``None`` for a caller that runs a single trial directly; this
+            function then freezes ``results_dir`` itself, which is still
+            pre-launch for that one trial. Only a multi-trial loop needs the
+            earlier freeze, because the exposure is one trial's payload
+            rewriting the tree the next trial would resolve.
 
     Returns:
         TrialResult with execution outcome.
@@ -1110,10 +1129,12 @@ def _run_single_trial(
         else:
             # A direct single-trial caller has no separately declared
             # operator boundary; retain the historical per-workload anchor.
-            trusted_root = results_dir.resolve()
-            collect_base = trusted_root
+            trusted_root = _fsafe.TrustedAnchor.freeze(results_dir.resolve())
+            collect_base = trusted_root.path
         config["_aorta_collect_dir"] = str(collect_base / trial_basename)
-        config["_aorta_results_root"] = str(trusted_root)
+        config["_aorta_results_root"] = str(trusted_root.path)
+        if trusted_root.identity is not None:
+            config["_aorta_results_root_id"] = list(trusted_root.identity)
 
     # Compute the effective controlled overlay in the platform env-precedence
     # order (lowest to highest):

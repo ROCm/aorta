@@ -8,6 +8,7 @@ translation Proton needs on AMD, and fail-soft ``.hatchet`` parsing.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,11 +25,13 @@ from aorta.instrumentation.proton import (
     PROTON_MODULE,
     QUEUE_INTERCEPTING_BACKENDS,
     ProtonWrapError,
+    _parse,
     build_argv_prefix,
     build_env,
     mode_argument,
     parse_profile,
     parse_summary,
+    parse_summary_from_streams,
     resolve_python,
     validate_options,
     wrap_argv,
@@ -1056,3 +1059,57 @@ def test_parse_profile_missing_file_is_empty(tmp_path):
 def test_parse_summary_accepts_str_path(tmp_path):
     _hatchet(tmp_path, _tree([_leaf("k", 1_000_000)]))
     assert parse_summary(str(tmp_path))["proton_top_kernels"] == ["k"]
+
+
+def test_parse_summary_holds_one_profile_open_at_a_time(tmp_path):
+    """A per-rank capture must not need a descriptor per rank.
+
+    Proton writes a profile per rank, so a large distributed run can hold more
+    ``.hatchet`` files than ``RLIMIT_NOFILE`` allows; opening them all up front
+    hit ``EMFILE`` partway through and reported totals covering only the ranks
+    before the limit. The count is compared across two tree sizes because an
+    absolute bound would pass for the eager version on a small tree.
+    """
+    if not Path("/proc/self/fd").is_dir():
+        pytest.skip("descriptor accounting needs /proc")
+
+    def peak_open_fds(root, ranks):
+        root.mkdir()
+        for rank in range(ranks):
+            _hatchet(root, _tree([_leaf("k", 1_000_000)]), name=f"rank{rank:03d}.hatchet")
+        parse_summary(root)  # warm any lazy imports before the baseline
+        baseline = len(os.listdir("/proc/self/fd"))
+        seen = []
+        original = _parse.parse_profile_stream
+
+        def counting_parse(stream):
+            seen.append(len(os.listdir("/proc/self/fd")))
+            return original(stream)
+
+        _parse.parse_profile_stream = counting_parse
+        try:
+            metrics = parse_summary(root)
+        finally:
+            _parse.parse_profile_stream = original
+        assert metrics["proton_kernel_count"] == ranks
+        assert len(seen) == ranks
+        return max(seen) - baseline
+
+    small = peak_open_fds(tmp_path / "small", 8)
+    large = peak_open_fds(tmp_path / "large", 64)
+    assert small == large
+    assert large <= 2
+
+
+def test_parse_summary_from_streams_consumes_a_lazy_iterator(tmp_path):
+    """The stream entrypoint takes an iterator, not just a sequence.
+
+    Both callers now pass a generator that opens one profile at a time, so a
+    ``len()`` or a second pass would break them.
+    """
+    path = _hatchet(tmp_path, _tree([_leaf("k", 2_000_000, count=3)]))
+    metrics = parse_summary_from_streams(
+        str(tmp_path), (p.open(encoding="utf-8") for p in [path])
+    )
+    assert metrics["proton_kernel_count"] == 3
+    assert metrics["proton_gpu_time_ms"] == pytest.approx(2.0)
