@@ -678,23 +678,28 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     should_write = rank == 0
     # The operator owns ``--results-dir``; the workload name below it is
     # payload-controlled state left by earlier attempts. Canonicalize only the
-    # operator boundary, then append the workload lexically so a pre-existing
-    # ``<results>/<workload> -> /outside`` link is visible to the collector
-    # guard instead of being folded into its trusted anchor.
-    canonical_results_dir = (
-        request.results_dir.resolve() if request.collect and should_write else None
-    )
-    results_dir = (
-        canonical_results_dir if canonical_results_dir is not None else request.results_dir
-    ) / request.workload
-    if should_write:
-        results_dir.mkdir(parents=True, exist_ok=True)
-    # Freeze the collector trust anchor here, once, before the FIRST trial
-    # runs -- not per trial. Trial 0's payload can replace ``results_dir``
-    # itself with a symlink; a per-trial ``resolve()`` would then hand trial 1
-    # a brand-new anchor pointing outside the operator's tree, and
-    # ``_reset_output_dir`` would happily clear a planted trial directory
-    # there. Every trial receives this same unchanged path.
+    # operator boundary -- folding away the operator's own links above it -- then
+    # append the workload lexically so a pre-existing
+    # ``<results>/<workload> -> /outside`` link stays visible to the guards
+    # instead of being folded into the trusted anchor.
+    #
+    # Not gated on ``request.collect``: the trial record and the captured logs
+    # are written through this same workload component on *every* run, so the
+    # anchor that protects those writes has to exist even when no collector is
+    # attached. (The ``_aorta_collect*`` config keys stay collector-gated; see
+    # ``_run_single_trial``.)
+    canonical_results_dir = request.results_dir.resolve() if should_write else None
+    if canonical_results_dir is not None:
+        # The operator boundary itself, created by pathname on purpose: it lives
+        # *above* the payload-writable tree and may legitimately be reached
+        # through the operator's own symlinks.
+        canonical_results_dir.mkdir(parents=True, exist_ok=True)
+    # Freeze the trust anchor here, once, before the FIRST trial runs -- not per
+    # trial. Trial 0's payload can replace the results directory itself with a
+    # symlink; a per-trial ``resolve()`` would then hand trial 1 a brand-new
+    # anchor pointing outside the operator's tree, and ``_reset_output_dir``
+    # would happily clear a planted trial directory there. Every trial receives
+    # this same unchanged path.
     #
     # The freeze records the directory's inode as well as its path, which is
     # the part a pathname cannot carry: a payload can rename the results
@@ -706,6 +711,13 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         if canonical_results_dir is not None
         else None
     )
+    results_dir = (
+        canonical_results_dir if canonical_results_dir is not None else request.results_dir
+    ) / request.workload
+    if collector_results_root is not None:
+        _create_workload_dir(collector_results_root, request.workload)
+    elif should_write:
+        results_dir.mkdir(parents=True, exist_ok=True)
     isolation_generation = (
         _next_isolation_generation()
         if effective_trial_isolation == "process"
@@ -910,6 +922,7 @@ def _run_single_trial_in_process_worker(
             request=request,
             trial_idx=trial_idx,
             results_dir=results_dir,
+            results_root=results_root,
         )
     return result
 
@@ -1232,11 +1245,29 @@ def _run_single_trial(
     stderr_fh: Any = None
     if request.save_logs and should_write:
         log_basename = f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
-        candidate_stdout = results_dir / f"{log_basename}.stdout.log"
-        candidate_stderr = results_dir / f"{log_basename}.stderr.log"
+        stdout_name = f"{log_basename}.stdout.log"
+        stderr_name = f"{log_basename}.stderr.log"
+        candidate_stdout = results_dir / stdout_name
+        candidate_stderr = results_dir / stderr_name
         try:
-            stdout_fh = open(candidate_stdout, "w", encoding="utf-8", errors="backslashreplace")
-            stderr_fh = open(candidate_stderr, "w", encoding="utf-8", errors="backslashreplace")
+            # Opened through the frozen anchor with a no-follow leaf: these land
+            # in the payload-writable per-workload directory, so a link at the
+            # workload component or at the filename would otherwise redirect or
+            # truncate a file outside ``--results-dir``.
+            stdout_fh = _open_record_file(
+                results_dir,
+                results_root,
+                stdout_name,
+                encoding="utf-8",
+                errors="backslashreplace",
+            )
+            stderr_fh = _open_record_file(
+                results_dir,
+                results_root,
+                stderr_name,
+                encoding="utf-8",
+                errors="backslashreplace",
+            )
         except OSError as exc:
             if stdout_fh is not None:
                 stdout_fh.close()
@@ -1412,9 +1443,87 @@ def _run_single_trial(
             request=request,
             trial_idx=trial_idx,
             results_dir=results_dir,
+            results_root=results_root,
         )
 
     return trial_result
+
+
+def _create_workload_dir(anchor: _fsafe.TrustedAnchor, workload: str) -> None:
+    """Create ``<anchor>/<workload>``, refusing a link or a replaced directory.
+
+    The per-workload output directory is where the trial records and captured
+    logs land, and it sits below the operator boundary: a stale
+    ``<results>/<workload> -> /outside`` link from an earlier run, or one a
+    payload planted, makes ``mkdir(exist_ok=True)`` succeed silently and every
+    later write follow it out of the tree.
+
+    Descending from the pinned anchor with ``O_NOFOLLOW`` refuses that instead,
+    and refuses the harder case of a *real* directory renamed into the anchor's
+    pathname. This is a hard failure rather than a warning: the run's entire
+    audit trail would otherwise be written somewhere the operator did not ask
+    for and will not look.
+
+    Raises:
+        RuntimeError: the component cannot be created or is not a real directory
+            reachable from the anchor without crossing a symlink.
+    """
+    if not _fsafe.HAVE_FD_TRAVERSAL:
+        # No fd primitives (non-POSIX): keep the historical pathname create,
+        # with a lexical refusal so a planted link still fails closed.
+        target = anchor.path / workload
+        if target.is_symlink():
+            raise RuntimeError(
+                f"refusing to use {target} for output: it is a symlink, so the "
+                "trial records and logs would be written outside "
+                f"{anchor.path}. Remove it, or point --results-dir at the "
+                "intended location."
+            )
+        target.mkdir(parents=True, exist_ok=True)
+        return
+    try:
+        with _fsafe.open_dir_nofollow(anchor, [workload], create_missing=True):
+            pass
+    except _fsafe.UnsafePathError as exc:
+        raise RuntimeError(
+            f"refusing to use {anchor.path / workload} for output: it is a "
+            "symlink, is not a directory, or is no longer the directory it was "
+            f"frozen as, so the trial records and logs would be written outside "
+            f"{anchor.path}. Remove it, or point --results-dir at the intended "
+            f"location. ({exc})"
+        ) from exc
+
+
+def _open_record_file(
+    results_dir: Path,
+    anchor: _fsafe.TrustedAnchor | None,
+    name: str,
+    **text_kwargs: Any,
+) -> Any:
+    """``open(results_dir / name, "w")`` that cannot be redirected by a link.
+
+    ``results_dir`` is ``<anchor>/<workload>``, which is below the operator
+    boundary and therefore payload-writable during a run. Writing by pathname
+    lets a link at the workload component *or* at the filename itself redirect
+    or truncate a file outside ``--results-dir``; descending from the pinned
+    anchor and opening the leaf ``O_NOFOLLOW`` removes both.
+
+    Returns the stream, matching the ``open()`` shape the callers already have
+    (the log capture keeps two handles for the length of a trial and has its own
+    cleanup for a partial open). Falls back to a plain ``open`` when no anchor
+    was frozen -- a direct programmatic caller -- or when the platform lacks the
+    fd primitives, or when ``results_dir`` is not lexically inside the anchor,
+    which are the same documented degradations the collector guards carry.
+    """
+    if anchor is None or not _fsafe.HAVE_FD_TRAVERSAL:
+        return open(results_dir / name, "w", **text_kwargs)
+    components = _fsafe.relative_components(anchor.path, results_dir)
+    if components is None:
+        return open(results_dir / name, "w", **text_kwargs)
+    # The directory fd is only needed to resolve ``name``; the returned file
+    # descriptor stays valid after it closes.
+    with _fsafe.open_dir_nofollow(anchor, components) as dir_fd:
+        return _fsafe.open_write_nofollow(dir_fd, name, **text_kwargs)
 
 
 def _write_trial_result(
@@ -1423,14 +1532,27 @@ def _write_trial_result(
     request: RunRequest,
     trial_idx: int,
     results_dir: Path,
+    results_root: _fsafe.TrustedAnchor | None = None,
 ) -> None:
-    output_path = results_dir / (
-        f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}.json"
-    )
+    name = f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}.json"
     serialized = result.to_dict()
     _sanitize_probe_extras_for_json(serialized.get("config"))
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(serialized, f, indent=2)
+    try:
+        with _open_record_file(results_dir, results_root, name, encoding="utf-8") as f:
+            json.dump(serialized, f, indent=2)
+    except _fsafe.UnsafePathError as exc:
+        # A component turned into a link (or a different directory) while the
+        # trial ran. Refusing costs this trial's record; writing would have put
+        # the operator's audit trail somewhere they will not look for it, so this
+        # is deliberately a hard failure rather than a warning -- unlike the log
+        # capture below it, which is a debug knob and degrades instead.
+        raise RuntimeError(
+            f"refusing to write the trial record to {results_dir / name}: a path "
+            f"component below {results_root.path if results_root else results_dir} "
+            "is a symlink, is not a directory, or is no longer the directory it "
+            f"was frozen as, so the record would land outside the results tree. "
+            f"({exc})"
+        ) from exc
 
 
 def _sanitize_probe_extras_for_json(config: Any) -> None:

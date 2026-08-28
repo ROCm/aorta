@@ -36,7 +36,7 @@ from aorta.run.collectors import (
     CollectorSpec,
     active_collectors,
     summarize_collectors,
-    trusted_results_anchor,
+    trusted_collector_anchor,
     unsafe_collector_paths,
     validate_collectors,
     wrap_argv_for_collectors,
@@ -815,20 +815,30 @@ def test_summarize_of_a_missing_subdir_yields_no_metrics(profilers_on_path, tmp_
 # ---- Trust-anchor inode pinning -------------------------------------------
 
 
-def test_trusted_results_anchor_carries_the_threaded_identity(tmp_path):
+def test_trusted_anchor_carries_the_threaded_identity(tmp_path):
     results = tmp_path / "results"
     results.mkdir()
-    anchor = trusted_results_anchor(
-        _config(["rocprof"], results_root=results, pin_results_root=True)
+    root = results / "wl" / "trial_d0_m0_t0"
+    anchor = trusted_collector_anchor(
+        _config(["rocprof"], results_root=results, pin_results_root=True), root
     )
-    assert anchor is not None
     assert anchor.path == results
     info = os.stat(results)
     assert anchor.identity == (info.st_dev, info.st_ino)
 
 
-def test_trusted_results_anchor_is_none_without_the_key(tmp_path):
-    assert trusted_results_anchor(_config(["rocprof"])) is None
+def test_trusted_anchor_falls_back_to_the_collect_roots_parent(tmp_path):
+    """A config with no threaded anchor still gets one, unpinned.
+
+    Returning ``None`` here is what let the retention pre-filter guard
+    ``collect_root.parent`` while the destructive prune it gates received
+    nothing and silently dropped to the pathname engine. One function, one
+    answer, so the two cannot disagree.
+    """
+    root = tmp_path / "wl" / "trial_d0_m0_t0"
+    anchor = trusted_collector_anchor(_config(["rocprof"]), root)
+    assert anchor.path == root.parent
+    assert anchor.identity is None
 
 
 @pytest.mark.parametrize("bad", ["nope", [1], [1, 2, 3], ["a", "b"], 7])
@@ -845,8 +855,7 @@ def test_unparseable_threaded_identity_degrades_to_unpinned_and_warns(
     config = _config(["rocprof"], results_root=results)
     config[CONFIG_KEY_RESULTS_ROOT_ID] = bad
     with caplog.at_level("WARNING"):
-        anchor = trusted_results_anchor(config)
-    assert anchor is not None
+        anchor = trusted_collector_anchor(config, results / "wl" / "trial_d0_m0_t0")
     assert anchor.identity is None
     assert any(CONFIG_KEY_RESULTS_ROOT_ID in r.getMessage() for r in caplog.records)
 
@@ -856,8 +865,10 @@ def test_absent_threaded_identity_is_not_warned_about(tmp_path, caplog):
     results = tmp_path / "results"
     results.mkdir()
     with caplog.at_level("WARNING"):
-        anchor = trusted_results_anchor(_config(["rocprof"], results_root=results))
-    assert anchor is not None
+        anchor = trusted_collector_anchor(
+            _config(["rocprof"], results_root=results), results / "wl" / "t"
+        )
+    assert anchor.path == results
     assert anchor.identity is None
     assert not caplog.records
 

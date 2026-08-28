@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from aorta.run import _fsafe
+from aorta.run import dispatcher as dispatcher_module
 from aorta.run.dispatcher import RunRequest, run_trials
 from aorta.workloads import Workload, WorkloadResult
 
@@ -697,21 +698,29 @@ class TestRunTrials:
         )
         assert not Path(captured_config["_aorta_results_root"]).is_symlink()
 
-    def test_workload_symlink_is_not_folded_into_the_collector_anchor(self, tmp_path):
-        """A stale workload link remains below the operator-owned boundary.
+    @pytest.mark.parametrize("collect", [(), ("layer_numerics",)])
+    def test_stale_workload_symlink_is_refused_before_any_write(self, tmp_path, collect):
+        """A link at the workload component aborts the run instead of escaping.
 
-        Resolving ``<results>/<workload>`` would trust its outside target.
-        Resolving only ``--results-dir`` and appending the workload lexically
-        lets the collector guard reject that payload-owned component.
+        Keeping ``<results>/<workload>`` lexical stops the collector guards
+        trusting its target, but the dispatcher writes the trial record and the
+        captured logs through that same component, and ``open()`` follows links.
+        A stale link from an earlier run therefore used to put the whole audit
+        trail in the link's target -- ``mkdir(exist_ok=True)`` on a symlink to a
+        directory succeeds silently, so nothing complained.
+
+        Parametrized over ``collect`` because these writes happen on every run,
+        not just a collector run: the anchor that protects them cannot be gated
+        on ``--collect``.
         """
-        captured_config: dict = {}
+        ran = []
 
         class ConfigCapturingWorkload(Workload):
             launch_mode = "single_process"
             min_world_size = 1
 
             def setup(self):
-                captured_config.update(self.config)
+                ran.append(1)
 
             def run(self):
                 return WorkloadResult(passed=True)
@@ -731,31 +740,44 @@ class TestRunTrials:
         mock_eps = MagicMock()
         mock_eps.select.return_value = [mock_ep]
 
+        raised: BaseException | None = None
         with patch("importlib.metadata.entry_points", return_value=mock_eps):
-            run_trials(
-                RunRequest(
-                    workload="stale_workload_link",
-                    trials=1,
-                    results_dir=results,
-                    collect=("layer_numerics",),
+            try:
+                run_trials(
+                    RunRequest(
+                        workload="stale_workload_link",
+                        trials=1,
+                        results_dir=results,
+                        collect=collect,
+                        save_logs=True,
+                    )
                 )
-            )
+            except RuntimeError as exc:
+                raised = exc
 
-        assert captured_config["_aorta_results_root"] == str(results.resolve())
-        assert captured_config["_aorta_collect_dir"] == str(
-            results.resolve() / "stale_workload_link" / "trial_d0_m0_t0"
-        )
-        assert outside.resolve() not in Path(
-            captured_config["_aorta_collect_dir"]
-        ).parents
+        # The escape is asserted FIRST so a regression fails by naming the files
+        # that got out, not merely by "DID NOT RAISE". Without the guard this
+        # reads ['trial_d0_m0_t0.json', '...stderr.log', '...stdout.log'].
+        assert sorted(p.name for p in outside.iterdir()) == []
+        # Refused before the workload was even constructed.
+        assert ran == []
+        assert raised is not None, "expected the run to refuse the planted link"
+        assert "refusing to use" in str(raised)
 
     def test_results_root_is_frozen_once_for_the_whole_trial_loop(self, tmp_path):
         """Trial 0's payload must not be able to re-anchor trial 1.
 
-        The anchor is resolved before the loop, so a workload that replaces
-        the results directory with a symlink to an outside tree cannot hand
-        the next trial a new trusted root: trial 1 still carries the original
-        canonical path, and its collect dir stays under it.
+        The anchor is frozen before the loop, so a workload that replaces the
+        workload directory with a symlink to an outside tree cannot hand the next
+        trial a new trusted root. Two properties in one run, because with the
+        record writes anchored they are now inseparable: the swap is *refused*
+        (nothing lands in the link's target), and the anchor trial 0 was handed
+        is the pre-run canonical path rather than one derived after the swap.
+
+        Mutation-verified in both directions: restoring the per-trial
+        ``resolve()`` re-anchors the write to ``outside`` and the emptiness
+        assertion fails; dropping the record-write guard writes
+        ``trial_d0_m0_t0.json`` into ``outside`` and the same assertion fails.
         """
         roots: list[str] = []
         collect_dirs: list[str] = []
@@ -801,16 +823,28 @@ class TestRunTrials:
                 trials=2,
                 results_dir=tmp_path,
                 collect=("layer_numerics",),
+                save_logs=True,
             )
-            run_trials(req)
+            # Trial 0's own record write is the first thing to touch the swapped
+            # component, so the run stops there rather than tolerating the swap
+            # for another whole trial.
+            raised: BaseException | None = None
+            try:
+                run_trials(req)
+            except RuntimeError as exc:
+                raised = exc
 
-        assert len(roots) == 2
-        assert roots[0] == roots[1]
+        # Asserted FIRST so a regression fails by naming what escaped rather
+        # than by "DID NOT RAISE": with either guard removed this reads
+        # ['trial_d0_m0_t0.json', ...].
+        assert sorted(p.name for p in outside.iterdir()) == []
+        # The anchor trial 0 received was pinned before the run, not derived
+        # from the tree the payload had just rewritten.
         assert Path(roots[0]) == expected_root
+        assert not Path(collect_dirs[0]).is_relative_to(outside.resolve())
         assert (tmp_path / "swap_results_dir").resolve() == outside.resolve()
-        # The second trial's artifact path is still anchored in the operator's
-        # tree rather than under the symlink the first trial planted.
-        assert not Path(collect_dirs[1]).is_relative_to(outside.resolve())
+        assert raised is not None, "expected the record write to refuse the swap"
+        assert "refusing to write the trial record" in str(raised)
 
     def test_results_root_identity_is_pinned_before_the_trial_loop(self, tmp_path):
         """The anchor carries the results directory's inode, not just its path.
@@ -2694,15 +2728,22 @@ class TestSaveLogs:
         assert (cell_dir / "trial_d0_m0_t0.stderr.log").read_text().strip() == "BEFORE-CRASH-STDERR"
 
     def test_log_open_failure_degrades_gracefully_and_restores_env(self, tmp_path):
-        """If log-file open() raises, the trial must still run, the env
+        """If the log-file open raises, the trial must still run, the env
         overlay must still be restored (otherwise mitigation vars leak
-        across cells), and the _aorta_* keys must NOT be injected."""
-        real_open = open
+        across cells), and the _aorta_* keys must NOT be injected.
 
-        def raising_open(path, *args, **kwargs):
-            if str(path).endswith((".stdout.log", ".stderr.log")):
+        Injected at ``_open_record_file`` rather than at ``builtins.open``: the
+        record writes go through the frozen anchor with a no-follow leaf now, so
+        patching ``open`` no longer intercepts them and the failure this test
+        exists to simulate would never fire. Same predicate as before -- only
+        the two log names -- so the trial JSON still writes normally.
+        """
+        real_open_record = dispatcher_module._open_record_file
+
+        def raising_open_record(results_dir, anchor, name, **kwargs):
+            if name.endswith((".stdout.log", ".stderr.log")):
                 raise PermissionError("simulated log-open failure")
-            return real_open(path, *args, **kwargs)
+            return real_open_record(results_dir, anchor, name, **kwargs)
 
         os.environ.pop("AORTA_LEAK_PROBE", None)
         NoisyWorkload.seen_config = {}
@@ -2711,8 +2752,8 @@ class TestSaveLogs:
         mock_ep.load.return_value = NoisyWorkload
         mock_eps = MagicMock()
         mock_eps.select.return_value = [mock_ep]
-        with patch("importlib.metadata.entry_points", return_value=mock_eps), patch(
-            "builtins.open", side_effect=raising_open
+        with patch("importlib.metadata.entry_points", return_value=mock_eps), patch.object(
+            dispatcher_module, "_open_record_file", side_effect=raising_open_record
         ):
             results = run_trials(
                 RunRequest(

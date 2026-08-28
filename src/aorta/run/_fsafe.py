@@ -1,4 +1,4 @@
-"""No-follow, fd-relative filesystem primitives for collector path guards.
+"""No-follow, fd-relative filesystem primitives for paths below ``--results-dir``.
 
 The collector output tree (``<results_root>/<workload>/<trial>/<subdir>``) is
 handed to the profiled command as a ``-d`` / ``-n`` target. Everything below the
@@ -12,11 +12,18 @@ ancestor for a symlink in the gap, redirecting the operation outside the tree.
 The only race-free defence is to stop re-resolving pathnames: descend the tree
 once with ``O_NOFOLLOW`` on every component below the trusted anchor, hold the
 resulting directory file descriptors, and perform every subsequent stat / read /
-unlink / rmdir *relative to those fds*. The kernel resolves a name under a dir fd
-only within that inode, so a later swap of an ancestor pathname cannot redirect
-it. This module is the shared leaf both :mod:`aorta.run.collectors` and
-:mod:`aorta.run.retention` build on; it depends only on the stdlib so retention
-stays dependency-free.
+write / unlink / rmdir *relative to those fds*. The kernel resolves a name under
+a dir fd only within that inode, so a later swap of an ancestor pathname cannot
+redirect it. This module is the shared leaf :mod:`aorta.run.collectors`,
+:mod:`aorta.run.retention` and :mod:`aorta.run.dispatcher` build on; it depends
+only on the stdlib so retention stays dependency-free.
+
+The same reasoning covers the dispatcher's *own* output, not just the collector
+artifacts. The per-workload directory sits below the same operator boundary, so
+the trial record and the captured logs are written through a held fd with
+:func:`open_write_nofollow` rather than by pathname -- otherwise a stale or
+payload-planted link at the workload component silently redirects the audit
+trail outside ``--results-dir``.
 
 Two things are needed beyond ``O_NOFOLLOW``, because it is a narrower guarantee
 than it looks:
@@ -36,8 +43,9 @@ than it looks:
 One property is also *not* obtainable from the descent: the type of a file can
 change between the walk that selected it and the read that consumes it. A
 regular file replaced by a FIFO turns a blocking ``open`` into an indefinite
-hang, so :func:`secure_open_read` opens ``O_NONBLOCK`` and validates the
-*descriptor* rather than trusting the earlier ``lstat``.
+hang, so :func:`secure_open_read` and :func:`open_write_nofollow` open
+``O_NONBLOCK`` and validate the *descriptor* rather than trusting the earlier
+``lstat``.
 
 Everything here is POSIX-only (``O_NOFOLLOW`` / ``O_DIRECTORY`` / ``dir_fd``).
 :data:`HAVE_FD_TRAVERSAL` is ``False`` on a platform that lacks them; callers
@@ -537,6 +545,54 @@ def secure_open_read(dir_fd: int, name: str, **text_kwargs: object) -> Iterator[
         stream.close()
 
 
+def open_write_nofollow(dir_fd: int, name: str, **text_kwargs: object) -> TextIO:
+    """Create/truncate ``name`` under ``dir_fd`` for writing, refusing a symlink.
+
+    The write-side counterpart of :func:`secure_open_read`, and returns the
+    stream rather than a context manager so a caller can keep the existing
+    ``fh = open(...)`` shape (the dispatcher's log capture holds both handles for
+    the length of a trial and has its own cleanup path for a partial open).
+
+    ``O_NOFOLLOW`` refuses a symlink planted at the final component, so a
+    payload cannot redirect a record write outside the tree by leaving a link
+    where the file goes. ``O_CREAT`` without ``O_EXCL`` on purpose: a re-run
+    legitimately overwrites its own trial record, and ``O_EXCL`` would break
+    probe resume. ``O_NONBLOCK`` plus an ``S_ISREG`` check on the *descriptor*
+    covers the write-side version of the FIFO trap -- opening a FIFO for writing
+    blocks until a reader appears (or fails ``ENXIO`` non-blocking), which would
+    hang the trial rather than fail it.
+
+    The caller owns the returned stream and must close it.
+
+    Raises:
+        UnsafePathError: ``name`` is not a single directory entry name, or what
+            was opened is not a regular file.
+        OSError: the file could not be created or opened.
+    """
+    _require_child_name(name, f"fd {dir_fd}")
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW | _O_NONBLOCK,
+        0o644,
+        dir_fd=dir_fd,
+    )
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafePathError(
+                errno.EINVAL,
+                f"refusing to write {name!r}: it is not a regular file "
+                f"(mode {stat.filemode(info.st_mode)})",
+            )
+        _clear_nonblock(fd)
+        return os.fdopen(fd, "w", **text_kwargs)  # type: ignore[arg-type,return-value]
+    except BaseException:
+        # ``fdopen`` only adopts the fd on success, so a refusal or an interrupt
+        # in between would otherwise leak it.
+        os.close(fd)
+        raise
+
+
 def _clear_nonblock(fd: int) -> None:
     """Drop ``O_NONBLOCK`` from ``fd``, best effort.
 
@@ -591,6 +647,7 @@ __all__ = [
     "iter_regular_files",
     "open_dir_at",
     "open_dir_nofollow",
+    "open_write_nofollow",
     "prune_empty_dirs",
     "relative_components",
     "remove_entry_at",

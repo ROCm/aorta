@@ -1140,7 +1140,7 @@ class SubprocessWorkload(Workload):
         from aorta.run.collectors import (
             CONFIG_KEY_COLLECT_DIR,
             active_collectors,
-            trusted_results_anchor,
+            trusted_collector_anchor,
             unsafe_collector_paths,
         )
 
@@ -1160,8 +1160,12 @@ class SubprocessWorkload(Workload):
         # time-of-check/time-of-use window the pathname guard could not close.
         # The anchor carries the inode the results directory had before launch,
         # so a rename that moved a real directory into that pathname is refused
-        # as well as a symlink.
-        trusted_root = trusted_results_anchor(self.config)
+        # as well as a symlink. Taken from the same helper the pre-filter below
+        # uses, including its ``collect_root.parent`` fallback: a direct or
+        # legacy config that threads ``_aorta_collect_dir`` without
+        # ``_aorta_results_root`` must still get the fd-relative engine, or the
+        # pre-filter guards a pathname that the prune then re-resolves.
+        trusted_root = trusted_collector_anchor(self.config, collect_root)
         # Fast pre-filter (and the source of the "kept" log line): on the
         # non-POSIX fallback path there is no fd engine, so this lexical check is
         # the guard; on POSIX it is a cheap probe and the fd engine is

@@ -203,7 +203,7 @@ def _collect_root(config: Mapping[str, Any]) -> Path | None:
     return Path(raw) if isinstance(raw, str) and raw else None
 
 
-def trusted_results_anchor(config: Mapping[str, Any]) -> _fsafe.TrustedAnchor | None:
+def _threaded_anchor(config: Mapping[str, Any]) -> _fsafe.TrustedAnchor | None:
     """The dispatcher's frozen ``--results-dir`` anchor, or ``None`` if unthreaded.
 
     Reads :data:`CONFIG_KEY_RESULTS_ROOT` (canonicalized at dispatch) together
@@ -214,9 +214,10 @@ def trusted_results_anchor(config: Mapping[str, Any]) -> _fsafe.TrustedAnchor | 
     the anchor through the same link would make containment succeed for a path
     that has left the operator's tree.
 
-    Returns ``None`` when the key is absent, which only happens for a direct
-    programmatic caller -- the dispatcher always supplies it alongside
-    ``_aorta_collect_dir``.
+    Private on purpose: every guard goes through
+    :func:`trusted_collector_anchor` so the fallback is applied in exactly one
+    place. A caller that took the bare ``None`` from here would silently get a
+    weaker guard than the pre-filter beside it.
     """
     raw = config.get(CONFIG_KEY_RESULTS_ROOT)
     if not isinstance(raw, str) or not raw:
@@ -257,15 +258,26 @@ def _threaded_identity(config: Mapping[str, Any]) -> tuple[int, int] | None:
     return None
 
 
-def _trusted_root(config: Mapping[str, Any], root: Path) -> _fsafe.TrustedAnchor:
-    """:func:`trusted_results_anchor` with the historical ``root.parent`` fallback.
+def trusted_collector_anchor(
+    config: Mapping[str, Any], root: Path
+) -> _fsafe.TrustedAnchor:
+    """The directory every collector path for ``root`` must stay inside.
 
-    The fallback only fires for a direct programmatic caller that threaded no
-    anchor. Being lexical and unpinned, it fails closed rather than guessing: a
-    symlink anywhere above the collector root makes the containment check
-    refuse, even when the operator put it there.
+    The dispatcher-threaded ``--results-dir`` when there is one (see
+    :func:`_threaded_anchor`), else ``root.parent``. The fallback only fires for
+    a direct programmatic caller that threaded no anchor. Being lexical and
+    unpinned, it fails closed rather than guessing: a symlink anywhere above the
+    collector root makes the containment check refuse, even when the operator
+    put it there.
+
+    **The single source of the anchor**, for the read path, the reset, the
+    retention pre-filter and the destructive prune alike. Deriving it twice is
+    how the pre-filter came to use ``root.parent`` while the prune it guards
+    received ``None`` and quietly dropped to the pathname engine -- a
+    time-of-check/time-of-use gap opened by the two spellings disagreeing, not
+    by either one being wrong on its own.
     """
-    anchor = trusted_results_anchor(config)
+    anchor = _threaded_anchor(config)
     if anchor is not None:
         return anchor
     return _fsafe.TrustedAnchor(root.parent)
@@ -294,7 +306,7 @@ def unsafe_collector_paths(config: Mapping[str, Any]) -> list[Path]:
     if root is None:
         return []
     registry = _registry()
-    trusted = _trusted_root(config, root)
+    trusted = trusted_collector_anchor(config, root)
     candidates = [root]
     for name in active_collectors(config):
         spec = registry.get(name)
@@ -598,7 +610,7 @@ def wrap_argv_for_collectors(
             continue
         out_dir = root / spec.output_subdir
         try:
-            _reset_output_dir(out_dir, _trusted_root(config, root))
+            _reset_output_dir(out_dir, trusted_collector_anchor(config, root))
         except OSError as exc:
             raise RuntimeError(
                 f"collect: cannot prepare the {name} artifact directory "
@@ -632,7 +644,7 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
     root = _collect_root(config)
     if root is None:
         return {}
-    trusted = _trusted_root(config, root)
+    trusted = trusted_collector_anchor(config, root)
     metrics: dict[str, Any] = {}
     registry = _registry()
     for name in active_collectors(config):
@@ -763,7 +775,7 @@ __all__ = [
     "active_collectors",
     "collector_root_is_traversable",
     "summarize_collectors",
-    "trusted_results_anchor",
+    "trusted_collector_anchor",
     "unsafe_collector_paths",
     "validate_collectors",
     "wrap_argv_for_collectors",
