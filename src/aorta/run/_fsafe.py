@@ -104,14 +104,22 @@ class TrustedAnchor:
         The caller must do this *before* any payload runs and after the
         directory exists, which for the dispatcher means after it has created
         the results tree. A stat failure yields an unpinned anchor rather than
-        raising: an anchor that cannot be pinned is still worth threading for
-        its no-follow descent.
+        raising -- an anchor that cannot be pinned is still worth threading for
+        its no-follow descent -- but it is logged at WARNING rather than
+        swallowed: the guard silently drops to its weaker form, and the
+        dispatcher creates the directory first precisely so this cannot happen.
         """
         anchor = Path(os.fspath(path))
         try:
             info = os.stat(anchor)
         except OSError as exc:
-            log.debug("could not pin the trust anchor %s (%s)", anchor, exc)
+            log.warning(
+                "could not pin the trust anchor %s (%s); path guards fall back "
+                "to no-follow-only, which cannot detect the directory being "
+                "renamed aside and replaced by a real one",
+                anchor,
+                exc,
+            )
             return cls(anchor)
         return cls(anchor, (info.st_dev, info.st_ino))
 

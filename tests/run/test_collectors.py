@@ -832,15 +832,34 @@ def test_trusted_results_anchor_is_none_without_the_key(tmp_path):
 
 
 @pytest.mark.parametrize("bad", ["nope", [1], [1, 2, 3], ["a", "b"], 7])
-def test_unparseable_threaded_identity_degrades_to_unpinned(tmp_path, bad):
-    """A malformed pin must not raise inside a guard that has to fail closed."""
+def test_unparseable_threaded_identity_degrades_to_unpinned_and_warns(
+    tmp_path, bad, caplog
+):
+    """A malformed pin must not raise, but must not be silent either.
+
+    The key is written only by the dispatcher, so a bad value is our bug and it
+    quietly drops the guard to its weaker no-follow-only form.
+    """
     results = tmp_path / "results"
     results.mkdir()
     config = _config(["rocprof"], results_root=results)
     config[CONFIG_KEY_RESULTS_ROOT_ID] = bad
-    anchor = trusted_results_anchor(config)
+    with caplog.at_level("WARNING"):
+        anchor = trusted_results_anchor(config)
     assert anchor is not None
     assert anchor.identity is None
+    assert any(CONFIG_KEY_RESULTS_ROOT_ID in r.getMessage() for r in caplog.records)
+
+
+def test_absent_threaded_identity_is_not_warned_about(tmp_path, caplog):
+    """A direct programmatic caller threads no pin; that is not a defect."""
+    results = tmp_path / "results"
+    results.mkdir()
+    with caplog.at_level("WARNING"):
+        anchor = trusted_results_anchor(_config(["rocprof"], results_root=results))
+    assert anchor is not None
+    assert anchor.identity is None
+    assert not caplog.records
 
 
 @_needs_fd
@@ -923,10 +942,15 @@ def test_unpinned_anchor_keeps_working(profilers_on_path, tmp_path):
             results_root=results.resolve(),
         )
     )
-    assert metrics["rocprof_kernel_count"] == 3
+    assert metrics.get("rocprof_kernel_count") == 3
 
 
 # ---- Bounded artifact descriptors -----------------------------------------
+
+
+_needs_proc_fd = pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="descriptor accounting needs /proc"
+)
 
 
 def _peak_fds_while_summarizing(tmp_path, monkeypatch, ranks):
@@ -963,6 +987,7 @@ def _peak_fds_while_summarizing(tmp_path, monkeypatch, ranks):
 
 
 @_needs_fd
+@_needs_proc_fd
 def test_summarize_descriptor_use_does_not_scale_with_artifact_count(
     profilers_on_path, tmp_path, monkeypatch
 ):
@@ -1004,11 +1029,12 @@ def test_summarize_aggregates_every_rank_artifact(profilers_on_path, tmp_path):
             pin_results_root=True,
         )
     )
-    assert metrics["rocprof_kernel_count"] == 16
-    assert metrics["rocprof_gpu_time_ms"] == pytest.approx(160 / 1_000_000.0)
+    assert metrics.get("rocprof_kernel_count") == 16
+    assert metrics.get("rocprof_gpu_time_ms") == pytest.approx(160 / 1_000_000.0)
 
 
 @_needs_fd
+@_needs_proc_fd
 def test_summarize_does_not_leak_fds_across_artifacts(profilers_on_path, tmp_path):
     results = tmp_path / "results"
     subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR

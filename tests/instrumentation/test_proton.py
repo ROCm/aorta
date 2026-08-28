@@ -1061,7 +1061,10 @@ def test_parse_summary_accepts_str_path(tmp_path):
     assert parse_summary(str(tmp_path))["proton_top_kernels"] == ["k"]
 
 
-def test_parse_summary_holds_one_profile_open_at_a_time(tmp_path):
+@pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="descriptor accounting needs /proc"
+)
+def test_parse_summary_holds_one_profile_open_at_a_time(tmp_path, monkeypatch):
     """A per-rank capture must not need a descriptor per rank.
 
     Proton writes a profile per rank, so a large distributed run can hold more
@@ -1070,8 +1073,7 @@ def test_parse_summary_holds_one_profile_open_at_a_time(tmp_path):
     before the limit. The count is compared across two tree sizes because an
     absolute bound would pass for the eager version on a small tree.
     """
-    if not Path("/proc/self/fd").is_dir():
-        pytest.skip("descriptor accounting needs /proc")
+    original = _parse.parse_profile_stream
 
     def peak_open_fds(root, ranks):
         root.mkdir()
@@ -1080,18 +1082,17 @@ def test_parse_summary_holds_one_profile_open_at_a_time(tmp_path):
         parse_summary(root)  # warm any lazy imports before the baseline
         baseline = len(os.listdir("/proc/self/fd"))
         seen = []
-        original = _parse.parse_profile_stream
 
         def counting_parse(stream):
             seen.append(len(os.listdir("/proc/self/fd")))
             return original(stream)
 
-        _parse.parse_profile_stream = counting_parse
+        monkeypatch.setattr(_parse, "parse_profile_stream", counting_parse)
         try:
             metrics = parse_summary(root)
         finally:
-            _parse.parse_profile_stream = original
-        assert metrics["proton_kernel_count"] == ranks
+            monkeypatch.setattr(_parse, "parse_profile_stream", original)
+        assert metrics.get("proton_kernel_count") == ranks
         assert len(seen) == ranks
         return max(seen) - baseline
 
@@ -1111,5 +1112,5 @@ def test_parse_summary_from_streams_consumes_a_lazy_iterator(tmp_path):
     metrics = parse_summary_from_streams(
         str(tmp_path), (p.open(encoding="utf-8") for p in [path])
     )
-    assert metrics["proton_kernel_count"] == 3
-    assert metrics["proton_gpu_time_ms"] == pytest.approx(2.0)
+    assert metrics.get("proton_kernel_count") == 3
+    assert metrics.get("proton_gpu_time_ms") == pytest.approx(2.0)

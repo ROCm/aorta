@@ -663,7 +663,10 @@ def test_parse_summary_accepts_str_path():
     assert parse_summary(str(FIXTURES / "flat_with_o"))["rocprof_kernel_count"] == _FLAT_CALLS
 
 
-def test_parse_summary_holds_one_csv_open_at_a_time(tmp_path):
+@pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="descriptor accounting needs /proc"
+)
+def test_parse_summary_holds_one_csv_open_at_a_time(tmp_path, monkeypatch):
     """A per-rank capture must not need a descriptor per rank.
 
     ``rocprofv3`` writes a stats/trace pair per process, so a large distributed
@@ -672,6 +675,7 @@ def test_parse_summary_holds_one_csv_open_at_a_time(tmp_path):
     ranks before the limit. The count is compared across two tree sizes because
     an absolute bound would pass for the eager version on a small tree.
     """
+    original = _parse._iter_rows
 
     def peak_open_fds(root, ranks):
         root.mkdir()
@@ -682,23 +686,20 @@ def test_parse_summary_holds_one_csv_open_at_a_time(tmp_path):
         parse_summary(root)  # warm any lazy imports before the baseline
         baseline = len(os.listdir("/proc/self/fd"))
         seen = []
-        original = _parse._iter_rows
 
         def counting_iter_rows(stream):
             seen.append(len(os.listdir("/proc/self/fd")))
             return original(stream)
 
-        _parse._iter_rows = counting_iter_rows
+        monkeypatch.setattr(_parse, "_iter_rows", counting_iter_rows)
         try:
             metrics = parse_summary(root)
         finally:
-            _parse._iter_rows = original
-        assert metrics["rocprof_kernel_count"] == ranks
+            monkeypatch.setattr(_parse, "_iter_rows", original)
+        assert metrics.get("rocprof_kernel_count") == ranks
         assert len(seen) == ranks
         return max(seen) - baseline
 
-    if not Path("/proc/self/fd").is_dir():
-        pytest.skip("descriptor accounting needs /proc")
     small = peak_open_fds(tmp_path / "small", 8)
     large = peak_open_fds(tmp_path / "large", 64)
     assert small == large
@@ -718,7 +719,7 @@ def test_parse_summary_from_streams_consumes_lazy_iterators(tmp_path):
     metrics = parse_summary_from_streams(
         str(tmp_path), (path.open(encoding="utf-8") for path in paths), iter(())
     )
-    assert metrics["rocprof_kernel_count"] == 4
+    assert metrics.get("rocprof_kernel_count") == 4
 
 
 def test_parse_summary_from_streams_falls_back_to_trace_on_empty_stats(tmp_path):
@@ -740,8 +741,8 @@ def test_parse_summary_from_streams_falls_back_to_trace_on_empty_stats(tmp_path)
             ]
         ),
     )
-    assert metrics["rocprof_kernel_count"] == 1
-    assert metrics["rocprof_top_kernels"] == ["traced"]
+    assert metrics.get("rocprof_kernel_count") == 1
+    assert metrics.get("rocprof_top_kernels") == ["traced"]
 
 
 # ---- Docs / schema agreement --------------------------------------------

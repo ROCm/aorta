@@ -155,12 +155,18 @@ def parse_summary_from_streams(
     path opens them ``O_NOFOLLOW`` under a directory fd so a payload symlink
     swapped in after the guard cannot redirect the read -- and the display
     string for ``rocprof_artifact_dir``. Same metrics contract as
-    :func:`parse_summary`; never raises.
+    :func:`parse_summary`.
 
     Each group may be a **lazy** iterator that opens one file at a time (both
     callers pass one), so a multi-rank capture never needs a descriptor per
     artifact. Each is consumed at most once, and the trace group is not
     consumed at all when the stats group yielded data.
+
+    Raises nothing of its own -- a malformed, truncated or undecodable artifact
+    yields fewer metrics -- but an exception from the caller's iterator
+    propagates. That is deliberate: the collector's iterator re-raises
+    descriptor exhaustion so its metrics are dropped rather than published as
+    totals covering only the ranks read before the limit.
     """
     metrics: dict[str, Any] = {"rocprof_artifact_dir": artifact_dir}
 

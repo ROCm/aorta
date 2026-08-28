@@ -227,18 +227,34 @@ def trusted_results_anchor(config: Mapping[str, Any]) -> _fsafe.TrustedAnchor | 
 def _threaded_identity(config: Mapping[str, Any]) -> tuple[int, int] | None:
     """Parse :data:`CONFIG_KEY_RESULTS_ROOT_ID`, or ``None`` when unusable.
 
-    A hand-built config (or one round-tripped through a lossy transport) may
-    carry anything here. An unparseable value degrades to an unpinned anchor
-    -- the no-follow descent still runs -- rather than raising in a guard whose
-    job is to fail closed on filesystem shape, not on config shape.
+    Absent is normal: a direct programmatic caller threads no pin, and a trial
+    config written before the key existed has none. Present-but-unparseable is
+    not, so it is logged -- the key is written only by the dispatcher, which
+    means a bad value is our bug, and it silently weakens a guard.
+
+    Either way the result is an unpinned anchor rather than an exception. This
+    is a deliberate line: the degradation is to the *previous* shipped guard
+    (the full ``O_NOFOLLOW`` descent below the anchor path), not to no guard,
+    and failing the run's whole collection over a config-shape bug in code the
+    payload cannot reach would cost more than it protects. Nothing here weakens
+    on input a payload controls -- it cannot write the trial config.
     """
     raw = config.get(CONFIG_KEY_RESULTS_ROOT_ID)
-    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+    if raw is None:
         return None
-    try:
-        return (int(raw[0]), int(raw[1]))
-    except (TypeError, ValueError):
-        return None
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        try:
+            return (int(raw[0]), int(raw[1]))
+        except (TypeError, ValueError):
+            pass
+    log.warning(
+        "collect: ignoring unusable %s=%r; expected [st_dev, st_ino]. Path "
+        "guards fall back to no-follow-only, which cannot detect the results "
+        "directory being renamed aside and replaced by a real one.",
+        CONFIG_KEY_RESULTS_ROOT_ID,
+        raw,
+    )
+    return None
 
 
 def _trusted_root(config: Mapping[str, Any], root: Path) -> _fsafe.TrustedAnchor:
@@ -300,7 +316,7 @@ def collector_root_is_traversable(
     -- follows links in *every* path component, so traversing one would read,
     and for retention *delete*, through the link.
 
-    Two checks, both required:
+    Three checks, all required:
 
     * **Containment.** ``root.resolve()`` must stay inside ``trusted_root``.
       ``trusted_root`` is a pre-launch canonical path and is **not** resolved
@@ -312,6 +328,11 @@ def collector_root_is_traversable(
       operate on the sibling. Operator-owned links *above* the anchor are
       already folded away because the dispatcher stores
       ``--results-dir.resolve()``.
+    * **The anchor is still the same inode** (POSIX, and only when the caller
+      threaded a pinned :class:`~aorta.run._fsafe.TrustedAnchor`). Neither check
+      above asks whether the trusted root is still the operator's directory: a
+      payload can rename it aside and move a *real* directory into its
+      pathname, and every symlink check on that pathname then passes.
 
     A path that is simply **absent** -- every component that does exist checks
     out, the leaf was never created -- is traversable: there is nothing there to
@@ -621,7 +642,7 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
         subdir = root / spec.output_subdir
         try:
             if _fsafe.HAVE_FD_TRAVERSAL and spec.summarize_streams is not None:
-                metrics.update(_summarize_streamed(spec, root, subdir, trusted))
+                metrics.update(_summarize_streamed(spec, subdir, trusted))
             elif spec.summarize is not None:
                 # Non-POSIX fallback: guard lexically, then parse by pathname.
                 # The parsers ``rglob`` the subdirectory, so one swapped for a
@@ -662,7 +683,7 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_streamed(
-    spec: CollectorSpec, root: Path, subdir: Path, trusted: _fsafe.TrustedAnchor
+    spec: CollectorSpec, subdir: Path, trusted: _fsafe.TrustedAnchor
 ) -> dict[str, Any]:
     """Parse one collector's artifacts through no-follow, fd-relative reads.
 

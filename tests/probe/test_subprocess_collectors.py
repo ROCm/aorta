@@ -436,7 +436,7 @@ def test_retention_prunes_rocprof_when_a_sibling_collector_wrote_nothing(
     result = wl.run()
 
     # Parsed before pruning, so the metric survives the trace it came from.
-    assert result.metrics["rocprof_kernel_count"] == 23
+    assert result.metrics.get("rocprof_kernel_count") == 23
     assert not (collect_dir / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv").exists()
     doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
     deleted = doc.get("capture", {}).get("retention", {}).get("deleted", [])

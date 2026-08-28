@@ -159,12 +159,18 @@ def parse_summary_from_streams(
     profile handles -- the collector path opens them ``O_NOFOLLOW`` under a
     directory fd so a payload symlink swapped in after the guard cannot
     redirect the read -- and the display string for ``proton_artifact_dir``.
-    Same metrics contract as :func:`parse_summary`; never raises.
+    Same metrics contract as :func:`parse_summary`.
 
     ``profile_streams`` may be a **lazy** iterator that opens one profile at a
     time (both callers pass one): each handle is aggregated and closed before
     the next opens, so a run with a profile per rank never needs a descriptor
     per rank.
+
+    Raises nothing of its own -- an unreadable or non-Proton profile
+    contributes nothing -- but an exception from the caller's iterator
+    propagates. That is deliberate: the collector's iterator re-raises
+    descriptor exhaustion so its metrics are dropped rather than published as
+    totals covering only the ranks read before the limit.
     """
     metrics: dict[str, Any] = {"proton_artifact_dir": artifact_dir}
     by_name: dict[str, float] = {}
