@@ -925,10 +925,8 @@ class TestRunTrials:
         )
         assert _anchor_from_envelope({"results_root": None}) is None
 
-    def test_collect_dir_absent_without_collector(self, tmp_path):
-        """No collector keys for a run with no collector -- back-compat
-        (``_aorta_collect_dir`` and ``_aorta_results_root`` only appear when a
-        collector was requested)."""
+    def test_runtime_anchor_is_not_persisted_without_collector(self, tmp_path):
+        """Probe safety gets the frozen anchor without changing record shape."""
         captured_config: dict = {}
 
         class ConfigCapturingWorkload(Workload):
@@ -954,8 +952,69 @@ class TestRunTrials:
             req = RunRequest(workload="nocollectdir", trials=1, results_dir=tmp_path)
             run_trials(req)
         assert "_aorta_collect_dir" not in captured_config
-        assert "_aorta_results_root" not in captured_config
-        assert "_aorta_results_root_id" not in captured_config
+        assert captured_config["_aorta_results_root"] == str(tmp_path.resolve())
+        info = os.stat(tmp_path.resolve())
+        assert captured_config["_aorta_results_root_id"] == [info.st_dev, info.st_ino]
+
+        written = list(tmp_path.rglob("trial_*.json"))
+        assert len(written) == 1
+        persisted_config = json.loads(written[0].read_text(encoding="utf-8"))["config"]
+        assert "_aorta_collect_dir" not in persisted_config
+        assert "_aorta_results_root" not in persisted_config
+        assert "_aorta_results_root_id" not in persisted_config
+
+    @pytest.mark.skipif(
+        not _fsafe.HAVE_FD_TRAVERSAL,
+        reason="fd-relative traversal unsupported here",
+    )
+    def test_probe_without_collector_refuses_replaced_results_inode(self, tmp_path):
+        """A normal probe reuses the dispatcher's pre-payload inode pin."""
+        from aorta.workloads._subprocess import SubprocessWorkload
+
+        results = tmp_path / "results"
+        moved = tmp_path / "results.original"
+        replacement = tmp_path / "replacement"
+        replacement_trial = replacement / "trial_0"
+        replacement_trial.mkdir(parents=True)
+        canary = replacement_trial / "canary"
+        canary.write_text("untouched", encoding="utf-8")
+        swap = (
+            "from pathlib import Path; "
+            f"results=Path({str(results)!r}); "
+            f"results.rename(Path({str(moved)!r})); "
+            f"Path({str(replacement)!r}).rename(results)"
+        )
+
+        mock_ep = MagicMock()
+        mock_ep.name = "_subprocess"
+        mock_ep.load.return_value = SubprocessWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with (
+            patch("importlib.metadata.entry_points", return_value=mock_eps),
+            pytest.raises(RuntimeError, match="refusing to write the trial record"),
+        ):
+            run_trials(
+                RunRequest(
+                    workload="_subprocess",
+                    trials=1,
+                    results_dir=results,
+                    save_logs=True,
+                    subprocess_argv=(sys.executable, "-c", swap),
+                    probe_extras={
+                        "cell_name": "none-none",
+                        "env_passthrough_mode": "inherit",
+                        "timeout_per_trial": None,
+                        "cell_env_vars": {},
+                        "disable_detector_tiers": ["tier2", "tier3"],
+                    },
+                )
+            )
+
+        redirected_trial = results / "trial_0"
+        assert (redirected_trial / "canary").read_text(encoding="utf-8") == "untouched"
+        assert not (redirected_trial / "result.json").exists()
 
     def test_collect_survives_trial_json_roundtrip(self, tmp_path):
         """``_aorta_collect`` is a plain list, so the trial JSON dump needs

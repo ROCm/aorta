@@ -27,7 +27,12 @@ from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run import _fsafe
 from aorta.run._process import TrialWorkerError, launch_trial_worker
-from aorta.run.collectors import KNOWN_RECIPES, validate_collectors
+from aorta.run.collectors import (
+    CONFIG_KEY_RESULTS_ROOT,
+    CONFIG_KEY_RESULTS_ROOT_ID,
+    KNOWN_RECIPES,
+    validate_collectors,
+)
 from aorta.run.discovery import (
     get_workload_class,
     get_workload_policy,
@@ -1119,6 +1124,22 @@ def _run_single_trial(
             name: dict(opts) for name, opts in request.collect_options.items()
         }
 
+    # Thread the pre-launch results anchor on every artifact-writing trial, not
+    # only collector trials. The probe workload writes its own trial tree even
+    # without a collector, so deriving an unpinned anchor during setup would
+    # let the payload replace the results directory with another real directory
+    # and redirect result.json before the dispatcher's later record write
+    # notices. A direct single-trial caller has no separately declared operator
+    # boundary; its results_dir is the per-workload directory, so its parent is
+    # the common boundary containing both that directory and probe trial_N/.
+    trusted_root = results_root
+    if should_write:
+        if trusted_root is None:
+            trusted_root = _fsafe.TrustedAnchor.freeze(results_dir.parent.resolve())
+        config[CONFIG_KEY_RESULTS_ROOT] = str(trusted_root.path)
+        if trusted_root.identity is not None:
+            config[CONFIG_KEY_RESULTS_ROOT_ID] = list(trusted_root.identity)
+
     # When a collector is active, thread the per-trial output path stem so a
     # workload can write collector artifacts (e.g. the layer_numerics NaN
     # logger's summary/jsonl) into the results tree -- WITHOUT requiring
@@ -1136,26 +1157,7 @@ def _run_single_trial(
         trial_basename = (
             f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
         )
-        # The trust anchor for the collector symlink guards. Taken from the
-        # caller when it froze one before the trial loop -- resolving it here
-        # would be *after* an earlier trial's payload ran, and that payload can
-        # replace ``results_dir`` with a symlink. The caller resolved only the
-        # operator-owned ``--results-dir`` boundary, folding legitimate links
-        # above it (such as a mounted scratch path); ``collect_base`` preserves
-        # the workload component lexically below that prefix so a stale
-        # workload symlink is rejected rather than trusted.
-        if results_root is not None:
-            trusted_root = results_root
-            collect_base = results_dir
-        else:
-            # A direct single-trial caller has no separately declared
-            # operator boundary; retain the historical per-workload anchor.
-            trusted_root = _fsafe.TrustedAnchor.freeze(results_dir.resolve())
-            collect_base = trusted_root.path
-        config["_aorta_collect_dir"] = str(collect_base / trial_basename)
-        config["_aorta_results_root"] = str(trusted_root.path)
-        if trusted_root.identity is not None:
-            config["_aorta_results_root_id"] = list(trusted_root.identity)
+        config["_aorta_collect_dir"] = str(results_dir / trial_basename)
 
     # Compute the effective controlled overlay in the platform env-precedence
     # order (lowest to highest):
@@ -1425,13 +1427,24 @@ def _run_single_trial(
     # the two in lockstep if ``Environment`` ever grows a field.
     execution_env = asdict(env_descriptor)
 
+    # The results anchor is runtime authority rather than workload
+    # configuration. Non-collector records historically omitted it, so keep
+    # their serialized/returned config byte-shape stable while still exposing
+    # the anchor to the workload during setup and run. Collector records already
+    # carried these keys before the anchor became unconditional.
+    result_config = config
+    if not request.collect:
+        result_config = dict(config)
+        result_config.pop(CONFIG_KEY_RESULTS_ROOT, None)
+        result_config.pop(CONFIG_KEY_RESULTS_ROOT_ID, None)
+
     # Build TrialResult
     trial_result = TrialResult(
         trial_id=trial_id,
         workload=request.workload,
         execution_env=execution_env,
         mitigations_applied=request.mitigations,
-        config=config,
+        config=result_config,
         env=env_snapshot.to_dict(),
         result=asdict(workload_result),
         wall_clock_sec=wall_clock,
