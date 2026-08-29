@@ -1518,14 +1518,16 @@ def _open_record_file(
     (the log capture keeps two handles for the length of a trial and has its own
     cleanup for a partial open). Falls back to a plain ``open`` when no anchor
     was frozen -- a direct programmatic caller -- or when the platform lacks the
-    fd primitives, or when ``results_dir`` is not lexically inside the anchor,
-    which are the same documented degradations the collector guards carry.
+    fd primitives. An anchored path outside the anchor is a caller bug and
+    refuses rather than silently bypassing the guard.
     """
     if anchor is None or not _fsafe.HAVE_FD_TRAVERSAL:
         return open(results_dir / name, "w", **text_kwargs)
     components = _fsafe.relative_components(anchor.path, results_dir)
     if components is None:
-        return open(results_dir / name, "w", **text_kwargs)
+        raise _fsafe.UnsafePathError(
+            f"record directory {results_dir} is outside trusted root {anchor.path}"
+        )
     # The directory fd is only needed to resolve ``name``; the returned file
     # descriptor stays valid after it closes.
     with _fsafe.open_dir_nofollow(anchor, components) as dir_fd:
@@ -1543,8 +1545,9 @@ def _unlink_record_file(
         return
     components = _fsafe.relative_components(anchor.path, results_dir)
     if components is None:
-        (results_dir / name).unlink(missing_ok=True)
-        return
+        raise _fsafe.UnsafePathError(
+            f"record directory {results_dir} is outside trusted root {anchor.path}"
+        )
     with _fsafe.open_dir_nofollow(anchor, components) as dir_fd:
         try:
             os.unlink(name, dir_fd=dir_fd)

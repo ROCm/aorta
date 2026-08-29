@@ -2815,6 +2815,28 @@ class TestSaveLogs:
             for name in names
         )
 
+    @pytest.mark.skipif(
+        not _fsafe.HAVE_FD_TRAVERSAL,
+        reason="fd-relative traversal unsupported here",
+    )
+    def test_anchored_record_helpers_refuse_a_directory_outside_anchor(self, tmp_path):
+        results = tmp_path / "results"
+        results.mkdir()
+        anchor = _fsafe.TrustedAnchor.freeze(results)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "record.log"
+        victim.write_text("keep me", encoding="utf-8")
+
+        with pytest.raises(_fsafe.UnsafePathError):
+            dispatcher_module._open_record_file(
+                outside, anchor, victim.name, encoding="utf-8"
+            )
+        with pytest.raises(_fsafe.UnsafePathError):
+            dispatcher_module._unlink_record_file(outside, anchor, victim.name)
+
+        assert victim.read_text(encoding="utf-8") == "keep me"
+
 
 class TestAortaTrialEnv:
     """Tests for the ``_aorta_trial_env`` config key and the 3-layer env-precedence contract.

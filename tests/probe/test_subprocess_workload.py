@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from aorta.run import _fsafe
+from aorta.run.collectors import CONFIG_KEY_RESULTS_ROOT, CONFIG_KEY_RESULTS_ROOT_ID
 from aorta.run.discovery import get_workload_class
 from aorta.workloads._subprocess import (
     CONFIG_KEY_LOG_PREFIX,
@@ -120,6 +121,28 @@ def test_setup_rejects_non_list_argv(tmp_path):
     )
     with pytest.raises(RuntimeError, match="non-empty list"):
         workload.setup()
+
+
+def test_setup_reuses_dispatcher_frozen_results_anchor(tmp_path):
+    """The probe tree must not refreeze its trust boundary after launch."""
+    (tmp_path / "_subprocess").mkdir()
+    anchor = _fsafe.TrustedAnchor.freeze(tmp_path)
+    assert anchor.identity is not None
+    workload = SubprocessWorkload(
+        {
+            CONFIG_KEY_SUBPROCESS_ARGV: ["true"],
+            CONFIG_KEY_LOG_PREFIX: str(
+                tmp_path / "_subprocess" / "trial_d0_m0_t0"
+            ),
+            CONFIG_KEY_RESULTS_ROOT: str(anchor.path),
+            CONFIG_KEY_RESULTS_ROOT_ID: list(anchor.identity),
+        }
+    )
+
+    workload.setup()
+
+    assert workload._trial_files is not None  # noqa: SLF001 -- wiring contract
+    assert workload._trial_files.anchor == anchor  # noqa: SLF001
 
 
 # ---- FR 1.12 (result.json shape + Tier 1 verdict) ------------------------

@@ -645,6 +645,8 @@ def open_write_nofollow(
 
     ``O_CREAT`` without ``O_EXCL`` is intentional: a re-run legitimately
     overwrites its own trial record, and ``O_EXCL`` would break probe resume.
+    When ``permissions`` is supplied, it is applied to the held descriptor
+    before truncation and before the stream is returned.
     ``O_NONBLOCK`` plus an ``S_ISREG`` check on the *descriptor* covers the
     write-side version of the FIFO trap -- opening a FIFO for writing blocks
     until a reader appears (or fails ``ENXIO`` non-blocking), which would hang
