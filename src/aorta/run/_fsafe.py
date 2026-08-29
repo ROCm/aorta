@@ -546,33 +546,38 @@ def secure_open_read(dir_fd: int, name: str, **text_kwargs: object) -> Iterator[
 
 
 def open_write_nofollow(dir_fd: int, name: str, **text_kwargs: object) -> TextIO:
-    """Create/truncate ``name`` under ``dir_fd`` for writing, refusing a symlink.
+    """Create/truncate ``name`` under ``dir_fd`` for writing, refusing links.
 
     The write-side counterpart of :func:`secure_open_read`, and returns the
     stream rather than a context manager so a caller can keep the existing
     ``fh = open(...)`` shape (the dispatcher's log capture holds both handles for
     the length of a trial and has its own cleanup path for a partial open).
 
-    ``O_NOFOLLOW`` refuses a symlink planted at the final component, so a
-    payload cannot redirect a record write outside the tree by leaving a link
-    where the file goes. ``O_CREAT`` without ``O_EXCL`` on purpose: a re-run
-    legitimately overwrites its own trial record, and ``O_EXCL`` would break
-    probe resume. ``O_NONBLOCK`` plus an ``S_ISREG`` check on the *descriptor*
-    covers the write-side version of the FIFO trap -- opening a FIFO for writing
-    blocks until a reader appears (or fails ``ENXIO`` non-blocking), which would
-    hang the trial rather than fail it.
+    ``O_NOFOLLOW`` refuses a symlink planted at the final component. A hard link
+    is different: opening it with ``O_TRUNC`` would damage its other name before
+    the descriptor could be checked. Open without ``O_TRUNC``, reject an inode
+    whose link count is not exactly one, and only then truncate the pinned
+    descriptor. A link added after that check can only name this already-opened
+    inode; it cannot redirect the descriptor to a pre-existing outside file.
+
+    ``O_CREAT`` without ``O_EXCL`` is intentional: a re-run legitimately
+    overwrites its own trial record, and ``O_EXCL`` would break probe resume.
+    ``O_NONBLOCK`` plus an ``S_ISREG`` check on the *descriptor* covers the
+    write-side version of the FIFO trap -- opening a FIFO for writing blocks
+    until a reader appears (or fails ``ENXIO`` non-blocking), which would hang
+    the trial rather than fail it.
 
     The caller owns the returned stream and must close it.
 
     Raises:
         UnsafePathError: ``name`` is not a single directory entry name, or what
-            was opened is not a regular file.
+            was opened is not a singly-linked regular file.
         OSError: the file could not be created or opened.
     """
     _require_child_name(name, f"fd {dir_fd}")
     fd = os.open(
         name,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW | _O_NONBLOCK,
+        os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW | _O_NONBLOCK,
         0o644,
         dir_fd=dir_fd,
     )
@@ -584,6 +589,13 @@ def open_write_nofollow(dir_fd: int, name: str, **text_kwargs: object) -> TextIO
                 f"refusing to write {name!r}: it is not a regular file "
                 f"(mode {stat.filemode(info.st_mode)})",
             )
+        if info.st_nlink != 1:
+            raise UnsafePathError(
+                errno.EMLINK,
+                f"refusing to write {name!r}: regular file has "
+                f"{info.st_nlink} hard links",
+            )
+        os.ftruncate(fd, 0)
         _clear_nonblock(fd)
         return os.fdopen(fd, "w", **text_kwargs)  # type: ignore[arg-type,return-value]
     except BaseException:

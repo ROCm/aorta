@@ -289,6 +289,19 @@ class TestChildNameEnforcement:
         finally:
             os.close(base_fd)
 
+    @pytest.mark.parametrize("bad", BAD_NAMES)
+    def test_open_write_nofollow_refuses(self, tmp_path, bad):
+        held, _canary = self._sandbox(tmp_path)
+        base_fd = os.open(str(held), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pytest.raises(_fsafe.UnsafePathError):
+                stream = _fsafe.open_write_nofollow(
+                    base_fd, self._name(bad, held), encoding="utf-8"
+                )
+                stream.close()
+        finally:
+            os.close(base_fd)
+
     def test_the_raw_calls_being_guarded_really_do_escape(self, tmp_path):
         """Without the check, each bad name reaches outside the held fd.
 
@@ -447,6 +460,61 @@ class TestSecureOpenReadFileType:
                 with pytest.raises(LookupError):
                     with _fsafe.secure_open_read(base_fd, "stats.csv", encoding="bogus"):
                         pass
+            assert _open_fd_count() == before
+        finally:
+            os.close(base_fd)
+
+
+class TestOpenWriteNoFollow:
+    """Writer validation must happen before any destructive truncation."""
+
+    def test_refuses_hard_link_without_truncating_target(self, tmp_path):
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("keep me", encoding="utf-8")
+        os.link(outside, output_dir / "result.json")
+
+        base_fd = os.open(str(output_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pytest.raises(_fsafe.UnsafePathError, match="hard links"):
+                stream = _fsafe.open_write_nofollow(
+                    base_fd, "result.json", encoding="utf-8"
+                )
+                # Closes the stream if the link-count guard is mutated away.
+                stream.close()
+        finally:
+            os.close(base_fd)
+
+        # Adding O_TRUNC back to os.open makes the refusal too late: the helper
+        # still raises, but this canary has already been emptied.
+        assert outside.read_text(encoding="utf-8") == "keep me"
+
+    def test_overwrites_singly_linked_regular_file(self, tmp_path):
+        target = tmp_path / "result.json"
+        target.write_text("old content with a longer tail", encoding="utf-8")
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with _fsafe.open_write_nofollow(
+                base_fd, "result.json", encoding="utf-8"
+            ) as stream:
+                stream.write("new")
+        finally:
+            os.close(base_fd)
+        assert target.read_text(encoding="utf-8") == "new"
+
+    def test_no_fd_leak_when_hard_link_is_refused(self, tmp_path):
+        outside = tmp_path / "outside.txt"
+        outside.write_text("keep me", encoding="utf-8")
+        os.link(outside, tmp_path / "result.json")
+        base_fd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            before = _open_fd_count()
+            for _ in range(50):
+                with pytest.raises(_fsafe.UnsafePathError):
+                    _fsafe.open_write_nofollow(
+                        base_fd, "result.json", encoding="utf-8"
+                    )
             assert _open_fd_count() == before
         finally:
             os.close(base_fd)
