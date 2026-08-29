@@ -952,13 +952,14 @@ class TestRunTrials:
             req = RunRequest(workload="nocollectdir", trials=1, results_dir=tmp_path)
             run_trials(req)
         assert "_aorta_collect_dir" not in captured_config
-        assert captured_config["_aorta_results_root"] == str(tmp_path.resolve())
+        assert captured_config.get("_aorta_results_root") == str(tmp_path.resolve())
         info = os.stat(tmp_path.resolve())
-        assert captured_config["_aorta_results_root_id"] == [info.st_dev, info.st_ino]
+        assert captured_config.get("_aorta_results_root_id") == [info.st_dev, info.st_ino]
 
         written = list(tmp_path.rglob("trial_*.json"))
         assert len(written) == 1
-        persisted_config = json.loads(written[0].read_text(encoding="utf-8"))["config"]
+        persisted_config = json.loads(written[0].read_text(encoding="utf-8")).get("config")
+        assert isinstance(persisted_config, dict)
         assert "_aorta_collect_dir" not in persisted_config
         assert "_aorta_results_root" not in persisted_config
         assert "_aorta_results_root_id" not in persisted_config
