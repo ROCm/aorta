@@ -59,7 +59,12 @@ from ._options import (
     mode_argument,
     validate_options,
 )
-from ._parse import parse_profile, parse_summary
+from ._parse import (
+    parse_profile,
+    parse_profile_stream,
+    parse_summary,
+    parse_summary_from_streams,
+)
 
 log = logging.getLogger(__name__)
 
@@ -506,7 +511,9 @@ __all__ = [
     "build_env",
     "mode_argument",
     "parse_profile",
+    "parse_profile_stream",
     "parse_summary",
+    "parse_summary_from_streams",
     "resolve_python",
     "validate_options",
     "wrap_argv",
