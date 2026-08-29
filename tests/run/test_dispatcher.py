@@ -2779,6 +2779,42 @@ class TestSaveLogs:
         assert "_aorta_save_logs" not in NoisyWorkload.seen_config
         assert "_aorta_log_prefix" not in NoisyWorkload.seen_config
 
+    @pytest.mark.skipif(
+        not _fsafe.HAVE_FD_TRAVERSAL,
+        reason="fd-relative traversal unsupported here",
+    )
+    def test_partial_open_cleanup_does_not_follow_swapped_workload_dir(self, tmp_path):
+        """Cleaning a log stub must stay anchored after its parent is swapped."""
+        results = tmp_path / "results"
+        workload_dir = results / "noisy"
+        workload_dir.mkdir(parents=True)
+        anchor = _fsafe.TrustedAnchor.freeze(results)
+        names = (
+            "trial_d0_m0_t0.stdout.log",
+            "trial_d0_m0_t0.stderr.log",
+        )
+        with dispatcher_module._open_record_file(
+            workload_dir, anchor, names[0], encoding="utf-8"
+        ):
+            pass
+
+        moved = results / "noisy.original"
+        workload_dir.rename(moved)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        for name in names:
+            (outside / name).write_text("keep me", encoding="utf-8")
+        workload_dir.symlink_to(outside, target_is_directory=True)
+
+        for name in names:
+            with pytest.raises(_fsafe.UnsafePathError):
+                dispatcher_module._unlink_record_file(workload_dir, anchor, name)
+
+        assert all(
+            (outside / name).read_text(encoding="utf-8") == "keep me"
+            for name in names
+        )
+
 
 class TestAortaTrialEnv:
     """Tests for the ``_aorta_trial_env`` config key and the 3-layer env-precedence contract.

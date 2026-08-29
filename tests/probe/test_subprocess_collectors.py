@@ -489,9 +489,12 @@ def test_retention_prune_uses_the_same_anchor_as_its_own_pre_filter(
     assert anchor.path == collect_dir.parent
     # ...and the prune still did its job.
     assert not (collect_dir / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv").exists()
-    # The operator's own record tree keeps the pathname engine: it is not handed
-    # to the payload, and its guard is the containment check, not an anchor.
-    assert seen.get(str(tmp_path / "trial_0"), "absent") is None
+    # The sibling probe trial tree is payload-writable too (the command runs as
+    # the same user), so it now carries its own fd-relative anchor rather than
+    # dropping to the pathname engine.
+    trial_anchor = seen.get(str(tmp_path / "trial_0"))
+    assert trial_anchor is not None
+    assert trial_anchor.path == tmp_path
 
 
 def test_retention_full_keeps_the_collector_tree(tmp_path, rocprofv3_on_path):

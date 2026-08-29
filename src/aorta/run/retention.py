@@ -247,8 +247,8 @@ def apply_retention(
 
     ``trusted_root`` selects the traversal strategy:
 
-    * **Given** (the collector artifact tree, which the profiled payload is
-      handed and can swap mid-run): on POSIX the whole prune runs
+    * **Given** (any artifact tree a same-user payload can swap mid-run): on
+      POSIX the whole prune runs
       **fd-relative** -- ``trial_dir`` is reached by descending from
       ``trusted_root`` with ``O_NOFOLLOW`` on every component, and every stat /
       unlink / rmdir is performed relative to the held directory fds. A payload
@@ -259,8 +259,8 @@ def apply_retention(
       bare path) to also pin the anchor's inode, so a payload that renamed the
       results directory aside and moved a real directory into its pathname is
       refused; a bare path keeps the no-follow-only descent.
-    * **Omitted** (the operator-written trial record tree, not handed to the
-      payload) or on a platform without the fd primitives: the historical
+    * **Omitted** (a direct caller with no declared trust boundary) or on a
+      platform without the fd primitives: the historical
       ``os.walk(..., followlinks=False)`` + ``resolve()``-containment body runs,
       which never descends a symlinked subdirectory and refuses to delete a path
       that dereferences outside ``trial_dir``.
@@ -332,16 +332,16 @@ def apply_retention(
 def _apply_retention_fd(
     trial_dir: Path, level: str, trusted_root: _fsafe.TrustedAnchor | Path
 ) -> RetentionOutcome:
-    """Race-free :func:`apply_retention` for the payload-writable collector tree.
+    """Race-free :func:`apply_retention` for a payload-writable artifact tree.
 
     Descends from ``trusted_root`` to ``trial_dir`` with ``O_NOFOLLOW`` on every
     component and holds the resulting directory fd, then classifies and deletes
     each file relative to the fds returned by :func:`aorta.run._fsafe`. Because
     no step re-resolves a pathname, a payload that swaps an ancestor after the
     descent cannot redirect a delete outside the results tree. Symlinked files
-    and subdirectories are never yielded by the walk, so they are neither read
-    nor unlinked. Tolerant like the pathname engine: a delete that fails keeps
-    the file and warns.
+    and subdirectories are yielded as links, recorded as kept with a warning,
+    and never read, followed, or unlinked. Tolerant like the pathname engine: a
+    delete that fails keeps the file and warns.
     """
     anchor = _fsafe.as_anchor(trusted_root)
     components = _fsafe.relative_components(anchor.path, trial_dir)
@@ -360,7 +360,13 @@ def _apply_retention_fd(
     try:
         with _fsafe.open_dir_nofollow(anchor, components) as base_fd:
             manifest = _load_manifest_fd(base_fd)
-            for rel, dir_fd, name, size in _fsafe.iter_regular_files(base_fd):
+            for rel, dir_fd, name, info in _fsafe.iter_entries(base_fd):
+                if stat.S_ISLNK(info.st_mode):
+                    log.warning("retention: skipping symlink %s; not pruning it", rel)
+                    kept.append(rel)
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
                 cls = classify_artifact(rel, manifest)
                 if cls == RECORD or _CLASS_RANK[cls] <= level_rank:
                     kept.append(rel)
@@ -373,7 +379,7 @@ def _apply_retention_fd(
                     )
                     kept.append(rel)
                     continue
-                freed += size
+                freed += info.st_size
                 deleted.append(rel)
             _fsafe.prune_empty_dirs(base_fd)
     except _fsafe.UnsafePathError as exc:

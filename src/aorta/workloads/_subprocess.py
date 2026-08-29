@@ -50,7 +50,7 @@ import stat
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, TextIO
 
 from aorta.probe.classifier import TrialContext, classify_trial
 from aorta.probe.classifier.tier1_process import (
@@ -75,6 +75,7 @@ from aorta.probe.classifier.verdict import (
     partition_detectors,
     verdict_from_detectors,
 )
+from aorta.run import _fsafe
 from aorta.run.retention import RetentionOutcome, apply_retention
 from aorta.workloads._base import Workload, WorkloadResult
 
@@ -97,6 +98,92 @@ _TIER3_STATE = Tier3State()
 # clock and to catch messages logged a few seconds after the child
 # crashed (e.g. amdgpu reset messages often arrive on the next tick).
 _DMESG_SINCE_PAD_SEC = 5.0
+
+
+@dataclasses.dataclass(frozen=True)
+class _TrialFiles:
+    """Fd-relative access to one payload-writable probe trial directory."""
+
+    path: Path
+    anchor: _fsafe.TrustedAnchor
+
+    @classmethod
+    def create(cls, config: dict[str, Any], path: Path) -> _TrialFiles:
+        """Create ``path`` below the threaded results anchor without links."""
+        from aorta.run.collectors import trusted_collector_anchor
+
+        anchor = trusted_collector_anchor(config, path)
+        files = cls(path, anchor)
+        if not _fsafe.HAVE_FD_TRAVERSAL:
+            path.mkdir(parents=True, exist_ok=True)
+            return files
+        try:
+            with _fsafe.open_dir_nofollow(
+                anchor, files._components(), create_missing=True
+            ):
+                pass
+        except _fsafe.UnsafePathError as exc:
+            raise RuntimeError(
+                f"refusing to create probe trial directory {path}: a component "
+                f"below the trusted results root {anchor.path} is unsafe ({exc})"
+            ) from exc
+        return files
+
+    def _components(self) -> list[str]:
+        components = _fsafe.relative_components(self.anchor.path, self.path)
+        if components is None:
+            raise _fsafe.UnsafePathError(
+                f"probe trial directory {self.path} is outside "
+                f"trusted results root {self.anchor.path}"
+            )
+        return components
+
+    def open_text(
+        self,
+        name: str,
+        *,
+        permissions: int | None = None,
+        **text_kwargs: object,
+    ) -> TextIO:
+        if not _fsafe.HAVE_FD_TRAVERSAL:
+            stream = open(self.path / name, "w", **text_kwargs)
+            if permissions is not None:
+                try:
+                    os.fchmod(stream.fileno(), permissions)
+                except OSError:
+                    pass
+            return stream
+        with _fsafe.open_dir_nofollow(self.anchor, self._components()) as dir_fd:
+            return _fsafe.open_write_nofollow(
+                dir_fd, name, permissions=permissions, **text_kwargs
+            )
+
+    def open_binary(self, name: str) -> BinaryIO:
+        if not _fsafe.HAVE_FD_TRAVERSAL:
+            return open(self.path / name, "wb")
+        with _fsafe.open_dir_nofollow(self.anchor, self._components()) as dir_fd:
+            return _fsafe.open_write_binary_nofollow(dir_fd, name)
+
+    def read_bytes(self, name: str, limit: int) -> bytes:
+        if not _fsafe.HAVE_FD_TRAVERSAL:
+            return (self.path / name).read_bytes()[:limit]
+        with _fsafe.open_dir_nofollow(self.anchor, self._components()) as dir_fd:
+            with _fsafe.secure_open_read_binary(dir_fd, name) as stream:
+                return stream.read(limit)
+
+    def unlink(self, name: str) -> None:
+        if not _fsafe.HAVE_FD_TRAVERSAL:
+            (self.path / name).unlink(missing_ok=True)
+            return
+        with _fsafe.open_dir_nofollow(self.anchor, self._components()) as dir_fd:
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+    def write_json(self, name: str, document: dict[str, Any]) -> None:
+        with self.open_text(name, encoding="utf-8") as stream:
+            json.dump(document, stream, indent=2, sort_keys=False)
 
 # Config key the dispatcher uses to deliver the opaque user argv. The
 # leading ``_aorta_`` prefix is reserved by the dispatcher and rejected
@@ -285,6 +372,7 @@ class SubprocessWorkload(Workload):
         super().__init__(config)
         self._argv: tuple[str, ...] | None = None
         self._trial_dir: Path | None = None
+        self._trial_files: _TrialFiles | None = None
         self._trial_index: int | None = None
 
     def setup(self) -> None:
@@ -376,7 +464,7 @@ class SubprocessWorkload(Workload):
         # ``<cell>/trial_<n>/{stdout,stderr,result}`` layout.
         cell_dir = Path(log_prefix).parent.parent
         self._trial_dir = cell_dir / f"trial_{self._trial_index}"
-        self._trial_dir.mkdir(parents=True, exist_ok=True)
+        self._trial_files = _TrialFiles.create(self.config, self._trial_dir)
 
     def run(self) -> WorkloadResult:
         """Fork the user command and write the Phase-2 ``result.json``.
@@ -391,13 +479,18 @@ class SubprocessWorkload(Workload):
         pass without modification because Phase 2 only ADDS keys
         to ``result.json``.
         """
-        if self._argv is None or self._trial_dir is None or self._trial_index is None:
+        if (
+            self._argv is None
+            or self._trial_dir is None
+            or self._trial_files is None
+            or self._trial_index is None
+        ):
             raise RuntimeError("SubprocessWorkload.run() called before setup()")
 
         argv = self._argv
         trial_dir = self._trial_dir
+        trial_files = self._trial_files
         stdout_path = trial_dir / "stdout.log"
-        stderr_path = trial_dir / "stderr.log"
         result_path = trial_dir / "result.json"
 
         probe_extras = self.config.get(CONFIG_KEY_PROBE_EXTRAS) or {}
@@ -463,7 +556,7 @@ class SubprocessWorkload(Workload):
         env_file_path = trial_dir / "probe.env"
         if env_mode == "file":
             try:
-                _write_env_file(env_file_path, cell_env_snapshot)
+                _write_env_file(trial_files, cell_env_snapshot)
             except ValueError as exc:
                 # ``_write_env_file`` rejects hostile/malformed mitigation
                 # keys/values (newlines, '=' in key, etc.) by raising
@@ -489,9 +582,7 @@ class SubprocessWorkload(Workload):
                 # subprocess that exited non-zero.
                 return self._write_env_file_failure_result(
                     exc=exc,
-                    result_path=result_path,
-                    stderr_path=stderr_path,
-                    env_file_path=env_file_path,
+                    trial_files=trial_files,
                     argv=argv,
                     probe_extras=probe_extras,
                     env_mode=env_mode,
@@ -509,7 +600,7 @@ class SubprocessWorkload(Workload):
             # ``AORTA_ENV_FILE`` exported, which is at best confusing
             # and at worst points downstream tooling at stale env
             # contents.
-            env_file_path.unlink(missing_ok=True)
+            trial_files.unlink("probe.env")
 
         # Tier 3 pre-snapshot. Fail-soft: returns None when ``amd-smi``
         # is missing or polling fails; ``scan_amd_smi`` then accepts
@@ -534,7 +625,9 @@ class SubprocessWorkload(Workload):
         launched = False
         hang_monitor: HangMonitor | None = None
         try:
-            with open(stdout_path, "wb") as out_fh, open(stderr_path, "wb") as err_fh:
+            with trial_files.open_binary(
+                "stdout.log"
+            ) as out_fh, trial_files.open_binary("stderr.log") as err_fh:
                 proc = subprocess.Popen(
                     list(argv),
                     stdout=out_fh,
@@ -633,7 +726,8 @@ class SubprocessWorkload(Workload):
             else:
                 exit_code = 1
             try:
-                stderr_path.write_text(f"{exc}\n", encoding="utf-8")
+                with trial_files.open_text("stderr.log", encoding="utf-8") as stream:
+                    stream.write(f"{exc}\n")
             except OSError:
                 pass
         walltime_sec = time.perf_counter() - t0
@@ -643,7 +737,7 @@ class SubprocessWorkload(Workload):
         # the ``with`` block. Errors here MUST NOT propagate (the
         # workload already succeeded or failed; classifier crashes
         # are bugs, not trial outcomes).
-        log_text = _read_log_text(stdout_path, stderr_path)
+        log_text = _read_log_text(trial_files)
         hang_detected = bool(hang_monitor and hang_monitor.hang_detected)
         # Reconcile the latched hang flag against the actual exit.
         #
@@ -845,10 +939,7 @@ class SubprocessWorkload(Workload):
             result_doc["capture"]["disabled_detector_tiers"] = sorted(
                 effective_disabled_tiers
             )
-        result_path.write_text(
-            json.dumps(result_doc, indent=2, sort_keys=False),
-            encoding="utf-8",
-        )
+        trial_files.write_json("result.json", result_doc)
 
         # Collector summaries ride the same ``metrics`` channel as the verdict
         # bookkeeping, so the numeric ones (``rocprof_gpu_time_ms`` etc.) land
@@ -879,10 +970,7 @@ class SubprocessWorkload(Workload):
         )
         if retention_outcome is not None:
             self._record_retention(result_doc, retention_outcome)
-            result_path.write_text(
-                json.dumps(result_doc, indent=2, sort_keys=False),
-                encoding="utf-8",
-            )
+            trial_files.write_json("result.json", result_doc)
 
         # ``main_work_started`` / ``executed_iterations`` mirror
         # whether ``Popen`` actually launched a child. A normal
@@ -935,9 +1023,7 @@ class SubprocessWorkload(Workload):
         self,
         *,
         exc: ValueError,
-        result_path: Path,
-        stderr_path: Path,
-        env_file_path: Path,
+        trial_files: _TrialFiles,
         argv: tuple[str, ...],
         probe_extras: dict[str, Any],
         env_mode: str,
@@ -961,9 +1047,10 @@ class SubprocessWorkload(Workload):
         validation rejection and contradict
         ``result.json::failure_type==env_file_validation_failed``.
         """
-        env_file_path.unlink(missing_ok=True)
+        trial_files.unlink("probe.env")
         try:
-            stderr_path.write_text(f"{exc}\n", encoding="utf-8")
+            with trial_files.open_text("stderr.log", encoding="utf-8") as stream:
+                stream.write(f"{exc}\n")
         except OSError:
             pass
         result_doc: dict[str, Any] = {
@@ -1010,24 +1097,18 @@ class SubprocessWorkload(Workload):
             "failure_type": "env_file_validation_failed",
             "error_message": str(exc),
         }
-        result_path.write_text(
-            json.dumps(result_doc, indent=2, sort_keys=False),
-            encoding="utf-8",
-        )
+        trial_files.write_json("result.json", result_doc)
         # Issue #231: honor ``retain.on_error`` for this infra-error trial
         # too (mirrors the main run() path). The probe.env was already
         # unlinked above; this prunes any other heavy artifacts a prior
         # resume left in the reused trial dir. Stamp the outcome back into
         # result.json so the applied level is auditable here too (oyazdanb).
         retention_outcome = self._apply_retention(
-            result_path.parent, "error", probe_extras
+            trial_files.path, "error", probe_extras
         )
         if retention_outcome is not None:
             self._record_retention(result_doc, retention_outcome)
-            result_path.write_text(
-                json.dumps(result_doc, indent=2, sort_keys=False),
-                encoding="utf-8",
-            )
+            trial_files.write_json("result.json", result_doc)
         return WorkloadResult(
             passed=False,
             failure_count=1,
@@ -1049,7 +1130,7 @@ class SubprocessWorkload(Workload):
             metrics={
                 "verdict": "error",
                 "exit_code": 2,
-                "result_json_path": str(result_path),
+                "result_json_path": str(trial_files.path / "result.json"),
                 "failure_detectors_fired": [],
                 "error_detectors_fired": ["meta:env_file_validation_failed"],
                 "warn_detectors_fired": [],
@@ -1095,7 +1176,10 @@ class SubprocessWorkload(Workload):
             return None
         level = retain.get(f"on_{verdict}", "full")
         try:
-            outcome = apply_retention(trial_dir, level)
+            trusted_root = (
+                self._trial_files.anchor if self._trial_files is not None else None
+            )
+            outcome = apply_retention(trial_dir, level, trusted_root=trusted_root)
         except Exception as exc:  # noqa: BLE001 -- retention is best-effort
             log.warning(
                 "retention: pruning %s at level %r failed (%s); artifacts kept",
@@ -1344,7 +1428,7 @@ def _failure_detail_type(*, launched: bool, timed_out: bool, exit_code: int) -> 
     return "detector_failure"
 
 
-def _read_log_text(stdout_path: Path, stderr_path: Path) -> str:
+def _read_log_text(trial_files: _TrialFiles) -> str:
     """Read stdout + stderr back as a single text blob for the classifier.
 
     Reads are bounded to :data:`aorta.probe.sandbox.MAX_LOG_BYTES`
@@ -1367,9 +1451,9 @@ def _read_log_text(stdout_path: Path, stderr_path: Path) -> str:
     from aorta.probe.sandbox import MAX_LOG_BYTES
 
     parts: list[str] = []
-    for path in (stdout_path, stderr_path):
+    for name in ("stdout.log", "stderr.log"):
         try:
-            data = path.read_bytes()[:MAX_LOG_BYTES]
+            data = trial_files.read_bytes(name, MAX_LOG_BYTES)
             parts.append(data.decode("utf-8", errors="replace"))
         except FileNotFoundError:
             parts.append("")
@@ -1458,23 +1542,16 @@ def _tier1_only_fallback_verdict(
     return verdict, tier_durations_ms
 
 
-def _write_env_file(path: Path, env: dict[str, str]) -> None:
+def _write_env_file(trial_files: _TrialFiles, env: dict[str, str]) -> None:
     """Write a POSIX KEY=VALUE\\n env file at ``chmod 0600``.
 
     Atomic with respect to validation failure: ``_validate_env_file_entries``
-    runs the full key/value check BEFORE we ``os.open(..., O_TRUNC)``, so
-    a hostile or malformed bundle either produces a complete + correct
-    file or leaves the path untouched. The previous interleaved shape
-    (open-truncate first, validate per-row while writing) could leave a
-    partial probe.env from rows 1..N-1 when row N was rejected. That
-    file looked legitimate (0600, KEY=VALUE shape) but contained only
-    a subset of the cell's bundle -- exactly the misleading artifact
-    the round-6 review flagged.
+    runs the full key/value check before the fd-relative writer opens the leaf,
+    so a hostile or malformed bundle either produces a complete + correct file
+    or leaves the path untouched. The writer also rejects links and special
+    files before truncation.
 
-    The 0600 mode is set via ``os.O_CREAT`` mode bits on platforms
-    that honour them, and chmod'd after as a belt-and-suspenders for
-    filesystems that ignore the open-mode (NFS without root squash,
-    some FUSE backends).
+    The 0600 mode is applied to the held descriptor before content is written.
 
     Per R5 in the rubric, the env file is the leakage surface for
     secrets in ``file`` mode; Phase 3 redaction scrubs these from the
@@ -1482,16 +1559,13 @@ def _write_env_file(path: Path, env: dict[str, str]) -> None:
     """
     _validate_env_file_entries(env)
 
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            for key in sorted(env):
-                fh.write(f"{key}={env[key]}\n")
-    finally:
-        try:
-            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass
+    with trial_files.open_text(
+        "probe.env",
+        permissions=stat.S_IRUSR | stat.S_IWUSR,
+        encoding="utf-8",
+    ) as fh:
+        for key in sorted(env):
+            fh.write(f"{key}={env[key]}\n")
 
 
 __all__ = [

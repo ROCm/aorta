@@ -1255,8 +1255,6 @@ def _run_single_trial(
         log_basename = f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
         stdout_name = f"{log_basename}.stdout.log"
         stderr_name = f"{log_basename}.stderr.log"
-        candidate_stdout = results_dir / stdout_name
-        candidate_stderr = results_dir / stderr_name
         try:
             # Opened through the frozen anchor with a no-follow leaf: these land
             # in the payload-writable per-workload directory, so a link at the
@@ -1283,9 +1281,9 @@ def _run_single_trial(
             # Best-effort cleanup so a 0-byte stub doesn't masquerade
             # as the trial's captured output -- if stdout opened but
             # stderr failed, the empty stdout.log is still on disk.
-            for path in (candidate_stdout, candidate_stderr):
+            for name in (stdout_name, stderr_name):
                 try:
-                    path.unlink()
+                    _unlink_record_file(results_dir, results_root, name)
                 except OSError:
                     pass
             logger.warning(
@@ -1532,6 +1530,26 @@ def _open_record_file(
     # descriptor stays valid after it closes.
     with _fsafe.open_dir_nofollow(anchor, components) as dir_fd:
         return _fsafe.open_write_nofollow(dir_fd, name, **text_kwargs)
+
+
+def _unlink_record_file(
+    results_dir: Path,
+    anchor: _fsafe.TrustedAnchor | None,
+    name: str,
+) -> None:
+    """Unlink a record leaf without reopening a payload-swappable pathname."""
+    if anchor is None or not _fsafe.HAVE_FD_TRAVERSAL:
+        (results_dir / name).unlink(missing_ok=True)
+        return
+    components = _fsafe.relative_components(anchor.path, results_dir)
+    if components is None:
+        (results_dir / name).unlink(missing_ok=True)
+        return
+    with _fsafe.open_dir_nofollow(anchor, components) as dir_fd:
+        try:
+            os.unlink(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
 
 
 def _write_trial_result(

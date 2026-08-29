@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import signal
+import sys
 from pathlib import Path
 
 import pytest
 
+from aorta.run import _fsafe
 from aorta.run.discovery import get_workload_class
 from aorta.workloads._subprocess import (
     CONFIG_KEY_LOG_PREFIX,
@@ -173,6 +175,35 @@ def test_pass_minimum_result_shape(tmp_path):
     assert (trial_dir / "stderr.log").is_file()
     # WorkloadResult round-trip:
     assert result.passed is True
+
+
+@pytest.mark.skipif(
+    not _fsafe.HAVE_FD_TRAVERSAL,
+    reason="fd-relative traversal unsupported here",
+)
+def test_result_write_refuses_trial_dir_swapped_by_payload(tmp_path):
+    """A command cannot redirect the probe record through a trial-dir link."""
+    trial_dir = tmp_path / "trial_0"
+    moved = tmp_path / "trial_0.original"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "result.json"
+    victim.write_text("keep me", encoding="utf-8")
+    swap = (
+        "from pathlib import Path; "
+        f"trial=Path({str(trial_dir)!r}); "
+        f"trial.rename(Path({str(moved)!r})); "
+        f"trial.symlink_to(Path({str(outside)!r}), target_is_directory=True)"
+    )
+    wl = _make_workload(tmp_path, [sys.executable, "-c", swap])
+    wl.setup()
+
+    with pytest.raises(_fsafe.UnsafePathError):
+        wl.run()
+
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert not (outside / "stdout.log").exists()
+    assert not (outside / "stderr.log").exists()
 
 
 def test_fail_minimum_result_shape(tmp_path):
@@ -1255,7 +1286,7 @@ def test_read_log_text_uses_replace_not_backslashreplace(tmp_path):
     byte->char invariant.
     """
     from aorta.probe.sandbox import MAX_LOG_BYTES
-    from aorta.workloads._subprocess import _read_log_text
+    from aorta.workloads._subprocess import _read_log_text, _TrialFiles
 
     # A blob of pure invalid bytes the size of the cap. ``replace``
     # gives len == MAX_LOG_BYTES; ``backslashreplace`` would give
@@ -1266,7 +1297,7 @@ def test_read_log_text_uses_replace_not_backslashreplace(tmp_path):
     stdout_path.write_bytes(binary)
     stderr_path.write_bytes(b"")
 
-    text = _read_log_text(stdout_path, stderr_path)
+    text = _read_log_text(_TrialFiles(tmp_path, _fsafe.TrustedAnchor(tmp_path)))
     # Allow a small overhead for the ``\n`` joiner and the empty
     # stderr piece; the load-bearing assertion is the 4x cap.
     assert len(text) <= MAX_LOG_BYTES + 8, (

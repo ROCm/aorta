@@ -344,6 +344,36 @@ def test_fd_engine_prunes_in_tree_and_keeps_the_record(tmp_path: Path):
 
 
 @_needs_fd
+def test_fd_engine_records_symlinks_as_kept_without_following(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """The fd engine preserves the pathname engine's symlink outcome contract."""
+    results = tmp_path / "results"
+    trial = results / "wl" / "trial_d0_m0_t0"
+    trial.mkdir(parents=True)
+    (trial / "result.json").write_text("{}", encoding="utf-8")
+    (trial / "trace.bin").write_text("delete me", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.bin"
+    victim.write_text("keep me", encoding="utf-8")
+    (trial / "escape.bin").symlink_to(victim)
+    (trial / "escape_dir").symlink_to(outside, target_is_directory=True)
+
+    with caplog.at_level("WARNING"):
+        outcome = apply_retention(
+            trial, "none", trusted_root=_fsafe.TrustedAnchor.freeze(results)
+        )
+
+    assert set(outcome.kept) >= {"result.json", "escape.bin", "escape_dir"}
+    assert "trace.bin" in outcome.deleted
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("escape.bin" in message and "symlink" in message for message in messages)
+    assert any("escape_dir" in message and "symlink" in message for message in messages)
+
+
+@_needs_fd
 def test_fd_engine_refuses_a_symlinked_ancestor(tmp_path: Path, caplog):
     """A symlinked component above the trial dir makes the prune refuse + keep."""
     results = tmp_path / "results"

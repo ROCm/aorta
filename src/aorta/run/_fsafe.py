@@ -18,12 +18,11 @@ redirect it. This module is the shared leaf :mod:`aorta.run.collectors`,
 :mod:`aorta.run.retention` and :mod:`aorta.run.dispatcher` build on; it depends
 only on the stdlib so retention stays dependency-free.
 
-The same reasoning covers the dispatcher's *own* output, not just the collector
-artifacts. The per-workload directory sits below the same operator boundary, so
-the trial record and the captured logs are written through a held fd with
-:func:`open_write_nofollow` rather than by pathname -- otherwise a stale or
-payload-planted link at the workload component silently redirects the audit
-trail outside ``--results-dir``.
+The same reasoning covers every platform-owned output below that boundary, not
+just collector artifacts. The dispatcher's per-workload records/logs and
+``_subprocess`` probe trial tree are written through held directory fds rather
+than by pathname -- otherwise a stale or payload-planted link at any component
+silently redirects the audit trail outside ``--results-dir``.
 
 Two things are needed beyond ``O_NOFOLLOW``, because it is a narrower guarantee
 than it looks:
@@ -63,7 +62,7 @@ import os
 import stat
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import TextIO
+from typing import BinaryIO, TextIO
 
 log = logging.getLogger(__name__)
 
@@ -459,6 +458,19 @@ def _empty_dir(dir_fd: int) -> tuple[int, int]:
     return (files, freed)
 
 
+def iter_entries(
+    base_fd: int,
+) -> Iterator[tuple[str, int, str, os.stat_result]]:
+    """Walk ``base_fd`` without following links, yielding every leaf entry.
+
+    Yields ``(relative_posix_path, parent_dir_fd, name, lstat_result)`` for
+    regular files, special files, and symlinks. Real directories are descended;
+    symlinked directories are yielded as links and never traversed.
+    ``parent_dir_fd`` remains live only until the generator advances.
+    """
+    yield from _walk_entries(base_fd, "")
+
+
 def iter_regular_files(base_fd: int) -> Iterator[tuple[str, int, str, int]]:
     """Walk the tree under ``base_fd``, yielding one entry per regular file.
 
@@ -471,20 +483,24 @@ def iter_regular_files(base_fd: int) -> Iterator[tuple[str, int, str, int]]:
     exhausted. Directories are visited top-down; the caller cannot rely on
     order beyond that.
     """
-    yield from _walk(base_fd, "")
+    for rel, dir_fd, name, info in iter_entries(base_fd):
+        if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            yield (rel, dir_fd, name, info.st_size)
 
 
-def _walk(dir_fd: int, prefix: str) -> Iterator[tuple[str, int, str, int]]:
+def _walk_entries(
+    dir_fd: int, prefix: str
+) -> Iterator[tuple[str, int, str, os.stat_result]]:
     subdirs: list[str] = []
     for name in sorted(os.listdir(dir_fd)):
         info = stat_at(dir_fd, name)
-        if info is None or stat.S_ISLNK(info.st_mode):
+        if info is None:
             continue
         rel = f"{prefix}{name}"
-        if stat.S_ISDIR(info.st_mode):
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
             subdirs.append(name)
-        elif stat.S_ISREG(info.st_mode):
-            yield (rel, dir_fd, name, info.st_size)
+        else:
+            yield (rel, dir_fd, name, info)
     for name in subdirs:
         try:
             child_fd = os.open(
@@ -493,9 +509,29 @@ def _walk(dir_fd: int, prefix: str) -> Iterator[tuple[str, int, str, int]]:
         except OSError:
             continue
         try:
-            yield from _walk(child_fd, f"{prefix}{name}/")
+            yield from _walk_entries(child_fd, f"{prefix}{name}/")
         finally:
             os.close(child_fd)
+
+
+def _open_read_fd_nofollow(dir_fd: int, name: str) -> int:
+    """Open and validate a regular read-only leaf, returning its owned fd."""
+    _require_child_name(name, f"fd {dir_fd}")
+    fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafePathError(
+                errno.EINVAL,
+                f"refusing to read {name!r}: it is not a regular file "
+                f"(mode {stat.filemode(info.st_mode)}); it was replaced after "
+                "the directory walk saw it",
+            )
+        _clear_nonblock(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 @contextlib.contextmanager
@@ -521,18 +557,8 @@ def secure_open_read(dir_fd: int, name: str, **text_kwargs: object) -> Iterator[
             was opened is not a regular file.
         OSError: the file could not be opened.
     """
-    _require_child_name(name, f"fd {dir_fd}")
-    fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dir_fd)
+    fd = _open_read_fd_nofollow(dir_fd, name)
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise UnsafePathError(
-                errno.EINVAL,
-                f"refusing to read {name!r}: it is not a regular file "
-                f"(mode {stat.filemode(info.st_mode)}); it was replaced after "
-                "the directory walk saw it",
-            )
-        _clear_nonblock(fd)
         stream = os.fdopen(fd, "r", **text_kwargs)  # type: ignore[arg-type]
     except BaseException:
         # Nothing owns the fd yet -- ``fdopen`` only adopts it on success -- so
@@ -545,7 +571,64 @@ def secure_open_read(dir_fd: int, name: str, **text_kwargs: object) -> Iterator[
         stream.close()
 
 
-def open_write_nofollow(dir_fd: int, name: str, **text_kwargs: object) -> TextIO:
+@contextlib.contextmanager
+def secure_open_read_binary(dir_fd: int, name: str) -> Iterator[BinaryIO]:
+    """Binary counterpart of :func:`secure_open_read`."""
+    fd = _open_read_fd_nofollow(dir_fd, name)
+    try:
+        stream = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        yield stream
+    finally:
+        stream.close()
+
+
+def _open_write_fd_nofollow(
+    dir_fd: int, name: str, *, permissions: int | None = None
+) -> int:
+    """Open, validate, and truncate a writable leaf, returning its owned fd."""
+    _require_child_name(name, f"fd {dir_fd}")
+    create_mode = 0o644 if permissions is None else permissions
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW | _O_NONBLOCK,
+        create_mode,
+        dir_fd=dir_fd,
+    )
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafePathError(
+                errno.EINVAL,
+                f"refusing to write {name!r}: it is not a regular file "
+                f"(mode {stat.filemode(info.st_mode)})",
+            )
+        if info.st_nlink != 1:
+            raise UnsafePathError(
+                errno.EMLINK,
+                f"refusing to write {name!r}: regular file has "
+                f"{info.st_nlink} hard links",
+            )
+        if permissions is not None:
+            os.fchmod(fd, permissions)
+        os.ftruncate(fd, 0)
+        _clear_nonblock(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_write_nofollow(
+    dir_fd: int,
+    name: str,
+    *,
+    permissions: int | None = None,
+    **text_kwargs: object,
+) -> TextIO:
     """Create/truncate ``name`` under ``dir_fd`` for writing, refusing links.
 
     The write-side counterpart of :func:`secure_open_read`, and returns the
@@ -574,33 +657,24 @@ def open_write_nofollow(dir_fd: int, name: str, **text_kwargs: object) -> TextIO
             was opened is not a singly-linked regular file.
         OSError: the file could not be created or opened.
     """
-    _require_child_name(name, f"fd {dir_fd}")
-    fd = os.open(
-        name,
-        os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW | _O_NONBLOCK,
-        0o644,
-        dir_fd=dir_fd,
-    )
+    fd = _open_write_fd_nofollow(dir_fd, name, permissions=permissions)
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise UnsafePathError(
-                errno.EINVAL,
-                f"refusing to write {name!r}: it is not a regular file "
-                f"(mode {stat.filemode(info.st_mode)})",
-            )
-        if info.st_nlink != 1:
-            raise UnsafePathError(
-                errno.EMLINK,
-                f"refusing to write {name!r}: regular file has "
-                f"{info.st_nlink} hard links",
-            )
-        os.ftruncate(fd, 0)
-        _clear_nonblock(fd)
         return os.fdopen(fd, "w", **text_kwargs)  # type: ignore[arg-type,return-value]
     except BaseException:
         # ``fdopen`` only adopts the fd on success, so a refusal or an interrupt
         # in between would otherwise leak it.
+        os.close(fd)
+        raise
+
+
+def open_write_binary_nofollow(
+    dir_fd: int, name: str, *, permissions: int | None = None
+) -> BinaryIO:
+    """Binary counterpart of :func:`open_write_nofollow`."""
+    fd = _open_write_fd_nofollow(dir_fd, name, permissions=permissions)
+    try:
+        return os.fdopen(fd, "wb")
+    except BaseException:
         os.close(fd)
         raise
 
@@ -656,13 +730,16 @@ __all__ = [
     "TrustedAnchor",
     "UnsafePathError",
     "as_anchor",
+    "iter_entries",
     "iter_regular_files",
     "open_dir_at",
     "open_dir_nofollow",
+    "open_write_binary_nofollow",
     "open_write_nofollow",
     "prune_empty_dirs",
     "relative_components",
     "remove_entry_at",
     "secure_open_read",
+    "secure_open_read_binary",
     "stat_at",
 ]
