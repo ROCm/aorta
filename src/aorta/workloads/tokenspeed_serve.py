@@ -1424,10 +1424,21 @@ class TokenSpeedServeWorkload(Workload):
             "render",
             "--security-opt",
             "seccomp=unconfined",
-            "--ipc",
-            "host",
             "--network",
             self._network,
+            # No `--ipc host`, which is what makes this take effect. Docker
+            # applies ShmSize only when it creates the /dev/shm mount itself:
+            # under host IPC the container gets the host's mount and --shm-size
+            # is silently ignored, so `shm_size` was a setting that did nothing
+            # and the 16g-vs-256g comparison in docs/tokenspeed-serving.md
+            # compared one host mount with itself.
+            #
+            # Nothing needed host IPC to begin with. Every TokenSpeed process --
+            # orchestrator, engine, scheduler, gateway -- is forked inside this
+            # one container and already shares its private IPC namespace, which
+            # is the same reasoning harvest_code_objects.py records for its own
+            # --shm-size. Host IPC would additionally expose node-wide shared
+            # memory and semaphores to a third-party image for no gain.
             "--shm-size",
             self._shm_size,
             "-v",

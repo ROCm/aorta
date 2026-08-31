@@ -201,14 +201,22 @@ File ".../tokenspeed/runtime/cache/flat_host_mirror.py", line 127, in __init__
 torch.AcceleratorError: CUDA error: out of memory
 ```
 
-Two things it is not. Not container shared memory: the failure is identical at
-`shm_size: 16g` and `256g`. Not contamination from an earlier cell: the GPUs were
-reset clean immediately before the run. The node has 3 TB of host RAM and eight
-309 GB cards, so neither is scarce, and the error naming CUDA for what the
-traceback shows to be a host allocation is part of why this took a while to pin
-down. Not yet diagnosed further; the cell is left out of the recipe rather than
-shipped red, because ranks that die this way hold their GPU memory long enough to
-poison whatever runs next.
+One thing it is not: contamination from an earlier cell — the GPUs were reset
+clean immediately before the run. The node has 3 TB of host RAM and eight 309 GB
+cards, so neither host memory nor VRAM is scarce, and the error naming CUDA for
+what the traceback shows to be a host allocation is part of why this took a while
+to pin down.
+
+Container shared memory is *not* ruled out, though it reads that way in earlier
+notes. Those runs compared `shm_size: 16g` against `256g` and saw an identical
+failure — but they predate the IPC fix below, and under the `--ipc host` in force
+at the time docker ignored `--shm-size` entirely and both runs used the same host
+`/dev/shm`. The comparison established nothing. Now that `shm_size` is effective
+it is worth re-running before drawing any conclusion.
+
+Not yet diagnosed further; the cell is left out of the recipe rather than shipped
+red, because ranks that die this way hold their GPU memory long enough to poison
+whatever runs next.
 
 ### Across load shapes (`tokenspeed-serve-load.yaml`)
 
@@ -784,6 +792,21 @@ The same reasoning applies inside the container: `serve_args` and `bench_args`
 may not set the flags `ts_bench_serve.sh` derives itself (`--port`,
 `--base-url`, `--num-prompts`, `--output-file` and the rest), since those are
 what tie the export back to the cell that asked for it.
+
+### The IPC namespace is private, which is what makes `shm_size` mean anything
+
+Docker applies `ShmSize` only when it creates the `/dev/shm` mount itself. Under
+`--ipc host` the container gets the host's mount and `--shm-size` is ignored
+without a word — so `shm_size` was a documented setting that did nothing, and the
+TP=4 note above "ruled out" shared memory by comparing one host mount with
+itself.
+
+Nothing needed host IPC. Every TokenSpeed process — orchestrator, engine,
+scheduler, gateway — is forked inside this one container and already shares its
+private IPC namespace, which is the same reasoning `harvest_code_objects.py`
+records for its own `--shm-size`. Host IPC additionally exposes node-wide shared
+memory and semaphores to a third-party image for no gain, so it is not passed and
+`shm_size` (default `16g`) is what sizes the mount.
 
 ### Auto-resolved ports must not collide with each other
 
