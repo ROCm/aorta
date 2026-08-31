@@ -2320,6 +2320,80 @@ def test_coverage_map_aborts_when_a_suite_probe_produces_no_map(
     assert "coverage totals would be incomplete" in proc.stderr
 
 
+def test_a_pytest_flag_reaches_the_child_instead_of_failing_its_argparse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`--pytest-arg` exists to forward pytest flags, and forwarded none of them.
+
+    Almost every value starts with a dash, and rebuilt as two argv elements
+    argparse reads `--pytest-arg -x` as this option followed by a *new* option
+    and exits with "expected one argument". So `--pytest-arg=-x` -- the form the
+    docs give -- died in the child before any suite ran.
+    """
+    module = _coverage_module()
+    workspace = tmp_path / "ws"
+    suite = workspace / "pkg" / "test" / "ops"
+    suite.mkdir(parents=True)
+
+    captured: list[list[str]] = []
+    # Kept because the stub below replaces `subprocess.run` process-wide, and the
+    # second half of this test needs to really spawn the child.
+    real_run = subprocess.run
+
+    def fake_run(cmd, **_kwargs):
+        captured.append([str(part) for part in cmd])
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "map_kernel_test_coverage.py",
+            "--workspace",
+            str(workspace),
+            "--suite",
+            "pkg/test/ops",
+            "--pytest-arg=-x",
+        ],
+    )
+
+    # Aborts afterwards because the stubbed child writes no map, which is not
+    # what this test is about -- the argv it was given is.
+    module.main()
+
+    assert captured, "no child was spawned"
+    child = captured[0]
+    assert "--pytest-arg=-x" in child, child
+    assert "--pytest-arg" not in child, "the split form is what the child rejects"
+
+    # And the child really does reject the split form: proving the attached one
+    # is necessary, not merely tidier. Neither invocation reaches a suite (the
+    # registry import fails outside the container), so the distinction is the
+    # argparse usage error.
+    def run_child(*extra: str) -> subprocess.CompletedProcess:
+        return real_run(
+            [
+                "python3",
+                str(_SOURCE / "map_kernel_test_coverage.py"),
+                "--_single",
+                str(suite),
+                "--out",
+                str(tmp_path / "part.json"),
+                "--workspace",
+                str(workspace),
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    split = run_child("--pytest-arg", "-x")
+    assert "expected one argument" in split.stderr, split.stderr
+    attached = run_child("--pytest-arg=-x")
+    assert "expected one argument" not in attached.stderr, attached.stderr
+
+
 @contextlib.contextmanager
 def _fake_registry(monkeypatch, impls: dict[str, object], candidates=()):
     """Stand in for `tokenspeed_kernel.registry` so the probe can be driven.
