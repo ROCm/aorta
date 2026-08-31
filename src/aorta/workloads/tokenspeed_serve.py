@@ -1661,7 +1661,13 @@ class TokenSpeedServeWorkload(Workload):
                 self._container_name(),
             )
             self._force_remove_container()
-            signal.signal(signum, previous.get(signum, signal.SIG_DFL))
+            # SIG_DFL, not the previous disposition. Restoring the previous one
+            # first looks tidier but does not guarantee the process dies:
+            # under `nohup` SIGHUP is inherited as SIG_IGN, so the re-sent
+            # signal was ignored and this handler simply returned into the
+            # benchmark -- with the container already removed underneath it.
+            # A supervisor then saw neither death by signal nor a usable run.
+            signal.signal(signum, signal.SIG_DFL)
             os.kill(os.getpid(), signum)
 
         # SIGHUP as well: a sweep started from a shell that goes away is the same

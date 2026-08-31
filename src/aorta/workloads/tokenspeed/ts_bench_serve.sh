@@ -329,24 +329,36 @@ supplies_flag() {  # supplies_flag <flag> <arg>...
   return 1
 }
 # The value behind such a flag, so an explicit choice can be validated rather
-# than merely detected. Non-zero when the flag is the last word with nothing
-# after it -- which `tokenspeed serve` would reject anyway, but which would
-# otherwise read here as an empty value and fail a numeric check with a message
-# about the wrong thing.
+# than merely detected.
+#
+# The *last* occurrence, because that is the one `tokenspeed serve` honours.
+# Returning the first meant `["--drain-timeout", "30", "--drain-timeout", "60"]`
+# validated the 30 and ran the 60 -- the check passing on a value the server
+# never used, which is worse than not checking at all.
+#
+# Non-zero when the flag is the last word with nothing after it, which
+# `tokenspeed serve` would reject anyway, but which would otherwise read here as
+# an empty value and fail a numeric check with a message about the wrong thing.
 flag_value() {  # flag_value <flag> <arg>...
-  local flag="$1" expect_value=""
+  local flag="$1" expect_value="" found="" value=""
   shift
   for word in "$@"; do
     if [ -n "${expect_value}" ]; then
-      printf '%s' "${word}"
-      return 0
+      value="${word}"
+      found=1
+      expect_value=""
+      continue
     fi
     case "${word}" in
       "${flag}") expect_value=1 ;;
-      "${flag}="*) printf '%s' "${word#*=}"; return 0 ;;
+      "${flag}="*) value="${word#*=}"; found=1 ;;
     esac
   done
-  return 1
+  # A trailing bare flag overrides anything before it, and has no value.
+  if [ -n "${expect_value}" ] || [ -z "${found}" ]; then
+    return 1
+  fi
+  printf '%s' "${value}"
 }
 
 # Keep the gateway drain just inside the teardown grace, or `teardown` escalates

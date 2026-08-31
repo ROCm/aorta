@@ -186,6 +186,17 @@ def test_bench_script_passes_bash_syntax_check():
             {"TS_SERVE_ARGS": '["--drain-timeout=60"]'},
             "serve_args --drain-timeout must be between",
         ),
+        # The *last* occurrence is the one `tokenspeed serve` honours, so it is
+        # the one that has to be checked. Validating the first accepted the 30
+        # and ran the 60 -- a check passing on a value the server never used.
+        (
+            {"TS_SERVE_ARGS": '["--drain-timeout", "30", "--drain-timeout", "60"]'},
+            "serve_args --drain-timeout must be between",
+        ),
+        (
+            {"TS_SERVE_ARGS": '["--drain-timeout=30", "--drain-timeout=60"]'},
+            "serve_args --drain-timeout must be between",
+        ),
     ],
 )
 def test_bench_script_rejects_unusable_ports_and_timeouts(tmp_path, env, expected):
@@ -1444,6 +1455,43 @@ def test_sigterm_removes_the_container_before_exiting(tmp_path):
     assert (
         proc.returncode == -signal.SIGTERM
     ), f"expected death by SIGTERM so a supervisor still reads 143, got {proc.returncode}"
+
+
+def test_an_ignored_signal_still_kills_the_process_after_cleanup(tmp_path):
+    """`nohup` leaves SIGHUP inherited as SIG_IGN.
+
+    The handler restored the *previous* disposition before re-sending, so under
+    nohup the re-sent signal was ignored and the handler returned straight back
+    into the benchmark -- with its container already removed underneath it. The
+    run then carried on against nothing, and a supervisor saw neither death by
+    signal nor a usable result. SIG_DFL is installed instead, so cancellation
+    stays death by signal however the process was started.
+    """
+    marker = tmp_path / "removed.txt"
+    script = tmp_path / "nohup_victim.py"
+    script.write_text(
+        "import os, signal, sys, time\n"
+        f"sys.path.insert(0, {str(_SRC)!r})\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "from aorta.workloads.tokenspeed_serve import TokenSpeedServeWorkload as W\n"
+        f"wl = W({{'work_dir': {str(tmp_path / 'work')!r}, 'steps': 1}})\n"
+        "wl._run_token = 'tok'\n"
+        f"wl._force_remove_container = lambda: open({str(marker)!r}, 'w').write('removed')\n"
+        "with wl._remove_container_on_termination():\n"
+        "    print('ready', flush=True)\n"
+        "    time.sleep(30)\n"
+        "print('SURVIVED', flush=True)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True)
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "ready"
+    proc.send_signal(signal.SIGHUP)
+    proc.wait(timeout=30)
+
+    assert marker.exists(), "the container was not removed on SIGHUP"
+    assert (
+        proc.returncode == -signal.SIGHUP
+    ), f"expected death by SIGHUP even though it was inherited ignored, got {proc.returncode}"
 
 
 def test_an_unbounded_default_still_reserves_the_concurrency_cap(tmp_path):
