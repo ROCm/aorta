@@ -520,8 +520,13 @@ def main() -> int:
                 "--workspace",
                 str(workspace),
             ]
+            # The attached form, and it has to be: almost every value here starts
+            # with a dash, and as two argv elements argparse reads `-x` as the
+            # next *option* rather than as this one's value and exits with
+            # "argument --pytest-arg: expected one argument". So the passthrough
+            # that exists to forward pytest flags rejected pytest flags.
             for extra in args.pytest_arg or []:
-                cmd += ["--pytest-arg", extra]
+                cmd.append(f"--pytest-arg={extra}")
 
             print(f"=== {label} ===", flush=True)
             proc = subprocess.run(cmd, cwd=_suite_cwd(workspace, path), check=False)
