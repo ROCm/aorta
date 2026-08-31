@@ -176,13 +176,17 @@ esac
 bytes=$(stat -c%s "${OBJECT}")
 # Kernel count is informational only, so a missing llvm-readelf should say so
 # rather than silently reporting "0 kernels" and looking like a wrong object.
+# --dyn-syms, not --symbols: --symbols prints .dynsym AND .symtab, and a kernel is
+# in both, so it reports exactly twice the kernel count. That is where the "490"
+# below (and the counts in daily-consan-gemm.yaml) came from before the fix.
 if command -v llvm-readelf >/dev/null; then
-    kernels="$(llvm-readelf --symbols "${OBJECT}" 2>/dev/null | grep -c 'FUNC.*GLOBAL')"
+    kernels="$(llvm-readelf --dyn-syms "${OBJECT}" 2>/dev/null | grep -c 'FUNC.*GLOBAL')"
 else
     kernels="unknown (llvm-readelf not on PATH)"
 fi
 echo "   object: ${bytes} bytes, ${kernels} kernels"
-echo "   (originally observed at 16265200 bytes / 490 kernels on ROCm 7.0.2.2)"
+echo "   (originally observed at 16265200 bytes / 245 kernels on ROCm 7.0.2.2;"
+echo "    the byte figure is the compressed CCOB bundle expanded ~40x by unbundling)"
 
 echo "== building load-only driver"
 hipcc --offload-arch=gfx950 -DOBJECT="\"${OBJECT}\"" "${LOADER_SRC}" -o "${LOADER}" \
