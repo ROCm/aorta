@@ -238,7 +238,14 @@ compared against.
 
 Surveyed on `nightly-20260714` with `list_harness_coverage.py` (kept in the
 workload directory so this can be re-checked against a newer image): 21 operator
-families with 40 registered kernels, of which **1 family can actually be run**.
+families over 38 registered kernel names, of which **1 family can actually be
+run**.
+
+38 is the count of distinct names in `KernelRegistry._by_name`, and it is the
+denominator used everywhere in this document, including the [suite probe](#suite-probe)
+table. Summing the per-family lists this survey prints gives 40 instead, because
+those come from `_by_operator` and a name registered under two operator keys is
+listed under both — a count of family/kernel pairs, not of kernels.
 
 | Status | Families |
 |---|---|
@@ -679,7 +686,7 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 194 tests (107 functions, the rest
+`tests/probe/test_tokenspeed_probe.py` — 198 tests (111 functions, the rest
 parametrised cases), no GPU or container required. A test asserts this count
 matches the file, since it went stale twice during review.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,

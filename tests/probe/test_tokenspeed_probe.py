@@ -55,6 +55,7 @@ _EXIT_NUMERICS = 32
 _EXIT_SCHEMA = 34
 _EXIT_PYTEST_FAILED = 40
 _EXIT_PYTEST_NOTHING_RAN = 41
+_EXIT_PYTEST_REPORT_UNUSABLE = 42
 
 
 @pytest.fixture(scope="module")
@@ -1100,6 +1101,70 @@ def test_pytest_probe_extra_args_cannot_redirect_the_report(bash: str, tmp_path:
     assert "tests_passed=7" not in proc.stdout, "the stale report was read"
 
 
+def test_pytest_probe_counts_are_converted_inside_the_parse_boundary(tmp_path: Path) -> None:
+    """A report can be well-formed XML and still unusable.
+
+    `tests="bad"` parses and then raises on `int()`. That conversion sat outside
+    the try, so the traceback left `counts` empty -- the script has no `set -e`
+    by design -- the PARSE_ERROR case did not match, and the empty strings read
+    as a suite that ran nothing: reported as `nothing_executed` (exit 41, a
+    selection problem) rather than an unparseable report (exit 42).
+    """
+    body = (_SOURCE / "ts_pytest_probe.sh").read_text()
+    snippet = body.split('counts=$(python3 - "${REPORT}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
+
+    report = tmp_path / "pytest.xml"
+    report.write_text(
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" '
+        'errors="0" failures="0" skipped="0" tests="bad" time="1.0"/></testsuites>'
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-c", snippet, str(report)], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("PARSE_ERROR"), proc.stdout
+
+
+def test_pytest_probe_treats_missing_counts_as_an_unparseable_report(
+    bash: str, tmp_path: Path
+) -> None:
+    """And nothing at all is the same verdict, reached a different way.
+
+    An interpreter that dies before printing -- or is killed -- leaves no counts,
+    which the PARSE_ERROR branch cannot report. Letting the empty strings through
+    to the arithmetic reads as a suite that ran nothing.
+    """
+    workspace = _fake_workspace(tmp_path, "def test_ok():\n    assert True\n")
+    out = tmp_path / "out"
+    shim_dir = out / "shim"
+    shim_dir.mkdir(parents=True)
+    shim = shim_dir / "python3"
+    # Real interpreter for `python3 -m pytest`; dies silently for the counts
+    # pass, which is the one invoked with a script on stdin.
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-" ]; then exit 1; fi\n'
+        f'exec "{sys.executable}" "$@"\n'
+    )
+    shim.chmod(0o755)
+
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "ts_pytest_probe.sh")],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{shim_dir}:{os.environ['PATH']}",
+            "TS_WORKSPACE": str(workspace),
+            "TS_OUT_DIR": str(out),
+            "TS_PYTEST_SUITE": "pkg/test/ops/test_stub.py",
+        },
+    )
+
+    assert proc.returncode == _EXIT_PYTEST_REPORT_UNUSABLE, proc.stdout + proc.stderr
+    assert "TS_PYTEST_FAIL: report_unparseable" in proc.stdout, proc.stdout
+
+
 def test_pytest_probe_fails_the_trial_on_a_test_failure(bash: str, tmp_path: Path) -> None:
     workspace = _fake_workspace(tmp_path, "def test_bad():\n    assert False\n")
     proc = _run_pytest_probe(
@@ -1476,6 +1541,67 @@ def test_harvest_consan_emits_one_recipe_per_object_not_per_identity(tmp_path: P
         "_fwd_kernel_metadata_entry",
         "_helper_kernel",
     ]
+
+
+def test_harvest_will_not_pin_a_consan_result_to_an_unharvested_identity(
+    tmp_path: Path,
+) -> None:
+    """The metadata can name a kernel Waitcheck never listed for the object.
+
+    Keeping the first harvested identity there wrote a recipe naming a kernel and
+    an entry offset that are *not* what the loader resolves -- so the one static
+    result was reported under a name that was never analyzed, with an exact-entry
+    identity implying it had been. The metadata name is used instead, without an
+    offset: a whole-object identity is weaker than an exact-entry one, and true.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    kernels = _fake_kernels(1, tmp_path / "cache")
+    kernels[0]["entry_offset"] = 4096
+    Path(kernels[0]["cache_object"]).with_suffix(".json").write_text(
+        json.dumps({"name": "_kernel_waitcheck_never_listed"})
+    )
+
+    module._write_consan_assets(tmp_path / "dest", kernels, "gfx950", loader, "lenient", None)
+
+    consan = tmp_path / "dest" / "consan"
+    entry = json.loads((consan / "manifest.json").read_text())["entries"][0]
+    assert entry["kernel"] == "_kernel_waitcheck_never_listed"
+    assert entry["identity_source"] == "metadata_unharvested"
+    # Both names are recorded: what the object contains is worth knowing even
+    # when only one of them can carry the result.
+    assert entry["identities"] == ["_fwd_kernel", "_kernel_waitcheck_never_listed"]
+
+    plan = yaml.safe_load(Path(entry["recipe"]).read_text())["sanitizer_plan"]["source"]["kernel"]
+    assert plan["name"] == "_kernel_waitcheck_never_listed"
+    assert "entry_offset" not in plan, plan
+
+
+def test_harvest_records_how_each_consan_identity_was_arrived_at(tmp_path: Path) -> None:
+    """Three provenances, and they are not equally trustworthy.
+
+    A reader comparing results across objects has to be able to tell a
+    metadata-confirmed name from a name that was simply the first one harvested.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    kernels = _fake_kernels(2, tmp_path / "cache")
+    # Object 0 has a sidecar naming one of its own harvested identities; object 1
+    # has none at all.
+    Path(kernels[0]["cache_object"]).with_suffix(".json").write_text(
+        json.dumps({"name": "_fwd_kernel"})
+    )
+
+    module._write_consan_assets(tmp_path / "dest", kernels, "gfx950", loader, "lenient", None)
+
+    manifest = json.loads((tmp_path / "dest" / "consan" / "manifest.json").read_text())
+    sources = {entry["sha256"]: entry["identity_source"] for entry in manifest["entries"]}
+    assert sources[kernels[0]["sha256"]] == "metadata"
+    assert sources[kernels[1]["sha256"]] == "harvest_order"
 
 
 def test_harvest_reads_the_metadata_sidecar_through_the_containment_guard(

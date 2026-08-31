@@ -177,17 +177,26 @@ import xml.etree.ElementTree as ET
 
 try:
     root = ET.parse(sys.argv[1]).getroot()
-except Exception as exc:  # noqa: BLE001 - any parse failure is the same verdict
+    # pytest emits <testsuites><testsuite .../></testsuites>; older versions emit
+    # a bare <testsuite>. Sum across suites so both shapes work.
+    #
+    # The conversions are inside the same boundary as the parse, because a report
+    # can be well-formed XML and still unusable: `tests="bad"` parses and then
+    # raises on int(). Outside the boundary that traceback left `counts` empty --
+    # the shell has no `set -e` by design -- so the PARSE_ERROR case did not
+    # match, the counts read as empty strings, and the run was reported as
+    # `nothing_executed` (exit 41, a selection problem) instead of an unparseable
+    # report (exit 42). Both failures are "the report cannot be believed", and
+    # they now produce the same verdict.
+    suites = root.findall("testsuite") or ([root] if root.tag == "testsuite" else [])
+    total = sum(int(s.get("tests", 0)) for s in suites)
+    failures = sum(int(s.get("failures", 0)) for s in suites)
+    errors = sum(int(s.get("errors", 0)) for s in suites)
+    skipped = sum(int(s.get("skipped", 0)) for s in suites)
+except Exception as exc:  # noqa: BLE001 - any unusable report is one verdict
     print(f"PARSE_ERROR {exc}")
     raise SystemExit(0)
 
-# pytest emits <testsuites><testsuite .../></testsuites>; older versions emit a
-# bare <testsuite>. Sum across suites so both shapes work.
-suites = root.findall("testsuite") or ([root] if root.tag == "testsuite" else [])
-total = sum(int(s.get("tests", 0)) for s in suites)
-failures = sum(int(s.get("failures", 0)) for s in suites)
-errors = sum(int(s.get("errors", 0)) for s in suites)
-skipped = sum(int(s.get("skipped", 0)) for s in suites)
 print(f"{total} {failures} {errors} {skipped}")
 PY
 )
@@ -195,6 +204,14 @@ PY
 case "${counts}" in
   PARSE_ERROR*)
     echo "TS_PYTEST_FAIL: report_unparseable ${counts}"
+    exit 42
+    ;;
+  # Nothing at all, which the branch above cannot produce: an interpreter that
+  # died before printing, or was killed. The verdict is the same -- there are no
+  # counts to reason about -- and saying so beats letting the empty strings reach
+  # the arithmetic below, where they read as a suite that ran nothing.
+  '')
+    echo "TS_PYTEST_FAIL: report_unparseable no counts from ${REPORT}"
     exit 42
     ;;
 esac
