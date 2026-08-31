@@ -120,17 +120,21 @@ settled before anyone sets the knob and expects a pass:
    86 even after a clean transform. This is the part of the earlier document's
    prediction that remains correct and remains unbuilt.
 
-## What is worth raising upstream
+## What was raised upstream
 
-Not a defect report. Two diagnostics points:
+Not a defect report. Filed as
+[ROCm/rocm-systems#10950](https://github.com/ROCm/rocm-systems/issues/10950)
+(`enhancement`), covering two diagnostics points:
 
 1. **`status=4112` conflates unrelated transform failures.** Anchor-range
    overlap (#10378) and a growth-ceiling rejection are different problems with
    different owners and different fixes, and they are indistinguishable from the
    status code, the exit code, and therefore from any dashboard built on them.
-   Only the human-readable line above the rejection separates them. A distinct
-   status per rejection class — or the reason token echoed into the
-   `load rejection` line — would have made this diagnosis immediate.
+   Only the human-readable line above the rejection separates them. The request
+   is a stable `cause=` token appended to the `load rejection` line — additive,
+   no status renumbering, no change to any run's outcome. A distinct status per
+   rejection class would also work but is behaviour-visible for anything already
+   matching 4112, so it was explicitly offered as the non-preferred alternative.
 2. **The expansion factor is worth a sanity check.** Instrumenting a 183 MiB
    object is reported as needing ~1.39 GiB of patched image, a 7.78x expansion.
    That may be entirely expected for full MOI record/replay coverage; it is
