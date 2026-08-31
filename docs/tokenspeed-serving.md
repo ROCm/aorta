@@ -65,6 +65,9 @@ Then read:
 | `tokenspeed-serve-load.yaml` | Concurrency 1→64, plus prefill-heavy and decode-heavy shapes. |
 | `tokenspeed-serve-gptoss.yaml` | gpt-oss-20b, two mitigation cells. TokenSpeed's canonical AMD benchmark model. |
 | `tokenspeed-serve-gptoss-tp.yaml` | gpt-oss-20b at `--tensor-parallel-size` 1 / 2. |
+| `tokenspeed-serve-gptoss-tp-wide.yaml` | The same axis at 1 / 2 / **4**, with the KVStore host tier bounded per rank so TP=4 fits. |
+| `tokenspeed-serve-load-high.yaml` | Concurrency 64 → 256, bracketing the ceiling the six-cell sweep left open. |
+| `tokenspeed-serve-models-large.yaml` | Qwen3 8B / 30B-A3B / 32B — MoE against dense at the same size, which separates architecture from MXFP4. |
 
 In the multi-model and load recipes the cells differ by *workload*, not by
 mitigation, so `matrix.md`'s confound ratio (a step-time comparison against the
@@ -192,7 +195,8 @@ second rank relieves no real constraint and pays collective cost on every step.
 The interesting result here is that the path works and reports coherently, not
 that it is fast.
 
-**TP=4 does not come up.** Reproducibly, on this image, with an out-of-memory
+**TP=4 does not come up at the default KVStore sizing**, and now does with one
+extra flag. The failure was reproducible on this image, with an out-of-memory
 raised while `FlatMemoryExecutor` builds its host-side KV mirror:
 
 ```
@@ -201,22 +205,32 @@ File ".../tokenspeed/runtime/cache/flat_host_mirror.py", line 127, in __init__
 torch.AcceleratorError: CUDA error: out of memory
 ```
 
-One thing it is not: contamination from an earlier cell — the GPUs were reset
-clean immediately before the run. The node has 3 TB of host RAM and eight 309 GB
-cards, so neither host memory nor VRAM is scarce, and the error naming CUDA for
-what the traceback shows to be a host allocation is part of why this took a while
-to pin down.
+The cause is that the mirror is sized per *rank* — `--kvstore-ratio` (default
+2.0) times that rank's device KV pool — while every rank fills its own card, so
+the node-wide pinned footprint is roughly linear in TP: a measured 494 GB per
+rank on gpt-oss-20b, hence 1976 GB at TP=4 on a 3 TB node. The allocation is
+`pin_memory=True`, which is why a host allocation reports a CUDA error, and the
+engine's own pre-allocation guard misses it because each rank compares its own
+494 GB against the whole node's free memory.
 
-Container shared memory is *not* ruled out, though it reads that way in earlier
-notes. Those runs compared `shm_size: 16g` against `256g` and saw an identical
-failure — but they predate the IPC fix below, and under the `--ipc host` in force
-at the time docker ignored `--shm-size` entirely and both runs used the same host
-`/dev/shm`. The comparison established nothing. Now that `shm_size` is effective
-it is worth re-running before drawing any conclusion.
+`--kvstore-size 128` bounds the tier per rank and TP=4 then passes, 96/96
+requests served. `tokenspeed-serve-gptoss-tp-wide.yaml` is that axis at TP 1 /
+2 / 4; the full diagnosis, the measurements and what was ruled out are in
+[Widening the TokenSpeed serving matrix](tokenspeed-matrix-widening.md).
 
-Not yet diagnosed further; the cell is left out of the recipe rather than shipped
-red, because ranks that die this way hold their GPU memory long enough to poison
-whatever runs next.
+Container shared memory is ruled out on mechanism, which is worth stating
+because the earlier A/B that appeared to rule it out did not: those runs
+compared `shm_size: 16g` against `256g` under the `--ipc host` in force at the
+time, where docker ignored `--shm-size` and both used the same host `/dev/shm`,
+so they compared one mount with itself. No re-run is needed — pinned host
+memory from `hipHostMalloc` is not `/dev/shm`, so `shm_size` can neither bound
+it nor fail it.
+
+The `tp4` cell is still absent from *this* recipe, which is deliberately left as
+the TP≤2 axis it was measured as. Do not add one without bounding the tier:
+ranks that die this way hold their GPU memory past the workload's five-minute
+wait, and reclaiming it needs a `rocm-smi --gpureset` an unprivileged user on an
+allocated node cannot issue.
 
 ### Across load shapes (`tokenspeed-serve-load.yaml`)
 
@@ -933,9 +947,12 @@ genuinely undefined. Keying off `output_len` there rejected a correct export.
   `aorta-internal`, where perf gating is still awaiting review.
 - **`sharegpt` measured on hardware.** The plumbing is tested; no run has been
   made against a real ShareGPT file, so there are no numbers from it yet.
-- **TP=4 and above.** TP 1 and 2 work; 4 fails to come up, diagnosed as far as
-  the host-side KV mirror allocation but no further (see above). The RCCL
-  mitigations that would become relevant at wider TP are untouched.
+- **TP=8 and above.** TP 1, 2 and 4 work, the last of them once the KVStore
+  host tier is bounded (see above). TP=8 is untested, and the RCCL mitigations
+  that would become relevant at wider TP are still untouched — as is a model
+  large enough for a TP number to mean anything, since gpt-oss-20b gains 7.6%
+  between TP=1 and TP=4. See
+  [Widening the TokenSpeed serving matrix](tokenspeed-matrix-widening.md).
 - **Why crashed TP ranks keep their memory.** A clean teardown clears in 30-45s
   and the workload waits it out. Ranks that die during startup hold theirs past
   a 5-minute wait and need `rocm-smi --gpureset`. Worth understanding, since it
