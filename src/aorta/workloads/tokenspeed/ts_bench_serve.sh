@@ -38,7 +38,9 @@
 #
 # Env:
 #   TS_MODEL              HF model id to serve            (default Qwen/Qwen3-0.6B)
-#   TS_SERVED_MODEL_NAME  name the bench asks for         (default TS_MODEL)
+#   TS_SERVED_MODEL_NAME  model id both sides use: the bench asks for it and,
+#                         when it differs from TS_MODEL, the server is told to
+#                         register it                     (default TS_MODEL)
 #   TS_PORT               gateway port, OpenAI /v1        (default 8000)
 #   TS_CONTROL_PORT       control port, /health           (default TS_PORT + 1)
 #   TS_READY_TIMEOUT      seconds to wait for /health     (default 900)
@@ -253,7 +255,7 @@ decode_json_args SERVE_EXTRA_ARGS TS_SERVE_ARGS "${TS_SERVE_ARGS:-}"
 decode_json_args BENCH_EXTRA_ARGS TS_BENCH_ARGS "${TS_BENCH_ARGS:-}"
 
 reject_owned_flags TS_SERVE_ARGS "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}" -- \
-  --host --port --control-port
+  --host --port --control-port --served-model-name
 # The load controls belong on this list for a sharper reason than the export
 # plumbing above. `--max-concurrency 1` against a configured cap of 8 changes the
 # load that was actually applied while the host still publishes 8, and both
@@ -562,6 +564,21 @@ GATEWAY_STARTUP_TIMEOUT="${TS_GATEWAY_STARTUP_TIMEOUT:-${READY_TIMEOUT}}"
 # now, so the relationship holds across the whole accepted range. The floor on
 # TEARDOWN_GRACE below is what keeps this positive.
 serve_args=( --host 127.0.0.1 --port "${PORT}" --control-port "${CONTROL_PORT}" )
+# The bench asks for ${SERVED_MODEL_NAME}; the server has to be the thing that
+# answers to it. Only the bench half was wired, so a non-default
+# served_model_name benchmarked a model id the server had never registered --
+# every request 404s and the step reports as a serving failure, naming the
+# gateway rather than the setting that broke it.
+#
+# Passed only when it differs from the model path, which is the configuration
+# that was broken: at the default the server already registers TS_MODEL, so the
+# flag would be a no-op on a CLI that has it and a hard failure on one that does
+# not. --served-model-name is reserved in TS_SERVE_ARGS for the same reason the
+# ports are: the two sides have to name one model, and spelling it there instead
+# would set the server's half while the bench kept asking for the other.
+if [ "${SERVED_MODEL_NAME}" != "${MODEL}" ]; then
+  serve_args+=( --served-model-name "${SERVED_MODEL_NAME}" )
+fi
 if ! supplies_flag --gateway-startup-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
   serve_args+=( --gateway-startup-timeout "${GATEWAY_STARTUP_TIMEOUT}" )
 fi
