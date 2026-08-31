@@ -314,7 +314,21 @@ _GATE_SPECS: dict[str, tuple[str, str]] = {
     "max_median_tpot_ms": ("median_tpot_ms", "max"),
     "max_p99_tpot_ms": ("p99_tpot_ms", "max"),
     "max_median_itl_ms": ("median_itl_ms", "max"),
+    # p99, for both of these, is the half worth gating. The gateway delivers
+    # several tokens per SSE chunk, so most recorded inter-token gaps are ~0 and
+    # `median_itl_ms` sits near zero while the real stalls land in the tail --
+    # `scripts/ci/eval_lib.py` says the same thing about the nightly allowlist.
+    #
+    # That observation rules out arming an ITL ceiling *automatically*, the way
+    # the nightly does, by taking a margin around a blessed baseline: 0.0 x 1.25
+    # is 0.0 and the gate fires on the first non-zero sample. It says nothing
+    # against a gate a recipe writes out as an absolute number, which is what
+    # these are -- `max_p99_itl_ms: 50` is a stated bound on tail stalls, and it
+    # is unaffected by where the median happens to sit. Leaving it out meant the
+    # one summary the docs recommend was the one a recipe could not gate on.
+    "max_p99_itl_ms": ("p99_itl_ms", "max"),
     "max_median_e2el_ms": ("median_e2el_ms", "max"),
+    "max_p99_e2el_ms": ("p99_e2el_ms", "max"),
     "min_output_throughput": ("output_throughput", "min"),
     "min_total_token_throughput": ("total_token_throughput", "min"),
     "min_request_throughput": ("request_throughput", "min"),

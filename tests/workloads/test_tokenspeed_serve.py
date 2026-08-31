@@ -1325,6 +1325,49 @@ def test_every_gate_spec_names_a_real_comparison():
         assert metric
 
 
+@pytest.mark.parametrize("gate", ["max_p99_itl_ms", "max_p99_e2el_ms"])
+def test_a_tail_latency_gate_breach_fails_the_trial(tmp_path, monkeypatch, gate):
+    """The p99 of ITL and E2EL is gateable, not only the median.
+
+    `median_itl_ms` sits near zero because the gateway delivers several tokens
+    per SSE chunk, so the stalls a serving regression produces are visible only
+    in the tail -- and a median-only gate set therefore could not express the
+    one ITL bound worth writing. That the median's value makes a *margin-derived*
+    baseline degenerate (0.0 x 1.25 == 0.0) is an argument about the nightly
+    arming a ceiling automatically, not about a recipe stating an absolute one.
+    """
+    wl = _make(tmp_path, gates={gate: 1.0})
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    result = wl.run()
+    assert result.passed is False
+    breach = next(d for d in result.failure_details if d["reason"] == "perf_gate_breached")
+    assert breach["gate"] == gate
+    assert breach["metric"] == mod._GATE_SPECS[gate][0]
+
+
+def test_satisfied_tail_latency_gates_pass(tmp_path, monkeypatch):
+    wl = _make(tmp_path, gates={"max_p99_itl_ms": 100, "max_p99_e2el_ms": 500})
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    assert wl.run().passed is True
+
+
+def test_the_percentile_metrics_the_bench_reports_are_all_gateable():
+    """The gate set and the emitted percentile set have to stay in step.
+
+    `percentile_metrics` defaults to all four families and each is exported with
+    a median and a p99, but only ttft and tpot had both halves here -- so
+    `max_p99_itl_ms` named a metric that was in every export, in the CI gating
+    allowlist and recommended by the docs, and was still rejected as unknown.
+    """
+    for family in mod._DEFAULT_PERCENTILE_METRICS.split(","):
+        for summary in ("median", "p99"):
+            gate = f"max_{summary}_{family}_ms"
+            assert gate in mod._GATE_SPECS, gate
+            assert mod._GATE_SPECS[gate] == (f"{summary}_{family}_ms", "max")
+
+
 # --------------------------------------------------------------- cleanup
 
 

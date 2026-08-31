@@ -295,6 +295,13 @@ workload_config:
     min_output_throughput: 1000
 ```
 
+The keys are `max_{median,p99}_{ttft,tpot,itl,e2el}_ms` and
+`min_{output_throughput,total_token_throughput,request_throughput}`; anything
+else is rejected at validation. `max_p99_itl_ms` is the ITL half worth using,
+for the reason above — a bound on `median_itl_ms` is a bound on a number that
+sits near zero. That is also why the nightly does not arm an ITL ceiling from a
+baseline margin, but a bound written out in a recipe does not have that problem.
+
 A gate naming a metric the bench did not report fails the trial rather than
 being skipped, so a recipe cannot believe it is gated when it is not.
 
