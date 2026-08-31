@@ -545,6 +545,13 @@ express: `bench_args: ["--extra-body", '{"a": 1}']` arrived as three arguments,
 and a value containing `*` or `?` was glob-expanded against the container's
 filesystem before TokenSpeed ever saw it.
 
+A string is accepted too, and it is parsed the way a shell would parse it, not
+with `split()`. Under `split()` there was no way to write an argument containing
+whitespace: `serve_args: '--extra-body "{\"a\": 1}"'` became three arguments, so
+the string form could express something other than what it said and the checks
+below saw tokens nobody wrote. An unbalanced quote is a config error rather than
+a guess at what was meant.
+
 `ts_bench_serve.sh` decodes the array through a NUL-separated stream — the one
 delimiter that cannot occur inside an argument — into a Bash array, and the
 owned-flag guard above runs over that array, so a flag is matched as an argument
@@ -891,6 +898,18 @@ first trial reports slower for a reason that is not the engine.
 Both layers validate it, and both do so before a server starts — a dataset
 problem found after the model has loaded costs minutes and reads as a bench
 failure rather than the staging mistake it is.
+
+What gets mounted is a copy under the work root, named by the digest of its
+contents, not the path the recipe gave. The path is validated with the caller's
+credentials, but the mount is resolved by the docker daemon, and on the NFS home
+this integration expects — the reason the work root has to be node-local at all —
+a file its author can read is squashed to nobody for the daemon. The container
+then gets an empty mount or an error, after the model has loaded, which is
+exactly the failure the up-front check exists to prevent. Copying moves the read
+to a directory where the daemon is root. Addressing the copy by content means a
+sweep over an unchanged dataset pays for it once, an edited dataset is never
+served from the previous copy, and concurrent runs cannot half-write each
+other's.
 
 `input_len`/`output_len` are dropped for `sharegpt`, since it takes its lengths
 from the conversations. They are not sent to the container, and they are

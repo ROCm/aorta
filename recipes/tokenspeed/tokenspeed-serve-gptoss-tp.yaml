@@ -34,10 +34,17 @@
 #     torch.zeros(...)
 #   torch.AcceleratorError: CUDA error: out of memory
 #
-# Ruled out: container shared memory (identical failure at `shm_size: 16g` and
-# `256g`), and contamination from an earlier cell (the GPUs were reset clean
+# Ruled out: contamination from an earlier cell (the GPUs were reset clean
 # immediately beforehand). The node has 3 TB of host RAM and eight 309 GB cards,
-# so it is not short of either. Adding the cell back would also leave the node
+# so it is short of neither.
+#
+# NOT ruled out: container shared memory. The `shm_size: 16g` vs `256g` runs
+# that appeared to rule it out predate the removal of `--ipc host`, under which
+# docker ignored `--shm-size` and both runs shared the host's /dev/shm -- so
+# they compared one mount with itself. Worth re-running before diagnosis goes
+# anywhere else; see docs/tokenspeed-serving.md.
+#
+# Adding the cell back would also leave the node
 # needing `rocm-smi --gpureset` after every sweep, because ranks that die this
 # way hold their memory for longer than the workload is willing to wait -- see
 # "A tensor-parallel teardown returns before the GPUs are actually free" in

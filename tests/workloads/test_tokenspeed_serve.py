@@ -1851,6 +1851,31 @@ def test_extra_args_reach_the_container_with_their_boundaries_intact(tmp_path, f
     assert json.loads(wl._container_env()[env_key]) == items
 
 
+@pytest.mark.parametrize("field", ["serve_args", "bench_args", "docker_args"])
+def test_the_string_form_keeps_a_quoted_argument_in_one_piece(tmp_path, field):
+    """The string form is documented, and split() could not express these.
+
+    `--extra-body '{"a": 1}'` word-split into three arguments, so the container
+    was told something other than what the recipe said -- and the boundary
+    checks downstream saw the split tokens, not what was written.
+    """
+    wl = _make(tmp_path, **{field: '--extra-body \'{"a": 1}\' --label-suffix "two words"'})
+    assert wl._arg_list(field) == [
+        "--extra-body",
+        '{"a": 1}',
+        "--label-suffix",
+        "two words",
+    ]
+
+
+@pytest.mark.parametrize("field", ["serve_args", "bench_args", "docker_args"])
+def test_an_unclosed_quote_is_a_config_error_not_a_silent_reinterpretation(tmp_path, field):
+    """There is no reading of `--foo "bar` that is what the author meant, and
+    guessing one runs a cell whose arguments nobody wrote."""
+    with pytest.raises(ValueError, match="not a parseable command line"):
+        _make(tmp_path, **{field: '--foo "bar'})._arg_list(field)
+
+
 @pytest.mark.parametrize(
     ("served", "expected"),
     [
@@ -2976,7 +3001,58 @@ def test_sharegpt_is_mounted_read_only_and_drops_the_random_knobs(tmp_path):
     assert env["TS_DATASET"] == "sharegpt"
     assert env["TS_DATASET_PATH"] == mod._CONTAINER_DATASET_PATH
     mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
-    assert f"{dataset}:{mod._CONTAINER_DATASET_PATH}:ro" in mounts, mounts
+    assert f"{wl._staged_dataset}:{mod._CONTAINER_DATASET_PATH}:ro" in mounts, mounts
+
+
+def test_the_dataset_is_mounted_from_the_work_root_not_where_the_recipe_kept_it(
+    tmp_path,
+):
+    """The daemon resolving the mount is not the process that validated the path.
+
+    On the NFS home the node-local work root exists for, a dataset its author can
+    read is squashed to nobody for the daemon: the mount arrives empty or fails,
+    after the model has loaded, which is the mid-run failure the up-front
+    dataset_path check exists to rule out. Staging moves the read to a directory
+    where the daemon is root.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    dataset = home / "sharegpt.json"
+    dataset.write_text('[{"conversations": []}]', encoding="utf-8")
+
+    wl = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset))
+    wl.setup()
+
+    staged = wl._staged_dataset
+    assert staged is not None
+    assert staged.parent == wl._work_dir / "datasets"
+    assert staged.read_bytes() == dataset.read_bytes()
+    # Content-addressed, so the copy is immutable for the life of its bytes and
+    # a concurrent run either writes the same bytes here or writes elsewhere.
+    assert staged.name != dataset.name
+    assert staged.suffix == ".json"
+
+
+def test_a_changed_dataset_is_staged_again_and_an_unchanged_one_is_not(tmp_path):
+    """Re-using the copy is the point of addressing it by content -- and a
+    dataset edited between sweeps must not be served from the old copy, which
+    would report the new recipe's numbers against the old conversations."""
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text('[{"conversations": []}]', encoding="utf-8")
+
+    first = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset))
+    first.setup()
+    again = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset))
+    again.setup()
+    assert again._staged_dataset == first._staged_dataset
+
+    dataset.write_text('[{"conversations": [{"value": "hi"}]}]', encoding="utf-8")
+    edited = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset))
+    edited.setup()
+    assert edited._staged_dataset != first._staged_dataset
+    assert edited._staged_dataset.read_bytes() == dataset.read_bytes()
+    staged_dir = edited._work_dir / "datasets"
+    assert len(list(staged_dir.iterdir())) == 2
 
 
 def test_dataset_path_is_rejected_for_the_random_dataset(tmp_path):

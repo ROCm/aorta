@@ -55,6 +55,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -467,6 +468,9 @@ class TokenSpeedServeWorkload(Workload):
         self._tokenizer = str(cfg.get("tokenizer") or self._model)
 
         self._dataset, self._dataset_path = self._validated_dataset()
+        # The copy under the work root that the container actually mounts, set
+        # by _stage_dataset() during setup.
+        self._staged_dataset: Path | None = None
 
         self._num_prompts = self._positive_int("num_prompts", _DEFAULT_NUM_PROMPTS)
         self._input_len = self._positive_int("input_len", _DEFAULT_INPUT_LEN)
@@ -852,7 +856,19 @@ class TokenSpeedServeWorkload(Workload):
         if value is None:
             return []
         if isinstance(value, str):
-            items = value.split()
+            # shlex, not split(): the string form is the documented one, and
+            # `--foo "bar baz"` under split() became three arguments, silently
+            # changing the invocation and defeating the boundary checks below --
+            # which see tokens, not what the user wrote.
+            try:
+                items = shlex.split(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"tokenspeed_serve: {key} ({value!r}) is not a parseable "
+                    f"command line: {exc}. Quote it as a shell would, or pass a "
+                    "list, where each entry is one argument and no quoting is "
+                    "involved."
+                ) from exc
         elif isinstance(value, (list, tuple)):
             items = [str(item) for item in value]
         else:
@@ -1040,6 +1056,57 @@ class TokenSpeedServeWorkload(Workload):
                 f"tokenspeed_serve: staged script {staged} failed 'bash -n':\n"
                 f"{check.stderr.strip()}"
             )
+
+        self._staged_dataset = self._stage_dataset()
+
+    def _stage_dataset(self) -> Path | None:
+        """Copy the ShareGPT file under the work root and mount that copy.
+
+        ``dataset_path`` is checked with *this* process's credentials, but the
+        bind mount is resolved by the docker daemon, which is a different reader.
+        The advertised setup is an NFS home with the node-local work root that
+        exists precisely because of it: there, a dataset the recipe author can
+        read is squashed to nobody for the daemon, so the mount arrives empty or
+        the container fails on it -- after the model has loaded, which is the
+        mid-run failure ``_validated_dataset`` exists to convert into a config
+        error. Staging moves the read to where the daemon is root.
+
+        Content-addressed for the same reason the script is: the copy is
+        immutable for the life of its bytes, so a concurrent run either writes
+        the same bytes to the same path or writes elsewhere, and a second sweep
+        over an unchanged dataset re-uses the copy instead of paying for it.
+        """
+        if self._dataset_path is None:
+            return None
+        source = self._dataset_path
+        digest = hashlib.sha256()
+        try:
+            with source.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+        except OSError as exc:
+            raise RuntimeError(f"tokenspeed_serve: cannot read dataset_path {source}: {exc}") from exc
+
+        datasets_dir = self._work_dir / "datasets"
+        datasets_dir.mkdir(parents=True, exist_ok=True)
+        staged = datasets_dir / f"{source.stem[:40]}.{digest.hexdigest()[:16]}{source.suffix}"
+        if not staged.exists():
+            size_mb = source.stat().st_size / (1024 * 1024)
+            log.info(
+                "tokenspeed_serve: staging dataset %s (%.0f MiB) at %s", source, size_mb, staged
+            )
+            tmp = staged.with_name(f".{staged.name}.{os.getpid()}")
+            try:
+                shutil.copyfile(source, tmp)
+                tmp.chmod(0o644)
+                os.replace(tmp, staged)
+            except OSError as exc:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"tokenspeed_serve: cannot stage dataset_path {source} at "
+                    f"{staged}: {exc}"
+                ) from exc
+        return staged
 
     # ------------------------------------------------------------------ run
 
@@ -1448,10 +1515,12 @@ class TokenSpeedServeWorkload(Workload):
             "-v",
             f"{self._hf_home}:/hf-cache",
         ]
-        if self._dataset_path is not None:
-            # Read-only: the dataset defines what was measured, so a run that
-            # could rewrite it would make its own results unfalsifiable.
-            argv += ["-v", f"{self._dataset_path}:{_CONTAINER_DATASET_PATH}:ro"]
+        if self._staged_dataset is not None:
+            # The staged copy, not the path the recipe named: see
+            # _stage_dataset. Read-only, because the dataset defines what was
+            # measured and a run that could rewrite it would make its own
+            # results unfalsifiable.
+            argv += ["-v", f"{self._staged_dataset}:{_CONTAINER_DATASET_PATH}:ro"]
         if self._run_as_current_user:
             # Without this the container writes the HF cache and the exported
             # JSON as root, and the next run (or the caller's cleanup) cannot
