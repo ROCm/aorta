@@ -921,6 +921,13 @@ To gate a serving recipe in the nightly: add it to
 `config/ci/nightly_eval_matrix.yaml`, let it run record-only, then bless it via
 the `refresh-baselines` workflow. See [ci-nightly-eval.md](ci-nightly-eval.md).
 
+Which of those metrics should actually get a bound is a separate question from
+whether they can, and the answer is not "all of them": bring-up ranges 189-379 s
+on one node with nothing changed, while the steady-state rates reproduce to
+within 3% across sweeps. [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md)
+works through the per-metric decision, how many record-only runs to take first,
+and what the thresholds should be derived from.
+
 ## Tests
 
 ```bash

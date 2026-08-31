@@ -31,6 +31,7 @@ def build_baselines(
     throughput_margin: float,
     perf_gate: bool,
     existing_baselines: dict[str, Any] | None = None,
+    perf_gate_entries: set[str] | None = None,
 ) -> dict[str, Any]:
     existing_baselines = existing_baselines or {}
     ngpu = nightly_eval.gpu_count()
@@ -103,12 +104,20 @@ def build_baselines(
             # Performance thresholds (min/max) are opt-in via --perf-gate. Only
             # allowlisted metrics are gated; unknown metrics (step_time_p99,
             # final_loss, ...) are NEVER auto-gated as min.
-            if perf_gate:
+            #
+            # --perf-gate is also scopable to named entries, because this file is
+            # rewritten WHOLE on every refresh: without a scope, arming one
+            # workload's perf gates arms every other entry's at the same time,
+            # off whatever single run happened to be under way. Those entries
+            # have no variance evidence behind them, and a bound derived from one
+            # observation is the flaky-gate failure this whole exercise exists to
+            # avoid -- so rolling gating out per workload has to be expressible.
+            if perf_gate and (not perf_gate_entries or name in perf_gate_entries):
                 st = metrics.get("mean_step_time_ms")
                 if st is not None:
                     spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
                 for mname, value in summary.items():
-                    if value is None or not eval_lib.is_performance_metric(mname):
+                    if value is None or not eval_lib.is_auto_gateable(mname):
                         continue
                     policy = eval_lib.metric_policy(mname)  # "min" or "max"
                     if policy == "min":
@@ -154,9 +163,29 @@ def main() -> int:
     ap.add_argument("--perf-gate", action="store_true",
                     help="also emit step-time/throughput bounds (Phase 5 perf gating); "
                          "default is correctness-only baselines")
+    ap.add_argument("--perf-gate-entry", action="append", default=[], metavar="NAME",
+                    help="restrict --perf-gate to this matrix entry (repeatable). "
+                         "Every other entry is refreshed correctness-only, so perf "
+                         "gating can be rolled out one workload at a time. Default "
+                         "(no flag) gates every entry, as before.")
     args = ap.parse_args()
 
     matrix_doc = nightly_eval._load_yaml(nightly_eval.MATRIX)
+
+    perf_gate_entries = set(args.perf_gate_entry)
+    if perf_gate_entries:
+        if not args.perf_gate:
+            raise SystemExit("--perf-gate-entry has no effect without --perf-gate")
+        # A misspelled entry would otherwise scope perf gating to nothing and
+        # produce a correctness-only refresh that reads as a successful bless.
+        known = {e["name"] for e in matrix_doc.get("entries") or []}
+        unknown = sorted(perf_gate_entries - known)
+        if unknown:
+            raise SystemExit(
+                f"--perf-gate-entry names no such matrix entry: {', '.join(unknown)}\n"
+                f"known entries: {', '.join(sorted(known))}"
+            )
+
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     existing_baselines: dict[str, Any] = {}
@@ -166,7 +195,7 @@ def main() -> int:
 
     doc = build_baselines(
         matrix_doc, args.work_dir, args.step_time_margin, args.throughput_margin,
-        args.perf_gate, existing_baselines,
+        args.perf_gate, existing_baselines, perf_gate_entries or None,
     )
 
     header = (

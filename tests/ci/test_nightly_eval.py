@@ -249,6 +249,232 @@ def test_refresh_refuses_when_entry_ran_but_failed(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Scoping --perf-gate to one entry, and not auto-arming a near-zero metric.
+# Both exist so serving perf gating can be rolled out on its own; see
+# docs/tokenspeed-gating-rollout.md.
+# ---------------------------------------------------------------------------
+
+
+_SERVING_SUMMARY = {
+    "median_ttft_ms": {"mean": 46.3},
+    "median_tpot_ms": {"mean": 1.94},
+    "median_itl_ms": {"mean": 0.0},
+    "p99_itl_ms": {"mean": 21.4},
+    "output_throughput": {"mean": 3538.0},
+}
+
+
+def _serving_matrix_runner(summary=None):
+    summary = _SERVING_SUMMARY if summary is None else summary
+
+    def fake_run_entry(entry, out_dir):
+        mpath = _write_matrix(out_dir / entry["name"] / "matrix.json",
+                              [{"name": "baseline", "error": None, "passed_count": 1,
+                                "failed_count": 0, "error_count": 0,
+                                "mean_step_time_ms": 1100.0,
+                                "metrics_summary": summary}])
+        return 0, mpath, False
+
+    return fake_run_entry
+
+
+def test_perf_gate_can_be_scoped_to_a_single_entry(tmp_path, monkeypatch):
+    """Rolling gating out per workload must not arm every other entry too.
+
+    refresh_baselines rewrites the whole baseline file, so an unscoped
+    --perf-gate would derive step-time ceilings for every unrelated entry from
+    whatever single run happened to be under way -- the one-observation
+    threshold this rollout exists to avoid, applied to workloads nobody looked at.
+    """
+    matrix_doc = {"entries": [
+        {"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"},
+        {"name": "gpu_smoke", "recipe": "r1.yaml"},
+    ]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, True,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    gated = doc["baselines"]["tokenspeed_serve_smoke::baseline"]
+    ungated = doc["baselines"]["gpu_smoke::baseline"]
+    assert gated["step_time_ms"] == {"max": 1375.0}
+    assert gated["metrics"]["median_tpot_ms"] == {"policy": "max", "value": 2.425}
+    assert gated["metrics"]["output_throughput"] == {"policy": "min", "value": 3007.3}
+    # The unscoped entry stays record-only for performance: no step-time ceiling
+    # and no metric bounds at all.
+    assert "step_time_ms" not in ungated
+    assert "metrics" not in ungated
+
+
+def test_perf_gate_without_a_scope_still_gates_every_entry(tmp_path, monkeypatch):
+    """The default is unchanged, so existing callers keep their behaviour."""
+    matrix_doc = {"entries": [
+        {"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"},
+        {"name": "gpu_smoke", "recipe": "r1.yaml"},
+    ]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    doc = refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, True)
+    for key in ("tokenspeed_serve_smoke::baseline", "gpu_smoke::baseline"):
+        assert doc["baselines"][key]["step_time_ms"] == {"max": 1375.0}
+
+
+def test_perf_gate_does_not_arm_a_near_zero_median_itl(tmp_path, monkeypatch):
+    """`median_itl_ms` is measured at ~0, so `value * 1.25` is a ceiling of 0.0
+    that no later run with any inter-token gap can satisfy. It stays charted and
+    hand-gateable; the refresher must not bless a bound for it."""
+    matrix_doc = {"entries": [{"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    doc = refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, True)
+    metrics = doc["baselines"]["tokenspeed_serve_smoke::baseline"]["metrics"]
+    assert "median_itl_ms" not in metrics
+    # Its tail counterpart is a real number and stays gateable.
+    assert metrics["p99_itl_ms"] == {"policy": "max", "value": 26.75}
+
+
+def _refresh_cli(*argv):
+    import subprocess
+    import sys
+    return subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "scripts" / "ci" / "refresh_baselines.py"), *argv],
+        capture_output=True, text=True, timeout=120)
+
+
+def test_perf_gate_entry_rejects_a_name_the_matrix_does_not_have():
+    """A typo would scope perf gating to nothing and produce a correctness-only
+    refresh that reads, in the PR diff, exactly like a successful bless."""
+    out = _refresh_cli("--perf-gate", "--perf-gate-entry", "tokenspeed_serve_smoek")
+    assert out.returncode != 0
+    assert "no such matrix entry" in out.stderr
+    # The message has to be actionable from the terminal it appeared in.
+    assert "gpu_smoke" in out.stderr
+
+
+def test_perf_gate_entry_without_perf_gate_is_rejected():
+    """Silently ignoring it would leave the operator believing gates were armed."""
+    out = _refresh_cli("--perf-gate-entry", "gpu_smoke")
+    assert out.returncode != 0
+    assert "no effect without --perf-gate" in out.stderr
+
+
+def test_a_staged_entry_is_not_a_valid_perf_gate_scope():
+    """`pending_entries` are not in `entries`, so scoping to one must fail rather
+    than quietly refresh everything correctness-only."""
+    out = _refresh_cli("--perf-gate", "--perf-gate-entry", "tokenspeed_serve_smoke")
+    assert out.returncode != 0
+    assert "no such matrix entry" in out.stderr
+
+
+# ---------------------------------------------------------------------------
+# The committed matrix file itself, through the loader the nightly uses.
+# ---------------------------------------------------------------------------
+
+
+def _real_matrix():
+    return nightly_eval._load_yaml(nightly_eval.MATRIX)
+
+
+def test_the_committed_matrix_loads_and_every_recipe_exists():
+    doc = _real_matrix()
+    assert doc["version"] == 1
+    entries = doc["entries"]
+    assert entries and len({e["name"] for e in entries}) == len(entries)
+    for entry in entries:
+        assert (nightly_eval.REPO_ROOT / entry["recipe"]).is_file(), entry["recipe"]
+
+
+def test_pending_entries_are_inert(tmp_path, monkeypatch):
+    """`pending_entries` documents staged work; nothing may execute it.
+
+    Both consumers iterate `entries` only, and this pins that -- a future reader
+    who wires the key up would otherwise start a blocked entry by accident.
+    """
+    doc = _real_matrix()
+    pending = {e["name"] for e in doc.get("pending_entries") or []}
+    assert pending, "expected at least one staged entry"
+
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 8)
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+    ran: list[str] = []
+
+    def fake(entry, out_dir):
+        ran.append(entry["name"])
+        return 0, _write_matrix(out_dir / entry["name"] / "matrix.json",
+                                [{"name": "c", "error": None, "passed_count": 1,
+                                  "failed_count": 0, "error_count": 0,
+                                  "metrics_summary": {}}]), False
+
+    monkeypatch.setattr(nightly_eval, "run_entry", fake)
+    result = nightly_eval.evaluate(doc, {"baselines": {}}, tmp_path)
+
+    assert not (pending & set(ran))
+    assert not (pending & {e["entry"] for e in result["entries"]})
+
+
+def test_pending_entries_are_valid_and_loadable():
+    """Validated exactly like a live entry, so promoting one is a move, not a bet.
+
+    A staged entry that names a deleted recipe or a misspelled field would
+    otherwise only be discovered by the first red nightly after promotion.
+    """
+    from aorta.triage.recipe import load_recipe
+
+    known_fields = {"name", "recipe", "nproc", "min_gpus", "timeout_sec", "blocked_on"}
+    pending = _real_matrix().get("pending_entries") or []
+    live = {e["name"] for e in _real_matrix()["entries"]}
+
+    for entry in pending:
+        assert set(entry) <= known_fields, f"{entry['name']}: {set(entry) - known_fields}"
+        assert entry["name"] not in live, f"{entry['name']} is both staged and live"
+        # A staged entry exists because it cannot run yet; say why, in the file.
+        assert entry.get("blocked_on"), f"{entry['name']} has no blocked_on"
+        path = nightly_eval.REPO_ROOT / entry["recipe"]
+        assert path.is_file(), entry["recipe"]
+        recipe = load_recipe(path)
+        assert recipe.cells, f"{entry['name']}: recipe has no cells"
+        # Every entry's budget must cover the recipe it names; the default is
+        # 1800s and a serving bring-up alone has been measured at 379s a cell.
+        assert int(entry.get("timeout_sec", 1800)) >= 1800
+
+
+def test_staged_serving_entry_metric_names_resolve_against_the_policy_table():
+    """The names `tokenspeed bench serve` exports, checked against the allowlist.
+
+    The workload passes its export through verbatim, so a metric the plan intends
+    to gate must resolve to the right direction -- and the ones it intends never
+    to gate must resolve to nothing, since an allowlist entry is what --perf-gate
+    arms from.
+    """
+    eval_lib = _load("eval_lib")
+    pending = {e["name"]: e for e in _real_matrix().get("pending_entries") or []}
+    assert "tokenspeed_serve_smoke" in pending
+
+    # Gated from the first bless (docs/tokenspeed-gating-rollout.md).
+    assert eval_lib.metric_policy("median_ttft_ms") == "max"
+    assert eval_lib.metric_policy("median_tpot_ms") == "max"
+    assert eval_lib.metric_policy("output_throughput") == "min"
+    for name in ("median_ttft_ms", "median_tpot_ms", "output_throughput"):
+        assert eval_lib.is_auto_gateable(name) is True, name
+
+    # Recorded but never gated: bring-up time is the noisiest thing the workload
+    # reports (189-379s on one node, nothing changed), and the counters/totals
+    # restate the recipe rather than measuring the stack.
+    for name in ("server_startup_sec", "container_elapsed_sec", "duration",
+                 "completed_total", "failed_total", "total_output_tokens",
+                 "max_output_tokens_per_s", "max_concurrent_requests",
+                 "mean_ttft_ms", "std_ttft_ms", "p50_ttft_ms", "p90_ttft_ms"):
+        assert eval_lib.metric_policy(name) is None, name
+
+    # Gateable, but not armed by a refresh.
+    assert eval_lib.is_auto_gateable("median_itl_ms") is False
+
+
+# ---------------------------------------------------------------------------
 # Dashboard metadata: the `rocm` column on both install layouts (issue #381)
 # ---------------------------------------------------------------------------
 
