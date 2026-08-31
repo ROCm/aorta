@@ -19,6 +19,7 @@ hardware:
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import json
@@ -491,8 +492,11 @@ def test_host_launch_container_name_is_unique_per_launcher(bash: str, tmp_path: 
     assert name_of(first) != name_of(second), "two launchers shared a container name"
     # The token still leads the name, so `docker ps` ties back to the artifacts.
     assert name_of(first).startswith(f"aorta-ts-{token}")
-    # And the token itself is untouched for artifact naming.
-    assert _token_from(first) == token
+    # The artifact token leads with the caller's value for the same reason, and
+    # is likewise unique per launcher -- see
+    # test_host_launch_respects_a_caller_supplied_token.
+    assert _token_from(first).startswith(f"{token}-")
+    assert _token_from(first) != _token_from(second)
 
 
 def test_host_launch_does_not_share_the_host_ipc_namespace(bash: str, tmp_path: Path) -> None:
@@ -508,7 +512,16 @@ def test_host_launch_does_not_share_the_host_ipc_namespace(bash: str, tmp_path: 
 
 
 def test_host_launch_respects_a_caller_supplied_token(bash: str, tmp_path: Path) -> None:
-    """An explicit TS_RUN_TOKEN wins, so a caller can correlate artifacts."""
+    """An explicit TS_RUN_TOKEN prefixes the token, so a caller can correlate
+    artifacts -- but it cannot make two trials share a name.
+
+    Taken verbatim, a token set once for a whole sweep (the natural way to label
+    a run) gave every trial the same export and log filenames, so they
+    overwrote each other and concurrent trials could read each other's verdict
+    files. That is the collision the token exists to prevent, arriving through
+    the knob meant to label it. Correlation only needs the prefix to be
+    searchable, so it stays a prefix and the unique part is always appended.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     record = tmp_path / "argv.explicit"
@@ -540,7 +553,19 @@ def test_host_launch_respects_a_caller_supplied_token(bash: str, tmp_path: Path)
         [bash, str(scripts / "host_launch.sh")], capture_output=True, text=True, env=env
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert _token_from(record.read_text()) == "cell7-trial2"
+    first = _token_from(record.read_text())
+    assert first.startswith("cell7-trial2-"), first
+    assert first != "cell7-trial2", "the caller value must not be the whole token"
+
+    # And the same caller token twice does not collide, which is the property
+    # taking it verbatim gave away.
+    proc = subprocess.run(
+        [bash, str(scripts / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    second = _token_from(record.read_text())
+    assert second.startswith("cell7-trial2-"), second
+    assert second != first, "two trials sharing a caller token got the same filenames"
 
 
 def test_kernel_probe_names_its_export_after_the_token(bash: str, tmp_path: Path) -> None:
@@ -1988,6 +2013,48 @@ def test_harvest_names_its_container_so_a_timeout_is_recoverable() -> None:
     assert "--name" in source
     assert "_force_remove_container" in source
     assert "except subprocess.TimeoutExpired" in source
+
+
+def test_harvest_removes_the_container_when_the_client_exits_nonzero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A nonzero client is not evidence the container is gone.
+
+    `--rm` fires when the *container* exits. The client can return nonzero while
+    the daemon still has it running -- an API disconnect, or the client being
+    killed -- and the GPU is then held for everything that follows. Timeout was
+    covered; this path reaches the same state and was not.
+    """
+    module = _harvest_module()
+    removed: list[str] = []
+    monkeypatch.setattr(
+        module, "_force_remove_container", lambda name, env: removed.append(name)
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 1, "out", "err"),
+    )
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    args = argparse.Namespace(
+        image="example/image:tag",
+        gpus="0",
+        network="bridge",
+        docker_config=None,
+        timeout=60,
+        kernel="gluon_mm_a16w16_gfx950",
+        op=None,
+        dtype="bf16",
+        dtype_role="a",
+        pytest_suite=None,
+        pytest_k=None,
+    )
+    with pytest.raises(SystemExit):
+        module._run_kernel(args, cache_dir)
+
+    assert removed, "a nonzero docker client left the container behind"
 
 
 def _coverage_module():

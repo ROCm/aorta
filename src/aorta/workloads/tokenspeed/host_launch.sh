@@ -48,7 +48,18 @@ ENTRY="${TS_ENTRY:-ts_serve_probe.sh}"
 # matrix the same filename -- each one overwriting the last, leaving only the
 # final trial's evidence behind. The host PID is genuinely per-trial, and the
 # nanosecond stamp keeps two trials distinct even if the PID is recycled.
-RUN_TOKEN="${TS_RUN_TOKEN:-$$-$(date +%s%N)}"
+#
+# A caller-supplied value is kept as a *prefix*, never as the whole token. Used
+# as-is, a `TS_RUN_TOKEN` set once for a sweep -- which is the natural way to
+# label a run for correlation -- gave every trial in that sweep the same
+# filenames again, so they overwrote each other and concurrent trials could read
+# each other's verdict files. That is the collision this token exists to
+# prevent, reintroduced by the one knob meant to label it. Correlation only
+# needs the prefix to be searchable, so both properties fit in one name.
+RUN_TOKEN="$$-$(date +%s%N)"
+if [ -n "${TS_RUN_TOKEN:-}" ]; then
+  RUN_TOKEN="${TS_RUN_TOKEN}-${RUN_TOKEN}"
+fi
 
 for d in "${SCRIPTS_DIR}" "${HF_DIR}" "${OUT_DIR}"; do
   case "${d}" in
