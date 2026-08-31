@@ -71,7 +71,28 @@ resolve_existing_prefix() {  # resolve_existing_prefix <path>
   else
     resolved="$(cd "$(dirname "${path}")" 2>/dev/null && pwd -P)/$(basename "${path}")" || return 1
   fi
-  printf '%s' "${resolved%/}${suffix}"
+
+  # The missing suffix is re-attached component by component rather than
+  # concatenated, so `..` in it pops a directory instead of surviving into the
+  # result. Left literal, `<local>/missing/../../<nfs>/run` matched the local
+  # mount while mkdir -p and docker both resolved it onto the network one --
+  # the guard bypassed by a path that never claimed to be local.
+  local out="${resolved%/}" comp
+  local IFS=/
+  for comp in ${suffix}; do
+    case "${comp}" in
+      ''|.) ;;
+      ..) out="$(dirname "${out}")" ;;
+      *) out="${out%/}/${comp}" ;;
+    esac
+  done
+  unset IFS
+  # Popping `..` can land back on something that exists, and that something can
+  # itself be a link, so resolve once more when it does.
+  if [ -d "${out}" ]; then
+    out="$(cd "${out}" 2>/dev/null && pwd -P)" || return 1
+  fi
+  printf '%s' "${out:-/}"
 }
 network_fstype() {  # network_fstype <path>
   local target="$1" best_len=-1 best_fs="" dev mount fstype rest dir base

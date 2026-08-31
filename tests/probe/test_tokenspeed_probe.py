@@ -132,7 +132,7 @@ def test_host_launch_refuses_a_network_mount_by_fstype(
     assert "root-squashed" in proc.stderr
 
 
-@pytest.mark.parametrize("shape", ["missing_parents", "symlinked_leaf"])
+@pytest.mark.parametrize("shape", ["missing_parents", "symlinked_leaf", "dotdot"])
 def test_host_launch_resolves_a_path_before_matching_the_mount(
     bash: str, tmp_path: Path, shape: str
 ) -> None:
@@ -149,9 +149,16 @@ def test_host_launch_resolves_a_path_before_matching_the_mount(
     netroot.mkdir()
     if shape == "missing_parents":
         scripts = netroot / "new" / "deep" / "scripts"
-    else:
+    elif shape == "symlinked_leaf":
         (tmp_path / "link").symlink_to(netroot)
         scripts = tmp_path / "link" / "scripts"
+    else:
+        # `..` traverses out of a local path and into the network mount. Left
+        # unnormalised in the reattached suffix it matched the local prefix,
+        # while mkdir -p and docker both resolved it onto the network one.
+        local = tmp_path / "local"
+        local.mkdir()
+        scripts = local / "missing" / ".." / ".." / "net" / "scripts"
 
     env = dict(os.environ)
     env.update(
