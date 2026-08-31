@@ -669,7 +669,7 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 137 tests (88 functions, the rest
+`tests/probe/test_tokenspeed_probe.py` — 141 tests (92 functions, the rest
 parametrised cases), no GPU or container required. A test asserts this count
 matches the file, since it went stale twice during review.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,

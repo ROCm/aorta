@@ -56,9 +56,18 @@ ENTRY="${TS_ENTRY:-ts_serve_probe.sh}"
 # each other's verdict files. That is the collision this token exists to
 # prevent, reintroduced by the one knob meant to label it. Correlation only
 # needs the prefix to be searchable, so both properties fit in one name.
+#
+# The prefix is sanitized to the same filename-safe alphabet the container name
+# uses, because the token *is* a filename component in the container: a label
+# like `feature/foo` put a path separator in the middle of every export and log
+# path, so the redirection failed on a directory that does not exist -- a
+# failure that reads as a broken script rather than as a label with a slash in
+# it. Everything outside the alphabet becomes `-`, so the prefix stays
+# recognisable in `docker ps` and in the artifact names.
 RUN_TOKEN="$$-$(date +%s%N)"
 if [ -n "${TS_RUN_TOKEN:-}" ]; then
-  RUN_TOKEN="${TS_RUN_TOKEN}-${RUN_TOKEN}"
+  _prefix="$(printf '%s' "${TS_RUN_TOKEN}" | tr -c 'a-zA-Z0-9_.-' '-')"
+  RUN_TOKEN="${_prefix}-${RUN_TOKEN}"
 fi
 
 for d in "${SCRIPTS_DIR}" "${HF_DIR}" "${OUT_DIR}"; do

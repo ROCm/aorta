@@ -285,7 +285,7 @@ def _install_probe(
 
     original_for_operator = KernelRegistry.get_for_operator
     original_get_impl = KernelRegistry.get_impl
-    proxies: dict[int, Any] = {}
+    proxies: dict[tuple[int, str], Any] = {}
 
     def record_entry(name: str, how: str) -> None:
         entered[name].add(how)
@@ -322,7 +322,16 @@ def _install_probe(
             # signal there is for this one.
             return result
         try:
-            return proxies.setdefault(id(result), _EntryProbe(result, str(name), record_entry))
+            # Keyed by implementation *and* name. The registry maps each kernel
+            # name to a callable independently, and two specs may register the
+            # same callable -- so keying on the callable alone handed the second
+            # name a proxy still carrying the first. Executing the second kernel
+            # then marked the first as covered and left the second reading as
+            # lookup-only: two wrong rows from one lookup, in the table this
+            # script exists to produce.
+            return proxies.setdefault(
+                (id(result), str(name)), _EntryProbe(result, str(name), record_entry)
+            )
         except Exception as exc:  # pragma: no cover - defensive
             # Never let instrumentation break the suites: an un-proxyable
             # implementation degrades this kernel to lookup_only rather than
