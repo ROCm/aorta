@@ -154,10 +154,19 @@ mkdir -p "${OUT_DIR}" || {
 # also tail this file into stdout, so aorta captures the tail per trial anyway.
 SERVER_LOG="${OUT_DIR}/server.${TS_RUN_TOKEN:-$$}.log"
 
-command -v tokenspeed >/dev/null 2>&1 || {
-  echo "TS_PROBE_FAIL: 'tokenspeed' not on PATH inside the container"
-  exit 64
-}
+# Everything this probe shells out to, checked in one place before any of it
+# runs. Only `tokenspeed` used to be, and the others fail in ways that read as
+# verdicts about the server: without `setsid` the launch below never becomes a
+# background job, so SRV_PID is stale and teardown signals whatever now holds
+# that pid while readiness polls a server that was never started; without `curl`
+# every probe reports the endpoint unreachable; without `python3` a completed
+# generation reports as unparseable.
+for tool in tokenspeed setsid curl python3; do
+  command -v "${tool}" >/dev/null 2>&1 || {
+    echo "TS_PROBE_FAIL: usage '${tool}' not on PATH inside the container"
+    exit 64
+  }
+done
 
 echo "TS_PROBE_INFO: model=${MODEL} gateway_port=${PORT} control_port=${CONTROL_PORT}"
 echo "TS_PROBE_INFO: ready_timeout=${READY_TIMEOUT}s gen_timeout=${GEN_TIMEOUT}s"

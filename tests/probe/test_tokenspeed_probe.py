@@ -3189,6 +3189,41 @@ def test_serve_probe_documents_every_exit_code_it_can_produce() -> None:
     assert produced - {0} <= documented, sorted(produced - {0} - documented)
 
 
+def test_serve_probe_checks_every_tool_it_shells_out_to(bash: str, tmp_path: Path) -> None:
+    """Only `tokenspeed` was checked, and the others fail as server verdicts.
+
+    Without `setsid` the launch never becomes a background job, so `$!` is stale:
+    teardown signals whatever holds that pid now and readiness polls a server
+    that was never started -- reported as a readiness timeout. `curl` missing
+    reads as an unreachable endpoint and `python3` missing as an unparseable
+    completion. None of those are statements about the server.
+    """
+    script = (_SOURCE / "ts_serve_probe.sh").read_text()
+    guard = re.search(r"for tool in (?P<tools>[\w \-]+); do\n(?P<body>.*?\n)done\n", script, re.S)
+    assert guard, "could not find the required-tool guard"
+    tools = guard.group("tools").split()
+    assert {"tokenspeed", "setsid", "curl", "python3"} <= set(tools), tools
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for missing in tools:
+        for name in tools:
+            stub = bin_dir / name
+            if name == missing:
+                stub.unlink(missing_ok=True)
+                continue
+            stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+            stub.chmod(0o755)
+        proc = subprocess.run(
+            [bash, "-c", guard.group(0)],
+            capture_output=True,
+            text=True,
+            env={"PATH": str(bin_dir)},
+        )
+        assert proc.returncode == _EXIT_USAGE, f"{missing}: {proc.stdout}{proc.stderr}"
+        assert missing in proc.stdout, proc.stdout
+
+
 def test_serve_probe_encodes_the_completion_request(bash: str, tmp_path: Path) -> None:
     """TS_MODEL is an operator-supplied string that ends up inside JSON.
 
