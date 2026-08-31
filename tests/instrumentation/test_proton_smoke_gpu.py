@@ -17,6 +17,7 @@ passes green for having silently measured nothing.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -24,7 +25,12 @@ from pathlib import Path
 
 import pytest
 
-from aorta.instrumentation.proton import OUTPUT_SUBDIR, PROFILE_BASENAME
+from aorta.instrumentation.proton import (
+    OUTPUT_SUBDIR,
+    PROFILE_BASENAME,
+    build_argv_prefix,
+    parse_summary,
+)
 from aorta.run.collectors import (
     CONFIG_KEY_COLLECT,
     CONFIG_KEY_COLLECT_DIR,
@@ -153,6 +159,20 @@ def test_default_backend_is_accepted_by_the_installed_proton(tmp_path):
 
 
 @skip_no_proton
+def test_hook_flag_is_accepted_by_the_installed_proton(tmp_path):
+    """``hook: triton`` renders Proton's ``-k triton``, which older Tritons could
+    plausibly not have. Being *in the schema* says nothing about being accepted
+    by the Proton that runs, so this asserts the wrap still captures with it on
+    rather than dying at argparse the way an unknown ``-b`` does."""
+    example, payload, args, kernel = _EXAMPLES[0]
+    proc, metrics = _capture(example, payload, args, tmp_path, {"hook": "triton"})
+    assert "invalid choice" not in proc.stderr, proc.stderr
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert metrics["proton_kernel_count"] > 0
+    assert kernel in metrics["proton_top_kernels"], metrics["proton_top_kernels"]
+
+
+@skip_no_proton
 def test_python_context_attributes_to_call_paths(tmp_path):
     """``context: python`` keys the tree by Python call path instead of launch
     site -- the configuration the softmax example ships."""
@@ -162,6 +182,136 @@ def test_python_context_attributes_to_call_paths(tmp_path):
     assert metrics["proton_kernel_count"] > 0
     assert metrics["proton_gpu_time_ms"] > 0.0
     assert kernel in metrics["proton_top_kernels"], metrics["proton_top_kernels"]
+
+
+# ---- Pinning an explicit AMD backend ------------------------------------
+#
+# Proton's CLI front-end calls ``_select_backend()`` only when ``-b`` is
+# absent, and that call is what initialises the HIP driver. A queue-intercepting
+# backend pinned through ``mode: cli`` therefore attaches ahead of the runtime
+# it is meant to trace and records nothing, exiting 0 with a hatchet holding a
+# bare ROOT frame. ``wrap_argv`` refuses that combination and names
+# ``mode: env``, where the payload starts Proton itself; these two tests are the
+# regression that would have caught the empty capture, and the check that the
+# upstream ordering it works around is still there.
+
+
+@skip_no_proton
+def test_env_mode_pins_roctracer_and_gets_a_non_empty_tree(tmp_path):
+    """The route the ``mode: cli`` rejection names, end to end.
+
+    Asserts the launch count rather than merely that metrics exist: the capture
+    spans exactly the payload's profiled loop, which dispatches its three Triton
+    kernels once per iteration and nothing else, so the total is predictable and
+    an over- or under-count is a real defect rather than noise.
+    """
+    iterations = 5
+    proc, metrics = _capture(
+        "amd-roctracer",
+        "pipeline.py",
+        ["--rows", "512", "--cols", "1024", "--iters", str(iterations)],
+        tmp_path,
+        {"mode": "env", "backend": "roctracer", "context": "shadow", "data": "tree"},
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "PASS" in proc.stdout
+    kernels = {"scale_kernel", "bias_gelu_kernel", "row_sum_kernel"}
+    assert kernels <= set(metrics["proton_top_kernels"]), metrics["proton_top_kernels"]
+    assert metrics["proton_kernel_count"] == len(kernels) * iterations
+    assert metrics["proton_gpu_time_ms"] > 0.0
+
+
+@skip_no_proton
+def test_cli_mode_pin_would_still_capture_nothing(tmp_path):
+    """Pins the premise of the ``wrap_argv`` guard against the installed Triton.
+
+    Builds the wrap the guard refuses -- ``build_argv_prefix`` renders the flags
+    without the attach-mode check -- and asserts it comes back empty. A failure
+    here is good news, not a bug: it means this Triton initialises the runtime
+    before starting a pinned backend, and the guard can be narrowed to the
+    versions that do not.
+    """
+    out_dir = tmp_path / OUTPUT_SUBDIR
+    out_dir.mkdir()
+    script = PROTON_EXAMPLES / "triton-vecadd" / "vecadd.py"
+    argv = [
+        *build_argv_prefix(out_dir, {"backend": "roctracer"}, python=sys.executable),
+        str(script),
+        "--size",
+        "262144",
+        "--iters",
+        "10",
+    ]
+    proc = subprocess.run(
+        argv,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        env={**os.environ, "TRITON_CACHE_DIR": str(tmp_path / "triton-cache")},
+    )
+    if _DLOPEN_MARKER in proc.stderr:
+        pytest.skip(_DLOPEN_MARKER)
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "PASS" in proc.stdout, "the payload itself must still have run"
+    # The silent part of the failure: a clean exit, an artifact directory, and no
+    # measurement anywhere in it.
+    assert parse_summary(out_dir) == {"proton_artifact_dir": str(out_dir)}
+
+
+@skip_no_proton
+def test_instrumentation_captures_scopes_inside_one_kernel(tmp_path):
+    """The intra-kernel backend attributes cycles to regions within a kernel.
+
+    Its leaves carry ``cycles`` / ``normalized_cycles`` and neither ``count``
+    nor ``time (<unit>)``, so the collector's summary -- which keys on wall-clock
+    time -- publishes only the artifact directory. That is asserted here too, so
+    the documented metric gap cannot drift out of step with the parser.
+    """
+    proc, metrics = _capture(
+        "amd-instrumentation",
+        "hotspot.py",
+        ["--size", "65536", "--steps", "8", "--iters", "3"],
+        tmp_path,
+        {
+            "mode": "env",
+            "backend": "instrumentation",
+            "instrumentation_mode": "default",
+            "context": "shadow",
+            "data": "tree",
+        },
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "PASS" in proc.stdout
+
+    profile = tmp_path / OUTPUT_SUBDIR / f"{PROFILE_BASENAME}.hatchet"
+    assert profile.is_file(), sorted(str(p) for p in (tmp_path / OUTPUT_SUBDIR).rglob("*"))
+    cycles = _scope_cycles(profile)
+    assert {"cheap", "expensive"} <= set(cycles), cycles
+    assert all(value > 0 for value in cycles.values()), cycles
+    assert metrics == {"proton_artifact_dir": str(tmp_path / OUTPUT_SUBDIR)}
+
+
+def _scope_cycles(profile: Path) -> dict[str, float]:
+    """Map each leaf frame name to its ``cycles`` metric in a hatchet profile."""
+    found: dict[str, float] = {}
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        children = node.get("children") or []
+        for child in children:
+            walk(child)
+        if children:
+            return
+        name = node.get("frame", {}).get("name")
+        value = node.get("metrics", {}).get("cycles")
+        if isinstance(name, str) and isinstance(value, (int, float)):
+            found[name] = float(value)
+
+    for root in json.loads(profile.read_text(encoding="utf-8")):
+        walk(root)
+    return found
 
 
 @skip_no_proton
