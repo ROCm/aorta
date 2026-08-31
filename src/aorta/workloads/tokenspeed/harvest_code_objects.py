@@ -752,21 +752,62 @@ def _consan_identities(kernels: list[dict]) -> list[dict]:
     knowing -- it is the *attribution* that has to stop pretending to separate
     them.
 
+    ``identity_source`` records which of three ways the name was arrived at,
+    because they are not equally trustworthy:
+
+    ``metadata``
+        The sidecar named a kernel, and it is one of the identities harvested for
+        this object. The name and the Waitcheck entry offset both describe what
+        the loader will resolve.
+    ``metadata_unharvested``
+        The sidecar named a kernel that Waitcheck never listed for this object.
+        Keeping the first harvested identity there would attribute the run to a
+        name and an entry offset that are *not* what gets resolved -- so the
+        metadata's name is used instead and the entry offset is dropped, leaving
+        a whole-object identity, which is weaker than an exact-entry one but true.
+    ``harvest_order``
+        No readable sidecar, so there is nothing to check the harvested name
+        against. It is the best available and the manifest says so.
+
     Order is harvest order, so ``--consan-limit`` still takes a stable prefix.
     """
-    chosen: dict[str, dict] = {}
+    grouped: dict[str, list[dict]] = {}
     for kernel in kernels:
-        digest = str(kernel["sha256"])
-        current = chosen.get(digest)
-        if current is None:
-            chosen[digest] = kernel
+        grouped.setdefault(str(kernel["sha256"]), []).append(kernel)
+
+    identities: list[dict] = []
+    for group in grouped.values():
+        # Any sidecar in the group: byte-identical objects compiled twice are one
+        # digest at two cache paths, and either one names the same entry.
+        metadata_name = next(
+            (name for name in map(_metadata_kernel_name, group) if name is not None), None
+        )
+        if metadata_name is None:
+            identities.append({**group[0], "identity_source": "harvest_order"})
             continue
-        # Upgrade only towards the metadata-backed name, never away from it.
-        if kernel["name"] == _metadata_kernel_name(kernel) and current[
-            "name"
-        ] != _metadata_kernel_name(current):
-            chosen[digest] = kernel
-    return list(chosen.values())
+        match = next((k for k in group if k["name"] == metadata_name), None)
+        if match is not None:
+            identities.append({**match, "identity_source": "metadata"})
+            continue
+        print(
+            f"harvest: consan   -> {group[0]['code_object']} declares "
+            f"'{metadata_name}' in its metadata, which Waitcheck did not list "
+            f"for this object (it listed {sorted({k['name'] for k in group})}). "
+            "Using the metadata name without an entry offset: it is what the "
+            "loader resolves, and naming a harvested identity instead would "
+            "report this object's result under a kernel and entry that are not "
+            "the ones analyzed.",
+            file=sys.stderr,
+        )
+        identities.append(
+            {
+                **group[0],
+                "name": metadata_name,
+                "entry_offset": None,
+                "identity_source": "metadata_unharvested",
+            }
+        )
+    return identities
 
 
 def _emit_consan_shim(
@@ -990,11 +1031,16 @@ def _write_consan_assets(
                 "code_object": str(staged_object),
                 "consan_command": str(shim),
                 "recipe": str(recipe),
+                # How the name above was arrived at; see _consan_identities. A
+                # reader comparing results across objects needs to know which of
+                # them are metadata-confirmed and which are not.
+                "identity_source": kernel["identity_source"],
                 # Every harvested identity that shares this object, so a reader
                 # of the manifest can see what the analysis does and does not
                 # separate. The result is the object's, not this name's alone.
                 "identities": sorted(
-                    {k["name"] for k in kernels if k["sha256"] == kernel["sha256"]}
+                    {kernel["name"]}
+                    | {k["name"] for k in kernels if k["sha256"] == kernel["sha256"]}
                 ),
             }
         )
