@@ -1478,6 +1478,37 @@ def test_harvest_consan_emits_one_recipe_per_object_not_per_identity(tmp_path: P
     ]
 
 
+def test_harvest_reads_the_metadata_sidecar_through_the_containment_guard(
+    tmp_path: Path,
+) -> None:
+    """The sidecar is container-written, so it is untrusted input like the object.
+
+    This read happens before the loop that stages the sidecars, so an unguarded
+    `read_text()` here would be the first thing to touch a planted link -- and it
+    is unbounded: `k.json -> /dev/zero` never returns, wedging the harvest with
+    the GPU still held for the rest of the sweep.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    kernels = _fake_kernels(1, tmp_path / "cache")
+    sidecar = Path(kernels[0]["cache_object"]).with_suffix(".json")
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text(json.dumps({"name": "_name_from_outside_the_cache"}))
+    sidecar.symlink_to(outside)
+
+    assert module._metadata_kernel_name(kernels[0]) is None
+
+    # The identity read declines quietly, since harvest order is a usable
+    # fallback; the staging that follows refuses outright, because there is no
+    # fallback for handing the loader a file the container chose. Either way the
+    # planted link is never opened.
+    with pytest.raises(SystemExit) as excinfo:
+        module._write_consan_assets(tmp_path / "dest", kernels, "gfx950", loader, "lenient", None)
+    assert "not a regular file inside the Triton cache" in str(excinfo.value)
+
+
 def test_harvest_consan_limit_budgets_objects_rather_than_repeats(tmp_path: Path) -> None:
     """The limit exists because an attention harvest yields twenty objects.
 

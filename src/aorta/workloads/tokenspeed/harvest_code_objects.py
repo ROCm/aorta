@@ -713,9 +713,19 @@ def _metadata_kernel_name(kernel: dict) -> str | None:
 
     That name is the one the loader resolves for itself, so it is the only one a
     ConSan result can honestly be attributed to. ``None`` when the sidecar is
-    missing or unreadable, which leaves the caller to fall back on harvest order.
+    missing, unreadable, or not a regular file inside the cache entry -- all of
+    which leave the caller to fall back on harvest order.
     """
     sidecar = Path(kernel["cache_object"]).with_suffix(".json")
+    # Through the same guard as every other read of this cache, and before it
+    # rather than after: this runs ahead of the loop that stages the sidecars, so
+    # an unguarded read here would be the first thing to touch a planted link.
+    # The name it could disclose is the weaker half; the read itself is
+    # unbounded, and `k.json -> /dev/zero` would wedge the harvest with the GPU
+    # still held for the rest of the sweep -- the failure _SUBPROCESS_TIMEOUT_SEC
+    # bounds for subprocesses, arriving through a plain file read.
+    if not _is_contained_file(sidecar, sidecar.parent):
+        return None
     try:
         doc = json.loads(sidecar.read_text())
     except (OSError, ValueError):
