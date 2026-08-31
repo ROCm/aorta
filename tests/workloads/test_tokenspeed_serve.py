@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
@@ -1039,6 +1040,82 @@ def test_the_first_failure_iteration_is_zero_based(tmp_path, monkeypatch):
     assert 0 <= result.first_failure_iteration < result.total_iterations
 
 
+def test_a_partial_run_points_at_the_step_that_stopped(tmp_path, monkeypatch):
+    """`incomplete_steps` named no step, so the index was invented.
+
+    With no `step` in any detail, `_first_failure_step` falls back to iteration
+    0 -- so a run whose steps 1 and 2 exported cleanly and whose step 3 died
+    reported its first failure at step 1, pointing a reader at the two steps
+    that worked. The exports say which numbers arrived, so the missing one is
+    knowable rather than guessable.
+    """
+    wl = _make(tmp_path, num_prompts=32, steps=3)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_bench_doc(), _bench_doc()],
+        # What the script prints: every measured step announces itself, so step 3
+        # is known to have started even though it exported nothing.
+        stdout="".join(f"TS_BENCH_STEP_START: {step}\n" for step in (1, 2, 3)),
+    )
+
+    result = wl.run()
+
+    assert result.passed is False
+    detail = next(d for d in result.failure_details if d["reason"] == "incomplete_steps")
+    assert detail["step"] == 3
+    assert "earliest missing step 3" in detail["detail"]
+    # Zero-based here, one-based in the detail, for the reason
+    # test_the_first_failure_iteration_is_zero_based gives.
+    assert result.first_failure_iteration == 2
+    assert 0 <= result.first_failure_iteration < result.total_iterations
+
+
+def test_a_gap_before_the_last_step_is_the_one_reported(tmp_path, monkeypatch):
+    """Earliest missing, not "total minus exported".
+
+    A step that exports out of order or is skipped in the middle leaves the
+    count able to point past the gap, which would name a step that ran.
+    """
+    wl = _make(tmp_path, num_prompts=32, steps=3)
+    wl.setup()
+    # Step 2 exported something unparseable, so it is missing from the records
+    # while 1 and 3 are present -- a gap, not a truncation.
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_bench_doc(), "{ truncated", _bench_doc()],
+        stdout="".join(f"TS_BENCH_STEP_START: {step}\n" for step in (1, 2, 3)),
+    )
+
+    result = wl.run()
+
+    detail = next(d for d in result.failure_details if d["reason"] == "incomplete_steps")
+    assert detail["step"] == 2
+    assert result.first_failure_iteration == 1
+
+
+def test_a_step_that_never_announced_itself_keeps_the_index_in_range(tmp_path, monkeypatch):
+    """`step` is read back as an iteration index, so it has to be one.
+
+    A run that stopped without announcing the step it stopped in leaves nothing
+    to point at beyond the last one that ran, and an index past the last
+    iteration is out of range wherever it is consumed. The text still names the
+    export that never arrived.
+    """
+    wl = _make(tmp_path, num_prompts=32, steps=3)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(), _bench_doc()], stdout="")
+
+    result = wl.run()
+
+    detail = next(d for d in result.failure_details if d["reason"] == "incomplete_steps")
+    assert "earliest missing step 3" in detail["detail"]
+    assert detail["step"] == 2
+    assert 0 <= result.first_failure_iteration < result.total_iterations
+
+
 def test_tpot_is_not_required_at_a_single_output_token(tmp_path, monkeypatch):
     """TPOT averages inter-token gaps, so at output_len 1 there are none to
     average and an absent value is correct rather than a fault. Requiring it
@@ -1224,6 +1301,24 @@ def test_cleanup_before_run_is_safe(tmp_path):
     wl = _make(tmp_path, keep_work_dir=False)
     wl.setup()
     wl.cleanup()
+
+
+def test_cleanup_after_a_failed_setup_reports_nothing_of_its_own(tmp_path, caplog):
+    """The dispatcher calls cleanup() even when setup() raised.
+
+    Most of what setup() rejects is rejected before `keep_work_dir` is read, so
+    reading it directly raised AttributeError out of cleanup -- logged as a
+    cleanup warning beside the real configuration error, so one bad recipe
+    reported two failures and the second described nothing that had happened.
+    """
+    wl = _make(tmp_path, num_prompts=0)
+    with pytest.raises(ValueError):
+        wl.setup()
+    assert not hasattr(wl, "_keep_work_dir"), "precondition: setup failed before this was set"
+
+    with caplog.at_level(logging.WARNING, logger=mod.log.name):
+        wl.cleanup()
+    assert not caplog.records, [record.message for record in caplog.records]
 
 
 # ---------------------------------------------------------------- recipes
@@ -1484,6 +1579,54 @@ def test_docker_args_cannot_smuggle_a_protocol_variable(tmp_path, spelling):
         _make(tmp_path, docker_args=spelling.split()).setup()
 
 
+@pytest.mark.parametrize(
+    ("spelling", "expected"),
+    [
+        # `-e=NAME=value`: docker takes the first `=` as the separator, so the
+        # value is `NAME=value`. Slicing from index 2 kept that `=` and produced
+        # an empty name, and an empty name matches nothing -- so the guard waved
+        # the override through and the trial reported a cap it had not run under.
+        (["-e=TS_RUN_TOKEN=x"], "TS_RUN_TOKEN"),
+        (["-e=TS_MAX_CONCURRENCY=1"], "TS_MAX_CONCURRENCY"),
+        # The value-taking letter need not lead the cluster. The scan stopped at
+        # `e` without reading what followed it, and the attached-value match only
+        # looked at position 0, so a boolean letter in front was enough to get
+        # past both.
+        (["-ieTS_RUN_TOKEN=x"], "TS_RUN_TOKEN"),
+        (["-ie=TS_RUN_TOKEN=x"], "TS_RUN_TOKEN"),
+        # Same gap, reached with an owned option instead of an owned variable:
+        # `-v` displaces the mount the audit reads, `-u` restores root-owned
+        # artifacts.
+        (["-iv/tmp:/ts-out"], "-v"),
+        (["-itu0:0"], "-u"),
+    ],
+)
+def test_docker_args_cannot_hide_an_override_in_a_short_cluster(tmp_path, spelling, expected):
+    """One parse for every spelling docker accepts, because the gaps between
+    three partial parses were each a way through."""
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        _make(tmp_path, docker_args=spelling).setup()
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        # An unowned variable in each of the same spellings: the guard must not
+        # become "anything with an `e` in it".
+        ["-e=MY_KNOB=1"],
+        ["-ieMY_KNOB=1"],
+        ["-itMY_FLAG"],
+        # `-e` whose value happens to read like an owned option. Docker sets a
+        # variable named `--name`; it does not rename the container.
+        ["-e", "--name"],
+    ],
+)
+def test_docker_args_still_take_the_same_spellings_unowned(tmp_path, spelling):
+    """The parse has to be exact in both directions, or the field it guards
+    stops being usable for what it exists for."""
+    _make(tmp_path, docker_args=spelling).setup()
+
+
 def test_docker_args_still_take_unowned_options(tmp_path):
     """The guard is about displacing generated options, not about docker_args --
     passing extra docker flags is why the field exists."""
@@ -1693,6 +1836,85 @@ def test_extra_args_reach_the_container_with_their_boundaries_intact(tmp_path, f
 
     env_key = "TS_SERVE_ARGS" if field == "serve_args" else "TS_BENCH_ARGS"
     assert json.loads(wl._container_env()[env_key]) == items
+
+
+@pytest.mark.parametrize(
+    ("served", "expected"),
+    [
+        ("my-alias", ["--served-model-name", "my-alias"]),
+        # The default: the server already registers the model path under that
+        # name, so the flag is not sent -- a CLI without it keeps working, and
+        # the only configuration whose behaviour changes is the broken one.
+        (None, []),
+    ],
+)
+def test_the_server_registers_the_name_the_bench_asks_for(tmp_path, served, expected):
+    """Only the bench half of `served_model_name` was wired.
+
+    The bench asked for it with `--model`, but the server was launched without
+    `--served-model-name`, so it registered the default id: every request 404s
+    and the step reports as a serving failure naming the gateway, not the
+    setting that broke it.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    argv_file = tmp_path / "argv.txt"
+    fake = bin_dir / "tokenspeed"
+    # Records what it was launched with, then dies, so the script's liveness
+    # check ends the readiness poll instead of waiting out the whole timeout.
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$@" >> "${TS_TEST_ARGV_FILE}"\n'
+        'case "${1}" in serve) exit 3 ;; esac\n'
+        "exit 0\n"
+    )
+    fake.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "TS_OUT_DIR": str(tmp_path / "out"),
+        "TS_TEST_ARGV_FILE": str(argv_file),
+        "TS_READY_TIMEOUT": "5",
+    }
+    if served is not None:
+        env["TS_SERVED_MODEL_NAME"] = served
+
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "server_exited_during_startup" in proc.stdout, proc.stdout
+    recorded = argv_file.read_text().splitlines()
+    assert "serve" in recorded, recorded
+    for token in expected:
+        assert token in recorded, recorded
+    if not expected:
+        assert "--served-model-name" not in recorded, recorded
+
+
+def test_serve_args_may_not_set_the_served_model_name(tmp_path):
+    """Reserved for the same reason the ports are: the two sides name one model.
+
+    Spelling it in `serve_args` sets the server's half while the bench keeps
+    asking for `served_model_name`, which is the divergence the field exists to
+    prevent.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path),
+            "TS_SERVE_ARGS": json.dumps(["--served-model-name", "other"]),
+        },
+    )
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert "TS_SERVE_ARGS may not set --served-model-name" in proc.stdout, proc.stdout
 
 
 @pytest.mark.parametrize(
@@ -2382,6 +2604,50 @@ def test_a_reaped_client_needs_only_one_removal_pass(tmp_path, monkeypatch):
     assert [event for event in events if event.startswith("docker rm")] == ["docker rm -f"], events
 
 
+def test_a_timeout_that_cannot_reap_the_client_retries_the_removal_too(tmp_path, monkeypatch):
+    """The retry belongs to the condition, not to the signal path.
+
+    `_terminate_docker_client` returns whether it can promise no client
+    survives, and the timeout path ignored it: a terminate that failed left a
+    client able to create the container just after this single removal reported
+    "No such container" -- the same orphan the signal path retries to catch,
+    reached from the timeout instead.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    events: list[str] = []
+    client = _stub_client_and_removal(wl, monkeypatch, events, removal_finds_nothing=True)
+
+    def refuse_to_die():
+        events.append("terminate refused")
+        raise OSError("no such process")
+
+    monkeypatch.setattr(client, "terminate", refuse_to_die)
+
+    result = wl.run()
+
+    removals = [event for event in events if event.startswith("docker rm")]
+    assert len(removals) == mod._CLEANUP_REMOVE_ATTEMPTS, events
+    assert any(d["reason"] == "container_timeout" for d in result.failure_details)
+
+
+def test_a_timeout_that_reaped_its_client_still_removes_once(tmp_path, monkeypatch):
+    """And the retry stays confined to that condition.
+
+    A reaped client cannot create anything, so a removal that finds nothing here
+    means `--rm` got there first. Repeating it would only hold up a trial that
+    has already failed.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    events: list[str] = []
+    _stub_client_and_removal(wl, monkeypatch, events, removal_finds_nothing=True)
+
+    wl.run()
+
+    assert [event for event in events if event.startswith("docker rm")] == ["docker rm -f"], events
+
+
 def test_the_timeout_cleanup_runs_while_the_signal_handlers_are_still_installed(
     tmp_path, monkeypatch
 ):
@@ -3035,6 +3301,20 @@ def test_an_explicit_drain_timeout_must_fit_inside_the_teardown_grace(tmp_path, 
     """
     with pytest.raises(ValueError, match="drain-timeout"):
         _make(tmp_path, serve_args=serve_args).setup()
+
+
+@pytest.mark.parametrize("spelling", ["08", "+5", " 5", "5 ", "3_0"])
+def test_a_drain_timeout_python_would_accept_but_the_container_rejects(tmp_path, spelling):
+    """Both validation layers have to accept the same set of spellings.
+
+    `int()` takes `"+5"`, `" 5 "`, `"3_0"` and the zero-padded `"08"`; the
+    container's `require_uint` takes none of them. Each of those passed here and
+    then exited 64 inside the container, where the failure reads as a script
+    problem on a recipe the host had already approved -- and `08` would have been
+    read as octal by the arithmetic that derives the drain.
+    """
+    with pytest.raises(ValueError, match="drain-timeout"):
+        _make(tmp_path, serve_args=["--drain-timeout", spelling]).setup()
 
 
 def test_a_drain_timeout_inside_the_grace_is_left_alone(tmp_path):

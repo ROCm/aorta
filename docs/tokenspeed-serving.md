@@ -254,6 +254,7 @@ matter most:
 | Key | Default | Notes |
 |---|---|---|
 | `model` | `Qwen/Qwen3-0.6B` | Any HF id the container can load. |
+| `served_model_name` | `model` | The id both sides use: the bench asks for it, and when it differs from `model` the server is told to register it. Reserved in `serve_args` so the halves cannot diverge. |
 | `num_prompts` | `64` | Requests per bench step. Also the audit target. |
 | `input_len` / `output_len` | `1024` / `128` | Random-dataset ISL/OSL. Not sent and reported as `null` for `sharegpt`. |
 | `dataset` | `random` | `random` or `sharegpt`. See [Datasets](#datasets). |
@@ -459,6 +460,14 @@ to be at least 1 and strictly less than `teardown_grace_sec` — rejected on the
 host and again in the script, since `TS_DRAIN_TIMEOUT` can also arrive from a
 mitigation. Raise `teardown_grace_sec` if a gateway genuinely needs longer.
 
+The two layers also have to accept the same *spellings*, not only the same
+range. `int()` reads `"+5"`, `" 5 "`, `"3_0"` and the zero-padded `"08"`; the
+script's `require_uint` reads none of them, so those recipes passed the host and
+then exited 64 in the container — where the failure reads as a script problem on
+a recipe the host had already approved. The host now requires the same plain
+unsigned decimal, and rejects rather than normalises it: `08` more likely means 8
+than octal 010, and the recipe should say which.
+
 Integer fields are also checked as integers rather than coerced with `int()`,
 which accepted two shapes of malformed recipe and ran a *different* load instead
 of failing. `num_prompts: true` becomes 1 because `bool` is an `int` subclass,
@@ -621,7 +630,8 @@ writing, `keep_work_dir: false` deleted the other user's exports mid-run. Every
 recipe in this repo names the same `/tmp/ts-work-serve`, so this is applied to
 the configured value and not only to the default. The root is created `1777`
 when the workload creates it, for the same reason `/tmp` is: the sticky bit lets
-everyone create their own subdirectory while stopping anyone removing another's.
+everyone create their own subdirectory while stopping *other users* removing
+another's.
 
 With one exception the sticky bit does not cover, which is why the root's
 *ownership* is checked as well: the owner of a sticky directory may rename or
@@ -748,8 +758,14 @@ the field is for.
 
 Two details the guard has to get right, because either one makes it avoidable
 rather than strict. Docker accepts a value attached to a short option, so `-u0:0`
-and `-v/tmp:/ts-out` are the spaced forms under another spelling and are
-normalised before the check. And the `-e` half is compared against the declared
+and `-v/tmp:/ts-out` are the spaced forms under another spelling — and so are
+`-e=NAME=value`, where the first `=` is docker's separator, and `-ieNAME=value`,
+where a boolean letter precedes the option that takes the value. Every token is
+parsed once, into the option it sets plus whatever value is attached to it,
+because reading it three partial ways left gaps between them: `-e=` extracted an
+empty name and matched nothing, and a cluster scan that stopped at `e` or `v`
+without reading the remainder accepted the same override it rejects spaced. And
+the `-e` half is compared against the declared
 protocol floor, not only the variables this run populated: `max_concurrency`
 defaults to unbounded and sets no `TS_MAX_CONCURRENCY`, so checking only what is
 present left the default configuration open to exactly the mislabelled pass

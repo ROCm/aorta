@@ -956,10 +956,16 @@ class TokenSpeedServeWorkload(Workload):
         # The shared root has to be enterable and writable by every user of the
         # node, or the second one cannot create their own `u<uid>` beneath a
         # root the first created at a 022 umask. Same reasoning as /tmp itself,
-        # including the sticky bit, which is what stops one user removing
-        # another's scratch. Only attempted on creation: an existing root is the
-        # administrator's (or the first user's) to set, and silently widening it
-        # would be its own surprise.
+        # including the sticky bit -- which stops one user removing another's
+        # scratch, with the exception that decides the check below it: the
+        # *owner* of a sticky directory may rename or remove any entry in it
+        # whoever owns that entry. Whoever ran first owns this root, so the bit
+        # binds every user except that one, and _assert_trusted_work_root is
+        # what declines to trust a root belonging to a stranger.
+        #
+        # Only attempted on creation: an existing root is the administrator's
+        # (or the first user's) to set, and silently widening it would be its own
+        # surprise.
         try:
             existed = self._work_root.exists()
             self._work_root.mkdir(parents=True, exist_ok=True)
@@ -1241,13 +1247,22 @@ class TokenSpeedServeWorkload(Workload):
             )
         if value is None:
             return
-        try:
-            drain = int(value)
-        except ValueError:
+        # The same unsigned decimal the container's require_uint accepts, and
+        # nothing else. `int()` also takes `"+5"`, `" 5 "`, `"5_0"` and the
+        # zero-padded `"08"` -- all of which pass here and then exit 64 inside
+        # the container, where the failure reads as a script problem on a recipe
+        # the host had already approved. Rejected rather than normalized, for the
+        # reason require_uint gives: `08` more likely means 8 than 010 octal, and
+        # the recipe should say which.
+        if not re.fullmatch(r"0|[1-9][0-9]*", value):
             raise ValueError(
                 f"tokenspeed_serve: serve_args --drain-timeout ({value!r}) must "
-                "be an integer number of seconds"
-            ) from None
+                "be an integer number of seconds, written as plain digits with "
+                "no sign, whitespace or leading zero -- the in-container check "
+                "rejects those spellings, so accepting them here would only "
+                "move the failure into the container."
+            )
+        drain = int(value)
         if not 1 <= drain < self._teardown_grace:
             raise ValueError(
                 f"tokenspeed_serve: serve_args --drain-timeout ({drain}) must be "
@@ -1511,13 +1526,6 @@ class TokenSpeedServeWorkload(Workload):
     # of splitting on `=` would reveal.
     _OWNED_SHORT_FLAG_LETTERS = frozenset({"d"})
 
-    # Short options docker also accepts with the value attached, where splitting
-    # on `=` is not enough to recover the flag: `-u0:0` and `-v/tmp:/ts-out` are
-    # the spaced forms by another spelling, and blocking only the spaced ones
-    # would leave the guard trivially avoidable -- `-u0:0` restores root-owned
-    # artifacts, `-v/tmp:/ts-out` displaces the mount the audit reads.
-    _OWNED_ATTACHED_SHORT_FLAGS = ("-v", "-u")
-
     # A short cluster holds boolean flags only up to the first option that takes
     # a value: in `-emodel=x` the `e` consumes the remainder, so the letters
     # after it are a *value*, not flags. Scanning the whole word for owned
@@ -1526,24 +1534,82 @@ class TokenSpeedServeWorkload(Workload):
     # short options; a letter outside the set is boolean and keeps the scan going.
     _SHORT_OPTS_WITH_VALUE = frozenset("evuplwmach")
 
+    def _docker_option(self, arg: str) -> tuple[str, str | None]:
+        """The option a ``docker_args`` token sets, and any value attached to it.
+
+        One parse for every spelling docker accepts, because reading the token
+        three ways -- prefix match, split on ``=``, cluster scan -- left gaps
+        between them that each admitted an owned option under a spelling none of
+        the three claimed:
+
+        * ``-e=NAME=value``. Docker takes the ``=`` as separator, so the value is
+          ``NAME=value``; slicing from index 2 kept the ``=`` and extracted an
+          empty name, and an empty name matches nothing, so the protocol guard
+          waved ``-e=TS_MAX_CONCURRENCY=1`` through. The reported cap and the one
+          the container ran under then disagreed.
+        * ``-ieTS_RUN_TOKEN=x`` and ``-iv/tmp:/ts-out``. The value-taking option
+          need not lead the cluster. The old scan stopped at ``e``/``v`` without
+          looking at what followed, and the attached-prefix match only ever
+          looked at position 0 -- so the same override that is refused spelled
+          ``-e ...`` or ``-v ...`` was accepted with a boolean letter in front.
+
+        Returning the option and its value together means each caller below sees
+        the same token the same way. ``None`` for the value is the spaced form,
+        where docker takes the next argument.
+        """
+        if arg.startswith("--"):
+            flag, sep, value = arg.partition("=")
+            return flag, (value if sep else None)
+        if not arg.startswith("-") or len(arg) < 2:
+            return arg, None
+        for index, letter in enumerate(arg[1:], start=1):
+            if not letter.isalpha():
+                break
+            if letter in self._SHORT_OPTS_WITH_VALUE:
+                # The remainder is this option's value in either spelling docker
+                # accepts: `-eNAME=v` and `-e=NAME=v` are the same thing, and the
+                # single leading `=` is the separator, not part of the value.
+                rest = arg[index + 1 :]
+                if rest.startswith("="):
+                    rest = rest[1:]
+                return f"-{letter}", (rest or None)
+            if letter in self._OWNED_SHORT_FLAG_LETTERS:
+                return f"-{letter}", None
+        return arg, None
+
+    def _reject_owned_env(self, name: str, owned_env: set[str] | None) -> None:
+        """Refuse an environment variable this workload sets itself.
+
+        Unioned with the declared floor for the same reason the mitigation check
+        is: ``owned_env`` can only name keys that are *present*, and an unbounded
+        ``max_concurrency`` sets no TS_MAX_CONCURRENCY -- so ``docker_args:
+        ["-e", "TS_MAX_CONCURRENCY=1"]`` on the default configuration ran the
+        container capped while the host reported ``max_concurrency: None``.
+        Fixing that for mitigations and not here just moved the same hole one
+        field sideways.
+        """
+        if name and name in (owned_env or set()) | _PROTOCOL_ENV_KEYS:
+            raise ValueError(
+                f"tokenspeed_serve: docker_args may not set {name}; this "
+                "workload sets it as part of its contract with "
+                "ts_bench_serve.sh, and overriding it here would bypass the "
+                "same check that rejects it in a mitigation. Set the "
+                "corresponding workload_config field instead."
+            )
+
     def _reject_owned_docker_args(self, *, owned_env: set[str] | None = None) -> None:
         """Refuse ``docker_args`` that would displace a generated option."""
         expect_env_value = False
         for arg in self._docker_args:
-            flag = arg.split("=", 1)[0]
-            for short in self._OWNED_ATTACHED_SHORT_FLAGS:
-                if arg.startswith(short) and len(arg) > len(short):
-                    flag = short
-                    break
-            # A combined cluster of boolean short options: `-dit` is three flags
-            # in one word, so `-d` is present without ever appearing as a token.
-            if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
-                for letter in arg[1:]:
-                    if letter in self._OWNED_SHORT_FLAG_LETTERS:
-                        flag = f"-{letter}"
-                        break
-                    if letter in self._SHORT_OPTS_WITH_VALUE or not letter.isalpha():
-                        break
+            if expect_env_value:
+                # This token is the preceding `-e`'s value, so it is data even if
+                # it reads like a flag: docker would set a variable named `--name`
+                # rather than renaming the container.
+                expect_env_value = False
+                self._reject_owned_env(arg.split("=", 1)[0], owned_env)
+                continue
+
+            flag, value = self._docker_option(arg)
             if flag in self._OWNED_DOCKER_FLAGS:
                 raise ValueError(
                     f"tokenspeed_serve: docker_args may not set {flag}; this "
@@ -1553,34 +1619,13 @@ class TokenSpeedServeWorkload(Workload):
                     "workload_config field -- network, run_as_current_user, "
                     "work_dir, hf_home -- instead."
                 )
-            # ``-e NAME=value`` and its attached/`=` spellings. Only a name the
-            # workload sets is a problem; anything else is a legitimate knob.
-            name = None
-            if expect_env_value:
-                name = arg.split("=", 1)[0]
-                expect_env_value = False
-            elif arg in ("-e", "--env"):
-                expect_env_value = True
-                continue
-            elif arg.startswith("--env="):
-                name = arg[len("--env=") :].split("=", 1)[0]
-            elif arg.startswith("-e") and len(arg) > 2:
-                name = arg[2:].split("=", 1)[0]
-            # Unioned with the declared floor for the same reason the mitigation
-            # check is: `owned_env` can only name keys that are *present*, and an
-            # unbounded `max_concurrency` sets no TS_MAX_CONCURRENCY -- so
-            # `docker_args: ["-e", "TS_MAX_CONCURRENCY=1"]` on the default
-            # configuration ran the container capped while the host reported
-            # `max_concurrency: None`. Fixing that for mitigations and not here
-            # just moved the same hole one field sideways.
-            if name and name in (owned_env or set()) | _PROTOCOL_ENV_KEYS:
-                raise ValueError(
-                    f"tokenspeed_serve: docker_args may not set {name}; this "
-                    "workload sets it as part of its contract with "
-                    "ts_bench_serve.sh, and overriding it here would bypass the "
-                    "same check that rejects it in a mitigation. Set the "
-                    "corresponding workload_config field instead."
-                )
+            # Only a name the workload sets is a problem; anything else is a
+            # legitimate knob, which is what docker_args exists to pass.
+            if flag in ("-e", "--env"):
+                if value is None:
+                    expect_env_value = True
+                    continue
+                self._reject_owned_env(value.split("=", 1)[0], owned_env)
 
     def run(self) -> WorkloadResult:
         # Token-qualify this trial's exports. ``$$`` inside the container is
@@ -1658,21 +1703,37 @@ class TokenSpeedServeWorkload(Workload):
                 # `communicate(timeout=)` leaves the client running, so it is
                 # killed here and drained -- which also yields whatever it had
                 # written.
-                self._terminate_docker_client()
+                reaped = self._terminate_docker_client()
                 stdout, stderr = self._drain_docker_client()
                 # Killing the client does not stop the container: it belongs to
                 # the daemon, and `--rm` only fires once it exits. Left alone, a
                 # timed-out cell would hand the next one a live TokenSpeed still
                 # holding the GPU and the gateway port -- so the next cell fails
                 # too, for a reason that is nowhere in its own logs.
-                self._force_remove_container()
+                #
+                # Retried on the same condition the signal path retries on. A
+                # terminate that could not confirm the client is gone leaves a
+                # process that may still create the container after this removal
+                # has reported "No such container" -- the orphan race, reached
+                # from the timeout instead of from a signal. Ignoring the return
+                # value here left one of the three cleanup paths without the
+                # guard the other one had.
+                self._force_remove_container(
+                    attempts=1 if reaped else _CLEANUP_REMOVE_ATTEMPTS
+                )
             except BaseException:
                 # KeyboardInterrupt, and anything else raised out of the call.
                 # The runner's SIGTERM does *not* arrive here -- see
                 # _remove_container_on_termination, which is what handles it. The
                 # original exception still propagates as the failure.
-                self._terminate_docker_client()
-                self._force_remove_container()
+                #
+                # This path can be entered *from inside* the Popen above, where
+                # no client has been published yet and terminate cannot promise
+                # one does not exist, so it takes the same retry.
+                reaped = self._terminate_docker_client()
+                self._force_remove_container(
+                    attempts=1 if reaped else _CLEANUP_REMOVE_ATTEMPTS
+                )
                 raise
             finally:
                 with self._docker_client_lock:
@@ -2150,6 +2211,13 @@ class TokenSpeedServeWorkload(Workload):
     ) -> WorkloadResult:
         failure_details: list[dict[str, Any]] = []
 
+        # Computed here rather than beside the WorkloadResult, because the
+        # incomplete-steps detail below has to stay inside this range: a `step`
+        # is read back as an iteration index, and an index past the last
+        # iteration is out of range wherever it is consumed.
+        started_steps = len(_MEASURED_STEP_START_RE.findall(stdout))
+        observed_steps = max(started_steps, len(records))
+
         # Only reached after waiting past the point where waiting helps -- see
         # _await_vram_release. Reported as a failure rather than a warning
         # because the alternative is a green cell that quietly breaks the next
@@ -2225,14 +2293,35 @@ class TokenSpeedServeWorkload(Workload):
                 }
             )
         elif len(records) < self._steps:
-            failure_details.append(
-                {
-                    "reason": "incomplete_steps",
-                    "detail": (f"{len(records)} of {self._steps} bench steps exported a " "result"),
-                    # Same reasoning: which step stopped and why is on stdout.
-                    "stdout_tail": _tail(stdout),
-                }
+            exported = {record.step for record in records}
+            # The earliest step with no export, one-based like every other
+            # `step` here. Without it this detail named no step at all, so
+            # _first_failure_step fell through to its "measured work ran, point
+            # at 0" default and reported the first failure at step 1 even when
+            # steps 1 and 2 had exported cleanly and step 3 was the one that
+            # died. The index is the whole value of the field, and it is
+            # knowable: the exports say which numbers arrived.
+            missing = next(
+                (step for step in range(1, self._steps + 1) if step not in exported),
+                None,
             )
+            detail: dict[str, Any] = {
+                "reason": "incomplete_steps",
+                "detail": (f"{len(records)} of {self._steps} bench steps exported a " "result"),
+                # Same reasoning: which step stopped and why is on stdout.
+                "stdout_tail": _tail(stdout),
+            }
+            if missing is not None:
+                detail["detail"] += f"; earliest missing step {missing}"
+                # The index is held inside the steps observed to run. When the
+                # script announced the step it then died in -- the ordinary case
+                # -- that is the missing step itself and nothing is capped. When
+                # it died announcing nothing, the last step known to have run is
+                # as far as an iteration index can honestly point, while the
+                # text above still names the export that never arrived.
+                if observed_steps:
+                    detail["step"] = min(missing, observed_steps)
+            failure_details.append(detail)
 
         # Re-audit the served-request counts here as well as in the script. The
         # script owns the fast verdict, but this class must not publish TTFT and
@@ -2310,7 +2399,6 @@ class TokenSpeedServeWorkload(Workload):
         # failures, exits 50-52 and 64, are what land here -- and the matrix
         # correctly reports did-not-run rather than folding a non-measurement in
         # as a data point.
-        started_steps = len(_MEASURED_STEP_START_RE.findall(stdout))
         main_work_started = bool(records) or started_steps > 0
 
         step_times_ms = [
@@ -2337,7 +2425,7 @@ class TokenSpeedServeWorkload(Workload):
             # `executed_iterations` stays on parsed records: that is the count
             # of steps that produced a result, which is what a consumer
             # averaging step_times_ms needs.
-            total_iterations=max(started_steps, len(records)),
+            total_iterations=observed_steps,
             step_times_ms=step_times_ms,
             elapsed_sec=elapsed,
             metrics=metrics,
@@ -2489,7 +2577,16 @@ class TokenSpeedServeWorkload(Workload):
         # about the exported artifacts. Kept by default: they are the raw
         # evidence behind the metrics, and a failed trial's export is exactly
         # what someone will want to read.
-        if self._keep_work_dir:
+        #
+        # Read with getattr because the dispatcher calls cleanup() even when
+        # setup() raised, and most of what setup() rejects is rejected before
+        # this attribute is assigned. Direct access then raised AttributeError
+        # out of cleanup, which the dispatcher logged as a cleanup warning
+        # alongside the real configuration error -- two failures reported for
+        # one cause, the second of them describing nothing that happened. The
+        # default is keep, matching the field's own default: a run that never
+        # started has nothing of its own to delete anyway.
+        if getattr(self, "_keep_work_dir", True):
             return
         token = getattr(self, "_run_token", None)
         if not token:
