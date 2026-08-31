@@ -181,8 +181,8 @@ def test_hook_flag_is_accepted_by_the_installed_proton(tmp_path):
     proc, metrics = _capture(example, payload, args, tmp_path, {"hook": "triton"})
     assert "invalid choice" not in proc.stderr, proc.stderr
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
-    assert metrics["proton_kernel_count"] > 0
-    assert kernel in metrics["proton_top_kernels"], metrics["proton_top_kernels"]
+    assert metrics.get("proton_kernel_count", 0) > 0, metrics
+    assert kernel in metrics.get("proton_top_kernels", []), metrics
 
 
 @skip_no_proton
@@ -228,10 +228,14 @@ def test_env_mode_pins_roctracer_and_gets_a_non_empty_tree(tmp_path):
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert "PASS" in proc.stdout
+    # Presence first, and with the whole mapping in the message: an empty tree
+    # is the failure this test exists for, and it shows up as *absent* metrics
+    # rather than wrong ones.
+    assert {"proton_kernel_count", "proton_gpu_time_ms"} <= set(metrics), metrics
     kernels = {"scale_kernel", "bias_gelu_kernel", "row_sum_kernel"}
-    assert kernels <= set(metrics["proton_top_kernels"]), metrics["proton_top_kernels"]
-    assert metrics["proton_kernel_count"] == len(kernels) * iterations
-    assert metrics["proton_gpu_time_ms"] > 0.0
+    assert kernels <= set(metrics.get("proton_top_kernels", [])), metrics
+    assert metrics.get("proton_kernel_count") == len(kernels) * iterations, metrics
+    assert metrics.get("proton_gpu_time_ms", 0.0) > 0.0, metrics
 
 
 @skip_no_proton
