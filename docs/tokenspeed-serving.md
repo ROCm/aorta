@@ -718,6 +718,15 @@ Three details of that are load-bearing, and each of them was a bug first:
   exist until it returns; such a client can create the container just after the
   first removal finds nothing, so three passes a second apart cover it. When the
   client *was* reaped, one pass is enough and only one is made.
+- **The removal runs on every path**, including the one where the client exited
+  on its own. A completed `communicate()` proves the *client* is gone, not the
+  container: a client that lost its connection to the daemon, was OOM-killed, or
+  had the daemon restart under it returns an exit code while the named container
+  keeps serving and holding the GPUs. `--rm` cannot help there, because it fires
+  when the container exits, which is the thing that did not happen. `docker rm
+  -f` on an already-removed container is one call reporting "No such container",
+  so the ordinary path pays a single no-op — the same trade `host_launch.sh`
+  makes with its unconditional EXIT cleanup.
 
 Removal failures are warned about with docker's exit code and stderr. `docker rm
 -f` reports an unreachable daemon or a permission problem by exit status rather

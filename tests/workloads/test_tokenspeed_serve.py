@@ -138,6 +138,7 @@ def _stub_docker(
 
     times_out = timeout
     real_popen = subprocess.Popen
+    real_run = subprocess.run
 
     class FakeClient:
         """Enough of ``Popen`` for the supervision the workload does.
@@ -204,7 +205,19 @@ def _stub_docker(
             return FakeClient(argv, listed[1:2] == ["run"], **kwargs)
         return real_popen(argv, **kwargs)
 
+    def fake_run(argv, **kwargs):
+        # The cleanup removal runs on every path now, including the one where the
+        # client exited on its own, so `docker rm -f` reaches this from an
+        # ordinary passing test. Answered as docker answers for a container that
+        # is already gone -- which is what `--rm` leaves behind -- rather than
+        # letting a unit test talk to a daemon.
+        listed = [str(a) for a in argv]
+        if listed and listed[0] == "docker":
+            return subprocess.CompletedProcess(argv, 1, "", "Error: No such container: x")
+        return real_run(argv, **kwargs)
+
     monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
 
 
 # --------------------------------------------------------------- packaging
@@ -2629,6 +2642,36 @@ def test_a_timeout_that_cannot_reap_the_client_retries_the_removal_too(tmp_path,
     removals = [event for event in events if event.startswith("docker rm")]
     assert len(removals) == mod._CLEANUP_REMOVE_ATTEMPTS, events
     assert any(d["reason"] == "container_timeout" for d in result.failure_details)
+
+
+@pytest.mark.parametrize("exit_code", [0, 53])
+def test_a_client_that_exited_on_its_own_still_gets_a_removal_pass(
+    tmp_path, monkeypatch, exit_code
+):
+    """A completed `communicate()` proves the client is gone, not the container.
+
+    If the client loses its connection to the daemon, is OOM-killed, or the
+    daemon restarts under it, it returns an exit code while the named container
+    keeps serving and holding the GPUs -- and `--rm` cannot help, because it
+    fires when the container exits, which is the thing that did not happen.
+    Removal was reached only from the timeout and exception paths, so that
+    container survived into the next cell of the sweep.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    removals: list[list[str]] = []
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()], exit_code=exit_code)
+
+    real_remove = wl._remove_container_once
+
+    def record(name):
+        removals.append(name)
+        return real_remove(name)
+
+    monkeypatch.setattr(wl, "_remove_container_once", record)
+    wl.run()
+
+    assert removals == [wl._container_name()], removals
 
 
 def test_a_timeout_that_reaped_its_client_still_removes_once(tmp_path, monkeypatch):

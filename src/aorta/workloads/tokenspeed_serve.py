@@ -1672,6 +1672,10 @@ class TokenSpeedServeWorkload(Workload):
         # killed the process outright and stranded the container, which is the
         # exact failure this context exists to prevent.
         with self._remove_container_on_termination():
+            # One removal per run, taken in the `finally` below so it covers
+            # every exit from this block. Retried only when the client could not
+            # be confirmed reaped; see _force_remove_container.
+            remove_attempts = 1
             try:
                 # Popen rather than run(), so the signal handler has a client to
                 # reap. Killing the client before removing the container is what
@@ -1703,24 +1707,20 @@ class TokenSpeedServeWorkload(Workload):
                 # `communicate(timeout=)` leaves the client running, so it is
                 # killed here and drained -- which also yields whatever it had
                 # written.
-                reaped = self._terminate_docker_client()
-                stdout, stderr = self._drain_docker_client()
+                #
                 # Killing the client does not stop the container: it belongs to
                 # the daemon, and `--rm` only fires once it exits. Left alone, a
                 # timed-out cell would hand the next one a live TokenSpeed still
                 # holding the GPU and the gateway port -- so the next cell fails
                 # too, for a reason that is nowhere in its own logs.
-                #
-                # Retried on the same condition the signal path retries on. A
-                # terminate that could not confirm the client is gone leaves a
-                # process that may still create the container after this removal
-                # has reported "No such container" -- the orphan race, reached
-                # from the timeout instead of from a signal. Ignoring the return
-                # value here left one of the three cleanup paths without the
-                # guard the other one had.
-                self._force_remove_container(
-                    attempts=1 if reaped else _CLEANUP_REMOVE_ATTEMPTS
-                )
+                if not self._terminate_docker_client():
+                    # A terminate that could not confirm the client is gone
+                    # leaves a process that may still create the container after
+                    # a removal has reported "No such container" -- the same
+                    # orphan race the signal path retries to close, reached from
+                    # the timeout instead.
+                    remove_attempts = _CLEANUP_REMOVE_ATTEMPTS
+                stdout, stderr = self._drain_docker_client()
             except BaseException:
                 # KeyboardInterrupt, and anything else raised out of the call.
                 # The runner's SIGTERM does *not* arrive here -- see
@@ -1730,12 +1730,26 @@ class TokenSpeedServeWorkload(Workload):
                 # This path can be entered *from inside* the Popen above, where
                 # no client has been published yet and terminate cannot promise
                 # one does not exist, so it takes the same retry.
-                reaped = self._terminate_docker_client()
-                self._force_remove_container(
-                    attempts=1 if reaped else _CLEANUP_REMOVE_ATTEMPTS
-                )
+                if not self._terminate_docker_client():
+                    remove_attempts = _CLEANUP_REMOVE_ATTEMPTS
                 raise
             finally:
+                # Unconditionally, including after a client that exited on its
+                # own. A completed `communicate()` proves the *client* is gone,
+                # not the container: if the client lost its connection to the
+                # daemon, or was OOM-killed, or the daemon restarted under it, it
+                # returns a nonzero exit while the named container keeps serving
+                # and holding the GPUs. Removal was reached only from the timeout
+                # and exception paths, so that container survived into the next
+                # cell of the sweep -- and `--rm` cannot help, because it fires
+                # when the container exits, which is the thing that did not
+                # happen. host_launch.sh takes the same unconditional approach on
+                # EXIT.
+                #
+                # Cheap where there is nothing to do: `docker rm -f` on an
+                # already-removed container is one call reporting "No such
+                # container", logged at debug and treated as the ordinary case.
+                self._force_remove_container(attempts=remove_attempts)
                 with self._docker_client_lock:
                     self._docker_client = None
         container_elapsed = time.monotonic() - start
