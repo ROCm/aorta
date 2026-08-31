@@ -55,7 +55,7 @@ jobs:
           fi
 
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
 
