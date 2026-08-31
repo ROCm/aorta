@@ -296,12 +296,15 @@ Two further experiments, in the order worth doing them:
   so one run of the committed recipe at default settings records all three
   points and turns the derivation into a measurement. Cheap: it is a log grep
   on a run that is happening anyway.
-- **Report it upstream.** The per-process guard cannot see a per-node budget,
-  and the message it fails to print is the one that would have made this a
-  five-minute diagnosis. A rank that knew its world size could check
-  `world_size × requested` against available memory and raise the ValueError it
-  already has. That is a small upstream patch and it would prevent the stranded
-  GPUs, which is the expensive part of the failure.
+- **Report it upstream.** Done, as evidence on
+  [lightseekorg/tokenspeed#297](https://github.com/lightseekorg/tokenspeed/issues/297),
+  which reports the same per-process guard in the radix `HostKVCache` path on
+  NVIDIA and was closed by the stale bot rather than by a fix. The flat
+  executor carries its own copy of the check, so a fix confined to
+  `kv_cache_host.py` would not cover what we hit. A rank that knew its world
+  size could check `world_size × requested` against available memory and raise
+  the ValueError it already has. That is a small upstream patch and it would
+  prevent the stranded GPUs, which is the expensive part of the failure.
 
 ## Workstream 2: larger loads
 
@@ -438,8 +441,9 @@ else in the directory. The 32B dense cell appears in both that recipe and
 measurable rather than assumed.
 
 The upstream fix is small — pin the metadata tensor, which is what the error
-message asks for — and worth reporting, because it is the only thing standing
-between the matrix and a BF16 MoE cell that runs like every other cell.
+message asks for — and it is the only thing standing between the matrix and a
+BF16 MoE cell that runs like every other cell. Filed as
+[lightseekorg/tokenspeed#1329](https://github.com/lightseekorg/tokenspeed/issues/1329).
 
 ### What the model cells measured
 
@@ -581,18 +585,22 @@ which `elapsed_sec` includes and `container_elapsed_sec` does not.
   needs all of them. Run it first on a fresh allocation, before any experiment
   that can leave a rank dead.
 - **A BF16 MoE model with CUDA graph capture.** Blocked on the upstream host
-  sync in `moe_align_block_size_device`. Until that is fixed, every MoE number
-  outside gpt-oss-20b is an eager number, and the eager penalty measured here
-  is about 1.75× on throughput.
+  sync in `moe_align_block_size_device`, filed as
+  [tokenspeed#1329](https://github.com/lightseekorg/tokenspeed/issues/1329).
+  Until that is fixed, every MoE number outside gpt-oss-20b is an eager number,
+  and the eager penalty measured here is about 1.75× on throughput.
 - **A captured MoE-versus-dense comparison.** Follows directly from the above.
   The eager one puts a floor under the MoE's advantage (9.8% on TPOT) and
   establishes the tail difference (17× on p99 TTFT), but the headline number
   should come from captured cells.
 - **Confirming the per-rank host tier at TP=1 and TP=2 by allocation** rather
   than by applying the logged formula. A log grep on a default-sized run.
-- **An upstream report on the per-process host-memory guard**, which cannot see
-  a per-node budget and so lets four ranks each approve an allocation that only
-  fits once.
+- **An upstream fix for the per-process host-memory guard**, which cannot see a
+  per-node budget and so lets four ranks each approve an allocation that only
+  fits once. Reported on
+  [tokenspeed#297](https://github.com/lightseekorg/tokenspeed/issues/297); the
+  thread is closed-stale and we lack the access to reopen it, so this may need
+  a maintainer nudge or a fresh issue scoped to the flat executor.
 - **The gated-repo path end to end.** No token available here.
 - **FP8 anywhere.** Probe first.
 - **Blessed baselines for any of this.** No serving recipe is gated in the
