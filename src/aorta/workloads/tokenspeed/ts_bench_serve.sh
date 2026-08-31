@@ -167,6 +167,14 @@ except ValueError as exc:
     sys.exit(f"is not valid JSON ({exc})")
 if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
     sys.exit("must be a JSON array of strings")
+# JSON can spell a NUL (\u0000) inside a string, and the decoder below streams
+# NUL-separated. An entry carrying one would be split there into two arguments
+# -- a silent change to the argv, which is what this decoding exists to prevent.
+# An exec argument cannot contain a NUL in any case, so there is nothing to
+# preserve: it is rejected here instead.
+for index, item in enumerate(items):
+    if "\0" in item:
+        sys.exit(f"item {index} contains a NUL byte, which no argument can carry")
 ' 2>&1)"; then
     echo "TS_BENCH_FAIL: usage ${label} ${err}"
     echo "  It is serialized by the workload from the recipe's list form; set it"

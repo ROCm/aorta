@@ -263,7 +263,8 @@ matter most:
 | `warmup_steps` | `1` | Discarded bench steps. See below. |
 | `num_warmups` | `1` | Warmup requests *within* a bench step. |
 | `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. |
-| `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch is per-uid beneath it; the HF cache is not. See below. |
+| `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch and the HF cache are per-uid beneath it, at `<work_dir>/u<uid>`. See below. |
+| `hf_home` | `<work_dir>/u<uid>/hf` | Set it to share one pre-populated cache between users; see below for why that has to be deliberate. |
 | `ready_timeout_sec` | `900` | Raise it for big models on a cold cache. |
 | `network` | `host` | See below. |
 | `port` / `control_port` | `auto` | Free ports, picked per trial. Explicit values must be in 1024..65535 and must differ. |

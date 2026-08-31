@@ -775,10 +775,26 @@ class TokenSpeedServeWorkload(Workload):
                 f"tokenspeed_serve: request_rate ({value!r}) must be a number "
                 'or "inf", not a boolean'
             )
-        rate = float(value)
-        if math.isinf(rate) and rate > 0:
+        # An int too large for a float raises here rather than overflowing, and
+        # the raw message ("int too large to convert to float") does not say
+        # which key was wrong.
+        try:
+            rate = float(value)
+        except OverflowError as exc:
+            raise ValueError(
+                f"tokenspeed_serve: request_rate ({value!r}) is too large to be "
+                'a rate; use a positive number, or "inf" to submit every '
+                "request at once"
+            ) from exc
+        if math.isinf(rate) and rate > 0 and isinstance(value, float) and math.isinf(value):
             return "inf"
         if math.isnan(rate) or math.isinf(rate):
+            # Reached by a *finite* spelling that overflows, "1e999" being the
+            # short one: `float()` turns it into +inf, and reading that as the
+            # unlimited token promoted a typo'd rate to the heaviest load the
+            # harness can generate -- while the trial still reported the rate
+            # the recipe asked for. Only the spellings handled above and a value
+            # that was already an infinite float mean "unlimited".
             raise ValueError(
                 f"tokenspeed_serve: request_rate ({value!r}) is not a usable "
                 'rate; use a positive number, or "inf" to submit every request '
@@ -817,12 +833,26 @@ class TokenSpeedServeWorkload(Workload):
         if value is None:
             return []
         if isinstance(value, str):
-            return value.split()
-        if isinstance(value, (list, tuple)):
-            return [str(item) for item in value]
-        raise ValueError(
-            f"tokenspeed_serve: {key} must be a string or list, " f"got {type(value).__name__}"
-        )
+            items = value.split()
+        elif isinstance(value, (list, tuple)):
+            items = [str(item) for item in value]
+        else:
+            raise ValueError(
+                f"tokenspeed_serve: {key} must be a string or list, " f"got {type(value).__name__}"
+            )
+        # These cross into the container as a JSON array and are decoded there
+        # from a NUL-separated stream, NUL being the one byte an argument cannot
+        # contain. An entry carrying one would be split at it into two
+        # arguments, so it is rejected on the host as well as in the script --
+        # here it names the offending key on the CPU gate rather than failing
+        # after a node has been occupied.
+        for index, item in enumerate(items):
+            if "\0" in item:
+                raise ValueError(
+                    f"tokenspeed_serve: {key}[{index}] contains a NUL byte, "
+                    "which no argument can carry"
+                )
+        return items
 
     def _validated_gates(self) -> dict[str, float]:
         raw = self.config.get("gates")

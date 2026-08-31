@@ -16,19 +16,25 @@
 # first trial spends minutes downloading before it serves anything; pre-warm
 # with
 #
-#   HF_HOME=/tmp/ts-work-serve/hf hf download openai/gpt-oss-20b
+#   HF_HOME=/tmp/ts-work-serve/u$(id -u)/hf hf download openai/gpt-oss-20b
 #
 # or expect the first cell to look slow for a reason that has nothing to do with
-# the engine. Two things about that command are load-bearing:
+# the engine. Three things about that command are load-bearing:
+#
+#   - The `u$(id -u)` component. The cache defaults to `<work_dir>/u<uid>/hf`, so
+#     a download into `<work_dir>/hf` populates a directory the run does not
+#     mount and the first cell downloads the 40 GB again anyway.
 #
 #   - The FULL snapshot, ~40 GB. `--exclude "original/*"` looks like an obvious
 #     saving and produces a cache that downloads fine and then fails during
 #     weight loading.
+#
 #   - Run it as the uid the trial runs as. `run_as_current_user` defaults to
 #     true, so a cache populated by a root container leaves the run failing with
 #     PermissionError on the snapshot directory.
 #
-# Both are written up in docs/tokenspeed-serving.md under "Measured: gpt-oss-20b".
+# All three are written up in docs/tokenspeed-serving.md under "Measured:
+# gpt-oss-20b".
 #
 # Single-GPU deliberately: MXFP4 puts the 21B parameters inside one MI355's
 # memory, so this recipe isolates model *size* as the variable. Tensor

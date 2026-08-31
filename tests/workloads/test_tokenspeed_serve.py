@@ -426,6 +426,19 @@ def test_request_rate_accepts_inf_spellings(tmp_path):
         assert wl._request_rate == "inf"
 
 
+@pytest.mark.parametrize("value", ["1e999", "-1e999", 10**400, "10" * 400])
+def test_a_finite_rate_that_overflows_is_rejected_not_read_as_unlimited(tmp_path, value):
+    """`float("1e999")` is `+inf`, not an error.
+
+    Treating that as the unlimited token turned a typo'd finite rate into the
+    heaviest load the harness can generate -- and the trial still reported the
+    rate the recipe asked for, so the numbers looked like a configuration nobody
+    had actually run. Only the explicit spellings mean unlimited.
+    """
+    with pytest.raises(ValueError, match="request_rate"):
+        _make(tmp_path, request_rate=value).setup()
+
+
 # ------------------------------------------------------------ setup guards
 
 
@@ -1788,6 +1801,47 @@ def test_the_script_rebuilds_extra_args_verbatim(tmp_path, field):
     lines = proc.stdout.splitlines()
     assert lines[0] == str(len(items)), proc.stdout
     assert lines[1:] == [f"[{item}]" for item in items], proc.stdout
+
+
+def test_the_script_rejects_a_nul_bearing_arg_rather_than_splitting_it(tmp_path):
+    """JSON can spell a NUL, and the decoder streams NUL-separated.
+
+    `"a\\u0000b"` therefore came out of `mapfile -d ''` as *two* arguments --
+    the one thing this decoding exists to prevent, reached through the encoding
+    it relies on. No argument can carry a NUL anyway, so there is nothing to
+    reconstruct: it has to fail instead of quietly changing the argv.
+    """
+    script = Path(mod.__file__).with_name("tokenspeed") / "ts_bench_serve.sh"
+    body = subprocess.run(
+        ["awk", "/^decode_json_args\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    harness = tmp_path / "drive.sh"
+    harness.write_text(
+        f"{body}\ndeclare -a out\ndecode_json_args out TS_TEST \"$1\"\necho UNREACHED\n"
+    )
+    proc = subprocess.run(
+        ["bash", str(harness), json.dumps(["--extra-body", "a\0b"])],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert "UNREACHED" not in proc.stdout
+    assert "NUL" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize("field", ["serve_args", "bench_args"])
+def test_the_host_rejects_a_nul_bearing_arg_on_the_cpu_gate(tmp_path, field):
+    """Same contract, checked on the host so it fails before a node is taken.
+
+    The script's guard is the one that matters for a hand-set env var; this one
+    means a recipe carrying it names the key on the CPU gate instead of failing
+    somewhere inside the container.
+    """
+    with pytest.raises(ValueError, match=f"{field}\\[1\\] contains a NUL"):
+        _make(tmp_path, **{field: ["--extra-body", "a\0b"]}).setup()
 
 
 def test_sharegpt_does_not_advertise_a_shape_it_never_ran(tmp_path):
