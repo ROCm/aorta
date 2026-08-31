@@ -11,14 +11,17 @@
 #     --output-dir /tmp/ts-rollout-smoke
 #
 # The first thing to read is `mean_output_tokens_per_request` across the two
-# cells. Between `n=1` and `n=4` it answers whether the gateway's
-# `usage.completion_tokens` covers all sampled choices or only the first, which
-# decides whether the throughput figures describe the whole rollout or a quarter
-# of it. See the header of tokenspeed-serve-rollout.yaml.
+# cells. Measured on gfx950 this comes out at 256 for `n=1` and 1024 for `n=4`,
+# which is how the gateway's `usage.completion_tokens` was established to sum
+# across all sampled choices -- no single choice can exceed its own 256-token
+# cap. A flat reading instead would mean the throughput figures describe one
+# sample per prompt rather than the whole rollout.
 #
-# The second is `generated_tokens_max`. At 256 it means the allowance truncated
-# the completions and the run says nothing about where the policy would have
-# stopped; below it, EOS is genuinely being respected.
+# The second is `generated_tokens_max`. Expect it at 256, and do not read that as
+# EOS being ignored: `dataset: random` prompts are random tokens, so nothing
+# induces an end-of-sequence token and every completion runs to the allowance.
+# EOS respect is real -- a direct probe returned `finish_reason: "stop"` at
+# variable lengths -- but this dataset cannot show it.
 schema_version: 1
 ticket: TOKENSPEED-SERVE-ROLLOUT-SMOKE
 workload: tokenspeed_serve

@@ -340,10 +340,16 @@ explained at length in [RL post-training](tokenspeed-rl-post-training.md#2-what-
   `ignore_eos: false` inside `--extra-body` and why that flag becomes owned in
   this mode. It also means an existing `ignore_eos: false` cell on the random
   dataset never respected EOS.
-- **`mean_output_tokens_per_request` is per request, not per sample.** Whether
-  the gateway's `usage.completion_tokens` covers all `n` choices or only the
-  first is the server's decision. Both committed rollout recipes carry an `n=1`
-  control cell so the ratio is measurable rather than assumed.
+- **`mean_output_tokens_per_request` is per request, not per sample.** Measured
+  on gfx950, the gateway's `usage.completion_tokens` sums across all `n` choices,
+  so the throughput figures cover the whole rollout — but that is one gateway
+  version's behaviour, and the name is true either way. Both rollout recipes keep
+  an `n=1` control cell so the ratio stays observable.
+- **On `dataset: random` the length distribution is an artifact of the cap.**
+  Random-token prompts give a model no reason to emit EOS, so every completion
+  runs to `output_len` and `generated_tokens_*` reads as a constant. Throughput
+  and the sample-count comparison are unaffected; the distribution needs prompts
+  a model would answer.
 - **TPOT and ITL are not per-token latencies under `n > 1`.** The bench client
   concatenates all choices and treats every chunk gap as an inter-token interval.
   TTFT and the throughputs stay meaningful.

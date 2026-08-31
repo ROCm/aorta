@@ -23,16 +23,23 @@
 # sample count and prompt shape, so they legitimately do different amounts of
 # work -- read `perf.md`.
 #
-# Why n=1 is a cell rather than a wasted one: the bench derives a request's
-# output length from the response's `usage.completion_tokens`, and whether the
-# gateway sums that over all `n` choices or reports only the first is the
-# server's business. Comparing `mean_output_tokens_per_request` between
-# `samples-1` and `samples-4` answers it from this recipe's own output -- roughly
-# 4x means all samples are counted and the throughput figures cover the whole
-# rollout; roughly flat means they describe one sample per prompt and the real
-# token volume is up to 4x higher than reported. Nothing else in the run
-# distinguishes the two, so removing the control cell would leave every number
-# here ambiguous by a factor of n.
+# Two things to know before reading the numbers.
+#
+# On `dataset: random` the length distribution is not a property of the model.
+# The prompts are random tokens, so nothing induces an end-of-sequence token and
+# every completion runs to `output_len`; `generated_tokens_*` will read as a
+# constant at the cap. Throughput, the concurrency behaviour and the sample-count
+# comparison are all still valid -- those depend on the request shape rather than
+# on where generation stops. A distribution that means something needs prompts a
+# model would answer.
+#
+# The `samples-1` cell is a control, not a wasted one. The bench derives a
+# request's output length from the response's `usage.completion_tokens`, which
+# was measured on gfx950 to sum across all `n` choices -- so the throughput
+# figures here cover the whole rollout rather than one sample of it. That is one
+# gateway version's behaviour, and comparing `mean_output_tokens_per_request`
+# between this cell and `samples-4` is what keeps it observable if it changes.
+# The same comparison is also the per-completion cost of a larger group.
 schema_version: 1
 ticket: TOKENSPEED-SERVE-ROLLOUT
 workload: tokenspeed_serve

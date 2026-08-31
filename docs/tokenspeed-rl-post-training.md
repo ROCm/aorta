@@ -179,21 +179,58 @@ setting is not removed, because it is still meaningful for `sharegpt`, and
 because the export-derived TPOT branch it selects is the conservative one. But
 nobody should read an existing `ignore_eos: false` cell as having respected EOS.
 
-### The `n` accounting question, which is left open on purpose
+### What was measured on gfx950
 
-The bench derives a request's output length from the response's
-`usage.completion_tokens`, falling back to tokenizing the concatenated text. With
-`n > 1`, whether the gateway reports that summed over all choices or only for the
-first is the server's decision, and it cannot be read from the client source.
+Two probes on one MI355X against the pinned image, Qwen3-0.6B.
 
-The consequence is a factor of `n` on every throughput number, so it is not
-something to assume. Rollout mode therefore reports
-`mean_output_tokens_per_request` — a name that is true on either reading — and
-both committed recipes carry an `n=1` control cell so the ratio is measurable
-from the recipe's own output. Roughly `n`x between the control and the `n=4` cell
-means all samples are counted and the throughput figures cover the whole rollout;
-roughly flat means they describe one sample per prompt and the real token volume
-is up to `n`x higher than reported.
+**The rollout path works end to end.** The smoke shape — 8 prompts, `n=4`,
+`temperature: 1.0`, 256-token allowance — served 8 requests with none failed,
+exit 0, at 6,461 output tok/s. The export carried `output_lens` under
+`save_detailed`, and the workload's floor and audits passed.
+
+**`usage.completion_tokens` sums across all sampled choices.** This was the open
+question and it is now closed. That run reported 1,024 generated tokens *per
+request* against a per-choice cap of 256: `4 x 256 = 1024`, and no single choice
+can exceed its own cap, so the count is necessarily the sum over all four.
+Rollout throughput figures therefore describe the whole rollout, not one sample
+of it.
+
+**EOS-respecting generation through the request body works.** A direct probe of
+`/v1/chat/completions` with `ignore_eos: false, n: 4` returned four choices, all
+with `finish_reason: "stop"`, totalling 788 tokens against an 800-token ceiling —
+completions that ended on EOS at genuinely variable lengths, not at the cap. This
+is the mechanism the whole mode depends on, and it is the one that could not be
+established by reading source.
+
+The metric name stays `mean_output_tokens_per_request` rather than becoming
+per-sample. The measurement above is one gateway version on one model; the name
+is true regardless, the `n=1` control cell in both recipes keeps the ratio
+observable if it ever changes, and that cell independently measures whether
+sharing a prefill across a larger group is cheaper per completion.
+
+### The random dataset cannot show a length distribution
+
+The same smoke run reported `output_lens` of exactly `[1024] x 8` — every
+completion at the cap. That is not EOS being ignored; the probe above shows it is
+respected. It is the prompts. `dataset: random` generates sequences of random
+tokens, and a model given gibberish has no reason to emit an end-of-sequence
+token, so every completion runs to `output_len` and the length distribution
+collapses to a constant.
+
+The consequence is worth stating plainly, because it limits what the committed
+recipes can show: **on `dataset: random`, rollout mode measures throughput at a
+rollout-shaped request pattern, but its `generated_tokens_*` distribution is an
+artifact of the cap rather than a property of the policy.** Throughput,
+concurrency behaviour and the sample-count comparison are all still valid — those
+depend on the request shape, not on where generation stops.
+
+A real length distribution needs prompts a model would answer. `dataset:
+sharegpt` is the option already supported and is the cheapest next step; a
+prompt set drawn from the actual rollout task — the recipe-synthesis prompts of
+[section 4](#4-the-domain-and-the-training-signal) — is the one that would
+actually predict the RL run's cost, and it needs a dataset loader that neither
+the workload nor the bench has today. Recorded under
+[known gaps](#known-gaps).
 
 Two further things degrade under `n > 1` and should not be read as if they had
 not. The client reads `choices[0]` from every SSE chunk and concatenates, so with
@@ -492,19 +529,19 @@ Neither weakens an assertion; both extend a fixture to cover a wider contract.
 
 ### Phase 0 — rollout-shaped measurement (done)
 
-Rollout mode plus two recipes, so the throughput and length numbers the cost
-model rests on can be measured instead of extrapolated. Gate: CPU suites, ruff,
-`bash -n`, `--dry-run`, and a real gfx950 run of the smoke recipe.
+Rollout mode plus two recipes, validated on gfx950 as described in
+[section 2](#what-was-measured-on-gfx950). Gate: CPU suites, ruff, `bash -n`,
+`--dry-run`, and a real run of the smoke shape.
 
-### Phase 1 — measure the real rollout shape
+### Phase 1 — prompts that stop, and the 8B numbers
 
-Run `tokenspeed-serve-rollout.yaml` on gfx950 and fill in a measured-results
-section: throughput at `n` = 1/4/8, the length distribution at a 1024- and a
-4096-token allowance, and the `n=1`-vs-`n=4` comparison that resolves the
-`usage.completion_tokens` question. Repeat on Qwen3-8B, which is the size the
-demo would actually use and the one whose concurrency scaling is currently
-extrapolated. **Output: the cost model in section 5 stops containing an
-extrapolation.**
+Two things, in order. First, prompts that induce EOS, since `dataset: random`
+cannot: run the rollout recipes against ShareGPT to get a length distribution
+that is a property of the model, then decide whether a task-shaped prompt set is
+worth the dataset plumbing. Second, run the sweep on Qwen3-8B — the size the
+demo would use, and the one whose concurrency scaling section 5 currently
+extrapolates. **Output: the cost model stops containing an extrapolation, and
+the mean-completion-length assumption behind it becomes a measurement.**
 
 ### Phase 2 — validate the weight-sync path
 
@@ -587,9 +624,10 @@ must be disaggregated onto separate GPUs (`nccl`), the node count doubles and th
 - **The weight-transfer path is unexercised here.** Everything in section 2 about
   it is read from source, not run. Phase 2 exists for this, and it is the
   assumption most worth breaking early.
-- **`usage.completion_tokens` under `n > 1` is unresolved.** The recipes are built
-  to answer it; until they run on hardware, every rollout throughput number is
-  ambiguous by a factor of up to `n`.
+- **The committed recipes cannot show a real length distribution**, because
+  `dataset: random` prompts do not induce EOS. Their throughput and sample-count
+  numbers are valid; `generated_tokens_*` will read as a constant at the cap.
+  ShareGPT is the cheap fix, task-shaped prompts the right one.
 - **TPOT and ITL are not meaningful under `n > 1`.** The client concatenates all
   choices and treats every chunk gap as an inter-token interval. Still reported,
   because suppressing metrics per-mode would make the metric set depend on the
