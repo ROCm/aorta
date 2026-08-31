@@ -75,10 +75,18 @@ fi
 # puts its network storage, so the bind mount failed with docker's own opaque
 # error, the confusion this guard exists to prevent -- while rejecting a local
 # `/home` on an ordinary workstation. This is the copy every recipe goes
-# through; harvest_code_objects.py carries the same logic in Python.
+# through.
 #
 # Best-effort: no /proc/mounts, or an unidentifiable mount, is treated as local
 # rather than refusing to launch on a guess. Docker's error is the backstop.
+#
+# THREE COPIES OF THIS RULE EXIST, and adding an fstype means editing all of
+# them: here, in stage_scripts.sh, and as _NETWORK_FSTYPES in
+# harvest_code_objects.py. Sourcing one shared file was considered and dropped:
+# host_launch.sh runs on the host before anything is staged, so a sibling
+# `. ts_fs_guard.sh` would make the guard fail exactly where the launcher has no
+# staging directory to read it from -- a guard that cannot run is worse than one
+# duplicated in view.
 _NETWORK_FSTYPES=" afs beegfs ceph cifs fuse.cephfs fuse.glusterfs fuse.sshfs gfs2 glusterfs gpfs lustre nfs nfs4 smb3 "
 # TS_MOUNTS_FILE exists so this is testable without a network mount, mirroring
 # the `mounts` parameter on the Python equivalent. Not a documented setting.

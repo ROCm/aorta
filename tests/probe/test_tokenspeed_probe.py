@@ -1405,6 +1405,32 @@ def test_harvest_consan_emits_one_recipe_per_identity(tmp_path: Path) -> None:
     assert len({recipe.name for recipe in recipes}) == 3
 
 
+def test_the_network_fstype_list_agrees_across_all_three_copies() -> None:
+    """One rule, three copies, and the list is the part that drifts.
+
+    The two shells have to stand alone -- host_launch.sh runs before anything is
+    staged and stage_scripts.sh is what stages it -- so the duplication is
+    deliberate, but adding `9p` or `fuse.s3fs` to one copy and not the others
+    leaves a guard that refuses a mount in the launcher and accepts it in the
+    stager. Comments name the other copies; this makes them agree.
+    """
+    module = _harvest_module()
+    copies = {"harvest_code_objects.py": set(module._NETWORK_FSTYPES)}
+    for script in ("host_launch.sh", "stage_scripts.sh"):
+        text = (_SOURCE / script).read_text()
+        match = re.search(r'^_NETWORK_FSTYPES="(.*)"$', text, re.MULTILINE)
+        assert match, f"{script} no longer declares _NETWORK_FSTYPES as one literal"
+        copies[script] = set(match.group(1).split())
+        # The shell match is `case " ${list} " in *" ${fstype} "*)`, so every
+        # entry has to be space-delimited: a tab or a stray comma would make
+        # that entry unmatchable while still reading as present.
+        assert match.group(1) == " " + " ".join(sorted(copies[script])) + " ", script
+
+    assert len(set(map(frozenset, copies.values()))) == 1, {
+        name: sorted(values) for name, values in copies.items()
+    }
+
+
 def test_harvest_consan_emits_one_recipe_per_object_not_per_identity(tmp_path: Path) -> None:
     """`--kernel-name` selects nothing when the loader is given the object.
 

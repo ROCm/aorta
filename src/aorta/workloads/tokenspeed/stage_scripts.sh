@@ -51,7 +51,12 @@ fi
 #
 # Best-effort by construction: no /proc/mounts, or a path whose mount cannot be
 # identified, is treated as local rather than blocking staging on a guess.
-# harvest_code_objects.py carries the same logic as `_network_filesystem`.
+#
+# THREE COPIES OF THIS RULE EXIST, and adding an fstype means editing all of
+# them: here, in host_launch.sh, and as _NETWORK_FSTYPES in
+# harvest_code_objects.py. This script is the one that does the staging, so it
+# cannot source a staged helper without a bootstrap problem -- see the longer
+# note in host_launch.sh for why the shared file was dropped.
 _NETWORK_FSTYPES=" afs beegfs ceph cifs fuse.cephfs fuse.glusterfs fuse.sshfs gfs2 glusterfs gpfs lustre nfs nfs4 smb3 "
 # The canonical form of a path that may not exist yet: walk up to the nearest
 # ancestor that does, resolve that with `pwd -P` (which follows symlinked
