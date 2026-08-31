@@ -33,6 +33,18 @@ jobs:
   eval:
     name: gpu eval (MI350)
     runs-on: [self-hosted, gpu]
+    # Defence in depth: today's only pull_request caller (bump-validate.yml)
+    # already refuses forks, so this closes no live hole. It makes the callee
+    # safe by default instead of relying on every future caller to remember,
+    # which matters more here than usual -- this job runs on the self-hosted
+    # MI350 and builds a container as root from the PR's own docker/**, so the
+    # cost of one forgetful caller is the host rather than a bad test run.
+    #
+    # In a called workflow these refer to the caller's event, so the nightly
+    # (workflow_run / workflow_dispatch) is unaffected.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 150
     permissions:
       contents: read
