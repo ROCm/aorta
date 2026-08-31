@@ -2911,6 +2911,36 @@ def test_stage_scripts_leaves_no_temporary_manifest_behind(bash: str, tmp_path: 
     assert not list(dest.glob(".aorta-staged.*")), "temporary manifest left behind"
 
 
+def test_stage_scripts_leaves_an_unrelated_pycache_alone(bash: str, tmp_path: Path) -> None:
+    """The syntax check compiles Python, and py_compile writes bytecode next to
+    the source -- so staging used to create `dest/__pycache__` and then delete it.
+
+    That deletion sat outside the manifest's ownership boundary: `dest` is
+    explicitly allowed to be shared or pre-populated, so a first staging run into
+    a directory that already held an unrelated `__pycache__` removed somebody
+    else's tree. The bytecode goes to a private prefix now, so there is nothing
+    in `dest` to clean up and nothing there gets removed.
+    """
+    dest = tmp_path / "staged"
+    dest.mkdir()
+    squatter = dest / "__pycache__"
+    squatter.mkdir()
+    (squatter / "someone_elses.cpython-311.pyc").write_bytes(b"not ours")
+
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "syntax OK" in proc.stdout, "the Python files were not compiled at all"
+    assert (squatter / "someone_elses.cpython-311.pyc").read_bytes() == b"not ours"
+    assert list(squatter.iterdir()) == [squatter / "someone_elses.cpython-311.pyc"], (
+        "staging wrote its own bytecode into a directory it does not own"
+    )
+
+
 @pytest.mark.parametrize("spelling", ["plain", "trailing_slash", "relative", "symlink"])
 def test_stage_scripts_refuses_to_stage_into_its_own_source(
     bash: str, tmp_path: Path, spelling: str
