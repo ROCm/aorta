@@ -101,8 +101,31 @@ if [ -f "${manifest}" ]; then
 fi
 rm -rf "${dest}/__pycache__"
 
-cp "${src}"/*.sh "${src}"/*.py "${dest}/"
-chmod +x "${dest}"/*.sh
+# Each file lands via a private temporary and a rename, for the same reason the
+# manifest does: `cp` follows a symlink at the destination, so in a shared `dest`
+# another user could plant `host_launch.sh -> <something the caller can write>`
+# and have staging overwrite that target instead. The rename replaces the link
+# rather than following it, and is atomic, so a concurrent run never executes a
+# half-copied script.
+for f in "${src}"/*.sh "${src}"/*.py; do
+  base="$(basename "${f}")"
+  tmp="$(mktemp "${dest}/.aorta-stage.XXXXXX")" || {
+    echo "stage_scripts: cannot create a temporary file in ${dest}" >&2
+    exit 64
+  }
+  if ! cat "${f}" > "${tmp}"; then
+    rm -f "${tmp}"
+    echo "stage_scripts: failed to copy ${f}" >&2
+    exit 64
+  fi
+  # 0755 for the shells and 0644 for the rest, set before the rename so the file
+  # is never briefly visible under its real name with mktemp's 0600.
+  case "${base}" in
+    *.sh) chmod 755 "${tmp}" ;;
+    *) chmod 644 "${tmp}" ;;
+  esac
+  mv -f "${tmp}" "${dest}/${base}"
+done
 
 # Written after the copy so an interrupted run cannot leave a manifest naming
 # files that were never staged.

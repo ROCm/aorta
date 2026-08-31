@@ -568,6 +568,26 @@ def test_host_launch_respects_a_caller_supplied_token(bash: str, tmp_path: Path)
     assert second != first, "two trials sharing a caller token got the same filenames"
 
 
+def test_host_launch_sanitizes_a_caller_token_into_a_filename(
+    bash: str, tmp_path: Path
+) -> None:
+    """The token is a filename component inside the container.
+
+    A branch-shaped label like `feature/foo` is an ordinary thing to correlate a
+    run by, and it put a path separator in the middle of every export and log
+    path -- so the redirection failed on a directory that does not exist, which
+    reads as a broken script rather than as a label with a slash in it. Reduced
+    to the same filename-safe alphabet the container name already used.
+    """
+    argv = _run_host_launch_with_docker_stub(
+        bash, tmp_path, "slashy", extra_env={"TS_RUN_TOKEN": "feature/foo:v2"}
+    )
+    token = _token_from(argv)
+
+    assert "/" not in token and ":" not in token, token
+    assert token.startswith("feature-foo-v2-"), token
+
+
 def test_kernel_probe_names_its_export_after_the_token(bash: str, tmp_path: Path) -> None:
     """The export path must carry the token, or per-trial evidence is lost."""
     fixture = tmp_path / "export.json"
@@ -2174,6 +2194,40 @@ def test_coverage_map_counts_entry_not_lookup(monkeypatch) -> None:
     assert entered["k_ran"] == {"call"}
 
 
+def test_coverage_map_keeps_two_names_sharing_one_callable_apart(monkeypatch) -> None:
+    """The registry maps each name to a callable independently, and two specs
+    may register the same one.
+
+    Caching proxies by callable identity alone handed the second name a proxy
+    still carrying the first, so running the second kernel credited the first
+    and left the second reading as lookup-only -- two wrong rows in the table
+    this script exists to produce, from one lookup.
+    """
+    from collections import defaultdict
+
+    module = _coverage_module()
+    entered: dict = defaultdict(set)
+    dispatched: dict = defaultdict(set)
+    candidates: dict = defaultdict(set)
+    requested: dict = {}
+
+    def shared_kernel(*args, **kwargs):
+        return "result"
+
+    impls = {"k_first": shared_kernel, "k_second": shared_kernel}
+    with _fake_registry(monkeypatch, impls):
+        module._install_probe(entered, dispatched, candidates, requested)
+        from tokenspeed_kernel.registry import KernelRegistry  # type: ignore
+
+        registry = KernelRegistry()
+        # Look the first up without running it, then run the second.
+        registry.get_impl("k_first")
+        assert registry.get_impl("k_second")(1) == "result"
+
+    assert set(entered) == {"k_second"}, "the wrong kernel was credited with the run"
+    assert set(dispatched) == {"k_first", "k_second"}
+
+
 def test_coverage_map_counts_a_triton_launch(monkeypatch) -> None:
     """Triton entry points are invoked as `kernel[grid](...)`.
 
@@ -2519,6 +2573,52 @@ def test_stage_scripts_writes_the_manifest_without_following_a_symlink(
     assert proc.returncode == 64, proc.stdout + proc.stderr
     assert "symlink" in proc.stderr
     assert victim.read_text() == "do not truncate me\n", "the manifest write followed a link"
+
+
+def test_stage_scripts_does_not_write_through_a_planted_symlink(
+    bash: str, tmp_path: Path
+) -> None:
+    """`cp` follows a symlink at the destination.
+
+    `dest` is explicitly allowed to be shared, so another user could plant
+    `host_launch.sh -> <a file this caller can write>` and have staging
+    overwrite that target instead of creating a file in `dest`. The manifest was
+    protected; the copied scripts were not. Each file lands via a private
+    temporary and a rename, which replaces the link rather than following it.
+    """
+    dest = tmp_path / "shared"
+    dest.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not overwrite me\n")
+    (dest / "host_launch.sh").symlink_to(victim)
+
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert victim.read_text() == "do not overwrite me\n", "staging wrote through the symlink"
+    staged = dest / "host_launch.sh"
+    assert not staged.is_symlink(), "the planted link survived instead of being replaced"
+    assert staged.read_text() == (_SOURCE / "host_launch.sh").read_text()
+    assert staged.stat().st_mode & 0o111, "staged shell scripts must stay executable"
+
+
+def test_stage_scripts_leaves_no_temporary_file_behind(bash: str, tmp_path: Path) -> None:
+    """Both the per-file staging temporaries and the manifest one are renamed
+    into place, so a shared directory does not accumulate `.aorta-stage.*`."""
+    dest = tmp_path / "staged"
+    dest.mkdir()
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not list(dest.glob(".aorta-stage.*")), "per-file temporary left behind"
 
 
 def test_stage_scripts_leaves_no_temporary_manifest_behind(bash: str, tmp_path: Path) -> None:
