@@ -257,12 +257,28 @@ and a shape list — and only `gemm.mm` has all three. `--op
 attention.mha_prefill` dies with `KeyError: No standard shapes registered for
 attention.mha_prefill. Known: gemm.mm` before any kernel launches. The
 generators that *do* exist for `moe.align_block_size` and `quantize.fp8_*` are
-keyed to operator names that no registered kernel uses (`moe.apply`,
-`quantization.fp8`), so they match nothing either.
+leftovers rather than candidates: they were written for kernel *modes* that no
+longer exist as such. The three `quantize.*` generators served modes that
+tokenspeed PR 216 consolidated into `quantization.fp8_with_scale`, and the
+`moe.align_block_size` mode was removed outright by tokenspeed PR 374. Each one
+therefore covers only a subset of the operation it once served, which is why no
+registered kernel maps to it.
 
-This is an upstream TokenSpeed gap, not an aorta one. The recipes name it as its
-own detector (`ts_kernel_no_input_generator`, `ts_kernel_no_standard_shapes`) so
-pointing one at an unsupported operator is self-diagnosing.
+That is not a naming mistake, and renaming them would not fix it. TokenSpeed's
+maintainer answered our report on exactly this point in
+[tokenspeed#1244](https://github.com/lightseekorg/tokenspeed/issues/1244): "the
+modes from the generators shouldn't become new standalone operations" — the
+right fix is generalising each generator to the operation as it now stands, not
+promoting the old mode back into one.
+
+This is an upstream TokenSpeed gap, not an aorta one, and the same answer
+explains why the coverage is this thin in the first place: "we are missing a lot
+of input generator implementations because most numerical correctness testing is
+done via unit tests." Upstream welcomes PRs adding them, and that is the only
+route to driving more than `gemm.mm` through the benchmark harness. The recipes
+name the gap as its own detector (`ts_kernel_no_input_generator`,
+`ts_kernel_no_standard_shapes`) so pointing one at an unsupported operator is
+self-diagnosing.
 
 It is **not**, however, the binding constraint on kernel coverage. TokenSpeed's
 own pytest suites build these inputs themselves, so they reach what the
