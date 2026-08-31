@@ -2204,14 +2204,20 @@ def test_sharegpt_requires_tpot_from_the_export_not_from_output_len(tmp_path, mo
 
 
 def test_tpot_is_not_required_when_eos_may_end_a_request_early(tmp_path, monkeypatch):
-    """`ignore_eos: false` is supported, and it unpins the output length.
+    """`ignore_eos: false` unpins the output length, on the one dataset that can
+    express it.
 
     Without `--ignore-eos` the model stops at its first EOS token, which for a
     short prompt can be immediately -- so every request may emit exactly one
-    token however large `output_len` is, and TPOT is genuinely undefined. The
-    audit keyed off `output_len > 1` and rejected that correct export.
+    token, and TPOT is genuinely undefined. The audit keyed off `output_len > 1`
+    and rejected that correct export. `sharegpt` because the bench CLI forces
+    EOS to be ignored for `random`, so the combination is rejected up front.
     """
-    wl = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False)
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    kwargs = {"dataset": "sharegpt", "dataset_path": str(dataset)}
+
+    wl = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False, **kwargs)
     wl.setup()
 
     doc = _bench_doc(completed=32, failed=0)
@@ -2225,7 +2231,7 @@ def test_tpot_is_not_required_when_eos_may_end_a_request_early(tmp_path, monkeyp
     assert result.passed is True, result.failure_details
 
     # Still required when the export shows a second token was emitted.
-    wl2 = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False)
+    wl2 = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False, **kwargs)
     wl2.setup()
     doc2 = _bench_doc(completed=32, failed=0)
     doc2["total_output_tokens"] = 4096
@@ -3122,6 +3128,39 @@ def test_an_unknown_dataset_is_rejected(tmp_path):
         _make(tmp_path, dataset="wikitext").setup()
 
 
+def test_ignore_eos_false_is_rejected_for_the_random_dataset(tmp_path):
+    """It could never have taken effect, and the trial reported it anyway.
+
+    `tokenspeed bench serve` sets `ignore_eos = True` for the random dataset on
+    an OpenAI-compatible backend after parsing its arguments -- after it has
+    honoured `--disable-ignore-eos` -- so no argv reaches it and the requests go
+    out at a pinned length. Accepting the setting published `ignore_eos: false`
+    on a run that ignored EOS throughout: the reported configuration is not the
+    one that ran, which is the mislabelled pass the owned-flag guards exist for.
+    """
+    with pytest.raises(ValueError, match="cannot take effect with dataset: random"):
+        _make(tmp_path, ignore_eos=False).setup()
+
+
+def test_the_rejection_names_the_payload_route(tmp_path):
+    """Refusing without naming `--extra-body` would read as "not supported",
+    when the payload is applied over the forced value and does reach it."""
+    with pytest.raises(ValueError, match="--extra-body"):
+        _make(tmp_path, ignore_eos=False).setup()
+
+
+def test_ignore_eos_false_is_accepted_for_sharegpt(tmp_path):
+    """The bench CLI keys the override on the dataset name, so ShareGPT honours
+    the flag -- the guard must not spread to the case that works."""
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    wl = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset), ignore_eos=False)
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    assert wl._container_env()["TS_IGNORE_EOS"] == "0"
+
+
 @pytest.mark.parametrize(
     "env_overrides,expect",
     [
@@ -3130,6 +3169,12 @@ def test_an_unknown_dataset_is_rejected(tmp_path):
         (
             {"TS_DATASET": "sharegpt", "TS_DATASET_PATH": "/nonexistent/ds.json"},
             "is not readable",
+        ),
+        # Hand-run, this is the setting that quietly does nothing: the bench CLI
+        # pins the output length for `random` whatever the argv says.
+        (
+            {"TS_DATASET": "random", "TS_IGNORE_EOS": "0"},
+            "cannot take effect with TS_DATASET=random",
         ),
     ],
 )

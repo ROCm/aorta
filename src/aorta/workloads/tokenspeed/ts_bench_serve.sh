@@ -331,6 +331,21 @@ TOKEN="${TS_RUN_TOKEN:-$$}"
 GATEWAY="http://127.0.0.1:${PORT}"
 CONTROL="http://127.0.0.1:${CONTROL_PORT}"
 
+# `tokenspeed bench serve` sets ignore_eos back on for the random dataset on an
+# OpenAI-compatible backend -- which this always is, `--backend openai` below --
+# and it does so after parsing, so it overwrites both an absent --ignore-eos and
+# an explicit --disable-ignore-eos. Running anyway would serve a pinned output
+# length while the caller believed EOS was being respected, and the export would
+# not say otherwise. Refuse instead, and name the one route that reaches it: the
+# request payload, since extra_body is merged over the forced value.
+if [ "${DATASET}" = "random" ] && [ "${IGNORE_EOS}" != "1" ]; then
+  echo "TS_BENCH_FAIL: usage TS_IGNORE_EOS=${IGNORE_EOS} cannot take effect with TS_DATASET=random"
+  echo "  The bench CLI forces ignore_eos on for the random dataset after it"
+  echo "  parses its arguments. Use TS_DATASET=sharegpt, or ask for it in the"
+  echo "  payload: TS_BENCH_ARGS='[\"--extra-body\",\"{\\\"ignore_eos\\\": false}\"]'"
+  exit 64
+fi
+
 # Day-long ceilings are sanity rails, not policy: they catch a millisecond value
 # passed as seconds. The grace period bounds a `seq` loop, and at 0 teardown
 # would escalate straight to SIGKILL, handing the next cell a KV cache the kernel

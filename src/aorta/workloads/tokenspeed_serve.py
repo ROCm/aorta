@@ -397,7 +397,11 @@ class TokenSpeedServeWorkload(Workload):
             reach readiness (default: ``ready_timeout_sec``). TokenSpeed's own
             default is 60s, which a cold start exceeds.
         ignore_eos: hold OSL fixed so every cell does the same work
-            (default ``True``).
+            (default ``True``). ``False`` is only accepted for
+            ``dataset: sharegpt``: the bench CLI forces it back on for the
+            random dataset after parsing, so the setting could not have taken
+            effect. Use ``bench_args: ["--extra-body", '{"ignore_eos":
+            false}']`` to reach it on ``random``.
         seed: dataset/sampling seed (default ``0``).
         percentile_metrics: which metrics get percentiles
             (default ``"ttft,tpot,itl,e2el"``).
@@ -524,6 +528,27 @@ class TokenSpeedServeWorkload(Workload):
         )
 
         self._ignore_eos = self._bool("ignore_eos", True)
+        # `random` pins the output length whatever the argv says. `tokenspeed
+        # bench serve` sets `ignore_eos = True` for the random dataset on an
+        # OpenAI-compatible backend *after* parsing, which is after it has
+        # honoured `--disable-ignore-eos` -- so neither omitting `--ignore-eos`
+        # nor passing the disable flag reaches the request. Accepting `false`
+        # would publish `ignore_eos: false` on a trial that served a pinned
+        # length: the reported configuration is not the one that ran, which is
+        # the mislabelled pass the owned-flag guards exist to prevent. The
+        # payload route does work -- `extra_body` is applied over the forced
+        # value, and `--extra-body` is not a flag this workload reserves -- so
+        # the message names it rather than only refusing.
+        if self._dataset == _DEFAULT_DATASET and not self._ignore_eos:
+            raise ValueError(
+                "tokenspeed_serve: ignore_eos: false cannot take effect with "
+                "dataset: random. The bench CLI forces EOS to be ignored for "
+                "that dataset after parsing its arguments, so the trial would "
+                "report a setting the run did not have. Use dataset: sharegpt, "
+                "or ask for it in the request payload with bench_args: "
+                "[\"--extra-body\", '{\"ignore_eos\": false}']."
+            )
+
         self._run_as_current_user = self._bool("run_as_current_user", True)
         self._keep_work_dir = self._bool("keep_work_dir", True)
 
@@ -2013,18 +2038,21 @@ class TokenSpeedServeWorkload(Workload):
         # average and an absent or zero value is correct, not a fault.
         #
         # Which source answers that depends on whether the configuration
-        # actually determines the output length. `random` *with* `--ignore-eos`
-        # does: the recipe pins the length and ignoring EOS holds it there, so
-        # `output_len` is exact.
+        # actually determines the output length. `random` does: the recipe pins
+        # the length and EOS is ignored -- forced on by the bench CLI and
+        # required to be so by validation above -- which holds it there, so
+        # `output_len` is exact. The `_ignore_eos` half of the condition is
+        # therefore redundant today and kept as the statement of what the branch
+        # depends on.
         #
-        # Nothing else does. ShareGPT takes its lengths from the conversations
-        # and the bench CLI never sees `output_len` at all. And `ignore_eos:
-        # false` -- a supported setting -- lets the model stop whenever it emits
+        # ShareGPT does not. It takes its lengths from the conversations and the
+        # bench CLI never sees `output_len` at all, and with `ignore_eos: false`
+        # -- which only ShareGPT can express -- the model stops whenever it emits
         # an EOS token, which for a short prompt can be immediately, so every
-        # request may produce exactly one token however large `output_len` is.
-        # Deciding from `output_len` in either case makes a step's validity
-        # hinge on a number the run was free to ignore, and rejects a correct
-        # export for not carrying a metric that was genuinely undefined.
+        # request may produce exactly one token. Deciding from `output_len` there
+        # makes a step's validity hinge on a number the run never saw, and
+        # rejects a correct export for not carrying a metric that was genuinely
+        # undefined.
         #
         # The export is the only source that knows: more output tokens than
         # completed requests means at least one request emitted a second token.
