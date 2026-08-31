@@ -357,6 +357,13 @@ def _run_kernel(args: argparse.Namespace, cache_dir: Path) -> None:
         _force_remove_container(container, env)
         raise
     if proc.returncode != 0:
+        # A nonzero client is not evidence the container is gone. `--rm` fires
+        # when the *container* exits, and the client can return nonzero while
+        # the daemon still has it running -- an API disconnect, or the client
+        # being killed -- which leaves the GPU held for everything that follows.
+        # Timeout was covered and this path was not, though it reaches the same
+        # state. A no-op once `--rm` has done its job.
+        _force_remove_container(container, env)
         sys.stderr.write(proc.stdout[-4000:])
         sys.stderr.write(proc.stderr[-4000:])
         raise SystemExit(
