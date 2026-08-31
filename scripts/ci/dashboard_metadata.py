@@ -199,6 +199,11 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "summary": "Offline LLM prefill/decode latency and throughput.",
             "workloads": ["inference_offline"],
         },
+        "serving": {
+            "label": "Serving",
+            "summary": "Online LLM serving latency (TTFT/TPOT) and token throughput.",
+            "workloads": ["tokenspeed_serve_smoke"],
+        },
         "training": {
             "label": "Training",
             "summary": "PyTorch DDP and FSDP training step times.",
@@ -291,6 +296,73 @@ DASHBOARD_METADATA: dict[str, Any] = {
                     "correctness gate in regression_baselines.yaml; latency and "
                     "throughput are recorded on the dashboard but not perf-gated yet."
                 ),
+            ),
+        },
+        "tokenspeed_serve_smoke": {
+            "title": "TokenSpeed online serving",
+            "summary": (
+                "Time to first token, time per output token, and token throughput "
+                "from a containerised TokenSpeed server."
+            ),
+            # Deliberately not the p99s or median_itl_ms: see
+            # docs/tokenspeed-gating-rollout.md for which serving metrics are
+            # stable enough to read as headline numbers.
+            "headline_metrics": [
+                "median_ttft_ms",
+                "median_tpot_ms",
+                "output_throughput",
+            ],
+            "recipe": "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml",
+            "min_gpus": 1,
+            "run_command": (
+                "aorta sweep run --recipe "
+                "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml"
+            ),
+            "repro": _workload_repro(
+                entry_name="tokenspeed_serve_smoke",
+                prerequisites=[
+                    "One gfx950 (MI355X) or gfx1250 GPU — the TokenSpeed image targets these",
+                    "A working docker client and daemon: the engine runs in its own container",
+                    "A node-local work_dir — an NFS home under root-squash cannot be bind-mounted",
+                    "Egress to the Hugging Face Hub, or a pre-populated cache plus hf_offline",
+                ],
+                recipe="recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml",
+                run_command=(
+                    "aorta sweep run --recipe "
+                    "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml"
+                ),
+                min_gpus=1,
+                distributed=False,
+                dry_run=(
+                    "aorta sweep run --recipe "
+                    "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml --dry-run"
+                ),
+                verify_title="Inspect serving latency and throughput artifacts",
+                verify_extra=[
+                    _METRICS_IN_PERF.format(
+                        pattern="ttft|tpot|output_throughput|completed_total"
+                    ),
+                ],
+                success=(
+                    "Both cells pass with completed_total == num_prompts * steps and "
+                    "failed_total == 0. median_ttft_ms / median_tpot_ms / "
+                    "output_throughput appear in perf.md. Serving cells are "
+                    "record-only until a baseline is blessed — see "
+                    "docs/tokenspeed-gating-rollout.md for which metrics get bounds "
+                    "and why bring-up time never does (189-379s on one node with "
+                    "nothing changed)."
+                ),
+                setup_extra=[
+                    {
+                        "title": "Serving-specific: pre-warm the model cache as the running uid",
+                        "commands": [
+                            "export HF_HOME=/tmp/ts-work-serve/u$(id -u)/hf",
+                            "# run_as_current_user defaults to true: a cache populated by a",
+                            "# root container leaves the trial failing with PermissionError",
+                            "docker pull lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78",
+                        ],
+                    },
+                ],
             ),
         },
         "training_ddp": {
