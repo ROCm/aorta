@@ -1,0 +1,80 @@
+# TokenSpeed serving: the concurrency curve above 64.
+#
+# `tokenspeed-serve-load.yaml` stops at a cap of 64 and its measured table says
+# why that is not the end of the story: throughput returned 6.8x for the first
+# 8x of cap, 3.5x for the next 4x, and 1.58x for the last 2x -- 0.85, 0.88 then
+# 0.79 per unit of cap, with p99 TTFT up 35% (315 -> 426 ms) to buy that last
+# 58%. That is a curve bending, not a curve flat. 64 is past the efficient
+# point without being the ceiling, and nothing on this node has bracketed the
+# ceiling yet.
+#
+# This recipe brackets it, with two more doublings and nothing else changed.
+# Two is the right number: one more point can only say "still rising", while
+# 128 and 256 together separate a curve still paying for cap from one that has
+# stopped -- if the 128 row returns materially less than the 0.79 the 64 row
+# managed, the knee is behind us and 256 says how far behind.
+#
+# `conc-64` is repeated here rather than borrowed from the other recipe. Its
+# numbers there were measured under a different cell neighbourhood and a
+# different server instance, and the whole point of the rows above is a
+# like-for-like ratio against it; an anchor measured in the same run is what
+# makes the two tables joinable. If this recipe's conc-64 disagrees with that
+# recipe's, the run-to-run spread is the story and the ratios above it are not
+# yet evidence.
+#
+# `num_prompts` stays at 4x the cap, which is the ratio the existing recipe
+# uses at 8 / 32 / 64. It is not a taste: requests that drain before the server
+# reaches steady state measure the ramp instead of the throughput, and holding
+# the *ratio* fixed rather than the count is what keeps these rows comparable
+# with the ones below them. Change one and the whole table has to be
+# re-measured -- see docs/tokenspeed-serving.md.
+#
+# As in the other load recipe, `matrix.md`'s confound ratio is meaningless
+# across these cells: a heavier load is legitimately slower. Read `perf.md`.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-load-high.yaml \
+#     --output-dir /tmp/ts-serve-load-high
+schema_version: 1
+ticket: TOKENSPEED-SERVE-LOAD-HIGH
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  # Digest, not the :nightly-20260714 tag it came from -- see the sibling
+  # recipe. These rows are meant to be read against that recipe's, which
+  # requires both to have run on the same image content.
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  model: Qwen/Qwen3-0.6B
+  input_len: 512
+  output_len: 128
+  num_warmups: 1
+  warmup_steps: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  ready_timeout_sec: 1200
+
+cells:
+  # The anchor. Identical to `conc-64` in tokenspeed-serve-load.yaml, on
+  # purpose: it is what joins this table to that one.
+  - name: conc-64
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 64
+      num_prompts: 256
+
+  - name: conc-128
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 128
+      num_prompts: 512
+
+  - name: conc-256
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 256
+      num_prompts: 1024

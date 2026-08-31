@@ -1,0 +1,84 @@
+# TokenSpeed serving: the dense curve above 8B.
+#
+# `tokenspeed-serve-models.yaml` runs Qwen3 0.6B / 1.7B / 4B / 8B and stops
+# there, so the dense line ends a factor of four below the largest model in the
+# matrix. This recipe extends it to 32B on one GPU, in the same family and the
+# same dtype, so exactly one thing moves across the whole curve.
+#
+# Qwen3-8B is the anchor. It is a cell of the existing sweep, repeated here so
+# this table joins to that one rather than floating: the curve runs 0.6B -> 8B
+# there and 8B -> 32B here, and the shared row is what makes those one curve.
+# Measured in the same run for the same reason `tokenspeed-serve-load-high.yaml`
+# repeats its conc-64 cell -- and for the reason that recipe's anchor
+# demonstrated, where the repeated cell came out 25% below its previously
+# recorded value. A denominator borrowed across runs carries that run's spread
+# into every ratio built on it.
+#
+# An MoE cell at this size belongs here and is not here, because it cannot come
+# up. `Qwen/Qwen3-30B-A3B` -- the obvious BF16 MoE partner for the 32B dense
+# cell, and the model that would separate "MoE" from "MXFP4" in the matrix --
+# dies during CUDA graph capture on this image:
+#
+#   tokenspeed_kernel_amd/ops/moe/gluon_bf16_moe/moe_align_device.py:268
+#     em, num_blocks = (int(x) for x in meta.tolist())  # single host sync
+#   RuntimeError: Cannot copy between CPU and CUDA tensors during CUDA graph
+#   capture unless the CPU tensor is pinned.
+#
+# It serves normally under `--enforce-eager`, which skips capture. That is a
+# usable workaround but not one that can live in this recipe: an eager cell
+# beside two graph-captured ones is a different execution mode, and the
+# comparison this recipe exists to support would be measuring that instead of
+# the model. See tokenspeed-serve-moe-vs-dense.yaml, where both cells are
+# eager and therefore comparable to each other.
+#
+# Load is identical to the existing model sweep (32 requests per step, ISL 512
+# / OSL 128, concurrency 8), because that is what makes the rows comparable.
+#
+# Both repos are ungated, so no HF token is needed. Pre-warm the cache as the
+# uid the trial runs as -- roughly 80 GB for the two -- and create the per-uid
+# directory mode 0700, or the workload refuses the trial because exports
+# written to a group-writable directory can be replaced between the run and the
+# audit that reads them.
+#
+# As in the other multi-model recipe, `matrix.md`'s confound ratio is not
+# meaningful across these cells: a bigger model is legitimately slower. Read
+# `perf.md`.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-models-large.yaml \
+#     --output-dir /tmp/ts-serve-models-large
+schema_version: 1
+ticket: TOKENSPEED-SERVE-MODELS-LARGE
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  warmup_steps: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  # 2400 rather than the 1200 the small-model sweep uses: a 32B checkpoint is
+  # 65 GB against 16 GB at 8B, and bring-up has to cover the read plus Triton
+  # compilation against whatever the node's caches already hold. Startup is
+  # noisy independently of size -- 189 to 379 s across repeats elsewhere in
+  # this integration -- so this is headroom, not an estimate.
+  ready_timeout_sec: 2400
+
+cells:
+  - name: qwen3-8b
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-8B
+
+  - name: qwen3-32b-dense
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-32B

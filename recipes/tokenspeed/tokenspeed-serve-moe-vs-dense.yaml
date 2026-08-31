@@ -1,0 +1,82 @@
+# TokenSpeed serving: MoE against dense at the same size, in eager mode.
+#
+# The matrix has exactly one MoE model, gpt-oss-20b, and it is also the only
+# quantised model and the only non-Qwen model. So **MoE and MXFP4 are perfectly
+# confounded**: any difference between it and the Qwen3 dense line could be the
+# architecture or the numerics, and nothing else committed can separate them.
+#
+# These two cells separate them. Same family, same tokenizer, same dtype, near
+# identical total parameter count, differing in architecture and nothing else:
+#
+#   Qwen3-30B-A3B  MoE, BF16, 30B total / 3B active
+#   Qwen3-32B      dense, BF16, 32B
+#
+# Why both cells carry `--enforce-eager`, which no other recipe here does.
+# Qwen3-30B-A3B cannot come up with CUDA graph capture on this image -- the
+# BF16 Gluon MoE path does a host sync inside capture, which torch forbids:
+#
+#   tokenspeed_kernel_amd/ops/moe/gluon_bf16_moe/moe_align_device.py:268
+#     em, num_blocks = (int(x) for x in meta.tolist())  # single host sync
+#   RuntimeError: Cannot copy between CPU and CUDA tensors during CUDA graph
+#   capture unless the CPU tensor is pinned.
+#
+# `--enforce-eager` skips capture and the model serves normally. The flag is on
+# the *dense* cell too, and that is the whole design of this recipe: the
+# comparison is only meaningful if both sides run in the same execution mode.
+# One eager cell beside one captured cell would measure the mode, not the
+# architecture, and the mode is worth more than the architecture here -- eager
+# decode is several times slower.
+#
+# What that costs, and it is not small: **these rows are not comparable to any
+# other recipe in this directory**, all of which run with capture enabled.
+# Read them against each other and nothing else. A 32B dense cell appears in
+# both this recipe and tokenspeed-serve-models-large.yaml precisely so the size
+# of that gap is measurable rather than assumed.
+#
+# Retire this recipe when the upstream MoE kernel stops syncing inside capture.
+# At that point both models run captured, the eager flags come off, and the
+# comparison joins the rest of the matrix.
+#
+# Load is identical to the other model recipes (32 requests per step, ISL 512 /
+# OSL 128, concurrency 8). Both repos are ungated. Pre-warm the cache as the
+# uid the trial runs as -- roughly 125 GB for the two -- with the per-uid
+# directory mode 0700.
+#
+# `matrix.md`'s confound ratio is not meaningful across these cells. Read
+# `perf.md`.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-moe-vs-dense.yaml \
+#     --output-dir /tmp/ts-serve-moe-vs-dense
+schema_version: 1
+ticket: TOKENSPEED-SERVE-MOE-VS-DENSE
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  warmup_steps: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  ready_timeout_sec: 2400
+
+cells:
+  - name: qwen3-30b-a3b-moe
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-30B-A3B
+      serve_args: ["--enforce-eager"]
+
+  - name: qwen3-32b-dense
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-32B
+      serve_args: ["--enforce-eager"]
