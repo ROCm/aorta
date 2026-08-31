@@ -66,6 +66,7 @@ import hashlib
 import json
 import os
 import posixpath
+import secrets
 import shutil
 import subprocess
 import sys
@@ -338,7 +339,13 @@ def _run_kernel(args: argparse.Namespace, cache_dir: Path) -> None:
     # compile would otherwise keep a GPU busy for the rest of the sweep with no
     # handle left to stop it. `--rm` covers the normal exit; the name covers the
     # abnormal one.
-    container = f"aorta-ts-harvest-{os.getpid()}"
+    #
+    # The random half is what makes the name cleanup authority. A pid alone is
+    # predictable and reused, so a stale container from an earlier harvest --
+    # or one another daemon user named first -- would collide on `docker run`,
+    # and the removal below would then delete a container this process never
+    # started.
+    container = f"aorta-ts-harvest-{os.getpid()}-{secrets.token_hex(8)}"
     docker_cmd = [
         "docker",
         "run",

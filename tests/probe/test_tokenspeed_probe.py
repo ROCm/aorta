@@ -2481,7 +2481,7 @@ def test_harvest_names_its_container_so_a_timeout_is_recoverable() -> None:
     the sweep.
     """
     source = (_SOURCE / "harvest_code_objects.py").read_text()
-    assert 'f"aorta-ts-harvest-{os.getpid()}"' in source
+    assert 'f"aorta-ts-harvest-{os.getpid()}-{secrets.token_hex(8)}"' in source
     assert "--name" in source
     assert "_force_remove_container" in source
     assert "except subprocess.TimeoutExpired" in source
@@ -2527,6 +2527,61 @@ def test_harvest_removes_the_container_when_the_client_exits_nonzero(
         module._run_kernel(args, cache_dir)
 
     assert removed, "a nonzero docker client left the container behind"
+
+
+def test_harvest_only_removes_a_container_it_could_have_created(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The name has to be unguessable before removal by name is safe.
+
+    A pid is predictable and gets reused, so a stale harvest container -- or one
+    another daemon user named first -- would collide on `docker run`, and the
+    removal on the failure path would then delete somebody else's container.
+    """
+    module = _harvest_module()
+
+    def one_run() -> tuple[str, list[str]]:
+        removed: list[str] = []
+        launched: list[str] = []
+        monkeypatch.setattr(
+            module, "_force_remove_container", lambda name, env: removed.append(name)
+        )
+
+        def fake_run(cmd, *a, **k):
+            launched.append(cmd[cmd.index("--name") + 1])
+            return subprocess.CompletedProcess(cmd, 1, "out", "err")
+
+        monkeypatch.setattr(module.subprocess, "run", fake_run)
+        cache_dir = tmp_path / f"cache-{len(list(tmp_path.iterdir()))}"
+        cache_dir.mkdir()
+        args = argparse.Namespace(
+            image="example/image:tag",
+            gpus="0",
+            network="bridge",
+            docker_config=None,
+            timeout=60,
+            kernel="gluon_mm_a16w16_gfx950",
+            op=None,
+            dtype="bf16",
+            dtype_role="a",
+            pytest_suite=None,
+            pytest_k=None,
+        )
+        with pytest.raises(SystemExit):
+            module._run_kernel(args, cache_dir)
+        assert len(launched) == 1
+        # What it removes is what it named, or the removal is aimed elsewhere.
+        assert removed == launched
+        return launched[0], removed
+
+    first, _ = one_run()
+    second, _ = one_run()
+
+    pid_prefix = f"aorta-ts-harvest-{os.getpid()}-"
+    assert first.startswith(pid_prefix) and second.startswith(pid_prefix)
+    assert first != second, "the pid is the whole name, so the name is guessable"
+    # Long enough that a collision is not something to reason about.
+    assert len(first) - len(pid_prefix) >= 16
 
 
 def _coverage_module():
