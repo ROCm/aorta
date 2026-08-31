@@ -662,11 +662,32 @@ pass | consan ran/pass | access  77/77  | analysis_complete=True | _mfma_lds_med
 **On the attention kernels it does not**, and the reason is upstream rather than
 here. All 20 harvested objects discover their sites, report them supported, and
 then fail to lower every one of them — 2502 sites, `access_patched=0`,
-`lowering_reason=instrumentation_patch_missing`. Worse, the hook counts barrier
-sites without itemizing them on that path, so aorta's coverage cross-check fails
-closed with `consan_output_parse_error: barrier site count mismatch` and the real
-number never reaches the report. Filed as
-[#405](https://github.com/ROCm/aorta/issues/405).
+`lowering_reason=instrumentation_patch_missing`. Filed as
+[#405](https://github.com/ROCm/aorta/issues/405) here and as
+[rocm-systems#10955](https://github.com/ROCm/rocm-systems/issues/10955)
+upstream, which is where the defect is.
+
+How aorta *reports* that has since changed, and this branch does not carry the
+change. The hook counts barrier sites without itemizing them on this path, and
+the coverage cross-check used to treat that as malformed evidence: the run failed
+closed with `consan_output_parse_error: barrier site count mismatch`, discarding
+the counts and the lowering reason along with it.
+[#408](https://github.com/ROCm/aorta/pull/408) (`e61f455`) inverted that on
+`main`. A site kind the hook counted but never itemized is now recorded as a
+named coverage gap — `reader 1 barrier sites not itemized: 0 of 12` — and the run
+reports `consan_coverage_incomplete` carrying the real counts and the reason
+lowering failed. *Partial* itemization still raises, since evidence that
+contradicts itself is not a gap. #408 is on `main` but not on this branch, so a
+run from here still shows the old parse error.
+
+The two upstream issues are distinct and neither subsumes the other.
+rocm-systems#10955 is the static lowering defect: fixing it takes the attention
+objects from nothing patched to fully patched (`0/232` to `232/232` on the object
+measured).
+[rocm-systems#10966](https://github.com/ROCm/rocm-systems/issues/10966) is the
+separate dynamic-records gap — a fully patched object under this flow still
+produces no dynamic records — so 10955 alone buys static coverage and no race
+evidence.
 
 Waitcheck is unaffected and passes on all 20, so these kernels are reachable —
 ConSan simply cannot instrument them yet.
@@ -751,11 +772,19 @@ python -m pytest tests/probe/test_tokenspeed_probe.py -q
   neither route reaches them — see
   [What the suites actually cover](#what-the-suites-actually-cover).
 - **ConSan on the attention kernels.** Works on gemm; every site fails to lower
-  on attention, and the failure is reported as a parse error rather than as
-  incomplete coverage. Blocked on
-  [#405](https://github.com/ROCm/aorta/issues/405).
+  on attention. Blocked on [#405](https://github.com/ROCm/aorta/issues/405) here
+  and on
+  [rocm-systems#10955](https://github.com/ROCm/rocm-systems/issues/10955)
+  upstream. The reporting half is done —
+  [#408](https://github.com/ROCm/aorta/pull/408) records the un-itemized barrier
+  sites as `consan_coverage_incomplete` instead of a parse error — but that is on
+  `main`, not on this branch.
 - **Dynamic race evidence anywhere.** The loader instruments but does not
   dispatch, so every ConSan lane here is static-coverage only — see
   [Why the recipes default to `consan_policy: lenient`](#why-the-recipes-default-to-consan_policy-lenient).
+  Tracked upstream as
+  [rocm-systems#10966](https://github.com/ROCm/rocm-systems/issues/10966), which
+  is a separate gap from the lowering defect above: even a fully patched object
+  records nothing under this flow.
 - **A larger model.** `gpt-oss-20b` is TokenSpeed's canonical AMD benchmark
   model; only Qwen3-0.6B has been run.
