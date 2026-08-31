@@ -197,7 +197,6 @@ elif [ -f "${manifest}" ]; then
     rm -f "${dest:?}/${staged}"
   done < "${manifest}"
 fi
-rm -rf "${dest}/__pycache__"
 
 # Each file lands via a private temporary and a rename, for the same reason the
 # manifest does: `cp` follows a symlink at the destination, so in a shared `dest`
@@ -249,6 +248,24 @@ mv -f "${manifest_tmp}" "${manifest}"
 trap - EXIT
 
 echo "stage_scripts: staged to ${dest}"
+
+# py_compile writes bytecode next to the source by default, so the syntax check
+# below used to create `${dest}/__pycache__` and then delete it. That deletion
+# was outside the manifest's ownership boundary: `dest` is explicitly allowed to
+# be shared or pre-populated, so a first staging run into a directory that
+# already held an unrelated `__pycache__` removed somebody else's tree -- the
+# one kind of collateral the rest of this script goes out of its way to avoid.
+#
+# Redirecting the bytecode into a private prefix instead means nothing is
+# created in `dest` and nothing has to be cleaned up there. A `__pycache__` left
+# by an older version of this script is inert: it is only ever mounted read-only
+# into the container, and a stale entry would be recompiled rather than used.
+pycache_dir="$(mktemp -d "${TMPDIR:-/tmp}/aorta-pycache.XXXXXX")" || {
+  echo "stage_scripts: cannot create a temporary bytecode directory" >&2
+  exit 64
+}
+trap 'rm -rf "${pycache_dir}"' EXIT
+
 # Iterating the manifest rather than globbing `dest`, for the same reason the
 # removal above does: in a shared directory the glob would also pick up files
 # this script never staged, and a syntax error in one of those would fail the
@@ -259,7 +276,7 @@ while IFS= read -r staged; do
   # the only symptom is a failed trial.
   case "${f}" in
     *.sh) checker=(bash -n "${f}") ;;
-    *.py) checker=(python3 -m py_compile "${f}") ;;
+    *.py) checker=(env "PYTHONPYCACHEPREFIX=${pycache_dir}" python3 -m py_compile "${f}") ;;
   esac
   "${checker[@]}" || {
     echo "stage_scripts: syntax error in ${f}" >&2
@@ -267,7 +284,6 @@ while IFS= read -r staged; do
   }
   printf '  %s (%s bytes)\n' "${staged}" "$(stat -c%s "${f}")"
 done < "${manifest}"
-# py_compile drops caches next to the source; they would otherwise be copied
-# into the container on the next run for no reason.
-rm -rf "${dest}/__pycache__"
+rm -rf "${pycache_dir}"
+trap - EXIT
 echo "stage_scripts: syntax OK"
