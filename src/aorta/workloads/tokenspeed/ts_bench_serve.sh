@@ -48,7 +48,8 @@
 #                         of strings, e.g. ["--foo","bar baz"]
 #   TS_BENCH_STEPS        measured bench repetitions      (default 1)
 #   TS_BENCH_WARMUP_STEPS discarded bench repetitions run
-#                         first, to absorb Triton JIT     (default 0)
+#                         first, to absorb Triton JIT     (default 1, matching
+#                         the workload's `warmup_steps`)
 #   TS_GATEWAY_STARTUP_TIMEOUT  orchestrator gateway budget (default READY_TIMEOUT)
 #   TS_DRAIN_TIMEOUT      gateway drain on shutdown       (default TEARDOWN_GRACE - 5)
 #   TS_NUM_PROMPTS        requests per bench step         (default 64)
@@ -277,7 +278,12 @@ reject_owned_flags TS_BENCH_ARGS "${BENCH_EXTRA_ARGS[@]+"${BENCH_EXTRA_ARGS[@]}"
 
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 BENCH_STEPS="${TS_BENCH_STEPS:-1}"
-WARMUP_STEPS="${TS_BENCH_WARMUP_STEPS:-0}"
+# 1, matching the workload's `warmup_steps`, for the same reason it defaults
+# there: the first bench against a fresh server pays Triton JIT and runs several
+# times slower than the rest. The workload always sets this, so the default is
+# what a hand-run gets -- and a hand-run that disagreed with the recipes was
+# measuring something they do not.
+WARMUP_STEPS="${TS_BENCH_WARMUP_STEPS:-1}"
 DATASET="${TS_DATASET:-random}"
 case "${DATASET}" in
   random)

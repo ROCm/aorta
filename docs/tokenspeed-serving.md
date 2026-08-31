@@ -268,7 +268,7 @@ matter most:
 | `dataset` | `random` | `random` or `sharegpt`. See [Datasets](#datasets). |
 | `dataset_path` | — | Host path to a ShareGPT JSON. Required for `sharegpt`, rejected for `random`. |
 | `max_concurrency` | unbounded | In-flight request cap. |
-| `request_rate` | `inf` | `inf` submits everything at once. |
+| `request_rate` | `inf` | The quoted string `"inf"` submits everything at once; an unquoted infinite float is rejected. See below. |
 | `warmup_steps` | `1` | Discarded bench steps. See below. |
 | `num_warmups` | `1` | Warmup requests *within* a bench step. |
 | `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. |
@@ -513,6 +513,17 @@ declaration cannot overreach and forbid a legitimate mitigation.
 Any `TS_*` knob the workload does not set — an engine
 tunable, an attention backend — is forwarded normally; all 22 mitigations in
 aorta's registry pass through untouched.
+
+### Unlimited has to be written as a quoted `"inf"`
+
+`request_rate: "inf"`, `"+inf"` and `"Infinity"` mean submit everything at once.
+An infinite *float* is rejected, which looks pedantic and is not: YAML reads
+`.inf` and `1.0e999` as the same value, and so does `float("1e999")`, so by the
+time the value arrives there is no way to tell a deliberate unlimited from a
+finite rate whose exponent was mistyped. Accepting it turned that typo into the
+heaviest load the harness can generate while the trial went on reporting the
+rate the recipe asked for — a green cell describing a run that did not happen.
+The quotes cost the deliberate case nothing and the accident cannot produce them.
 
 ### Extra arguments cannot shadow the flags the workload owns
 

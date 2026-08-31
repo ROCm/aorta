@@ -827,19 +827,20 @@ class TokenSpeedServeWorkload(Workload):
                 'a rate; use a positive number, or "inf" to submit every '
                 "request at once"
             ) from exc
-        if math.isinf(rate) and rate > 0 and isinstance(value, float) and math.isinf(value):
-            return "inf"
         if math.isnan(rate) or math.isinf(rate):
-            # Reached by a *finite* spelling that overflows, "1e999" being the
-            # short one: `float()` turns it into +inf, and reading that as the
-            # unlimited token promoted a typo'd rate to the heaviest load the
-            # harness can generate -- while the trial still reported the rate
-            # the recipe asked for. Only the spellings handled above and a value
-            # that was already an infinite float mean "unlimited".
+            # Only the string spellings above mean "unlimited". An infinite
+            # *float* does not, because by the time it arrives here there is no
+            # way to tell which one it was: YAML reads `.inf` and `1.0e999` as
+            # the same value, and so does `float("1e999")` -- so accepting it
+            # promoted a typo'd finite rate to the heaviest load the harness can
+            # generate, while the trial went on reporting the rate the recipe
+            # asked for. The quoted token costs the deliberate case one pair of
+            # quotes and makes the accident impossible.
             raise ValueError(
                 f"tokenspeed_serve: request_rate ({value!r}) is not a usable "
-                'rate; use a positive number, or "inf" to submit every request '
-                "at once"
+                'rate; use a positive number, or the quoted string "inf" to '
+                "submit every request at once (an unquoted infinite float is "
+                "indistinguishable from a finite rate that overflowed)"
             )
         if rate <= 0:
             raise ValueError(

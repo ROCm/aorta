@@ -434,10 +434,24 @@ def test_unknown_config_key_warns_but_does_not_fail(tmp_path, caplog):
 
 
 def test_request_rate_accepts_inf_spellings(tmp_path):
-    for value in ("inf", "INF", float("inf")):
+    for value in ("inf", "INF", "+inf", "Infinity"):
         wl = _make(tmp_path, request_rate=value)
         wl.setup()
         assert wl._request_rate == "inf"
+
+
+def test_an_infinite_float_is_not_the_unlimited_token(tmp_path):
+    """YAML reads `.inf` and `1.0e999` as the same value.
+
+    Accepting an infinite float therefore accepted an overflowed finite rate as
+    the heaviest load the harness can generate, with the trial still reporting
+    the rate the recipe asked for -- the one failure this validation exists to
+    prevent, arriving through the YAML parser instead of through `float()`.
+    Unlimited has to be written as the quoted string, which the accident cannot
+    produce.
+    """
+    with pytest.raises(ValueError, match="indistinguishable"):
+        _make(tmp_path, request_rate=float("inf")).setup()
 
 
 @pytest.mark.parametrize("value", ["1e999", "-1e999", 10**400, "10" * 400])
@@ -2339,6 +2353,23 @@ def test_the_derived_drain_always_fits_inside_the_grace(tmp_path, grace):
 
     assert drain > 0, f"grace {grace} produced a non-positive drain {drain}"
     assert drain < grace, f"grace {grace} produced a drain of {drain} that does not fit"
+
+
+def test_the_two_layers_agree_on_how_many_warmup_steps_there_are(tmp_path):
+    """A hand-run of the script must measure what the recipes measure.
+
+    The script defaulted to 0 while the workload defaults to 1, and the script's
+    header documented the 0 -- so reproducing a cell by running the script
+    directly silently included the step that pays Triton JIT, which is the one
+    the recipes throw away.
+    """
+    script = (Path(mod.__file__).with_name("tokenspeed") / "ts_bench_serve.sh").read_text()
+    default = re.search(r'WARMUP_STEPS="\$\{TS_BENCH_WARMUP_STEPS:-(\d+)\}"', script)
+    assert default, "could not find the warmup default"
+    wl = _make(tmp_path)
+    wl.setup()
+    assert int(default.group(1)) == wl._warmup_steps
+    assert "(default 1," in script, "the header no longer states the default it uses"
 
 
 def test_a_bringup_failure_still_reports_that_nothing_was_measured(tmp_path, monkeypatch):
