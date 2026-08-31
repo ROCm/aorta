@@ -3,8 +3,8 @@ name: GPU eval (reusable)
 # Reusable GPU evaluation: build/start the pinned ROCm container, install the
 # aorta wheel (the exact triggering wheel when a run-id is given, else the latest
 # rc from the index), run the nightly-eval harness, and upload results + debug
-# artifacts. Used by nightly-eval.yml (nightly) and bump-validate.yml (stack
-# bump PRs). Alerting/Pages are the caller's responsibility.
+# artifacts. Used by nightly-eval.yml (nightly + on-demand dispatch).
+# Alerting/Pages are the caller's responsibility.
 
 on:
   workflow_call:
