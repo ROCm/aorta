@@ -319,14 +319,22 @@ case "${content}" in
 esac
 
 echo "TS_PROBE_OK: completion (${#content} chars)"
-# The generated text goes out on one line, with control characters replaced and
-# a hard length cap. It is model output on the same stream the recipe's failure
-# detectors scan, and those patterns are unanchored -- so a completion that
-# happened to contain a newline followed by `TS_PROBE_FAIL: readiness_timeout`
-# turned a passing cell into a failure naming a step that had succeeded. The
-# text is diagnostic; the verdict lines above it are not, and they should not be
-# forgeable by the thing under test.
+# The generated text goes out on one line, control characters replaced, marker
+# prefix defanged, and length capped. It is model output on the same stream the
+# recipe's failure detectors scan, and those patterns are neither anchored nor
+# line-scoped -- aorta's tier-5 classifier searches a window of the whole log --
+# so a completion containing `TS_PROBE_FAIL: readiness_timeout` anywhere in it
+# turned a passing cell into a failure naming a step that had succeeded.
+#
+# Flattening the newlines was not enough for that reason: the marker only has to
+# appear as a substring, and it is entirely printable, so it survived `tr`. The
+# `TS_PROBE` prefix is rewritten instead, which is what every detector in the
+# serve recipes keys on. The text stays readable; it stops being a verdict.
+#
+# The untouched response is in ${resp_file} either way, so nothing diagnostic is
+# lost by mangling this copy.
 printf 'TS_PROBE_INFO: completion_text=%s\n' \
-  "$(printf '%s' "${content}" | tr -c '[:print:]' ' ' | cut -c1-200)"
+  "$(printf '%s' "${content}" | tr -c '[:print:]' ' ' | sed 's/TS_PROBE/TS-PROBE/g' | cut -c1-200)"
+printf 'TS_PROBE_INFO: completion_response_file=%s\n' "${resp_file}"
 echo "TS_PROBE_RESULT: pass"
 exit 0

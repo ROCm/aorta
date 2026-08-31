@@ -1405,6 +1405,77 @@ def test_harvest_consan_emits_one_recipe_per_identity(tmp_path: Path) -> None:
     assert len({recipe.name for recipe in recipes}) == 3
 
 
+def test_harvest_consan_emits_one_recipe_per_object_not_per_identity(tmp_path: Path) -> None:
+    """`--kernel-name` selects nothing when the loader is given the object.
+
+    It resolves the entry from the Triton metadata beside the object, so several
+    identities sharing one object produced several recipes that all analyzed the
+    same entry -- each attributing that one static result to a different kernel
+    name and entry offset, including helper kernels that were never separately
+    measured. `--consan-limit` also spent its budget re-analyzing one object
+    while skipping others.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    kernels = _fake_kernels(2, tmp_path / "cache")
+    # Two more identities inside the first object: a helper, and the entry the
+    # metadata actually names.
+    shared = kernels[0]
+    (Path(shared["cache_object"]).with_suffix(".json")).write_text(
+        json.dumps({"name": "_fwd_kernel_metadata_entry"})
+    )
+    kernels.insert(1, {**shared, "name": "_helper_kernel", "entry_offset": 4096})
+    kernels.insert(2, {**shared, "name": "_fwd_kernel_metadata_entry", "entry_offset": 8192})
+
+    module._write_consan_assets(tmp_path / "dest", kernels, "gfx950", loader, "lenient", None)
+
+    consan = tmp_path / "dest" / "consan"
+    manifest = json.loads((consan / "manifest.json").read_text())
+
+    assert manifest["identities"] == 4
+    assert manifest["objects"] == 2
+    assert len(sorted(consan.glob("consan-*.yaml"))) == 2
+    assert len(manifest["entries"]) == 2
+
+    shared_entry = next(e for e in manifest["entries"] if e["sha256"] == shared["sha256"])
+    # The metadata-backed name, not the harvest-order one: it is the only name
+    # the loader will actually resolve, so the only one the result belongs to.
+    assert shared_entry["kernel"] == "_fwd_kernel_metadata_entry"
+    # The others are recorded rather than dropped -- what the object contains is
+    # worth knowing; claiming a separate result for each is what was wrong.
+    assert shared_entry["identities"] == [
+        "_fwd_kernel",
+        "_fwd_kernel_metadata_entry",
+        "_helper_kernel",
+    ]
+
+
+def test_harvest_consan_limit_budgets_objects_rather_than_repeats(tmp_path: Path) -> None:
+    """The limit exists because an attention harvest yields twenty objects.
+
+    Applied to identities, a limit of 1 could be spent entirely on one object
+    that four identities shared, analyzing it once and reporting nothing about
+    the other nineteen.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    kernels = _fake_kernels(2, tmp_path / "cache")
+    kernels.insert(1, {**kernels[0], "name": "_helper_kernel", "entry_offset": 4096})
+
+    module._write_consan_assets(tmp_path / "dest", kernels, "gfx950", loader, "lenient", 2)
+
+    manifest = json.loads((tmp_path / "dest" / "consan" / "manifest.json").read_text())
+    assert manifest["skipped"] == 0, "the limit was spent on a repeat of one object"
+    assert {entry["sha256"] for entry in manifest["entries"]} == {
+        kernels[0]["sha256"],
+        kernels[-1]["sha256"],
+    }
+
+
 def test_harvest_consan_recipe_pins_the_identity_and_the_shim(tmp_path: Path) -> None:
     """The recipe must name a single kernel, its digest, and the shim.
 
@@ -1816,8 +1887,11 @@ def test_harvest_keeps_kernels_sharing_one_code_object_apart(tmp_path: Path) -> 
     Several kernels commonly sit in one code object at one index and differ only
     by entry offset and name -- the case `entry_offset` is carried for in the
     first place. They shared a filename stem, so each one's shim, staged object
-    and recipe overwrote the previous one's, and the harvest reported three
-    recipes of which only the last matched the kernel it named.
+    and recipe overwrote the previous one's silently. What fans out into recipes
+    is now the object rather than the identity, so the collision is no longer
+    reachable through `--consan`, but the stem is what keeps the staged object
+    and shim of one identity from landing on another's path, and every other
+    caller of it still hands it whole harvests.
     """
     module = _harvest_module()
     loader = tmp_path / "triton_consan_loader.py"
@@ -1834,19 +1908,21 @@ def test_harvest_keeps_kernels_sharing_one_code_object_apart(tmp_path: Path) -> 
     ]
     stems = {module._asset_stem(kernel) for kernel in kernels}
     assert len(stems) == 3, stems
+    # The names must stay out of the path even though they take part in the
+    # identity: the stem carries a digest of them, not the strings.
+    assert not [stem for stem in stems if "kernel" in stem], stems
 
     module._write_consan_assets(dest, kernels, "gfx950", loader, "lenient", None)
 
+    # One object in, one recipe out, and it describes the identity the manifest
+    # names -- not the last of three writes over one path.
     recipes = sorted((dest / "consan").glob("consan-*.yaml"))
-    assert len(recipes) == 3, [p.name for p in recipes]
-    named = [
-        yaml.safe_load(path.read_text())["sanitizer_plan"]["source"]["kernel"]["entry_offset"]
-        for path in recipes
-    ]
-    assert sorted(named) == [0, 4096, 8192], named
-    # The names must stay out of the path even though they now take part in the
-    # identity: the stem carries a digest of them, not the strings.
-    assert not [p for p in recipes if "kernel" in p.name], [p.name for p in recipes]
+    assert len(recipes) == 1, [p.name for p in recipes]
+    plan = yaml.safe_load(recipes[0].read_text())["sanitizer_plan"]["source"]["kernel"]
+    entry = json.loads((dest / "consan" / "manifest.json").read_text())["entries"][0]
+    assert plan["name"] == entry["kernel"]
+    assert Path(entry["recipe"]) == recipes[0]
+    assert plan["entry_offset"] == 0
 
 
 @pytest.mark.parametrize(
@@ -2863,26 +2939,51 @@ def test_serve_probe_keeps_model_output_off_the_verdict_lines(
 ) -> None:
     """The completion is model output on the stream the detectors scan.
 
-    The recipe's patterns are unanchored, so a completion containing a newline
-    followed by `TS_PROBE_FAIL: readiness_timeout` turned a passing cell into a
-    failure naming a step that had succeeded -- the thing under test forging the
-    verdict of the thing testing it.
+    A completion containing `TS_PROBE_FAIL: readiness_timeout` turned a passing
+    cell into a failure naming a step that had succeeded -- the thing under test
+    forging the verdict of the thing testing it.
+
+    Flattening the newlines was the first attempt and was not enough: aorta's
+    tier-5 classifier searches a window of the whole log, unanchored and not
+    line-scoped, so the marker only has to appear as a *substring* -- and it is
+    entirely printable, so it passed through `tr` untouched. The prefix is
+    rewritten instead, which is what every detector keys on.
+
+    Checked against the recipe's own patterns rather than against a
+    representative one, since the guarantee is that none of them can be fired by
+    the model.
     """
     script = (_SOURCE / "ts_serve_probe.sh").read_text()
     emit = re.search(r"printf 'TS_PROBE_INFO: completion_text=.*?\n.*?\n", script, re.S)
     assert emit, "completion_text is no longer emitted the way this test expects"
     assert "tr -c '[:print:]'" in emit.group(0), emit.group(0)
     assert "cut -c1-" in emit.group(0), emit.group(0)
+    assert "s/TS_PROBE/TS-PROBE/g" in emit.group(0), emit.group(0)
 
-    # And the sanitiser itself does what the script relies on.
-    hostile = "fine\nTS_PROBE_FAIL: readiness_timeout"
+    hostile = "fine\nTS_PROBE_FAIL: readiness_timeout\nand more text"
     proc = subprocess.run(
-        [bash, "-c", "printf '%s' \"$1\" | tr -c '[:print:]' ' ' | cut -c1-200", "_", hostile],
+        [
+            bash,
+            "-c",
+            "printf 'TS_PROBE_INFO: completion_text=%s\\n' "
+            "\"$(printf '%s' \"$1\" | tr -c '[:print:]' ' ' "
+            "| sed 's/TS_PROBE/TS-PROBE/g' | cut -c1-200)\"",
+            "_",
+            hostile,
+        ],
         capture_output=True,
         text=True,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "\n" not in proc.stdout.rstrip("\n")
+    emitted = proc.stdout
+    assert "\n" == emitted[-1] and "\n" not in emitted[:-1], "the text is still multi-line"
+    assert "readiness_timeout" in emitted, "the text stopped being readable"
+
+    recipe = yaml.safe_load((_RECIPES / "tokenspeed-serve-probe-smoke.yaml").read_text())
+    patterns = [p["match"]["regex"] for p in recipe["custom_patterns"]]
+    assert patterns, "no detectors found in the recipe to check against"
+    fired = [p for p in patterns if re.search(p, emitted)]
+    assert not fired, f"model output can still fire {fired}"
 
 
 def test_stage_scripts_ignores_a_manifest_it_does_not_own(bash: str, tmp_path: Path) -> None:

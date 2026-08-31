@@ -625,6 +625,15 @@ harvest yields 20. The shims are emitted with `--copy-object`, lifting each
 object and its sidecars out of the Triton cache before the next harvest deletes
 it.
 
+Per object, and not per harvested kernel *name*. The loader is handed the object
+and resolves the entry from the Triton metadata beside it, so `--kernel-name`
+selects nothing on that path: several identities sharing one object would each
+get a recipe analyzing the same entry, reporting one static result under several
+names and burning `--consan-limit` on repeats. Each recipe names the
+metadata-backed identity, and `consan/manifest.json` records the rest —
+`objects` and `identities` counts, plus an `identities` list per entry naming
+every kernel that shares that object.
+
 On the gemm kernels this works, with full static instrumentation:
 
 ```
@@ -675,7 +684,7 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 190 tests (103 functions, the rest
+`tests/probe/test_tokenspeed_probe.py` — 192 tests (105 functions, the rest
 parametrised cases), no GPU or container required. A test asserts this count
 matches the file, since it went stale twice during review.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,
