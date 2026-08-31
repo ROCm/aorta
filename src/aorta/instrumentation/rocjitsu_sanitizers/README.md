@@ -5,12 +5,15 @@ RocJITsu guardrails without importing customer-derived artifacts.
 
 **Scope.** This module delivers the Phase-1 engine and the `mode: sanitizer`
 recipe UX (deterministic selection, exact-entry Waitcheck, fail-closed ConSan
-Record/Replay, versioned reports). The end goal of
-[#316](https://github.com/ROCm/aorta/issues/316) -- fully automatic
+Record/Replay, versioned reports). That is the whole of what
+[#316](https://github.com/ROCm/aorta/issues/316) ended up covering: it was closed
+when [#324](https://github.com/ROCm/aorta/pull/324) merged with an explicitly
+reduced scope, so it is not where the remaining work is tracked. Fully automatic
 workload-driven top-kernel execution (profile an uninstrumented model, resolve
-the top-K kernels to exact identities, then run scoped ConSan) -- is **not** yet
+the top-K kernels to exact identities, then run scoped ConSan) is still **not**
 delivered; the "Not available yet" and "Planned scoped ConSan flow" sections
-below track that remaining work.
+below describe it, and the upstream blocker is
+[ROCm/rocm-systems#10966](https://github.com/ROCm/rocm-systems/issues/10966).
 
 ## Phase 0 capability
 
@@ -39,7 +42,8 @@ The last item is intentionally fail-closed. Current RocJITsu ConSan has no
 documented kernel allowlist, so wrapping a model would instrument every
 supported code object it loads. A top-K ConSan request therefore returns
 `not_checked` with `worklist_scope_unsupported`; it never silently falls back to
-whole-application instrumentation.
+whole-application instrumentation. The missing allowlist is tracked upstream as
+[ROCm/rocm-systems#10966](https://github.com/ROCm/rocm-systems/issues/10966).
 
 ## Static Waitcheck example
 
@@ -212,12 +216,17 @@ buffer that would over-run the segment.
 Two limits are worth stating plainly. One logical Triton kernel usually compiles
 to several objects (shape-selected variants), and ConSan takes exactly one code
 object per run, so harvest one shim and one recipe per object; an ambiguous
-selection fails closed and lists the candidates. And on the currently shipping
-RocJITsu build, record/replay reports itself as `an inventory-only stub`, so a
-dispatch captures no dynamic records and strict policy fails closed with exit 86
-— the same outcome the committed `daily-consan-tiny.yaml` and
-`daily-consan-lds-dispatch.yaml` lanes document
-([ROCm/rocm-systems#9972](https://github.com/ROCm/rocm-systems/issues/9972)).
+selection fails closed and lists the candidates. And a dispatch here still
+captures no dynamic records, so strict policy fails closed with exit 86 — the
+same outcome the committed `daily-consan-tiny.yaml` and
+`daily-consan-lds-dispatch.yaml` lanes document.
+
+That is no longer the inventory-only record/replay stub it once was.
+[ROCm/rocm-systems#9972](https://github.com/ROCm/rocm-systems/issues/9972) was
+fixed in `15275dad` and closed on 2026-08-24, and record capture is verified
+working since — `dynamic_complete=true` with 3072 committed records. What is
+left is that nothing dispatches under the scoped flow, which is
+[ROCm/rocm-systems#10966](https://github.com/ROCm/rocm-systems/issues/10966).
 The loader removes the aorta-side gap; the dynamic-coverage half stays blocked
 upstream.
 
