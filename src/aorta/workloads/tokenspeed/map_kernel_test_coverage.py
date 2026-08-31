@@ -360,9 +360,24 @@ def _run_one_suite(args: argparse.Namespace) -> int:
     inventory = _registry_inventory()
     _install_probe(entered, dispatched, candidates, requested)
 
+    # Count call-phase reports rather than inferring execution from the options.
+    # A denylist of no-execution modes cannot be complete -- `--collect-only`
+    # was missing, then `--fixtures`, `--help` and `--version` -- and every one
+    # of them exits 0 with an empty map, which then merges as "no kernel is
+    # covered". Counting what pytest actually ran establishes the opposite
+    # directly, and needs no list.
+    class _CountExecutedTests:
+        def __init__(self) -> None:
+            self.executed = 0
+
+        def pytest_runtest_logreport(self, report: Any) -> None:
+            if report.when == "call":
+                self.executed += 1
+
+    counter = _CountExecutedTests()
     argv = [str(suite), "-q", "--no-header", "-p", "no:cacheprovider"]
     argv += args.pytest_arg or []
-    code = int(pytest.main(argv))
+    code = int(pytest.main(argv, plugins=[counter]))
 
     partial = {
         "inventory": inventory,
@@ -371,6 +386,7 @@ def _run_one_suite(args: argparse.Namespace) -> int:
         "candidates": {name: sorted(keys) for name, keys in candidates.items()},
         "lookups": requested,
         "exit_code": code,
+        "executed_tests": counter.executed,
     }
     Path(args.out).write_text(json.dumps(partial) + "\n")
     return 0
@@ -412,8 +428,17 @@ _EARLY_EXIT_OPTS = (
 _NO_EXECUTION_OPTS = ("--collect-only", "--co", "--setup-only", "--setup-plan")
 
 
-def _incomplete_suite_reason(rc: int, pytest_args: list[str]) -> str | None:
-    """Why this suite's map should not be merged, or ``None`` if it is sound."""
+def _incomplete_suite_reason(
+    rc: int, pytest_args: list[str], executed_tests: int | None = None
+) -> str | None:
+    """Why this suite's map should not be merged, or ``None`` if it is sound.
+
+    ``executed_tests`` is the count of call-phase reports the child observed.
+    Zero means nothing ran, whatever the options said and whatever the exit code
+    was -- which is the check that does not depend on keeping a list of
+    no-execution modes complete. The option lists below stay because they catch
+    the *partial* cases, where tests did run but not all of them.
+    """
 
     def supplied(opts: tuple[str, ...]) -> bool:
         return any(
@@ -440,6 +465,8 @@ def _incomplete_suite_reason(rc: int, pytest_args: list[str]) -> str | None:
 
     if rc in _INCOMPLETE_PYTEST_RCS:
         return f"{_INCOMPLETE_PYTEST_RCS[rc]} (rc={rc})"
+    if executed_tests == 0:
+        return "the suite executed no test bodies, so nothing was observed"
     if supplied(_NO_EXECUTION_OPTS):
         return "an option that executes no tests was in effect (collection or setup only)"
     if rc == 1 and (supplied(_EARLY_EXIT_OPTS) or short_cluster_sets_exitfirst()):
@@ -541,7 +568,14 @@ def main() -> int:
             # from a suite that did start.
             suite_rc = data["exit_code"]
             exit_codes[label] = suite_rc
-            incomplete = _incomplete_suite_reason(suite_rc, args.pytest_arg or [])
+            incomplete = _incomplete_suite_reason(
+                suite_rc,
+                args.pytest_arg or [],
+                # Absent from a map written before this field existed, which
+                # reads as "unknown" and leaves the option-based checks to
+                # decide, rather than as "nothing ran".
+                data.get("executed_tests"),
+            )
             if incomplete and not args.allow_incomplete_suites:
                 print(
                     f"map_kernel_test_coverage: {label} did not run to "
