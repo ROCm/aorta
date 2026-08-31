@@ -116,6 +116,15 @@ _MIN_TEARDOWN_GRACE_SEC = 5
 # pipes, and every path that stops it is already an abnormal one.
 _CLIENT_TERMINATE_GRACE_SEC = 5
 
+# Removal passes when the client could not be reaped, which is only possible
+# while `Popen` is still running: such a client may create the container just
+# after the first pass finds nothing. Three passes a second apart, because this
+# runs on the way out of a process that is already dying -- long enough to cover
+# a daemon that is slow to register the container, short enough that a supervisor
+# waiting for the process to die is not left wondering.
+_CLEANUP_REMOVE_ATTEMPTS = 3
+_CLEANUP_REMOVE_RETRY_SEC = 1.0
+
 # A few GiB of driver and runtime overhead survives any run, so the check is
 # against growth past a margin rather than against zero. The leak this exists for
 # is two orders of magnitude larger -- 256 GB on a 309 GB card.
@@ -192,6 +201,7 @@ _KNOWN_KEYS = frozenset(
         "hf_token_env",
         "shm_size",
         "hip_visible_devices",
+        "exclusive_gpus",
         "docker_args",
         "run_as_current_user",
         "keep_work_dir",
@@ -408,7 +418,12 @@ class TokenSpeedServeWorkload(Workload):
             (default: ``port + 1`` when free).
         shm_size: container ``--shm-size`` (default ``"16g"``).
         hip_visible_devices: value for ``HIP_VISIBLE_DEVICES``
-            (default: unset, i.e. all GPUs).
+            (default: unset, i.e. all GPUs). A visibility filter, not an
+            allocation -- see ``exclusive_gpus``.
+        exclusive_gpus: assert that no other job shares this node's GPUs
+            (default ``False``). Only with this set does unreleased device
+            memory after teardown fail the trial; otherwise it is logged as an
+            observation, because a co-tenant's allocation looks identical.
         docker_args: extra ``docker run`` args (list or string).
         run_as_current_user: run the container as the calling uid:gid
             (default ``True``) so exported JSON and the HF cache stay
@@ -543,6 +558,10 @@ class TokenSpeedServeWorkload(Workload):
         self._shm_size = str(cfg.get("shm_size") or _DEFAULT_SHM_SIZE)
         hip_devices = cfg.get("hip_visible_devices")
         self._hip_visible_devices = None if hip_devices is None else str(hip_devices)
+        # Opt-in, and it has to be: nothing the workload can read establishes
+        # exclusivity. Defaulting it on would fail healthy trials on shared nodes
+        # for a co-tenant's allocation.
+        self._exclusive_gpus = self._bool("exclusive_gpus", False)
 
         # Host networking by default. The server and the load generator both run
         # inside this container and talk over 127.0.0.1, so they do not need it
@@ -890,7 +909,16 @@ class TokenSpeedServeWorkload(Workload):
     # base class owns construction, and every path that reads these tolerates
     # `None` (no client running).
     _docker_client: subprocess.Popen[str] | None = None
-    _docker_client_lock = threading.Lock()
+    # Reentrant, and that is the whole point. A Python signal handler runs in the
+    # main thread -- the same thread that holds this lock while spawning and
+    # publishing the client -- so with a plain Lock a SIGTERM arriving in that
+    # window deadlocked the handler against the code it interrupted, and the
+    # container it was there to remove survived until someone sent SIGKILL.
+    _docker_client_lock = threading.RLock()
+    # Set for the width of the spawn, so the handler can tell "no client" from
+    # "a client may exist that I cannot see yet". Publication is not atomic with
+    # process creation: `Popen` returns, and only then is the object assigned.
+    _docker_client_spawning = False
 
     # ---------------------------------------------------------------- setup
 
@@ -950,6 +978,7 @@ class TokenSpeedServeWorkload(Workload):
                 "under root-squash cannot be bind-mounted into a container)."
             ) from exc
 
+        self._assert_trusted_work_root()
         self._assert_own_scratch()
 
         for directory in (
@@ -1228,6 +1257,51 @@ class TokenSpeedServeWorkload(Workload):
                 "or longer is cut off partway -- which strands GPU memory into "
                 "the next trial, the failure the derived default avoids. Raise "
                 "teardown_grace_sec if the gateway genuinely needs longer."
+            )
+
+    def _assert_trusted_work_root(self) -> None:
+        """Refuse a shared scratch root owned by another unprivileged user.
+
+        The root is created ``1777`` so every user of a node can make their own
+        ``u<uid>`` beneath it, and the sticky bit is what stops one user removing
+        another's entry -- with one exception that matters here: the *owner* of a
+        sticky directory may rename or remove anything in it regardless of who
+        owns it. Whoever ran first owns the root, so a co-tenant who got there
+        first could swap this trial's scratch for a directory of their own after
+        :meth:`_assert_own_scratch` had already approved it, and the mounts, the
+        exports and the audit that reads them would follow.
+
+        Trusted therefore means a root this run does not have to take a
+        stranger's word for: root-owned, because an administrator provisioned it,
+        or owned by this uid. Anything else is refused with the remedy, rather
+        than used and hoped about -- the check that would otherwise "pass" is one
+        whose result another user can change afterwards.
+        """
+        try:
+            info = os.lstat(self._work_root)
+        except OSError as exc:
+            raise RuntimeError(
+                f"tokenspeed_serve: cannot stat {self._work_root}: {exc}"
+            ) from exc
+
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(
+                f"tokenspeed_serve: {self._work_root} is not a directory. The "
+                "scratch root is refused rather than followed: on a shared node "
+                "another user can create that name, and a symlink would send "
+                "this trial's mounts and exports somewhere of their choosing."
+            )
+        if info.st_uid not in (0, os.getuid()):
+            raise RuntimeError(
+                f"tokenspeed_serve: {self._work_root} is owned by uid "
+                f"{info.st_uid}, which is neither root nor this user "
+                f"({os.getuid()}). The owner of a sticky directory can rename "
+                "or remove entries in it whoever owns them, so that user could "
+                "replace this trial's scratch directory after it has been "
+                "checked. Set work_dir to a path you own (for example "
+                f"{self._work_root}-$USER), or have an administrator create "
+                f"{self._work_root} root-owned with mode 1777 so it is shareable "
+                "without being anyone's to rearrange."
             )
 
     def _assert_own_scratch(self) -> None:
@@ -1546,51 +1620,63 @@ class TokenSpeedServeWorkload(Workload):
         vram_before = _vram_used_by_gpu()
         start = time.monotonic()
         timed_out = False
-        try:
-            with self._remove_container_on_termination():
+        # Every cleanup path runs *inside* the termination context, not in an
+        # `except` clause outside it. Cleanup takes over a minute in the worst
+        # case -- the terminate grace, the pipe drain and `docker rm -f` -- and
+        # with the handlers already restored a SIGTERM arriving in that window
+        # killed the process outright and stranded the container, which is the
+        # exact failure this context exists to prevent.
+        with self._remove_container_on_termination():
+            try:
                 # Popen rather than run(), so the signal handler has a client to
                 # reap. Killing the client before removing the container is what
                 # closes the race between the two: otherwise a signal arriving
                 # while `docker run` is still starting removes nothing, and the
                 # client goes on to create the container after we have exited.
                 with self._docker_client_lock:
-                    self._docker_client = subprocess.Popen(
-                        argv,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        # Carries the values referenced by the bare `-e NAME`
-                        # flags in argv. Inherits the rest, since docker needs
-                        # its own environment (DOCKER_HOST, PATH) to work at all.
-                        env={**os.environ, **self._secret_env()},
-                    )
+                    self._docker_client_spawning = True
+                    try:
+                        self._docker_client = subprocess.Popen(
+                            argv,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            # Carries the values referenced by the bare `-e NAME`
+                            # flags in argv. Inherits the rest, since docker needs
+                            # its own environment (DOCKER_HOST, PATH) to work at
+                            # all.
+                            env={**os.environ, **self._secret_env()},
+                        )
+                    finally:
+                        self._docker_client_spawning = False
                 client = self._docker_client
                 stdout, stderr = client.communicate(timeout=self._timeout)
                 exit_code = client.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            exit_code = None
-            # `communicate(timeout=)` leaves the client running, so it is killed
-            # here and drained -- which also yields whatever it had written.
-            self._terminate_docker_client()
-            stdout, stderr = self._drain_docker_client()
-            # Killing the client does not stop the container: it belongs to the
-            # daemon, and `--rm` only fires once it exits. Left alone, a
-            # timed-out cell would hand the next one a live TokenSpeed still
-            # holding the GPU and the gateway port -- so the next cell fails
-            # too, for a reason that is nowhere in its own logs.
-            self._force_remove_container()
-        except BaseException:
-            # KeyboardInterrupt, and anything else raised out of the call. The
-            # runner's SIGTERM does *not* arrive here -- see
-            # _remove_container_on_termination, which is what handles it. The
-            # original exception still propagates as the failure.
-            self._terminate_docker_client()
-            self._force_remove_container()
-            raise
-        finally:
-            with self._docker_client_lock:
-                self._docker_client = None
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                exit_code = None
+                # `communicate(timeout=)` leaves the client running, so it is
+                # killed here and drained -- which also yields whatever it had
+                # written.
+                self._terminate_docker_client()
+                stdout, stderr = self._drain_docker_client()
+                # Killing the client does not stop the container: it belongs to
+                # the daemon, and `--rm` only fires once it exits. Left alone, a
+                # timed-out cell would hand the next one a live TokenSpeed still
+                # holding the GPU and the gateway port -- so the next cell fails
+                # too, for a reason that is nowhere in its own logs.
+                self._force_remove_container()
+            except BaseException:
+                # KeyboardInterrupt, and anything else raised out of the call.
+                # The runner's SIGTERM does *not* arrive here -- see
+                # _remove_container_on_termination, which is what handles it. The
+                # original exception still propagates as the failure.
+                self._terminate_docker_client()
+                self._force_remove_container()
+                raise
+            finally:
+                with self._docker_client_lock:
+                    self._docker_client = None
         container_elapsed = time.monotonic() - start
 
         records = self._collect_step_records()
@@ -1616,13 +1702,14 @@ class TokenSpeedServeWorkload(Workload):
         )
 
     def _owned_gpu_indices(self) -> set[int] | None:
-        """GPUs this trial had exclusively, or ``None`` when that is unknown.
+        """GPUs this trial could have allocated on, or ``None`` for "any".
 
-        ``hip_visible_devices`` is the only statement of exclusive assignment
-        the workload has: it is what the container was restricted to, so growth
-        on those devices during this trial is this trial's. Anything outside
-        that set -- or the whole node, when the field is unset and the engine
-        chooses for itself -- may equally belong to another tenant.
+        ``hip_visible_devices`` narrows *which* devices the growth may be
+        watched on -- the container could not have touched anything else. It says
+        nothing about who else could: ``HIP_VISIBLE_DEVICES`` is a visibility
+        filter on this process tree, not an allocation, so a co-tenant may be on
+        the same physical GPU throughout. Whether the growth is this trial's to
+        be blamed for is a separate question, answered by ``exclusive_gpus``.
 
         Entries that are not plain indices (a UUID form is also accepted by
         HIP) yield ``None`` rather than a partial set, since a partial set
@@ -1661,10 +1748,16 @@ class TokenSpeedServeWorkload(Workload):
         A before/after delta says memory grew; it does not say who allocated it.
         On a shared node another tenant starting a job mid-trial produces the
         same delta, and blaming it here would fail a healthy cell and tell the
-        operator to reset somebody else's GPU. So growth is only *attributed* on
-        the GPUs this trial can prove it owned -- the ones named by
-        ``hip_visible_devices``, which is the only exclusive assignment the
-        workload has.
+        operator to reset somebody else's GPU. So growth is only *attributed*
+        when something outside this workload says the GPUs were its own:
+        ``exclusive_gpus: true``, which is the recipe author asserting a
+        scheduler allocation or a dedicated machine.
+
+        ``hip_visible_devices`` does not carry that meaning and no longer implies
+        it. It is a visibility filter on this process tree, so it narrows which
+        devices are *watched* -- the container could not have allocated elsewhere
+        -- while leaving the same device open to a co-tenant. Reading it as an
+        exclusive assignment made a healthy trial fail for somebody else's job.
 
         Without that evidence the wait still happens, because waiting helps the
         next cell whoever owns the memory, but the caller is told the result is
@@ -1677,7 +1770,7 @@ class TokenSpeedServeWorkload(Workload):
             return {}, False
 
         owned = self._owned_gpu_indices()
-        attributed = owned is not None
+        attributed = self._exclusive_gpus
         watched = before if owned is None else {i: b for i, b in before.items() if i in owned}
         if not watched:
             return {}, attributed
@@ -1704,9 +1797,13 @@ class TokenSpeedServeWorkload(Workload):
         if outstanding and not attributed:
             log.warning(
                 "tokenspeed_serve: %d GPU(s) still hold memory after teardown (%s), but "
-                "this trial had no exclusive GPU assignment (hip_visible_devices is "
-                "unset), so the growth cannot be attributed to it. Not failing the "
-                "trial; set hip_visible_devices to make this check authoritative.",
+                "nothing establishes that this trial owned them exclusively, so the "
+                "growth cannot be attributed to it -- a co-tenant's new allocation "
+                "produces the same delta, even on a device HIP_VISIBLE_DEVICES "
+                "restricted this container to. Not failing the trial; set "
+                "exclusive_gpus: true when the node's GPUs really are this job's "
+                "alone (a scheduler allocation, or a machine you have to yourself) "
+                "to make this check authoritative.",
                 len(outstanding),
                 ", ".join(
                     f"GPU {i}: {b / 1024**3:.0f} GiB" for i, b in sorted(outstanding.items())
@@ -1847,8 +1944,16 @@ class TokenSpeedServeWorkload(Workload):
             # creating it -- an orphan holding the GPU, produced by the cleanup
             # path. Reaping the client closes the window, because nothing is
             # left that could still create the container.
-            self._terminate_docker_client()
-            self._force_remove_container()
+            #
+            # Except in one window: a signal arriving while `Popen` itself is
+            # running finds no client object to reap, because the object is only
+            # assigned once the call returns. The removal is retried there, so a
+            # container created moments later by a process this one cannot name
+            # is still caught.
+            reaped = self._terminate_docker_client()
+            self._force_remove_container(
+                attempts=1 if reaped else _CLEANUP_REMOVE_ATTEMPTS,
+            )
             # SIG_DFL, not the previous disposition. Restoring the previous one
             # first looks tidier but does not guarantee the process dies:
             # under `nohup` SIGHUP is inherited as SIG_IGN, so the re-sent
@@ -1874,7 +1979,7 @@ class TokenSpeedServeWorkload(Workload):
                 except (OSError, ValueError):  # pragma: no cover
                     pass
 
-    def _terminate_docker_client(self) -> None:
+    def _terminate_docker_client(self) -> bool:
         """Stop the ``docker run`` client and reap it.
 
         Ordered before container removal on every cleanup path, because the
@@ -1886,11 +1991,21 @@ class TokenSpeedServeWorkload(Workload):
         Best-effort and silent about a client that has already exited, which is
         the common case: this runs on paths where the run has usually finished
         or failed on its own.
+
+        Returns whether the caller can be sure no client survives: either none
+        was published *and* none was mid-spawn, or the published one is now
+        reaped. It is ``False`` only in the narrow window where ``Popen`` has
+        been entered but has not yet returned the object to assign -- there a
+        process may exist that this one cannot name, so a single removal is not
+        enough on its own.
         """
         with self._docker_client_lock:
             client = self._docker_client
-        if client is None or client.poll() is not None:
-            return
+            spawning = self._docker_client_spawning
+        if client is None:
+            return not spawning
+        if client.poll() is not None:
+            return True
         try:
             client.terminate()
             try:
@@ -1900,6 +2015,8 @@ class TokenSpeedServeWorkload(Workload):
                 client.wait(timeout=_CLIENT_TERMINATE_GRACE_SEC)
         except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - defensive
             log.warning("tokenspeed_serve: could not stop the docker client: %s", exc)
+            return False
+        return True
 
     def _drain_docker_client(self) -> tuple[str, str]:
         """Whatever the client wrote before it was stopped."""
@@ -1913,7 +2030,7 @@ class TokenSpeedServeWorkload(Workload):
             return "", ""
         return _as_text(stdout), _as_text(stderr)
 
-    def _force_remove_container(self) -> None:
+    def _force_remove_container(self, *, attempts: int = 1) -> None:
         """Stop and remove a container the docker client no longer supervises.
 
         ``docker rm -f`` covers the running and already-exited cases in one call,
@@ -1926,8 +2043,27 @@ class TokenSpeedServeWorkload(Workload):
         :meth:`_remove_container_on_termination` (SIGTERM does not raise, so the
         exception path alone would miss it). Nothing can help against SIGKILL,
         which no handler survives.
+
+        ``attempts`` is for the one case a single removal cannot cover: a client
+        that could not be reaped because it was mid-spawn may create the
+        container *after* the first removal reported "No such container". Later
+        passes catch that, and stop as soon as a pass actually removes something.
         """
         name = self._container_name()
+        for attempt in range(1, max(attempts, 1) + 1):
+            if self._remove_container_once(name) or attempt == attempts:
+                return
+            log.debug(
+                "tokenspeed_serve: no container %s on attempt %d of %d; a client "
+                "this process could not name may still be creating it",
+                name,
+                attempt,
+                attempts,
+            )
+            time.sleep(_CLEANUP_REMOVE_RETRY_SEC)
+
+    def _remove_container_once(self, name: str) -> bool:
+        """One ``docker rm -f`` pass. True when it removed a container."""
         try:
             proc = subprocess.run(
                 ["docker", "rm", "-f", name],
@@ -1937,10 +2073,10 @@ class TokenSpeedServeWorkload(Workload):
             )
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("tokenspeed_serve: could not remove container %s: %s", name, exc)
-            return
+            return False
         if proc.returncode == 0:
             log.info("tokenspeed_serve: removed orphaned container %s", name)
-            return
+            return True
         # A nonzero exit is how docker reports most of what can go wrong here --
         # daemon unreachable, permission denied -- and none of it raises. Ignoring
         # it meant the one outcome worth knowing about, a container that is still
@@ -1952,7 +2088,7 @@ class TokenSpeedServeWorkload(Workload):
             # trial failed before the container was ever created. Not a failure
             # to clean up, so not a warning -- there is nothing left to leak.
             log.debug("tokenspeed_serve: no container %s to remove", name)
-            return
+            return False
         log.warning(
             "tokenspeed_serve: could not remove container %s (docker rm -f exited "
             "%d): %s -- it may still be running and holding the GPU; remove it "
@@ -1962,6 +2098,7 @@ class TokenSpeedServeWorkload(Workload):
             stderr or "(no stderr)",
             name,
         )
+        return False
 
     def _collect_step_records(self) -> list[_StepRecord]:
         """Parse whatever the bench exported for this trial.
@@ -2019,12 +2156,15 @@ class TokenSpeedServeWorkload(Workload):
         # one: nothing in this trial's own numbers looks wrong, and the cost
         # lands later as an out-of-memory error naming a device nobody chose.
         #
-        # Only when the growth is this trial's to claim, though. Without an
-        # exclusive GPU assignment a before/after delta cannot tell this
-        # workload's leftover memory from a co-tenant's new allocation, and
-        # failing the cell there would punish a healthy run for someone else's
-        # job -- and point `rocm-smi --gpureset` at their device.
-        # _await_vram_release logs the unattributed case.
+        # Only when the growth is this trial's to claim, though, which means
+        # `exclusive_gpus: true` and nothing less. A before/after delta cannot
+        # tell this workload's leftover memory from a co-tenant's new
+        # allocation -- not even on a device HIP_VISIBLE_DEVICES restricted this
+        # container to, since that filters what this process tree sees rather
+        # than reserving anything. Failing the cell on the strength of it would
+        # punish a healthy run for someone else's job, and point
+        # `rocm-smi --gpureset` at their device. _await_vram_release logs the
+        # unattributed case.
         for index, grown in sorted((leaked_vram or {}).items() if leaked_vram_attributed else []):
             failure_details.append(
                 {

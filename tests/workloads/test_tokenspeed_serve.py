@@ -1550,7 +1550,7 @@ def test_sigterm_removes_the_container_before_exiting(tmp_path):
         "from aorta.workloads.tokenspeed_serve import TokenSpeedServeWorkload as W\n"
         f"wl = W({{'work_dir': {str(tmp_path / 'work')!r}, 'steps': 1}})\n"
         "wl._run_token = 'tok'\n"
-        f"wl._force_remove_container = lambda: open({str(marker)!r}, 'w').write('removed')\n"
+        f"wl._force_remove_container = lambda **kw: open({str(marker)!r}, 'w').write('removed')\n"
         "with wl._remove_container_on_termination():\n"
         "    print('ready', flush=True)\n"
         "    time.sleep(30)\n"
@@ -1586,7 +1586,7 @@ def test_an_ignored_signal_still_kills_the_process_after_cleanup(tmp_path):
         "from aorta.workloads.tokenspeed_serve import TokenSpeedServeWorkload as W\n"
         f"wl = W({{'work_dir': {str(tmp_path / 'work')!r}, 'steps': 1}})\n"
         "wl._run_token = 'tok'\n"
-        f"wl._force_remove_container = lambda: open({str(marker)!r}, 'w').write('removed')\n"
+        f"wl._force_remove_container = lambda **kw: open({str(marker)!r}, 'w').write('removed')\n"
         "with wl._remove_container_on_termination():\n"
         "    print('ready', flush=True)\n"
         "    time.sleep(30)\n"
@@ -2207,13 +2207,20 @@ def test_an_already_gone_container_is_not_reported_as_a_failure(tmp_path, monkey
     assert not any(r.levelname == "WARNING" for r in caplog.records), caplog.text
 
 
-def _stub_client_and_removal(wl, monkeypatch, events: list[str]):
+def _stub_client_and_removal(
+    wl, monkeypatch, events: list[str], *, removal_finds_nothing: bool = False
+):
     """A `docker run` client that ignores its timeout, with removals recorded.
 
     Returns the client so a test can assert on how it was stopped; `events` gets
     an entry per cleanup step, in the order the workload took them.
+
+    `removal_finds_nothing` makes `docker rm -f` report "No such container",
+    which is what a removal racing container creation looks like -- and the only
+    result that leaves the retry loop anything to do.
     """
     real_popen = subprocess.Popen
+    monkeypatch.setattr(mod, "_CLEANUP_REMOVE_RETRY_SEC", 0)
 
     class Client:
         args = ["docker", "run"]
@@ -2251,6 +2258,10 @@ def _stub_client_and_removal(wl, monkeypatch, events: list[str]):
 
     def fake_run(argv, **_kwargs):
         events.append(" ".join(str(a) for a in argv[:3]))
+        if removal_finds_nothing:
+            return subprocess.CompletedProcess(
+                argv, 1, "", f"Error: No such container: {wl._container_name()}"
+            )
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
@@ -2314,6 +2325,93 @@ def test_a_signal_stops_the_client_before_removing_the_container(tmp_path, monke
             signal.raise_signal(signal.SIGTERM)
 
     assert events == ["terminate client", "docker rm -f"], events
+
+
+def test_a_signal_arriving_while_the_client_lock_is_held_does_not_deadlock(tmp_path, monkeypatch):
+    """A Python signal handler runs in the main thread -- the thread that holds
+    this lock while spawning the client.
+
+    So a plain `threading.Lock` made the handler wait for a release that could
+    only come from the code it had interrupted. The process then sat there until
+    someone sent SIGKILL, with the container it was supposed to remove still
+    running. The lock is reentrant for exactly this reason.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token = "tok"
+    events: list[str] = []
+    _stub_client_and_removal(wl, monkeypatch, events, removal_finds_nothing=True)
+
+    with pytest.raises(SystemExit):
+        with wl._remove_container_on_termination():
+            monkeypatch.setattr(mod.signal, "signal", lambda *_a: None)
+            monkeypatch.setattr(mod.os, "kill", lambda *_a: (_ for _ in ()).throw(SystemExit(143)))
+            # Exactly the window the deadlock lived in: the lock held, the client
+            # not yet published.
+            with wl._docker_client_lock:
+                wl._docker_client_spawning = True
+                signal.raise_signal(signal.SIGTERM)
+
+    removals = [event for event in events if event.startswith("docker rm")]
+    assert removals, "the handler never got as far as removing the container"
+    # Retried, because a client this process cannot name may create the container
+    # just after the first pass finds nothing there.
+    assert len(removals) == mod._CLEANUP_REMOVE_ATTEMPTS, events
+
+
+def test_a_reaped_client_needs_only_one_removal_pass(tmp_path, monkeypatch):
+    """The retry is for the spawn window alone.
+
+    Once the client is reaped nothing can create the container, so repeating the
+    removal would only delay a process that is already dying -- even when the
+    removal found nothing, which on this path means `--rm` got there first.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token = "tok"
+    events: list[str] = []
+    client = _stub_client_and_removal(wl, monkeypatch, events, removal_finds_nothing=True)
+    wl._docker_client = client
+
+    with pytest.raises(SystemExit):
+        with wl._remove_container_on_termination():
+            monkeypatch.setattr(mod.signal, "signal", lambda *_a: None)
+            monkeypatch.setattr(mod.os, "kill", lambda *_a: (_ for _ in ()).throw(SystemExit(143)))
+            signal.raise_signal(signal.SIGTERM)
+
+    assert [event for event in events if event.startswith("docker rm")] == ["docker rm -f"], events
+
+
+def test_the_timeout_cleanup_runs_while_the_signal_handlers_are_still_installed(
+    tmp_path, monkeypatch
+):
+    """Cleanup is the window a SIGTERM is most likely to land in and least
+    affordable to lose.
+
+    It runs for over a minute in the worst case -- the terminate grace, the pipe
+    drain and `docker rm -f` -- and it used to run in an `except` clause outside
+    the termination context, so the handlers had already been restored. A signal
+    there killed the process outright and stranded the container, which is the
+    single failure the context exists to prevent.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    installed: list[object] = []
+    _stub_client_and_removal(wl, monkeypatch, [])
+
+    real_remove = wl._force_remove_container
+
+    def remove_and_check(**kwargs):
+        installed.append(signal.getsignal(signal.SIGTERM))
+        return real_remove(**kwargs)
+
+    monkeypatch.setattr(wl, "_force_remove_container", remove_and_check)
+    wl.run()
+
+    assert installed, "the timeout path never removed the container"
+    assert all(
+        handler not in (signal.SIG_DFL, signal.SIG_IGN, None) for handler in installed
+    ), "cleanup ran with the workload's SIGTERM handler already restored"
 
 
 def test_request_counters_are_published_as_sums_not_also_as_means(tmp_path, monkeypatch):
@@ -2659,8 +2757,8 @@ def test_memory_never_released_fails_the_trial_that_held_it(tmp_path, monkeypatc
     """Once waiting has stopped helping, a green cell would quietly break the
     next one -- nothing in this trial's own numbers looks wrong.
 
-    `hip_visible_devices` is what makes the growth this trial's to claim; see
-    the unattributed case below.
+    `exclusive_gpus` is what makes the growth this trial's to claim; see the
+    unattributed cases below.
     """
     monkeypatch.setattr(
         mod,
@@ -2670,7 +2768,7 @@ def test_memory_never_released_fails_the_trial_that_held_it(tmp_path, monkeypatc
     monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
     monkeypatch.setattr(mod, "_VRAM_RELEASE_TIMEOUT_SEC", 0)
 
-    wl = _make(tmp_path, num_prompts=64, hip_visible_devices="0")
+    wl = _make(tmp_path, num_prompts=64, hip_visible_devices="0", exclusive_gpus=True)
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
     result = wl.run()
@@ -2681,8 +2779,24 @@ def test_memory_never_released_fails_the_trial_that_held_it(tmp_path, monkeypatc
     assert "gpureset" in leaks[0]["detail"]
 
 
-def test_unreleased_memory_is_not_blamed_on_a_trial_that_did_not_own_the_gpu(
-    tmp_path, monkeypatch, caplog
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param({}, id="nothing_claimed"),
+        # The case this parametrisation exists for. `HIP_VISIBLE_DEVICES` filters
+        # what this process tree can see; it reserves nothing, so a co-tenant can
+        # be allocating on the same physical GPU throughout. Reading it as an
+        # exclusive assignment failed a healthy trial for somebody else's job and
+        # told the operator to reset their device.
+        pytest.param({"hip_visible_devices": "0"}, id="visibility_filter_only"),
+        pytest.param(
+            {"hip_visible_devices": "0", "exclusive_gpus": False},
+            id="exclusivity_declined",
+        ),
+    ],
+)
+def test_unreleased_memory_is_not_blamed_without_an_exclusivity_claim(
+    tmp_path, monkeypatch, caplog, config
 ):
     """A before/after delta shows growth; it does not show who allocated it.
 
@@ -2700,7 +2814,7 @@ def test_unreleased_memory_is_not_blamed_on_a_trial_that_did_not_own_the_gpu(
     monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
     monkeypatch.setattr(mod, "_VRAM_RELEASE_TIMEOUT_SEC", 0)
 
-    wl = _make(tmp_path, num_prompts=64)  # no hip_visible_devices
+    wl = _make(tmp_path, num_prompts=64, **config)
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
     with caplog.at_level("WARNING"):
@@ -2716,7 +2830,8 @@ def test_only_the_trials_own_gpus_are_watched_for_unreleased_memory(tmp_path, mo
 
     The check sampled every card on the node, so a co-tenant allocating on any
     of them failed this workload. Only the devices named by
-    `hip_visible_devices` are this trial's to answer for.
+    `hip_visible_devices` are watched -- the container could not have allocated
+    anywhere else -- and only then if the trial also claims exclusivity.
     """
     monkeypatch.setattr(
         mod,
@@ -2732,7 +2847,7 @@ def test_only_the_trials_own_gpus_are_watched_for_unreleased_memory(tmp_path, mo
     monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
     monkeypatch.setattr(mod, "_VRAM_RELEASE_TIMEOUT_SEC", 0)
 
-    wl = _make(tmp_path, num_prompts=64, hip_visible_devices="0")
+    wl = _make(tmp_path, num_prompts=64, hip_visible_devices="0", exclusive_gpus=True)
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
     result = wl.run()
@@ -3011,6 +3126,61 @@ def test_two_users_on_one_node_get_separate_scratch(tmp_path, monkeypatch):
     # This trial's own scratch is private, cache included.
     assert wl._work_dir.stat().st_mode & 0o077 == 0
     assert not (root / "hf").exists(), "the cache must not default to the shared root"
+
+
+def test_a_shared_root_owned_by_another_user_is_refused(tmp_path, monkeypatch):
+    """The sticky bit does not bind the directory's owner.
+
+    Whoever ran first owns the shared root, and the owner of a sticky directory
+    may rename or remove anything in it however it is owned -- so a co-tenant who
+    got there first could swap this trial's `u<uid>` for a directory of their own
+    *after* the per-uid check had approved it, and the mounts, the exports and the
+    audit that reads them would follow. A root owned by root is fine (an
+    administrator provisioned it) and so is one owned by this user; anything else
+    is refused with the remedy.
+    """
+    root = tmp_path / "shared"
+    root.mkdir()
+    real_lstat = os.lstat
+
+    def lstat_as_a_stranger(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if Path(path) != root:
+            return info
+        return os.stat_result(
+            (info.st_mode, info.st_ino, info.st_dev, info.st_nlink, os.getuid() + 1)
+            + tuple(info)[5:]
+        )
+
+    monkeypatch.setattr(mod.os, "lstat", lstat_as_a_stranger)
+    with pytest.raises(RuntimeError, match="neither root nor this user"):
+        _make(tmp_path, work_dir=str(root)).setup()
+
+
+@pytest.mark.parametrize("owner", ["root", "self"])
+def test_a_root_owned_or_own_shared_root_is_accepted(tmp_path, monkeypatch, owner):
+    """The two roots that cannot be rearranged by a stranger.
+
+    Root-owned is the shareable case an administrator provisions; owned by this
+    user is what an unshared `/tmp` path is on first use. Refusing either would
+    make the guard above unusable rather than safe.
+    """
+    root = tmp_path / "shared"
+    root.mkdir()
+    real_lstat = os.lstat
+
+    def lstat_as_root(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if Path(path) != root:
+            return info
+        return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink, 0) + tuple(info)[5:])
+
+    if owner == "root":
+        monkeypatch.setattr(mod.os, "lstat", lstat_as_root)
+
+    wl = _make(tmp_path, work_dir=str(root))
+    wl.setup()
+    assert wl._out_dir.is_dir()
 
 
 def test_an_explicit_hf_home_is_left_where_it_was_pointed(tmp_path):

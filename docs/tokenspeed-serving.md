@@ -265,6 +265,8 @@ matter most:
 | `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. |
 | `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch and the HF cache are per-uid beneath it, at `<work_dir>/u<uid>`. See below. |
 | `hf_home` | `<work_dir>/u<uid>/hf` | Set it to share one pre-populated cache between users; see below for why that has to be deliberate. |
+| `hip_visible_devices` | unset | Which GPUs the container sees. A visibility filter, not an allocation. |
+| `exclusive_gpus` | `false` | Assert that no other job shares this node's GPUs. Only then does unreleased VRAM fail the trial. |
 | `ready_timeout_sec` | `900` | Raise it for big models on a cold cache. |
 | `network` | `host` | See below. |
 | `port` / `control_port` | `auto` | Free ports, picked per trial. Explicit values must be in 1024..65535 and must differ. |
@@ -400,13 +402,19 @@ shared node a co-tenant starting a job mid-trial produces the same delta, and
 blaming it here would redden a healthy cell and point `rocm-smi --gpureset` at
 someone else's device.
 
-So growth is only **attributed** on GPUs the trial can prove it owned: the ones
-named by `hip_visible_devices`, which is the only exclusive assignment the
-workload has. Without it the wait still happens — waiting helps the next cell
-whoever owns the memory — but the outcome is a logged warning rather than a
-failure, and the log says to set `hip_visible_devices` to make the check
-authoritative. `tokenspeed-serve-gptoss-tp.yaml` pins its GPUs per cell for
-exactly this reason; it is the recipe where slow release was observed.
+So growth is only **attributed** when something outside this workload says the
+GPUs were its own: `exclusive_gpus: true`, the recipe author asserting a
+scheduler allocation or a machine they have to themselves. Without it the wait
+still happens — waiting helps the next cell whoever owns the memory — but the
+outcome is a logged warning rather than a failure, and the log says what to set.
+
+`hip_visible_devices` does **not** carry that meaning, and used to be read as if
+it did. It is a visibility filter on this process tree, not an allocation: it
+narrows which devices are *watched*, since the container could not have allocated
+anywhere else, while leaving the same physical GPU open to a co-tenant for the
+whole trial. A cell that pins its devices and nothing more is therefore still
+unattributed. `tokenspeed-serve-gptoss-tp.yaml` pins its GPUs per cell — that is
+what makes the watch specific; the claim of exclusivity is a separate statement.
 
 VRAM is read from `/sys/class/drm/card*/device/mem_info_vram_used` — no
 subprocess, no PATH assumption — and a node that does not expose it simply skips
@@ -615,6 +623,16 @@ the configured value and not only to the default. The root is created `1777`
 when the workload creates it, for the same reason `/tmp` is: the sticky bit lets
 everyone create their own subdirectory while stopping anyone removing another's.
 
+With one exception the sticky bit does not cover, which is why the root's
+*ownership* is checked as well: the owner of a sticky directory may rename or
+remove anything in it however it is owned. Whoever ran first owns the root, so a
+co-tenant who got there first could swap this trial's `u<uid>` for a directory of
+their own after the per-uid check had approved it. A root owned by root (an
+administrator provisioned it) or by the current user is accepted; one owned by
+another unprivileged user is refused, naming both remedies — set `work_dir` to a
+path you own, or have an administrator create the shared root root-owned and
+`1777` so it is shareable without being anyone's to rearrange.
+
 The HF cache is per-uid too, at `<work_dir>/u<uid>/hf`. Sharing it by default
 was tried and withdrawn: a cache is only shareable if later users can *write* it
 — the failure a second user hits is a cache miss, not a read — and making the
@@ -673,6 +691,23 @@ the GPU produced by the cleanup path itself. Reaping the client first closes it,
 since nothing is then left that could still create the container. Draining the
 client on the way out also recovers what it had written, so a timeout still
 reports the bring-up log that explains it instead of discarding the pipe.
+
+Three details of that are load-bearing, and each of them was a bug first:
+
+- **The lock is reentrant.** A Python signal handler runs in the main thread,
+  which is the thread holding the lock while the client is spawned and published,
+  so a plain `Lock` made the handler wait for a release only the code it had
+  interrupted could give. The process then sat there until SIGKILL, container
+  still running.
+- **Cleanup runs inside the termination context**, not in an `except` clause
+  after it. Cleanup takes over a minute in the worst case — terminate grace, pipe
+  drain, `docker rm -f` — and with the handlers already restored a signal in that
+  window killed the process outright and stranded the container.
+- **The removal is retried when the client could not be reaped.** That is only
+  possible while `Popen` itself is running, since the object to reap does not
+  exist until it returns; such a client can create the container just after the
+  first removal finds nothing, so three passes a second apart cover it. When the
+  client *was* reaped, one pass is enough and only one is made.
 
 Removal failures are warned about with docker's exit code and stderr. `docker rm
 -f` reports an unreachable daemon or a permission problem by exit status rather
