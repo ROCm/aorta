@@ -663,6 +663,16 @@ container already removed underneath it. A
 SIGKILL still leaks the container, since no handler survives one, but the runner
 sends SIGTERM first and that is the window this uses.
 
+Every cleanup path reaps the `docker run` client *before* removing the container,
+which is why the run is launched with `Popen` rather than `run()` — the handler
+needs a client it can reach. Removing first left a window in which the removal
+reported "No such container" because the daemon had not created it yet, and the
+surviving client went on to create it after this process was gone: an orphan on
+the GPU produced by the cleanup path itself. Reaping the client first closes it,
+since nothing is then left that could still create the container. Draining the
+client on the way out also recovers what it had written, so a timeout still
+reports the bring-up log that explains it instead of discarding the pipe.
+
 Removal failures are warned about with docker's exit code and stderr. `docker rm
 -f` reports an unreachable daemon or a permission problem by exit status rather
 than by raising, so checking only for exceptions meant the one outcome worth
@@ -761,8 +771,8 @@ the `refresh-baselines` workflow. See [ci-nightly-eval.md](ci-nightly-eval.md).
 python -m pytest tests/workloads/test_tokenspeed_serve.py -q
 ```
 
-GPU-free and Docker-free: `shutil.which`, the `/dev/kfd` probe and
-`subprocess.run` are monkeypatched, so what is covered is what this workload
+GPU-free and Docker-free: `shutil.which`, the `/dev/kfd` probe and the
+`subprocess` entry points are monkeypatched, so what is covered is what this workload
 owns — config validation, env/argv construction, export parsing, aggregation and
 the verdict. The served-request audit, the exit-code mapping and the gates get
 the most attention. Every committed recipe is also loaded through the real

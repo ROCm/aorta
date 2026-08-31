@@ -111,6 +111,11 @@ _MAX_TEARDOWN_GRACE_SEC = 3600
 # and below 5 no positive drain fits inside it.
 _MIN_TEARDOWN_GRACE_SEC = 5
 
+# How long the `docker run` client gets to exit after SIGTERM before it is
+# killed. It is a client, not the workload: it has nothing to flush but its own
+# pipes, and every path that stops it is already an abnormal one.
+_CLIENT_TERMINATE_GRACE_SEC = 5
+
 # A few GiB of driver and runtime overhead survives any run, so the check is
 # against growth past a margin rather than against zero. The leak this exists for
 # is two orders of magnitude larger -- 256 GB on a 309 GB card.
@@ -850,6 +855,13 @@ class TokenSpeedServeWorkload(Workload):
             gates[key] = bound
         return gates
 
+    # The running `docker run` client, so the signal handler can reap it before
+    # removing the container. Class-level defaults rather than an __init__: the
+    # base class owns construction, and every path that reads these tolerates
+    # `None` (no client running).
+    _docker_client: subprocess.Popen[str] | None = None
+    _docker_client_lock = threading.Lock()
+
     # ---------------------------------------------------------------- setup
 
     def setup(self) -> None:
@@ -1506,35 +1518,49 @@ class TokenSpeedServeWorkload(Workload):
         timed_out = False
         try:
             with self._remove_container_on_termination():
-                proc = subprocess.run(
-                    argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout,
-                    # Carries the values referenced by the bare `-e NAME` flags
-                    # in argv. Inherits the rest, since docker needs its own
-                    # environment (DOCKER_HOST, PATH) to work at all.
-                    env={**os.environ, **self._secret_env()},
-                )
-            stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
-        except subprocess.TimeoutExpired as exc:
+                # Popen rather than run(), so the signal handler has a client to
+                # reap. Killing the client before removing the container is what
+                # closes the race between the two: otherwise a signal arriving
+                # while `docker run` is still starting removes nothing, and the
+                # client goes on to create the container after we have exited.
+                with self._docker_client_lock:
+                    self._docker_client = subprocess.Popen(
+                        argv,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        # Carries the values referenced by the bare `-e NAME`
+                        # flags in argv. Inherits the rest, since docker needs
+                        # its own environment (DOCKER_HOST, PATH) to work at all.
+                        env={**os.environ, **self._secret_env()},
+                    )
+                client = self._docker_client
+                stdout, stderr = client.communicate(timeout=self._timeout)
+                exit_code = client.returncode
+        except subprocess.TimeoutExpired:
             timed_out = True
-            stdout = _as_text(exc.stdout)
-            stderr = _as_text(exc.stderr)
             exit_code = None
-            # The timeout kills the docker *client*; the daemon keeps the
-            # container running, and `--rm` only fires once it exits. Left alone,
-            # a timed-out cell would hand the next one a live TokenSpeed still
-            # holding the GPU and the gateway port -- so the next cell fails too,
-            # for a reason that is nowhere in its own logs.
+            # `communicate(timeout=)` leaves the client running, so it is killed
+            # here and drained -- which also yields whatever it had written.
+            self._terminate_docker_client()
+            stdout, stderr = self._drain_docker_client()
+            # Killing the client does not stop the container: it belongs to the
+            # daemon, and `--rm` only fires once it exits. Left alone, a
+            # timed-out cell would hand the next one a live TokenSpeed still
+            # holding the GPU and the gateway port -- so the next cell fails
+            # too, for a reason that is nowhere in its own logs.
             self._force_remove_container()
         except BaseException:
             # KeyboardInterrupt, and anything else raised out of the call. The
             # runner's SIGTERM does *not* arrive here -- see
             # _remove_container_on_termination, which is what handles it. The
             # original exception still propagates as the failure.
+            self._terminate_docker_client()
             self._force_remove_container()
             raise
+        finally:
+            with self._docker_client_lock:
+                self._docker_client = None
         container_elapsed = time.monotonic() - start
 
         records = self._collect_step_records()
@@ -1783,6 +1809,15 @@ class TokenSpeedServeWorkload(Workload):
                 signum,
                 self._container_name(),
             )
+            # The client first, then the container. A single removal here raced
+            # container creation: the handler is armed while `docker run` is
+            # starting, so a signal arriving after the client was spawned but
+            # before the daemon had created the named container got "No such
+            # container", killed Python, and left the client alive to finish
+            # creating it -- an orphan holding the GPU, produced by the cleanup
+            # path. Reaping the client closes the window, because nothing is
+            # left that could still create the container.
+            self._terminate_docker_client()
             self._force_remove_container()
             # SIG_DFL, not the previous disposition. Restoring the previous one
             # first looks tidier but does not guarantee the process dies:
@@ -1808,6 +1843,45 @@ class TokenSpeedServeWorkload(Workload):
                     signal.signal(sig, prev)
                 except (OSError, ValueError):  # pragma: no cover
                     pass
+
+    def _terminate_docker_client(self) -> None:
+        """Stop the ``docker run`` client and reap it.
+
+        Ordered before container removal on every cleanup path, because the
+        client is the only thing that can still *create* the container. Removing
+        first and killing second left a window -- signal arrives, removal
+        reports "No such container" because the daemon has not made it yet, and
+        the surviving client then creates it after this process is gone.
+
+        Best-effort and silent about a client that has already exited, which is
+        the common case: this runs on paths where the run has usually finished
+        or failed on its own.
+        """
+        with self._docker_client_lock:
+            client = self._docker_client
+        if client is None or client.poll() is not None:
+            return
+        try:
+            client.terminate()
+            try:
+                client.wait(timeout=_CLIENT_TERMINATE_GRACE_SEC)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                client.wait(timeout=_CLIENT_TERMINATE_GRACE_SEC)
+        except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - defensive
+            log.warning("tokenspeed_serve: could not stop the docker client: %s", exc)
+
+    def _drain_docker_client(self) -> tuple[str, str]:
+        """Whatever the client wrote before it was stopped."""
+        with self._docker_client_lock:
+            client = self._docker_client
+        if client is None:
+            return "", ""
+        try:
+            stdout, stderr = client.communicate(timeout=_CLIENT_TERMINATE_GRACE_SEC)
+        except (OSError, subprocess.SubprocessError):  # pragma: no cover - defensive
+            return "", ""
+        return _as_text(stdout), _as_text(stderr)
 
     def _force_remove_container(self) -> None:
         """Stop and remove a container the docker client no longer supervises.

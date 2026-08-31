@@ -1,7 +1,7 @@
 """Unit tests for the `tokenspeed_serve` online-serving benchmark workload.
 
 Unit-level: no GPU, no Docker, no TokenSpeed container. `shutil.which`, the
-`/dev/kfd` probe and `subprocess.run` are all monkeypatched, so what is under
+`/dev/kfd` probe and `subprocess.Popen`/`run` are all monkeypatched, so what is under
 test is the part this workload actually owns -- config validation, container env
 and argv construction, parsing of what `tokenspeed bench serve` exports,
 aggregation across steps, and the verdict.
@@ -123,26 +123,87 @@ def _stub_docker(
     wl: TokenSpeedServeWorkload,
     monkeypatch,
     *,
-    docs: list[dict] | None = None,
+    docs: list[dict | str] | None = None,
     exit_code: int = 0,
     stdout: str = "TS_BENCH_METRIC: server_startup_sec=307\nTS_BENCH_RESULT: pass\n",
     timeout: bool = False,
     capture: dict | None = None,
 ) -> None:
-    """Stand in for the container: write the exports it would have written."""
+    """Stand in for the container: write the exports it would have written.
 
-    def fake_run(argv, **kwargs):
-        if capture is not None:
-            capture["argv"] = argv
-            capture["kwargs"] = kwargs
-        for index, doc in enumerate(docs or [], start=1):
-            path = wl._out_dir / f"bench.{wl._run_token}.step{index}.json"
-            path.write_text(json.dumps(doc), encoding="utf-8")
-        if timeout:
-            raise subprocess.TimeoutExpired(cmd=argv, timeout=1, output=stdout)
-        return subprocess.CompletedProcess(argv, exit_code, stdout, "")
+    A `docs` entry given as a string is written verbatim, for the malformed-export
+    cases; anything else is JSON-encoded.
+    """
 
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    times_out = timeout
+    real_popen = subprocess.Popen
+
+    class FakeClient:
+        """Enough of ``Popen`` for the supervision the workload does.
+
+        The workload launches the container with ``Popen`` so that a signal
+        arriving mid-run has a client to reap, so the stub has to answer
+        ``poll``/``terminate``/``wait`` as well as ``communicate`` -- and, on the
+        timeout path, stay "alive" until it is stopped, the way a real client
+        left behind by ``communicate(timeout=)`` does.
+        """
+
+        def __init__(self, argv, benching, **kwargs):
+            self.args = argv
+            self.returncode = None
+            self._benching = benching
+            self._stopped = False
+            if not benching:
+                return
+            if capture is not None:
+                capture["argv"] = argv
+                capture["kwargs"] = kwargs
+            for index, doc in enumerate(docs or [], start=1):
+                path = wl._out_dir / f"bench.{wl._run_token}.step{index}.json"
+                body = doc if isinstance(doc, str) else json.dumps(doc)
+                path.write_text(body, encoding="utf-8")
+
+        def communicate(self, _input=None, timeout=None):
+            if self._benching and times_out and not self._stopped:
+                raise subprocess.TimeoutExpired(cmd=self.args, timeout=timeout, output=stdout)
+            if self.returncode is None:
+                self.returncode = exit_code if self._benching else 0
+            return (stdout, "") if self._benching else ("", "")
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self._stopped = True
+
+        def kill(self):
+            self._stopped = True
+
+        def wait(self, timeout=None):
+            self._stopped = True
+            if self.returncode is None:
+                self.returncode = -signal.SIGTERM
+            return self.returncode
+
+        # `subprocess.run` -- which the cleanup and `bash -n` paths still use --
+        # drives Popen as a context manager.
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_popen(argv, **kwargs):
+        # Only docker is stubbed. Patching Popen patches it for the whole
+        # process, and the workload also shells out to `bash -n` (syntax check)
+        # and to `docker rm -f` (cleanup); the first has to keep working for
+        # real, and the second must not reach a daemon from a unit test.
+        listed = [str(a) for a in argv]
+        if listed and listed[0] == "docker":
+            return FakeClient(argv, listed[1:2] == ["run"], **kwargs)
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
 
 
 # --------------------------------------------------------------- packaging
@@ -1056,12 +1117,7 @@ def test_unparseable_export_is_skipped(tmp_path, monkeypatch):
     wl = _make(tmp_path)
     wl.setup()
 
-    def fake_run(argv, **_kwargs):
-        path = wl._out_dir / f"bench.{wl._run_token}.step1.json"
-        path.write_text("{not json", encoding="utf-8")
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    _stub_docker(wl, monkeypatch, docs=["{not json"])
     result = wl.run()
     assert result.passed is False
     assert any(d["reason"] == "no_bench_export" for d in result.failure_details)
@@ -2095,6 +2151,115 @@ def test_an_already_gone_container_is_not_reported_as_a_failure(tmp_path, monkey
         wl._force_remove_container()
 
     assert not any(r.levelname == "WARNING" for r in caplog.records), caplog.text
+
+
+def _stub_client_and_removal(wl, monkeypatch, events: list[str]):
+    """A `docker run` client that ignores its timeout, with removals recorded.
+
+    Returns the client so a test can assert on how it was stopped; `events` gets
+    an entry per cleanup step, in the order the workload took them.
+    """
+    real_popen = subprocess.Popen
+
+    class Client:
+        args = ["docker", "run"]
+
+        def __init__(self):
+            self.returncode = None
+            self._stopped = False
+
+        def communicate(self, _input=None, timeout=None):
+            if not self._stopped:
+                raise subprocess.TimeoutExpired(cmd=self.args, timeout=timeout, output="")
+            return "bring-up log the client had already written", ""
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            events.append("terminate client")
+            self._stopped = True
+
+        def kill(self):  # pragma: no cover - terminate is enough for this client
+            events.append("kill client")
+            self._stopped = True
+
+        def wait(self, timeout=None):
+            self.returncode = -signal.SIGTERM
+            return self.returncode
+
+    client = Client()
+
+    def fake_popen(argv, **kwargs):
+        if [str(a) for a in argv][:2] == ["docker", "run"]:
+            return client
+        return real_popen(argv, **kwargs)
+
+    def fake_run(argv, **_kwargs):
+        events.append(" ".join(str(a) for a in argv[:3]))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    return client
+
+
+def test_a_timed_out_client_is_stopped_before_the_container_is_removed(tmp_path, monkeypatch):
+    """Order matters, because the client is what *creates* the container.
+
+    `communicate(timeout=)` returns to the host but leaves `docker run` running.
+    Removing first and reaping second left a window: the removal reports "No such
+    container" because the daemon has not finished creating it, and the surviving
+    client then creates it after the host has moved on -- an orphaned TokenSpeed
+    holding the GPU and the gateway port, produced by the cleanup path itself.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    events: list[str] = []
+    client = _stub_client_and_removal(wl, monkeypatch, events)
+
+    result = wl.run()
+
+    assert events == ["terminate client", "docker rm -f"], events
+    assert client.returncode is not None, "the client was left unreaped"
+    assert result.passed is False
+    assert any(d["reason"] == "container_timeout" for d in result.failure_details)
+
+
+def test_a_timed_out_client_is_drained_so_its_output_is_still_reported(tmp_path, monkeypatch):
+    """The bring-up log is the only account of why the trial ran out of time.
+
+    `communicate(timeout=)` raises without returning what it had read, so a
+    timeout that reported nothing left the pipe -- and the reason -- discarded,
+    which is the case where the log is needed most.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    _stub_client_and_removal(wl, monkeypatch, [])
+
+    result = wl.run()
+
+    tails = " ".join(str(d.get("stdout_tail", "")) for d in result.failure_details)
+    assert "bring-up log the client had already written" in tails
+
+
+def test_a_signal_stops_the_client_before_removing_the_container(tmp_path, monkeypatch):
+    """Same ordering on the signal path, where the race was originally reachable:
+    the handler is armed while `docker run` is still starting."""
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token = "tok"
+    events: list[str] = []
+    client = _stub_client_and_removal(wl, monkeypatch, events)
+    wl._docker_client = client
+
+    with pytest.raises(SystemExit):
+        with wl._remove_container_on_termination():
+            monkeypatch.setattr(mod.signal, "signal", lambda *_a: None)
+            monkeypatch.setattr(mod.os, "kill", lambda *_a: (_ for _ in ()).throw(SystemExit(143)))
+            signal.raise_signal(signal.SIGTERM)
+
+    assert events == ["terminate client", "docker rm -f"], events
 
 
 def test_request_counters_are_published_as_sums_not_also_as_means(tmp_path, monkeypatch):
