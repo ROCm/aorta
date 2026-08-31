@@ -33,8 +33,12 @@ _METRIC_POLICIES: dict[str, str] = {
     "prefill_latency_ms": "max",
     "decode_latency_ms": "max",
     "latency_ms": "max",
-    # Online-serving metrics, as `tokenspeed bench serve` spells them (the
-    # `tokenspeed_serve` workload passes its export through verbatim).
+    # Online-serving metrics, under the names `tokenspeed bench serve` uses. The
+    # `tokenspeed_serve` workload keeps those names but not those values: each
+    # one published here is the mean across the trial's measured bench steps,
+    # and only when every step reported it. It also adds names of its own --
+    # `tokens_per_sec` aliases `output_throughput` onto the spelling this
+    # allowlist already knew, and `completed_total` / `failed_total` are sums.
     # Deliberately NOT aliased onto prefill/decode_latency_ms above: TTFT
     # includes queueing delay and TPOT is an inter-token average, so gating them
     # under those names would gate a differently-defined quantity. Medians and

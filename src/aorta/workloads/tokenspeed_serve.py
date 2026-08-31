@@ -1184,10 +1184,24 @@ class TokenSpeedServeWorkload(Workload):
     def _container_env(self) -> dict[str, str]:
         """Env for the container: TS_* knobs, then the cell's mitigations.
 
-        Mitigations are applied last so a cell can override a default knob, and
-        because they are the whole point of the matrix -- a mitigation silently
-        losing to a workload default would make two cells identical while
-        reporting them as different.
+        Mitigations are merged last, but "last" here settles precedence between
+        a mitigation and *anything else a mitigation may legitimately set* --
+        not between a mitigation and the knobs below. A mitigation naming a key
+        this workload owns is rejected outright rather than allowed to win: the
+        host would keep auditing and reporting its own value while the container
+        ran the other one. The owned set is everything in ``env``, plus
+        ``_PROTOCOL_ENV_KEYS`` for the keys whose configured value is absence,
+        plus the secret names. So of the ``TS_*`` namespace, only what this
+        workload does not own is a mitigation's to set -- in practice
+        ``TS_DRAIN_TIMEOUT``, which ``ts_bench_serve.sh`` reads, bounds against
+        the teardown grace, and this class never sets. Everything else a
+        mitigation carries (engine and runtime variables, which is what the
+        matrix mostly varies) is untouched by the guard and lands here.
+
+        Anything the workload does set is therefore configured through
+        ``workload_config``, which is the only route that keeps the host's
+        expectations, its audit and its reported configuration in step with the
+        run.
         """
         env: dict[str, str] = {
             "TS_MODEL": self._model,
