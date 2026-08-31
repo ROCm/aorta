@@ -57,6 +57,15 @@ _METRIC_POLICIES: dict[str, str] = {
     "output_throughput": "min",
     "total_token_throughput": "min",
     "request_throughput": "min",
+    # Rollout-mode generated-length metrics. `min` for both: what a nightly
+    # would be protecting against here is the engine or the model returning
+    # *less* text for the same prompts, since an RL rollout's throughput
+    # numbers are only comparable between runs that generated comparable
+    # amounts. The upper side is deliberately not gated -- longer completions
+    # are not a regression, and under EOS-respecting generation the length is
+    # the model's choice rather than the stack's.
+    "mean_output_tokens_per_request": "min",
+    "generated_tokens_p50": "min",
     "logits_checksum": "equal",
     "output_checksum": "equal",
     "checksum": "equal",

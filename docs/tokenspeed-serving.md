@@ -271,7 +271,9 @@ matter most:
 | `request_rate` | `inf` | `inf` submits everything at once. |
 | `warmup_steps` | `1` | Discarded bench steps. See below. |
 | `num_warmups` | `1` | Warmup requests *within* a bench step. |
-| `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. |
+| `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. Has no effect on `dataset: random` — see [Rollout mode](#rollout-mode). |
+| `rollout` | `false` | Shape the load like an RL rollout. See [Rollout mode](#rollout-mode). |
+| `save_detailed` | `false` | Keep the export's per-request arrays. `true` by default under `rollout`. |
 | `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch and the HF cache are per-uid beneath it, at `<work_dir>/u<uid>`. See below. |
 | `hf_home` | `<work_dir>/u<uid>/hf` | Set it to share one pre-populated cache between users; see below for why that has to be deliberate. |
 | `hip_visible_devices` | unset | Which GPUs the container sees. A visibility filter, not an allocation. |
@@ -280,6 +282,81 @@ matter most:
 | `network` | `host` | See below. |
 | `port` / `control_port` | `auto` | Free ports, picked per trial. Explicit values must be in 1024..65535 and must differ. |
 | `gates` | none | Optional per-trial perf gates. |
+
+### Rollout mode
+
+`rollout: true` changes what the engine is asked to do per request rather than
+how hard it is pushed: `rollout_samples` sampled completions per prompt, at a
+temperature above zero, stopping on EOS. That is the load an RL post-training
+loop puts on an inference engine during its generation phase, and the difference
+that matters is that the number of tokens generated becomes a property of the
+policy instead of a number the recipe chose.
+
+The design, the cost model it supports, and where the RL loop itself would live
+are in [RL post-training](tokenspeed-rl-post-training.md). What follows is the
+configuration.
+
+| Key | Default | Notes |
+|---|---|---|
+| `rollout` | `false` | Enables the mode. The four keys below are rejected without it. |
+| `rollout_samples` | `4` | Completions per prompt — the `n` of the sampling API. Max 1024. |
+| `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
+| `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
+| `min_mean_output_tokens` | `8` | Per-step floor on `total_output_tokens / completed`. `0` disables it. |
+
+The sampling keys are **rejected outside the mode** rather than ignored. Outside
+it no sampling parameters are sent at all, so a `temperature` in an ordinary
+serving recipe would have changed nothing while the trial published it as that
+cell's configuration.
+
+`ignore_eos` defaults to `false` under `rollout`, and an explicit `true` is
+refused. The two cannot both mean what they say: ignoring EOS pins every
+completion to `output_len`, so the run has no length distribution and its token
+volume is a function of the recipe. `output_len` remains meaningful as the
+`max_tokens` **allowance** — a `generated_tokens_max` sitting exactly on it means
+the cap truncated the rollout rather than the model stopping.
+
+Metrics the mode adds:
+
+| Metric | Meaning |
+|---|---|
+| `mean_output_tokens_per_request` | `total_output_tokens / completed`, meaned across steps. The reading to trust — computed from fields every export carries. |
+| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of per-request generated length, pooled across measured steps. Needs `save_detailed`. |
+| `generated_tokens_mean` / `_min` / `_max` / `_std` / `_count` | The rest of the distribution. |
+
+`generated_tokens_*` comes from the export's `output_lens` array, which the bench
+strips unless `--save-detailed` is passed — hence `save_detailed` defaulting on
+inside the mode. It is published only when *every* measured step carried the
+array, for the same reason the scalar aggregate requires that: a distribution
+pooled over whichever steps happened to have it would describe a subset while
+reading as the trial's.
+
+Three things about this mode are traps rather than settings, and all three are
+explained at length in [RL post-training](tokenspeed-rl-post-training.md#2-what-a-rollout-loop-needs-from-the-engine-and-what-tokenspeed-has):
+
+- **`ignore_eos` is forced on for `dataset: random` by the bench CLI itself**,
+  after argument parsing, regardless of the flags. EOS-respecting generation is
+  reachable only through the request body, which is why rollout mode sends
+  `ignore_eos: false` inside `--extra-body` and why that flag becomes owned in
+  this mode. It also means an existing `ignore_eos: false` cell on the random
+  dataset never respected EOS.
+- **`mean_output_tokens_per_request` is per request, not per sample.** Whether
+  the gateway's `usage.completion_tokens` covers all `n` choices or only the
+  first is the server's decision. Both committed rollout recipes carry an `n=1`
+  control cell so the ratio is measurable rather than assumed.
+- **TPOT and ITL are not per-token latencies under `n > 1`.** The bench client
+  concatenates all choices and treats every chunk gap as an inter-token interval.
+  TTFT and the throughputs stay meaningful.
+
+The served-request audit is unchanged — `completed` counts requests, not
+completions — but it stops being *sufficient*, which is what
+`min_mean_output_tokens` exists for: a policy that answers every request with an
+immediate EOS passes every other guard in the workload while generating about one
+token per prompt. Exit 56 / `rollout_output_too_short` is that verdict, checked in
+the container and again on the host.
+
+Recipes: `tokenspeed-serve-rollout-smoke.yaml` (the shape check to run first)
+and `tokenspeed-serve-rollout.yaml` (sample-count and long-form cells).
 
 ### Perf gates
 

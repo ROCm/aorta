@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -620,6 +621,12 @@ def test_the_documented_protocol_floor_is_actually_owned(tmp_path):
             "bench_args": ["--goodput", "ttft:200"],
             "hip_visible_devices": "0,1",
         },
+        # The rollout family is absent-when-off, and off is the default, so
+        # the computed set reaches none of it on an ordinary serving cell.
+        # `top_p` needs naming explicitly even inside the mode: it is the one
+        # rollout key with no default, since the server's own nucleus setting is
+        # a reasonable thing to leave alone.
+        {"rollout": True, "top_p": 0.95},
     ]
 
     owned: set[str] = set()
@@ -2375,7 +2382,9 @@ def test_a_failure_without_a_step_still_points_at_an_iteration(tmp_path, monkeyp
     assert 0 <= result.first_failure_iteration < result.total_iterations
 
 
-def _run_script_audit(tmp_path: Path, doc: dict, *, expected: int = 32) -> str:
+def _run_script_audit(
+    tmp_path: Path, doc: dict, *, expected: int = 32, min_mean_output: int = 0
+) -> str:
     """Drive `audit_result_json` out of ts_bench_serve.sh directly.
 
     The in-container audit is the half of the guard that runs where the host
@@ -2396,7 +2405,11 @@ def _run_script_audit(tmp_path: Path, doc: dict, *, expected: int = 32) -> str:
     export = tmp_path / "export.json"
     export.write_text(json.dumps(doc))
     harness = tmp_path / "drive.sh"
-    harness.write_text(f'NUM_PROMPTS={expected}\n{body}\naudit_result_json "$1"\n')
+    harness.write_text(
+        f"NUM_PROMPTS={expected}\n"
+        f"MIN_MEAN_OUTPUT_TOKENS={min_mean_output}\n"
+        f'{body}\naudit_result_json "$1"\n'
+    )
     proc = subprocess.run(["bash", str(harness), str(export)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip()
@@ -3599,3 +3612,561 @@ def test_an_explicit_hf_home_is_left_where_it_was_pointed(tmp_path):
     assert wl._hf_home == shared
     assert wl._container_env()["HF_HOME"] == "/hf-cache"
     assert f"{shared}:/hf-cache" in wl._docker_argv(wl._container_env())
+
+
+# ---------------------------------------------------------------- rollout mode
+
+
+def _rollout_doc(
+    *,
+    completed: int = 32,
+    total_output_tokens: int = 8192,
+    output_lens: list[int] | None = None,
+    **overrides,
+) -> dict:
+    """A `--save-detailed` export from an EOS-respecting sampled run.
+
+    Differs from `_bench_doc` in the two fields a rollout is read through: the
+    generated-token total is a property of the policy rather than of the recipe,
+    and `output_lens` carries the per-request lengths that only appear with
+    `--save-detailed`.
+    """
+    doc = _bench_doc(completed=completed)
+    doc["total_output_tokens"] = total_output_tokens
+    if output_lens is not None:
+        doc["output_lens"] = output_lens
+    doc.update(overrides)
+    return doc
+
+
+def _rollout(tmp_path: Path, **cfg) -> TokenSpeedServeWorkload:
+    base = {"rollout": True, "num_prompts": 32}
+    base.update(cfg)
+    return _make(tmp_path, **base)
+
+
+def test_sampling_keys_are_rejected_without_rollout(tmp_path):
+    """Outside rollout mode no sampling parameters are sent at all.
+
+    A `temperature` in an ordinary serving recipe therefore changed nothing while
+    the trial published it as that cell's configuration -- a result labelled with
+    a sampling setting the server was never told, which is the same mislabelling
+    the owned-flag guards exist to prevent, reached through a key that reads as
+    supported.
+    """
+    for key, value in (
+        ("temperature", 1.0),
+        ("rollout_samples", 4),
+        ("top_p", 0.9),
+        ("min_mean_output_tokens", 8),
+    ):
+        with pytest.raises(ValueError, match="require rollout: true"):
+            _make(tmp_path, **{key: value}).setup()
+
+
+def test_rollout_with_ignore_eos_is_rejected(tmp_path):
+    """The combination cannot mean what either half says.
+
+    Ignoring EOS pins every completion to `output_len`, so the run has no length
+    distribution and its token volume is a function of the recipe rather than of
+    the policy. Accepting it would run a fixed-length benchmark and publish it as
+    a rollout, which is worse than refusing the recipe.
+    """
+    with pytest.raises(ValueError, match="incompatible with"):
+        _rollout(tmp_path, ignore_eos=True).setup()
+
+
+def test_rollout_defaults_ignore_eos_off(tmp_path):
+    """Stopping on EOS is the mode, not an option within it.
+
+    Inheriting the ordinary default of `True` would have made every rollout
+    recipe carry `ignore_eos: false` to get the behaviour its own mode name
+    promises, and one that forgot would have measured the wrong thing silently.
+    """
+    wl = _rollout(tmp_path)
+    wl.setup()
+    assert wl._ignore_eos is False
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    assert wl._container_env()["TS_IGNORE_EOS"] == "0"
+
+
+@pytest.mark.parametrize(
+    "cfg,expected",
+    [
+        # Zero would draw the same greedy completion n times: n decodes' worth of
+        # cost, a length distribution with no variance in it, and no sampling.
+        ({"temperature": 0}, r"must be in \(0, 2.0\]"),
+        ({"temperature": -1}, r"must be in \(0, 2.0\]"),
+        ({"temperature": 5}, r"must be in \(0, 2.0\]"),
+        # `bool` is an `int` subclass, so this would otherwise sample at 1.0 and
+        # report it as though someone had written it.
+        ({"temperature": True}, "got the boolean"),
+        ({"temperature": float("inf")}, "must be a finite number"),
+        ({"temperature": float("nan")}, "must be a finite number"),
+        ({"top_p": 0}, r"must be in \(0, 1.0\]"),
+        ({"top_p": 1.5}, r"must be in \(0, 1.0\]"),
+        ({"rollout_samples": 0}, "must be >= 1"),
+        ({"rollout_samples": 2000}, "must be between 1 and 1024"),
+        ({"rollout_samples": 1.5}, "must be a whole number"),
+    ],
+)
+def test_rollout_sampling_parameters_are_range_checked(tmp_path, cfg, expected):
+    """Each of these reaches the server inside the request body, so an
+    out-of-range value is rejected per-request -- every prompt fails and the
+    trial reports a serving failure for what is a recipe error, after the model
+    has loaded."""
+    with pytest.raises(ValueError, match=expected):
+        _rollout(tmp_path, **cfg).setup()
+
+
+def test_a_floor_above_the_token_cap_is_rejected(tmp_path):
+    """`output_len` becomes the request's `max_tokens`, so a floor above it names
+    a length the server is not permitted to produce.
+
+    Such a recipe cannot pass, and it would fail as `rollout_output_too_short` --
+    reading as a policy that stopped generating rather than as the arithmetic
+    error it is.
+    """
+    with pytest.raises(ValueError, match="exceeds output_len"):
+        _rollout(tmp_path, output_len=16, min_mean_output_tokens=64).setup()
+
+
+def test_rollout_env_carries_the_sampling_contract(tmp_path):
+    """The container has to be told what to sample, and told it in a spelling the
+    script accepts.
+
+    `str(1e-05)` is `'1e-05'`, which the script's `require_decimal` refuses -- so
+    a small temperature passed the host and then exited 64 inside the container,
+    reported as a script problem on a recipe the host had already approved.
+    """
+    wl = _rollout(tmp_path, rollout_samples=8, temperature=0.00001, top_p=0.95)
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    env = wl._container_env()
+
+    assert env["TS_ROLLOUT"] == "1"
+    assert env["TS_ROLLOUT_SAMPLES"] == "8"
+    assert env["TS_TOP_P"] == "0.950000"
+    assert "e" not in env["TS_TEMPERATURE"], env["TS_TEMPERATURE"]
+    assert float(env["TS_TEMPERATURE"]) == pytest.approx(0.00001)
+    # Defaulted on inside the mode: the per-request `output_lens` array the
+    # length distribution is computed from is stripped from the export without it.
+    assert env["TS_SAVE_DETAILED"] == "1"
+    assert env["TS_MIN_MEAN_OUTPUT_TOKENS"] == "8"
+
+
+def test_an_ordinary_serving_cell_carries_no_rollout_env(tmp_path):
+    """Absence is how the mode is switched off, and it has to be real absence.
+
+    A `TS_ROLLOUT=0` in the environment would be forwarded and reserved like any
+    other protocol key, which is harmless -- but `TS_TEMPERATURE` present at some
+    default would make the script append an `--extra-body` for a cell that never
+    asked to sample, changing what every existing serving recipe measures.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    env = wl._container_env()
+    for key in (
+        "TS_ROLLOUT",
+        "TS_ROLLOUT_SAMPLES",
+        "TS_TEMPERATURE",
+        "TS_TOP_P",
+        "TS_MIN_MEAN_OUTPUT_TOKENS",
+        "TS_SAVE_DETAILED",
+    ):
+        assert key not in env, key
+
+
+def test_top_p_is_omitted_when_unset(tmp_path):
+    """The server's own nucleus setting is a reasonable thing to leave alone, and
+    sending a default would override it while reporting nothing about having done
+    so."""
+    wl = _rollout(tmp_path)
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    assert "TS_TOP_P" not in wl._container_env()
+    assert wl._top_p is None
+
+
+def test_a_mitigation_cannot_redefine_the_rollout_contract(tmp_path):
+    """A mitigation setting these would sample differently from what the trial
+    reports.
+
+    `TS_ROLLOUT_SAMPLES=1` against a configured 4 is the sharpest: the load drops
+    to a quarter of the completions, every request still completes, and the cell
+    passes carrying `rollout_samples: 4`. Nothing fails, and the number is wrong.
+    """
+    for key in ("TS_ROLLOUT", "TS_ROLLOUT_SAMPLES", "TS_TEMPERATURE", "TS_MIN_MEAN_OUTPUT_TOKENS"):
+        wl = _rollout(tmp_path)
+        wl.setup()
+        wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+        wl.config["_aorta_trial_env"] = {key: "1"}
+        with pytest.raises(ValueError, match=key):
+            wl._container_env()
+
+
+def test_a_collapsed_policy_fails_the_rollout_floor(tmp_path, monkeypatch):
+    """The served-request audit stops being sufficient once EOS is respected.
+
+    `completed == num_prompts` and `failed == 0` say every request was answered;
+    they say nothing about whether anything was generated. A policy that emits
+    EOS immediately satisfies both, takes real time doing it, and reports finite
+    positive duration, TTFT and throughput -- so every other guard in this file
+    passes and the cell goes green having produced about one token per prompt.
+    For a fixed-length benchmark that state is unreachable, which is why the
+    audit did not cover it; in RL it is routine (entropy collapse, an
+    overshooting length penalty, a tokenizer whose EOS lands first).
+    """
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=33)])
+    result = wl.run()
+
+    assert not result.passed
+    reasons = [detail["reason"] for detail in result.failure_details]
+    assert reasons == ["rollout_output_too_short"], result.failure_details
+    detail = result.failure_details[0]
+    assert detail["mean_output_tokens"] == pytest.approx(33 / 32)
+    # Said explicitly, because the counters look healthy and the reader's first
+    # guess will be the engine.
+    assert "stopped generating rather than a serving failure" in detail["detail"]
+
+
+def test_a_healthy_rollout_clears_the_floor(tmp_path, monkeypatch):
+    """Establishes that the floor is not simply failing everything, which is what
+    would make the test above pass for the wrong reason."""
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=8192)])
+    result = wl.run()
+    assert result.passed, result.failure_details
+
+
+def test_the_floor_is_not_applied_outside_rollout(tmp_path, monkeypatch):
+    """A fixed-length serving cell has no floor to clear.
+
+    `ignore_eos` holds every completion at `output_len`, so a short mean is
+    impossible unless the export is wrong -- and the existing guards already
+    cover that. Applying the floor here would fail legitimate low-OSL recipes
+    (`output_len: 1` is a supported prefill-only shape).
+    """
+    wl = _make(tmp_path, output_len=1)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    result = wl.run()
+    assert result.passed, result.failure_details
+
+
+def test_an_unusable_token_total_fails_rather_than_skipping_the_floor(tmp_path, monkeypatch):
+    """"We could not read it" must not become "it passed".
+
+    The floor is computed from `total_output_tokens`, and an export omitting it
+    would otherwise leave the rollout's one mode-specific guard silently
+    inactive while the cell reported a distribution it had not verified.
+    """
+    doc = _rollout_doc()
+    doc.pop("total_output_tokens")
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+
+    assert not result.passed
+    assert any(
+        detail["reason"] == "result_json_unusable" and "total_output_tokens" in detail["detail"]
+        for detail in result.failure_details
+    ), result.failure_details
+
+
+def test_the_in_container_audit_also_enforces_the_floor(tmp_path):
+    """Two independent audits only help if both fail closed on the same contract.
+
+    The script owns the fast verdict and stops the run before the remaining steps
+    burn node time; the host re-checks so the guard survives someone editing the
+    script's exit codes.
+    """
+    short = _run_script_audit(
+        tmp_path,
+        {"completed": 32, "failed": 0, "total_output_tokens": 33},
+        min_mean_output=8,
+    )
+    assert short.startswith("SHORTLEN"), short
+
+    healthy = _run_script_audit(
+        tmp_path,
+        {"completed": 32, "failed": 0, "total_output_tokens": 8192},
+        min_mean_output=8,
+    )
+    assert healthy.startswith("OK"), healthy
+
+
+def test_the_in_container_floor_rejects_a_boolean_token_total(tmp_path):
+    """`json` decodes `true` into an `int` subclass, so an export carrying
+    `total_output_tokens: true` would divide to 1/32 and be compared as a real
+    measurement -- or, at `num_prompts: 1`, clear a floor of 1 outright."""
+    verdict = _run_script_audit(
+        tmp_path,
+        {"completed": 32, "failed": 0, "total_output_tokens": True},
+        min_mean_output=8,
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+
+def test_rollout_reports_generated_length_per_request(tmp_path, monkeypatch):
+    """Per *request*, and named that way on purpose.
+
+    The bench derives a request's output length from `usage.completion_tokens`,
+    and whether the gateway sums that over all `n` choices or reports only the
+    first is the server's decision, not something this workload can read. A
+    metric named per-sample would be wrong by a factor of `n` on one of those
+    two readings; this name is true on both.
+    """
+    wl = _rollout(tmp_path, rollout_samples=4, steps=2)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(total_output_tokens=6400),
+            _rollout_doc(total_output_tokens=3200),
+        ],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    # Mean of the per-step means (200 and 100), not of the totals.
+    assert result.metrics["mean_output_tokens_per_request"] == pytest.approx(150.0)
+    assert result.metrics["rollout"] is True
+    assert result.metrics["rollout_samples"] == 4
+    assert result.metrics["temperature"] == pytest.approx(1.0)
+
+
+def test_the_length_distribution_is_pooled_across_steps(tmp_path, monkeypatch):
+    """A mean hides the tail, and the tail is what a rollout is bounded by.
+
+    One 4000-token completion among short ones averages to something
+    unremarkable, while it is the thing that sizes the KV cache and decides how
+    long the slowest completion holds a batch open.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, steps=2)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, 10]),
+            _rollout_doc(completed=4, total_output_tokens=4030, output_lens=[10, 10, 10, 4000]),
+        ],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    metrics = result.metrics
+    assert metrics["generated_tokens_count"] == 8
+    assert metrics["generated_tokens_min"] == 10
+    assert metrics["generated_tokens_max"] == 4000
+    assert metrics["generated_tokens_p50"] == pytest.approx(10.0)
+    # Interpolated the way numpy does it, so these columns are comparable with
+    # the latency percentiles the bench computes beside them.
+    assert metrics["generated_tokens_p99"] == pytest.approx(10 + 3990 * 0.93)
+
+
+def test_a_partial_length_distribution_is_not_published(tmp_path, monkeypatch):
+    """Pooling over whichever steps happened to carry the array would describe a
+    subset while reading as the trial's -- the same reason the scalar aggregate
+    publishes a metric only when every step supplied it."""
+    wl = _rollout(tmp_path, num_prompts=4, steps=2)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, 10]),
+            _rollout_doc(completed=4, total_output_tokens=40),
+        ],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+    # The reading that does not depend on `--save-detailed` still has to arrive.
+    assert result.metrics["mean_output_tokens_per_request"] == pytest.approx(10.0)
+
+
+def test_exit_56_is_named_rather_than_generic(tmp_path, monkeypatch):
+    """The script stops the run on a short rollout, and the host has to say why.
+
+    Mapped to "container_failed" the cell would report an exit code with nothing
+    about lengths in it, and the reader would look at the engine.
+    """
+    wl = _rollout(tmp_path)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc()], exit_code=56)
+    result = wl.run()
+
+    assert not result.passed
+    assert any(
+        detail["reason"] == "rollout_output_too_short" for detail in result.failure_details
+    ), result.failure_details
+
+
+def _script_bench_argv(tmp_path: Path, env: dict) -> list[str]:
+    """The bench argv `ts_bench_serve.sh` would build, without running anything.
+
+    A fake `tokenspeed` on PATH records its own argv and exits nonzero at the
+    first bench step, which is far enough to have assembled the full command.
+    Reading the argv rather than the script text is what makes this a test of
+    behaviour: the flags are conditional, and the conditions are the point.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    argv_log = tmp_path / "argv.log"
+    fake = bin_dir / "tokenspeed"
+    # `serve` has to satisfy the readiness poll, or the script exits at phase 1
+    # and never assembles a bench command -- so the stub answers 200 on the
+    # control port for as long as the run needs it, then the bench step fails and
+    # the script stops without anything having touched a GPU.
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$@" >> "{argv_log}"\n'
+        'if [ "$1" = "version" ]; then echo fake; exit 0; fi\n'
+        'if [ "$1" = "serve" ]; then\n'
+        "  port=\"\"\n"
+        "  while [ $# -gt 0 ]; do\n"
+        '    if [ "$1" = "--control-port" ]; then port="$2"; fi\n'
+        "    shift\n"
+        "  done\n"
+        '  exec python3 -c "\n'
+        "import http.server, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n"
+        '" "${port}"\n'
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    with socket.socket() as probe, socket.socket() as probe2:
+        probe.bind(("127.0.0.1", 0))
+        probe2.bind(("127.0.0.1", 0))
+        gateway, control = probe.getsockname()[1], probe2.getsockname()[1]
+
+    subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_PORT": str(gateway),
+            "TS_CONTROL_PORT": str(control),
+            "TS_READY_TIMEOUT": "30",
+            # No discarded steps: the measured step is the one whose argv this
+            # reads, and a warmup would assemble the same command under a
+            # different prefix.
+            "TS_BENCH_WARMUP_STEPS": "0",
+            **env,
+        },
+        timeout=120,
+    )
+    return argv_log.read_text(encoding="utf-8").splitlines() if argv_log.exists() else []
+
+
+def test_the_rollout_body_overrides_the_bench_cli_forcing_ignore_eos(tmp_path):
+    """The one finding this mode could not be built without.
+
+    `tokenspeed bench serve` sets `args.ignore_eos = True` whenever the dataset is
+    `random` and the backend is OpenAI-compatible -- unconditionally, after
+    parsing, so neither omitting `--ignore-eos` nor passing
+    `--disable-ignore-eos` reaches it. On the random dataset the flag is
+    therefore not a way to ask for EOS-respecting generation at all.
+
+    What does reach it is the request body: the builder writes
+    `payload["ignore_eos"]` from that forced flag and *then* applies extra_body
+    over the payload. Without `ignore_eos: false` in the body, a rollout cell
+    would run at a pinned output length while reporting itself as EOS-respecting
+    -- a mislabelled pass arriving from upstream rather than from a recipe.
+    """
+    argv = _script_bench_argv(
+        tmp_path,
+        {
+            "TS_ROLLOUT": "1",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            # What the workload sends. The script refuses to infer either of
+            # these from `TS_ROLLOUT`: its own defaults are 1 and 0, and deriving
+            # them from a second variable would make a hand-run's meaning depend
+            # on something other than what it says.
+            "TS_IGNORE_EOS": "0",
+            "TS_SAVE_DETAILED": "1",
+        },
+    )
+    assert "--extra-body" in argv, argv
+    body = json.loads(argv[argv.index("--extra-body") + 1])
+    assert body["ignore_eos"] is False, body
+    assert body["n"] == 4
+    assert body["temperature"] == pytest.approx(1.0)
+    # `--ignore-eos` is not passed, which is necessary but demonstrably not
+    # sufficient -- hence the body above.
+    assert "--ignore-eos" not in argv
+    # Without this the export drops `output_lens` and the length distribution
+    # the mode exists to report is unavailable.
+    assert "--save-detailed" in argv
+
+
+def test_an_ordinary_cell_sends_no_extra_body(tmp_path):
+    """Every existing serving recipe has to keep measuring what it measured.
+
+    An `--extra-body` appended unconditionally would change the sampling of runs
+    the committed numbers in docs/tokenspeed-serving.md were taken against.
+    """
+    argv = _script_bench_argv(tmp_path, {})
+    assert "--extra-body" not in argv, argv
+    assert "--save-detailed" not in argv
+    assert "--ignore-eos" in argv
+
+
+@pytest.mark.parametrize("extra", ['["--extra-body", "{}"]', '["--extra-b", "{}"]'])
+def test_bench_args_may_not_shadow_the_rollout_body(tmp_path, extra):
+    """`tokenspeed bench serve` takes the last occurrence, and the extras arrive
+    after the generated flags.
+
+    A caller's `--extra-body` would therefore replace the sampling parameters
+    wholesale: the run would generate a different number of completions at a
+    different temperature while the trial kept publishing the configured ones,
+    every request would complete, and the cell would go green describing a run
+    that did not happen. The abbreviation is refused for the same reason the
+    other owned flags refuse theirs -- argparse resolves an unambiguous prefix.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path),
+            "TS_ROLLOUT": "1",
+            "TS_TEMPERATURE": "1.0",
+            "TS_BENCH_ARGS": extra,
+        },
+    )
+    assert proc.returncode == 64, proc.stdout
+    assert "may not set --extra-body" in proc.stdout, proc.stdout
+
+
+def test_extra_body_stays_available_outside_rollout(tmp_path):
+    """Reserved exactly where the script generates one, and not otherwise.
+
+    Outside rollout no sampling parameters are sent, so there is nothing for a
+    caller's `--extra-body` to shadow -- and reserving it anyway would remove the
+    only route to a sampling knob, which `bench_args` documents as a use.
+    """
+    wl = _make(tmp_path, bench_args=["--extra-body", '{"top_k": 20}'])
+    wl.setup()
+    assert wl._bench_args == ["--extra-body", '{"top_k": 20}']
