@@ -62,15 +62,32 @@ sanitizer_plan:
     # only that a different ROCm "may extract a differently sized object".
     #
     # Measured, one object per release, same layout (Ailk_Bjlk heavy SS) and the
-    # same unbundle this recipe consumes:
+    # same unbundle this recipe consumes. These are POST-UNBUNDLE sizes, and are
+    # much larger than what hipBLASLt installs: on the 10.0 tree the shipped .co
+    # is a zlib-compressed offload bundle (CCOB magic, method 1) measuring
+    # 4,081,640 B, which the gfx950 unbundle inflates ~41.6x. Only that release's
+    # bundle was measured on disk; whether 7.0.2 and 7.2.4 shipped compressed
+    # bundles at all is unchecked (neither image is on the gate host), so do not
+    # carry the ratio back to those rows. What ConSan processes, and what this
+    # ceiling is about, is the expansion, not the shipped artifact.
     #
-    #   ROCm 7.0.2  16,265,080 B    490 kernels    217,634 memory instructions
-    #   ROCm 7.2.4  191,935,808 B  1554 kernels  2,583,251 memory instructions
-    #   ROCm 10.0   169,996,560 B   682 kernels  2,093,009 memory instructions
+    #   ROCm 7.0.2   16,265,080 B  245 kernels    217,634 memory instructions
+    #   ROCm 7.2.4  191,935,808 B  777 kernels  2,583,251 memory instructions
+    #   ROCm 10.0   169,996,560 B  341 kernels  2,093,009 memory instructions
     #
-    # The timing above was taken on ROCm 7.0.2.2, on an object of 16,265,200 B /
-    # 490 kernels (docs/sanitizers/consan-4112-overlapping-anchor-patches.md
-    # records it), which the 7.0.2 row above matches to within 120 bytes. So the
+    # Kernel counts corrected -- they were 2x here for several revisions, from
+    # counting .kd symbols across both .dynsym and .symtab (llvm-readelf
+    # --symbols prints both tables, 341 each, hence "682"). The 10.0 row is
+    # re-measured directly: 341 .kd in .dynsym, and unbundling that release's
+    # bundle yields 169,996,760 B, 200 B off the recorded figure. The 7.0.2 and
+    # 7.2.4 counts are the recorded numbers halved, NOT re-measured -- neither
+    # image is on the gate host -- so treat them as corrected-by-inference and
+    # re-measure if either becomes load-bearing. The byte and memory-instruction
+    # columns are unchanged; those were always right.
+    #
+    # The timing above was taken on ROCm 7.0.2.2, on an object of 16,265,200 B
+    # (docs/sanitizers/consan-4112-overlapping-anchor-patches.md records it),
+    # which the 7.0.2 row above matches to within 120 bytes. So the
     # object CI feeds this case is ~10x the timed one on bytes and ~9.6x on the
     # memory instructions ConSan discovers access sites from -- and it was ~12x on
     # the old 7.2.4 base too. The gap is not something the ROCm 10 migration

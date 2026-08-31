@@ -33,13 +33,18 @@ not use for the device would misrepresent what runs:
 * the build-time hardware-row comparator, as documented in hipBLASLt's
   "PCI chip ID predicates walkthrough".
 
-Size is deliberately not quoted here: the extracted gfx950 object measures ~162 MiB
-on the current CI base (ROCm 10.0) and ~183 MiB on the previous one (ROCm 7.2.4), so
+Size is deliberately not quoted here, and every figure below is the size *after*
+unbundling -- do not read any of them as a hipBLASLt install footprint. On the ROCm
+10 tree the shipped ``.co`` is a zlib-compressed offload bundle (``CCOB`` magic,
+method 1): the four CU256 SS layouts measure 2.6-4.8 MB on disk and inflate 38-45x
+under ``--unbundle``, so it is this script that produces the large object. Earlier
+releases were not checked on disk. The extracted gfx950 object measures ~162 MiB on the
+current CI base (ROCm 10.0) and ~183 MiB on the previous one (ROCm 7.2.4), so
 the "~16 MB" this docstring used to claim had already drifted by more than a factor
-of ten. It is a per-release property of the shipped Tensile libraries -- the ROCm
-7.14 variants measure ~156-168 MiB and the ROCm 10.0 ones ~96-162 MiB, a spread wide
+of ten. It is a per-release property of the generated code -- the ROCm
+7.14 variants measure ~156-168 MiB and the ROCm 10.0 ones ~96-204 MiB, a spread wide
 enough that even one release's variants disagree with each other, while the ROCm
-7.0.2 line shipped ~15.5 MiB for the same layout -- so treat any figure as
+7.0.2 line yielded ~15.5 MiB for the same layout -- so treat any figure as
 version-specific and measure rather than trust a comment. That last figure is not
 trivia: the ConSan timing this repo sizes a timeout against was taken on it, which
 is why ``recipes/sanitizers/daily-consan-gemm.yaml`` records the gap explicitly.
