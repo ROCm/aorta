@@ -3499,6 +3499,52 @@ def test_the_reserved_secret_name_follows_hf_token_env(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "docker_args",
+    [
+        ["-e", "HF_TOKEN=hf_secret_value"],
+        ["-eHF_TOKEN=hf_secret_value"],
+        ["-e=HF_TOKEN=hf_secret_value"],
+        ["--env", "HF_TOKEN=hf_secret_value"],
+        ["--env=HF_TOKEN=hf_secret_value"],
+    ],
+)
+def test_docker_args_cannot_carry_a_credential_by_value(tmp_path, docker_args):
+    """And it has to fail on the CPU gate, not after the trial takes a node.
+
+    `docker_args` is spliced into the client's argv, so this is the same
+    world-readable `/proc/<pid>/cmdline` exposure the by-name path exists to
+    avoid, reached by a route the mitigation guard does not cover. It was
+    rejected -- but only inside `_docker_argv`, which runs after `setup()` has
+    passed and the trial has been scheduled onto a GPU. A recipe that cannot
+    work should say so before it occupies anything.
+    """
+    with pytest.raises(ValueError, match="HF_TOKEN"):
+        _make(tmp_path, docker_args=docker_args).setup()
+
+
+def test_the_docker_args_credential_guard_follows_hf_token_env(tmp_path):
+    """Same ordering point from the other side: the guard runs during
+    validation, so `hf_token_env` has to be resolved before it, not with the
+    rest of the HF settings further down."""
+    with pytest.raises(ValueError, match="MY_HF_TOKEN"):
+        _make(
+            tmp_path,
+            hf_token_env="MY_HF_TOKEN",
+            docker_args=["-e", "MY_HF_TOKEN=hf_secret_value"],
+        ).setup()
+
+
+def test_the_credential_rejection_does_not_advise_a_field_that_does_not_exist(tmp_path):
+    """The owned-key message says to set the corresponding workload_config
+    field. No field carries a token -- the value is read from the environment
+    aorta runs in -- so a secret name needs its own message."""
+    with pytest.raises(ValueError) as excinfo:
+        _make(tmp_path, docker_args=["-e", "HF_TOKEN=hf_secret_value"]).setup()
+    assert "hf_token_env" in str(excinfo.value)
+    assert "corresponding workload_config field" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
     "serve_args",
     [
         ["--drain-timeout", "60"],

@@ -597,10 +597,24 @@ class TokenSpeedServeWorkload(Workload):
         self._validate_drain_timeout()
         self._bench_args = self._arg_list("bench_args")
         self._docker_args = self._arg_list("docker_args")
+        # Resolved here rather than beside `hf_home` below, because the guard on
+        # the next line needs it: `_secret_env_names` reads it, and a recipe
+        # naming another variable makes that name the credential on this node.
+        self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
         # Checked here as well as at argv-build time so a recipe naming an owned
-        # flag fails before a node is occupied. The env-name half of the check
-        # needs the resolved run token, so it can only run later.
-        self._reject_owned_docker_args()
+        # flag fails before a node is occupied. The protocol floor and the secret
+        # names are both available now -- the latter unconditionally, which is
+        # the point of `_secret_env_names` not depending on the host having a
+        # token. Only the keys whose *value* this run computes (TS_PORT and the
+        # rest, which need the resolved run token) have to wait for
+        # `_docker_argv`, and `_PROTOCOL_ENV_KEYS` already reserves their names.
+        #
+        # Without the secret half here, `docker_args: ["-e", "HF_TOKEN=..."]`
+        # passed validation and `--dry-run` and was only refused inside
+        # `_docker_argv`, after the trial had taken a GPU node -- so the recipe
+        # that cannot work failed late, and the credential it was trying to put
+        # into a world-readable argv was not named until then.
+        self._reject_owned_docker_args(owned_env=self._secret_env_names())
 
         self._shm_size = str(cfg.get("shm_size") or _DEFAULT_SHM_SIZE)
         hip_devices = cfg.get("hip_visible_devices")
@@ -701,7 +715,6 @@ class TokenSpeedServeWorkload(Workload):
         # than an accident of who got there first.
         hf_home = cfg.get("hf_home")
         self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_dir / "hf"
-        self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
 
         self._gates = self._validated_gates()
 
@@ -1711,8 +1724,24 @@ class TokenSpeedServeWorkload(Workload):
         container capped while the host reported ``max_concurrency: None``.
         Fixing that for mitigations and not here just moved the same hole one
         field sideways.
+
+        A secret name gets its own message: there is no workload_config field
+        that carries a token, so pointing the caller at one would be advice that
+        cannot be followed.
         """
-        if name and name in (owned_env or set()) | _PROTOCOL_ENV_KEYS:
+        if not name:
+            return
+        if name in self._secret_env_names():
+            raise ValueError(
+                f"tokenspeed_serve: docker_args may not set {name}; it is a "
+                "credential, and this workload already forwards it. `-e "
+                "NAME=value` would put the value in the docker client's argv, "
+                "which /proc/<pid>/cmdline exposes to every user on the node "
+                "for the life of the trial. Export it in the environment you "
+                "run aorta from, where it is forwarded by name instead, and "
+                "use hf_token_env to name a different variable."
+            )
+        if name in (owned_env or set()) | _PROTOCOL_ENV_KEYS:
             raise ValueError(
                 f"tokenspeed_serve: docker_args may not set {name}; this "
                 "workload sets it as part of its contract with "
