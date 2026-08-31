@@ -35,8 +35,12 @@ env_passthrough_mode: inherit
 # available, `roctracer` otherwise. That is the only portable spelling --
 # naming `rocprofiler` explicitly is correct on current upstream Triton but
 # exits with an argparse "invalid choice: 'rocprofiler'" on Triton 3.7.x and
-# earlier, before your payload runs. Pin a backend explicitly only when you
-# need to know exactly which one measured.
+# earlier, before your payload runs. Pinning either AMD backend also means
+# leaving `mode: cli`: Proton's front-end initialises the HIP runtime only on
+# the path where `-b` is absent, so a pinned queue-intercepting backend
+# captures an empty tree and the collector refuses the pairing. See
+# examples/profiling/proton/amd-roctracer for the `mode: env` shape that
+# pinning requires.
 collect:
   proton:
     mode: "cli"

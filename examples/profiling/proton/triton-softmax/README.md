@@ -94,8 +94,9 @@ installed.
 - **Device selection.** Use `ROCR_VISIBLE_DEVICES`, not
   `HIP_VISIBLE_DEVICES` — Proton on AMD does not honor the latter.
 - **Backend.** Left on `backend: "auto"`; see
-  [`../triton-vecadd/README.md`](../triton-vecadd/README.md) for why, and
-  for the `libroctracer64.so` note.
+  [`../triton-vecadd/README.md`](../triton-vecadd/README.md) for why, for
+  why pinning an AMD backend means `mode: "env"`, and for the
+  `libroctracer64.so` note.
 - **Do not stack this with `rocprof`**; both intercept HSA queues and the
   pairing is rejected at recipe load. Only the `instrumentation` backend
   coexists.

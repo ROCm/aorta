@@ -17,6 +17,9 @@ at.
 | [`rocprof/torch-matmul`](rocprof/torch-matmul/) | hipBLASLt / rocBLAS GEMM kernels PyTorch picks for `a @ b` | `torch` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/rocprof/torch-matmul/recipe.yaml --output ./profiling_results -- python examples/profiling/rocprof/torch-matmul/matmul.py` |
 | [`proton/triton-vecadd`](proton/triton-vecadd/) | One Triton elementwise kernel, launch-site attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-vecadd/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-vecadd/vecadd.py` |
 | [`proton/triton-softmax`](proton/triton-softmax/) | A Triton fused reduction, Python-frame attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-softmax/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-softmax/softmax.py` |
+| [`proton/amd-roctracer`](proton/amd-roctracer/) | Three Triton kernels in sequence, whole-kernel attribution on a pinned `roctracer` backend | `torch` + `triton` for ROCm. Container. `roctracer` is the one AMD backend every released Triton has. | `aorta sweep run --recipe examples/profiling/proton/amd-roctracer/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-roctracer/pipeline.py` |
+| [`proton/amd-instrumentation`](proton/amd-instrumentation/) | Two named scopes *inside* one unbalanced Triton kernel — intra-kernel attribution | `torch` + `triton` for ROCm. Container. The only Proton backend that coexists with `rocprofv3`; publishes no numeric metrics, only `proton_artifact_dir`. | `aorta sweep run --recipe examples/profiling/proton/amd-instrumentation/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-instrumentation/hotspot.py` |
+| [`proton/amd-rocprofiler`](proton/amd-rocprofiler/) | Statistical instruction-level attribution (`backend_mode: pcsampling`) instead of whole-kernel spans | `torch` + `triton` for ROCm. Container. **Triton `main`**: no released Triton carries the `rocprofiler` backend, so this one ships documented but unverified. | `aorta sweep run --recipe examples/profiling/proton/amd-rocprofiler/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-rocprofiler/gelu.py` |
 
 ## Start here
 
@@ -33,8 +36,8 @@ aorta sweep run \
   -- /tmp/hip_gemm 512 20
 ```
 
-The other three need a PyTorch-for-ROCm interpreter (and Triton, for the
-Proton pair). The reference way to get one is a ROCm PyTorch container with
+The other six need a PyTorch-for-ROCm interpreter (and Triton, for the five
+Proton ones). The reference way to get one is a ROCm PyTorch container with
 aorta installed **inside** it — see each example's README. Running
 `aorta sweep run -- docker run ...` from the host instead would attach the
 profiler to the docker client, which dispatches no kernels and produces an
@@ -51,12 +54,19 @@ empty capture.
 together, so the pairing is rejected at recipe load. Only Proton's
 `instrumentation` backend coexists with `rocprof`.
 
-The Proton examples leave `backend: "auto"`, which omits Proton's `-b` and
-lets Proton pick the backend matching the active runtime. That is what makes
-them run out of the box across Triton versions: `rocprofiler` is the
+The two Triton examples leave `backend: "auto"`, which omits Proton's `-b`
+and lets Proton pick the backend matching the active runtime. That is what
+makes them run out of the box across Triton versions: `rocprofiler` is the
 preferred AMD backend upstream, but Triton 3.7.x and earlier accept only
 `cupti`/`roctracer`/`instrumentation` and exit with an argparse
 `invalid choice: 'rocprofiler'` before the payload runs.
+
+The three `amd-*` examples pin a backend instead, and therefore all use
+`mode: "env"` with a payload that calls `proton.start()` itself. Proton's CLI
+front-end initialises the HIP runtime only on the path where `-b` is absent,
+so a pinned backend under the default `mode: "cli"` captures an empty tree —
+the collector now refuses that combination rather than letting a trial pass
+with nothing in it.
 
 ## Where the collector options live
 
@@ -106,7 +116,7 @@ examples/profiling/<collector>/<example-name>/
   README.md               requirements, standalone run, aorta run, artifacts
 ```
 
-The conventions the existing four follow, and that a new one should too:
+The conventions the existing seven follow, and that a new one should too:
 
 1. **Standalone-runnable.** A user must be able to reproduce the payload
    without aorta. Every README shows the bare command first.

@@ -1,0 +1,55 @@
+# Proton capture on the `rocprofiler` backend, with PC sampling.
+#
+# SHIPPED UNVERIFIED. The `rocprofiler` backend exists only on Triton `main`:
+# no released Triton, wheel, or container image has it, so this recipe was
+# never run end-to-end. Everything else in this tree was. Check first with
+#
+#   python -c "from triton._C.libproton import proton as p; print(p.get_available_profilers())"
+#
+# -- an AttributeError means the installed Triton predates the feature. See
+# README.md.
+#
+#   aorta sweep run \
+#       --recipe examples/profiling/proton/amd-rocprofiler/recipe.yaml \
+#       --output ./profiling_results \
+#       -- python examples/profiling/proton/amd-rocprofiler/gelu.py \
+#            --size 4194304 --iters 50
+schema_version: 1
+mode: probe
+
+ticket: PROFILING-PROTON-AMD-ROCPROFILER
+
+trials: 1
+timeout_per_trial: 1800
+
+mitigation_axis: [none]
+diagnostic_axis: [none]
+
+env_passthrough_mode: inherit
+
+# `mode: env`, not `mode: cli`, for two independent reasons.
+#
+# First, Triton's Proton CLI front-end calls its own `_select_backend()` only
+# when `-b` is *absent*, and that call initialises the Triton HIP driver as a
+# side effect. A queue-tracing AMD backend records nothing when it attaches
+# ahead of the runtime it traces, so pinning one through `mode: cli` yields a
+# 160-byte hatchet with a bare ROOT frame and an exit status of 0 -- the trial
+# looks successful and carries no Proton metrics. The collector rejects
+# `mode: cli` with an explicit roctracer/rocprofiler backend for that reason.
+#
+# Second, the shipped CLI parses `-m/--mode` and never forwards it to
+# `start()`, so `backend_mode` below would be a silent no-op there. In
+# `mode: env` it is exported as `AORTA_PROTON_MODE` and the payload passes it
+# to `proton.start(mode=...)` itself.
+#
+# `backend_mode: pcsampling` asks rocprofiler-sdk for statistical
+# instruction-level attribution -- where in the kernel the samples land --
+# rather than the whole-kernel spans `roctracer` reports. The backend's other
+# valid `backend_mode` is `periodic_flushing`.
+collect:
+  proton:
+    mode: "env"
+    backend: "rocprofiler"
+    backend_mode: "pcsampling"
+    context: "shadow"
+    data: "tree"

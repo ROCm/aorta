@@ -16,9 +16,11 @@ import pytest
 
 from aorta.instrumentation.proton import (
     AUTO_BACKEND,
+    BACKEND_MODES,
     BACKENDS,
     ENV_PREFIX,
     ENV_PROTON_PYTHON,
+    HOOKS,
     OPTION_KEYS,
     OUTPUT_SUBDIR,
     PROFILE_BASENAME,
@@ -190,6 +192,72 @@ def test_validate_options_rejects_intra_kernel_knob_on_wrong_backend(key):
         validate_options({"backend": "roctracer", key: "cta" if key == "granularity" else "mma"})
 
 
+@pytest.mark.parametrize(
+    ("backend", "backend_mode"),
+    sorted((backend, mode) for backend, modes in BACKEND_MODES.items() for mode in modes),
+)
+def test_validate_options_accepts_every_backend_mode_of_its_backend(backend, backend_mode):
+    effective = validate_options({"backend": backend, "backend_mode": backend_mode})
+    assert effective["backend_mode"] == backend_mode
+
+
+def test_validate_options_rejects_a_backend_mode_the_backend_does_not_have():
+    """The domains differ per backend -- ``pcsampling`` is a rocprofiler / cupti
+    mode, and roctracer only has ``periodic_flushing``. A flat union would
+    accept this and fail later inside Proton."""
+    with pytest.raises(ValueError, match="not one of.*for backend: roctracer"):
+        validate_options({"backend": "roctracer", "backend_mode": "pcsampling"})
+
+
+def test_validate_options_rejects_unknown_backend_mode():
+    with pytest.raises(ValueError, match="backend_mode"):
+        validate_options({"backend": "rocprofiler", "backend_mode": "sampling"})
+
+
+@pytest.mark.parametrize("backend", ["auto", "instrumentation"])
+def test_validate_options_rejects_backend_mode_without_a_backend_to_validate_it(backend):
+    """``auto`` resolves at runtime, so its mode domain is unknown here; the
+    instrumentation backend's modes are the ``instrumentation_mode`` pair."""
+    with pytest.raises(ValueError, match="requires an explicit backend"):
+        validate_options({"backend": backend, "backend_mode": "pcsampling"})
+
+
+@pytest.mark.parametrize("intra_kernel_key", ["instrumentation_mode", "granularity"])
+def test_validate_options_rejects_backend_mode_beside_an_intra_kernel_knob(intra_kernel_key):
+    """Both render Proton's single ``--mode``, so the pair has no rendering.
+
+    The message must name the collision rather than the backend gate that would
+    also have rejected this: the fix is dropping one option, not changing the
+    backend.
+    """
+    value = "cta" if intra_kernel_key == "granularity" else "mma"
+    with pytest.raises(ValueError, match="conflicts with"):
+        validate_options(
+            {
+                "backend": "instrumentation",
+                "backend_mode": "pcsampling",
+                intra_kernel_key: value,
+            }
+        )
+
+
+@pytest.mark.parametrize("hook", sorted(HOOKS))
+def test_validate_options_accepts_every_hook(hook):
+    assert validate_options({"hook": hook})["hook"] == hook
+
+
+def test_validate_options_rejects_unknown_hook():
+    with pytest.raises(ValueError, match="'hook'"):
+        validate_options({"hook": "launch"})
+
+
+def test_hook_is_not_gated_on_a_backend():
+    """Proton's ``-k`` is backend-independent: it registers a launch hook that
+    records Triton kernel metadata whichever backend measures."""
+    for backend in sorted(BACKENDS):
+        assert validate_options({"backend": backend, "hook": "triton"})["hook"] == "triton"
+
+
 def test_validate_options_does_not_mutate_input():
     supplied = {"backend": "ROCTRACER"}
     validate_options(supplied)
@@ -197,16 +265,28 @@ def test_validate_options_does_not_mutate_input():
 
 
 def test_option_keys_match_the_validator():
-    samples = {
+    """Two samples rather than one: ``backend_mode`` and the intra-kernel pair
+    render the same ``--mode`` and are rejected together, so no single mapping
+    can carry every declared key."""
+    intra_kernel = {
         "mode": "cli",
         "backend": "instrumentation",
         "context": "shadow",
         "data": "tree",
         "instrumentation_mode": "mma",
         "granularity": "warp",
+        "hook": "triton",
     }
-    assert set(samples) == set(OPTION_KEYS)
-    assert validate_options(samples)
+    whole_kernel = {
+        "mode": "env",
+        "backend": "roctracer",
+        "backend_mode": "periodic_flushing",
+        "context": "python",
+        "data": "trace",
+    }
+    assert set(intra_kernel) | set(whole_kernel) == set(OPTION_KEYS)
+    assert validate_options(intra_kernel)
+    assert validate_options(whole_kernel)
 
 
 # ---- --mode rendering ----------------------------------------------------
@@ -231,6 +311,14 @@ def test_mode_argument_name_and_granularity():
         {"backend": "instrumentation", "instrumentation_mode": "mma", "granularity": "cta"}
     )
     assert mode_argument(effective) == "mma:granularity=cta"
+
+
+def test_mode_argument_renders_backend_mode():
+    """``backend_mode`` is Proton's ``--mode`` for the whole-kernel backends, so
+    it renders as the bare name -- no ``granularity=`` grammar, which belongs to
+    the instrumentation backend."""
+    effective = validate_options({"backend": "roctracer", "backend_mode": "periodic_flushing"})
+    assert mode_argument(effective) == "periodic_flushing"
 
 
 # ---- Interpreter resolution ---------------------------------------------
@@ -353,6 +441,20 @@ def test_build_argv_prefix_includes_mode_for_intra_kernel(tmp_path):
     assert argv[argv.index("--mode") + 1] == "mma"
 
 
+def test_build_argv_prefix_includes_mode_for_a_backend_mode(tmp_path):
+    argv = build_argv_prefix(tmp_path, {"backend": "cupti", "backend_mode": "pcsampling"})
+    assert argv[argv.index("--mode") + 1] == "pcsampling"
+
+
+def test_build_argv_prefix_omits_the_hook_flag_by_default(tmp_path):
+    assert "-k" not in build_argv_prefix(tmp_path)
+
+
+def test_build_argv_prefix_renders_the_hook(tmp_path):
+    argv = build_argv_prefix(tmp_path, {"hook": "triton"})
+    assert argv[argv.index("-k") + 1] == "triton"
+
+
 def test_build_argv_prefix_propagates_option_error(tmp_path):
     with pytest.raises(ValueError, match="unknown option"):
         build_argv_prefix(tmp_path, {"nope": "1"})
@@ -466,17 +568,91 @@ def test_wrap_argv_does_not_mutate_the_input(tmp_path):
     assert inner == ["python", "vecadd.py"]
 
 
+# ---- CLI mode cannot pin a queue-intercepting backend -------------------
+#
+# Verified on gfx950 / ROCm 7.0.2 / Triton 3.7.1 against the shipped
+# triton-vecadd payload: no ``-b`` gives a ~3 KB hatchet holding 27 dispatches,
+# while ``-b roctracer`` gives a 160-byte hatchet whose ROOT frame has empty
+# metrics -- from a run that exits 0. Proton's front-end calls
+# ``_select_backend()`` only when ``-b`` is absent, and that call is what
+# initialises the HIP driver; a queue interceptor that starts first records
+# nothing. In aorta that surfaced as a trial with no proton metrics at all,
+# since ``parse_summary`` degrades to the artifact directory for an empty tree.
+#
+# The guard covers the queue-intercepting pair only. ``instrumentation`` needs
+# no interceptor and captures correctly under a CLI pin, so refusing it would
+# cost a working configuration; the ``granularity`` / ``instrumentation_mode``
+# knobs are what ``mode: cli`` costs there, and the schema documents that.
+
+
+@pytest.mark.parametrize("backend", ["roctracer", "rocprofiler"])
+def test_wrap_argv_cli_refuses_to_pin_a_queue_intercepting_backend(tmp_path, backend):
+    with pytest.raises(ProtonWrapError, match="cannot pin backend"):
+        wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": backend}, env={})
+
+
+def test_cli_backend_pin_rejection_names_the_mechanism_and_the_route(tmp_path):
+    """The message has to carry the reason, because the alternative outcome is
+    a green trial: an operator who is only told "not supported" will reach for
+    the pin again on the next Triton."""
+    with pytest.raises(ProtonWrapError) as excinfo:
+        wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"}, env={})
+    message = str(excinfo.value)
+    assert "_select_backend()" in message
+    assert "empty ROOT frame" in message
+    assert "mode: env" in message
+
+
+def test_wrap_argv_cli_still_allows_the_default_backend(tmp_path):
+    """``auto`` is the ``-b``-absent path, so it is the one that works."""
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": AUTO_BACKEND}, env={})
+    assert "-b" not in argv
+
+
+@pytest.mark.parametrize("backend", ["instrumentation", "cupti"])
+def test_wrap_argv_cli_still_pins_a_non_intercepting_backend(tmp_path, backend):
+    """Neither installs an HSA queue interceptor, so neither depends on
+    attaching before the runtime comes up."""
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": backend}, env={})
+    assert argv[argv.index("-b") + 1] == backend
+
+
+@pytest.mark.parametrize("backend", ["roctracer", "rocprofiler"])
+def test_wrap_argv_env_mode_pins_the_same_backend_happily(tmp_path, env_on_path, backend):
+    """The route the rejection names: the payload starts Proton itself, after
+    its own ``import torch`` has brought the runtime up."""
+    argv = wrap_argv(
+        ["python", "pipeline.py"],
+        tmp_path,
+        {"mode": "env", "backend": backend},
+        env={},
+    )
+    assert f"{ENV_PREFIX}BACKEND={backend}" in argv
+
+
+def test_cli_pin_is_refused_before_the_argv_shape_is_checked(tmp_path):
+    """Both failures are fixed by ``mode: env``, and this is the one whose
+    absence is invisible, so it is the one to report."""
+    with pytest.raises(ProtonWrapError, match="cannot pin backend"):
+        wrap_argv(["/tmp/aorta_hip_gemm", "512"], tmp_path, {"backend": "roctracer"}, env={})
+
+
 # ---- Device-variable translation ----------------------------------------
 
 
 def test_wrap_argv_translates_hip_visible_devices(tmp_path, env_on_path):
     """Proton on AMD does not honour ``HIP_VISIBLE_DEVICES`` for the
     queue-intercepting backends, so a device-pinned cell would otherwise
-    profile the wrong GPU."""
+    profile the wrong GPU.
+
+    Spelled with ``backend: auto`` because that is the only queue-intercepting
+    backend ``mode: cli`` will pin, and the assertion below is about where the
+    ``env(1)`` prefix sits relative to the CLI wrap.
+    """
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"backend": AUTO_BACKEND},
         env={"HIP_VISIBLE_DEVICES": "1"},
     )
     assert argv[0] == str(env_on_path)
@@ -492,11 +668,15 @@ def test_wrap_argv_translates_cuda_visible_devices(tmp_path, env_on_path):
     ROCm's PyTorch presents its devices as ``cuda``, so an operator pinning a
     GPU commonly reaches for ``CUDA_VISIBLE_DEVICES``. Handling only the HIP
     spelling left that trial reaching Proton with a variable it refuses.
+
+    ``mode: env`` throughout the explicitly-pinned cases below: an explicit
+    ``roctracer`` / ``rocprofiler`` is refused in ``mode: cli``, and the
+    translation is the same code either way.
     """
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"mode": "env", "backend": "roctracer"},
         env={"CUDA_VISIBLE_DEVICES": "2"},
     )
     assert "CUDA_VISIBLE_DEVICES" in argv
@@ -508,7 +688,7 @@ def test_wrap_argv_unsets_both_device_spellings_and_prefers_hip(tmp_path, env_on
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "rocprofiler"},
+        {"mode": "env", "backend": "rocprofiler"},
         env={"HIP_VISIBLE_DEVICES": "1", "CUDA_VISIBLE_DEVICES": "2"},
     )
     assert "HIP_VISIBLE_DEVICES" in argv
@@ -593,7 +773,7 @@ def test_wrap_argv_keeps_an_explicit_rocr_visible_devices(tmp_path, env_on_path)
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "rocprofiler"},
+        {"mode": "env", "backend": "rocprofiler"},
         env={"HIP_VISIBLE_DEVICES": "1", "ROCR_VISIBLE_DEVICES": "0"},
     )
     assert "ROCR_VISIBLE_DEVICES=0" in argv
@@ -609,7 +789,7 @@ def test_wrap_argv_translates_an_empty_hip_visible_devices(tmp_path, env_on_path
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"mode": "env", "backend": "roctracer"},
         env={"HIP_VISIBLE_DEVICES": ""},
     )
     assert "HIP_VISIBLE_DEVICES" in argv
@@ -622,7 +802,7 @@ def test_wrap_argv_keeps_an_explicitly_empty_rocr_visible_devices(tmp_path, env_
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"mode": "env", "backend": "roctracer"},
         env={"HIP_VISIBLE_DEVICES": "1", "ROCR_VISIBLE_DEVICES": ""},
     )
     assert "ROCR_VISIBLE_DEVICES=" in argv
@@ -668,20 +848,20 @@ def test_wrap_argv_fails_when_env_binary_is_missing(tmp_path, monkeypatch):
         wrap_argv(
             ["python", "vecadd.py"],
             tmp_path,
-            {"backend": "roctracer"},
+            {"backend": AUTO_BACKEND},
             env={"HIP_VISIBLE_DEVICES": "1"},
         )
 
 
 def test_wrap_argv_reads_os_environ_by_default(tmp_path, env_on_path, monkeypatch):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "3")
-    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"})
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": AUTO_BACKEND})
     assert "ROCR_VISIBLE_DEVICES=3" in argv
 
 
 def test_wrap_argv_never_mutates_the_supplied_env(tmp_path, env_on_path):
     env = {"HIP_VISIBLE_DEVICES": "1"}
-    wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"}, env=env)
+    wrap_argv(["python", "vecadd.py"], tmp_path, {"mode": "env", "backend": "roctracer"}, env=env)
     assert env == {"HIP_VISIBLE_DEVICES": "1"}
 
 
@@ -712,6 +892,21 @@ def test_build_env_carries_an_explicit_backend(tmp_path):
 def test_build_env_includes_mode_for_intra_kernel(tmp_path):
     env = build_env(tmp_path, {"backend": "instrumentation", "granularity": "warp"})
     assert env[f"{ENV_PREFIX}MODE"] == "default:granularity=warp"
+
+
+def test_build_env_includes_mode_for_a_backend_mode(tmp_path):
+    env = build_env(tmp_path, {"backend": "rocprofiler", "backend_mode": "pcsampling"})
+    assert env[f"{ENV_PREFIX}MODE"] == "pcsampling"
+
+
+def test_build_env_omits_the_hook_by_default(tmp_path):
+    assert f"{ENV_PREFIX}HOOK" not in build_env(tmp_path)
+
+
+def test_build_env_carries_the_hook(tmp_path):
+    """The env bundle mirrors the CLI flags one-for-one, so a payload driving
+    Proton itself can forward ``hook`` into ``proton.start()``."""
+    assert build_env(tmp_path, {"hook": "triton"})[f"{ENV_PREFIX}HOOK"] == "triton"
 
 
 def test_build_env_accepts_str_out_dir():

@@ -1,0 +1,57 @@
+# Proton capture *inside* one Triton kernel, on the `instrumentation` backend.
+#
+# The only Proton backend that attributes cycles to regions within a kernel,
+# and the only one that installs no HSA queue interceptor -- which is why it is
+# also the only one aorta's rocprof+proton conflict guard accepts. See
+# README.md.
+#
+#   aorta sweep run \
+#       --recipe examples/profiling/proton/amd-instrumentation/recipe.yaml \
+#       --output ./profiling_results \
+#       -- python examples/profiling/proton/amd-instrumentation/hotspot.py \
+#            --size 65536 --steps 8
+schema_version: 1
+mode: probe
+
+ticket: PROFILING-PROTON-AMD-INSTRUMENTATION
+
+trials: 1
+timeout_per_trial: 1800
+
+mitigation_axis: [none]
+diagnostic_axis: [none]
+
+env_passthrough_mode: inherit
+
+# `mode: env`, not `mode: cli`, because the shipped Triton CLI parses
+# `-m/--mode` and then never forwards it to `start()` -- so `instrumentation_mode`
+# below would be a silent no-op on every released Triton (upstream `main` does
+# pass it). `mode: env` exports the value as `AORTA_PROTON_MODE` and the payload
+# hands it to `proton.start()` itself, which is the only way the knob takes
+# effect today.
+#
+# Note this is a *different* reason from the one that forces `mode: env` on the
+# sibling `amd-roctracer` recipe. That backend records nothing when Proton's
+# CLI pins it, because the CLI initialises the HIP runtime only on the path
+# where `-b` is absent and a queue interceptor must be installed first. The
+# instrumentation backend installs no interceptor and captures fine under a
+# `-b instrumentation` CLI wrap (verified); it is only the mode knob that does
+# not survive that route.
+#
+# `granularity` is deliberately ABSENT. The option pair
+# `instrumentation_mode: default` + `granularity: warp` renders Proton's single
+# `--mode` as the string `default:granularity=warp`, and Triton 3.7.1 rejects
+# that at kernel exit with
+#   RuntimeError: Only warp granularity is supported for now
+# raised from `libproton.exit_instrumented_op`. Only the *string* spelling of
+# the `granularity=` key is broken -- the bare `default` works, and so does the
+# equivalent typed `triton.profiler.mode.Default(granularity="warp")` -- and
+# warp granularity is this backend's own default on this version anyway, so
+# omitting the key costs nothing. Spell it explicitly only on Triton `main`.
+collect:
+  proton:
+    mode: "env"
+    backend: "instrumentation"
+    instrumentation_mode: "default"
+    context: "shadow"
+    data: "tree"

@@ -31,9 +31,16 @@ so a device-pinned cell still profiles the device it asked for.
 The default backend is :data:`AUTO_BACKEND`, which omits Proton's ``-b``
 entirely. Proton then picks the backend matching the active runtime --
 ``rocprofiler`` where rocprofiler-sdk is available, ``roctracer`` otherwise.
-Naming a backend explicitly is a version commitment: ``rocprofiler`` is the
-preferred AMD backend upstream but was added after Triton 3.7, whose CLI
-rejects the name at argparse before the payload ever runs.
+Naming a backend explicitly costs more than a version commitment (though it is
+also that: ``rocprofiler`` is the preferred AMD backend upstream but was added
+after Triton 3.7, whose CLI rejects the name at argparse before the payload
+ever runs). Proton's front-end calls ``_select_backend()`` only on the path
+where ``-b`` is absent, and that call is what brings the GPU runtime up, so an
+AMD queue-intercepting backend pinned through ``mode: cli`` starts before the
+first HSA queue exists and records nothing -- a 160-byte profile holding an
+empty ``ROOT`` frame, from a run that exits 0. :func:`wrap_argv` refuses that
+combination and names ``mode: env`` instead, where the payload starts Proton
+itself after the runtime is up.
 """
 
 from __future__ import annotations
@@ -48,10 +55,12 @@ from pathlib import Path
 
 from ._options import (
     AUTO_BACKEND,
+    BACKEND_MODES,
     BACKENDS,
     CONTEXTS,
     DATA_FORMATS,
     GRANULARITIES,
+    HOOKS,
     INSTRUMENTATION_MODES,
     MODES,
     OPTION_KEYS,
@@ -104,6 +113,13 @@ _AMD_BACKENDS: frozenset[str] = frozenset({"rocprofiler", "roctracer"})
 #: ``backend: auto`` too. ``ROCR_VISIBLE_DEVICES`` is the variable Proton reads
 #: on AMD; ``HIP_VISIBLE_DEVICES`` is the one it refuses.
 _AMD_ENV_SIGNALS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+
+#: Backends ``mode: cli`` cannot pin, because a queue interceptor has to be
+#: installed before the first HSA queue is created and Proton's front-end only
+#: initialises the runtime on the ``-b``-absent path. Derived from the schema's
+#: interception set rather than spelled out, so a backend added to one is
+#: covered by the other: ``auto`` comes out because it *is* that path.
+_CLI_UNPINNABLE_BACKENDS: frozenset[str] = QUEUE_INTERCEPTING_BACKENDS - {AUTO_BACKEND}
 
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
 # Interpreter flags that take no argument and can safely stay in front of
@@ -243,6 +259,9 @@ def build_argv_prefix(
     mode = mode_argument(effective)
     if mode is not None:
         argv += ["--mode", mode]
+    hook = effective.get("hook")
+    if hook is not None:
+        argv += ["-k", hook]
     return argv
 
 
@@ -282,6 +301,9 @@ def build_env(
     mode = mode_argument(effective)
     if mode is not None:
         env[f"{ENV_PREFIX}MODE"] = mode
+    hook = effective.get("hook")
+    if hook is not None:
+        env[f"{ENV_PREFIX}HOOK"] = hook
     return env
 
 
@@ -471,8 +493,9 @@ def wrap_argv(
     Raises:
         ValueError: an option key or value is invalid.
         ProtonWrapError: ``mode: cli`` was requested for a command Proton's
-            front-end cannot execute, or the wrap needs ``env(1)`` to carry
-            variables into the command and it is not on ``$PATH``.
+            front-end cannot execute or with a backend it cannot pin, or the
+            wrap needs ``env(1)`` to carry variables into the command and it is
+            not on ``$PATH``.
     """
     effective = validate_options(options)
     inner = list(argv)
@@ -480,6 +503,24 @@ def wrap_argv(
     if effective["mode"] == "env":
         prefix = _device_env_prefix(effective["backend"], environ, build_env(out_dir, options))
         return [*prefix, *inner]
+
+    # Checked before the argv shape, because ``mode: env`` is the fix for both
+    # and this is the one an operator cannot see failing: an unwrappable argv
+    # at least stops the trial, while a pinned queue-intercepting backend
+    # produces a clean exit 0 carrying an empty profile.
+    if effective["backend"] in _CLI_UNPINNABLE_BACKENDS:
+        raise ProtonWrapError(
+            f"proton mode 'cli' cannot pin backend {effective['backend']!r}. "
+            "Proton's command front-end calls _select_backend() only when '-b' "
+            "is absent, and that call is what initialises the GPU runtime, so a "
+            "pinned queue-intercepting backend starts before the first HSA "
+            "queue exists and records nothing: the profile comes back as an "
+            "empty ROOT frame and the trial reports no proton metrics while "
+            "exiting 0. Use 'proton: {mode: env}' with a payload that calls "
+            "proton.start() after the runtime is up (see "
+            "examples/profiling/proton/amd-roctracer), or leave "
+            f"'backend: {AUTO_BACKEND}', which omits '-b' and is unaffected."
+        )
 
     flags, target = _split_python_launch(inner)
     python = resolve_python(inner)
@@ -493,12 +534,14 @@ def wrap_argv(
 
 __all__ = [
     "AUTO_BACKEND",
+    "BACKEND_MODES",
     "BACKENDS",
     "CONTEXTS",
     "DATA_FORMATS",
     "ENV_PREFIX",
     "ENV_PROTON_PYTHON",
     "GRANULARITIES",
+    "HOOKS",
     "INSTRUMENTATION_MODES",
     "MODES",
     "OPTION_KEYS",

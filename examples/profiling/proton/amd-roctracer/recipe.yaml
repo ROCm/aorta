@@ -1,0 +1,45 @@
+# Proton capture of a three-kernel Triton pipeline on the `roctracer` backend.
+#
+# The portable AMD path: `roctracer` is Proton's deprecated but universally
+# present AMD backend -- it is the one every released Triton accepts, where
+# `rocprofiler` exists only on Triton `main`. See README.md.
+#
+#   aorta sweep run \
+#       --recipe examples/profiling/proton/amd-roctracer/recipe.yaml \
+#       --output ./profiling_results \
+#       -- python examples/profiling/proton/amd-roctracer/pipeline.py \
+#            --rows 4096 --cols 1024 --iters 20
+schema_version: 1
+mode: probe
+
+ticket: PROFILING-PROTON-AMD-ROCTRACER
+
+trials: 1
+timeout_per_trial: 1800
+
+mitigation_axis: [none]
+diagnostic_axis: [none]
+
+env_passthrough_mode: inherit
+
+# `mode: env`, not `mode: cli`, and the reason is mechanical rather than
+# stylistic. Triton's Proton CLI front-end calls its own `_select_backend()`
+# only when `-b` is *absent*, and that call initialises the Triton HIP driver
+# as a side effect. roctracer records nothing when it attaches ahead of the
+# HIP runtime it is tracing, so naming a backend on the CLI hands you a
+# 160-byte hatchet with a bare ROOT frame and an exit status of 0 -- aorta's
+# parser then degrades to `proton_artifact_dir` and the trial silently carries
+# no Proton metrics at all. `mode: env` instead exports `AORTA_PROTON_*` and
+# lets the payload call `proton.start()` after its own `import torch`, so the
+# backend attaches to a live runtime. The collector rejects `mode: cli` with
+# an explicit roctracer/rocprofiler backend for exactly this reason.
+#
+# `context: shadow` attributes time to the launch site, which for this payload
+# means one node per Triton kernel; `data: tree` is the `.hatchet` the
+# collector's summary parser reads.
+collect:
+  proton:
+    mode: "env"
+    backend: "roctracer"
+    context: "shadow"
+    data: "tree"
