@@ -1570,6 +1570,48 @@ def test_host_launch_puts_the_cidfile_in_a_private_directory(bash: str, tmp_path
         (0, ["--setup-only"], "executes no tests"),
     ],
 )
+@pytest.mark.parametrize("executed", [None, 7])
+def test_coverage_mapper_option_checks(
+    rc: int, pytest_args: list[str], expected: str | None, executed: int | None
+) -> None:
+    """The option-based checks, with execution either unknown or observed.
+
+    Passing a positive count must not soften them: `-x` with rc=1 still means
+    the suite stopped short, however many tests ran before it did.
+    """
+    module = _coverage_module()
+    reason = module._incomplete_suite_reason(rc, pytest_args, executed)
+    if expected is None:
+        assert reason is None, reason
+    else:
+        assert reason is not None and expected in reason, reason
+
+
+def test_coverage_mapper_rejects_a_suite_that_executed_nothing() -> None:
+    """The check that does not depend on a list staying complete.
+
+    A denylist of no-execution modes cannot be exhaustive -- `--collect-only`
+    was missing, then `--fixtures`, `--help`, `--version` -- and each exits 0
+    with an empty map, which merges as "no kernel is covered". Counting
+    call-phase reports establishes execution directly.
+    """
+    module = _coverage_module()
+    reason = module._incomplete_suite_reason(0, ["--fixtures"], 0)
+    assert reason is not None and "executed no test bodies" in reason
+
+    # And a suite that did run is unaffected, whatever exotic option was passed.
+    assert module._incomplete_suite_reason(0, ["--fixtures"], 12) is None
+
+
+@pytest.mark.parametrize(
+    "rc,pytest_args,expected",
+    [
+        (0, [], None),
+        (1, [], None),
+        (2, [], "interrupted"),
+        (1, ["-x"], "early-exit"),
+    ],
+)
 def test_coverage_mapper_rejects_a_suite_that_did_not_finish(
     rc: int, pytest_args: list[str], expected: str | None
 ) -> None:
@@ -1636,6 +1678,32 @@ def test_harvest_bounds_the_waitcheck_inventory(tmp_path: Path) -> None:
     assert "did not finish within" in message, message
     # Says what to do about it, since the object is not the operator's to fix.
     assert "--waitcheck" in message, message
+
+
+@pytest.mark.parametrize("suffix", [".json", ".amdgcn"])
+def test_harvest_refuses_a_symlinked_consan_sidecar(tmp_path: Path, suffix: str) -> None:
+    """The object was filtered when the cache was walked; the loader reaches
+    further.
+
+    It resolves and copies the `.json` and `.amdgcn` beside the object with APIs
+    that follow symlinks, and the container writes that directory -- so
+    `k.json -> /etc/something` would have the host read and copy a file of the
+    container's choosing, as the calling user.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+    kernels = _fake_kernels(1, tmp_path / "cache")
+    victim = tmp_path / "outside.txt"
+    victim.write_text("not yours\n")
+    Path(kernels[0]["cache_object"]).with_suffix(suffix).symlink_to(victim)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._write_consan_assets(tmp_path / "dest", kernels, "gfx950", loader, "lenient", None)
+
+    message = str(excinfo.value)
+    assert "sidecar" in message, message
+    assert "written by the container" in message, message
 
 
 def test_harvest_bounds_the_consan_loader(tmp_path: Path) -> None:

@@ -84,11 +84,12 @@ produces a confusing failure if missed:
    daemon runs as root, so on a root-squashed NFS export `-v /home/...` fails
    with `mkdir /home/<user>: permission denied`. Scripts, the HF cache, and
    probe output all have to live node-locally — `/tmp/ts-work/...`.
-   `host_launch.sh` and `stage_scripts.sh` refuse `/home` paths up front instead
-   of letting docker produce that error, and `harvest_code_objects.py` resolves
-   its `--dest` against `/proc/mounts` and refuses any network fstype — a path
-   prefix says nothing useful here, since `/home` is often local and `/mnt`,
-   `/shared` or an autofs mount point often is not. It is best-effort: a path
+   All three — `host_launch.sh`, `stage_scripts.sh` and
+   `harvest_code_objects.py` — resolve the path against `/proc/mounts` and
+   refuse any network fstype up front, instead of letting docker produce that
+   error. By filesystem type, not by name: a path prefix says nothing useful
+   here, since `/home` is often local (and is accepted when it is) while
+   `/mnt`, `/shared` or an autofs mount point often is not. It is best-effort: a path
    whose mount cannot be identified is treated as local, because blocking a
    harvest on a guess is worse than letting docker report its own error. Note
    `/tmp` is per-node: an `rm -rf
@@ -674,7 +675,7 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 162 tests (98 functions, the rest
+`tests/probe/test_tokenspeed_probe.py` — 188 tests (101 functions, the rest
 parametrised cases), no GPU or container required. A test asserts this count
 matches the file, since it went stale twice during review.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,

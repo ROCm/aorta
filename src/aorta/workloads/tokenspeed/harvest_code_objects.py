@@ -721,6 +721,23 @@ def _emit_consan_shim(
     shim = bin_dir / f"consan_{stem}"
     _ensure_within(isa_dir, staged_object)
     _ensure_within(bin_dir, shim)
+
+    # The object itself was filtered when the cache was walked, but the loader
+    # reaches further: it resolves and copies the `.json` and `.amdgcn` sitting
+    # beside it, with APIs that follow symlinks. The container writes that
+    # directory, so `k.json -> /etc/something` would have the host read and copy
+    # a file of its choosing. Each sidecar is checked the same way the object
+    # was, before the loader is invoked at all.
+    cache_object = Path(kernel["cache_object"])
+    cache_root = cache_object.parent
+    for sidecar in (cache_object.with_suffix(".json"), cache_object.with_suffix(".amdgcn")):
+        if sidecar.exists() and not _is_contained_file(sidecar, cache_root):
+            raise SystemExit(
+                f"harvest: refusing to run the ConSan loader for {kernel['name']}: "
+                f"its sidecar {sidecar} is not a regular file inside the Triton "
+                "cache. The cache is written by the container, so this would "
+                "have the loader read a file it chose, as you."
+            )
     # Bounded for the same reason as the --list-kernels parse: the object this
     # reads is a Triton cache entry written by the third-party image, so a hang
     # here wedges the --consan path with the GPU still held.
