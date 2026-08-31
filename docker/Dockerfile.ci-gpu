@@ -13,9 +13,11 @@
 # has therefore been removed from this image. hipcc (from the ROCm base) still
 # builds the HIP repro fixtures and does not need any of those -- but on the ROCm
 # 10 wheel base that is true only BECAUSE of the devel-symlink fixup below.
-# Untouched, this base's hipcc compiles and then fails at the link step. If you
-# bump the digest, re-check that fixup; the link smoke test beside it is there so
-# the build tells you instead of the nightly sanitizer gate telling you later.
+# Untouched, this base's hipcc compiles and then fails at the link step, and
+# Proton fails to dlopen its rocprofiler backend. If you bump the digest,
+# re-check that fixup; the two smoke tests beside it are there so the build
+# tells you instead of the nightly sanitizer gate or the GPU gate telling you
+# hours later.
 #
 # Base: rocm/pytorch ROCm 10.0, Ubuntu 26.04, Python 3.14, PyTorch 2.13.0
 #
@@ -66,68 +68,110 @@ USER root
 COPY rocm_layout_guard.py /usr/local/share/aorta/rocm_layout_guard.py
 RUN python /usr/local/share/aorta/rocm_layout_guard.py
 
-# Restore the `libamdhip64.so` devel symlink so hipcc can LINK.
+# Restore the bare `libfoo.so` devel symlinks this base does not ship.
 #
 # This base ships the ROCm RUNTIME wheels (`_rocm_sdk_core`,
 # `_rocm_sdk_libraries`) but NOT `rocm[devel]` -- `rocm-sdk path --root` reports
 # the devel package as absent. Runtime wheels carry only versioned sonames, so
-# `libamdhip64.so.7` exists and the bare `libamdhip64.so` does not (43 such bare
-# symlinks are missing across the two trees). hipcc hands the linker that bare
-# name as an ABSOLUTE path, so every HIP link fails:
+# `libamdhip64.so.7` exists and the bare `libamdhip64.so` does not. 44 bare
+# names are missing across the two trees: 27 under `_rocm_sdk_core/lib` and 17
+# under `_rocm_sdk_libraries/lib`.
 #
-#   ld.lld: error: cannot open .../_rocm_sdk_core/lib/libamdhip64.so:
-#           No such file or directory
-#   clang++: error: linker command failed with exit code 1
+# TWO INDEPENDENT CONSUMERS need them, by two different mechanisms:
 #
-# hipcc itself resolves fine (/opt/venv/bin/hipcc) -- this is purely the link
-# step, which is why it survives a `command -v hipcc` check. It breaks
-# sanitizers-nightly.yml's fixture builds, so it is fixed in the image rather
-# than worked around per-workflow.
+#   * hipcc hands the LINKER the bare name as an ABSOLUTE path, so every HIP
+#     link fails:
+#         ld.lld: error: cannot open .../_rocm_sdk_core/lib/libamdhip64.so:
+#                 No such file or directory
+#         clang++: error: linker command failed with exit code 1
+#     hipcc itself resolves fine (/opt/venv/bin/hipcc) -- this is purely the
+#     link step, which is why it survives a `command -v hipcc` check. It breaks
+#     sanitizers-nightly.yml's fixture builds.
+#   * Proton (the profiler shipped inside Triton) DLOPENS bare names at
+#     runtime. `triton/_C/libproton.so` names five of them -- libamdhip64.so,
+#     libhsa-runtime64.so, librocprofiler-sdk.so, libroctracer64.so,
+#     libroctx64.so -- and Triton's own triton/profiler/__init__.py points it at
+#     `_rocm_sdk_core/lib` through TRITON_ROCPROFILER_SDK_LIB_PATH, so
+#     librocprofiler-sdk.so is opened by absolute path and the others by plain
+#     loader search. It breaks tests/instrumentation/test_proton_smoke_gpu.py in
+#     the GPU gate.
 #
-# Only libamdhip64 gets a symlink here: every hipcc call in
-# sanitizers-nightly.yml is a plain compile with no `-l` flags, so the implicit
-# HIP runtime is the only library involved, and this one symlink was verified
-# sufficient to make those builds link.
-# Fixing all 43 would be papering over a base-image packaging gap with a wider
-# blast radius than the failure warrants.
+# ALL of them, rather than the two we have watched fail. Measured on this
+# digest: with only libamdhip64.so linked, `proton.start()` dies with
+#   RuntimeError: [PROTON] Could not load `librocprofiler-sdk.so`
+# and adding just that one name moves the same failure to Proton's finalize:
+#   RuntimeError: [PROTON] Could not load `libamdhip64.so`
+# -- so naming libraries one at a time was already 2 of the 5 that a single
+# consumer needs, and the third (libroctracer64.so) is named in that test file's
+# own dlopen-failure skip marker.
 #
-# The lib directory is DERIVED, not hardcoded. A literal
+# The earlier argument for the one-at-a-time shape was that fixing all of them
+# papers over a base-image packaging gap with a wider blast radius than the
+# failure warrants. It does not survive the evidence:
+#   * It is not papering over. A bare-soname symlink layer is PRECISELY what
+#     `rocm[devel]` installs; this reconstructs the absent package's link farm
+#     rather than working around it, and it is the mechanism both consumers
+#     were written against.
+#   * The blast radius of one at a time is a red CI round per name on a shared
+#     MI350 runner, hours after the fact. libamdhip64 surfaced through a
+#     nightly fixture build and librocprofiler-sdk through the GPU gate, and
+#     `workload regression (GPU, MI350)` has not yet run against this base at
+#     all, so its consumers are still unexercised.
+#   * The blast radius of all of them is small and measurable: a link is
+#     created only where the versioned file already exists, so no library
+#     appears in the image that was not already there, and all 44 were verified
+#     to dlopen cleanly on this digest.
+# Installing `rocm[devel]` is the true root-cause fix, but it needs network at
+# image build time and adds size to an already ~52 GB image. It stays the thing
+# to do when the base ships it -- at which point every link below is already
+# present and this becomes a no-op.
+#
+# The lib directories are DERIVED, not hardcoded. A literal
 # /opt/venv/lib/python3.14/site-packages/... path would rot silently the first
 # time a base moves the venv or bumps Python -- exactly what issue #381 argued
 # against. This re-implements the resolver's import-based discovery rather than
 # importing aorta.instrumentation.rocm_paths, for the same reason
-# rocm_layout_guard.py does: aorta is not installed at image build time. The
-# soname is globbed rather than spelled `.so.7` so a ROCm 10.x base that bumps to
-# `.8` still works, and the symlink is relative and created only when absent, so
-# a future base that ships `rocm[devel]` makes this a no-op instead of a
-# conflict.
+# rocm_layout_guard.py does: aorta is not installed at image build time. BOTH
+# trees, because the two consumers above split across them: libamdhip64 is core,
+# libhipblaslt is libraries.
+#
+# The soname is globbed rather than spelled, so a ROCm 10.x base that bumps
+# `.so.7` to `.so.8` still works. `sort -V` rather than `sort`, so a tree that
+# ever carries two majors side by side picks `.so.10` over `.so.9` instead of
+# the lexicographic answer. The links are relative and created only when
+# absent, so a future base that ships `rocm[devel]` makes this a no-op instead
+# of a conflict.
 #
 # A non-wheel base is skipped, not failed: classic installs ship their own devel
-# symlinks. The link smoke test below is the real assertion either way -- it
-# checks the property we actually depend on rather than the mechanism, so it
-# stays honest if a future base fixes this upstream.
+# symlinks. The two smoke tests below are the real assertion either way -- they
+# check the properties we actually depend on rather than the mechanism, so they
+# stay honest if a future base fixes this upstream.
 RUN set -eu; \
-    libdir="$(python -c 'import importlib.util, os; s = importlib.util.find_spec("_rocm_sdk_core"); print(os.path.join(os.path.dirname(s.origin), "lib") if s and s.origin else "")')"; \
-    if [ -z "${libdir}" ]; then \
-      echo "no _rocm_sdk_core (classic layout): skipping devel-symlink fixup"; \
-    elif [ ! -d "${libdir}" ]; then \
-      echo "resolved ROCm core lib dir does not exist: ${libdir}" >&2; exit 1; \
+    libdirs="$(python -c 'import importlib.util, os; print(chr(32).join(os.path.join(os.path.dirname(s.origin), "lib") for s in (importlib.util.find_spec(m) for m in ("_rocm_sdk_core", "_rocm_sdk_libraries")) if s and s.origin))')"; \
+    if [ -z "${libdirs}" ]; then \
+      echo "no ROCm wheels (classic layout): skipping devel-symlink fixup"; \
     else \
-      bare="${libdir}/libamdhip64.so"; \
-      if [ -e "${bare}" ]; then \
-        echo "libamdhip64.so already present in ${libdir}"; \
-      else \
-        versioned="$(find "${libdir}" -maxdepth 1 -name 'libamdhip64.so.*' | sort | head -n1)"; \
-        [ -n "${versioned}" ] || { echo "no libamdhip64.so.* in ${libdir}" >&2; exit 1; }; \
-        ln -s "$(basename "${versioned}")" "${bare}"; \
-        echo "created ${bare} -> $(basename "${versioned}")"; \
-      fi; \
+      created=0; \
+      for libdir in ${libdirs}; do \
+        [ -d "${libdir}" ] || { echo "resolved ROCm lib dir does not exist: ${libdir}" >&2; exit 1; }; \
+        cd "${libdir}"; \
+        for versioned in *.so.*; do \
+          [ -f "${versioned}" ] || continue; \
+          bare="${versioned%%.so.*}.so"; \
+          [ -e "${bare}" ] && continue; \
+          newest="$(ls -1 "${bare}".* | sort -V | tail -n1)"; \
+          ln -s "${newest}" "${bare}"; \
+          created=$((created + 1)); \
+          echo "created ${libdir}/${bare} -> ${newest}"; \
+        done; \
+      done; \
+      echo "devel-symlink fixup: created ${created} bare sonames"; \
     fi
 
-# Prove hipcc can link, at build time. Without the symlink above this fails, and
-# the failure would otherwise surface hours later as a broken nightly sanitizer
-# fixture build rather than here. Same reasoning as the exact pins below: a
-# broken image should surface during the build.
+# Prove hipcc can link, at build time. Without the symlinks above this fails,
+# and the failure would otherwise surface hours later as a broken nightly
+# sanitizer fixture build rather than here. Same reasoning as the exact pins
+# below: a broken image should surface during the build.
 #
 # gfx950 because that is what sanitizers-nightly.yml compiles for and this gate
 # runs on MI350; no GPU is needed to compile and link for it. A base that could
@@ -138,6 +182,55 @@ RUN set -eu; \
     hipcc --offload-arch=gfx950 /tmp/hipcc_link_check.hip -o /tmp/hipcc_link_check; \
     rm -f /tmp/hipcc_link_check.hip /tmp/hipcc_link_check; \
     echo "hipcc link check: OK"
+
+# And prove Proton can dlopen, at build time. The link check above covers only
+# the hipcc half of the devel-symlink fixup; a missing bare soname that nothing
+# LINKS against is invisible to it, which is how librocprofiler-sdk.so reached
+# the GPU gate. This is that check for the runtime half.
+#
+# It asks libproton.so which ROCm sonames it names rather than repeating a list
+# here. A hardcoded list would have to be re-derived by hand on every Triton
+# bump, and a Triton that starts dlopening a sixth library would pass a stale
+# list and fail in the gate -- the exact loop this fixup exists to break. The
+# names sit in the binary as NUL-terminated strings, which is where they were
+# found in the first place. An empty intersection is a build failure, not a
+# pass: it means the extraction stopped working and the check is asserting
+# nothing.
+#
+# BY BARE NAME, with the lib dirs on LD_LIBRARY_PATH, because that is how Proton
+# opens them -- so this exercises the symlink and the loader search together.
+# Appended, never prepended, mirroring the workflow export for the same reason.
+# No GPU is needed: dlopen resolves and relocates the library without a device,
+# and all 44 links were verified to load this way on a device-less container.
+RUN set -eu; \
+    libdirs="$(python -c 'import importlib.util, os; print(chr(32).join(os.path.join(os.path.dirname(s.origin), "lib") for s in (importlib.util.find_spec(m) for m in ("_rocm_sdk_core", "_rocm_sdk_libraries")) if s and s.origin))')"; \
+    if [ -z "${libdirs}" ]; then \
+      echo "no ROCm wheels (classic layout): skipping the proton dlopen check"; \
+    else \
+      printf '%s\n' \
+        'import ctypes, glob, importlib.util, os, re, sys' \
+        'spec = importlib.util.find_spec("triton")' \
+        'if spec is None or not spec.origin:' \
+        '    sys.exit("no triton installed, so proton cannot be smoke tested")' \
+        'proton = os.path.join(os.path.dirname(spec.origin), "_C", "libproton.so")' \
+        'with open(proton, "rb") as handle:' \
+        '    blob = handle.read()' \
+        'named = {m.decode() for m in re.findall(rb"lib[A-Za-z0-9_.+-]+\.so(?=\x00)", blob)}' \
+        'shipped = sorted(' \
+        '    name' \
+        '    for name in named' \
+        '    if any(glob.glob(os.path.join(d, name) + "*") for d in sys.argv[1:])' \
+        ')' \
+        'if not shipped:' \
+        '    sys.exit(f"{proton} names no ROCm soname under {sys.argv[1:]}")' \
+        'for name in shipped:' \
+        '    ctypes.CDLL(name)' \
+        'print("proton dlopen check: OK -- " + ", ".join(shipped))' \
+        > /tmp/proton_dlopen_check.py; \
+      LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(echo ${libdirs} | tr ' ' ':')" \
+        python /tmp/proton_dlopen_check.py ${libdirs}; \
+      rm -f /tmp/proton_dlopen_check.py; \
+    fi
 
 # NOTE for a future digest bump: hipcc-built binaries in this base carry NEITHER
 # RPATH nor RUNPATH, so they need the ROCm lib dirs on LD_LIBRARY_PATH to RUN,

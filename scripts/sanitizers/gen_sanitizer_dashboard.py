@@ -1922,9 +1922,11 @@ _ROCM_LLVM_PATH_EXPORT = (
 # BOTH lib dirs, core first: ``core_lib_dir`` holds the HIP runtime and
 # ``lib_dir`` the math libraries (see the resolver's properties). Appended, never
 # prepended, so an inherited LD_LIBRARY_PATH -- an operator substitution -- keeps
-# winning. Byte-identical to both payloads in sanitizers-nightly.yml, which
-# ``test_rebuild_commands_export_the_rocm_library_path`` cross-checks, so the
-# published guidance cannot drift from what actually produced the artifacts.
+# winning. Byte-identical to all three workflow copies -- both payloads in
+# sanitizers-nightly.yml and the pytest step in gpu-tests.yml, which needs it for
+# the same reason: the rocprof smoke test launches a hipcc-built binary directly.
+# ``test_rebuild_commands_export_the_rocm_library_path`` cross-checks every one, so
+# the published guidance cannot drift from what actually produced the artifacts.
 _ROCM_LIB_PATH_EXPORT = (
     'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}'
     '$(python -c "import os; from aorta.instrumentation.rocm_paths import '

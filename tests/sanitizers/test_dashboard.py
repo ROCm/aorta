@@ -2794,24 +2794,38 @@ def test_rebuild_commands_export_the_rocm_library_path():
     environment instead, and it has to be the workflow's own line -- guidance
     that drifts from what actually built the artifacts is worse than none.
 
-    Checked over EVERY occurrence in the workflow, not "appears somewhere":
-    the gate job and the survey job each carry their own provisioning block,
-    and one converted line beside one stale one reads as done and is not.
+    Checked over EVERY occurrence in EVERY workflow that needs it, not "appears
+    somewhere": the nightly's gate job and survey job each carry their own
+    provisioning block, and the GPU gate needs the same line because
+    ``test_rocprof_smoke_gpu.py`` compiles the rocprof example with hipcc and
+    then launches it bare -- which is exactly the exit-127 loader failure this
+    export exists to prevent, arriving in a second workflow. One converted line
+    beside one stale one reads as done and is not.
+
+    The per-file minimum is asserted as well as the text, so a job that quietly
+    loses its provisioning block fails here rather than on the runner.
     """
-    workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
-        encoding="utf-8"
-    )
-    exports = [
-        stripped
-        for line in workflow.splitlines()
-        if (stripped := line.strip()).startswith("export LD_LIBRARY_PATH=")
-    ]
-    assert len(exports) >= 2, f"expected an export per job; found {exports}"
-    for export in exports:
-        assert export == gen._ROCM_LIB_PATH_EXPORT, (
-            "this line has drifted from the library path the dashboard publishes "
-            f"beside the rebuild commands: {export}"
+    minimum_per_workflow = {
+        # gate job + survey job
+        ".github/workflows/sanitizers-nightly.yml": 2,
+        # the pytest step
+        ".github/workflows/gpu-tests.yml": 1,
+    }
+    for relative, minimum in minimum_per_workflow.items():
+        workflow = (_REPO_ROOT / relative).read_text(encoding="utf-8")
+        exports = [
+            stripped
+            for line in workflow.splitlines()
+            if (stripped := line.strip()).startswith("export LD_LIBRARY_PATH=")
+        ]
+        assert len(exports) >= minimum, (
+            f"{relative}: expected at least {minimum} export(s); found {exports}"
         )
+        for export in exports:
+            assert export == gen._ROCM_LIB_PATH_EXPORT, (
+                f"{relative}: this line has drifted from the library path the "
+                f"dashboard publishes beside the rebuild commands: {export}"
+            )
     # Both lib dirs, and both asked of the resolver rather than spelled out: a
     # literal site-packages path rots on the next digest bump, and core_lib_dir
     # is the one holding libamdhip64 -- lib_dir alone still fails 127.
