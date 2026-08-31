@@ -205,6 +205,55 @@ jobs:
             export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
             echo "[$(date +%T)] setup: ROCm LLVM bindir on PATH -> ${PATH%%:*}"
 
+            # And the ROCm lib dirs on LD_LIBRARY_PATH, or the fixtures below
+            # build and then fail to LAUNCH. Measured on this base: hipcc output
+            # carries neither DT_RPATH nor DT_RUNPATH and the image sets no
+            # LD_LIBRARY_PATH, so the loader has nowhere to look and every
+            # fixture dies before main with
+            #   error while loading shared libraries: libamdhip64.so.7
+            # at exit 127. Nothing on the path from `aorta sweep run` to the
+            # fixture supplies a library path -- run_consan launches the repro
+            # with a copy of its own environment plus the HSA_TOOLS_LIB /
+            # RJ_CONSAN_* pins -- so what this shell exports is what the fixture
+            # process gets.
+            #
+            # ROCm 7.2.4 was immune twice over, and BOTH reasons are gone: its
+            # hipcc embedded DT_RUNPATH=/opt/rocm-7.2.4/lib in the binary, and
+            # its base exported LD_LIBRARY_PATH=/opt/rocm/lib. The RUNPATH is the
+            # one that was actually load-bearing -- a 7.2.4 fixture still launches
+            # with LD_LIBRARY_PATH scrubbed -- so a future digest bump has to check
+            # the binary, not the image environment; docker/Dockerfile.ci-gpu says
+            # so beside its link smoke test. No build-time check can catch this:
+            # that smoke test passes on this base, because linking is not launching.
+            #
+            # Here rather than as an ENV in docker/Dockerfile.ci-gpu: that file
+            # argues at length (issue #381) against asserting ROCm paths it
+            # cannot know are true of its base, and the literal
+            # /opt/venv/lib/python3.14/site-packages/... this expands to would rot
+            # on the next digest bump. Same resolver as the PATH line above, so
+            # this stays layout-agnostic instead.
+            #
+            # BOTH lib dirs, core first. libamdhip64 lives in core_lib_dir, which
+            # is NOT lib_dir -- that is <libraries>/lib, the math libraries, and
+            # launching with only it still fails 127. Both are resolver properties
+            # so this reads as the distinction it is rather than as an inline
+            # <core>/lib join a future reader has to decode. On a classic install
+            # the two roots coincide and dict.fromkeys collapses them to one entry.
+            #
+            # Appended, never prepended: an inherited LD_LIBRARY_PATH is an
+            # operator substitution and has to keep winning. On a classic base
+            # that inherited value is already /opt/rocm/lib, so this line adds a
+            # duplicate and changes nothing there.
+            #
+            # Same apostrophe rule as the PATH line above, and byte-identical to
+            # the survey job copy and to _ROCM_LIB_PATH_EXPORT in
+            # gen_sanitizer_dashboard.py, which publishes it beside the rebuild
+            # commands so a pasted rebuild also RUNS; the three are asserted equal
+            # by test_rebuild_commands_export_the_rocm_library_path. os.pathsep
+            # rather than a ":" literal so the one-liner needs no inner quoting.
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+            echo "[$(date +%T)] setup: ROCm lib dirs on LD_LIBRARY_PATH -> ${LD_LIBRARY_PATH}"
+
             mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
             echo "[$(date +%T)] fixture build: hipcc consan_lds_race (clean single-wave LDS repro) …"
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race.hip" \
@@ -459,8 +508,17 @@ jobs:
             # The apostrophe rule from the gate job applies to THIS payload as well:
             # it is its own single-quoted bash -lc block, so any apostrophe below
             # closes it early. Both payloads are now checked by
-            # test_sanitizer_nightly_payload_has_no_apostrophes.
+            # test_sanitizer_nightly_payloads_have_no_apostrophes.
             export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
+            # Same LD_LIBRARY_PATH requirement as the gate job, and byte-identical
+            # to its line -- see the full rationale there. This job launches three
+            # more hipcc-built executables (lds_dispatch, consan_tiny_load,
+            # consan_gemm_load) through `aorta sweep run`, so without this every
+            # ConSan survey row is an exit-127 loader failure rather than an
+            # observation. The waitcheck rows are static scans of code objects and
+            # would survive; that asymmetry is exactly what makes it worth stating.
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+            echo "[$(date +%T)] setup: ROCm lib dirs on LD_LIBRARY_PATH -> ${LD_LIBRARY_PATH}"
             # This job builds its own fixtures from scratch -- the gate job removes
             # these directories in its cleanup step, and on a fresh runner they never
             # existed -- so create them rather than assuming a previous job did.

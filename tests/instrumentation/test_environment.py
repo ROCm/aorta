@@ -4699,6 +4699,7 @@ class TestEnvVars:
             "HIPBLASLT_TENSILE_LIBPATH",
             "HIPBLASLT_EXT_OP_LIBRARY_PATH",
             "HIPBLASLT_PRELOAD_KERNELS",
+            "TENSILE_MAX_DECOMPRESSED_BYTES",
             "ROCBLAS_TENSILE_LIBPATH",
             "ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH",
             # Backend routing + generator choice

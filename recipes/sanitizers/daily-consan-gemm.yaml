@@ -54,11 +54,44 @@ sanitizer_plan:
     # require-records at exit 86. 2000s would have guaranteed combined_hook_timeout:
     # the exact failure this recipe change exists to remove.
     #
-    # 6000s is ~45% over the slower of the two. The headroom absorbs that spread
-    # (both runs emitted an identical 508727 log lines, so the ~12% difference is
-    # host contention, not workload variance) and the fact that the timing comes from
-    # ROCm 7.0.2.2 while CI builds fixtures against 7.2.4 (#380), whose hipBLASLt may
-    # extract a differently sized object.
+    # 6000s is ~45% over the slower of the two. That headroom absorbs the spread
+    # between them (both runs emitted an identical 508727 log lines, so the ~12%
+    # difference is host contention, not workload variance). It does NOT absorb the
+    # difference between the object those runs timed and the object CI extracts,
+    # and this is the part earlier revisions of this comment got wrong -- they said
+    # only that a different ROCm "may extract a differently sized object".
+    #
+    # Measured, one object per release, same layout (Ailk_Bjlk heavy SS) and the
+    # same unbundle this recipe consumes:
+    #
+    #   ROCm 7.0.2  16,265,080 B    490 kernels    217,634 memory instructions
+    #   ROCm 7.2.4  191,935,808 B  1554 kernels  2,583,251 memory instructions
+    #   ROCm 10.0   169,996,560 B   682 kernels  2,093,009 memory instructions
+    #
+    # The timing above was taken on ROCm 7.0.2.2, on an object of 16,265,200 B /
+    # 490 kernels (docs/sanitizers/consan-4112-overlapping-anchor-patches.md
+    # records it), which the 7.0.2 row above matches to within 120 bytes. So the
+    # object CI feeds this case is ~10x the timed one on bytes and ~9.6x on the
+    # memory instructions ConSan discovers access sites from -- and it was ~12x on
+    # the old 7.2.4 base too. The gap is not something the ROCm 10 migration
+    # introduced; the migration is the favourable direction on every axis
+    # measurable off-GPU (ROCm 10 is 0.89x the bytes and 0.81x the memory
+    # instructions of 7.2.4, because 10 splits the libraries per device and CI
+    # selects the CU256/ID75a0 variant rather than one bundle covering every part).
+    #
+    # What that means for this ceiling, stated as the bound it is rather than as a
+    # budget: 4152s was dominated by per-site work -- ~76% hook debug logging, and
+    # 508727 log lines against 68894 discovered access sites is ~7.4 lines per site
+    # -- so a ~10x site count does not fit inside a 1.45x margin. This ceiling is
+    # therefore NOT established to clear the run; it is what stops a non-gating row
+    # burning the survey job. It is left at 6000s deliberately rather than raised:
+    # the sanitizers-survey job caps at timeout-minutes: 120 (7200s), so no ceiling
+    # that could plausibly fit ~10x the timed work also fits the job, and inventing
+    # one would replace a measured number with a guess. Re-sizing needs a real
+    # measurement on the gate host against a ROCm 10 object; until then the first
+    # combined_hook_timeout on this row is expected evidence, not a surprise, and
+    # ROCm/rocm-systems#10686 below is the change that would actually make the case
+    # fit.
     #
     # This case runs in the non-gating sanitizers-survey job, not on the gate job --
     # a ~69-min observed-only row does not belong in front of the Tab 1 verdict.

@@ -8,24 +8,24 @@
 # version IS the experiment (a customer's stack, a specific amdgpu build, a
 # bisect point). Do not "modernise" those; add to this one instead.
 #
-# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 24.04, Python 3.12, PyTorch 2.10.0
+# Base: rocm/pytorch ROCm 10.0, Ubuntu 26.04, Python 3.14, PyTorch 2.13.0
 # Kept in step with Dockerfile.ci-gpu so local runs match what CI validates.
-# Newest published combination on every axis: 24.04 / py3.12 / torch 2.10.0 are
-# the newest Ubuntu, Python and PyTorch on the 7.2.4 line. py3.12 is purely what
-# that ROCM line offers -- our own packaging no longer caps it, since pyproject
-# declares through 3.14 and the CPU matrix tests 3.10-3.14 (#383).
+# Newest published combination on every axis: 26.04 / py3.14 / torch 2.13.0 are
+# the newest Ubuntu, Python and PyTorch on the ROCm 10.0 line, and py3.14 now
+# also matches the top of what pyproject declares and the CPU matrix tests.
 #
-# This is the newest ROCm PRODUCTION release this image currently tracks:
-#   * 7.9-7.13 are the technology PREVIEW stream, not newer production;
-#   * 7.14+ is production and ships wheel-based (TheRock) images with no
-#     /opt/rocm. Issue #381 made discovery layout-agnostic, so that layout is
-#     readable now; moving this image onto it is issue #383.
+# This tracks the ROCm 10 line, which replaces the 7.x preview-vs-production
+# argument that used to sit here (7.9-7.13 preview, 7.14 the first wheel-based
+# production release, moving onto that wheel line a separate step -- issue #383,
+# now done). ROCm 10 ships only on TheRock, so the wheel layout is the only
+# layout: ROCm lives under site-packages and there is no /opt/rocm. Issue #381
+# made discovery layout-agnostic, which is what makes that readable.
 #
 # Tag-pinned rather than `:latest`: `rocm/pytorch:latest` moves whenever a new
 # ROCm-tested PyTorch is published, which would silently change the stack under
 # a running experiment. Bump this tag deliberately. (GPU CI additionally pins a
 # digest -- see Dockerfile.ci-gpu -- because CI must be byte-reproducible.)
-FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
+FROM rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0
 
 USER root
 
@@ -34,6 +34,36 @@ USER root
 # tooling silently misreports a null ROCm version.
 COPY rocm_layout_guard.py /usr/local/share/aorta/rocm_layout_guard.py
 RUN python /usr/local/share/aorta/rocm_layout_guard.py
+
+# Same `libamdhip64.so` devel-symlink fixup as Dockerfile.ci-gpu, and applied here
+# for the reason stated at the top of this file: local runs are supposed to match
+# what CI validates. Without it hipcc compiles and then fails to link, because
+# this base ships the ROCm runtime wheels but not `rocm[devel]`, so only the
+# versioned `libamdhip64.so.7` exists while hipcc passes the linker the bare name.
+# See Dockerfile.ci-gpu for the full mechanism and the error it produces.
+#
+# This is not a CI-only concern: the sanitizer dashboard hands developers hipcc
+# rebuild commands to re-run locally, and the failure it produces
+# ("ld.lld: error: cannot open .../libamdhip64.so") points at a missing file
+# rather than at a missing devel package, so it costs real time to diagnose.
+#
+# Derived rather than hardcoded, globbed rather than pinned to `.so.7`, and a
+# no-op when already present or when the base is a classic /opt/rocm layout --
+# same rationale as the CI image. The CI image additionally runs a hipcc link
+# smoke test; this one asserts only that the symlink exists, keeping local
+# builds fast and forgiving in the style of the rest of this file.
+RUN set -eu; \
+    libdir="$(python -c 'import importlib.util, os; s = importlib.util.find_spec("_rocm_sdk_core"); print(os.path.join(os.path.dirname(s.origin), "lib") if s and s.origin else "")')"; \
+    if [ -z "${libdir}" ] || [ ! -d "${libdir}" ]; then \
+      echo "no ROCm wheel layout detected: skipping devel-symlink fixup"; \
+    elif [ -e "${libdir}/libamdhip64.so" ]; then \
+      echo "libamdhip64.so already present in ${libdir}"; \
+    else \
+      versioned="$(find "${libdir}" -maxdepth 1 -name 'libamdhip64.so.*' | sort | head -n1)"; \
+      [ -n "${versioned}" ] || { echo "no libamdhip64.so.* in ${libdir}" >&2; exit 1; }; \
+      ln -s "$(basename "${versioned}")" "${libdir}/libamdhip64.so"; \
+      echo "created ${libdir}/libamdhip64.so -> $(basename "${versioned}")"; \
+    fi
 
 # Analysis tooling used by the report/trace workflows. Unpinned and non-fatal
 # (`|| true`) to match the other dev images: a transient GitHub outage should
@@ -46,9 +76,10 @@ RUN pip install openpyxl seaborn
 # Deliberately NO `ENV ROCM_HOME=/opt/rocm` here -- same reason as
 # Dockerfile.ci-gpu (issue #381): it is an explicit override that ranks above
 # autodetection, so on a wheel base that also has any /opt/rocm stub it wins
-# over the real install. The classic base already exports /opt/rocm/bin on PATH
-# and /opt/rocm/lib on LD_LIBRARY_PATH itself, so dropping it changes nothing
-# here.
+# over the real install. On this ROCm 10 base there is no /opt/rocm at all, so
+# the line would assert a path that does not exist -- and the base exports
+# neither /opt/rocm/bin on PATH nor /opt/rocm/lib on LD_LIBRARY_PATH, so there is
+# nothing for it to restate either.
 
 WORKDIR /workspace/aorta
 

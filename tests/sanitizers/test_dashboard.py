@@ -2639,7 +2639,8 @@ def test_rebuild_commands_are_runnable_from_the_repo_root():
         assert entry["path"].startswith("fixtures/"), entry["path"]
         assert entry["commands"], entry["path"]
         assert entry["commands"][0] == gen._ROCM_LLVM_PATH_EXPORT
-        assert entry["commands"][1].startswith("mkdir -p recipes/sanitizers/fixtures/")
+        assert entry["commands"][1] == gen._ROCM_LIB_PATH_EXPORT
+        assert entry["commands"][2].startswith("mkdir -p recipes/sanitizers/fixtures/")
         for command in entry["commands"]:
             # No bare recipe-relative path survives into an executable command:
             # every fixtures/ token must be reached through recipes/sanitizers/.
@@ -2779,6 +2780,57 @@ def test_rebuild_commands_export_the_rocm_llvm_path():
     assert f"`{gen._ROCM_LLVM_PATH_EXPORT}`" in hint
     # An unrecognised reference still yields no commands rather than a bare export.
     assert gen.rebuild_plan(["fixtures/other/x"], target="gfx950")[0]["commands"] == []
+
+
+def test_rebuild_commands_export_the_rocm_library_path():
+    """Building a fixture is not the same as being able to run it.
+
+    hipcc output on the wheel-layout ROCm base carries neither DT_RPATH nor
+    DT_RUNPATH and the image sets no LD_LIBRARY_PATH, so a reader who pastes
+    these commands gets a binary that links and then dies before main at exit
+    127. The fix cannot be a link flag: the recorded ``command_sha256`` is a
+    contract about the artifact bytes, and ``-Wl,-rpath`` would change the
+    compile line and stop reproducing it. So the lib dirs are published as
+    environment instead, and it has to be the workflow's own line -- guidance
+    that drifts from what actually built the artifacts is worse than none.
+
+    Checked over EVERY occurrence in the workflow, not "appears somewhere":
+    the gate job and the survey job each carry their own provisioning block,
+    and one converted line beside one stale one reads as done and is not.
+    """
+    workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    exports = [
+        stripped
+        for line in workflow.splitlines()
+        if (stripped := line.strip()).startswith("export LD_LIBRARY_PATH=")
+    ]
+    assert len(exports) >= 2, f"expected an export per job; found {exports}"
+    for export in exports:
+        assert export == gen._ROCM_LIB_PATH_EXPORT, (
+            "this line has drifted from the library path the dashboard publishes "
+            f"beside the rebuild commands: {export}"
+        )
+    # Both lib dirs, and both asked of the resolver rather than spelled out: a
+    # literal site-packages path rots on the next digest bump, and core_lib_dir
+    # is the one holding libamdhip64 -- lib_dir alone still fails 127.
+    assert "core_lib_dir" in gen._ROCM_LIB_PATH_EXPORT
+    assert "lib_dir" in gen._ROCM_LIB_PATH_EXPORT
+    # Appended, never prepended, so an inherited operator substitution wins.
+    assert gen._ROCM_LIB_PATH_EXPORT.startswith(
+        'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}'
+    )
+    # No apostrophe: it lives inside a single-quoted bash -lc payload, which
+    # test_sanitizer_nightly_payloads_have_no_apostrophes enforces on the
+    # workflow side and this keeps true of the constant itself.
+    assert "'" not in gen._ROCM_LIB_PATH_EXPORT
+    for entry in gen.rebuild_plan(
+        ["fixtures/isa", "fixtures/bin/consan_lds_race"], target="gfx950"
+    ):
+        assert entry["commands"][1] == gen._ROCM_LIB_PATH_EXPORT, entry["path"]
+    hint = gen._rebuild_hints(gen.rebuild_plan(["fixtures/isa"], target="gfx950"))[0]
+    assert f"`{gen._ROCM_LIB_PATH_EXPORT}`" in hint
 
 
 def test_run_area_ships_every_source_its_rebuild_commands_read():
@@ -3437,6 +3489,7 @@ def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
     lds = plan[0]
     assert lds["commands"] == [
         gen._ROCM_LLVM_PATH_EXPORT,
+        gen._ROCM_LIB_PATH_EXPORT,
         "mkdir -p recipes/sanitizers/fixtures/isa",
         "hipcc --genco --offload-arch=gfx950 "
         "recipes/sanitizers/fixtures/kernels/lds_reduce.hip -o tmp.o",
@@ -3450,7 +3503,7 @@ def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
     # automated consumer can execute the branch.
     assert "__CLANG_OFFLOAD_BUNDLE__" in " ".join(lds["commands"])
     assert "--genco" in lds["caveat"]
-    hipcc = plan[1]["commands"][2]
+    hipcc = plan[1]["commands"][3]
     assert "-O1 -g" not in hipcc  # loader binaries are built without
     assert "-DLDS_HSACO=" in hipcc
     # An unknown reference yields no command rather than a plausible wrong one.

@@ -33,11 +33,16 @@ not use for the device would misrepresent what runs:
 * the build-time hardware-row comparator, as documented in hipBLASLt's
   "PCI chip ID predicates walkthrough".
 
-Size is deliberately not quoted here: the extracted gfx950 object measures ~183 MiB
-on the current CI base (ROCm 7.2.4), so the "~16 MB" this docstring used to claim
-had already drifted by more than a factor of ten. It is a per-release property of
-the shipped Tensile libraries -- the ROCm 7.14 variants measure ~156-168 MiB -- so
-treat any figure as version-specific and measure rather than trust a comment.
+Size is deliberately not quoted here: the extracted gfx950 object measures ~162 MiB
+on the current CI base (ROCm 10.0) and ~183 MiB on the previous one (ROCm 7.2.4), so
+the "~16 MB" this docstring used to claim had already drifted by more than a factor
+of ten. It is a per-release property of the shipped Tensile libraries -- the ROCm
+7.14 variants measure ~156-168 MiB and the ROCm 10.0 ones ~96-162 MiB, a spread wide
+enough that even one release's variants disagree with each other, while the ROCm
+7.0.2 line shipped ~15.5 MiB for the same layout -- so treat any figure as
+version-specific and measure rather than trust a comment. That last figure is not
+trivia: the ConSan timing this repo sizes a timeout against was taken on it, which
+is why ``recipes/sanitizers/daily-consan-gemm.yaml`` records the gap explicitly.
 """
 
 from __future__ import annotations
@@ -71,8 +76,9 @@ _LAYOUT = {
     ("T", "N"): "Alik_Bljk",
     ("T", "T"): "Alik_Bjlk",
 }
-# The heavy f32 GEMM library family. Unbundles to a large gfx950 object -- ~183 MiB
-# measured on ROCm 7.2.4; see the module docstring on why no fixed size is asserted.
+# The heavy f32 GEMM library family. Unbundles to a large gfx950 object -- ~162 MiB
+# measured on the ROCm 10.0 CI base, ~183 MiB on the previous 7.2.4 one; see the
+# module docstring on why no fixed size is asserted.
 _SS_HEAVY_STEM = "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_{layout}_Cijk_Dijk"
 # Through ROCm 7.2.4 that stem plus ``_gfx950.co`` named exactly one file.
 _SS_HEAVY = _SS_HEAVY_STEM + "_" + GFX + ".co"

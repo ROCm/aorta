@@ -228,6 +228,73 @@ def test_strict_rejection_never_passes() -> None:
     assert consan.reason == "consan_strict_load_rejection"
 
 
+_LOADER_FAILURE = (
+    "/repro: error while loading shared libraries: libamdhip64.so.7: "
+    "cannot open shared object file: No such file or directory"
+)
+
+
+def test_loader_failure_is_reported_as_a_missing_library_not_a_bare_exit() -> None:
+    """Exit 127 plus the loader message means the repro never reached main.
+
+    Measured on the wheel-layout ROCm base: hipcc output carries no RPATH or
+    RUNPATH and the image sets no LD_LIBRARY_PATH, so a repro that builds fine
+    dies before main. Without this the run reports only
+    ``combined_hook_exit_127``, which reads like a sanitizer verdict and points
+    at nothing.
+    """
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 127, "", _LOADER_FAILURE)
+    )
+
+    reason = str(consan.reason)
+    # The machine-readable token still leads, so consumers keying off it are
+    # unaffected by the added prose.
+    assert reason.startswith("combined_hook_exit_127")
+    assert "libamdhip64.so.7" in reason
+    assert "LD_LIBRARY_PATH" in reason
+    # And it says why aorta will not simply fix it, so the next reader does not
+    # "fix" it by mutating the child environment.
+    assert "environment of the process under test" in reason
+    assert consan.verdict is Verdict.ERROR
+
+
+def test_a_bare_exit_127_gets_no_invented_library_hint() -> None:
+    """A repro is free to exit 127 for its own reasons.
+
+    The diagnostic requires the loader message as well as the code, so an exit
+    this module cannot explain keeps exactly the reason it always had.
+    """
+    _waitcheck, consan = evaluate_record_replay(ProcessResult(("app",), 127, "", "boom"))
+
+    assert str(consan.reason) == "combined_hook_exit_127"
+
+
+def test_the_loader_message_alone_does_not_trigger_the_hint() -> None:
+    """Output the repro merely printed is not evidence of its own launch failure."""
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 3, _LOADER_FAILURE, "")
+    )
+
+    assert str(consan.reason) == "combined_hook_exit_3"
+
+
+def test_run_consan_never_injects_a_library_path_into_the_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The diagnostic is words only: the process under test keeps its own env.
+
+    Prepending stock ROCm lib dirs here would hijack the LD_LIBRARY_PATH
+    substitution the library-swap workflows in docs/ci-testing-plan.md depend
+    on, so the repro must see exactly what aorta inherited.
+    """
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/operator/substituted/lib")
+
+    env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
+
+    assert env["LD_LIBRARY_PATH"] == "/operator/substituted/lib"
+
+
 def test_timeout_never_passes() -> None:
     _waitcheck, consan = evaluate_record_replay(
         ProcessResult(("app",), None, "", "", timed_out=True)

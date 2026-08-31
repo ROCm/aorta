@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from ..rocm_paths import resolve_rocm_roots, safe_is_dir
 from .consan_coverage import CoverageDecision, parse_coverage_decision
 from .execution import ProcessResult, run_argv
 from .models import (
@@ -29,6 +30,13 @@ _WAITCHECK_HAZARD = re.compile(r"missing\s+s_wait|hazard", re.IGNORECASE)
 _WAITCHECK_CONTEXT = re.compile(r"^(producer|consumer)\b", re.IGNORECASE)
 _AUTO_REPLAY_DIAGNOSTIC = re.compile(r"\bauto\s+replay\s+diagnostic(?:\s|$)", re.IGNORECASE)
 _KV = re.compile(r"(\w+)=(\S+)")
+# glibc's ld.so message when a needed DT_NEEDED library is not on any search
+# path. Paired with exit 127 it means the repro never reached main -- see
+# ``_launch_diagnostic``.
+_MISSING_SHARED_OBJECT = re.compile(
+    r"error while loading shared libraries:\s*(?P<soname>[^\s:]+):\s*"
+    r"cannot open shared object file"
+)
 
 
 class ConSanMode(str, Enum):
@@ -272,6 +280,53 @@ def _error_result(
     )
 
 
+def _launch_diagnostic(process: ProcessResult) -> str:
+    """An actionable suffix when exit 127 was the loader, not the sanitizer.
+
+    A hipcc-built repro on a wheel-layout ROCm install (ROCm 10 / TheRock) has
+    neither ``DT_RPATH`` nor ``DT_RUNPATH``, and those images set no
+    ``LD_LIBRARY_PATH``, so the repro dies before ``main`` and the run reports a
+    bare ``combined_hook_exit_127`` with nothing pointing at the cause. CI works
+    around this by exporting the lib dirs in its own shell; a developer running
+    ``aorta sweep run`` on such a host gets no such hint.
+
+    Strictly a diagnostic. aorta must NOT fix this by editing the child
+    environment: ``run_consan`` hands the repro a copy of its own environ plus
+    the sanitizer pins, so injecting stock ROCm lib dirs would silently alter
+    the environment of the process under test *and* hijack the very
+    ``LD_LIBRARY_PATH`` substitution the library-swap workflows in
+    ``docs/ci-testing-plan.md`` depend on. What is missing is discoverability,
+    so what is added is words.
+
+    Both the exit code and the loader message are required. 127 alone is
+    ambiguous -- a repro may exit 127 for its own reasons -- and the message
+    alone could be text the repro merely printed. Returns ``""`` when this is
+    not that failure, so the reason string is unchanged for every other exit.
+    """
+    if process.returncode != 127:
+        return ""
+    match = _MISSING_SHARED_OBJECT.search(f"{process.stdout}\n{process.stderr}")
+    if match is None:
+        return ""
+    roots = resolve_rocm_roots()
+    # core first: libamdhip64 lives in core_lib_dir, while lib_dir is the math
+    # libraries. On a classic install the two coincide and collapse to one entry.
+    dirs = list(dict.fromkeys((str(roots.core_lib_dir), str(roots.lib_dir))))
+    remedy = (
+        f"append {os.pathsep.join(dirs)} to LD_LIBRARY_PATH"
+        if safe_is_dir(roots.core_lib_dir)
+        else f"no ROCm lib dir was found to name (resolver source={roots.source})"
+    )
+    return (
+        f": {match.group('soname')} was not found by the dynamic loader, so the "
+        "repro never started. A hipcc-built binary on a wheel-layout ROCm install "
+        "carries no RPATH or RUNPATH, so the ROCm lib dirs have to be on "
+        f"LD_LIBRARY_PATH in the shell that invokes aorta -- {remedy}. aorta does "
+        "not alter the environment of the process under test, so it cannot do this "
+        "for you"
+    )
+
+
 def evaluate_record_replay(
     process: ProcessResult,
     *,
@@ -320,10 +375,12 @@ def evaluate_record_replay(
             ),
         )
     if process.returncode != 0:
+        # The machine-readable token stays the whole reason for every exit that
+        # aorta cannot explain; only a recognised loader failure appends prose.
         reason = (
             "consan_strict_load_rejection"
             if process.returncode == 92
-            else f"combined_hook_exit_{process.returncode}"
+            else f"combined_hook_exit_{process.returncode}{_launch_diagnostic(process)}"
         )
         return (
             _error_result(

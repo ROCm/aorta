@@ -43,14 +43,14 @@ image to reproduce a stack against.
 
 | Dockerfile | Stack | Use Case |
 |------------|-------|----------|
-| `Dockerfile.rocm-latest` | **7.2.4 / PyTorch 2.10** (newest stack CI validates) — compose default | General development and testing |
+| `Dockerfile.rocm-latest` | **10.0 / PyTorch 2.13** (newest stack CI validates) — compose default | General development and testing |
 | `Dockerfile.rocm70_9-1` | 7.2 / PyTorch 2.9.1 | Older-stack comparison |
 | `Dockerfile.rocm70_9-1-shampoo` | 7.0 meta build #19, plus Shampoo optimizer | Shampoo optimizer experiments |
 | `Dockerfile.rocm70_2-ubuntu-pytorch` | 7.0.2.1 build #17 on Ubuntu 22.04 | Legacy 7.0.2.x support |
 | `Dockerfile.rocm70_2-ubuntu-nan` | 7.0.2.1 build #17, plus NaN debugging | Debugging NaN issues |
 | `Dockerfile.rocm-ubuntu-ebpf` | 7.2.0.1 build #5, plus eBPF tracing (bpftrace, bcc) | eBPF-based GPU queue/memory tracing |
-| `Dockerfile.ci-gpu` | 7.2.4 / PyTorch 2.10, pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
-| `Dockerfile.rocm-canary` | whatever `rocm/pytorch:latest` resolves to, via a `BASE_IMAGE` build arg | Non-gating latest-ROCm canary (see `.env.canary`, issue #382) |
+| `Dockerfile.ci-gpu` | 10.0 / PyTorch 2.13, pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
+| `Dockerfile.rocm-canary` | whatever `rocm/pytorch:latest` (or a dispatched override) resolves to, via a `BASE_IMAGE` build arg | Non-gating latest-ROCm canary (see `.env.canary`, issue #382) |
 
 Except for `Dockerfile.rocm-latest`, `Dockerfile.ci-gpu` and
 `Dockerfile.rocm-canary`, the images above are
@@ -59,11 +59,24 @@ customer's stack, a specific `amdgpu` build, a bisect point). Bumping them would
 turn a reproducer into noise. New general-purpose tooling belongs in
 `Dockerfile.rocm-latest`.
 
-7.2.4 is the newest ROCm **production** release these images track. ROCm
-7.9–7.13 are the technology *preview* stream (a higher number there is not an
-upgrade). 7.14+ is production and ships wheel-based (TheRock) `rocm/pytorch`
-images with no `/opt/rocm`; issue #381 made ROCm discovery layout-agnostic, so
-that layout is readable now, and moving the base onto it is issue #383.
+ROCm **10.0** is the newest production release these images track, as of the
+issue #383 stack flip — which moved ROCm, Ubuntu, Python and PyTorch together
+(7.2.4 → 10.0, 24.04 → 26.04, py3.12 → py3.14, torch 2.10 → 2.13), because the
+ROCm 10 line publishes no torch 2.10 image and so offered no smaller step.
+
+That flip also retires the 7.x version-reading rules that used to live here: ROCm
+7.9–7.13 were the technology *preview* stream (a higher number there was not an
+upgrade), and 7.14 was the first wheel-based (TheRock) production line. ROCm 10
+ships **only** on TheRock, so the wheel layout is no longer one option among two
+— ROCm lives under `site-packages` and there is no `/opt/rocm` at all. Issue #381
+made ROCm discovery layout-agnostic, which is what makes that base readable.
+
+**Disk:** budget the *uncompressed* size for these ROCm bases. Docker Hub lists
+the ROCm 10 base at around 20.5 GB, but that is the compressed manifest —
+`docker images` reports **51.8 GB** once pulled, and the images built on top add
+little. Recent ROCm bases all land in the 40–52 GB range, so a host that keeps
+the gate image and the canary image at once needs well over 100 GB for these
+alone, before any older pinned reproducer images.
 
 `Dockerfile.ci-gpu`, `Dockerfile.rocm-latest` and `Dockerfile.rocm-canary` run
 [`rocm_layout_guard.py`](rocm_layout_guard.py) at build time. It accepts either
@@ -82,6 +95,16 @@ release is noticed early without the merge gate depending on a moving tag —
 `.github/workflows/latest-rocm-canary.yml` resolves `rocm/pytorch:latest` to a
 concrete digest at job start, passes it in as `BASE_IMAGE`, and records it with
 the results, so the tag moves between runs while each run stays reproducible.
+
+The workflow also takes an optional `base_image` `workflow_dispatch` input, which
+points the lane at some other tag for a single run. It closes a real gap rather
+than adding a convenience: a major ROCm release is published under a versioned
+tag well before AMD moves `:latest`, so the lane is blind to it during exactly
+the window the early warning is worth something (ROCm 10 was the case in point).
+Leave the input blank to follow `:latest` as usual. An override does not make an
+unattributable run possible — it goes through the same resolve step, so the run
+still records `tag@sha256:…`, and the recorded base image is what tells an
+overridden canary row apart from a scheduled one.
 
 `BASE_IMAGE` has no default and `docker-compose.canary.yaml` requires
 `CANARY_BASE_IMAGE`, so building it without a resolved digest fails rather than
@@ -198,7 +221,7 @@ docker/
 ├── .env.example                  # Template for your .env
 ├── .env                          # Your personal config (git-ignored)
 ├── setup-env.sh                  # Interactive setup script
-├── Dockerfile.rocm-latest        # ROCm 7.2.4 / PyTorch 2.10 (compose default)
+├── Dockerfile.rocm-latest        # ROCm 10.0 / PyTorch 2.13 (compose default)
 ├── Dockerfile.rocm70_9-1         # ROCm 7.2 / PyTorch 2.9.1
 ├── Dockerfile.rocm70_9-1-shampoo # ROCm 7.0 meta build #19 + Shampoo
 ├── Dockerfile.rocm70_2-ubuntu-*  # ROCm 7.0.2.1 build #17

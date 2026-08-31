@@ -374,6 +374,7 @@ class TestClassicRegression:
         assert roots.version_file == Path("/opt/rocm/.info/version")
         assert roots.version_dev_file == Path("/opt/rocm/.info/version-dev")
         assert roots.lib_dir == Path("/opt/rocm/lib")
+        assert roots.core_lib_dir == Path("/opt/rocm/lib")
         assert roots.include_dir == Path("/opt/rocm/include")
         assert roots.manifest_file == Path("/opt/rocm/share/therock/therock_manifest.json")
         assert roots.llvm_bin_dir == Path("/opt/rocm/lib/llvm/bin")
@@ -410,6 +411,40 @@ class TestDerivedPaths:
         # The LLVM tools ship with the core component in both layouts, not
         # with the math libraries and not with the devel headers.
         assert roots.llvm_bin_dir == core / "lib" / "llvm" / "bin"
+
+    def test_the_two_lib_dirs_are_different_directories_on_a_wheel(
+        self, no_rocm, tmp_path: Path
+    ):
+        """``lib_dir`` is the math libraries; the HIP runtime is in ``core_lib_dir``.
+
+        The names invite the opposite reading, and getting it wrong is not a
+        cosmetic slip: a fixture launched with only ``lib_dir`` on
+        ``LD_LIBRARY_PATH`` cannot find ``libamdhip64`` and dies at exit 127.
+        Pin that they hang off DIFFERENT roots here, so a future refactor that
+        collapses one into the other fails a test instead of a nightly.
+        """
+        site = tmp_path / "site-packages"
+        core = build_wheel(site, devel=True)
+        roots = resolve_rocm_roots({"ROCM_PATH": str(core)})
+
+        assert roots.core_lib_dir == core / "lib"
+        assert roots.lib_dir == site / "_rocm_sdk_libraries" / "lib"
+        assert roots.core_lib_dir != roots.lib_dir
+
+    def test_the_two_lib_dirs_coincide_on_a_classic_install(self, no_rocm, tmp_path: Path):
+        """One root holds everything, so a caller joining the two gets one entry.
+
+        This is what keeps the nightly's ``LD_LIBRARY_PATH`` line a no-op on a
+        classic base: both properties resolve to ``<root>/lib`` and
+        ``dict.fromkeys`` collapses them.
+        """
+        root = build_classic(tmp_path / "rocm")
+        roots = resolve_rocm_roots({"ROCM_PATH": str(root)})
+
+        assert roots.core_lib_dir == roots.lib_dir == root / "lib"
+        assert list(dict.fromkeys((str(roots.core_lib_dir), str(roots.lib_dir)))) == [
+            str(root / "lib")
+        ]
 
     def test_roots_are_frozen(self, no_rocm, tmp_path: Path):
         roots = resolve_rocm_roots({})

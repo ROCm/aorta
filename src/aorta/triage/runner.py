@@ -614,6 +614,20 @@ def _resolve_cell_env_vars(
     legacy callers that only care about the mitigation+extra_env layers still
     work; when provided, the named environment's baseline ``env`` seeds the
     bundle so the recorded set matches what the workload actually observes.
+
+    The bundle is applied as environment variables only, so a cell that
+    substitutes a library via ``LD_LIBRARY_PATH`` -- pointing the run at a
+    patched hipBLASLt / rocBLAS build to test a hypothesis -- depends on how
+    the ROCm objects in play were linked, which aorta does not control.
+    ``DT_RUNPATH`` (ROCm 7.x, and tarball installs generally) is searched
+    AFTER ``LD_LIBRARY_PATH``, so the substitution takes effect. ``DT_RPATH``
+    (ROCm 10 DEB / RPM / runfile installs) is searched BEFORE it and is
+    inherited by every object below the one carrying it, so a stock sibling
+    on ``$ORIGIN/../lib`` wins instead -- with no loader diagnostic and a zero
+    exit status, meaning the cell passes while measuring the library the
+    operator meant to replace. ``LD_PRELOAD`` is subject to neither and stays
+    the reliable way to force a specific object; :mod:`aorta.workloads.hrx`
+    pairs the two and fails the trial when the loader ignores the preload.
     """
     extra = list(sidecar_files) if sidecar_files else None
     env: dict[str, str] = {}
