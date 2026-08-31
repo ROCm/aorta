@@ -56,6 +56,7 @@ _EXIT_SCHEMA = 34
 _EXIT_PYTEST_FAILED = 40
 _EXIT_PYTEST_NOTHING_RAN = 41
 _EXIT_PYTEST_REPORT_UNUSABLE = 42
+_EXIT_SIGNAL_ABORT = 143
 
 
 @pytest.fixture(scope="module")
@@ -3170,6 +3171,47 @@ def test_serve_probe_extra_args_cannot_move_the_ports_readiness_polls() -> None:
     body = invocation.group(0)
     for owned in ("--port", "--control-port", "--host"):
         assert body.index("TS_SERVE_ARGS") < body.index(owned), body
+
+
+def test_serve_probe_documents_every_exit_code_it_can_produce() -> None:
+    """The exit code is the verdict channel, so the header is its interface.
+
+    143 was the one the script could produce and the header did not mention, and
+    it is the one whose absence misleads: a trial stopped from outside is not a
+    statement about the server, but a reader matching an undocumented code
+    against the list has no way to tell that from a probe failure.
+    """
+    script = (_SOURCE / "ts_serve_probe.sh").read_text()
+    header = script.split("set -uo pipefail", 1)[0]
+    produced = {int(code) for code in re.findall(r"^\s*exit (\d+)$", script, re.M)}
+    documented = {int(code) for code in re.findall(r"^#\s+(\d+)\s+\S", header, re.M)}
+    assert _EXIT_SIGNAL_ABORT in produced, "the signal handler no longer exits 143"
+    assert produced - {0} <= documented, sorted(produced - {0} - documented)
+
+
+def test_serve_probe_encodes_the_completion_request(bash: str, tmp_path: Path) -> None:
+    """TS_MODEL is an operator-supplied string that ends up inside JSON.
+
+    Interpolated, a model id containing a quote or a backslash produced a body
+    the gateway rejects, and the probe reported `completion_http_400` -- which
+    reads as the server refusing a valid request rather than as this script
+    having written an invalid one.
+    """
+    script = (_SOURCE / "ts_serve_probe.sh").read_text()
+    assert '-d "${request}"' in script, "the request is no longer sent from one encoded string"
+    encoder = re.search(r"request=\$\(python3 -c '(?P<code>.*?)'\s*\"\$\{MODEL\}\"", script, re.S)
+    assert encoder, "could not find the request encoder"
+
+    hostile = 'org/model"-\\-\n-x'
+    proc = subprocess.run(
+        [sys.executable, "-c", encoder.group("code"), hostile],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["model"] == hostile
+    assert doc["messages"][0]["role"] == "user"
 
 
 def test_serve_probe_keeps_model_output_off_the_verdict_lines(

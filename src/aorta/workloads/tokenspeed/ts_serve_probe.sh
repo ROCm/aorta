@@ -19,6 +19,10 @@
 #   22  /health_generate never went healthy
 #   23  completion request failed or returned no content
 #   64  usage / environment error (missing tokenspeed CLI, bad config)
+#   143 SIGINT or SIGTERM arrived and the probe aborted (128 + SIGTERM). Not a
+#       verdict about the server: it is what a trial that was stopped from
+#       outside looks like, and it is listed because the exit code is the
+#       interface the recipes and tests read.
 #
 # Two ports, because `tokenspeed serve` is an orchestrator, not one server: it
 # spawns an smg gateway (the OpenAI-compatible /v1 surface, on --port) in front
@@ -286,9 +290,31 @@ echo "TS_PROBE_OK: health_generate"
 # the same prompt is reproducible across cells in the matrix.
 echo "TS_PROBE_INFO: issuing completion"
 resp_file="${OUT_DIR}/completion.${TS_RUN_TOKEN:-$$}.json"
+# Encoded, not interpolated. TS_MODEL is an operator-supplied string, and a
+# quote or backslash in it produced a body the gateway rejects -- reported as
+# completion_http_400, which reads as the server refusing a valid request rather
+# than as this script having written an invalid one.
+request=$(python3 -c '
+import json, sys
+
+print(
+    json.dumps(
+        {
+            "model": sys.argv[1],
+            "messages": [{"role": "user", "content": "Name three primary colors."}],
+            "max_tokens": 32,
+            "temperature": 0,
+        }
+    )
+)
+' "${MODEL}" 2>/dev/null)
+if [ -z "${request}" ]; then
+  echo "TS_PROBE_FAIL: usage cannot encode a request for TS_MODEL=${MODEL}"
+  exit 64
+fi
 code=$(curl -s -o "${resp_file}" -w '%{http_code}' --max-time "${GEN_TIMEOUT}" \
   -H 'Content-Type: application/json' \
-  -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Name three primary colors.\"}],\"max_tokens\":32,\"temperature\":0}" \
+  -d "${request}" \
   "${GATEWAY}/v1/chat/completions" 2>/dev/null || echo 000)
 
 if [ "${code}" != "200" ]; then
