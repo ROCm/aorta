@@ -316,6 +316,64 @@ CONTROL="http://127.0.0.1:${CONTROL_PORT}"
 require_uint TS_READY_TIMEOUT "${READY_TIMEOUT}" 1 86400
 require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 5 3600
 
+# Whether an argv supplies a flag, in either spelling, so a value the caller
+# chose is told apart from one merely containing the flag name.
+supplies_flag() {  # supplies_flag <flag> <arg>...
+  local flag="$1"
+  shift
+  for word in "$@"; do
+    case "${word}" in
+      "${flag}"|"${flag}="*) return 0 ;;
+    esac
+  done
+  return 1
+}
+# The value behind such a flag, so an explicit choice can be validated rather
+# than merely detected. Non-zero when the flag is the last word with nothing
+# after it -- which `tokenspeed serve` would reject anyway, but which would
+# otherwise read here as an empty value and fail a numeric check with a message
+# about the wrong thing.
+flag_value() {  # flag_value <flag> <arg>...
+  local flag="$1" expect_value=""
+  shift
+  for word in "$@"; do
+    if [ -n "${expect_value}" ]; then
+      printf '%s' "${word}"
+      return 0
+    fi
+    case "${word}" in
+      "${flag}") expect_value=1 ;;
+      "${flag}="*) printf '%s' "${word#*=}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Keep the gateway drain just inside the teardown grace, or `teardown` escalates
+# to SIGKILL while the gateway is still draining -- the delayed-VRAM-release
+# failure this exists to avoid, arriving by the route meant to prevent it.
+#
+# The small-grace branch used to be a flat 10, which broke that invariant for
+# every grace at or below 10. Derived from the grace in both branches now, so
+# the relationship holds across the whole accepted range; the floor on
+# TEARDOWN_GRACE above is what keeps it positive.
+DRAIN_TIMEOUT="${TS_DRAIN_TIMEOUT:-$(( TEARDOWN_GRACE > 15 ? TEARDOWN_GRACE - 5 : TEARDOWN_GRACE - 2 ))}"
+# The derivation cannot break the invariant. The two ways of setting the drain
+# explicitly both could, and both bypassed the bench-flag guard: TS_DRAIN_TIMEOUT
+# arrives from a mitigation, and `--drain-timeout` is a *serve* flag, so
+# `reject_owned_flags` never sees it. `serve_args: ["--drain-timeout", "60"]`
+# against the default 45s grace put every teardown back in the failure this
+# derivation exists to prevent. Checked before the environment is probed, so a
+# recipe that cannot work says so as a usage error.
+require_uint TS_DRAIN_TIMEOUT "${DRAIN_TIMEOUT}" 1 "$(( TEARDOWN_GRACE - 1 ))"
+if supplies_flag --drain-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
+  caller_drain="$(flag_value --drain-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}")" || {
+    echo "TS_BENCH_FAIL: usage serve_args --drain-timeout given with no value"
+    exit 64
+  }
+  require_uint "serve_args --drain-timeout" "${caller_drain}" 1 "$(( TEARDOWN_GRACE - 1 ))"
+fi
+
 mkdir -p "${OUT_DIR}" || {
   echo "TS_BENCH_FAIL: cannot create out dir ${OUT_DIR}"
   exit 64
@@ -437,27 +495,12 @@ GATEWAY_STARTUP_TIMEOUT="${TS_GATEWAY_STARTUP_TIMEOUT:-${READY_TIMEOUT}}"
 # window it was supposed to fit inside. Derived from the grace in both branches
 # now, so the relationship holds across the whole accepted range. The floor on
 # TEARDOWN_GRACE below is what keeps this positive.
-DRAIN_TIMEOUT="${TS_DRAIN_TIMEOUT:-$(( TEARDOWN_GRACE > 15 ? TEARDOWN_GRACE - 5 : TEARDOWN_GRACE - 2 ))}"
-
 serve_args=( --host 127.0.0.1 --port "${PORT}" --control-port "${CONTROL_PORT}" )
-# Only supply these when the caller has not: `tokenspeed serve` takes the last
-# occurrence of a repeated flag, so appending ours unconditionally would silently
-# override an explicit operator choice. Matched against the decoded argv, so
-# `--gateway-startup-timeout=30` and a value that merely contains the flag name
-# are told apart.
-supplies_flag() {  # supplies_flag <flag> <arg>...
-  local flag="$1"
-  shift
-  for word in "$@"; do
-    case "${word}" in
-      "${flag}"|"${flag}="*) return 0 ;;
-    esac
-  done
-  return 1
-}
 if ! supplies_flag --gateway-startup-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
   serve_args+=( --gateway-startup-timeout "${GATEWAY_STARTUP_TIMEOUT}" )
 fi
+# Validated above, next to the grace it has to fit inside; only supplied when
+# the caller has not, since `tokenspeed serve` takes the last occurrence.
 if ! supplies_flag --drain-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
   serve_args+=( --drain-timeout "${DRAIN_TIMEOUT}" )
 fi

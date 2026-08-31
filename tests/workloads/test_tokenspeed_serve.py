@@ -169,6 +169,23 @@ def test_bench_script_passes_bash_syntax_check():
         ({"TS_READY_TIMEOUT": "0"}, "TS_READY_TIMEOUT must be between"),
         ({"TS_TEARDOWN_GRACE": "0"}, "TS_TEARDOWN_GRACE must be between"),
         ({"TS_TEARDOWN_GRACE": "-5"}, "positive integer"),
+        # The drain has to finish inside the grace, whichever way it is set.
+        # `TS_DRAIN_TIMEOUT` arrives from a mitigation and used to replace the
+        # derived value unchecked, so teardown SIGKILLed a gateway mid-drain --
+        # the delayed VRAM release the derivation exists to avoid.
+        ({"TS_DRAIN_TIMEOUT": "60"}, "TS_DRAIN_TIMEOUT must be between"),
+        ({"TS_DRAIN_TIMEOUT": "45"}, "TS_DRAIN_TIMEOUT must be between"),
+        ({"TS_DRAIN_TIMEOUT": "0"}, "TS_DRAIN_TIMEOUT must be between"),
+        # Same bound, reached through `serve_args` instead. `--drain-timeout` is
+        # a serve flag, so the bench-flag guard never saw it.
+        (
+            {"TS_SERVE_ARGS": '["--drain-timeout", "60"]'},
+            "serve_args --drain-timeout must be between",
+        ),
+        (
+            {"TS_SERVE_ARGS": '["--drain-timeout=60"]'},
+            "serve_args --drain-timeout must be between",
+        ),
     ],
 )
 def test_bench_script_rejects_unusable_ports_and_timeouts(tmp_path, env, expected):
@@ -1147,9 +1164,17 @@ def test_recipe_mitigations_resolve_in_the_registry(name):
 
 
 @pytest.mark.parametrize("name", _RECIPES)
-def test_recipe_workload_config_is_accepted_by_the_workload(name, tmp_path):
+def test_recipe_workload_config_is_accepted_by_the_workload(name, tmp_path, caplog):
     """Every committed recipe must survive this workload's own validation --
-    a typo'd key or an out-of-range value should not wait for a GPU to surface."""
+    a typo'd key or an out-of-range value should not wait for a GPU to surface.
+
+    An unknown key only *warns* at runtime, deliberately: a config carrying a
+    key some other tool reads should not be fatal. But that made this gate
+    weaker than it looked, because a committed recipe saying `num_prompt`
+    passed here and then ran the whole matrix at the default request count --
+    silently, with plausible numbers. Warnings are therefore fatal for the
+    recipes in this repo, which are ours to keep correct.
+    """
     from aorta.triage.recipe import load_recipe
 
     recipe = load_recipe(_recipe_dir() / name)
@@ -1157,7 +1182,11 @@ def test_recipe_workload_config_is_accepted_by_the_workload(name, tmp_path):
         config = {**recipe.workload_config, **cell.workload_config}
         config["steps"] = cell.steps or recipe.steps
         config["work_dir"] = str(tmp_path / "work")
-        TokenSpeedServeWorkload(config).setup()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger=mod.log.name):
+            TokenSpeedServeWorkload(config).setup()
+        unknown = [r.getMessage() for r in caplog.records if "unknown workload_config key" in r.getMessage()]
+        assert not unknown, f"{name}: {unknown}"
 
 
 @pytest.mark.parametrize("name", _RECIPES)
@@ -2465,6 +2494,36 @@ def test_elapsed_covers_the_drain_wait_the_cell_actually_spent(tmp_path, monkeyp
 
     assert result.elapsed_sec == pytest.approx(42.0)
     assert result.metrics["container_elapsed_sec"] == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize(
+    "serve_args",
+    [
+        ["--drain-timeout", "60"],
+        ["--drain-timeout=60"],
+        ["--drain-timeout", "45"],  # equal to the grace is already too long
+        ["--drain-timeout", "0"],
+    ],
+)
+def test_an_explicit_drain_timeout_must_fit_inside_the_teardown_grace(tmp_path, serve_args):
+    """`--drain-timeout` is a *serve* flag, so the bench-flag guard never saw it.
+
+    The script derives the drain from the grace precisely so teardown cannot
+    SIGKILL a gateway mid-drain -- the delayed VRAM release this workload spends
+    a poll loop waiting out. Passing the flag in `serve_args` replaced that
+    derived value with an unchecked one, so `60` against the default 45s grace
+    put every teardown back in the failure the derivation prevents.
+    """
+    with pytest.raises(ValueError, match="drain-timeout"):
+        _make(tmp_path, serve_args=serve_args).setup()
+
+
+def test_a_drain_timeout_inside_the_grace_is_left_alone(tmp_path):
+    """The caller keeps the choice; it just has to fit. A recipe tuning the
+    drain for a slow gateway is exactly what the flag is for."""
+    wl = _make(tmp_path, serve_args=["--drain-timeout", "30"], teardown_grace_sec=45)
+    wl.setup()
+    assert "--drain-timeout" in wl._serve_args
 
 
 def test_an_hf_token_is_never_written_into_the_docker_command_line(tmp_path, monkeypatch):

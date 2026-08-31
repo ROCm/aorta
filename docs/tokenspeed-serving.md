@@ -442,6 +442,14 @@ or teardown escalates to SIGKILL while the gateway is still draining — the
 delayed-VRAM-release failure the drain exists to prevent, arriving through the
 mechanism meant to prevent it. Below 5 there is no positive drain that fits.
 
+The same relationship is enforced when the drain is set explicitly. `serve_args:
+["--drain-timeout", "60"]` against the default 45-second grace put the drain
+back outside the window, and `--drain-timeout` is a *serve* flag, so the guard
+that rejects owned *bench* flags never saw it. An explicit value is now required
+to be at least 1 and strictly less than `teardown_grace_sec` — rejected on the
+host and again in the script, since `TS_DRAIN_TIMEOUT` can also arrive from a
+mitigation. Raise `teardown_grace_sec` if a gateway genuinely needs longer.
+
 Integer fields are also checked as integers rather than coerced with `int()`,
 which accepted two shapes of malformed recipe and ran a *different* load instead
 of failing. `num_prompts: true` becomes 1 because `bool` is an `int` subclass,
@@ -748,8 +756,16 @@ owns — config validation, env/argv construction, export parsing, aggregation a
 the verdict. The served-request audit, the exit-code mapping and the gates get
 the most attention. Every committed recipe is also loaded through the real
 recipe parser, resolved against the real mitigation registry, and pushed through
-the workload's own validation, so a typo'd key fails on the CPU gate rather than
-on a GPU node.
+the workload's own validation, so an out-of-range value fails on the CPU gate
+rather than on a GPU node.
+
+An *unknown* key is only a warning at runtime, on purpose: a config carrying a
+key some other tool reads should not be fatal. That made the gate weaker than it
+looked, though — a recipe saying `num_prompt` passed validation and then ran the
+whole matrix at the default request count, silently, with plausible numbers. So
+the recipe test treats that warning as fatal for the recipes in this repo, which
+are ours to keep correct. A typo in a committed recipe fails the CPU gate; a
+typo in someone's local recipe still warns and runs.
 
 ## Datasets
 

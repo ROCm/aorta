@@ -511,6 +511,7 @@ class TokenSpeedServeWorkload(Workload):
             )
 
         self._serve_args = self._arg_list("serve_args")
+        self._validate_drain_timeout()
         self._bench_args = self._arg_list("bench_args")
         self._docker_args = self._arg_list("docker_args")
         # Checked here as well as at argv-build time so a recipe naming an owned
@@ -1049,6 +1050,55 @@ class TokenSpeedServeWorkload(Workload):
                 )
             env.update(trial_env)
         return env
+
+    def _validate_drain_timeout(self) -> None:
+        """An explicit ``--drain-timeout`` still has to fit inside the grace.
+
+        The script derives the drain from ``teardown_grace_sec`` precisely so
+        teardown cannot SIGKILL a gateway mid-drain -- that is the delayed
+        VRAM release this workload spends a poll loop waiting out. But
+        ``--drain-timeout`` is a *serve* flag, so it is not in the bench-flag
+        guard, and passing it in ``serve_args`` replaced the derived value with
+        an unchecked one: ``60`` against the default 45s grace put every
+        teardown back in the failure the derivation exists to avoid.
+
+        Rejected here as well as in the script so a recipe that cannot work
+        fails before it takes a node, and mirrors the bound the container
+        enforces.
+        """
+        value: str | None = None
+        expect_value = False
+        for arg in self._serve_args:
+            if expect_value:
+                value = arg
+                expect_value = False
+            elif arg == "--drain-timeout":
+                expect_value = True
+            elif arg.startswith("--drain-timeout="):
+                value = arg[len("--drain-timeout=") :]
+        if expect_value:
+            raise ValueError(
+                "tokenspeed_serve: serve_args ends with --drain-timeout and no value"
+            )
+        if value is None:
+            return
+        try:
+            drain = int(value)
+        except ValueError:
+            raise ValueError(
+                f"tokenspeed_serve: serve_args --drain-timeout ({value!r}) must "
+                "be an integer number of seconds"
+            ) from None
+        if not 1 <= drain < self._teardown_grace:
+            raise ValueError(
+                f"tokenspeed_serve: serve_args --drain-timeout ({drain}) must be "
+                f"at least 1 and less than teardown_grace_sec "
+                f"({self._teardown_grace}). Teardown sends SIGTERM and waits "
+                f"{self._teardown_grace}s before SIGKILL, so a drain that long "
+                "or longer is cut off partway -- which strands GPU memory into "
+                "the next trial, the failure the derived default avoids. Raise "
+                "teardown_grace_sec if the gateway genuinely needs longer."
+            )
 
     def _secret_env(self) -> dict[str, str]:
         """Values forwarded by name rather than by value.
