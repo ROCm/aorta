@@ -80,6 +80,15 @@ fi
 # from here.
 manifest="${dest}/.aorta-staged"
 
+# Not through a symlink: `-f` follows one, and in a shared directory a planted
+# link would make the deletion list somebody else's to write. A run written by
+# this script is always a regular file, so refusing the link loses nothing.
+if [ -L "${manifest}" ]; then
+  echo "stage_scripts: ${manifest} is a symlink; refusing to trust it." >&2
+  echo "  Remove it, or stage into a directory only you can write." >&2
+  exit 64
+fi
+
 if [ -f "${manifest}" ]; then
   while IFS= read -r staged; do
     # Basenames only, and re-checked here: a hand-edited manifest must not be
@@ -97,9 +106,26 @@ chmod +x "${dest}"/*.sh
 
 # Written after the copy so an interrupted run cannot leave a manifest naming
 # files that were never staged.
+#
+# Via a private temporary file and a rename, not by redirecting onto the path.
+# `dest` is explicitly allowed to be a shared directory, and `>` follows a
+# symlink: another user could pre-create `.aorta-staged` pointing at any file
+# this caller can write and have this script truncate it. `mktemp` creates in
+# the destination (so the rename stays on one filesystem) and refuses to follow
+# anything, and the rename is atomic, so a concurrent staging run reads either
+# the old manifest or the new one and never a half-written list.
+manifest_tmp="$(mktemp "${dest}/.aorta-staged.XXXXXX")" || {
+  echo "stage_scripts: cannot create a temporary manifest in ${dest}" >&2
+  exit 64
+}
+trap 'rm -f "${manifest_tmp}"' EXIT
 for f in "${src}"/*.sh "${src}"/*.py; do
   basename "${f}"
-done > "${manifest}"
+done > "${manifest_tmp}"
+# 0644: the manifest is read by the next run, which may be another user's.
+chmod 644 "${manifest_tmp}"
+mv -f "${manifest_tmp}" "${manifest}"
+trap - EXIT
 
 echo "stage_scripts: staged to ${dest}"
 # Iterating the manifest rather than globbing `dest`, for the same reason the

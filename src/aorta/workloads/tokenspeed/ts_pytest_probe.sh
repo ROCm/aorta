@@ -134,15 +134,22 @@ echo "TS_PYTEST_INFO: suite=${SUITE}"
 echo "TS_PYTEST_INFO: root=${ROOT} token=${TOKEN}"
 [ -n "${TS_PYTEST_K:-}" ] && echo "TS_PYTEST_INFO: -k ${TS_PYTEST_K}"
 
-pytest_args=("${SUITE}" -q --no-header)
+pytest_args=("${SUITE}")
+# Caller arguments go first, before every option the verdict depends on, so that
+# argparse's last-wins resolution leaves the probe's own values in force. They
+# used to come last, which meant a caller-supplied `--junitxml` redirected the
+# report -- and since the probe reads the report back by path, a reused
+# TS_RUN_TOKEN then let it parse a previous run's XML and return that run's
+# verdict. Same ordering, and the same reason, as ts_kernel_probe.sh.
+# shellcheck disable=SC2206  # word-splitting TS_PYTEST_ARGS is deliberate
+[ -n "${TS_PYTEST_ARGS:-}" ] && pytest_args+=(${TS_PYTEST_ARGS})
+pytest_args+=(-q --no-header)
 # The source tree is read-only for a non-root container user, and pytest's cache
 # plugin treats an unwritable rootdir as a warning-worthy failure. Disable it
 # rather than let that noise into every trial's stderr.
 pytest_args+=(-p no:cacheprovider)
 pytest_args+=("--junit-xml=${REPORT}")
 [ -n "${TS_PYTEST_K:-}" ] && pytest_args+=(-k "${TS_PYTEST_K}")
-# shellcheck disable=SC2206  # word-splitting TS_PYTEST_ARGS is deliberate
-[ -n "${TS_PYTEST_ARGS:-}" ] && pytest_args+=(${TS_PYTEST_ARGS})
 
 cd "${ROOT}" || {
   echo "TS_PYTEST_FAIL: usage cannot cd to ${ROOT}"
