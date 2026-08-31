@@ -2496,6 +2496,45 @@ def test_elapsed_covers_the_drain_wait_the_cell_actually_spent(tmp_path, monkeyp
     assert result.metrics["container_elapsed_sec"] == pytest.approx(10.0)
 
 
+@pytest.mark.parametrize("label", ["port", "control_port"])
+@pytest.mark.parametrize("value", [8000.9, None, True, [8000], "8000"])
+def test_a_port_must_be_an_int_or_auto(tmp_path, label, value):
+    """Coercing with `int()` bound a port the recipe did not ask for.
+
+    A float truncates, so `port: 8000.9` ran on 8000 while the recipe said
+    otherwise; `port: null` -- the natural YAML for "unset" -- reached
+    `int(None)` and surfaced as a bare TypeError naming no field; and `True` is
+    an `int` subclass, so it would have meant port 1.
+    """
+    with pytest.raises(ValueError, match=f'{label} must be an int or "auto"'):
+        _make(tmp_path, **{label: value}).setup()
+
+
+def test_a_mitigation_cannot_smuggle_the_hf_token_into_argv(tmp_path):
+    """The by-name secret path is only worth having if nothing walks around it.
+
+    Mitigation env is merged into the container env, and everything there is
+    rendered as `-e NAME=value` in the docker client's argv -- so a mitigation
+    carrying HF_TOKEN would put a credential in /proc/<pid>/cmdline for the life
+    of the trial, which is exactly what passing it by name avoids. Reserved
+    whether or not this host has a token set, since the hazard is the mitigation
+    supplying one.
+    """
+    wl = _make(tmp_path, _aorta_trial_env={"HF_TOKEN": "hf_secret_value"})
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    with pytest.raises(ValueError, match="HF_TOKEN"):
+        wl._container_env()
+
+
+def test_the_reserved_secret_name_follows_hf_token_env(tmp_path):
+    """A recipe pointing at another variable makes *that* name the credential."""
+    wl = _make(tmp_path, hf_token_env="MY_HF_TOKEN")
+    wl.setup()
+    assert wl._secret_env_names() == {"HF_TOKEN", "MY_HF_TOKEN"}
+
+
 @pytest.mark.parametrize(
     "serve_args",
     [

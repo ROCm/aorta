@@ -542,6 +542,22 @@ class TokenSpeedServeWorkload(Workload):
                 raise ValueError(
                     f'tokenspeed_serve: {label} must be an int or "auto", ' f"got {value!r}"
                 )
+            # Anything that is not `"auto"` has to be an actual int, checked
+            # before the range test rather than coerced by it. `int()` accepted
+            # two shapes that bind a port the recipe did not ask for: a float
+            # truncates, so `port: 8000.9` ran on 8000 while the recipe said
+            # otherwise, and `port: null` -- a natural way to write "unset" in
+            # YAML -- reached `int(None)` and surfaced as a TypeError with no
+            # mention of which field caused it. `bool` is excluded because it is
+            # an `int` subclass, so `port: true` would otherwise mean port 1.
+            if not isinstance(value, str) and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ValueError(
+                    f'tokenspeed_serve: {label} must be an int or "auto", got '
+                    f"{value!r} ({type(value).__name__}). Omit the field for "
+                    'an automatically chosen free port, or set it to "auto".'
+                )
             # 1024, not 1, to match `ts_bench_serve.sh`: the container runs
             # unprivileged and cannot bind a reserved port, so the script rejects
             # anything below 1024 outright. Accepting 1..1023 here meant such a
@@ -1035,7 +1051,13 @@ class TokenSpeedServeWorkload(Workload):
             # pass again, reached only on the default. Unioning the documented
             # floor closes it: those keys are reserved whether or not this run
             # happens to carry a value for them.
-            owned = set(env) | _PROTOCOL_ENV_KEYS
+            # The secret names are reserved here too, and unconditionally rather
+            # than only when a token is present. Everything in `env` is rendered
+            # by `docker_env_flags` into `-e NAME=value` in the docker client's
+            # argv, so a mitigation carrying HF_TOKEN would put a credential in
+            # /proc/<pid>/cmdline for the life of the trial -- walking straight
+            # past the by-name path that exists to keep it out of there.
+            owned = set(env) | _PROTOCOL_ENV_KEYS | self._secret_env_names()
             collisions = sorted(set(trial_env) & owned)
             if collisions:
                 raise ValueError(
@@ -1099,6 +1121,17 @@ class TokenSpeedServeWorkload(Workload):
                 "the next trial, the failure the derived default avoids. Raise "
                 "teardown_grace_sec if the gateway genuinely needs longer."
             )
+
+    def _secret_env_names(self) -> set[str]:
+        """Names that may only ever travel by reference, never by value.
+
+        Reserved whether or not this run carries a token: the hazard is a
+        *mitigation* or ``docker_args`` supplying one, which does not depend on
+        the host having the variable set. ``hf_token_env`` is included as well
+        as ``HF_TOKEN``, since a recipe pointing at another variable means that
+        name is the credential on this node.
+        """
+        return {"HF_TOKEN", self._hf_token_env}
 
     def _secret_env(self) -> dict[str, str]:
         """Values forwarded by name rather than by value.
@@ -1170,7 +1203,7 @@ class TokenSpeedServeWorkload(Workload):
         # readable only by the owning uid and root.
         for name in self._secret_env():
             argv += ["-e", name]
-        self._reject_owned_docker_args(owned_env=set(env) | set(self._secret_env()))
+        self._reject_owned_docker_args(owned_env=set(env) | self._secret_env_names())
         argv += self._docker_args
         argv += [
             "--entrypoint",
