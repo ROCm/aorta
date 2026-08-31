@@ -150,12 +150,68 @@ the case represents. The 13 MiB option becomes available only if the sanitizer
 nightly moves to ROCm ≥ 7.14. Note `latest-rocm-canary.yml` does **not** help here:
 it is an eval lane and never runs the sanitizer recipes.
 
-> **Treat the projections as planning numbers, not measurements.** The ~7.8x
-> figure comes from one data point (1,492,987,904 required for a 191,935,808-byte
-> input), and expansion tracks the number of *instrumentable sites*, not bytes —
-> the 183 MiB object holds 637,823 access ranges. Scaling it linearly puts the
-> 13 MiB object near ~100 MiB of patched image, comfortably inside the ceiling,
-> and the 41 MiB MX object near ~320 MiB, marginally inside. Neither has been run.
+### Measured: the 13 MiB object does clear the ceiling, on ROCm 7.14
+
+Run on a gfx950 host inside `rocm/pytorch:rocm7.14_ubuntu26.04_py3.14_pytorch_release_2.12.0`
+with the **exact CI bundle** `97c1640b` (hook SHA-256 `fac74fad3fd8f0ee…`, byte-identical
+to what the nightly recorded), driving the unbundled `_ID75a3-75a2` object through the
+repo's own load-only `consan_load.hip`:
+
+```
+ConSan MOI inventory end    elapsed_ms=11826.885
+ConSan patch end   visited=true modified=true outcome=modified-valid errors=0 warnings=13517 patches=88758 patch_ms=31253.498
+ConSan coverage    access_discovered=72824 access_supported=72824 access_selected=72824 access_patched=72824
+ConSan patched-image growth memory   peak_growth_bytes=188555264
+RJ_CONSAN_MOI_REQUIRE_RECORDS requested, but 1 auto MOI report buffer(s) contained
+zero visible records and no kernel dispatch packet was observed
+exit 86 after 87s
+```
+
+| | 183 MiB object (CI today) | 13.1 MiB `_ID75a3-75a2` |
+|---|--:|--:|
+| Patched-image growth | 1,492,987,904 required | **188,555,264 peak** |
+| Against the 400 MiB ceiling | 3.56x over — **rejected** | **fits, 55% headroom** |
+| Patches applied | 0 | **88,758** |
+| Access sites | 637,823 discovered, 0 patched | 72,824 discovered, **all patched** |
+| Wall clock | ~730 s, then exit 92 | **87 s**, then exit 86 |
+
+So the object transforms cleanly and is genuinely instrumented, in 87 seconds against
+a 6000 s budget. The run still ends at exit 86 on strict require-records, for the
+load-only-driver reason above — which is the *known* remaining gap, not a capacity one.
+
+**Two corrections to the projections this document previously carried:**
+
+1. **Expansion is not ~7.8x, and is not linear in bytes.** This object expands
+   **13.7x** (188,555,264 from 13,750,952). The linear estimate predicted ~100 MiB
+   and the real figure is ~180 MiB. It still fits, but anyone sizing a third object
+   should measure rather than scale.
+2. **The report buffer is the tighter constraint, not the growth ceiling.** The plan
+   needed `required_bytes=507242680` against `per_buffer_ceiling=536870912` — only
+   **5.6% of headroom** — and `barriers=1728640` dominates it. A modestly larger
+   object would hit `status=4104 moi-report-allocation` before it ever reached the
+   growth ceiling. Worth knowing, because 4104 is *another* distinct rejection that
+   also terminates with exit 92 (see #10950).
+
+### The hook itself works on ROCm 7.14, but the image needs two shims
+
+Also established by the run above: the prebuilt rocjitsu bundle loads and runs
+correctly against ROCm 7.14's HSA runtime — `installed ConSan hook` appears and the
+full transform completes. That was the main unknown for moving the sanitizer lane
+off 7.2.4.
+
+Two mechanical obstacles in the wheel/TheRock image, both of which would break the
+nightly's fixture-build step rather than anything subtle:
+
+* **`hipcc` cannot link a HIP program.** The wheel ships only versioned sonames
+  (`libamdhip64.so.7`) with no unversioned `libamdhip64.so`, and `--hip-link`
+  references the unversioned path *absolutely*, so `-L` does not help — the symlink
+  has to exist next to the versioned library.
+* **The built binary needs `LD_LIBRARY_PATH`** covering `_rocm_sdk_core/lib` and
+  `_rocm_sdk_libraries/lib`; without it the loader fails with exit 127 before the
+  hook is ever consulted.
+
+Neither is a blocker, but both are load-bearing for a base bump and neither is
+visible from the Python side that `resolve_rocm_roots()` already handles.
 
 ### Raising the ceiling alone will not turn this row green
 
