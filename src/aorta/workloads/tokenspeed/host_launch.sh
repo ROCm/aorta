@@ -82,14 +82,37 @@ fi
 _NETWORK_FSTYPES=" afs beegfs ceph cifs fuse.cephfs fuse.glusterfs fuse.sshfs gfs2 glusterfs gpfs lustre nfs nfs4 smb3 "
 # TS_MOUNTS_FILE exists so this is testable without a network mount, mirroring
 # the `mounts` parameter on the Python equivalent. Not a documented setting.
+# The canonical form of a path that may not exist yet: walk up to the nearest
+# ancestor that does, resolve that with `pwd -P` (which follows symlinked
+# components), then re-attach the part that is still missing.
+resolve_existing_prefix() {  # resolve_existing_prefix <path>
+  local path="$1" suffix="" resolved
+  case "${path}" in
+    /*) ;;
+    *) path="$(pwd -P)/${path}" ;;
+  esac
+  while [ ! -e "${path}" ] && [ "${path}" != "/" ]; do
+    suffix="/$(basename "${path}")${suffix}"
+    path="$(dirname "${path}")"
+  done
+  if [ -d "${path}" ]; then
+    resolved="$(cd "${path}" 2>/dev/null && pwd -P)" || return 1
+  else
+    resolved="$(cd "$(dirname "${path}")" 2>/dev/null && pwd -P)/$(basename "${path}")" || return 1
+  fi
+  printf '%s' "${resolved%/}${suffix}"
+}
 network_fstype() {  # network_fstype <path>
   local target="$1" best_len=-1 best_fs="" dev mount fstype rest dir base
   local mounts="${TS_MOUNTS_FILE:-/proc/mounts}"
   [ -r "${mounts}" ] || return 0
-  dir="$(dirname "${target}")"
-  base="$(basename "${target}")"
-  dir="$(cd "${dir}" 2>/dev/null && pwd -P)" || return 0
-  target="${dir%/}/${base}"
+  # Resolved against the nearest ancestor that exists, with the missing suffix
+  # put back. Resolving only the immediate parent gave up on a path two levels
+  # deep -- `/mnt/nfs/new/deep` with `/mnt/nfs/new` absent was reported local,
+  # and `mkdir -p` then created the whole thing on the network filesystem this
+  # is meant to refuse. `pwd -P` resolves symlinked components, so a final
+  # component that is a link is matched by its target rather than by its name.
+  target="$(resolve_existing_prefix "${target}")" || return 0
   while read -r dev mount fstype rest; do
     # /proc/mounts octal-escapes spaces and tabs in the mount point.
     mount="${mount//\\040/ }"

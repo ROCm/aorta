@@ -132,6 +132,46 @@ def test_host_launch_refuses_a_network_mount_by_fstype(
     assert "root-squashed" in proc.stderr
 
 
+@pytest.mark.parametrize("shape", ["missing_parents", "symlinked_leaf"])
+def test_host_launch_resolves_a_path_before_matching_the_mount(
+    bash: str, tmp_path: Path, shape: str
+) -> None:
+    """Two ways a network path was still classified local.
+
+    Resolving only the immediate parent gave up when it did not exist, so
+    `/mnt/nfs/new/deep` was called local and `mkdir -p` then created the whole
+    thing on the filesystem this refuses -- the guard bypassed by the directory
+    not being there yet, which is the normal case on a fresh node. And a final
+    component that is a symlink was matched by its own path rather than by what
+    it points at.
+    """
+    netroot = tmp_path / "net"
+    netroot.mkdir()
+    if shape == "missing_parents":
+        scripts = netroot / "new" / "deep" / "scripts"
+    else:
+        (tmp_path / "link").symlink_to(netroot)
+        scripts = tmp_path / "link" / "scripts"
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": str(scripts),
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_MOUNTS_FILE": str(_mounts_file(tmp_path, [(str(netroot), "nfs")])),
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+
+    assert proc.returncode == _EXIT_USAGE, proc.stdout + proc.stderr
+    assert "nfs" in proc.stderr
+    assert not scripts.exists(), "the guard let mkdir -p create it on the network mount"
+
+
 def test_host_launch_accepts_a_local_path_whatever_it_is_called(
     bash: str, tmp_path: Path
 ) -> None:
@@ -1504,6 +1544,23 @@ def test_host_launch_puts_the_cidfile_in_a_private_directory(bash: str, tmp_path
         (1, ["-x"], "early-exit"),
         (1, ["--exitfirst"], "early-exit"),
         (0, ["-x"], None),
+        # Stepwise stops at the first failure too; it is spelled as a
+        # session-scoped option rather than a failure limit, but the effect on
+        # the map is identical.
+        (1, ["--stepwise"], "early-exit"),
+        (1, ["--sw"], "early-exit"),
+        (1, ["--stepwise-skip"], "early-exit"),
+        # Clustered short options: `-x` never appears as its own token.
+        (1, ["-xq"], "early-exit"),
+        (1, ["-qx"], "early-exit"),
+        # But `-rx` is `-r x`, a report specifier -- the scan has to stop at the
+        # first option that takes a value or this rejects healthy runs.
+        (1, ["-rx"], None),
+        # No execution at all, and these exit 0, so nothing else would hint that
+        # the empty map should be doubted.
+        (0, ["--collect-only"], "executes no tests"),
+        (0, ["--co"], "executes no tests"),
+        (0, ["--setup-only"], "executes no tests"),
     ],
 )
 def test_coverage_mapper_rejects_a_suite_that_did_not_finish(
@@ -1622,6 +1679,27 @@ def test_harvest_detects_a_network_dest_by_fstype_not_by_path(
     assert module._network_filesystem(Path("/mnt/shared/run"), mounts) == expected
     # The longest matching mount wins, so an unrelated shorter one cannot mask it.
     assert module._network_filesystem(Path("/tmp/ts-work"), mounts) is None
+
+
+def test_harvest_resolves_an_absolute_dest_symlink(tmp_path: Path) -> None:
+    """An absolute path can still be a link.
+
+    Absolute paths were used as given, so `--dest /tmp/run` pointing at
+    `/mnt/shared/run` was matched against `/tmp` and called local -- the guard
+    skipped by the one spelling most likely to be typed on the command line.
+    """
+    module = _harvest_module()
+    mounts = tmp_path / "mounts"
+    real = tmp_path / "shared"
+    real.mkdir()
+    link = tmp_path / "run"
+    link.symlink_to(real)
+    mounts.write_text(f"/dev/sda1 / ext4 rw 0 0\nserver:/export {real} nfs rw 0 0\n")
+
+    assert module._network_filesystem(link, mounts) == "nfs"
+    # And a path under it that does not exist yet keeps the same answer, since
+    # resolve() is non-strict and preserves the missing suffix.
+    assert module._network_filesystem(link / "new" / "deep", mounts) == "nfs"
 
 
 def test_harvest_treats_an_unreadable_mount_table_as_local(tmp_path: Path) -> None:

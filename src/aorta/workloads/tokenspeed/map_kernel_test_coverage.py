@@ -420,11 +420,29 @@ def _incomplete_suite_reason(rc: int, pytest_args: list[str]) -> str | None:
             arg == opt or arg.startswith(f"{opt}=") for arg in pytest_args for opt in opts
         )
 
+    # pytest accepts short options clustered, so `-xq` sets `-x` without it ever
+    # appearing as its own token -- and the suite then stops at the first
+    # failure while this read the map as complete. The scan stops at the first
+    # option that takes a value, because everything after it is that value:
+    # `-rx` is `-r x`, a report specifier, not an exit-first request.
+    short_opts_with_value = set("kmnprocW")
+
+    def short_cluster_sets_exitfirst() -> bool:
+        for arg in pytest_args:
+            if not arg.startswith("-") or arg.startswith("--") or len(arg) < 2:
+                continue
+            for letter in arg[1:]:
+                if letter == "x":
+                    return True
+                if letter in short_opts_with_value or not letter.isalpha():
+                    break
+        return False
+
     if rc in _INCOMPLETE_PYTEST_RCS:
         return f"{_INCOMPLETE_PYTEST_RCS[rc]} (rc={rc})"
     if supplied(_NO_EXECUTION_OPTS):
         return "an option that executes no tests was in effect (collection or setup only)"
-    if rc == 1 and supplied(_EARLY_EXIT_OPTS):
+    if rc == 1 and (supplied(_EARLY_EXIT_OPTS) or short_cluster_sets_exitfirst()):
         return "a test failed while an early-exit option was in effect (rc=1)"
     return None
 

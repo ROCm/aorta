@@ -117,7 +117,11 @@ def _network_filesystem(path: Path, mounts: Path = Path("/proc/mounts")) -> str 
     except OSError:
         return None
 
-    target = path if path.is_absolute() else path.resolve()
+    # Resolved even when already absolute: an absolute `--dest` can still be a
+    # symlink, and `/tmp/run -> /mnt/nfs/run` was then matched against `/tmp`
+    # and called local. `resolve()` is non-strict, so a path that does not exist
+    # yet keeps its missing suffix rather than raising.
+    target = path.resolve()
     best: tuple[int, str] | None = None
     for entry in entries:
         fields = entry.split()
