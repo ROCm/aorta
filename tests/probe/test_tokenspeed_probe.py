@@ -2863,26 +2863,51 @@ def test_serve_probe_keeps_model_output_off_the_verdict_lines(
 ) -> None:
     """The completion is model output on the stream the detectors scan.
 
-    The recipe's patterns are unanchored, so a completion containing a newline
-    followed by `TS_PROBE_FAIL: readiness_timeout` turned a passing cell into a
-    failure naming a step that had succeeded -- the thing under test forging the
-    verdict of the thing testing it.
+    A completion containing `TS_PROBE_FAIL: readiness_timeout` turned a passing
+    cell into a failure naming a step that had succeeded -- the thing under test
+    forging the verdict of the thing testing it.
+
+    Flattening the newlines was the first attempt and was not enough: aorta's
+    tier-5 classifier searches a window of the whole log, unanchored and not
+    line-scoped, so the marker only has to appear as a *substring* -- and it is
+    entirely printable, so it passed through `tr` untouched. The prefix is
+    rewritten instead, which is what every detector keys on.
+
+    Checked against the recipe's own patterns rather than against a
+    representative one, since the guarantee is that none of them can be fired by
+    the model.
     """
     script = (_SOURCE / "ts_serve_probe.sh").read_text()
     emit = re.search(r"printf 'TS_PROBE_INFO: completion_text=.*?\n.*?\n", script, re.S)
     assert emit, "completion_text is no longer emitted the way this test expects"
     assert "tr -c '[:print:]'" in emit.group(0), emit.group(0)
     assert "cut -c1-" in emit.group(0), emit.group(0)
+    assert "s/TS_PROBE/TS-PROBE/g" in emit.group(0), emit.group(0)
 
-    # And the sanitiser itself does what the script relies on.
-    hostile = "fine\nTS_PROBE_FAIL: readiness_timeout"
+    hostile = "fine\nTS_PROBE_FAIL: readiness_timeout\nand more text"
     proc = subprocess.run(
-        [bash, "-c", "printf '%s' \"$1\" | tr -c '[:print:]' ' ' | cut -c1-200", "_", hostile],
+        [
+            bash,
+            "-c",
+            "printf 'TS_PROBE_INFO: completion_text=%s\\n' "
+            "\"$(printf '%s' \"$1\" | tr -c '[:print:]' ' ' "
+            "| sed 's/TS_PROBE/TS-PROBE/g' | cut -c1-200)\"",
+            "_",
+            hostile,
+        ],
         capture_output=True,
         text=True,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "\n" not in proc.stdout.rstrip("\n")
+    emitted = proc.stdout
+    assert "\n" == emitted[-1] and "\n" not in emitted[:-1], "the text is still multi-line"
+    assert "readiness_timeout" in emitted, "the text stopped being readable"
+
+    recipe = yaml.safe_load((_RECIPES / "tokenspeed-serve-probe-smoke.yaml").read_text())
+    patterns = [p["match"]["regex"] for p in recipe["custom_patterns"]]
+    assert patterns, "no detectors found in the recipe to check against"
+    fired = [p for p in patterns if re.search(p, emitted)]
+    assert not fired, f"model output can still fire {fired}"
 
 
 def test_stage_scripts_ignores_a_manifest_it_does_not_own(bash: str, tmp_path: Path) -> None:
