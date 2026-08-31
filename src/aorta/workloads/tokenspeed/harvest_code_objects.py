@@ -83,6 +83,12 @@ _SUBPROCESS_TIMEOUT_SEC = 120
 # root-squash surprises. Matched on fstype rather than on path, because the
 # path spelling says nothing: /home is often local and /mnt, /shared, /users or
 # an autofs mount point is often not.
+#
+# THREE COPIES OF THIS LIST EXIST, and adding an fstype means editing all of
+# them: here, and as _NETWORK_FSTYPES in host_launch.sh and stage_scripts.sh.
+# The two shells have to stand alone -- one runs before anything is staged and
+# the other is what stages it -- so a shared sourced file was dropped rather
+# than made conditional; see the note in host_launch.sh.
 _NETWORK_FSTYPES = frozenset(
     {
         "afs",
