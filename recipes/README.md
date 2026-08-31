@@ -195,7 +195,7 @@ not how it is merged. For distributed details, see
   # recommended: one structured NANLOG_SPEC value (see docs/layer-numerics.md):
   collect:
     layer_numerics:
-      NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"sample_every":50}'
+      NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"bounds":[0,60]}],"sample_every":50}'
   ```
 
   Cells may also set `collect:`. An absent cell key inherits the recipe-level

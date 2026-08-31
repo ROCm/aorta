@@ -102,7 +102,8 @@ observation kinds:
 | `stages` | (follow) check at the pipeline stage boundaries | `true` (`copy`/`sparse_start`/`sparse_wait`/`forward`) |
 | `stride` | (follow) also check every Nth module in `scope` | `N` (default `1`; requires `scope`). Set `stages`, `scope`, or both; neither ⇒ stages only |
 | `pipeline` | (follow) install the copy/sparse stage wrappers | `true` (default) / `false` — `false` follows at forward entry + `scope` blocks only, **without** the stage wrappers (timing-safe; see below). Requires a `scope`; incompatible with `stages: true` |
-| `stage_reads` | (follow) run the copy/sparse/forward stage read on a **side stream** | `true` / `false` (default). Keeps the wrappers but moves each stage read off the pipeline stream so it no longer serializes the copy/compute overlap — timing-safe **stage** brackets. Requires `pipeline: true` (see below) |
+| `stage_reads` | (follow) run timing-safe stage observations | `true` / `false` (default). Copy/sparse use side streams after explicit producer events; forward entry is ordered directly on the compute stream before the model body. Never falls back inline when upstream timing evidence is unresolved. Requires `pipeline: true` |
+| `post_step` | (follow) additionally observe pre-forward buffers after a compute tick | `true` / `false` (default). Optional C+ bracket for overlapping forward/backward/optimizer work; requires `stage_reads: true` |
 | `stride` | (watch) hook only every Nth matched module | `N` (integer `>= 1`, default `1`); thins a broad watch whose per-module reduction volume is too high |
 | `diagnostics` | (top-level) how-much-detail toggles applied to **every** captured record | `addr, locate, bad_values, dump_tensor, alloc_snapshot` (see below) |
 
@@ -128,6 +129,8 @@ Common patterns (each cell is a complete, copy-paste `NANLOG_SPEC` value):
 | Follow a tensor every N layers | `{"follow":[{"tensor":"embedding_features","scope":{"names":["emb_proj"]},"stride":8}]}` |
 | Follow a tensor at named layers only | `{"follow":[{"tensor":"embedding_features","scope":{"names":["emb_proj.projections.0"]}}]}` |
 | Follow through blocks WITHOUT the stage wrappers (timing-safe) | `{"follow":[{"tensor":"embedding_features","pipeline":false,"scope":{"names":["emb_proj"]},"bounds":[0,60]}]}` |
+| Timing-safe stage observations | `{"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"bounds":[0,60]}]}` |
+| Stage observations plus optional post-tick bracket | `{"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"post_step":true,"bounds":[0,60]}]}` |
 
 When `NANLOG_SPEC` is set it **wins**; when it is unset, the flat `NANLOG_*`
 vars below are read directly (still fully supported). A malformed spec logs a
@@ -233,10 +236,11 @@ capture at, so a block scope is what it checks) and is **incompatible with
 `stages: true`** (stage capture *is* the wrappers) — either combination rolls the
 spec back. What you give up vs. the default: the `copy` / `sparse_start` /
 `sparse_wait` stage records (the upstream-of-forward checkpoints). What you keep:
-the block-by-block trajectory of the followed tensor. The summary records
-`follow_mode` (`stage_wrappers` / `forward_blocks` / `off`) so a run is auditable.
+the block-by-block trajectory of the followed tensor. The summary's `follow_mode`
+distinguishes legacy stage wrappers, valid/invalid side-read modes, forward-only block
+tracking, and no follow (full values are listed under Output).
 
-#### `stage_reads: true` — timing-safe copy/sparse **stage** brackets
+#### `stage_reads: true` — timing-safe copy/sparse observations
 
 `pipeline: false` gives up the copy/sparse stage records — so it can bracket *which
 block* inside forward, but not *which stage* (copy vs sparse vs "arrived before
@@ -245,20 +249,19 @@ wild write from a kernel with a bad index/offset that lands in the buffer's memo
 you need reads at the stage boundaries, but the default stage read is exactly what
 serializes the overlap and hides the race.
 
-`"stage_reads": true` resolves this: it **keeps** the stage wrappers (so the
-`copy`/`sparse_start`/`sparse_wait`/`forward` timing points still fire) but runs each
-stage read of the tracked tensor on a **dedicated side CUDA stream**. The side stream
-waits on the current stream's already-enqueued work; the pipeline stream **never waits
-back**, so no ordering dependency is inserted into the overlap and the race still fires.
-The reductions ride the existing per-step drain (one host sync; the drain inserts a
-device-side wait so the side-stream results are ready before the read-back).
+`"stage_reads": true` keeps the wrappers. Copy/sparse observations run on a dedicated
+side CUDA stream after an event on TorchRec's actual producer stream
+(`_memcpy_stream` / `_data_dist_stream`); the producer never waits back. Forward entry
+uses the compute stream directly, matching Pass A: its reductions are enqueued before the
+model body, so stream order makes it a trusted pre-forward observation without a host wait.
 
-> **Assumption (why this is customer-validated).** The side read waits on the *current*
-> stream at the wrapper. That reads valid post-stage bytes only if the stage's work is
-> ordered on the current stream when the wrapper fires — TorchRec runs stages on its own
-> internal streams, and which stream is current at that point can vary by version. We
-> can't verify torchrec's stream layout in-house, so treat the bracket as best-effort
-> and confirm it via the NaN-rate check below rather than assuming it's exact.
+The root pre-hook does **not** wait for an incomplete stage observation. It queries the
+completion event and leaves unfinished records queued for a later drain, preserving the
+copy/sparse/forward overlap. Shutdown forces the remaining observations to finish.
+
+V6 also resolves `(batch, context)` and context-only `wait_sparse_data_dist(context)`
+through an external per-pipeline token. It does not add bookkeeping keys or attributes to
+the customer batch.
 
 ```bash
 NANLOG_DIR=/output/layer_numerics \
@@ -266,24 +269,53 @@ NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","stages":true,"stage_read
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
 
-Then the first bad read's `phase` (in `first_bad` / `first_oob`) names the bracketing
-stage: `copy` → a copy-stage kernel; `sparse_start`/`sparse_wait` → a sparse-stage
-kernel; `forward` → between sparse and forward.
+Each record has `observation_status`:
+
+- `trusted` — the read completed before the next same-batch boundary.
+- `overlapped_next_stage` — the read was still running when the next stage began; its
+  phase is not authoritative.
+- `skipped` is represented in summary counters when producer stream, batch/context,
+  device, or side-stream setup could not be resolved.
+
+The first trusted corrupt observation and preceding trusted clean observation bracket a
+**wall-clock interval**. They do not prove the writer logically belongs to that stage:
+copy N+2, sparse N+1, and compute N overlap.
 
 Constraints and caveats:
 - **Requires `pipeline: true`** (the wrappers must exist to have a stage read to move).
   `stage_reads: true` + `pipeline: false` rolls the spec back.
+- Timing-safe CUDA failures are **skipped**, never retried inline. Check
+  `stage_evidence_valid`, `stage_phase_counts`, and `stage_skip_reasons` before interpreting
+  a clean run.
 - A **torn read** (reading while a wild kernel is mid-write) is possible and acceptable
   here — you only need clean-vs-corrupt to bracket, not exact boundary values.
 - The side stream removes the *serialization* but still shares SMs/HBM bandwidth, so it
   is much lighter than the inline read but **not zero-overhead**. On a marginal race it
   *may* still perturb the window. **Validate it:** compare its NaN capture rate against a
-  known-good baseline (`watch` or `pipeline:false`); if the rate holds, the stage
-  bracket is trustworthy; if it collapses, the read is still too heavy on that build.
-- Auditability: the summary records `stage_reads` (requested), `stage_reads_active`
-  (whether the side stream was actually created — `false` means it **fell back to the
-  serializing inline read** and may have hidden the race), `stage_read_count`, and
-  `follow_mode: "stage_wrappers_side_read"` when active.
+  known-good baseline (`watch` or `pipeline:false`). A comparable rate validates low
+  perturbation; `observation_status` separately validates ordering.
+- Auditability: the summary records requested/active state, side-stream devices,
+  per-phase attempt/scheduled/trusted/overlap/skip counts, skip reasons, and
+  `follow_mode`. Invalid timing evidence uses
+  `follow_mode: "stage_wrappers_side_read_invalid"`.
+
+#### Optional `post_step: true` — bracket an overlapping compute tick
+
+Pass C can show that a future batch became corrupt between copy and sparse, but that
+interval also contains another batch's forward/backward/optimizer work. C+ adds a
+default-off observation after `TrainPipelineSparseDist.progress()` enqueues the compute
+tick and scans the still-live pre-forward buffers touched in that tick:
+
+```bash
+NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"post_step":true,"bounds":[0,60]}]}' \
+  python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
+```
+
+Post-step records use `phase:"post_step"`, `relative_slot:"post_step_prefetch"`, and
+`compute_batch_id`. Their side read waits on both the compute-tick event and each
+prefetch token's latest copy/sparse producer event, so legitimate producer writes cannot
+race the C+ observation. This mode adds work and is intended only after stage-only Pass C
+leaves a compute-overlap ambiguity.
 
 Add a `bounds: [lo, hi]` to a `follow` entry to flag out-of-range values
 (`kind="oob"`) — a two-sided check the one-sided "huge" threshold misses.
@@ -319,24 +351,61 @@ only after the first pass localizes the problem.
 
 ### Stage 1 — cheap, timing-safe scan
 
-Find **which stage** a tracked tensor first goes bad (e.g. leaves an expected
-range). Follows the tensor at each pipeline stage with only the sync-free bounds
-check and pre-context buffer, so it is safe to run on a timing-sensitive repro:
+Find the first trusted stage observation where a tracked tensor goes bad. Run this
+alongside a known reproducing `pipeline:false` Pass A baseline; capture-rate comparison
+is what tells you whether even the side-stream work perturbed the race.
 
 ```bash
 NANLOG_DIR=/output/layer_numerics \
-NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","stages":true,"bounds":[0,60]}],"pre_context":10,"sample_every":50}' \
+NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"bounds":[0,60]}],"pre_context":10,"sample_every":50}' \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
 
 Find the first out-of-range hit:
 
 ```bash
-jq -c 'select(.oob_count>0) | {step,batch_id,phase,layer_name,first_bad_value}' \
+jq -c 'select(.oob_count>0) | {step,batch_id,pipeline_tick,phase,relative_slot,observation_status,layer_name,first_bad_value}' \
   /output/layer_numerics/layers_rank0.jsonl | head
 ```
 
-The `phase` field on the first hit tells you where to focus Stage 2.
+Use only `observation_status:"trusted"` hits, and verify
+`summary_rank0.json.stage_evidence_valid` before focusing Stage 2.
+
+#### Customer A / C / C+ campaign
+
+For a low-rate race, run A and C concurrently with the same GPU count, trial length, and
+seed. A is the reproduction-rate control; C is the stage observation:
+
+```json
+{"follow":[{"tensor":"embedding_features","pipeline":false,"scope":{"names":["emb_proj.projections.10"]},"bounds":[0,60]}],"sample_every":50,"pre_context":10}
+```
+
+```json
+{"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"bounds":[0,60]}],"sample_every":50,"pre_context":10}
+```
+
+Use C+ only if C leaves an interval ambiguous with an overlapping compute tick:
+
+```json
+{"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"post_step":true,"bounds":[0,60]}],"sample_every":50,"pre_context":10}
+```
+
+Before interpreting any C/C+ result, check:
+
+```bash
+jq '{spec_applied,pipeline_installed,follow_mode,stage_evidence_valid,
+     stage_missing_phases,stage_skip_reasons,stage_phase_counts,
+     post_step_active,post_step_valid}' \
+  /output/layer_numerics/summary_rank0.json
+```
+
+Required for C: `spec_applied=true`, `pipeline_installed=true`,
+`follow_mode="stage_wrappers_side_read"`, `stage_evidence_valid=true`, no missing phases
+or skip reasons, and trusted observations in every required phase. C+ additionally
+requires `post_step_active=true` and `post_step_valid=true`.
+
+If C's NaN rate collapses relative to A, do not interpret a clean C run as “fixed”; the
+extra observation work changed the race window.
 
 ### Stage 2 — targeted follow-up
 
@@ -368,7 +437,7 @@ add it as a flat var alongside the spec):
 
 ```bash
 NANLOG_DIR=/output/layer_numerics_stage2 \
-NANLOG_SPEC='{"watch":[{"scope":{"names":["<sparse.module.names>"]},"tensors":["input","output"]}],"follow":[{"tensor":"embedding_features","stages":true,"bounds":[0,60]}],"pre_context":10}' \
+NANLOG_SPEC='{"watch":[{"scope":{"names":["<sparse.module.names>"]},"tensors":["input","output"]}],"follow":[{"tensor":"embedding_features","stages":true,"stage_reads":true,"bounds":[0,60]}],"pre_context":10}' \
 NANLOG_SPARSE=1 \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
@@ -382,13 +451,16 @@ NANLOG_SPARSE=1 \
 Written under `NANLOG_DIR`:
 
 - `summary_rank<N>.json` — the headline: the `first_bad` fingerprint
-  (step / layer / direction / kind / `matmul_calls_so_far`), and when bounds are
+  (step / layer / direction / kind / phase / batch / tick / observation status),
+  and when bounds are
   set `first_oob` / `oob_records` / `peak_finite_min` / `peak_finite_max`, plus
   totals. For a `follow`, it also records **how** the tensor was tracked so a run
   is auditable:
-  - `follow_mode` — `"stage_wrappers"` (stage boundaries + any blocks, the
-    default), `"forward_blocks"` (a `pipeline:false` follow: forward entry + blocks,
-    **no** stage wrappers), or `"off"` (no follow).
+  - `follow_mode` — `"stage_wrappers"` (legacy inline stage observations),
+    `"stage_wrappers_side_read"` (V6 timing-safe observations with valid plumbing),
+    `"stage_wrappers_side_read_invalid"` (requested but incomplete/invalid evidence),
+    `"forward_blocks"` (a `pipeline:false` follow: forward entry + blocks, no stage
+    wrappers), or `"off"` (no follow).
   - `pipeline` / `pipeline_installed` — whether the copy/sparse stage wrappers were
     requested / actually installed. Both `false` in a `pipeline:false` run.
   - `pipeline_checkpoints` — count of **stage-wrapper** checkpoints
@@ -400,10 +472,18 @@ Written under `NANLOG_DIR`:
     stage wrappers). This is the "yes, the pipeline-off follow captured something"
     signal for a `forward_blocks` run, kept separate from `pipeline_checkpoints` so
     a timing-safe run never looks like it used stage instrumentation.
-- `layers_rank<N>.jsonl` — the full per-(layer, step, channel) trajectory. Each
-  record carries `phase` and `batch_id` when a follow is active (`phase="forward"`
-  for the forward-entry checkpoint; `checkpoint=<block name>` for a per-block
-  re-scan).
+  - `stage_evidence_valid` — all requested CUDA observations had resolvable
+    producer/context/device/side-stream plumbing and every required phase produced a
+    trusted observation. `stage_required_phases` / `stage_missing_phases` show coverage.
+  - `stage_phase_counts` / `stage_skip_reasons` — per-phase
+    attempt/scheduled/trusted/overlap/skip audit and exact failure reasons.
+  - `post_step`, `post_step_executions`, `post_step_observations`, and
+    `post_step_valid` — distinguish configuration from an actually emitted C+
+    observation; `pipeline_ticks` reports observer ticks.
+- `layers_rank<N>.jsonl` — the full per-(layer, step, channel) trajectory. Timing-safe
+  stage records carry `phase`, `batch_id`, `pipeline_tick`, `relative_slot`,
+  `source_stream_kind`, and `observation_status`. Pipeline-off/per-block records retain
+  the legacy `phase` / `batch_id` / `checkpoint` schema.
 - `bad_tensor_step*_rank<N>.pt` — the full bad tensor (only with
   `NANLOG_DUMP_TENSOR=1`, on first detection).
 - `alloc_snapshot_step*_rank<N>.pickle` — caching-allocator event trace (only
@@ -541,7 +621,9 @@ All heavy features default **OFF** and feed the same single per-step host transf
 | `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) | — |
 | `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each scoped block. Rides an **active follow** — with `NANLOG_PIPELINE=1` (stage+block). **Setting this flat var alone (no `NANLOG_PIPELINE`, no spec) is a warned no-op**, so a legacy run is never silently switched into forward-capture mode; the wrapper-free block follow is opt-in via a `pipeline:false` spec. | `0` (off) | `follow[].scope` (+ `stride`) |
 | `NANLOG_PIPELINE_OFF_FOLLOW` | **Spec-internal, not a supported public flat knob.** The engine does read it from the environment (so it *can* be set by hand), but it is **intended to be set only** by a validated `follow[].pipeline:false`; enables the forward+block follow without the stage wrappers. Documented for artifact readers — prefer the `pipeline:false` spec over setting it directly. | `0` (off) | `follow[].pipeline: false` |
-| `NANLOG_STAGE_READS` | With `NANLOG_PIPELINE=1`, run the copy/sparse/forward stage read on a side CUDA stream (one-way event dependency) so it doesn't serialize the copy/compute overlap — timing-safe **stage** brackets. Falls back to the inline (serializing) read + warns if the side stream can't be created; the summary's `stage_reads_active` reports which happened. | `0` (off) | `follow[].stage_reads` |
+| `NANLOG_STAGE_READS` | With `NANLOG_PIPELINE=1`, observe copy/sparse on side streams after explicit producer events and forward entry on the compute stream before the model body. Unresolved upstream CUDA checkpoints are skipped and audited. | `0` (off) | `follow[].stage_reads` |
+| `NANLOG_POST_STEP` | Also observe still-live pre-forward buffers after each compute tick; requires pipeline + stage reads | `0` (off) | `follow[].post_step` |
+| `NANLOG_MAX_STAGE_DEFERRAL_STEPS` | Discard/invalidate a side observation still incomplete after N forward steps, bounding retained events/scalars without blocking | `8` | — |
 | `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when re-scan is on | `1` | `follow[].stride` |
 
 Channel notes:
