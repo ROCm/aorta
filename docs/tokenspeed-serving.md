@@ -614,11 +614,18 @@ the configured value and not only to the default. The root is created `1777`
 when the workload creates it, for the same reason `/tmp` is: the sticky bit lets
 everyone create their own subdirectory while stopping anyone removing another's.
 
-The HF cache is the deliberate exception. It stays at `<work_dir>/hf`, shared
-across users of the node, because a snapshot is content-addressed, read-only in
-practice, and large — a gpt-oss pre-warm is roughly 40 GB, and a per-uid copy
-would mean every user downloading it again. That works as long as the pre-warmed
-cache is readable by the running user; set `hf_home` explicitly when it is not.
+The HF cache is per-uid too, at `<work_dir>/u<uid>/hf`. Sharing it by default
+was tried and withdrawn: a cache is only shareable if later users can *write* it
+— the failure a second user hits is a cache miss, not a read — and making the
+parent world-writable does not achieve that, because `huggingface_hub` creates
+`hub`, `.locks` and each model directory at the creating user's umask. A
+world-writable model cache is also something any local user can pre-populate
+with entries a later run would load.
+
+Sharing a pre-warmed cache is still worth doing on a busy node, since a gpt-oss
+snapshot is roughly 40 GB. It just has to be deliberate: point `hf_home` at a
+directory an administrator populated, where read-only is the intended mode
+rather than an accident of who ran first.
 
 ### An HF token is passed by name, never by value
 

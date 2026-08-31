@@ -524,6 +524,14 @@ def test_the_documented_protocol_floor_is_actually_owned(tmp_path):
     configs = [
         {"max_concurrency": 4},
         {"max_concurrency": 4, "dataset": "sharegpt", "dataset_path": str(dataset)},
+        # The same shape again for the pass-through args and the device list:
+        # all three are absent by default, so the computed set never reaches
+        # them on the configuration most cells actually run.
+        {
+            "serve_args": ["--tp", "2"],
+            "bench_args": ["--goodput", "ttft:200"],
+            "hip_visible_devices": "0,1",
+        },
     ]
 
     owned: set[str] = set()
@@ -2763,9 +2771,11 @@ def test_two_users_on_one_node_get_separate_scratch(tmp_path, monkeypatch):
         wl = _make(tmp_path, work_dir=str(root))
         wl._validated_config()
         dirs.append(wl._work_dir)
-        # The cache is shared on purpose: content-addressed, and ~40 GB for
-        # gpt-oss, so per-uid copies would mean re-downloading it per user.
-        assert wl._hf_home == root / "hf"
+        # The cache is per-uid as well. Sharing it needs later users to be able
+        # to write it, which a world-writable parent does not give you --
+        # huggingface_hub creates its subdirectories at the creating user's
+        # umask. An intentionally shared cache is an explicit `hf_home`.
+        assert wl._hf_home == wl._work_dir / "hf"
     # Restored directly rather than with monkeypatch.undo(), which would also
     # drop the autouse fixture's docker and /dev/kfd stubs.
     monkeypatch.setattr(mod.os, "getuid", real_getuid)
@@ -2779,9 +2789,25 @@ def test_two_users_on_one_node_get_separate_scratch(tmp_path, monkeypatch):
     # Enterable and writable by every user, sticky like /tmp so neither can
     # remove the other's scratch.
     assert root.stat().st_mode & 0o1777 == 0o1777
-    # The shared cache has to be writable too: the failure a second user hits is
-    # a cache *miss*, which fails inside snapshot_download rather than reading
-    # as a permission bit.
-    assert (root / "hf").stat().st_mode & 0o1777 == 0o1777
-    # But this trial's own scratch is private.
+    # This trial's own scratch is private, cache included.
     assert wl._work_dir.stat().st_mode & 0o077 == 0
+    assert not (root / "hf").exists(), "the cache must not default to the shared root"
+
+
+def test_an_explicit_hf_home_is_left_where_it_was_pointed(tmp_path):
+    """Sharing a pre-warmed cache is deliberate, not the default.
+
+    A gpt-oss snapshot is ~40 GB, so a shared cache is worth having on a busy
+    node -- but it has to be a directory someone populated on purpose, where
+    read-only is the intended mode rather than an accident of who ran first.
+    """
+    shared = tmp_path / "prewarmed"
+    shared.mkdir()
+    wl = _make(tmp_path, hf_home=str(shared))
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+
+    assert wl._hf_home == shared
+    assert wl._container_env()["HF_HOME"] == "/hf-cache"
+    assert f"{shared}:/hf-cache" in wl._docker_argv(wl._container_env())

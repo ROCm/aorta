@@ -263,6 +263,19 @@ _PROTOCOL_ENV_KEYS = frozenset(
         "TS_TOKENIZER",
         "TS_OUT_DIR",
         "TS_RUN_TOKEN",
+        # Absent when the corresponding field is empty, which is the default --
+        # the same hole `TS_MAX_CONCURRENCY` had. `serve_args` and `bench_args`
+        # are validated on the host (the drain-timeout bound among them) and
+        # then passed through, so a mitigation supplying them would run flags
+        # nothing checked, and `--drain-timeout 600` would be back.
+        "TS_SERVE_ARGS",
+        "TS_BENCH_ARGS",
+        # Absent when `hip_visible_devices` is unset, which is the default, and
+        # it decides more than the run: `_owned_gpu_indices` reads the recipe's
+        # value to decide which GPUs this trial may be blamed for leaking. A
+        # mitigation setting it would have the container use one set of devices
+        # while the host attributed VRAM against another.
+        "HIP_VISIBLE_DEVICES",
         "TS_PORT",
         "TS_CONTROL_PORT",
         "TS_PERCENTILE_METRICS",
@@ -369,11 +382,12 @@ class TokenSpeedServeWorkload(Workload):
             NFS home under root-squash cannot be bind-mounted. Scripts and
             exports go to a per-uid ``<work_dir>/u<uid>`` so two users on one
             node do not collide.
-        hf_home: HF cache directory (default ``<work_dir>/hf``, shared across
-            users of the node rather than per-uid, since a snapshot is large
-            and read-only in practice). Persisting this across runs is what
-            keeps a big model from re-downloading; point it elsewhere when the
-            shared cache is not readable by this user.
+        hf_home: HF cache directory (default ``<work_dir>/u<uid>/hf``, i.e.
+            per-uid). Persisting it across runs is what keeps a big model from
+            re-downloading. To share one cache between users of a node, point
+            this at a directory an administrator pre-populated: a cache is only
+            shareable if later users can write it, and a world-writable model
+            cache is something any local user can pre-populate.
         hf_token_env: name of a host env var holding an HF token, forwarded
             for gated models (default ``"HF_TOKEN"``; skipped when unset).
         hf_offline: serve strictly from the pre-populated HF cache
@@ -600,20 +614,22 @@ class TokenSpeedServeWorkload(Workload):
         # so scoping only the default would have left that unfixed.
         self._work_root = Path(str(cfg.get("work_dir") or _DEFAULT_WORK_DIR)).resolve()
         self._work_dir = self._work_root / f"u{os.getuid()}"
-        # The cache stays on the shared root on purpose: it is content-addressed
-        # and read-only in practice, a gpt-oss snapshot is ~40 GB, and per-uid
-        # copies would mean each user on the node downloading it again.
+        # Per-uid, like the rest of the scratch, and *not* shared by default.
         #
-        # "Read-only in practice" is not read-only, though, and the failure a
-        # second user actually hits is a *write*: the first user creates this at
-        # a 022 umask, and then any cache miss -- a new model, a new revision,
-        # even a lock file -- fails inside `snapshot_download`, which on this
-        # path reads like a network or model-id problem rather than a permission
-        # one. So it is created group- and world-writable, sticky, the same way
-        # the root is; see setup(). `hf_home` remains the way out when a shared
-        # cache is not wanted at all.
+        # Sharing it was tried and withdrawn. A cache is only shareable if later
+        # users can write it, and making the root world-writable does not
+        # achieve that: huggingface_hub creates `hub`, `.locks` and each model
+        # directory at the creating user's umask, so the second user still fails
+        # on the first cache miss -- and a world-writable model cache is
+        # something any local user can pre-populate with entries a later run
+        # would then load. Neither half is worth the download it saves.
+        #
+        # Sharing a pre-warmed cache is still the right thing on a busy node; it
+        # just has to be deliberate. Point `hf_home` at a directory an
+        # administrator populated, where read-only is the intended mode rather
+        # than an accident of who got there first.
         hf_home = cfg.get("hf_home")
-        self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_root / "hf"
+        self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_dir / "hf"
         self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
 
         self._gates = self._validated_gates()
@@ -893,19 +909,6 @@ class TokenSpeedServeWorkload(Workload):
             ) from exc
 
         self._assert_own_scratch()
-
-        # Shared, so writable by every user of the node and sticky like the root
-        # above -- a cache miss under another user's 0755 directory fails deep
-        # inside snapshot_download, reported as anything but a permission bit.
-        # Only on creation, and best-effort: an existing cache is whoever made
-        # it, and widening it silently would be its own surprise.
-        if self._hf_home == self._work_root / "hf" and not self._hf_home.exists():
-            try:
-                self._hf_home.mkdir(parents=True, exist_ok=True)
-                with contextlib.suppress(OSError):
-                    os.chmod(self._hf_home, 0o1777)
-            except OSError:
-                pass
 
         for directory in (
             self._scripts_dir,
