@@ -89,27 +89,67 @@ def test_host_launch_requires_image(bash: str, tmp_path: Path) -> None:
     assert "TS_IMAGE" in proc.stdout + proc.stderr
 
 
-def test_host_launch_refuses_nfs_mount(bash: str, tmp_path: Path) -> None:
-    """A /home path must be rejected before docker is ever invoked.
+def _mounts_file(tmp_path: Path, entries: list[tuple[str, str]]) -> Path:
+    """A stand-in /proc/mounts: (mount point, fstype) pairs."""
+    path = tmp_path / "mounts"
+    lines = ["/dev/root / ext4 rw,relatime 0 0"]
+    lines += [f"server:/export {point} {fstype} rw,relatime 0 0" for point, fstype in entries]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+@pytest.mark.parametrize("fstype", ["nfs", "nfs4", "lustre", "cifs", "gpfs"])
+def test_host_launch_refuses_a_network_mount_by_fstype(
+    bash: str, tmp_path: Path, fstype: str
+) -> None:
+    """Rejected before docker is ever invoked, and decided by filesystem type.
 
     The daemon runs as root against a root-squashed export, so the bind mount
-    fails with an opaque "mkdir /home/<user>: permission denied" from docker
-    itself. Refusing early keeps the error actionable.
+    fails with an opaque "mkdir /...: permission denied" from docker itself.
+    Refusing early keeps the error actionable.
+
+    By fstype rather than by path spelling: `/home/*|/nfs/*` passed `/mnt`,
+    `/shared`, `/users` and any autofs path -- which is where a cluster usually
+    puts its network storage -- while rejecting a perfectly local `/home`.
     """
+    scripts = tmp_path / "net" / "scripts"
+    scripts.mkdir(parents=True)
     env = dict(os.environ)
     env.update(
         {
             "TS_IMAGE": "example/image:tag",
-            "TS_SCRIPTS_DIR": "/home/someone/scripts",
+            "TS_SCRIPTS_DIR": str(scripts),
             "TS_HF_DIR": str(tmp_path / "hf"),
             "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_MOUNTS_FILE": str(_mounts_file(tmp_path, [(str(tmp_path / "net"), fstype)])),
         }
     )
     proc = subprocess.run(
         [bash, str(_SOURCE / "host_launch.sh")], capture_output=True, text=True, env=env
     )
-    assert proc.returncode == _EXIT_USAGE
+    assert proc.returncode == _EXIT_USAGE, proc.stdout + proc.stderr
+    assert fstype in proc.stderr
     assert "root-squashed" in proc.stderr
+
+
+def test_host_launch_accepts_a_local_path_whatever_it_is_called(
+    bash: str, tmp_path: Path
+) -> None:
+    """The other half of the same fix.
+
+    The prefix test refused any `/home` path outright, which made an ordinary
+    workstation unable to run this from the obvious place. What matters is the
+    filesystem, so an ext4 mount is accepted however the path is spelled.
+    """
+    argv = _run_host_launch_with_docker_stub(
+        bash,
+        tmp_path,
+        "local-home",
+        extra_env={"TS_MOUNTS_FILE": str(_mounts_file(tmp_path, []))},
+    )
+    # The helper asserts a zero exit, so reaching here means the guard let it
+    # through; the recorded argv confirms docker was actually invoked.
+    assert "--rm" in argv.splitlines()
 
 
 def test_host_launch_reports_missing_entry_script(bash: str, tmp_path: Path) -> None:
@@ -2573,6 +2613,86 @@ def test_stage_scripts_writes_the_manifest_without_following_a_symlink(
     assert proc.returncode == 64, proc.stdout + proc.stderr
     assert "symlink" in proc.stderr
     assert victim.read_text() == "do not truncate me\n", "the manifest write followed a link"
+
+
+def test_serve_probe_extra_args_cannot_move_the_ports_readiness_polls() -> None:
+    """`TS_SERVE_ARGS` used to be appended after the probe's own port flags.
+
+    `tokenspeed serve` takes the last occurrence, so `--port 9000` bound the
+    gateway where the readiness poll was not looking and a healthy server was
+    reported as `readiness_timeout` (exit 21). The other two probes were
+    reordered for exactly this reason; this one was missed.
+    """
+    script = (_SOURCE / "ts_serve_probe.sh").read_text()
+    invocation = re.search(r"setsid tokenspeed serve .*?&\n", script, re.S)
+    assert invocation, "could not find the serve invocation"
+    body = invocation.group(0)
+    for owned in ("--port", "--control-port", "--host"):
+        assert body.index("TS_SERVE_ARGS") < body.index(owned), body
+
+
+def test_serve_probe_keeps_model_output_off_the_verdict_lines(
+    bash: str, tmp_path: Path
+) -> None:
+    """The completion is model output on the stream the detectors scan.
+
+    The recipe's patterns are unanchored, so a completion containing a newline
+    followed by `TS_PROBE_FAIL: readiness_timeout` turned a passing cell into a
+    failure naming a step that had succeeded -- the thing under test forging the
+    verdict of the thing testing it.
+    """
+    script = (_SOURCE / "ts_serve_probe.sh").read_text()
+    emit = re.search(r"printf 'TS_PROBE_INFO: completion_text=.*?\n.*?\n", script, re.S)
+    assert emit, "completion_text is no longer emitted the way this test expects"
+    assert "tr -c '[:print:]'" in emit.group(0), emit.group(0)
+    assert "cut -c1-" in emit.group(0), emit.group(0)
+
+    # And the sanitiser itself does what the script relies on.
+    hostile = "fine\nTS_PROBE_FAIL: readiness_timeout"
+    proc = subprocess.run(
+        [bash, "-c", "printf '%s' \"$1\" | tr -c '[:print:]' ' ' | cut -c1-200", "_", hostile],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "\n" not in proc.stdout.rstrip("\n")
+
+
+def test_stage_scripts_ignores_a_manifest_it_does_not_own(bash: str, tmp_path: Path) -> None:
+    """The manifest is a deletion authority, so it has to be ours.
+
+    Refusing a symlink closed one way to supply that list, but in the shared
+    `dest` this script explicitly supports a co-tenant can equally write a plain
+    `.aorta-staged` naming someone else's file -- and the basename check only
+    stops traversal, not that. Not owned by this uid means it is not trusted,
+    which degrades to deleting nothing: the same safe default as a first run.
+
+    Driven by ownership rather than by planting a file as another user, which a
+    test cannot do: the manifest is written with a uid that is not ours.
+    """
+    dest = tmp_path / "shared"
+    dest.mkdir()
+    victim = dest / "cell.env"
+    victim.write_text("FOO=bar\n")
+    (dest / ".aorta-staged").write_text("cell.env\n")
+
+    # `stat -c %u` is what the script consults; a manifest owned by another uid
+    # is simulated by making the script see a different id.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "id").write_text("#!/usr/bin/env bash\necho 999999\n")
+    (fake_bin / "id").chmod(0o755)
+
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert victim.exists(), "staging deleted a file named by a manifest it does not own"
+    assert "not owned by this user" in proc.stderr
 
 
 def test_stage_scripts_does_not_write_through_a_planted_symlink(

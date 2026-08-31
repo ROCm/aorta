@@ -142,6 +142,42 @@ def _network_filesystem(path: Path, mounts: Path = Path("/proc/mounts")) -> str 
     return fstype if fstype in _NETWORK_FSTYPES else None
 
 
+def _is_contained_file(path: Path, root: Path) -> bool:
+    """A real file the container wrote inside ``root``, not a link out of it.
+
+    The Triton cache is written by the third-party image, so everything under it
+    is untrusted input to this host-side pass. ``rglob`` happily returns a
+    symlink named ``*.hsaco``, and hashing or copying one follows it *as the
+    host user* -- so a link to any file this user can read gets content-addressed
+    into ``code_objects/`` and shipped into a sanitizer recipe. The ConSan path
+    is worse, because it also picks up the ``.json`` and ``.amdgcn`` sidecars
+    beside the object.
+
+    Skipped with a warning rather than raising: one planted link should not
+    discard an otherwise good harvest, but it must not be silent either.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            print(
+                f"harvest: skipping {path}, which is not a regular file "
+                "(the Triton cache is written by the container, so a symlink "
+                "here would be followed as you)",
+                file=sys.stderr,
+            )
+            return False
+        resolved = path.resolve()
+        root_resolved = root.resolve()
+        if root_resolved != resolved and root_resolved not in resolved.parents:
+            print(
+                f"harvest: skipping {path}, which resolves outside {root_resolved}",
+                file=sys.stderr,
+            )
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def _reset_dir(path: Path) -> None:
     """Replace ``path`` with an empty directory, creating parents as needed."""
     if path.exists():
@@ -974,7 +1010,7 @@ def main() -> int:
     _run_kernel(args, cache_dir)
 
     waitcheck = Path(args.waitcheck).resolve() if args.waitcheck else None
-    found = sorted(cache_dir.rglob("*.hsaco"))
+    found = [obj for obj in sorted(cache_dir.rglob("*.hsaco")) if _is_contained_file(obj, cache_dir)]
     if not found:
         raise SystemExit(
             "harvest: the run produced no .hsaco. Either the selection compiled "
@@ -985,7 +1021,7 @@ def main() -> int:
 
     kernels: list[dict] = []
     targets = set()
-    seen: set[tuple[str, str, int]] = set()
+    seen: set[tuple[str, str, int, int | None]] = set()
     for obj in found:
         # Stage content-addressed. The Triton cache holds one directory per
         # shape specialization and they reuse file names -- a single attention

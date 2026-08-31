@@ -70,14 +70,53 @@ if [ -n "${TS_RUN_TOKEN:-}" ]; then
   RUN_TOKEN="${_prefix}-${RUN_TOKEN}"
 fi
 
-for d in "${SCRIPTS_DIR}" "${HF_DIR}" "${OUT_DIR}"; do
-  case "${d}" in
-    /home/*|/nfs/*)
-      echo "host_launch: refusing to bind-mount ${d}: the docker daemon cannot" >&2
-      echo "  traverse the root-squashed NFS export. Stage it under /tmp." >&2
-      exit 64
-      ;;
+# By filesystem type, not by path spelling. `/home/*|/nfs/*` passed `/mnt`,
+# `/shared`, `/users` and any autofs path -- which is where a cluster usually
+# puts its network storage, so the bind mount failed with docker's own opaque
+# error, the confusion this guard exists to prevent -- while rejecting a local
+# `/home` on an ordinary workstation. This is the copy every recipe goes
+# through; harvest_code_objects.py carries the same logic in Python.
+#
+# Best-effort: no /proc/mounts, or an unidentifiable mount, is treated as local
+# rather than refusing to launch on a guess. Docker's error is the backstop.
+_NETWORK_FSTYPES=" afs beegfs ceph cifs fuse.cephfs fuse.glusterfs fuse.sshfs gfs2 glusterfs gpfs lustre nfs nfs4 smb3 "
+# TS_MOUNTS_FILE exists so this is testable without a network mount, mirroring
+# the `mounts` parameter on the Python equivalent. Not a documented setting.
+network_fstype() {  # network_fstype <path>
+  local target="$1" best_len=-1 best_fs="" dev mount fstype rest dir base
+  local mounts="${TS_MOUNTS_FILE:-/proc/mounts}"
+  [ -r "${mounts}" ] || return 0
+  dir="$(dirname "${target}")"
+  base="$(basename "${target}")"
+  dir="$(cd "${dir}" 2>/dev/null && pwd -P)" || return 0
+  target="${dir%/}/${base}"
+  while read -r dev mount fstype rest; do
+    # /proc/mounts octal-escapes spaces and tabs in the mount point.
+    mount="${mount//\\040/ }"
+    mount="${mount//\\011/	}"
+    mount="${mount%/}"
+    case "${target}/" in
+      "${mount}"/*) ;;
+      *) continue ;;
+    esac
+    if [ "${#mount}" -gt "${best_len}" ]; then
+      best_len="${#mount}"
+      best_fs="${fstype}"
+    fi
+  done < "${mounts}"
+  case "${_NETWORK_FSTYPES}" in
+    *" ${best_fs} "*) printf '%s' "${best_fs}" ;;
   esac
+}
+
+for d in "${SCRIPTS_DIR}" "${HF_DIR}" "${OUT_DIR}"; do
+  _fstype="$(network_fstype "${d}")"
+  if [ -n "${_fstype}" ]; then
+    echo "host_launch: refusing to bind-mount ${d}: it is on ${_fstype} and the" >&2
+    echo "  docker daemon cannot traverse a root-squashed network export." >&2
+    echo "  Stage it under /tmp." >&2
+    exit 64
+  fi
 done
 mkdir -p "${HF_DIR}" "${OUT_DIR}"
 
