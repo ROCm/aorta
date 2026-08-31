@@ -344,6 +344,23 @@ def _is_scalar(value: Any) -> bool:
     return math.isfinite(value)
 
 
+def _step_detail(record: _StepRecord) -> dict[str, Any]:
+    """One step's scalars, with the export's integers still integers.
+
+    ``scalars`` is float-typed because what is done with it is arithmetic --
+    means, sums, gate comparisons -- but the same dict is also published per
+    step, and there ``completed: 32.0`` is a counter that has been made to look
+    like a measurement. The type comes back from the parsed document, which
+    still has it; ``type(...) is int`` rather than ``isinstance`` because a JSON
+    boolean is an ``int`` to ``isinstance``.
+    """
+    detail: dict[str, Any] = {"step": record.step}
+    for key, value in record.scalars.items():
+        original = record.doc.get(key)
+        detail[key] = original if type(original) is int else value
+    return detail
+
+
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
@@ -494,12 +511,13 @@ class TokenSpeedServeWorkload(Workload):
         if max_conc is None:
             self._max_concurrency: int | None = None
         else:
-            self._max_concurrency = self._positive_int("max_concurrency", 1)
-            if self._max_concurrency < 1:
-                raise ValueError(
-                    "tokenspeed_serve: max_concurrency "
-                    f"({self._max_concurrency}) must be >= 1 (omit it for unbounded)"
-                )
+            try:
+                self._max_concurrency = self._positive_int("max_concurrency", 1)
+            except ValueError as exc:
+                # The bound is _positive_int's; only the way out of it is local,
+                # since 0 is the spelling someone reaches for to mean unbounded
+                # and this field expresses that by being absent.
+                raise ValueError(f"{exc} (omit it for unbounded)") from exc
 
         self._request_rate = self._validated_request_rate(
             cfg.get("request_rate", _DEFAULT_REQUEST_RATE)
@@ -2624,7 +2642,7 @@ class TokenSpeedServeWorkload(Workload):
         # Per-step detail lands in the trial JSON. The matrix aggregates only
         # scalars, so this list is carried without being summarised -- which is
         # what makes step-to-step variance recoverable after the fact.
-        metrics["steps"] = [{"step": r.scalars.get("step", r.step), **r.scalars} for r in records]
+        metrics["steps"] = [_step_detail(r) for r in records]
         metrics["result_files"] = [str(r.path) for r in records]
         return metrics
 

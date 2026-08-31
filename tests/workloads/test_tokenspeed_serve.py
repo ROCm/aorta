@@ -796,6 +796,28 @@ def test_per_step_detail_is_retained(tmp_path, monkeypatch):
     assert len(metrics["result_files"]) == 2
 
 
+def test_per_step_counters_stay_counters(tmp_path, monkeypatch):
+    """The aggregate is arithmetic; the per-step detail is a record of the run.
+
+    Every scalar is floated for the means, sums and gate comparisons, and the
+    same dict is what lands in the trial JSON -- where `completed: 32.0` reads
+    as a measurement of a quantity that is counted, and a consumer expecting an
+    exact counter has to guess whether the .0 means anything.
+    """
+    wl = _make(tmp_path, steps=1, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    step = wl.run().metrics["steps"][0]
+
+    assert isinstance(step["step"], int)
+    assert step["completed"] == 32 and isinstance(step["completed"], int)
+    assert isinstance(step["failed"], int)
+    # Measurements keep their float type: the export gave them that way, and
+    # rounding a latency into a counter would be the same mislabelling in
+    # reverse.
+    assert isinstance(step["median_ttft_ms"], float)
+
+
 def test_startup_seconds_parsed_from_stdout(tmp_path, monkeypatch):
     wl = _make(tmp_path)
     wl.setup()
