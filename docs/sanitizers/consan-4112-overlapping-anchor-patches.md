@@ -198,7 +198,9 @@ established.
 > knob to retry under. See
 > [`consan-gemm-patched-image-growth-cap.md`](consan-gemm-patched-image-growth-cap.md).
 > The shared status code is filed upstream as
-> [ROCm/rocm-systems#10950](https://github.com/ROCm/rocm-systems/issues/10950). `1` requires *both* that the module loaded and that the hook ended
+> [ROCm/rocm-systems#10950](https://github.com/ROCm/rocm-systems/issues/10950).
+
+`1` requires *both* that the module loaded and that the hook ended
 the run with its own exit 86 — the load-only driver never dispatches, so strict
 require-records is expected to fail afterwards, and that is the post-fix state
 described above rather than a second defect. Demanding the hook-owned exit code
