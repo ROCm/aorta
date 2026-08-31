@@ -390,16 +390,41 @@ _INCOMPLETE_PYTEST_RCS = {
 # Options that make pytest stop at the first failures. With one of these, rc=1
 # no longer means "ran everything, some failed" -- it means the run was cut
 # short, which is the --maxfail case.
-_EARLY_EXIT_OPTS = ("-x", "--exitfirst", "--maxfail")
+# Stepwise stops at the first failure just as `-x` does, and it took a second
+# look to notice: it is spelled as a session-scoped option rather than as a
+# failure limit, but the effect on this tool is identical -- the suite stops
+# early with rc=1 and every kernel in the tests that never ran is published as
+# uncovered. That is the undercount this guard exists to prevent, reached
+# through options it did not recognise.
+_EARLY_EXIT_OPTS = (
+    "-x",
+    "--exitfirst",
+    "--maxfail",
+    "--stepwise",
+    "--sw",
+    "--stepwise-skip",
+)
+
+# These execute no test bodies at all, and they exit 0 while doing it -- so the
+# run looks clean and the map is empty. Publishing that as "nothing is covered"
+# is worse than the early-exit case, because there is no failure anywhere to
+# suggest the number should be doubted.
+_NO_EXECUTION_OPTS = ("--collect-only", "--co", "--setup-only", "--setup-plan")
 
 
 def _incomplete_suite_reason(rc: int, pytest_args: list[str]) -> str | None:
     """Why this suite's map should not be merged, or ``None`` if it is sound."""
+
+    def supplied(opts: tuple[str, ...]) -> bool:
+        return any(
+            arg == opt or arg.startswith(f"{opt}=") for arg in pytest_args for opt in opts
+        )
+
     if rc in _INCOMPLETE_PYTEST_RCS:
         return f"{_INCOMPLETE_PYTEST_RCS[rc]} (rc={rc})"
-    if rc == 1 and any(
-        arg == opt or arg.startswith(f"{opt}=") for arg in pytest_args for opt in _EARLY_EXIT_OPTS
-    ):
+    if supplied(_NO_EXECUTION_OPTS):
+        return "an option that executes no tests was in effect (collection or setup only)"
+    if rc == 1 and supplied(_EARLY_EXIT_OPTS):
         return "a test failed while an early-exit option was in effect (rc=1)"
     return None
 

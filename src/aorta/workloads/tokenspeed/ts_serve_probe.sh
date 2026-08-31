@@ -217,9 +217,16 @@ trap 'on_signal SIGTERM' TERM
 # whole tree. Word-splitting TS_SERVE_ARGS is deliberate -- it carries multiple
 # flags -- so the shellcheck warning is suppressed rather than fixed.
 # shellcheck disable=SC2086
+# Caller args go first, before the options this probe's verdict depends on:
+# `tokenspeed serve` takes the last occurrence, so appended last they won. A
+# `TS_SERVE_ARGS="--port 9000"` then bound the gateway somewhere the readiness
+# poll was not looking, and a healthy server was reported as
+# `readiness_timeout` (exit 21). Same ordering, and the same reason, as
+# ts_kernel_probe.sh and ts_pytest_probe.sh.
 setsid tokenspeed serve "${MODEL}" \
+  ${TS_SERVE_ARGS:-} \
   --host 127.0.0.1 --port "${PORT}" --control-port "${CONTROL_PORT}" \
-  ${TS_SERVE_ARGS:-} >"${SERVER_LOG}" 2>&1 &
+  >"${SERVER_LOG}" 2>&1 &
 SRV_PID=$!
 echo "TS_PROBE_INFO: server pid=${SRV_PID}, log=${SERVER_LOG}"
 
@@ -312,6 +319,14 @@ case "${content}" in
 esac
 
 echo "TS_PROBE_OK: completion (${#content} chars)"
-echo "TS_PROBE_INFO: completion_text=${content}"
+# The generated text goes out on one line, with control characters replaced and
+# a hard length cap. It is model output on the same stream the recipe's failure
+# detectors scan, and those patterns are unanchored -- so a completion that
+# happened to contain a newline followed by `TS_PROBE_FAIL: readiness_timeout`
+# turned a passing cell into a failure naming a step that had succeeded. The
+# text is diagnostic; the verdict lines above it are not, and they should not be
+# forgeable by the thing under test.
+printf 'TS_PROBE_INFO: completion_text=%s\n' \
+  "$(printf '%s' "${content}" | tr -c '[:print:]' ' ' | cut -c1-200)"
 echo "TS_PROBE_RESULT: pass"
 exit 0

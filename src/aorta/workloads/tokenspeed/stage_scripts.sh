@@ -42,13 +42,50 @@ if [ -d "${dest}" ] && [ "$(cd "${dest}" && pwd -P)" = "${src_real}" ]; then
   exit 64
 fi
 
-case "${dest}" in
-  /home/*|/nfs/*)
-    echo "stage_scripts: ${dest} is on NFS; the docker daemon cannot read it." >&2
-    echo "  Pick a node-local path such as /tmp/ts-work/scripts." >&2
-    exit 64
-    ;;
-esac
+# What actually matters is the filesystem type, not how the path is spelled.
+# The old `/home/*|/nfs/*` test was wrong in both directions: it passed `/mnt`,
+# `/shared`, `/users` and any autofs path -- which is where a cluster usually
+# puts its network storage -- while rejecting a perfectly local `/home` on an
+# ordinary workstation. The mount is resolved from /proc/mounts by longest
+# matching prefix, which is the mount the kernel would use.
+#
+# Best-effort by construction: no /proc/mounts, or a path whose mount cannot be
+# identified, is treated as local rather than blocking staging on a guess.
+# harvest_code_objects.py carries the same logic as `_network_filesystem`.
+_NETWORK_FSTYPES=" afs beegfs ceph cifs fuse.cephfs fuse.glusterfs fuse.sshfs gfs2 glusterfs gpfs lustre nfs nfs4 smb3 "
+network_fstype() {  # network_fstype <path>
+  local target="$1" best_len=-1 best_fs="" dev mount fstype rest dir base
+  local mounts="${TS_MOUNTS_FILE:-/proc/mounts}"
+  [ -r "${mounts}" ] || return 0
+  dir="$(dirname "${target}")"
+  base="$(basename "${target}")"
+  dir="$(cd "${dir}" 2>/dev/null && pwd -P)" || return 0
+  target="${dir%/}/${base}"
+  while read -r dev mount fstype rest; do
+    # /proc/mounts octal-escapes spaces and tabs in the mount point.
+    mount="${mount//\\040/ }"
+    mount="${mount//\\011/	}"
+    mount="${mount%/}"
+    case "${target}/" in
+      "${mount}"/*) ;;
+      *) continue ;;
+    esac
+    if [ "${#mount}" -gt "${best_len}" ]; then
+      best_len="${#mount}"
+      best_fs="${fstype}"
+    fi
+  done < "${mounts}"
+  case "${_NETWORK_FSTYPES}" in
+    *" ${best_fs} "*) printf '%s' "${best_fs}" ;;
+  esac
+}
+
+_dest_fstype="$(network_fstype "${dest}")"
+if [ -n "${_dest_fstype}" ]; then
+  echo "stage_scripts: ${dest} is on ${_dest_fstype}; the docker daemon cannot read it." >&2
+  echo "  Pick a node-local path such as /tmp/ts-work/scripts." >&2
+  exit 64
+fi
 
 mkdir -p "${dest}"
 
@@ -89,13 +126,30 @@ if [ -L "${manifest}" ]; then
   exit 64
 fi
 
+# The manifest is a *deletion authority*, so it has to be ours. Refusing the
+# symlink closed one way to supply that list; a co-tenant can equally write a
+# plain `.aorta-staged` naming `cell.env`, and this loop would then delete a
+# file this script never staged. The basename check only stops traversal, not
+# that. Owned by this uid, or it is not trusted -- which for a first run into a
+# populated directory means deleting nothing, the same safe default as no
+# manifest at all.
+_manifest_owner=""
 if [ -f "${manifest}" ]; then
+  _manifest_owner="$(stat -c '%u' "${manifest}" 2>/dev/null || echo "")"
+fi
+if [ -f "${manifest}" ] && [ "${_manifest_owner}" != "$(id -u)" ]; then
+  echo "stage_scripts: ${manifest} is not owned by this user; ignoring it." >&2
+  echo "  Nothing will be removed from ${dest} on this run. Stage into a" >&2
+  echo "  directory only you can write to restore mirror behaviour." >&2
+elif [ -f "${manifest}" ]; then
   while IFS= read -r staged; do
     # Basenames only, and re-checked here: a hand-edited manifest must not be
     # able to reach outside the staging directory.
     case "${staged}" in
       ''|*/*|.|..) continue ;;
     esac
+    # Never through a link, for the same reason as the manifest itself.
+    [ -L "${dest}/${staged}" ] && continue
     rm -f "${dest:?}/${staged}"
   done < "${manifest}"
 fi
