@@ -103,6 +103,60 @@ To clear the CI object the ceiling has to admit 1,492,987,904 bytes against a
 percent form is the better fit here precisely because the fixture's size is a
 hipBLASLt release property.
 
+## Is there a smaller object to use instead? Measured, and the answer is "not on our base"
+
+Surveyed across three ROCm versions by unbundling every `Type_SS` gfx950 NT
+(`Ailk_Bjlk`) bundle each one ships. Unbundled size is what ConSan instruments;
+kernel counts are unique `.kd` symbols.
+
+First, the object the script selects today, which confirms the survey resolved the
+same file CI does:
+
+| ROCm | Selected NT bundle | Unbundled | Kernels |
+|---|---|--:|--:|
+| **7.2.4 (our CI base)** | `..._Ailk_Bjlk_Cijk_Dijk_gfx950.co` | **183.0 MiB** | 777 |
+| 7.14.0 | `..._CU256_ID75a0_gfx950.co` | 162.1 MiB | 341 |
+| 10.0.0 | `..._CU256_ID75a0_gfx950.co` | 162.1 MiB | 341 |
+
+A genuinely attractive alternative exists — but **only on ROCm ≥ 7.14**. It is the
+per-chip sibling of the same family and layout, plain (non-MX) f32, with kernels
+named identically apart from the tile shape:
+
+| ROCm | Bundle | Unbundled | Kernels |
+|---|---|--:|--:|
+| 7.14.0 | `..._Ailk_Bjlk_Cijk_Dijk_ID75a3-75a2_gfx950.co` | **13.1 MiB** | 71 |
+| 10.0.0 | same | **13.6 MiB** | 73 |
+
+Reaching it needs no code change: `_select_variant` returns the first *exact*
+chip-id match regardless of sort order, so `prepare_gemm_isa.py --chip-id 0x75a3`
+selects it (for `0x75a3` the `_CU256_ID75a0` bundle is only a registry fallback,
+while `_ID75a3-75a2` is an exact hit). The cost is that the fixture would then
+represent an MI355X-class device rather than the gate's MI350X.
+
+**The blocker: ROCm 7.2.4 does not ship it.** The flat pre-7.14 layout ships
+exactly one bundle per layout, so on the base `docker/Dockerfile.ci-gpu` pins there
+is no smaller plain-f32 NT object at all. What 7.2.4 does offer, and why each is
+unsuitable:
+
+| ROCm 7.2.4 alternative | Unbundled | Kernels | Why not |
+|---|--:|--:|---|
+| `SS_SB_HA_Bias_SAV_UA` | 104.1 MiB | 471 | f32 in, **bf16 out** — different dtype path, and ~810 MiB projected still exceeds the ceiling |
+| `SS_SS_HA_Bias_SAV_MX_UA` | 41.2 MiB | 244 | **microscaling** (`_S_MX_B_` kernels), not the plain f32 path this case represents |
+| same, TT layout | 20.0 MiB | 85 | microscaling, and the wrong transpose layout |
+| `Aux` / `Grad` / bare `Bias` | ≤ 347 KiB | 1 | one kernel each — would exercise almost nothing |
+
+So on our current base the choice is between raising the ceiling and changing what
+the case represents. The 13 MiB option becomes available only if the sanitizer
+nightly moves to ROCm ≥ 7.14. Note `latest-rocm-canary.yml` does **not** help here:
+it is an eval lane and never runs the sanitizer recipes.
+
+> **Treat the projections as planning numbers, not measurements.** The ~7.8x
+> figure comes from one data point (1,492,987,904 required for a 191,935,808-byte
+> input), and expansion tracks the number of *instrumentable sites*, not bytes —
+> the 183 MiB object holds 637,823 access ranges. Scaling it linearly puts the
+> 13 MiB object near ~100 MiB of patched image, comfortably inside the ceiling,
+> and the 41 MiB MX object near ~320 MiB, marginally inside. Neither has been run.
+
 ### Raising the ceiling alone will not turn this row green
 
 Two things still stand between this case and a real verdict, and both should be
