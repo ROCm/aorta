@@ -485,7 +485,16 @@ for pair in "NUM_WARMUPS=${NUM_WARMUPS}" "WARMUP_STEPS=${WARMUP_STEPS}"; do
 done
 
 echo "TS_BENCH_INFO: model=${MODEL} gateway_port=${PORT} control_port=${CONTROL_PORT}"
-echo "TS_BENCH_INFO: steps=${BENCH_STEPS} num_prompts=${NUM_PROMPTS} isl=${INPUT_LEN} osl=${OUTPUT_LEN}"
+# ISL/OSL only where they were sent. They are `random`-only knobs, so for
+# sharegpt -- which takes its lengths from the conversations -- this line was
+# reporting `isl=1024 osl=128` for a request shape that never ran, in the log the
+# audit is read from. The dataset is named instead, which is the shape fact that
+# is true on that path.
+if [ "${DATASET}" = "random" ]; then
+  echo "TS_BENCH_INFO: steps=${BENCH_STEPS} num_prompts=${NUM_PROMPTS} dataset=random isl=${INPUT_LEN} osl=${OUTPUT_LEN}"
+else
+  echo "TS_BENCH_INFO: steps=${BENCH_STEPS} num_prompts=${NUM_PROMPTS} dataset=${DATASET} isl=from-dataset osl=from-dataset"
+fi
 echo "TS_BENCH_INFO: max_concurrency=${TS_MAX_CONCURRENCY:-unbounded} request_rate=${REQUEST_RATE} warmups=${NUM_WARMUPS}"
 echo "TS_BENCH_INFO: tokenspeed=$(tokenspeed version 2>&1 | tr '\n' ' ')"
 echo "TS_BENCH_INFO: rocm=$(cat /opt/rocm/.info/version 2>/dev/null || echo unknown)"
