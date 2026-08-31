@@ -1,0 +1,90 @@
+# TokenSpeed serving: tensor parallelism past TP=2, with the host KV tier bounded.
+#
+# `tokenspeed-serve-gptoss-tp.yaml` stops at TP=2 because TP=4 would not come
+# up: ranks died with an out-of-memory raised from `flat_host_mirror.py:127`,
+# inside a `torch.zeros(..., pin_memory=True)`. This recipe is the same axis
+# with the cause removed, so it runs 1 / 2 / 4.
+#
+# What the cause turned out to be, since the flag below looks arbitrary
+# otherwise. `FlatMemoryExecutor` sizes its pinned host mirror from
+# `--kvstore-ratio` (default 2.0) as a multiple of *this rank's* device KV
+# pool. Each rank owns a whole MI355X and fills it, so the ratio resolves
+# against the same ~250 GiB on every rank whatever TP is: sharding halves the
+# bytes each rank holds per token and doubles the tokens that fit, and the
+# product -- the mirror -- does not move. It is a per-rank constant, so the
+# node-wide pinned footprint is `TP * that constant`.
+#
+# Measured on this model and image, from the engine's own sizing log: 494.01 GB
+# per rank, so 494 GB at TP=1, 988 at TP=2 and 1976 at TP=4 on a 3 TB node.
+# TP=2 fits; TP=4 does not, and dies in `torch.zeros(..., pin_memory=True)`.
+# The per-rank guard in `flat_memory_executor.py` cannot catch it: each rank
+# compares its own 494 GB against the whole node's free memory and passes.
+#
+# `--kvstore-size` replaces the ratio with an explicit per-rank budget in GB,
+# which is what makes the footprint flat instead of linear in TP: 128 GB per
+# rank is 512 GB across the node at TP=4, roughly what TP=1 asks for by
+# default. Every cell carries the same value, because a TP axis whose host
+# tier changes per cell is measuring two things at once.
+#
+# Why this is nearly free here: the KVStore host tier is an L2 cache for
+# *prefix reuse*. These cells run `dataset: random`, whose prompts share no
+# prefixes, so the tier is allocated and never hit -- bounding it changes the
+# footprint and not the numbers. A workload built on shared system prompts
+# would notice; this one cannot. Do not carry the value over to a
+# prefix-caching benchmark without re-measuring.
+#
+# Why gpt-oss-20b, and why the same load as the other TP recipe: so these rows
+# can be read against that recipe's. See its header for the model choice.
+#
+# Requires 4 visible GPUs. Each cell pins exactly the ones it needs -- that is
+# what makes the post-teardown VRAM watch specific to this trial rather than to
+# whatever else is on the node. See "A tensor-parallel teardown returns before
+# the GPUs are actually free" in docs/tokenspeed-serving.md.
+schema_version: 1
+ticket: TOKENSPEED-SERVE-GPTOSS-TP-WIDE
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  model: openai/gpt-oss-20b
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  # Higher than the TP<=2 recipe's 2400: at TP=4 four ranks JIT their own Gluon
+  # kernels against one cache and initialise a wider collective, and bring-up is
+  # already noisy enough (189-319 s observed at TP=1) that a tight bound would
+  # fail on variance rather than on a real stall.
+  ready_timeout_sec: 3000
+
+cells:
+  # TP=1 is the control twice over: against TP=2/4 in this recipe, and against
+  # the `tp1` cell of tokenspeed-serve-gptoss-tp.yaml, which is identical except
+  # for the bounded host tier. If those two rows disagree, the bound is not free
+  # after all and every conclusion above has to be re-read.
+  - name: tp1
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0"
+      serve_args: ["--tensor-parallel-size", "1", "--kvstore-size", "128"]
+
+  - name: tp2
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0,1"
+      serve_args: ["--tensor-parallel-size", "2", "--kvstore-size", "128"]
+
+  - name: tp4
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0,1,2,3"
+      serve_args: ["--tensor-parallel-size", "4", "--kvstore-size", "128"]

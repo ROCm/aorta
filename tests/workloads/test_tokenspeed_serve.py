@@ -1428,6 +1428,51 @@ def test_the_default_image_is_digest_pinned():
     assert "@sha256:" in mod._DEFAULT_IMAGE
 
 
+@pytest.mark.parametrize("name", _RECIPES)
+def test_a_wide_tp_recipe_bounds_the_host_kv_tier(name):
+    """A cell at `--tensor-parallel-size` 4 or more must also bound the KVStore
+    host tier, or it cannot come up on a node of this size.
+
+    `FlatMemoryExecutor` sizes its pinned host mirror at `--kvstore-ratio`
+    (default 2.0) times *this rank's* device KV pool, and every rank fills its
+    own card, so the mirror is a per-rank constant -- measured at 494.01 GB on
+    gpt-oss-20b. The node-wide pinned footprint is therefore linear in TP:
+    494 GB at TP=1, 988 at TP=2, 1976 at TP=4 on a 3 TB node. TP=4 dies inside
+    `torch.zeros(..., pin_memory=True)` in flat_host_mirror.py, and the engine's
+    own guard cannot catch it because each rank compares its own 494 GB against
+    the whole node's free memory and passes.
+
+    This is a repo-hygiene check rather than a workload guard on purpose. The
+    threshold is a property of these nodes and this image's defaults, not of the
+    engine, so enforcing it inside `setup()` would reject a legitimate recipe on
+    a larger-memory node. Here it only has to keep *our* recipes correct.
+
+    The cost of getting it wrong is why it is checked at all: the ranks that die
+    this way hold their GPU memory past the workload's five-minute wait, and
+    reclaiming it needs a `rocm-smi --gpureset` that an unprivileged user on a
+    scheduler-allocated node cannot issue -- so one bad cell strands the GPUs for
+    everything that runs after it. See docs/tokenspeed-matrix-widening.md.
+    """
+    from aorta.triage.recipe import load_recipe
+
+    bounding_flags = ("--kvstore-size", "--kvstore-ratio", "--disable-kvstore")
+
+    recipe = load_recipe(_recipe_dir() / name)
+    for cell in recipe.cells:
+        config = {**recipe.workload_config, **cell.workload_config}
+        serve_args = [str(a) for a in (config.get("serve_args") or [])]
+        if "--tensor-parallel-size" not in serve_args:
+            continue
+        tp = int(serve_args[serve_args.index("--tensor-parallel-size") + 1])
+        if tp < 4:
+            continue
+        assert any(flag in serve_args for flag in bounding_flags), (
+            f"{name}/{cell.name}: --tensor-parallel-size {tp} without any of "
+            f"{bounding_flags}; the host KV mirror is a per-rank constant, so "
+            f"this asks for {tp} x 494 GB of pinned host memory"
+        )
+
+
 def test_equal_explicit_ports_are_rejected(tmp_path):
     """The gateway and the control endpoint are separate listeners.
 
