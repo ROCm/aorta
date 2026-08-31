@@ -49,6 +49,7 @@ instead of quietly benchmarking the same configuration twice.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -57,6 +58,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -600,9 +602,16 @@ class TokenSpeedServeWorkload(Workload):
         self._work_dir = self._work_root / f"u{os.getuid()}"
         # The cache stays on the shared root on purpose: it is content-addressed
         # and read-only in practice, a gpt-oss snapshot is ~40 GB, and per-uid
-        # copies would mean each user on the node downloading it again. Sharing
-        # depends on the pre-warm being world-readable; `hf_home` is the way out
-        # when it is not.
+        # copies would mean each user on the node downloading it again.
+        #
+        # "Read-only in practice" is not read-only, though, and the failure a
+        # second user actually hits is a *write*: the first user creates this at
+        # a 022 umask, and then any cache miss -- a new model, a new revision,
+        # even a lock file -- fails inside `snapshot_download`, which on this
+        # path reads like a network or model-id problem rather than a permission
+        # one. So it is created group- and world-writable, sticky, the same way
+        # the root is; see setup(). `hf_home` remains the way out when a shared
+        # cache is not wanted at all.
         hf_home = cfg.get("hf_home")
         self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_root / "hf"
         self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
@@ -883,6 +892,21 @@ class TokenSpeedServeWorkload(Workload):
                 "under root-squash cannot be bind-mounted into a container)."
             ) from exc
 
+        self._assert_own_scratch()
+
+        # Shared, so writable by every user of the node and sticky like the root
+        # above -- a cache miss under another user's 0755 directory fails deep
+        # inside snapshot_download, reported as anything but a permission bit.
+        # Only on creation, and best-effort: an existing cache is whoever made
+        # it, and widening it silently would be its own surprise.
+        if self._hf_home == self._work_root / "hf" and not self._hf_home.exists():
+            try:
+                self._hf_home.mkdir(parents=True, exist_ok=True)
+                with contextlib.suppress(OSError):
+                    os.chmod(self._hf_home, 0o1777)
+            except OSError:
+                pass
+
         for directory in (
             self._scripts_dir,
             self._out_dir,
@@ -907,9 +931,24 @@ class TokenSpeedServeWorkload(Workload):
                 "wheel must ship workloads/tokenspeed/*.sh (see pyproject "
                 "package-data)."
             )
-        staged = self._scripts_dir / _BENCH_SCRIPT
-        shutil.copyfile(source, staged)
-        staged.chmod(0o755)
+        # Content-addressed, not a fixed name. `scripts/ts_bench_serve.sh` is
+        # shared by every concurrent run from this uid and was overwritten in
+        # place, so a second sweep could truncate or replace the file after this
+        # trial had syntax-checked it and before its container read the bind
+        # mount -- and two different checkouts could have the host validate one
+        # script while the container ran the other. Naming by digest makes the
+        # staged file immutable for the life of its content: a concurrent run
+        # with the same script writes the same bytes to the same path, and one
+        # with different bytes writes elsewhere.
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+        staged = self._scripts_dir / f"{Path(_BENCH_SCRIPT).stem}.{digest}.sh"
+        if not staged.exists():
+            # Written via a temporary and renamed, so a concurrent run never
+            # sees a partially written script under the final name.
+            tmp = staged.with_name(f".{staged.name}.{os.getpid()}")
+            shutil.copyfile(source, tmp)
+            tmp.chmod(0o755)
+            os.replace(tmp, staged)
         self._staged_script = staged
 
         # Syntax-check the staged copy rather than trusting it: a truncated copy
@@ -1088,16 +1127,40 @@ class TokenSpeedServeWorkload(Workload):
         fails before it takes a node, and mirrors the bound the container
         enforces.
         """
+        flag = "--drain-timeout"
+
+        def is_flag(word: str) -> bool:
+            # Any spelling argparse resolves to this option, abbreviations
+            # included: `--drain` bypassed an exact-match test entirely, so the
+            # derived value was appended, the caller's won as the last
+            # occurrence, and the bound was never applied. Ambiguity cannot be
+            # judged without the server's option list, so any long-option prefix
+            # counts -- the same fail-closed choice the bench-flag guard makes.
+            name = word.split("=", 1)[0]
+            return name.startswith("--") and len(name) > 2 and flag.startswith(name)
+
         value: str | None = None
         expect_value = False
         for arg in self._serve_args:
             if expect_value:
+                # An option where a value should be means the earlier
+                # `--drain-timeout` never got one. Accepting it and moving on
+                # validated a later occurrence while the malformed one still
+                # reached the server, which then failed during startup and was
+                # classified as a slow or broken engine -- after taking a node.
+                if arg.startswith("-"):
+                    raise ValueError(
+                        "tokenspeed_serve: serve_args has --drain-timeout "
+                        f"followed by {arg!r}, which is another option rather "
+                        "than a value."
+                    )
                 value = arg
                 expect_value = False
-            elif arg == "--drain-timeout":
-                expect_value = True
-            elif arg.startswith("--drain-timeout="):
-                value = arg[len("--drain-timeout=") :]
+            elif is_flag(arg):
+                if "=" in arg:
+                    value = arg.split("=", 1)[1]
+                else:
+                    expect_value = True
         if expect_value:
             raise ValueError(
                 "tokenspeed_serve: serve_args ends with --drain-timeout and no value"
@@ -1120,6 +1183,60 @@ class TokenSpeedServeWorkload(Workload):
                 "or longer is cut off partway -- which strands GPU memory into "
                 "the next trial, the failure the derived default avoids. Raise "
                 "teardown_grace_sec if the gateway genuinely needs longer."
+            )
+
+    def _assert_own_scratch(self) -> None:
+        """Refuse a per-uid scratch directory that is not ours.
+
+        Making the root ``1777`` so every user can create their own subdirectory
+        opened a hole of its own: the sticky bit restricts *deleting* another
+        user's entry, not *creating* a name. A uid is trivially discoverable, so
+        a co-tenant could pre-create ``u<victim>`` as a symlink and have the
+        victim's exports, HF writes and container mounts land wherever they
+        chose -- or simply read them afterwards.
+
+        Created with ``mkdir`` here rather than as part of the batch below,
+        because the check is only meaningful against the directory this run will
+        actually use: an existing entry must be a real directory, owned by this
+        uid, and not group- or world-writable.
+        """
+        try:
+            self._work_dir.mkdir(mode=0o700, exist_ok=True)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise RuntimeError(
+                f"tokenspeed_serve: cannot create {self._work_dir}: {exc}"
+            ) from exc
+
+        try:
+            info = os.lstat(self._work_dir)
+        except OSError as exc:
+            raise RuntimeError(
+                f"tokenspeed_serve: cannot stat {self._work_dir}: {exc}"
+            ) from exc
+
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(
+                f"tokenspeed_serve: {self._work_dir} is not a directory. The "
+                "scratch root is shared and world-writable by design, so this "
+                "path is refused rather than followed -- another user can create "
+                "a name there, and a symlink would send this trial's exports and "
+                "mounts somewhere of their choosing. Remove it, or set work_dir "
+                "to a directory only you can write."
+            )
+        if info.st_uid != os.getuid():
+            raise RuntimeError(
+                f"tokenspeed_serve: {self._work_dir} is owned by uid "
+                f"{info.st_uid}, not {os.getuid()}. Another user created this "
+                "trial's scratch directory; refusing to write exports the audit "
+                "will later read into it."
+            )
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RuntimeError(
+                f"tokenspeed_serve: {self._work_dir} is group- or world-writable "
+                f"(mode {stat.S_IMODE(info.st_mode):04o}). Exports written there "
+                "can be replaced between the run and the audit that reads them."
             )
 
     def _secret_env_names(self) -> set[str]:
@@ -1209,7 +1326,10 @@ class TokenSpeedServeWorkload(Workload):
             "--entrypoint",
             "bash",
             self._image,
-            f"/ts-scripts/{_BENCH_SCRIPT}",
+            # The digest-named copy this trial staged and syntax-checked, not
+            # the generic name -- which a concurrent run from the same uid could
+            # have replaced in between.
+            f"/ts-scripts/{self._staged_script.name}",
         ]
         return argv
 

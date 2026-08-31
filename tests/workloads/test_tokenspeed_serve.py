@@ -15,6 +15,7 @@ exist specifically to pin the guard that separates the two.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -197,6 +198,25 @@ def test_bench_script_passes_bash_syntax_check():
             {"TS_SERVE_ARGS": '["--drain-timeout=30", "--drain-timeout=60"]'},
             "serve_args --drain-timeout must be between",
         ),
+        # An abbreviation argparse resolves to the same option. Exact matching
+        # saw nothing, so the derived value was appended and the caller's won as
+        # the last occurrence -- the invariant bypassed by a shorter spelling.
+        (
+            {"TS_SERVE_ARGS": '["--drain", "600"]'},
+            "serve_args --drain-timeout must be between",
+        ),
+        # An option where the value should be means the earlier occurrence never
+        # got one; taking it as the value validated something the server rejects
+        # at startup, reported as a broken engine.
+        (
+            {"TS_SERVE_ARGS": '["--drain-timeout", "--tp", "2"]'},
+            "given without a value",
+        ),
+        # Zero-padded values are read as octal by the arithmetic below them, so
+        # `08000` aborted inside `$(( PORT + 1 ))` with status 1 rather than the
+        # documented usage exit.
+        ({"TS_PORT": "08000"}, "must not be zero-padded"),
+        ({"TS_TEARDOWN_GRACE": "045"}, "must not be zero-padded"),
     ],
 )
 def test_bench_script_rejects_unusable_ports_and_timeouts(tmp_path, env, expected):
@@ -375,8 +395,12 @@ def test_setup_reports_unusable_work_dir(tmp_path, monkeypatch):
 def test_setup_stages_and_syntax_checks_the_script(tmp_path):
     wl = _make(tmp_path)
     wl.setup()
-    staged = Path(wl._work_dir) / "scripts" / mod._BENCH_SCRIPT
+    # Named by content digest rather than by the generic name, so a concurrent
+    # run from this uid cannot replace it between the syntax check and the
+    # container reading the bind mount.
+    staged = Path(wl._staged_script)
     assert staged.is_file()
+    assert staged.parent == Path(wl._work_dir) / "scripts"
     assert staged.stat().st_mode & 0o111
     original = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text(encoding="utf-8")
     assert staged.read_text(encoding="utf-8") == original
@@ -582,7 +606,7 @@ def test_docker_argv_uses_host_network_and_current_user(tmp_path):
     assert argv[:2] == ["docker", "run"]
     assert "--network" in argv and argv[argv.index("--network") + 1] == "host"
     assert "--user" in argv
-    assert argv[-1] == f"/ts-scripts/{mod._BENCH_SCRIPT}"
+    assert argv[-1] == f"/ts-scripts/{wl._staged_script.name}"
     assert "-e" in argv and "A=1" in argv
 
 
@@ -1316,18 +1340,27 @@ def test_bench_script_rejects_extra_args_that_shadow_owned_flags(tmp_path, env_k
 
 @pytest.mark.parametrize(
     "env_key,extra",
-    [("TS_SERVE_ARGS", "--tp 2"), ("TS_BENCH_ARGS", "--goodput ttft:200")],
+    [("TS_SERVE_ARGS", ["--tp", "2"]), ("TS_BENCH_ARGS", ["--goodput", "ttft:200"])],
 )
 def test_bench_script_still_accepts_unowned_extra_args(tmp_path, env_key, extra):
     """The guard is about the flags the workload owns, not about extras at all --
-    tuning the engine or the bench through these is the point of having them."""
+    tuning the engine or the bench through these is the point of having them.
+
+    Serialized as JSON, which is what `decode_json_args` requires: passed as a
+    space-joined string both cases died at the JSON validation error instead,
+    so the assertion below passed without the extra flag ever reaching the
+    owned-flag check it is supposed to clear.
+    """
     proc = subprocess.run(
         ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
         capture_output=True,
         text=True,
-        env={**os.environ, "TS_OUT_DIR": str(tmp_path), env_key: extra},
+        env={**os.environ, "TS_OUT_DIR": str(tmp_path), env_key: json.dumps(extra)},
     )
     assert "may not set" not in proc.stdout, proc.stdout
+    assert "must be a JSON array" not in proc.stdout, proc.stdout
+    # Reached the next phase, which off a GPU node is the missing binary.
+    assert "'tokenspeed' not on PATH" in proc.stdout, proc.stdout
 
 
 @pytest.mark.parametrize(
@@ -2558,6 +2591,63 @@ def test_a_port_must_be_an_int_or_auto(tmp_path, label, value):
         _make(tmp_path, **{label: value}).setup()
 
 
+def test_scratch_owned_by_another_user_is_refused(tmp_path, monkeypatch):
+    """The shared root is world-writable, so the per-uid directory under it is
+    not automatically ours.
+
+    The sticky bit stops a co-tenant *deleting* another user's entry; it does
+    nothing about *creating* a name. A uid is trivially discoverable, so
+    `u<victim>` could be pre-created -- as a symlink, sending this trial's
+    exports and container mounts wherever they chose, or as a directory they can
+    read afterwards. Checked rather than trusted, which is the price of making
+    the root world-writable in the first place.
+    """
+    root = tmp_path / "shared"
+    root.mkdir()
+    (root / f"u{os.getuid()}").symlink_to(tmp_path / "attacker")
+
+    with pytest.raises(RuntimeError, match="is not a directory"):
+        _make(tmp_path, work_dir=str(root)).setup()
+
+
+def test_scratch_that_others_can_write_is_refused(tmp_path):
+    """Same reasoning one step further in: a group- or world-writable scratch
+    lets exports be replaced between the run and the audit that reads them."""
+    root = tmp_path / "shared"
+    root.mkdir()
+    mine = root / f"u{os.getuid()}"
+    mine.mkdir(mode=0o777)
+    os.chmod(mine, 0o777)
+
+    with pytest.raises(RuntimeError, match="group- or world-writable"):
+        _make(tmp_path, work_dir=str(root)).setup()
+
+
+def test_the_staged_script_is_named_by_its_content(tmp_path):
+    """A fixed `scripts/ts_bench_serve.sh` is shared by every concurrent run
+    from this uid, and was overwritten in place.
+
+    A second sweep could truncate or replace it after this trial had
+    syntax-checked it and before its container read the bind mount -- and two
+    checkouts could have the host validate one script while the container ran
+    the other. Naming by digest makes the staged file immutable for the life of
+    its content.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+
+    assert wl._staged_script.name != mod._BENCH_SCRIPT
+    assert wl._staged_script.exists()
+    digest = hashlib.sha256((mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_bytes()).hexdigest()[:16]
+    assert digest in wl._staged_script.name
+
+    # And the container is told to run that copy, not the generic name.
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    argv = wl._docker_argv(wl._container_env())
+    assert argv[-1] == f"/ts-scripts/{wl._staged_script.name}"
+
+
 def test_a_mitigation_cannot_smuggle_the_hf_token_into_argv(tmp_path):
     """The by-name secret path is only worth having if nothing walks around it.
 
@@ -2662,18 +2752,36 @@ def test_two_users_on_one_node_get_separate_scratch(tmp_path, monkeypatch):
     `/tmp/ts-work-serve`, so the scoping applies to the configured value.
     """
     root = tmp_path / "shared"
+
+    # Path derivation for two uids. Only the real one can run `setup()` --
+    # `_assert_own_scratch` compares the directory's owner against `getuid()`,
+    # so a faked uid would (correctly) refuse a directory this process owns.
+    real_getuid = os.getuid
     dirs = []
     for uid in (1000, 1001):
         monkeypatch.setattr(mod.os, "getuid", lambda uid=uid: uid)
         wl = _make(tmp_path, work_dir=str(root))
-        wl.setup()
-        dirs.append(wl._out_dir)
-        # The cache is shared on purpose: content-addressed, read-only in
-        # practice, and ~40 GB for gpt-oss.
+        wl._validated_config()
+        dirs.append(wl._work_dir)
+        # The cache is shared on purpose: content-addressed, and ~40 GB for
+        # gpt-oss, so per-uid copies would mean re-downloading it per user.
         assert wl._hf_home == root / "hf"
+    # Restored directly rather than with monkeypatch.undo(), which would also
+    # drop the autouse fixture's docker and /dev/kfd stubs.
+    monkeypatch.setattr(mod.os, "getuid", real_getuid)
 
     assert dirs[0] != dirs[1]
     assert all(str(d).startswith(str(root)) for d in dirs)
+
+    wl = _make(tmp_path, work_dir=str(root))
+    wl.setup()
+    assert wl._out_dir.is_dir()
     # Enterable and writable by every user, sticky like /tmp so neither can
     # remove the other's scratch.
     assert root.stat().st_mode & 0o1777 == 0o1777
+    # The shared cache has to be writable too: the failure a second user hits is
+    # a cache *miss*, which fails inside snapshot_download rather than reading
+    # as a permission bit.
+    assert (root / "hf").stat().st_mode & 0o1777 == 0o1777
+    # But this trial's own scratch is private.
+    assert wl._work_dir.stat().st_mode & 0o077 == 0

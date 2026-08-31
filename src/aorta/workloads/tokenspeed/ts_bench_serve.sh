@@ -92,6 +92,19 @@ require_uint() {
       echo "TS_BENCH_FAIL: usage ${1} must be a positive integer, got '${2}'"
       exit 64
       ;;
+    0|[1-9]*) ;;
+    *)
+      # All digits, but zero-padded -- and every comparison and derivation below
+      # is bash arithmetic, which reads a leading zero as octal. `TS_PORT=08000`
+      # passed this check and then aborted inside `$(( PORT + 1 ))` with status
+      # 1, which is neither the documented usage exit nor a message about the
+      # port. Rejected here rather than normalised, because a recipe writing
+      # 08000 more likely means 8000 than 4096 and should say which.
+      echo "TS_BENCH_FAIL: usage ${1} must not be zero-padded, got '${2}'"
+      echo "  Leading zeros are read as octal by the arithmetic below; write"
+      echo "  ${1}=$(printf '%s' "${2}" | sed 's/^0*//') instead."
+      exit 64
+      ;;
   esac
   if [ "${2}" -lt "${3}" ] || [ "${2}" -gt "${4}" ]; then
     echo "TS_BENCH_FAIL: usage ${1} must be between ${3} and ${4}, got '${2}'"
@@ -316,15 +329,38 @@ CONTROL="http://127.0.0.1:${CONTROL_PORT}"
 require_uint TS_READY_TIMEOUT "${READY_TIMEOUT}" 1 86400
 require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 5 3600
 
-# Whether an argv supplies a flag, in either spelling, so a value the caller
-# chose is told apart from one merely containing the flag name.
+# Whether one word is that flag, in any spelling argparse would accept for it:
+# exact, `=`-attached, or an abbreviation. `reject_owned_flags` already fails
+# closed on prefixes for the bench flags, and the drain guard is the same
+# situation -- `serve_args: ["--drain", "600"]` is resolved by argparse to
+# `--drain-timeout` while an exact-match test saw nothing, so the derived value
+# was appended, the caller's won as the last occurrence, and the invariant this
+# guard exists for was bypassed by a shorter spelling of the same flag.
+#
+# Ambiguity cannot be judged from here without the server's full option list, so
+# any prefix counts. The cost of being wrong is a rejected recipe that could
+# have run; the cost of the other direction is a SIGKILL mid-drain.
+flag_matches() {  # flag_matches <flag> <word>
+  local flag="$1" word="$2" name="${2%%=*}"
+  [ "${word}" = "${flag}" ] && return 0
+  case "${word}" in
+    "${flag}"=*) return 0 ;;
+  esac
+  # An abbreviation is a long option that is a proper prefix of the flag.
+  case "${name}" in
+    --?*)
+      case "${flag}" in
+        "${name}"*) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
 supplies_flag() {  # supplies_flag <flag> <arg>...
   local flag="$1"
   shift
   for word in "$@"; do
-    case "${word}" in
-      "${flag}"|"${flag}="*) return 0 ;;
-    esac
+    flag_matches "${flag}" "${word}" && return 0
   done
   return 1
 }
@@ -344,15 +380,24 @@ flag_value() {  # flag_value <flag> <arg>...
   shift
   for word in "$@"; do
     if [ -n "${expect_value}" ]; then
+      # Another option where a value should be means the earlier occurrence
+      # never got one. Taking it as the value validated something the server
+      # would reject at startup, reported as a broken engine rather than as the
+      # malformed argument it is.
+      case "${word}" in
+        -*) return 2 ;;
+      esac
       value="${word}"
       found=1
       expect_value=""
       continue
     fi
-    case "${word}" in
-      "${flag}") expect_value=1 ;;
-      "${flag}="*) value="${word#*=}"; found=1 ;;
-    esac
+    if flag_matches "${flag}" "${word}"; then
+      case "${word}" in
+        *=*) value="${word#*=}"; found=1 ;;
+        *) expect_value=1 ;;
+      esac
+    fi
   done
   # A trailing bare flag overrides anything before it, and has no value.
   if [ -n "${expect_value}" ] || [ -z "${found}" ]; then
@@ -380,7 +425,8 @@ DRAIN_TIMEOUT="${TS_DRAIN_TIMEOUT:-$(( TEARDOWN_GRACE > 15 ? TEARDOWN_GRACE - 5 
 require_uint TS_DRAIN_TIMEOUT "${DRAIN_TIMEOUT}" 1 "$(( TEARDOWN_GRACE - 1 ))"
 if supplies_flag --drain-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
   caller_drain="$(flag_value --drain-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}")" || {
-    echo "TS_BENCH_FAIL: usage serve_args --drain-timeout given with no value"
+    echo "TS_BENCH_FAIL: usage serve_args --drain-timeout given without a value"
+    echo "  (it is followed by another option, or ends the argument list)"
     exit 64
   }
   require_uint "serve_args --drain-timeout" "${caller_drain}" 1 "$(( TEARDOWN_GRACE - 1 ))"

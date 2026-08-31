@@ -647,8 +647,12 @@ interpreter *without raising*, so `except BaseException` around the `docker run`
 call never runs and the case most likely to strand a container — a cancelled
 sweep, an expired job budget — was the one case not covered. SIGTERM and SIGHUP
 are trapped for the duration of the run, and the handler removes the container,
-restores the previous disposition and re-raises the signal at itself, so a
-supervisor still sees death by signal (exit 143) rather than a swallowed one. A
+installs `SIG_DFL` and re-raises the signal at itself, so a supervisor still
+sees death by signal (exit 143) rather than a swallowed one. `SIG_DFL`
+specifically, rather than whatever disposition was there before: under `nohup`
+SIGHUP is inherited as `SIG_IGN`, so restoring the previous one meant the
+re-sent signal was ignored and the handler returned into the benchmark with its
+container already removed underneath it. A
 SIGKILL still leaks the container, since no handler survives one, but the runner
 sends SIGTERM first and that is the window this uses.
 
