@@ -41,8 +41,8 @@ class TestEndToEndGraph:
     async def test_full_flow_direct_answer(self, fake_retriever):
         """Full graph: router -> plan -> retrieve -> act answers -> critic passes."""
         router_llm = make_fake_llm(["action"])
-        plan_llm = make_fake_llm(["1. Read aorta/chat/ui/app.py to find the entry point."])
-        act_llm = make_fake_llm(["The AORTA main entry point is aorta/chat/ui/app.py."])
+        plan_llm = make_fake_llm(["1. Read src/main.py to find the entry point."])
+        act_llm = make_fake_llm(["The AORTA main entry point is src/main.py."])
         critic_llm = make_fake_llm(["VALID"])
 
         with (

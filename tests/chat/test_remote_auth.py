@@ -87,41 +87,42 @@ class TestDescribeAuth:
 def _load_settings() -> Settings:
     """Build ``Settings`` from the process environment only.
 
-    ``_env_file=None`` is load-bearing: without it these tests read whatever
-    ``.env`` the developer happens to have, so a machine configured for a real
-    gateway would fail on the default-value assertions.
+    Isolation from the developer's own configuration comes from the autouse
+    ``isolated_chat_config`` fixture in ``conftest.py``, which points
+    ``XDG_CONFIG_HOME`` at an empty tmp dir. Without it, a machine configured
+    for a real gateway would fail the default-value assertions here.
     """
-    return Settings(_env_file=None)
+    return Settings()
 
 
 class TestExtraHeaderParsing:
     """``REMOTE_*_EXTRA_HEADERS`` comes off the environment as a string."""
 
     def test_comma_separated_pairs(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", "user=alice,x-tenant=amd")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", "user=alice,x-tenant=amd")
         assert _load_settings().remote_llm_extra_headers == {
             "user": "alice",
             "x-tenant": "amd",
         }
 
     def test_json_object(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", '{"user": "alice"}')
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", '{"user": "alice"}')
         assert _load_settings().remote_llm_extra_headers == {"user": "alice"}
 
     def test_json_is_the_escape_hatch_for_a_value_with_a_comma(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", '{"x-tags": "a,b"}')
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", '{"x-tags": "a,b"}')
         assert _load_settings().remote_llm_extra_headers == {"x-tags": "a,b"}
 
     def test_only_the_first_equals_splits_so_padded_values_survive(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", "x-token=abc==")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", "x-token=abc==")
         assert _load_settings().remote_llm_extra_headers == {"x-token": "abc=="}
 
     def test_surrounding_whitespace_is_ignored(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", " user = alice , ")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", " user = alice , ")
         assert _load_settings().remote_llm_extra_headers == {"user": "alice"}
 
     def test_empty_means_no_headers(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", "")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", "")
         assert _load_settings().remote_llm_extra_headers == {}
 
     def test_default_is_no_headers(self, monkeypatch):
@@ -129,21 +130,21 @@ class TestExtraHeaderParsing:
         assert _load_settings().remote_llm_extra_headers == {}
 
     def test_a_pair_without_equals_is_rejected(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", "user")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", "user")
         with pytest.raises(ValidationError, match="missing '='"):
             _load_settings()
 
     def test_malformed_json_is_rejected_rather_than_comma_split(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", '{"user": alice}')
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", '{"user": alice}')
         with pytest.raises(ValidationError, match="not valid JSON"):
             _load_settings()
 
     def test_the_embedding_field_parses_the_same_way(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_EMBEDDING_EXTRA_HEADERS", "user=alice")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_EMBEDDING_EXTRA_HEADERS", "user=alice")
         assert _load_settings().remote_embedding_extra_headers == {"user": "alice"}
 
     def test_the_two_fields_are_independent(self, monkeypatch):
-        monkeypatch.setenv("REMOTE_LLM_EXTRA_HEADERS", "user=alice")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", "user=alice")
         monkeypatch.delenv("REMOTE_EMBEDDING_EXTRA_HEADERS", raising=False)
         assert _load_settings().remote_embedding_extra_headers == {}
 

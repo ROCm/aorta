@@ -25,12 +25,47 @@ if importlib.util.find_spec("langchain_core") is None:  # pragma: no cover
 # a likely one to have -- sends act_node down the native path in tests written
 # for the text protocol. A test that wants the other value monkeypatches the
 # settings object directly.
-os.environ["LLM_TOOL_MODE"] = "text"
+os.environ["AORTA_CHAT_LLM_TOOL_MODE"] = "text"
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
 from langchain_core.documents import Document  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolated_chat_config(monkeypatch, tmp_path_factory):
+    """Point XDG at empty tmp dirs so no test reads the developer's own profile.
+
+    Autouse and unconditional. The profile file is a real credential store on a
+    developer machine, and a suite that reads it both leaks its values into
+    assertion output and fails differently for every person who runs it. Also
+    drops the cached settings on the way in and out, since laziness means the
+    first test to touch ``settings`` would otherwise pin the values for the
+    rest of the session.
+    """
+    from aorta.chat import config
+
+    root = tmp_path_factory.mktemp("xdg")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))
+    config.reset_settings()
+    yield
+    config.reset_settings()
+
+
+@pytest.fixture()
+def chat_profile(isolated_chat_config) -> Path:
+    """Path of the isolated profile file, with its parent created.
+
+    The file itself is not written -- a test that wants content writes it, and
+    a test that wants "no profile" gets that for free.
+    """
+    from aorta._user_paths import chat_config_path
+
+    path = chat_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @pytest.fixture()
@@ -39,8 +74,7 @@ def fake_aorta_dir(tmp_path: Path) -> Path:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "src" / "main.py").write_text(
-        "def main():\n    print('hello')\n\n"
-        "class App:\n    def run(self):\n        pass\n",
+        "def main():\n    print('hello')\n\n" "class App:\n    def run(self):\n        pass\n",
         encoding="utf-8",
     )
     (tmp_path / "config.yaml").write_text("key: value\n", encoding="utf-8")
@@ -48,9 +82,7 @@ def fake_aorta_dir(tmp_path: Path) -> Path:
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__" / "cached.pyc").write_bytes(b"\x00")
     (tmp_path / ".git").mkdir()
-    (tmp_path / ".git" / "HEAD").write_text(
-        "ref: refs/heads/main\n", encoding="utf-8"
-    )
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     return tmp_path
 
 
@@ -60,14 +92,23 @@ def mock_settings(fake_aorta_dir: Path, tmp_path: Path):
     with patch("aorta.chat.config.settings") as mock_s:
         mock_s.aorta_path = str(fake_aorta_dir)
         mock_s.aorta_root = fake_aorta_dir
-        mock_s.chroma_path = str(tmp_path / "chroma")
+        mock_s.index_path = str(tmp_path / "index.sqlite")
         mock_s.repo_map_path = str(tmp_path / "repo_map.md")
         mock_s.embedding_model = "BAAI/bge-small-en-v1.5"
         mock_s.chunk_size = 512
         mock_s.chunk_overlap = 50
         mock_s.allowed_commands = [
-            "python", "pytest", "make", "pip", "grep",
-            "wc", "head", "tail", "cat", "ls", "find",
+            "python",
+            "pytest",
+            "make",
+            "pip",
+            "grep",
+            "wc",
+            "head",
+            "tail",
+            "cat",
+            "ls",
+            "find",
         ]
         mock_s.command_timeout = 10
         mock_s.max_retry_iterations = 3

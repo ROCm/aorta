@@ -21,11 +21,11 @@ class TestParseActionValid:
         assert kwargs == {"path": "src/"}
 
     def test_file_path_arg(self):
-        result = _parse_action('ACTION: read_file(file_path="aorta/chat/ui/app.py")')
+        result = _parse_action('ACTION: read_file(file_path="src/main.py")')
         assert result is not None
         name, kwargs = result
         assert name == "read_file"
-        assert kwargs == {"file_path": "aorta/chat/ui/app.py"}
+        assert kwargs == {"file_path": "src/main.py"}
 
     def test_integer_arg(self):
         result = _parse_action('ACTION: search_code(query="test", k=3)')

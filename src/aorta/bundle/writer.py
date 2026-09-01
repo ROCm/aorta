@@ -36,6 +36,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+from aorta._user_paths import CHAT_CONFIG_FILENAME
 from aorta.bundle._slug import NO_TICKET_SLUG, safe_slug
 from aorta.bundle.errors import (
     BundleAbortedError,
@@ -208,6 +209,16 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
     not its basename -- a workload that emits ``cell/trial_0/manifest.json``
     or ``cell/.aorta-probe.lock`` (e.g. a script that wraps its own
     bundler-style output) gets those files bundled normally.
+
+    ``chat.toml`` is the one exception, and it IS matched by basename at
+    any depth: ``aorta chat config init`` writes an API key into
+    :func:`aorta._user_paths.chat_config_path` at mode ``0600``, and a
+    bundle is a file the operator emails to AMD. The redactor cannot
+    save us here -- its env-key removal is driven by the recipe's
+    ``redaction:`` globs, which say nothing about a TOML file -- so a
+    copy of the profile inside a run dir is refused outright and the
+    skip is logged rather than silent. (A *symlink* to the real profile
+    is already refused by the escape check above.)
     """
     skipped_rel_paths = frozenset({".aorta-probe.lock", MANIFEST_FILENAME})
     root = run_dir.resolve()
@@ -224,6 +235,15 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
             raise UnsafeSymlinkError(run_dir=run_dir, path=path, target=resolved)
         rel = path.relative_to(run_dir).as_posix()
         if rel in skipped_rel_paths:
+            continue
+        if path.name == CHAT_CONFIG_FILENAME:
+            log.warning(
+                "aorta bundle: refusing to package %s -- '%s' is the "
+                "'aorta chat' profile filename and may hold an API key. "
+                "Move it out of the run dir if it is something else.",
+                rel,
+                CHAT_CONFIG_FILENAME,
+            )
             continue
         files.append(path)
     files.sort(key=lambda p: p.relative_to(run_dir).as_posix())

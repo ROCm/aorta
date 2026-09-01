@@ -52,6 +52,9 @@ _INSTALL_HINT = (
 #: fails if this list and the factory's registry drift apart.
 _LLM_PROVIDERS = ("litellm", "openai", "vllm")
 
+#: Likewise hard-coded against ``aorta.chat.config.PROFILE_TEMPLATES``.
+_CONFIG_PROFILES = ("anthropic", "azure-apim", "local-vllm", "openai", "openai-compatible")
+
 
 def _require_python() -> None:
     """Refuse politely on an interpreter chat does not support."""
@@ -406,20 +409,6 @@ def _common_options(command: Any) -> Any:
     return command
 
 
-def _apply_llm_overrides(provider: str | None, model: str | None) -> None:
-    """Apply --llm-provider / --llm-model on top of the loaded settings."""
-    config = _load("config")
-    if provider:
-        config.settings.llm_provider = provider
-    if model:
-        # Which field the model name belongs in depends on the resolved
-        # provider, so the provider has to be settled first.
-        if config.settings.llm_provider == "vllm":
-            config.settings.vllm_model = model
-        else:
-            config.settings.remote_llm_model = model
-
-
 def _dispatch(
     query: str | None,
     as_json: bool,
@@ -432,7 +421,8 @@ def _dispatch(
     """Shared body of the bare group and ``ask``."""
     if as_json and plain:
         raise click.UsageError("--json and --plain are mutually exclusive.")
-    _apply_llm_overrides(llm_provider, llm_model)
+    config = _load("config")
+    config.apply_cli_overrides(provider=llm_provider, model=llm_model)
     quiet = _setup_logging(verbose)
     asyncio.run(_run(query, _output_mode(as_json, plain), quiet, no_wait))
 
@@ -514,6 +504,94 @@ def ui(host: str, port: int) -> None:
             ]
         )
     )
+
+
+@chat.group(name="config")
+def config_group() -> None:
+    """Create and inspect the chat profile (~/.config/aorta/chat.toml)."""
+
+
+@config_group.command(name="init")
+@click.option(
+    "--profile",
+    type=click.Choice(_CONFIG_PROFILES),
+    required=True,
+    help="Starting point for the generated profile.",
+)
+@click.option("--force", is_flag=True, help="Overwrite an existing profile.")
+@click.option(
+    "--no-input",
+    is_flag=True,
+    help="Write the profile template without prompting (for scripting).",
+)
+def config_init(profile: str, force: bool, no_input: bool) -> None:
+    """Write a chat profile for PROFILE.
+
+    The file is created mode 0600 because it may hold an API key
+    (Decision 9b). ``aorta bundle`` refuses to package it, and
+    ``aorta chat config show`` masks the key unless ``--reveal`` is passed.
+    """
+    config = _load("config")
+    from aorta._user_paths import chat_config_path
+
+    target = chat_config_path()
+    if target.exists() and not force:
+        raise click.ClickException(f"{target} already exists; pass --force to overwrite.")
+
+    values = dict(config.PROFILE_TEMPLATES[profile])
+    if not no_input:
+        for field in config.PROFILE_PROMPTS[profile]:
+            secret = field in config.SECRET_FIELDS
+            answer = click.prompt(
+                field.replace("_", " "),
+                default=values.get(field, ""),
+                hide_input=secret,
+                show_default=not secret,
+            )
+            if answer:
+                values[field] = answer
+    written = config.write_profile(values)
+    click.echo(f"Wrote {written} (mode {config.PROFILE_FILE_MODE:04o})")
+    click.echo("Review it with: aorta chat config show")
+
+
+@config_group.command(name="show")
+@click.option(
+    "--reveal",
+    is_flag=True,
+    help="Print API keys in full instead of masking them.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the settings as JSON.")
+def config_show(reveal: bool, as_json: bool) -> None:
+    """Print the effective configuration, with credentials masked."""
+    config = _load("config")
+    from aorta._user_paths import chat_config_path
+
+    values = config.effective_settings(reveal=reveal)
+    if as_json:
+        click.echo(json.dumps(values, indent=2, sort_keys=True, default=str))
+        return
+    path = chat_config_path()
+    click.echo(f"profile: {path}{'' if path.exists() else ' (not present)'}")
+    click.echo("")
+    for key in sorted(values):
+        click.echo(f"  {key} = {values[key]!r}")
+    if not reveal:
+        click.echo("")
+        click.echo("API keys are masked. Pass --reveal to print them.")
+
+
+@config_group.command(name="validate")
+def config_validate() -> None:
+    """Check the profile parses, has no dead keys, and is not world-readable."""
+    config = _load("config")
+    problems = config.validate_profile()
+    if not problems:
+        click.echo("Profile OK.")
+        return
+    for problem in problems:
+        click.echo(f"error: {problem}", err=True)
+    raise click.exceptions.Exit(1)
 
 
 __all__ = ["chat"]

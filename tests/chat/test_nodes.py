@@ -107,7 +107,7 @@ class TestActNode:
         """LLM keeps calling tools and hits the 5-round limit."""
         responses = [
             'ACTION: list_files(path=".")',
-            'ACTION: read_file(file_path="aorta/chat/ui/app.py")',
+            'ACTION: read_file(file_path="src/main.py")',
             'ACTION: search_code(query="entry")',
             'ACTION: list_files(path="src")',
             'ACTION: read_file(file_path="config.yaml")',

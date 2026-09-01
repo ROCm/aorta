@@ -66,7 +66,7 @@ class TestReadFile:
     @patch("aorta.chat.tools.files.settings")
     def test_reads_python_file(self, mock_settings, fake_aorta_dir):
         mock_settings.aorta_root = fake_aorta_dir
-        result = read_file.invoke({"file_path": "aorta/chat/ui/app.py"})
+        result = read_file.invoke({"file_path": "src/main.py"})
         assert "def main():" in result
 
     @patch("aorta.chat.tools.files.settings")

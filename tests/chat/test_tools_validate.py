@@ -93,7 +93,7 @@ class TestIsIgnored:
         assert _is_ignored("src/foo.pyc") is True
 
     def test_normal_python_not_ignored(self):
-        assert _is_ignored("aorta/chat/ui/app.py") is False
+        assert _is_ignored("src/main.py") is False
 
     def test_readme_not_ignored(self):
         assert _is_ignored("README.md") is False
