@@ -25,11 +25,17 @@ _GITIGNORE_PATTERNS: list[str] = [
 
 
 def _resolve_safe(path: str) -> Path:
-    """Resolve *path* relative to AORTA_PATH and prevent directory traversal."""
+    """Resolve *path* relative to AORTA_PATH and prevent directory traversal.
+
+    ``relative_to`` rather than a string prefix test: ``/aorta-old`` starts with
+    the characters of ``/aorta`` without being inside it.
+    """
     root = settings.aorta_root
     resolved = (root / path).resolve()
-    if not str(resolved).startswith(str(root)):
-        raise ValueError(f"Path escapes AORTA root: {path}")
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise ValueError(f"Path escapes AORTA root: {path}") from None
     return resolved
 
 

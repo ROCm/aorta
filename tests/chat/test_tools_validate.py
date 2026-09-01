@@ -126,3 +126,81 @@ class TestResolveSafe:
         mock_settings.aorta_root = tmp_path
         result = _resolve_safe(".")
         assert result == tmp_path.resolve()
+
+    @patch("aorta.chat.tools.files.settings")
+    def test_sibling_sharing_a_prefix_is_not_inside_the_root(self, mock_settings, tmp_path):
+        """``/aorta-old`` starts with the characters of ``/aorta`` without being in it."""
+        root = tmp_path / "aorta"
+        root.mkdir()
+        (tmp_path / "aorta-old").mkdir()
+        (tmp_path / "aorta-old" / "secrets.txt").write_text("token\n", encoding="utf-8")
+        mock_settings.aorta_root = root
+        with pytest.raises(ValueError, match="escapes AORTA root"):
+            _resolve_safe("../aorta-old/secrets.txt")
+
+    @patch("aorta.chat.tools.files.settings")
+    def test_absolute_path_outside_the_root_raises(self, mock_settings, tmp_path):
+        """An absolute argument discards the root entirely in ``root / path``."""
+        mock_settings.aorta_root = tmp_path
+        with pytest.raises(ValueError, match="escapes AORTA root"):
+            _resolve_safe("/etc/passwd")
+
+    @patch("aorta.chat.tools.files.settings")
+    def test_symlink_pointing_out_of_the_root_raises(self, mock_settings, tmp_path):
+        root = tmp_path / "aorta"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secrets.txt").write_text("token\n", encoding="utf-8")
+        (root / "link.txt").symlink_to(outside / "secrets.txt")
+        mock_settings.aorta_root = root
+        with pytest.raises(ValueError, match="escapes AORTA root"):
+            _resolve_safe("link.txt")
+
+    @patch("aorta.chat.tools.files.settings")
+    def test_prefix_sharing_child_inside_the_root_is_allowed(self, mock_settings, tmp_path):
+        """The boundary is a path component, so ``<root>/<root name>-old`` is fine."""
+        root = tmp_path / "aorta"
+        (root / "aorta-old").mkdir(parents=True)
+        mock_settings.aorta_root = root
+        assert _resolve_safe("aorta-old") == (root / "aorta-old").resolve()
+
+    @patch("aorta.chat.tools.files.settings")
+    def test_traversal_that_lands_back_inside_is_allowed(self, mock_settings, tmp_path):
+        mock_settings.aorta_root = tmp_path
+        (tmp_path / "src").mkdir()
+        assert _resolve_safe("src/../src") == (tmp_path / "src").resolve()
+
+
+class TestGrepCodeSandbox:
+    """``grep_code`` guards its own ``path`` argument rather than calling _resolve_safe."""
+
+    @patch("aorta.chat.tools.search.settings")
+    def test_sibling_sharing_a_prefix_is_refused(self, mock_settings, tmp_path):
+        from aorta.chat.tools.search import grep_code
+
+        root = tmp_path / "aorta"
+        root.mkdir()
+        (tmp_path / "aorta-old").mkdir()
+        (tmp_path / "aorta-old" / "secrets.py").write_text("TOKEN = 'x'\n", encoding="utf-8")
+        mock_settings.aorta_root = root
+        out = grep_code.invoke({"pattern": "TOKEN", "path": "../aorta-old"})
+        assert "escapes AORTA root" in out
+        assert "secrets.py" not in out
+
+    @patch("aorta.chat.tools.search.settings")
+    def test_traversal_is_refused(self, mock_settings, tmp_path):
+        from aorta.chat.tools.search import grep_code
+
+        mock_settings.aorta_root = tmp_path
+        assert "escapes AORTA root" in grep_code.invoke({"pattern": "x", "path": "../.."})
+
+    @patch("aorta.chat.tools.search.settings")
+    def test_in_root_search_still_works(self, mock_settings, tmp_path):
+        from aorta.chat.tools.search import grep_code
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
+        mock_settings.aorta_root = tmp_path
+        out = grep_code.invoke({"pattern": "def main", "path": "src"})
+        assert "src/main.py:1" in out
