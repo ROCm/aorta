@@ -97,7 +97,7 @@ Repro: [`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh).
 This section describes the defect as observed on `db0c47df`, per the status note
 above; it is fixed in `dc7c8e04`. Under the combined rocjitsu ConSan hook
 in `record-replay` / `strict` mode on gfx950, loading a large hipBLASLt f32
-Tensile code object (16,265,200 bytes, 245 kernels) gets all the way through MOI
+Tensile code object (16,265,200 bytes unbundled, 245 kernels) gets all the way through MOI
 inventory and report planning, and is then rejected by the transform's final
 validation:
 

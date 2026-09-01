@@ -61,7 +61,7 @@ def _tracked_text_files() -> list[Path]:
 
 
 def _runs_commands(path: Path, text: str) -> bool:
-    """True for a file whose contents are executed rather than read."""
+    """True for a file that can carry a command: a script, a module, a workflow."""
     if path.suffix in _COMMAND_SUFFIXES:
         return True
     return not path.suffix and text.startswith("#!")
@@ -101,13 +101,13 @@ def _kernel_counting_readelf_commands() -> list[tuple[Path, int, str]]:
     """Every command in a tracked file that counts kernel symbols via llvm-readelf."""
     found: list[tuple[Path, int, str]] = []
     for path in _tracked_text_files():
-        if path.resolve() == _SELF:
-            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue  # binary or unreadable: not a readelf call site
         if "readelf" not in text or not _runs_commands(path, text):
+            continue
+        if path.resolve() == _SELF:
             continue
         for lineno, command in _logical_lines(text):
             if "readelf" not in command:
@@ -168,10 +168,15 @@ def test_a_wrapped_pipeline_is_still_seen_as_one_command() -> None:
 def test_prose_is_not_a_call_site() -> None:
     """Re-wrapping a doc must never fail the guard above.
 
-    The docs quote both the wrong flag and the ``.kd`` suffix, and a reflow can
-    land them on one line without changing a word of meaning.
+    The doc quotes both the wrong flag and the ``.kd`` marker, so a reflow that
+    landed them on one line would read as a call site if prose were scanned.
+    The bait is asserted first: without it this would pass for the wrong reason.
     """
-    assert not _runs_commands(
-        _REPO_ROOT / "docs/sanitizers/consan-4112-overlapping-anchor-patches.md",
-        "`llvm-readelf --symbols` counts each `.kd` twice",
+    doc = _REPO_ROOT / "docs/sanitizers/consan-4112-overlapping-anchor-patches.md"
+    text = doc.read_text(encoding="utf-8")
+    assert "llvm-readelf --symbols" in text and ".kd" in text, (
+        "bait is gone: this doc no longer quotes the flag and the marker the scan looks for"
     )
+    assert not _runs_commands(doc, text)
+    flagged = {path for path, _, _ in _kernel_counting_readelf_commands()}
+    assert doc.relative_to(_REPO_ROOT) not in flagged
