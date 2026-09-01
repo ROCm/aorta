@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -61,8 +62,25 @@ def _get_splitter(ext: str) -> RecursiveCharacterTextSplitter:
     )
 
 
-def _load_documents(codebase_path: Path) -> list[Document]:
-    """Walk the codebase and load files as LangChain Documents."""
+def _load_documents(
+    codebase_path: Path,
+    include: Callable[[str], bool] | None = None,
+    relative_to: Path | None = None,
+) -> list[Document]:
+    """Walk the codebase and load files as LangChain Documents.
+
+    Args:
+        codebase_path: Directory to walk.
+        include: Optional predicate over the ``source`` metadata value. The
+            published-index build passes the checkout's tracked-file set here,
+            which is what makes "public tree only" a filter rather than a
+            convention (see :mod:`aorta.chat.rag.corpus`).
+        relative_to: Base the ``source`` metadata is computed against, when it
+            differs from the walk root -- so a corpus assembled from several
+            subdirectories of one tree yields non-colliding, tree-relative
+            source paths.
+    """
+    base = relative_to or codebase_path
     docs: list[Document] = []
     for dirpath, dirnames, filenames in os.walk(codebase_path):
         root = Path(dirpath)
@@ -73,7 +91,9 @@ def _load_documents(codebase_path: Path) -> list[Document]:
             if fpath.suffix not in CODE_EXTENSIONS:
                 continue
 
-            rel = str(fpath.relative_to(codebase_path))
+            rel = str(fpath.relative_to(base))
+            if include is not None and not include(rel):
+                continue
 
             try:
                 size = fpath.stat().st_size
@@ -118,6 +138,14 @@ def _split_documents(docs: list[Document]) -> list[Document]:
             chunk.metadata["chunk_index"] = i
         all_chunks.extend(chunks)
     return all_chunks
+
+
+#: Public aliases for the two halves of corpus loading. ``rag/corpus.py`` and
+#: ``rag/index_ops.py`` build the published index from the same walk and the same
+#: splitter as a local ``index_codebase()`` run -- an artifact built by a
+#: different chunker than the one the manifest advertises would be undetectable.
+load_documents = _load_documents
+split_documents = _split_documents
 
 
 def index_codebase(

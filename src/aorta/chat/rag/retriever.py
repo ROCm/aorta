@@ -22,6 +22,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore, VectorStoreRetriever
 
 from aorta.chat.config import settings
+from aorta.chat.rag.embeddings.base import EmbeddingProvider
 from aorta.chat.rag.embeddings.factory import get_provider
 from aorta.chat.rag.sqlite_compat import ensure_loadable_extensions, ensure_modern_sqlite
 
@@ -43,12 +44,11 @@ _REGISTRY_TABLE = "aorta_collections"
 _SAFE_COLLECTION = re.compile(r"\A[A-Za-z0-9_]+\Z")
 
 _MISSING_INDEX = (
-    "No chat index at {path}. Build one with:\n"
-    "  python -c 'from aorta.chat.rag.indexer import index_codebase; "
-    "index_codebase()'"
+    "No chat index at {path}.\n"
+    "  aorta chat index fetch     download the prebuilt index for this version\n"
+    "  aorta chat index build     build one from the code on this machine\n"
+    "  aorta chat doctor          check what else is missing first"
 )
-# Phase 4: this becomes `aorta chat index build` for a local build and
-# `aorta chat index fetch` for a prebuilt one, and this message names those.
 
 _MISSING_COLLECTION = (
     "The chat index at {path} holds no collection named {collection!r}, which is "
@@ -401,6 +401,49 @@ def reset_caches() -> None:
     _vectorstore_cache = None
 
 
+def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
+    """Enforce Decision 20a before the first query, not after it.
+
+    Warn on source drift, refuse on an embedding-model or dimension mismatch.
+    The refusal is the point: the store's own dimension check only fires when
+    the numbers differ, and two BGE-small variants at 384 dimensions would sail
+    straight past it and answer from vectors that were never comparable.
+
+    An index with no manifest beside it -- one built before manifests existed,
+    or copied without its sidecar -- is reported as a warning rather than a
+    refusal, because it is more likely to be a correct index missing a file than
+    a wrong one. ``aorta chat doctor`` names it either way.
+    """
+    from aorta.chat.rag import manifest as manifest_mod
+
+    try:
+        found = manifest_mod.read_manifest(index_file)
+    except manifest_mod.ManifestError as exc:
+        logger.warning("Cannot verify the chat index: %s", exc)
+        return
+
+    report = manifest_mod.validate(
+        found,
+        embedding_model=settings.embedding_model,
+        collection=provider.collection_name(),
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        installed_version=_installed_version(),
+    )
+    for warning in report.warnings:
+        logger.warning("chat index: %s", warning)
+    report.raise_if_refused(index_file)
+
+
+def _installed_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("amd-aorta")
+    except PackageNotFoundError:  # pragma: no cover - raw source tree
+        return ""
+
+
 def _get_vectorstore() -> SqliteVecStore:
     """Return the cached sqlite-vec store, opening it on first call."""
     global _vectorstore_cache
@@ -414,6 +457,7 @@ def _get_vectorstore() -> SqliteVecStore:
     # One provider decides both halves: embeddings and the collection they were
     # written to. Mixing them would query the wrong vector dimension.
     provider = get_provider()
+    _check_manifest(index_file, provider)
     store = SqliteVecStore(
         path=index_file,
         embedding=provider.get_embeddings(),

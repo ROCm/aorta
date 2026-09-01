@@ -128,8 +128,8 @@ def _output_mode(as_json: bool, plain: bool) -> str:
 def _quiet_mode() -> None:
     """Suppress noisy third-party output that bypasses the logging system.
 
-    Silences LangChain's DeprecationWarnings, tqdm progress bars, and the
-    sentence-transformers LOAD REPORT table.
+    Silences LangChain's DeprecationWarnings, tqdm progress bars, and
+    fastembed's per-batch loguru chatter.
     """
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     os.environ.setdefault("TQDM_DISABLE", "1")
@@ -142,7 +142,7 @@ def _quiet_mode() -> None:
     for noisy in (
         "httpx",
         "httpcore",
-        "sentence_transformers",
+        "fastembed",
         "aorta.chat.rag",
         "openai",
         "langchain",
@@ -163,9 +163,10 @@ _stderr_suppressed = False
 def _suppress_stderr_noise() -> None:
     """Redirect stderr to /dev/null for the first invocation only.
 
-    Catches the BertModel LOAD REPORT table that sentence-transformers prints
-    straight to stderr with no way to disable it. After the first call the model
-    is cached, so later calls are clean.
+    Catches model-loading banners that go straight to stderr with no logging
+    hook to silence them -- historically sentence-transformers' LOAD REPORT
+    table, now onnxruntime's provider warnings. After the first call the model
+    is loaded, so later calls are clean.
     """
     global _stderr_suppressed
     if _stderr_suppressed:
@@ -632,6 +633,275 @@ def config_validate() -> None:
     for problem in problems:
         click.echo(f"error: {problem}", err=True)
     raise click.exceptions.Exit(1)
+
+
+# ── index and doctor ──────────────────────────────────────────────────────
+
+
+def _index_logging(verbose: bool) -> None:
+    """Show build/fetch progress, which is minutes long and otherwise silent."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(message)s",
+    )
+    for noisy in ("httpx", "httpcore", "fastembed", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def _guard(action: Any) -> Any:
+    """Run ``action``, turning chat's known failures into a clean CLI error.
+
+    The messages these carry are the deliverable -- an index-mismatch refusal
+    and a missing-model failure are written to be read by the person whose
+    command just stopped -- so they are surfaced verbatim rather than wrapped in
+    a traceback.
+    """
+    corpus = _load("rag.corpus")
+    manifest = _load("rag.manifest")
+    ops = _load("rag.index_ops")
+    embeddings = _load("rag.embeddings.fastembed_bge")
+    known = (
+        corpus.PublicTreeError,
+        embeddings.ModelUnavailableError,
+        manifest.IndexMismatchError,
+        manifest.ManifestError,
+        ops.IndexFetchError,
+        FileNotFoundError,
+        # The embedding and LLM provider factories report bad configuration as
+        # ValueError, message-first; a traceback would bury it.
+        ValueError,
+    )
+    try:
+        return action()
+    except known as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _resolve_corpus(path: str | None, public_only: bool) -> Any:
+    """Build the corpus spec for ``index build`` / ``index digest``."""
+    corpus = _load("rag.corpus")
+    config = _load("config")
+    if public_only:
+        # The CI path. Verifies the checkout is ROCm/aorta and restricts the
+        # walk to git-tracked files, because the index embeds source verbatim.
+        return corpus.published_corpus(Path(path or ".").resolve())
+    return corpus.local_corpus(path or config.settings.aorta_path)
+
+
+@chat.group(name="index")
+def index_group() -> None:
+    """Build, download or inspect the retrieval index."""
+
+
+@index_group.command(name="build")
+@click.option("--path", default=None, help="Corpus root. Defaults to the installed aorta package.")
+@click.option("--output", default=None, help="Where to write the index. Defaults to the cache.")
+@click.option(
+    "--public-only",
+    is_flag=True,
+    help="Index only git-tracked files of a ROCm/aorta checkout (what CI publishes).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the build result as JSON.")
+@click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
+def index_build(
+    path: str | None, output: str | None, public_only: bool, as_json: bool, verbose: bool
+) -> None:
+    """Build the index from source on this machine.
+
+    The air-gapped and developer path. Needs the embedding weights, which are
+    downloaded once (~65 MB) unless the cache is pre-seeded -- run 'aorta chat
+    doctor' first if this node has no egress.
+    """
+    _index_logging(verbose)
+    ops = _load("rag.index_ops")
+    result = _guard(lambda: ops.build_index(_resolve_corpus(path, public_only), index_path=output))
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "index": str(result.index_path),
+                    "files": result.file_count,
+                    "chunks": result.chunk_count,
+                    "size_bytes": result.size_bytes,
+                    "seconds": round(result.seconds, 1),
+                    "corpus_digest": result.manifest.corpus_digest,
+                    "collection": result.manifest.collection,
+                    "dimensions": result.manifest.dimensions,
+                },
+                indent=2,
+            )
+        )
+        return
+    manifest = result.manifest
+    click.echo(f"Built {result.index_path}")
+    click.echo(f"  corpus      {result.corpus}")
+    click.echo(f"  files       {result.file_count}")
+    click.echo(f"  chunks      {result.chunk_count}")
+    click.echo(f"  size        {result.size_bytes / (1024 * 1024):.1f} MB")
+    click.echo(f"  time        {result.seconds:.1f}s")
+    click.echo(f"  model       {manifest.embedding_model} @ {manifest.dimensions}d")
+    click.echo(f"  collection  {manifest.collection}")
+    click.echo(f"  digest      {manifest.corpus_digest}")
+
+
+@index_group.command(name="fetch")
+@click.option(
+    "--version",
+    default=None,
+    help="Release version or tag to fetch. Overrides version matching.",
+)
+@click.option(
+    "--from",
+    "from_path",
+    default=None,
+    help="Side-load a staged index file instead of downloading (air-gapped path).",
+)
+@click.option("--output", default=None, help="Where to install it. Defaults to the cache.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the result as JSON.")
+@click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
+def index_fetch(
+    version: str | None,
+    from_path: str | None,
+    output: str | None,
+    as_json: bool,
+    verbose: bool,
+) -> None:
+    """Download the prebuilt index matching this aorta version.
+
+    An exact release version takes that release's asset; a development version
+    takes the rolling asset built from main and reports how far off it is.
+    Pass --version to override, or --from to side-load a staged file.
+    """
+    if version and from_path:
+        raise click.UsageError("--version and --from are mutually exclusive.")
+    _index_logging(verbose)
+    ops = _load("rag.index_ops")
+
+    if from_path:
+        result = _guard(lambda: ops.side_load(from_path, index_path=output))
+    else:
+        result = _guard(lambda: ops.fetch_index(version=version, index_path=output))
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "index": str(result.index_path),
+                    "source": result.source,
+                    "warnings": result.warnings,
+                    "manifest": result.manifest.describe(),
+                },
+                indent=2,
+            )
+        )
+        return
+    click.echo(f"Installed {result.index_path}")
+    click.echo(f"  source    {result.source}")
+    click.echo(f"  built as  {result.manifest.describe()}")
+    for warning in result.warnings:
+        click.echo(f"warning: {warning}", err=True)
+
+
+@index_group.command(name="digest")
+@click.option("--path", default=None, help="Corpus root. Defaults to the installed aorta package.")
+@click.option(
+    "--public-only", is_flag=True, help="Restrict to git-tracked files of the public tree."
+)
+def index_digest(path: str | None, public_only: bool) -> None:
+    """Print the corpus digest without building anything.
+
+    CI compares this against the published manifest's digest and skips the
+    rebuild when they match, so an unchanged corpus does not re-upload tens of
+    megabytes every night.
+    """
+    ops = _load("rag.index_ops")
+    digest, files = _guard(lambda: ops.compute_digest(_resolve_corpus(path, public_only)))
+    click.echo(json.dumps({"corpus_digest": digest, "files": files}))
+
+
+@index_group.command(name="eval")
+@click.option("--questions", default=None, help="JSON question set. Defaults to the shipped one.")
+@click.option("--k", default=None, type=int, help="Retrieval depth. Defaults to the configured k.")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Emit scores and per-question detail as JSON."
+)
+def index_eval(questions: str | None, k: int | None, as_json: bool) -> None:
+    """Score retrieval over a question set (Decision 19b).
+
+    Run it before and after changing the embedding model, so the next model
+    argument is settled with numbers from this corpus rather than leaderboards.
+    """
+    _index_logging(False)
+    evaluation = _load("rag.eval")
+    config = _load("config")
+    depth = k or config.settings.retriever_k
+    result = _guard(lambda: evaluation.evaluate(evaluation.load_questions(questions), k=depth))
+
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), indent=2))
+        return
+    click.echo(f"model: {result.embedding_model}")
+    click.echo(result.summary())
+    for item in result.results:
+        position = f"@{item.rank}" if item.hit else "MISS"
+        click.echo(f"  {position:<6} {item.question.question}")
+        if not item.hit:
+            click.echo(f"         expected one of: {', '.join(item.question.expected)}")
+
+
+#: Marker widths are fixed so the statuses line up into a scannable column.
+_STATUS_MARK = {"ok": "[ ok ]", "warn": "[warn]", "fail": "[FAIL]", "skip": "[ -- ]"}
+
+
+@chat.command(name="doctor")
+@click.option(
+    "--no-backend",
+    is_flag=True,
+    help="Skip the LLM backend preflight (which needs the network).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+def doctor(no_backend: bool, as_json: bool) -> None:
+    """Report extras, backend reachability, index freshness and model cache.
+
+    Exits non-zero if anything is broken, so it works as a CI or setup gate.
+    """
+    _require_python()
+    module = _load("doctor")
+    report = module.run_checks(backend=not no_backend)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": not report.failed,
+                    "checks": [
+                        {
+                            "name": check.name,
+                            "status": check.status,
+                            "detail": check.detail,
+                            "hint": check.hint,
+                            "procedure": check.procedure,
+                        }
+                        for check in report.checks
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        for check in report.checks:
+            mark = _STATUS_MARK.get(check.status, "[ ?? ]")
+            click.echo(f"{mark} {check.name:<22} {check.detail}")
+            for line in check.hint.splitlines():
+                click.echo(f"       {line}")
+            if check.procedure:
+                click.echo("")
+                for line in check.procedure.splitlines():
+                    click.echo(f"  {line}")
+                click.echo("")
+    if report.failed:
+        raise click.exceptions.Exit(1)
 
 
 __all__ = ["chat"]

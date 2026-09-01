@@ -1,1 +1,1 @@
-"""Embedding providers: local BGE and remote API, behind one factory."""
+"""Embedding providers: local BGE on onnxruntime and remote API, behind one factory."""
