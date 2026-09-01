@@ -98,10 +98,22 @@ jobs:
             # without it, so a PR touching only the probe ran neither the audit
             # nor the GPU-gated tests in that file.
             'src/aorta/instrumentation/environment.py'
+            # The Proton collector attaches a profiler to a real GPU launch, so
+            # its behaviour is only observable on hardware: the CPU suite can
+            # assert the argv and the env bundle, but not that the capture came
+            # back with kernels in it. Listed with its smoke test because a
+            # backend pin that silently records nothing passes every CPU check.
+            'src/aorta/instrumentation/proton/*'
             'scripts/audit_env_knobs.py'
             'tests/hw_queue_eval/*'
             'tests/instrumentation/test_environment.py'
             'tests/instrumentation/test_env_knob_audit.py'
+            'tests/instrumentation/test_proton_smoke_gpu.py'
+            # The Proton smoke test runs these payloads, so they are code the
+            # GPU job covers: a PR that breaks pipeline.py or hotspot.py while
+            # touching no collector or test file would otherwise skip the only
+            # job that would have caught it.
+            'examples/profiling/proton/*'
             'tests/instrumentation/rocjitsu_sanitizers/*'
             'tests/sanitizers/*'
             'tests/test_marker_partition.py'
@@ -187,6 +199,23 @@ jobs:
       # per CPU core would spin up dozens of HIP contexts contending for a
       # single device (OOM / flakiness). A small bounded pool keeps parallelism
       # without oversubscribing the GPU.
+      #
+      # --timeout=300 (pytest-timeout, already in the `tests` extra) bounds a
+      # wedged test rather than the job. A GPU test that hangs instead of
+      # failing costs far more than one red test: the job runs to its
+      # 60-minute cap, and because a GitHub-side cancel skips the junit upload,
+      # the gate reports NO test results at all -- so any real failure in the
+      # same run is destroyed along with it. Observed on run 33527313950, where
+      # 105 of 108 tests reported in 54 s, a profiler payload then wedged for
+      # 59 minutes, and the one genuine failure went out with the cancel.
+      #
+      # Sized from measurement: on run 33606698270 the whole suite was 104
+      # tests in 51.6 s wall, and its slowest single test -- the rocprofv3
+      # sweep -- took 20.2 s. 300 s is ~15x that, and more than the entire
+      # suite has ever needed. Set here rather than in
+      # pytest.ini because the opt-in operator payloads (AORTA_LN_GPU_SMOKE)
+      # legitimately run for tens of minutes and must keep their own budgets;
+      # only this job is being bounded.
       - name: Install package and run GPU test suite
         run: |
           bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
@@ -194,7 +223,27 @@ jobs:
             cd /workspace/aorta
             python -m pip install --upgrade pip
             pip install -e ".[tests,hw-queue]"
-            pytest -m "gpu or rocm" -n 4 --junitxml=gpu-results.xml
+            # The ROCm lib dirs on LD_LIBRARY_PATH, or the payloads these tests
+            # compile with hipcc build and then fail to LAUNCH. Measured on the
+            # ROCm 10 wheel base: hipcc output carries neither DT_RPATH nor
+            # DT_RUNPATH and the image sets no LD_LIBRARY_PATH, so the loader has
+            # nowhere to look and the payload dies before main with
+            #   error while loading shared libraries: libamdhip64.so.7
+            # at exit 127 -- which is what test_payload_runs_and_self_checks
+            # reported. Its sibling test runs the SAME binary under rocprofv3 and
+            # passed, so this is the bare-launch loader path and nothing else.
+            #
+            # Byte-identical to both payloads in sanitizers-nightly.yml and to
+            # _ROCM_LIB_PATH_EXPORT in gen_sanitizer_dashboard.py; the four are
+            # asserted equal by test_rebuild_commands_export_the_rocm_library_path.
+            # See the gate job in that workflow for the full rationale -- both lib
+            # dirs with core first, derived from the resolver rather than a
+            # literal site-packages path (issue #381), appended rather than
+            # prepended so an inherited operator substitution keeps winning, and
+            # written with no apostrophe because this is a single-quoted bash -lc
+            # payload that any apostrophe would close early.
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+            pytest -m "gpu or rocm" -n 4 --timeout=300 --junitxml=gpu-results.xml
           '
 
       # Separate step, after pytest: under `set -euo pipefail` a knob the

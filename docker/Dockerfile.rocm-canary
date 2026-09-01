@@ -32,6 +32,67 @@ USER root
 COPY rocm_layout_guard.py /usr/local/share/aorta/rocm_layout_guard.py
 RUN python /usr/local/share/aorta/rocm_layout_guard.py
 
+# Same devel-symlink fixup as Dockerfile.ci-gpu and Dockerfile.rocm-latest, and
+# here for the same reason the pip line below gives for matching the gate's extra
+# deps: the canary is only worth reading if a canary/gate difference is
+# attributable to ROCm. An image missing bare sonames
+# the gate image has is a difference in US, and it points the wrong way -- the
+# canary would look healthier than the gate on the same release, which is the
+# ambiguity #382 exists to remove.
+#
+# See Dockerfile.ci-gpu for the mechanism, the measurements and the two consumers
+# (hipcc links against bare names, Proton dlopens them). Nothing in the current
+# nightly_eval matrix compiles HIP or enables Proton, so today this changes
+# nothing observable here -- it is the image matching the gate rather than a
+# repair. That is the point: `rocm/pytorch:latest` resolves to a 7.14 wheel image
+# today and will move to ROCm 10, and config/ci/nightly_eval_matrix.yaml is
+# explicitly written to grow rows (HRX, which does shell out to hipcc, is parked
+# there pending gfx950 recipes). Both changes would otherwise land on a lane that
+# had quietly stopped matching.
+#
+# The layout-aware skip carries more weight here than in the other two files.
+# Their bases are tag-pinned and known to be wheel images; this one is whatever
+# BASE_IMAGE was resolved to, which may legitimately be a classic /opt/rocm
+# install that ships its own devel symlinks. An empty discovery is therefore a
+# normal outcome to be skipped, never a build failure -- rocm_layout_guard.py
+# above is what fails a base we genuinely cannot read.
+#
+# Byte-identical to the block in both other Dockerfiles, and
+# `test_devel_symlink_fixup_is_identical_across_the_rocm_images` holds all three
+# to that. A near-copy is how the dev image drifted into shipping only the
+# libamdhip64 fixup while the gate had the full farm.
+#
+# Deliberately WITHOUT the CI image's hipcc-link and Proton-dlopen smoke tests.
+# Those install nothing, so they are not part of "match the gated image" -- they
+# only decide whether a build aborts, and this lane's gating semantics are the
+# opposite of the gate's. A failed RUN here costs the run its workload verdicts:
+# the workflow synthesises an attributable row, but an empty one, for a base
+# whose PyTorch workloads might have run perfectly well. Failing closed on
+# something no wired canary recipe exercises trades the report this lane exists
+# to produce for a capability check the gate already makes at digest-bump time.
+# Add them here when the matrix wires a recipe that needs hipcc or Proton.
+RUN set -eu; \
+    libdirs="$(python -c 'import importlib.util, os; print(chr(32).join(os.path.join(os.path.dirname(s.origin), "lib") for s in (importlib.util.find_spec(m) for m in ("_rocm_sdk_core", "_rocm_sdk_libraries")) if s and s.origin))')"; \
+    if [ -z "${libdirs}" ]; then \
+      echo "no ROCm wheels (classic layout): skipping devel-symlink fixup"; \
+    else \
+      created=0; \
+      for libdir in ${libdirs}; do \
+        [ -d "${libdir}" ] || { echo "resolved ROCm lib dir does not exist: ${libdir}" >&2; exit 1; }; \
+        cd "${libdir}"; \
+        for versioned in *.so.*; do \
+          [ -f "${versioned}" ] || continue; \
+          bare="${versioned%%.so.*}.so"; \
+          [ -e "${bare}" ] && continue; \
+          newest="$(ls -1 "${bare}".* | sort -V | tail -n1)"; \
+          ln -s "${newest}" "${bare}"; \
+          created=$((created + 1)); \
+          echo "created ${libdir}/${bare} -> ${newest}"; \
+        done; \
+      done; \
+      echo "devel-symlink fixup: created ${created} bare sonames"; \
+    fi
+
 # Match the gated image's extra deps so a canary/gate difference is attributable
 # to ROCm rather than to a missing report dependency. Unpinned here (the gate
 # pins them): pinning against a moving base is what would actually break, since
@@ -39,9 +100,20 @@ RUN python /usr/local/share/aorta/rocm_layout_guard.py
 RUN python -m pip install --no-cache-dir openpyxl seaborn
 
 # No `ENV ROCM_HOME=/opt/rocm` -- see Dockerfile.ci-gpu. It matters more here
-# than anywhere else: this base genuinely has no /opt/rocm, so asserting it
-# would be the one thing that could still defeat layout-agnostic discovery
-# (#381, #382 design notes).
+# than anywhere else, and for a reason specific to BASE_IMAGE being an argument:
+# this file cannot know its base's layout at all. `rocm/pytorch:latest` is a
+# wheel image with no /opt/rocm today, and a future one may ship a compat stub or
+# be a classic install outright -- ROCM_HOME outranks autodetection in every one
+# of those cases, so asserting it is the one thing that could still defeat
+# layout-agnostic discovery (#381, #382 design notes).
+#
+# And no profile script either, unlike Dockerfile.rocm-latest. That script exists
+# to put the ROCm lib dirs in front of a HUMAN opening an interactive shell, who
+# has no workflow step exporting them. This lane has no interactive shells; it
+# also has no reason to differ from the image it exists to predict,
+# and Dockerfile.ci-gpu does not ship one. Adding environment here that the gate
+# does not have would reintroduce exactly the canary/gate difference the fixup
+# above was ported to remove.
 
 WORKDIR /workspace/aorta
 

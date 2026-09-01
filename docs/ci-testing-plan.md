@@ -213,7 +213,7 @@ gaps). New GPU tests must carry `@pytest.mark.gpu` or `@pytest.mark.rocm`.
 
 | Job | Triggers | What it runs |
 | --- | --- | --- |
-| `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n 4` inside a digest-pinned ROCm container (bounded workers so xdist doesn't oversubscribe the single GPU) |
+| `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n 4 --timeout=300` inside a digest-pinned ROCm container (bounded workers so xdist doesn't oversubscribe the single GPU; the per-test cap keeps a wedged test from running out the job's 60-minute limit, which would cancel the run and take the junit report with it) |
 | `workload regression (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | Real-hardware workload smokes from [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml) via [`scripts/ci/run_gpu_regression_smokes.sh`](../scripts/ci/run_gpu_regression_smokes.sh). PRs run the fast single-GPU `pr` tier; nightly / dispatch run the full manifest |
 
 ### Execution environment (docker)
@@ -222,7 +222,7 @@ GPU CI runs inside a privileged ROCm PyTorch container (same device/capability
 model as the existing analysis workflows):
 
 - Compose file: [`docker/docker-compose.build.yaml`](../docker/docker-compose.build.yaml)
-- CI env file: [`docker/.env.ci`](../docker/.env.ci) (committed; pins base image digest)
+- CI env file: [`docker/.env.ci`](../docker/.env.ci) (committed; selects the Dockerfile, image and container names -- carries no digest, see below)
 - CI Dockerfile: [`docker/Dockerfile.ci-gpu`](../docker/Dockerfile.ci-gpu)
 - Container name: `aorta-ci-gpu`
 - Workspace mount: repo root at `/workspace/aorta`
@@ -230,35 +230,47 @@ model as the existing analysis workflows):
 The base image is pinned by digest:
 
 ```
-rocm/pytorch@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+rocm/pytorch@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c
 ```
 
-(tag: `rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0`). Bump the digest in
-`Dockerfile.ci-gpu` / `.env.ci` when intentionally upgrading the CI stack.
+(tag: `rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0`). The digest itself
+lives in `Dockerfile.ci-gpu`; `.env.ci` only records how to resolve a new one.
+Bump it there when intentionally upgrading the CI stack.
 
-That tag is the newest published combination on every axis at once — ROCm 7.2.4
-is the newest classic-layout production release, and 24.04 / py3.12 / torch
-2.10.0 are the newest Ubuntu, Python and PyTorch that line ships. Newer Python
-(3.13, 3.14) and newer PyTorch (2.11, 2.12) exist **only** on the wheel-based
-7.14 line, so they arrive with the **#383** base-image flip. Reading that layout
-is no longer the blocker (#381 landed); moving the pinned base onto it is.
+That tag is the newest published combination on every axis at once — ROCm 10.0,
+Ubuntu 26.04, Python 3.14, PyTorch 2.13.0. It arrived with the **#383**
+base-image flip, retargeted from ROCm 7.14 to ROCm 10.0 once ROCm 10 shipped
+(Aug 2026) and superseded it. The flip moved four axes together and could not
+have moved fewer: the ROCm 10 line publishes no torch 2.10 image, so keeping the
+old PyTorch was not on offer.
 
-Python's second, independent cap has now been lifted: `pyproject.toml` declares
-through 3.14 and the CPU matrix tests 3.10–3.14 (issue #383). The GPU gate stays
-on py3.12 only because that is the newest Python the classic ROCm line ships, so
-the remaining move is the base-image flip, not a packaging change.
+Python's two independent caps are now both gone, and they agree:
+`pyproject.toml` declares through 3.14, the CPU matrix tests 3.10–3.14, and the
+GPU gate runs py3.14 as well. It sat on py3.12 only because that was the newest
+Python the classic ROCm line shipped.
+
+**Disk cost on the runner: ~52 GB, not the ~20 GB the registry reports.** Docker
+Hub lists this image at about 20.5 GB, which is the *compressed* manifest size;
+`docker images` reports **51.8 GB** once pulled, and the built gate image adds
+only a thin pip layer on top. Budget the uncompressed figure. That matters on the
+shared MI350 runner because the canary lane pulls a *second*, independent ROCm
+base alongside this one (its own recent bases measure 40–49 GB), so the steady
+state is two images of this size, not one — plus whatever the previous gate base
+still occupies until it is pruned.
 
 CI tracks the newest ROCm production release it can actually run, so the nightly
-eval reports against the stack customers run. Two constraints bound "newest", and
-a bump proposal — from a human or from automation — must clear both:
+eval reports against the stack customers run. What bounds "newest" narrowed with
+the ROCm 10 flip. Two of the old constraints are now history: the ROCm 7.9–7.13
+*technology preview* stream (where a higher number was not an upgrade) is behind
+the gate, and the wheel-layout move that 7.14 introduced has been made rather
+than deferred. One rule survives, and a bump proposal — from a human or from
+automation — must still clear it:
 
-1. **Preview stream.** ROCm 7.9 through 7.13 are the *technology preview* stream,
-   not newer production releases, so a higher number there is not an upgrade.
-2. **A deliberate flip, not a digest bump.** 7.14 onward is production and
-   wheel-based (see below). The repo **can** read that layout as of #381, so the
-   remaining blocker is not capability — it is that moving the pinned base is
-   issue #383, which changes ROCm, Ubuntu, Python and PyTorch at once and needs
-   baselines re-blessed. Not something to do by editing a digest.
+- **A major bump is a deliberate flip, not a digest bump.** Within the ROCm 10
+  line a digest bump is an ordinary digest bump. Changing the *major* drags
+  Ubuntu, Python and PyTorch along with it and needs baselines re-blessed, which
+  is what made #383 a PR of its own rather than an edited digest — and is what
+  will make the next major one too.
 
 #### ROCm install layout: both are supported (issue #381)
 
@@ -283,16 +295,18 @@ the same synthetic trees.
 
 Neither image sets `ENV ROCM_HOME=/opt/rocm` any more. An explicit override
 ranks above autodetection, so declaring it unconditionally lets a stale
-`/opt/rocm` stub win over a correct wheel install; the classic base already
-exports `/opt/rocm/bin` on `PATH` and `/opt/rocm/lib` on `LD_LIBRARY_PATH`
-itself, so removing it changes nothing there.
+`/opt/rocm` stub win over a correct wheel install. That was already the reason to
+drop it while the base was classic — where it was merely redundant, since that
+base exported `/opt/rocm/bin` on `PATH` and `/opt/rocm/lib` on `LD_LIBRARY_PATH`
+itself. On the ROCm 10 base it is load-bearing: there is no `/opt/rocm` for it to
+name, and no `PATH`/`LD_LIBRARY_PATH` entries for it to restate.
 
 Which images are which, and how to tell before pulling:
 
 | Image | Layout | Tell |
 |---|---|---|
 | `rocm7.2.x` tags | classic | `/opt/rocm/bin` on `PATH`; no `npi.*` labels |
-| `rocm7.14+` tags, `rocm/pytorch:latest` | wheel (TheRock) | `npi.*` labels present; no `/opt/rocm` on `PATH` |
+| `rocm7.14+` and `rocm10.x` tags, `rocm/pytorch:latest` | wheel (TheRock) | `npi.*` labels present; no `/opt/rocm` on `PATH` |
 
 Check before pulling — a classic image carries `/opt/rocm/bin` on `PATH`, a
 wheel-based one does not:
@@ -301,7 +315,8 @@ wheel-based one does not:
 docker buildx imagetools inspect rocm/pytorch:<tag> \
   --format '{{range .Image.Config.Env}}{{println .}}{{end}}' | grep ^PATH=
 # classic 7.2.4 -> PATH=/opt/venv/bin:/opt/rocm/bin:...
-# wheel   7.14  -> PATH=/opt/venv/bin:...            (no /opt/rocm/bin)
+# wheel   10.0  -> PATH=/opt/venv/bin:/usr/local/sbin:...   (no /opt/rocm/bin,
+#                  and the image sets no LD_LIBRARY_PATH at all)
 
 # The npi.* labels are the same signal from the other side:
 docker buildx imagetools inspect rocm/pytorch:<tag> --format '{{json .Image.Config.Labels}}'
@@ -315,9 +330,120 @@ build's `the_rock_commit`, `github_run_id` and any patches applied on top of
 each upstream pin. Schema 1.16 records all of it under `therock`, and the GEMM
 libraries' `upstream_commit`.
 
-The base image itself is still the classic 7.2.4 line; flipping it to 7.14 is
-issue #383 and a deliberate separate step, since it moves ROCm, Python and
-PyTorch at once.
+The gate now runs on that layout, because the `rocm/pytorch` ROCm 10 images are
+wheel-based — a property of those images, not of the release, which still ships
+DEB/RPM and tarballs rooted at `/opt/rocm` as described above. So this provenance
+is now what every *gated* run records rather than something only the canary lane
+ever saw — the payoff for reading the layout instead of merely tolerating it
+arrived with issue #383's flip, not just for the canary.
+
+#### Library substitution on ROCm 10: check `RPATH` before trusting `LD_LIBRARY_PATH`
+
+A caveat to check per substitution, not a blanket property of the gate: the
+*mechanism* is measured below, but whether it bites depends on which library you
+are substituting and what loads it. It matters here because AORTA is a debugging
+tool that *substitutes* libraries — pointing a run at a custom hipBLASLt or
+rocBLAS build — and the failure mode is silent.
+
+**The change (documented upstream, not measured by us).** ROCm 10 switches
+DEB/RPM/runfile installs to embed `RPATH` instead of `RUNPATH`. Tarball installs
+keep `RUNPATH`. The two are consulted on opposite sides of the environment:
+
+| Tag | Searched | Consequence for substitution |
+|---|---|---|
+| `DT_RUNPATH` | **after** `LD_LIBRARY_PATH` | `LD_LIBRARY_PATH` wins; substitution works |
+| `DT_RPATH` | **before** `LD_LIBRARY_PATH` | the stock library wins; substitution is ignored |
+
+Confirmed on a purpose-built two-library repro differing only in
+`--enable-new-dtags` vs `--disable-new-dtags`: the `RUNPATH` binary loaded the
+fake library, the `RPATH` binary loaded the real one, **exited 0, and printed no
+loader diagnostic**. That silence is the whole problem — for a debugging tool, a
+run that passes while measuring the wrong library is worse than a crash.
+
+Two refinements from the same repro: `LD_PRELOAD` still beats `RPATH`, which is
+why it is the robust mechanism; and `RPATH` is inherited *transitively* while
+`RUNPATH` is not, so the tag that defeats a substitution need not be on the
+library you are substituting.
+
+**Measured in the gate's own ROCm 10 image** (`readelf -d`, run inside the
+digest-pinned base). This settles the wheel-layout half, which the upstream note
+does not cover — and it settles it on the hazardous side:
+
+- Of 196 shared objects under `_rocm_sdk_core` / `_rocm_sdk_libraries`, **152
+  carry `DT_RPATH` and none carry `DT_RUNPATH`**. So the wheel layout is not
+  exempt: `libhipblaslt.so.1`, `librocblas.so.5` and `libMIOpen.so.1` all carry
+  `RPATH`, entirely `$ORIGIN`-relative (`$ORIGIN`, `$ORIGIN/llvm/lib`,
+  `$ORIGIN/../../_rocm_sdk_core/lib`, …), which resolves back into the wheel tree.
+- PyTorch's own objects are the exception: `libtorch_hip.so` and `libc10_hip.so`
+  carry `DT_RUNPATH`, because they come from the PyTorch manylinux build rather
+  than TheRock. Mixed tags in one process are normal here, so "does this image
+  use RPATH?" has no single answer — it is per object.
+- End to end, the hazard is real in this image and not merely theoretical. With a
+  same-soname decoy on `LD_LIBRARY_PATH`, `import torch` loaded the **stock**
+  `libhipblaslt.so.1` from the wheel tree and never tried the decoy. `LD_DEBUG=libs`
+  attributes it explicitly — `(RPATH from file …/libhipblas.so.3)` — i.e. an
+  inherited `RPATH` from a *neighbouring ROCm library*, which is exactly the
+  transitive-inheritance case above. `libtorch_hip.so` having `RUNPATH` does not
+  save it.
+
+**The mirror image: `hipcc` output carries neither tag.** Also measured in this
+base, and worth holding alongside the above because it points the opposite way. A
+binary built by this image's `hipcc` has **no `RPATH` and no `RUNPATH` at all**,
+so `ldd` reports `libamdhip64.so.7 => not found` until the ROCm lib directory is
+on `LD_LIBRARY_PATH`. Adding the core lib dir resolves it.
+
+So `LD_LIBRARY_PATH` has two opposite roles in one process, depending on which
+object you are talking about:
+
+| Object | Tags | Role of `LD_LIBRARY_PATH` |
+|---|---|---|
+| ROCm's own libraries (TheRock) | `RPATH` | **cannot** override them — substitution silently ignored |
+| `hipcc`-built binaries (fixtures) | neither | **required**, or they do not start at all |
+
+That asymmetry is easy to trip over: the same variable that is useless for
+substituting hipBLASLt is mandatory for running a fixture. It also means "we set
+`LD_LIBRARY_PATH`" and "our substitution took effect" are independent facts, and
+only the first is self-evident from a passing run.
+
+Established, not still open: `sanitizers-nightly.yml` used to export the ROCm LLVM
+bindir on `PATH` (so `hipcc` can find `clang-offload-bundler`) with no
+`LD_LIBRARY_PATH` counterpart, and its fixtures run through `aorta sweep run`
+rather than directly. Nothing on that path supplies a library path — `run_consan`
+launches the repro with a copy of its own environment plus the `HSA_TOOLS_LIB` /
+`RJ_CONSAN_*` pins — so every fixture died before `main` at exit 127. Both
+provisioning blocks now export `resolve_rocm_roots().core_lib_dir` and `.lib_dir`,
+core first, and the same line is published beside the dashboard's rebuild
+commands so a pasted rebuild can also be run. Note which half was load-bearing on
+the old base: 7.2.4's `hipcc` embedded `DT_RUNPATH=/opt/rocm-7.2.4/lib`, and a
+7.2.4 fixture still launches with `LD_LIBRARY_PATH` scrubbed — so a digest bump
+should re-check `readelf -d` on a built fixture rather than whether the image sets
+`LD_LIBRARY_PATH`. Outside CI, `aorta` does **not** repair this: altering the
+environment of the process under test would also hijack the substitution
+described above, so a recognised exit-127 loader failure is reported with an
+actionable reason instead.
+
+**Guidance.** When substituting a library, pair `LD_LIBRARY_PATH` with
+`LD_PRELOAD` rather than relying on the search path alone. The in-tree HRX
+recipes already do this, and `workloads/hrx.py` fails the trial when a preload is
+rejected, so they need no change — but anything new that substitutes a library
+should follow that shape.
+
+**`--strict` is not the safety net here.** Its help text is accurate as written;
+the point is that this failure mode is outside what it can see. An ignored
+`LD_LIBRARY_PATH` produces a cell that ran, passed, and measured the wrong
+library — there is no error for `--strict` to escalate.
+
+**Still unverified**, and deliberately not claimed above: no `readelf -d` has been
+captured from a real *classic-layout* ROCm 10 DEB/RPM install, so the
+upstream-documented half rests on upstream's word. The measurements above are
+loader-resolution behaviour in the gate image, not a full GPU workload run.
+
+For the native path, the shape of the risk is already visible: ROCm 7.0.2.2
+objects on the current host all carry `RUNPATH` pointing at stock sibling
+directories (`libhipblaslt.so` → `$ORIGIN/../lib:…:/opt/rocm-7.0.2.2/lib`). Those
+are precisely the entries that would shadow a substituted build if ROCm 10
+re-emits them as `RPATH`, so a classic ROCm 10 install is where this should be
+re-checked first.
 
 #### The latest-ROCm canary lane (non-gating)
 
@@ -328,6 +454,17 @@ deliberately avoids: a red result would be ambiguous (our regression, or did the
 base change?) and neither reproducible nor bisectable afterwards. So the lane
 resolves `:latest` to a concrete digest at job start, records it with the
 results, and stays out of the gate's way.
+
+The workflow additionally accepts an optional `base_image` `workflow_dispatch`
+input, which points the lane at a different tag for one run. This closes a gap in
+the early-warning promise rather than adding a convenience: a major ROCm release
+is published under a versioned tag well before AMD moves `:latest`, so during
+exactly the window the warning is worth having, the lane cannot see the release.
+ROCm 10 was the case in point — `:latest` still resolved to a ROCm 7.14 image
+after ROCm 10 images were on Docker Hub. An override cannot produce an
+unattributable run: it is resolved by the same step, with the same fail-closed
+check, so the row still carries `tag@sha256:…`, and the recorded base image is
+what distinguishes an overridden row from a scheduled one.
 
 Non-gating is structural here, not just intended:
 
@@ -412,6 +549,11 @@ docker exec aorta-ci-gpu bash -lc '
 '
 docker compose --env-file .env.ci -f docker-compose.build.yaml down -v
 ```
+
+The gate's `--timeout=300` is omitted here on purpose: it exists to stop a
+wedged test from consuming the CI job's 60-minute budget, and locally you
+usually want a hang to sit still so it can be attached to and inspected. Add it
+if what you are reproducing *is* the timeout.
 
 Workload regression smokes (inside the same container):
 

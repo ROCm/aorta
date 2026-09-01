@@ -1,0 +1,56 @@
+# Proton capture of a three-kernel Triton pipeline on the `roctracer` backend.
+#
+# The portable AMD path: `roctracer` is Proton's deprecated but universally
+# present whole-kernel AMD backend -- the one every released Triton accepts for
+# timing kernels, including the releases predating `rocprofiler`, which arrived
+# in Triton 3.8.0. `instrumentation` is in every release too, but measures
+# inside a kernel. See README.md.
+#
+#   aorta sweep run \
+#       --recipe examples/profiling/proton/amd-roctracer/recipe.yaml \
+#       --output ./profiling_results \
+#       -- python examples/profiling/proton/amd-roctracer/pipeline.py \
+#            --rows 4096 --cols 1024 --iters 20
+schema_version: 1
+mode: probe
+
+ticket: PROFILING-PROTON-AMD-ROCTRACER
+
+trials: 1
+timeout_per_trial: 1800
+
+mitigation_axis: [none]
+diagnostic_axis: [none]
+
+env_passthrough_mode: inherit
+
+# `mode: env`, not `mode: cli`, and the reason is mechanical rather than
+# stylistic. Triton's Proton CLI front-end calls its own `_select_backend()`
+# only when `-b` is *absent*, and that call initialises the Triton HIP driver
+# as a side effect. roctracer records nothing when it attaches ahead of the
+# HIP runtime it is tracing, so naming a backend on the CLI hands you a
+# 160-byte hatchet with a bare ROOT frame and an exit status of 0 -- aorta's
+# parser then degrades to `proton_artifact_dir` and the trial silently carries
+# no Proton metrics at all. `mode: env` instead exports `AORTA_PROTON_*` and
+# lets the payload call `proton.start()` after its own `import torch`, so the
+# backend attaches to a live runtime. The collector rejects `mode: cli` with
+# an explicit roctracer backend for exactly this reason. No Triton version
+# fixes it: line 73 of `third_party/proton/proton/proton.py` at the `v3.8.0`
+# tag is still `backend = args.backend if args.backend else
+# _select_backend()`.
+#
+# The refusal is roctracer-only. `rocprofiler` has the opposite contract --
+# `libproton.so` configures it from an `__attribute__((constructor))` at load
+# time, so it wants to be set up before HSA rather than after -- and its CLI
+# pin is allowed. That is also why `../amd-rocprofiler/gelu.py` imports Proton
+# before torch while `pipeline.py` here does the reverse.
+#
+# `context: shadow` attributes time to the launch site, which for this payload
+# means one node per Triton kernel; `data: tree` is the `.hatchet` the
+# collector's summary parser reads.
+collect:
+  proton:
+    mode: "env"
+    backend: "roctracer"
+    context: "shadow"
+    data: "tree"

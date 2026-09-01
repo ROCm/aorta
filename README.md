@@ -79,15 +79,40 @@ uv pip install -e ".[hw-queue]"
 
 Hardware-queue evaluation and most GPU training or inference workloads also
 require PyTorch. AORTA does not bundle it. When the selected workload requires
-PyTorch, install a build matching that environment's ROCm version:
+PyTorch, install a build matching that environment's ROCm version — but note
+that *where* those builds are hosted now depends on the ROCm major, so there is
+no single URL pattern to fill in:
 
 ```bash
-# Set this to the index URL for your ROCm release from
-# https://pytorch.org/get-started/locally/
-PYTORCH_ROCM_INDEX=https://download.pytorch.org/whl/nightly/rocmX.Y/
-python -m pip install --pre torch \
-  --index-url "$PYTORCH_ROCM_INDEX"
+# Pick ONE index for your ROCm major:
+#   ROCm 7.x  -> PyTorch's own index, one URL per ROCm minor
+#   ROCm 10.x -> AMD's TheRock index (PyTorch's index has no rocm10.0)
+PYTORCH_ROCM_INDEX=https://download.pytorch.org/whl/rocm7.2/
+# PYTORCH_ROCM_INDEX=https://stable.repo.amd.com/rocm/whl-next/
+
+python -m pip install torch --index-url "$PYTORCH_ROCM_INDEX"
 ```
+
+The split is not cosmetic, and picking the wrong host fails with a bare
+"no matching distribution" that does not hint at the reason:
+
+- `download.pytorch.org/whl/rocm<minor>/` **stops at `rocm7.2`**. Both
+  `whl/rocm7.14/` and `whl/rocm10.0/` return 403 — they were never published, so
+  substituting your ROCm version into that path only works on the 7.x line.
+- ROCm 10 torch is routed through TheRock at
+  [`stable.repo.amd.com/rocm/whl-next/`](https://stable.repo.amd.com/rocm/whl-next/),
+  which carries `torch` 2.11.0, 2.12.0 and 2.13.0 (all `+rocm10.0.0`, cp310
+  through cp314) alongside `torchvision`, `torchaudio` and the `rocm-sdk-*`
+  wheels. These are release builds, so no `--pre` is needed.
+- The ROCm 10 **nightly** channel is a trap worth knowing about:
+  `whl/nightly/rocm10.0/` responds 200, so it looks like the old pattern still
+  works, but it serves only shared dependencies (numpy, sympy, filelock, …) and
+  no `torch` at all. A 200 from the index root is not evidence that torch is
+  there.
+
+[pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/)
+remains the authority on which channel is current; check it before pinning, since
+the ROCm 10 line is new and the 7.2 stable index is the retiring one.
 
 Other optional extras include `analysis`, `report`, `hw-queue-profiling`,
 `agent`, and `ebpf`. The `ebpf` extra has no additional Python packages; its
@@ -280,6 +305,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [LLM Determinism](docs/llm-determinism.md) | Bit-exact double-run nondeterminism probe |
 | [Layer Numerics](docs/layer-numerics.md) | Per-layer / per-stage NaN, magnitude, and out-of-range logger |
 | [Profiling Collectors](docs/profiling-collectors.md) | `--collect rocprof` (wraps any subprocess command) / `--collect proton` (Python launches, or `mode: env`) — attach a GPU profiler without editing the payload |
+| [Choosing a Proton backend](docs/proton-backends.md) | Which of Proton's five backends answers which question — whole-kernel timing vs intra-kernel cycles vs PC sampling, what each costs you, and what is available on which Triton |
 | [TokenSpeed](docs/tokenspeed.md) | Third-party inference engine under `mode: probe` — kernel, operator-suite and serving triage, plus Waitcheck and ConSan over its JIT attention/gemm kernels (gfx950) |
 | [TokenSpeed serving](docs/tokenspeed-serving.md) | `tokenspeed_serve` workload — TTFT / TPOT / ITL / throughput per cell, over model, concurrency and ISL/OSL sweeps (gfx950) |
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |

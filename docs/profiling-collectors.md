@@ -5,6 +5,11 @@ Both collectors work by rewriting the launch argv — the same seam the mirage
 emulator uses — so an opaque `aorta sweep run ... -- <command>` gets profiled
 and the payload never learns it is being measured.
 
+This page is the reference: every option, the artifact layout, and the
+troubleshooting table. It does not tell you *which* Proton backend to pick —
+for that, and for what each one costs you, see
+[Choosing a Proton backend](proton-backends.md).
+
 How wide "a command" is differs by collector, and it is the first thing to
 check: `rocprof` wraps **anything**, while Proton's default `mode: cli` takes
 over a Python *script*, so it attaches only to `python ... <script>.py`, a
@@ -208,14 +213,20 @@ Precedence and scope:
 
 ### `proton` options
 
+The `backend` row below is the schema. For which backend answers which question
+— and for the version matrix, the two opposite initialisation contracts, and the
+measured sharp edges — see [Choosing a Proton backend](proton-backends.md).
+
 | Option | Values | Default | Notes |
 |---|---|---|---|
 | `mode` | `cli`, `env` | `cli` | See [Attach modes](#proton-attach-modes). |
-| `backend` | `auto`, `rocprofiler`, `roctracer`, `instrumentation`, `cupti` | `auto` | `auto` omits Proton's `-b` and lets Proton pick the backend matching the active runtime — `rocprofiler` where rocprofiler-sdk is available, `roctracer` otherwise. It is the only portable spelling and is why it is the default: **naming a backend is a version commitment.** `rocprofiler` is the preferred AMD backend upstream but Triton 3.7.x and earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an argparse `invalid choice: 'rocprofiler'` before the payload runs. `roctracer` is the deprecated AMD predecessor; `instrumentation` the intra-kernel path; `cupti` the NVIDIA one, accepted so a recipe stays portable even though aorta's examples are AMD. Pin a backend when you need to know exactly which one measured. |
+| `backend` | `auto`, `rocprofiler`, `roctracer`, `instrumentation`, `cupti` | `auto` | `auto` omits Proton's `-b` and lets Proton pick the backend matching the active runtime. On AMD that resolution is version-dependent — `select_profiler_from_triton_backend('hip')` returns `rocprofiler` on Triton 3.8.0 and newer and `roctracer` on 3.7.1 and earlier; on NVIDIA it is `cupti` either way. It is the only spelling correct on every version and is why it is the default: **naming a backend is a version commitment, and naming `roctracer` is an attach-mode commitment too.** `rocprofiler` is the preferred AMD backend upstream and has been a released backend since Triton 3.8.0 (2026-08-28), whose CLI advertises `-b {cupti,rocprofiler,roctracer,instrumentation}`; 3.7.x and earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an argparse `invalid choice: 'rocprofiler'` before the payload runs. `roctracer` is the deprecated AMD predecessor, and the one *whole-kernel* AMD backend present in *every* release including the oldest; `instrumentation` the intra-kernel path, also present in every release; `cupti` the NVIDIA one, accepted so a recipe stays portable even though aorta's examples are AMD. Pinning `roctracer` means `mode: env` and a payload that drives Proton itself: under the default `mode: cli` such a pin captures an empty tree, and the collector refuses that one pairing. The two AMD tracing backends have *opposite* initialisation contracts, so `rocprofiler` is not covered — it configures itself when `libproton` loads, which makes `mode: cli` the ordering upstream prefers for it — see [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend). `instrumentation` measures *inside* a kernel and publishes **no numeric metrics** — its leaves carry `cycles` / `normalized_cycles`, never `time (<unit>)`, so such a trial reports `proton_artifact_dir` and nothing else. |
+| `backend_mode` | `pcsampling`, `periodic_flushing` | (unset) | Proton's per-backend `--mode`. **Requires an explicit (non-`auto`) backend**, because which values are valid depends on which backend runs: `rocprofiler` takes both, `roctracer` only `periodic_flushing`, `cupti` both. Not valid on `backend: instrumentation`, whose modes are the `instrumentation_mode` key, and rejected together with `instrumentation_mode` *or* `granularity` — all three render into Proton's single `--mode` argument, so only one may be set. What the schema accepts is the backend's documented domain, not what a given build implements: `rocprofiler` + `pcsampling` is rejected by Triton 3.8.0 itself with `ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling`, because AMD PC sampling landed upstream after the 3.8.0 tag. `roctracer` + `periodic_flushing` is accepted by `start()` on 3.8.0, but **accepted is not the same as working**: on Triton 3.7.1 / ROCm 7.0.2 that pair kills the workload with SIGSEGV (exit 139) once kernels dispatch — verified on two payloads — so leave it unset there. Reaching Proton through `mode: cli` is version-dependent — see the paragraph below the table. |
 | `context` | `shadow`, `python` | `shadow` | How a kernel's time is attributed to a calling frame. |
 | `data` | `tree`, `trace` | `tree` | `tree` writes the `.hatchet` file the parser reads; `trace` writes a chrome trace instead, so it produces no numeric metrics. |
-| `instrumentation_mode` | `default`, `mma`, `pcsampling` | (unset) | **Requires `backend: instrumentation`.** |
-| `granularity` | `cta`, `warp`, `warp_2`, `warp_4`, `warp_8`, `warp_group`, `warp_group_2`, `warp_group_4`, `warp_group_8` | (unset) | **Requires `backend: instrumentation`.** |
+| `instrumentation_mode` | `default`, `mma`, `pcsampling` | (unset) | **Requires `backend: instrumentation`.** Renders into Proton's single `--mode` argument, so under `mode: cli` it reaches Proton on Triton 3.8.0 and newer and is silently dropped on 3.7.1 and earlier; `mode: env` carries it on every version. See the paragraph below the table. |
+| `granularity` | `cta`, `warp`, `warp_2`, `warp_4`, `warp_8`, `warp_group`, `warp_group_2`, `warp_group_4`, `warp_group_8` | (unset) | **Requires `backend: instrumentation`.** Version-dependent under `mode: cli` like `instrumentation_mode`, and unusable on Triton 3.7.1 by either route regardless: the rendered `default:granularity=warp` string fails at kernel exit with `RuntimeError: Only warp granularity is supported for now`. Warp is that backend's own default there, so leave it unset. |
+| `hook` | `triton` | (unset) | Renders Proton's `-k triton` under `mode: cli`; exported as `AORTA_PROTON_HOOK` under `mode: env`. Registers Proton's launch hook, which records Triton kernel launch metadata alongside the timing. |
 
 `instrumentation_mode` and `granularity` are rejected with an actionable
 error on any other backend rather than accepted-and-ignored: Proton would
@@ -223,8 +234,33 @@ silently produce a profile you did not ask for. Together they render into
 Proton's single `--mode` argument as
 `<instrumentation_mode>:granularity=<granularity>`, with
 `instrumentation_mode` defaulting to `default` when only `granularity` is
-set. When neither is set the collector omits `--mode` entirely and Proton
-keeps its own default.
+set. `backend_mode` renders into that same argument, which is why the two
+cannot be combined. When none of them is set the collector omits `--mode`
+entirely and Proton keeps its own default.
+
+Every `--mode`-bearing option — `backend_mode`, `instrumentation_mode`,
+`granularity` — reaches Proton through `mode: cli` **only on Triton 3.8.0 and
+newer**. Line 75 of `third_party/proton/proton/proton.py` at the `v3.8.0` tag
+reads `start(args.name, context=args.context, data=args.data, backend=backend,
+mode=args.mode, hook=args.hook)`; the equivalent line on 3.7.1 has no `mode=`,
+so that front-end parses `-m/--mode` and then calls `start()` without it,
+dropping the value on the floor. The CLI wrap renders `--mode` anyway rather
+than refusing the combination: `validate_options` runs in aorta's own
+interpreter, not the workload's, so it cannot know which Triton will execute the
+wrap, and refusing would reject a recipe that is correct on the current release.
+Under `mode: env` the payload reads `AORTA_PROTON_MODE` and passes it to
+`proton.start(mode=...)` itself, which works on every version — that is why the
+shipped `amd-*` examples use it.
+`granularity` does not survive even that route on Triton 3.7.1: the rendered
+`default:granularity=warp` is rejected inside
+`libproton.exit_instrumented_op` (the bare `default` and other knobs such as
+`buffer_size` are accepted, and the typed
+`triton.profiler.mode.Default(granularity="warp")` object works). Warp
+granularity is that backend's default on that version anyway, so the
+`amd-instrumentation` example sets `instrumentation_mode` and omits
+`granularity` deliberately. `hook` is in none of this: every Proton CLI
+forwards `-k`, so it behaves identically in either attach mode on every
+version.
 
 ### Proton attach modes
 
@@ -297,7 +333,148 @@ merge into the subprocess env. It never mutates `os.environ`.
 | `AORTA_PROTON_BACKEND` | `backend` option value; **absent on the default `backend: auto`**, so the workload passes `backend=None` and gets Proton's own selection |
 | `AORTA_PROTON_CONTEXT` | `context` option value |
 | `AORTA_PROTON_DATA` | `data` option value |
-| `AORTA_PROTON_MODE` | Rendered `--mode` value; absent when no intra-kernel knob is set |
+| `AORTA_PROTON_MODE` | Rendered `--mode` value — the intra-kernel pair or `backend_mode`; absent when none of them is set |
+| `AORTA_PROTON_HOOK` | `hook` option value, for `proton.start(hook=...)`; absent when unset |
+
+#### Pinning an explicit AMD backend
+
+The two AMD tracing backends look like a pair and are not one. Their
+initialisation contracts are **opposite**, so what is safe for one is the
+failure mode of the other. Note the incompatibility is in *initialisation
+order*, not in the attach modes themselves: `roctracer` is the only backend an
+attach mode is forced on, while `rocprofiler` works under either — `mode: cli`
+loads `libproton` before the payload, and `mode: env` is equally safe provided
+the payload imports Proton before torch, as `amd-rocprofiler/gelu.py` does.
+
+| Backend | Configures itself | Runtime state it needs at that moment | Attach mode |
+|---|---|---|---|
+| `roctracer` | when the profiling session starts | HIP runtime **already** up | `mode: env` — `mode: cli` is refused |
+| `rocprofiler` | when `libproton.so` is loaded | HSA **not** yet initialised | either; `mode: cli` is the ordering upstream prefers |
+
+An explicit `backend: roctracer` therefore belongs with `mode: env`, and only
+there. Proton's CLI front-end calls its own `_select_backend()` **only when
+`-b` is absent**, and that call initialises the Triton HIP driver as a side
+effect. `roctracer` records nothing unless it starts *after* the HIP runtime
+is up, so naming the backend removes the very step that makes the capture work
+— and Proton does not complain.
+
+Measured on the shipped `triton-vecadd` payload (8x gfx950 / MI355X, ROCm
+7.0.2, Triton 3.7.1, PyTorch 2.13.0+rocm7.2), 3/3 deterministic:
+
+| Wrap | Result |
+|---|---|
+| no `-b` (aorta's `backend: auto`) | ~3 KB hatchet, 27 dispatches across 5 kernels |
+| `-b roctracer` | 160-byte hatchet, `ROOT` frame with empty metrics |
+
+Both runs exit 0. Ordering alone accounts for the difference: driving Proton
+from the Python API with `import torch` deferred past `proton.start()`
+reproduces the empty tree (160 bytes), and initialising the driver before
+`start()` gives a populated one (~1.6 KB with kernels).
+
+In aorta the consequence is a quiet one: `parse_summary` finds no leaf
+metrics in a `ROOT`-only tree, so the trial exits 0 carrying only
+`proton_artifact_dir` — no `proton_gpu_time_ms`, no kernel names, nothing to
+notice in `perf.md`. The collector therefore refuses that pairing at setup:
+`mode: cli` with an explicit `backend: roctracer` raises `ProtonWrapError`
+naming `mode: env` as the route.
+
+**This is a Triton 3.7.x-and-earlier defect, and the guard has an expiry.** The
+byte counts above are from 3.7.1. On 3.8.0 the same pinned `-b roctracer`
+captured 17 kernels on aorta's own MI350 runner, so the bug does not reproduce
+there. The guard stays because 3.7.x is what this repo's containers ship, and
+the GPU test that asserts the bug is still present skips itself from 3.8.0 on —
+so when the floor moves, the test stops claiming something false and the guard
+can be removed deliberately rather than discovered to be dead.
+
+**`rocprofiler` is not covered, and must not be.** The evidence for it is of a
+different kind from everything above — it is read from upstream's source and
+its comments, not measured here — so it is worth being explicit about the
+asymmetry. In Triton v3.8.0's
+`third_party/proton/csrc/lib/Profiler/RocprofSDK/RocprofSDKProfiler.cpp` the
+profiler's constructor calls `rocprofiler::forceConfigure<true>(&protonConfigure)`,
+and that constructor is reached from an `__attribute__((constructor)) void
+protonRocprofSDKLoadHook()` whose own comment says it "Runs during dlopen of
+libproton.so (i.e. `import triton.profiler._C`) … so its constructor — which
+calls rocprofiler_force_configure — runs before any Python code executes." The
+comment above the `forceConfigure` call gives the reason:
+
+> Deferring until doStart() is unsafe: any code that fully initializes HSA
+> beforehand (e.g. triton's HIP driver query at pytest collection time, or a
+> torch import chain) causes rocprofiler-sdk 1.2.0 to silently skip
+> kernel-dispatch buffer tracing installation on already-existing queues,
+> producing an empty dispatch buffer and no per-kernel timing data.
+
+So `rocprofiler` must be configured *before* HSA comes up, which is the exact
+inverse of `roctracer`'s requirement. The CLI path loads `libproton` before the
+payload runs, so `mode: cli` gives it the ordering upstream prefers; an
+env-mode payload that imports torch and only then calls `proton.start()` gives
+it the ordering upstream warns against. Refusing the CLI pin would have pushed
+operators toward the failure mode rather than away from it.
+
+That claim is **not** measured here, unlike the `roctracer` numbers above, and
+the difference in confidence is real: no environment available to this work
+could run it. Triton 3.7.1 predates the backend entirely, and the ROCm 10
+image that has it cannot `dlopen librocprofiler-sdk.so` (see
+[`amd-rocprofiler`](../examples/profiling/proton/amd-rocprofiler/README.md)).
+What is documented for `rocprofiler` is upstream's stated contract; what is
+documented for `roctracer` is an observed byte count.
+
+Note that this is only about the *attach mode*. `rocprofiler` does install an
+HSA queue interceptor, so it is still one of the backends that conflicts with
+a simultaneous `rocprof` capture — see [Combining
+collectors](#combining-collectors). The two questions are independent.
+
+The `mode: cli` guard therefore covers `roctracer` alone, and the backends
+outside it are outside for different reasons rather than one.
+`instrumentation` is outside it because it installs no queue
+interceptor, and a `-b instrumentation` CLI wrap of a payload that carries
+intra-kernel scopes captures them correctly (verified on Triton 3.7.1 — 1738
+bytes, both scopes, cycle counts intact). What `mode: cli` costs on that backend
+is `--mode` on Triton 3.7.1 and earlier, never the capture — a different and
+version-scoped limitation, with `mode: env` as the same remedy; see the
+`instrumentation_mode` row above. `cupti` is not an AMD path and is untested
+here.
+
+`backend: auto` is unaffected, and this is why it is the default: omitting
+`-b` is exactly what keeps Proton's own driver-initialising selection step in
+the picture.
+
+A future queue-intercepting backend has to be classified by its own
+initialisation contract before it is added to the guard. The collector spells
+the refused set out as `frozenset({"roctracer"})` rather than deriving it from
+the interception set for that reason: interception and attach-mode ordering
+turned out to be different properties, and deriving one from the other is what
+produced the wrong answer for `rocprofiler` in the first place.
+
+What `auto` then resolves to is version-dependent, and the artifact does not
+record it. On AMD it is `rocprofiler` from Triton 3.8.0 onward and `roctracer`
+on 3.7.1 and earlier, so two captures of the same payload taken on two images
+can come from two different backends while looking identical. Proton's
+`.hatchet` metadata carries only the device type
+(`{"HIP": {"0": {"arch": "gfx950", ...}}}`) and never the backend name, and the
+collector deliberately publishes no `proton_backend` metric rather than one that
+would imply more than it knows. The Triton version in the run's env snapshot is
+what disambiguates which backend produced a given set of numbers — read it
+before comparing `proton_gpu_time_ms` across runs from different environments.
+
+To pin `roctracer`, use `mode: env` and a payload that imports torch and then
+calls `proton.start()` itself (`rocprofiler` needs the reverse import order, and
+also accepts `mode: cli`):
+
+```yaml
+collect:
+  proton:
+    mode: "env"
+    backend: "roctracer"
+    context: "shadow"
+    data: "tree"
+```
+
+[`examples/profiling/proton/amd-roctracer/`](../examples/profiling/proton/amd-roctracer/)
+is that recipe with a working payload;
+[`amd-instrumentation/`](../examples/profiling/proton/amd-instrumentation/)
+and [`amd-rocprofiler/`](../examples/profiling/proton/amd-rocprofiler/) are
+the same shape for the other two backends.
 
 ### Device selection on AMD
 
@@ -432,7 +609,13 @@ numeric scalars only — and are readable from the per-trial dispatcher JSON at
 `.result.metrics`, which is where the `jq` recipes below look for them.
 
 Only `<c>_artifact_dir` is guaranteed. A capture with no kernel data
-contributes just that key.
+contributes just that key, and so does a capture whose data the parser does
+not speak. Proton's `instrumentation` backend is the standing example of the
+second case: a working intra-kernel capture carries `cycles` and
+`normalized_cycles` on its leaves, not `time (<unit>)` and not `count`. The
+parser keys exclusively on `time (<unit>)`, so an `instrumentation` trial
+publishes no numeric metrics at all however healthy the capture is — read the
+tree with `proton-viewer -m normalized_cycles` instead.
 
 ## Analysis recipes
 
@@ -519,24 +702,122 @@ uses `-m triton.profiler.proton` rather than the `proton` console script
 precisely because the console script's shebang is frequently the wrong
 interpreter.
 
-**`RuntimeError: Could not load \`libroctracer64.so\`` from Proton.** The
-environment's ROCm ships only the versioned soname
-(`libroctracer64.so.4`) while Proton `dlopen`s the unversioned name. Seen on
-container images whose ROCm comes from Python wheels rather than a system
-install. Add a directory of unversioned symlinks to `$LD_LIBRARY_PATH`, or
-run on a host with a system ROCm install (where both spellings exist).
+**``RuntimeError: Could not load `lib<something>.so` `` from Proton.** The
+environment's ROCm ships only the versioned soname (`libroctracer64.so.4`)
+while Proton `dlopen`s the unversioned name. Seen on container images whose
+ROCm comes from Python wheels rather than a system install. Add a directory of
+unversioned symlinks to `$LD_LIBRARY_PATH`, or run on a host with a system ROCm
+install (where both spellings exist).
+
+**Which** library it names follows the backend, so it changed with Triton
+3.8.0: `libroctracer64.so` for `roctracer`, and `librocprofiler-sdk.so` for the
+`rocprofiler` backend that 3.8.0 added. That matters for `backend: auto`
+specifically, because `auto` resolves to `rocprofiler` from 3.8.0 — measured in
+aorta's ROCm 10 base image, where the default example fails on
+`librocprofiler-sdk.so`. The remedy is the same for either name. Note this says
+nothing about whether the backend or its mode is supported; it is purely a
+packaging problem.
 
 **`invalid choice: 'rocprofiler'` from Proton, before the payload runs.**
-The installed Triton predates the `rocprofiler` backend. Drop the pin and
-let the default `backend: auto` choose — that is what it is for. See the
-`backend` row of the [Proton options](#proton-options) table.
+The installed Triton predates the `rocprofiler` backend, which was released in
+Triton 3.8.0 (2026-08-28). 3.7.1, 3.7.0 and 3.6.0+rocm7.2.4 all offer
+`-b {cupti,roctracer,instrumentation}` and nothing else. Upgrade to 3.8.0 or
+newer, or drop the pin and let the default `backend: auto` choose — which on
+3.7.1 hands you `roctracer`. See the `backend` row of the
+[Proton options](#proton-options) table.
+`python -m triton.profiler.proton --help` lists what your build accepts; 3.8.0
+derives that list from `libproton.get_available_profilers()`, which there
+returns `['cupti', 'rocprofiler', 'roctracer', 'instrumentation']`. An
+`AttributeError` from calling that function is the quickest check that a build
+predates the backend registry entirely.
 
-**A Proton profile with a ROOT node and no children.** Proton's queue
-interceptor has to be installed before the first HSA queue is created; a
-run that initialises the GPU earlier captures nothing and still exits 0.
-The default `backend: auto` avoids this by construction, because Proton's
-own backend selection initialises the runtime before the session starts.
-An explicit backend pin skips that step, so pin one only when you need to.
+**`ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling`.**
+A different diagnosis from the one above, and worth separating: here the
+`rocprofiler` backend *is* present — so you are on Triton 3.8.0 or newer — and
+it is the mode that is missing. AMD PC sampling landed upstream after the 3.8.0
+tag, so `backend_mode: pcsampling` needs a post-3.8 `main` build.
+`backend_mode: periodic_flushing` is accepted on 3.8.0, as is `roctracer` with
+the same mode — though see the SIGSEGV entry below before reaching for it.
+Backend availability and mode availability are separate questions on this
+backend; check which one the error is about before editing the recipe.
+
+**The trial died with exit 139 (SIGSEGV, "dumped core") and no traceback.**
+Check whether the recipe sets `backend_mode: periodic_flushing` on
+`roctracer`. On Triton 3.7.1 / ROCm 7.0.2 that pair passes Proton's own mode
+validation and then segfaults once kernels dispatch, taking the workload with
+it and leaving no Python-level diagnostic. Verified on two separate payloads;
+dropping the option makes the same run pass. It is reachable only through
+`mode: env`, because the collector refuses a `mode: cli` `roctracer` pin for
+the unrelated reason above.
+
+The option is left in the schema rather than removed, for the same reason
+`granularity` is: the domain mirrors what Proton documents, and the failure is
+one build's, not the option's. But unlike `granularity` — which fails with a
+catchable `RuntimeError` naming itself — this one gives the operator nothing,
+which is why it gets an entry keyed on the exit code.
+
+**A `mode: cli` recipe's `--mode` value had no effect.** Triton 3.7.1 and
+earlier parse `-m/--mode` in the Proton front-end and then call `start()`
+without it, so `backend_mode` / `instrumentation_mode` / `granularity` are
+rendered into the wrap and dropped; 3.8.0 and newer forward the value. The
+collector renders the flag on every version because it cannot tell from its own
+interpreter which Triton will run the wrap. Switch to `mode: env` if you need
+the knob to take effect independently of the installed version — see the
+paragraph under the [Proton options](#proton-options) table.
+
+**`proton mode 'cli' cannot pin backend 'roctracer'`, at setup.** `roctracer`
+is the only backend this is raised for. The full message states the mechanism:
+
+> Proton's command front-end calls `_select_backend()` only when `-b` is
+> absent, and that call is what initialises the GPU runtime, so roctracer's
+> interceptor is installed before the first HSA queue exists and records
+> nothing: the profile comes back as an empty ROOT frame and the trial
+> reports no proton metrics while exiting 0. Use `proton: {mode: env}` with a
+> payload that calls `proton.start()` after the runtime is up (see
+> `examples/profiling/proton/amd-roctracer`), or leave `backend: auto`, which
+> omits `-b` and is unaffected. Note this applies to roctracer only —
+> rocprofiler configures itself when libproton loads, so its CLI pin is
+> allowed and is the ordering upstream prefers.
+
+See [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend) for
+the measured evidence and for `rocprofiler`'s opposite contract.
+`instrumentation` and `cupti` are not refused either: the first does not
+interpose on queues, and the second is not an AMD path.
+
+**`RuntimeError: Only warp granularity is supported for now`, raised at
+kernel exit from `libproton.exit_instrumented_op`.** Triton 3.7.1's
+instrumentation backend rejects the rendered `<mode>:granularity=<value>`
+string that the `granularity` option produces, even for `granularity: warp`
+— which is that backend's own default. Drop `granularity` from the recipe
+and keep `instrumentation_mode` alone. See the `granularity` row of the
+[Proton options](#proton-options) table.
+
+**A Proton profile with a ROOT node and no children.** An ordering problem,
+and which ordering depends on the backend — the two AMD ones want opposite
+things, so check which one ran before acting.
+
+On `roctracer` the interceptor has to go in *after* the HIP runtime is up; a
+session that starts before the first HSA queue exists captures nothing and
+still exits 0. The default `backend: auto` avoids this by construction,
+because Proton's own backend selection initialises the runtime before the
+session starts, and an explicit `roctracer` pin skips exactly that step —
+which is why the collector refuses it under `mode: cli` and points at
+`mode: env` instead. See
+[Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend) for the
+mechanism and the measured sizes. Under `mode: env` the payload owns the
+ordering: import torch (or otherwise touch the GPU) *before*
+`proton.start()`.
+
+On `rocprofiler` the fix is the reverse. Upstream's own source comment (see
+the same section) warns that anything which fully initialises HSA before
+`libproton.so` is loaded — it names a torch import chain — makes
+rocprofiler-sdk skip dispatch-buffer tracing on the queues that already exist
+and hand back an empty buffer. So an env-mode payload must import
+`triton.profiler` *before* torch;
+[`amd-rocprofiler/gelu.py`](../examples/profiling/proton/amd-rocprofiler/gelu.py)
+does, and says so at the import site. `mode: cli` is not exposed to this at
+all, since it loads `libproton` before the payload. This diagnosis is
+upstream's, not something reproduced here.
 
 **No `.hatchet` written at all, and the payload exited 0.** The payload
 ended by raising `SystemExit` (`raise SystemExit(main())`, or a bare
@@ -572,12 +853,15 @@ for instance). That is a legitimate outcome, so parsing is fail-soft and
 you get only `<c>_artifact_dir`. Check the payload actually dispatched a
 kernel before suspecting the collector.
 
-**`<c>_artifact_dir` present but no numeric metrics.** Three common causes:
+**`<c>_artifact_dir` present but no numeric metrics.** Four common causes:
 `output_format` is not `csv` (the parser reads CSV only), `data: trace`
-rather than `tree` on the Proton side (no `.hatchet` to walk), or the
-payload dispatched nothing. Malformed or partial artifacts degrade the same
-way — an opt-in measurement never turns an otherwise-healthy trial into a
-failure.
+rather than `tree` on the Proton side (no `.hatchet` to walk), the payload
+dispatched nothing, or `backend: instrumentation`, whose leaves carry
+`cycles` / `normalized_cycles` instead of the `time (<unit>)` the parser
+keys on — that last one is expected, not a fault, and the tree itself is
+fine (see [Metrics](#metrics)). Malformed or partial artifacts degrade the
+same way — an opt-in measurement never turns an otherwise-healthy trial into
+a failure.
 
 **`collect: <name> requested but no _aorta_collect_dir was threaded into the
 trial config (non-writing rank?); skipping.`** The platform only threads the
@@ -633,7 +917,10 @@ Two consequences worth internalising:
   the opposite. A collector that cannot run (no `rocprofv3`, a Proton wrap of
   a command its front end cannot execute, no `env(1)` for a device
   translation, an artifact directory that cannot be prepared) fails the
-  trial's setup rather than running it unprofiled. And a profiler is a real
+  trial's setup rather than running it unprofiled. A configuration that would
+  run and measure nothing is refused there too: a `mode: cli` pin of
+  `roctracer` (see
+  [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend)). And a profiler is a real
   process in the trial: its own non-zero exit is the trial's exit code, and
   `rocprof`'s `simple_timer` stderr lines are visible to the classifier's
   stderr detectors (see [Troubleshooting](#troubleshooting)). Profiling is a
@@ -660,8 +947,10 @@ the Proton wrap reads and rewrites them — see
 
 ## See also
 
-- [`examples/profiling/README.md`](../examples/profiling/README.md) — four
-  runnable examples (HIP GEMM, torch matmul, Triton vecadd, Triton softmax).
+- [`examples/profiling/README.md`](../examples/profiling/README.md) — seven
+  runnable examples (HIP GEMM, torch matmul, Triton vecadd, Triton softmax,
+  plus one per pinned AMD Proton backend: roctracer, instrumentation,
+  rocprofiler).
 - [`recipes/README.md`](../recipes/README.md#schema-rules-full-detail) — the
   `collect:` schema, cell-level overrides, CLI precedence.
 - [`docs/layer-numerics.md`](layer-numerics.md) — the other documented

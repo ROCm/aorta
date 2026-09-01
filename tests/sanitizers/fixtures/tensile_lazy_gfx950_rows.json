@@ -1,12 +1,13 @@
 {
   "_comment": "Real hipBLASLt hardware-predicate -> Tensile library mapping, extracted from the shipped lazy master index. Ground truth for the variant selection in scripts/sanitizers/prepare_gemm_isa.py: the filename tokens (_CU<n>, _ID<hex>[-<hex>]) restate these predicates, so the selector must reproduce this table. Regenerate by msgpack-decoding the source file below from the image and re-running the extraction.",
   "source": {
-    "image": "rocm/pytorch:rocm7.14_ubuntu26.04_py3.14_pytorch_release_2.12.0@sha256:8785d67393d9f452cbae2362003f2e211289f9c12163a8c168496724664a0fda",
-    "rocm_version": "7.14.0",
+    "image": "rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c",
+    "rocm_version": "10.0.0",
     "file": "lib/hipblaslt/library/gfx950/TensileLibrary_lazy_gfx950.dat.zlib",
     "library_type": "Hardware",
     "family": "SS_SS_HA_Bias_SAV_UA"
   },
+  "_regeneration_comment": "Re-decoded for the ROCm 10 stack flip. The rows below are byte-identical to those decoded from the previous provenance (rocm/pytorch:rocm7.14_ubuntu26.04_py3.14_pytorch_release_2.12.0@sha256:8785d67393d9f452cbae2362003f2e211289f9c12163a8c168496724664a0fda, rocm_version 7.14.0) -- only this source block changed. Both indices were decoded with the same extractor and the 7.14 result was diffed against the previously committed rows to confirm the procedure before re-recording it, so an unchanged table here is a measurement rather than an assumption. Token blocks shipped for gfx950 are also unchanged across the two images (_CU128_ID75a0, _CU256_ID75a0, _ID75a0, _ID75a3-75a2, _ID75a8), the SS_SS_HA_Bias_SAV_UA family ships the same three variants per layout in both. An earlier revision of this note claimed ROCm 10 ships more bundles overall, '629 vs 308 .co files'; that comparison is withdrawn as unsound rather than restated, because only one side of it can be checked here. A ROCm 10-era gfx950 library tree (a local rocm-libraries build, not the image cited above) holds 313 .co plus 314 .dat.zlib, 627 files total -- which makes 629 almost certainly a total-file count rather than a .co count, and so not comparable with 308. On that evidence ROCm 10's .co count is close to 7.14's rather than double it, but neither number is re-measured on its own image: re-count both with the same predicate before relying on either.",
   "_resolution_comment": "This table is the row DATA only. How the rows are walked is not in it and cannot be inferred from it -- notably that a row whose predicate matches but which offers nothing for a family does not end the walk (findBestSolution guards its return with `if(rv)`), and that a chip id may match a row via the fallback graph. Both come from tensilelite, cited below and mirrored in prepare_gemm_isa.py.",
   "resolution": {
     "walk": "tensilelite include/Tensile/ExactLogicLibrary.hpp -- ExactLogicLibrary::findBestSolution, HardwarePredicate::isFallbackMatch",

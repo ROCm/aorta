@@ -20,6 +20,24 @@
 #     under extra_env are passed verbatim (no shell expansion) -- use ABSOLUTE
 #     paths. A wrong/placeholder path fails setup instead of silently measuring
 #     stock HIP.
+#   * On a wheel-layout ROCm install (ROCm 10 / TheRock, where there is no
+#     /opt/rocm) two further steps, because this workload builds the bench and
+#     then execs it:
+#       1. hipcc is looked up as $HIPCC, then /opt/rocm/bin/hipcc, then PATH. A
+#          wheel install keeps it at <core>/bin/hipcc and does not put it on
+#          PATH, so set `workload_config.hipcc` or $HIPCC. This one is loud --
+#          setup fails with a named "hipcc not found" error.
+#       2. hipcc output carries neither DT_RPATH nor DT_RUNPATH and these images
+#          export no LD_LIBRARY_PATH, so the bench dies before main at exit 127
+#          ("libamdhip64.so.N: cannot open shared object file") and surfaces
+#          only as a cell that produced no step times -- read `stderr_tail` in
+#          the trial's failure_details to see it. Put the ROCm lib dirs on
+#          LD_LIBRARY_PATH in the shell that invokes aorta, as CI does (see
+#          .github/workflows/gpu-tests.yml):
+#            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+#          That covers hrx_off only. `extra_env` REPLACES an inherited variable
+#          rather than appending to it, so the hrx_on cell's own LD_LIBRARY_PATH
+#          must list the ROCm lib dirs too, after the HRX one so HRX still wins.
 #
 # Run (ticket comes from `ticket:` below; add --strict to fail if a cell errors
 # or never runs):

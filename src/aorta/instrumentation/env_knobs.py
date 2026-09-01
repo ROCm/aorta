@@ -632,6 +632,26 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         source_reference=REF_HIPBLASLT_SO,
         reference_build=REFERENCE_BUILD_GEMM,
     ),
+    # Marked absent from the reference build on upstream dating rather than on a
+    # binary we hold: compressed .dat libraries arrived in hipblaslt #8294
+    # (2026-06-24) and this bound in #8796 (2026-07-09), both long after ROCm
+    # 7.0.2. Worth stating because a local audit can disagree without either side
+    # being wrong -- a 7.0.2.2 install reports it PRESENT (that line was rebuilt
+    # after the fix), while ROCm 7.14 reports it absent despite being newer than
+    # 7.0.2, having been branched between the two commits.
+    EnvironmentKnob(
+        name="TENSILE_MAX_DECOMPRESSED_BYTES",
+        library="hipblaslt",
+        consumer=(
+            "caps the decompressed size of a zlib-compressed Tensile library; the "
+            "bound may only be lowered from the built-in 16 GiB, and a stream that "
+            "exceeds it is rejected so the loader falls back to the uncompressed "
+            ".dat -- so it can change which file backs the kernels"
+        ),
+        category="gemm_loading",
+        source_reference=ABSENT_FROM_REFERENCE_BUILD,
+        reference_build=REFERENCE_BUILD_GEMM,
+    ),
     EnvironmentKnob(
         name="ROCBLAS_TENSILE_LIBPATH",
         library="rocblas",
@@ -1014,9 +1034,10 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         name="TENSILE_ADAPTIVE_GEMM_NTAB_ALGO",
         library="hipblaslt",
         consumer=(
-            "adaptive-GEMM N-table algorithm selection; the name is in ROCm 7.14's "
-            "libhipblaslt string table but its call site is not traced, so the "
-            "classification is forward-compat rather than a behaviour claim"
+            "adaptive-GEMM N-table algorithm selection; the name is in ROCm 10.0's "
+            "libhipblaslt string table (and was in 7.14's) but its call site is not "
+            "traced, so the classification is forward-compat rather than a "
+            "behaviour claim"
         ),
         category="gemm_forward_compat",
         source_reference=ABSENT_FROM_REFERENCE_BUILD,
@@ -1154,7 +1175,9 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         name="HIPBLASLT_BENCH_PERF_ALL",
         library="hipblaslt",
         consumer=(
-            "sibling of HIPBLASLT_BENCH_PERF; absent from the reference build, present in ROCm 7.2.3"
+            "sibling of HIPBLASLT_BENCH_PERF; absent from the reference build and "
+            "from ROCm 10.0, present in ROCm 7.2.3 -- retained so a customer on a "
+            "build that has it still gets it diffed"
         ),
         category="gemm_diagnostics",
         source_reference=ABSENT_FROM_REFERENCE_BUILD,
