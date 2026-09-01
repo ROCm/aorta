@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -1851,3 +1852,195 @@ def test_hidden_path_uploads_declare_include_hidden_files():
                 if globs_hidden_dir and not with_.get("include-hidden-files"):
                     offenders.append(f"{path.name}: {step.get('name')}")
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# The CI image's docker client, and the opt-in route to the daemon.
+#
+# `tokenspeed_serve` runs the TokenSpeed engine in a container of its own, while
+# nightly_eval.py runs INSIDE aorta-ci-gpu. Its setup() begins with
+# `shutil.which("docker")`, so without a client in the image every serving cell
+# errors and fail-closed reddens the whole nightly. These are file-shape
+# assertions, not a build: they cannot prove the image works, only that nobody
+# removed the pieces that make it possible. See docs/tokenspeed-gating-rollout.md.
+# ---------------------------------------------------------------------------
+
+
+def _ci_dockerfile() -> str:
+    return (_REPO_ROOT / "docker" / "Dockerfile.ci-gpu").read_text("utf-8")
+
+
+def _split_mount(mount: str) -> list[str]:
+    """Split a compose short-form mount into its colon-separated fields.
+
+    Brace-aware, because `${VAR:-/default}` carries colons of its own and a
+    plain `split(":")` tears the default value off the variable.
+    """
+    fields, current, depth = [], [], 0
+    for char in mount:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        if char == ":" and depth == 0:
+            fields.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    fields.append("".join(current))
+    return fields
+
+
+def _docker_cli_installer():
+    """Import the installer. Nothing runs at import: the download is behind
+    ``main()``, which only ``__main__`` calls."""
+    path = _REPO_ROOT / "docker" / "install_docker_cli.py"
+    spec = importlib.util.spec_from_file_location("install_docker_cli", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_ci_image_installs_a_docker_client():
+    """The nightly cannot launch a serving container without one."""
+    installer = _REPO_ROOT / "docker" / "install_docker_cli.py"
+    assert installer.is_file()
+
+    dockerfile = _ci_dockerfile()
+    assert "install_docker_cli.py" in dockerfile, (
+        "docker/Dockerfile.ci-gpu no longer installs a docker client; "
+        "tokenspeed_serve's setup() fails on \"'docker' not on PATH\""
+    )
+    # Copied AND run: a COPY on its own leaves the script in the image without
+    # ever putting a binary on PATH, which reads as installed and is not.
+    assert "COPY install_docker_cli.py" in dockerfile
+    assert "RUN python /usr/local/share/aorta/install_docker_cli.py" in dockerfile
+
+
+def test_the_docker_client_is_pinned_by_version_and_digest():
+    """Same rule as the base image and the pip pins: no moving targets."""
+    installer = _docker_cli_installer()
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", installer.VERSION), installer.VERSION
+    assert re.fullmatch(r"[0-9a-f]{64}", installer.SHA256), installer.SHA256
+    assert installer.VERSION in installer.URL
+    assert installer.URL.startswith("https://")
+
+
+def test_the_ci_image_carries_no_docker_daemon():
+    """Client only. The static tarball ships dockerd, containerd and runc
+    alongside the client, so shipping a daemon is a one-word edit away -- and a
+    daemon in the image would be a second, nested container runtime rather than
+    the sibling pattern the workload and the socket mount are built around."""
+    assert _docker_cli_installer().MEMBER == "docker/docker"
+
+    # And the build says so itself, so this cannot rot into a comment.
+    assert "dockerd" in _ci_dockerfile()
+
+
+def test_the_daemon_socket_is_opt_in_rather_than_always_mounted():
+    """Mounting the socket grants effective root on the host, so it must not be
+    something a run gets by default. The base compose documents override files
+    as the mechanism for optional mounts ("Do not add a volume here")."""
+    import yaml
+
+    base = yaml.safe_load(
+        (_REPO_ROOT / "docker" / "docker-compose.build.yaml").read_text("utf-8")
+    )
+    volumes = base["services"]["torchenv"].get("volumes") or []
+    assert not any("docker.sock" in str(v) for v in volumes), (
+        "the daemon socket is mounted by the DEFAULT compose file; it belongs "
+        "in docker-compose.docker-socket.yaml so enabling it is a deliberate act"
+    )
+
+    override_path = _REPO_ROOT / "docker" / "docker-compose.docker-socket.yaml"
+    assert override_path.is_file()
+    override = yaml.safe_load(override_path.read_text("utf-8"))
+    mounts = override["services"]["torchenv"]["volumes"]
+    assert any("docker.sock" in m for m in mounts)
+
+    # The scratch mount must be the SAME path on both sides. The -v sources the
+    # workload builds from work_dir are resolved by the HOST daemon, so a path
+    # that exists only inside the container makes the daemon create an empty one
+    # and mount that -- an engine container with no scripts and no exports.
+    same_path = [m for m in mounts if "docker.sock" not in m]
+    assert same_path, "no scratch mount in the socket override"
+    for mount in same_path:
+        source, target = _split_mount(mount)[:2]
+        assert source == target, (
+            f"{mount}: work_dir must resolve to the same path for the host "
+            "daemon as for the process inside the container"
+        )
+
+
+def test_no_ci_lane_gets_the_daemon_socket_without_asking():
+    """The setup action is shared by the GPU gate, the sanitizer nightly, the
+    lock-requirements job, refresh-baselines and the eval lane. Exactly one of
+    them has a workload that needs the daemon, so the socket must be opt-in per
+    lane rather than a property of being set up -- otherwise one workload's
+    requirement hands host root to four unrelated jobs."""
+    import yaml
+
+    action = yaml.safe_load(
+        (_REPO_ROOT / ".github/actions/rocm-ci-setup/action.yml").read_text("utf-8")
+    )
+    assert action["inputs"]["docker-socket"]["default"] == "false"
+
+    enabled = []
+    for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        for name, job in (_load_workflow(path.name).get("jobs") or {}).items():
+            for step in job.get("steps") or []:
+                if "rocm-ci-setup" not in (step.get("uses") or ""):
+                    continue
+                if str((step.get("with") or {}).get("docker-socket", "")).lower() == "true":
+                    enabled.append(f"{path.name}:{name}")
+
+    # Not a ban -- the eval lane will need it the day tokenspeed_serve is
+    # promoted out of `pending_entries`. It is a review tripwire: turning it on
+    # is a security decision for whoever owns this CI, so it should never be a
+    # quiet diff. Update this list, and say who signed off, in the same PR.
+    assert enabled == [], (
+        f"lanes mounting the host docker socket: {enabled}. This grants "
+        "effective root on the runner; see docker/docker-compose.docker-socket.yaml"
+    )
+
+
+def test_the_socket_toggle_does_not_shadow_a_compose_substitution():
+    """The override's mount sources are `${NAME:-default}` substitutions, so any
+    env var the setup action exports under one of those names is read as a PATH.
+    A boolean toggle sharing a name with the socket's own variable would make
+    compose bind-mount a directory called `true` -- and only on the first run
+    that turned the socket on, which is the worst time to find out."""
+    import yaml
+
+    override = yaml.safe_load(
+        (_REPO_ROOT / "docker" / "docker-compose.docker-socket.yaml").read_text("utf-8")
+    )
+    substituted = {
+        match
+        for mount in override["services"]["torchenv"]["volumes"]
+        for match in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", mount)
+    }
+    assert substituted, "no substitutions in the override; this guard is asserting nothing"
+
+    action = yaml.safe_load(
+        (_REPO_ROOT / ".github/actions/rocm-ci-setup/action.yml").read_text("utf-8")
+    )
+    for step in action["runs"]["steps"]:
+        clash = substituted & set(step.get("env") or {})
+        assert not clash, (
+            f"step {step.get('name')!r} exports {sorted(clash)}, which "
+            "docker-compose.docker-socket.yaml substitutes as a mount path"
+        )
+
+
+def test_the_socket_override_states_the_privilege_it_grants():
+    """It is a root-equivalent grant. Whoever enables it should not have to
+    infer that, and a future edit should not be able to quietly drop it."""
+    text = (
+        _REPO_ROOT / "docker" / "docker-compose.docker-socket.yaml"
+    ).read_text("utf-8")
+    assert "root on the host" in text
+    # And an alternative for CI that cannot accept it.
+    assert "outside the CI container" in text

@@ -10,8 +10,11 @@ it is the fastest way to repair or re-verify a client on a runner, and it record
 in the image itself which artifact the binary came from.
 
 Deliberately stdlib-only and downloader-free. The base image guarantees python
-(pip installs and the layout guard both need it) but promises neither curl nor
-wget, so shelling out to one would add a dependency this image does not have.
+(the layout guard, the ROCm fixup blocks and the pip pins all run it) but
+promises neither curl nor wget, so shelling out to one would add a dependency
+this image does not have. Stdlib-only also means the Ubuntu 26.04 / py3.14 base
+this now sits on moved it for free, which a pinned third-party dependency would
+not have.
 """
 
 from __future__ import annotations
