@@ -512,14 +512,17 @@ is the same every time:
 
 Decode is untouched — TPOT and ITL are identical to three significant figures.
 So is median TTFT. What moves is the *tail* of time-to-first-token, by almost
-exactly 0.93 s, and the step duration grows by almost exactly the same 0.93 s.
+exactly 0.92 s, and the step duration grows by almost exactly the same 0.92 s.
 So the tail of the batch waits about a second to be admitted and then runs at
-full speed. The magnitude repeats to within 1.4% across all three occurrences,
-which argues for a fixed-duration blocking event in the prefill or scheduling
-path rather than contention, which would vary. One of the three also admitted
-128 concurrent requests instead of the usual 192. Nothing in the server log
-marks the event. Attributing it needs server-side profiling and is not done
-here; it is filed under Not done below.
+full speed. All six measurements — three durations, three TTFT tails — fall
+between 0.914 and 0.930 s, a 1.8% peak-to-peak spread, which argues for a
+fixed-duration blocking event in the prefill or scheduling path rather than
+contention, which would vary. One of the three also admitted 128 concurrent
+requests instead of the usual 192. Nothing in the server log marks the event.
+Attributing it needs server-side profiling and is not done here; it is filed
+under Not done below, and reported upstream as
+[tokenspeed#1355](https://github.com/lightseekorg/tokenspeed/issues/1355) with
+the full 36-step table.
 
 **What this means for quoting these numbers.** Clean steady-state serving
 throughput on this cell reproduces to 1.13% CV, which is in line with the
@@ -745,14 +748,17 @@ which `elapsed_sec` includes and `container_elapsed_sec` does not.
 
 ## Not done
 
-- **What the ~0.93 s serving stall is.** Measured above at 8% of bench steps on
+- **What the ~0.92 s serving stall is.** Measured above at 8% of bench steps on
   the `conc-64` cell, with a signature specific enough to chase: fixed
   magnitude, tail-of-TTFT only, decode untouched, and nothing in the server
   log. Ruling it in or out needs server-side profiling across a run long enough
   to catch three or four of them — `rocprof` or `proton` against a
   twelve-step cell would do it. Until then, load cells should run twelve steps
   rather than three so the mean is not a sample of three from a bimodal
-  population.
+  population. Reported upstream with the per-step data as
+  [tokenspeed#1355](https://github.com/lightseekorg/tokenspeed/issues/1355);
+  the engine side is theirs to profile, but the twelve-step guidance holds here
+  regardless of what they find.
 - **RCCL mitigations at wide TP.** Still untouched. TP=8 now runs, so the axis
   they would apply to exists; nothing has varied them.
 - **TP=8 on a model that saturates above four cards.** Qwen3-32B peaks at TP=4,

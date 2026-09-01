@@ -740,9 +740,12 @@ So: **quote a load number with the step count it was measured at, and do not
 compare two three-step means as though the difference were signal.** Twelve
 steps costs about 20 extra seconds against a 300 s bring-up, which is the
 cheapest variance reduction available anywhere in this workload. The stall
-itself — a fixed ~0.93 s delay to the tail of time-to-first-token, with decode
-untouched and nothing in the server log — is undiagnosed; see
-[Widening the TokenSpeed serving matrix](tokenspeed-matrix-widening.md).
+itself — a fixed ~0.92 s delay to the tail of time-to-first-token, with decode
+untouched and nothing in the server log — is undiagnosed here and reported
+upstream as
+[tokenspeed#1355](https://github.com/lightseekorg/tokenspeed/issues/1355); see
+[Widening the TokenSpeed serving matrix](tokenspeed-matrix-widening.md) for the
+measurement.
 
 The committed recipes still say `steps: 3`. They are left that way deliberately:
 changing it would invalidate every table in this document that was measured at
@@ -1017,6 +1020,28 @@ and applies them to the workload process — but the engine runs in a container,
 which does not inherit them. Forwarding uses the platform's `docker_env_flags`
 helper. Without it both cells of a mitigation A/B benchmark the same
 configuration and report a spurious "no effect".
+
+### The repo's py3.14 stack is the CI image, not the interpreter these runs use
+
+PR #411 moved the CI and dev stack to ROCm 10 / Ubuntu 26.04 / Python 3.14, and
+the Dockerfiles, workflows and `docs/ci-testing-plan.md` all now describe that
+base. None of it applies to a host-side `aorta sweep run`. These recipes drive a
+digest-pinned *TokenSpeed* image and use `environment: local`, so the
+interpreter that runs aorta is whatever the operator's venv holds, and
+`pyproject.toml` still declares `requires-python = ">=3.10"` with the CPU matrix
+covering 3.10 through 3.14.
+
+That matters because the two ends of a Slurm allocation can disagree. On the
+cluster these tables were measured on, the login node was Ubuntu with
+`/usr/bin/python3` at 3.10 while the compute nodes were CentOS Stream 9 with
+only 3.9, so a venv built on the login node could not start on the node that
+held the GPUs. The fix is a portable interpreter that satisfies both — a
+uv-managed CPython (3.11 was used here) placed on a filesystem both sides can
+read. Nothing about #411 removes this: it puts a 3.14 interpreter inside
+container images, not on the compute nodes, and reading the repo's current
+stack documentation as a statement about the host is the mistake to avoid.
+Check `python3 -V` on an allocated node before trusting a venv built anywhere
+else.
 
 ## CI gating
 
