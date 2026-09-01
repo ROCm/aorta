@@ -4083,6 +4083,10 @@ def test_an_unusable_token_total_fails_rather_than_skipping_the_floor(tmp_path, 
     The floor is computed from `total_output_tokens`, and an export omitting it
     would otherwise leave the rollout's one mode-specific guard silently
     inactive while the cell reported a distribution it had not verified.
+
+    Reported once, not twice. `_missing_core_metrics` requires this field
+    unconditionally under rollout, so a second report from the floor itself was
+    two failure_details and a failure_count of two for one broken export.
     """
     doc = _rollout_doc()
     doc.pop("total_output_tokens")
@@ -4092,10 +4096,59 @@ def test_an_unusable_token_total_fails_rather_than_skipping_the_floor(tmp_path, 
     result = wl.run()
 
     assert not result.passed
-    assert any(
-        detail["reason"] == "result_json_unusable" and "total_output_tokens" in detail["detail"]
+    unusable = [
+        detail
         for detail in result.failure_details
-    ), result.failure_details
+        if detail["reason"] == "result_json_unusable"
+        and "total_output_tokens" in detail["detail"]
+    ]
+    assert len(unusable) == 1, result.failure_details
+    assert result.failure_count == 1, result.failure_details
+
+
+def test_a_zero_token_total_is_an_unusable_export_not_a_collapsed_policy(
+    tmp_path, monkeypatch
+):
+    """The two rollout audits must not both claim the same broken export.
+
+    `total_output_tokens: 0` beside 32 completed requests is not a policy that
+    stopped generating -- it is a measurement that cannot be read, and
+    `_missing_core_metrics` says so because it requires the field to be strictly
+    positive. The floor previously also divided it out to a mean of 0.0 and
+    reported `rollout_output_too_short`, which named an RL failure mode for what
+    is an export fault and would have sent a reader looking at the policy.
+    """
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=0)])
+    result = wl.run()
+
+    assert not result.passed
+    reasons = [detail["reason"] for detail in result.failure_details]
+    assert "rollout_output_too_short" not in reasons, result.failure_details
+    assert reasons == ["result_json_unusable"], result.failure_details
+
+
+def test_the_floor_and_the_core_metric_audit_do_not_double_report(
+    tmp_path, monkeypatch
+):
+    """The case the floor exists for stays a single, correctly-named failure.
+
+    An export that is readable and short must produce exactly one detail, from
+    the floor -- the audit has nothing to say about it, since every core metric
+    is present and positive. This is the other side of the two tests above: the
+    audit owns unreadable exports, the floor owns short ones, and neither should
+    start covering for the other.
+    """
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=33)])
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "rollout_output_too_short"
+    ], result.failure_details
 
 
 def test_the_in_container_audit_also_enforces_the_floor(tmp_path):

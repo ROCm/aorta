@@ -2339,12 +2339,18 @@ class TokenSpeedServeWorkload(Workload):
         # average and an absent or zero value is correct, not a fault.
         #
         # Which source answers that depends on whether the configuration
-        # actually determines the output length. `random` does: the recipe pins
-        # the length and EOS is ignored -- forced on by the bench CLI and
-        # required to be so by validation above -- which holds it there, so
-        # `output_len` is exact. The `_ignore_eos` half of the condition is
-        # therefore redundant today and kept as the statement of what the branch
-        # depends on.
+        # actually determines the output length. `random` does *when EOS is
+        # ignored*: the recipe pins the length and the bench CLI forces EOS to be
+        # ignored, which holds it there, so `output_len` is exact.
+        #
+        # The `_ignore_eos` half of this condition used to be unreachable, and
+        # was kept only as a statement of what the branch depended on. Rollout
+        # makes it load-bearing: it runs on `random` with `_ignore_eos` false,
+        # reaching the forced flag through the request body, so its lengths come
+        # from the policy and not from `output_len`. Deciding from `output_len`
+        # there would require TPOT of a rollout whose completions may all be a
+        # single token. The condition already routes rollout to the export-based
+        # branch below, which is the correct source for it.
         #
         # ShareGPT does not. It takes its lengths from the conversations and the
         # bench CLI never sees `output_len` at all, and with `ignore_eos: false`
@@ -2824,19 +2830,27 @@ class TokenSpeedServeWorkload(Workload):
             # throughput.
             if self._rollout and self._min_mean_output_tokens > 0:
                 total_output = record.doc.get("total_output_tokens")
-                if type(total_output) is not int:
-                    failure_details.append(
-                        {
-                            "reason": "result_json_unusable",
-                            "step": record.step,
-                            "detail": (
-                                f"total_output_tokens={total_output!r} in "
-                                f"{record.path.name}; a rollout's floor cannot be "
-                                "checked without it"
-                            ),
-                        }
-                    )
-                elif type(completed) is int and completed > 0:
+                # Only compare when there is a number to compare. Every other
+                # shape of `total_output_tokens` -- absent, non-numeric, boolean,
+                # zero, negative -- is already reported as `result_json_unusable`
+                # by `_missing_core_metrics` below, which requires this field
+                # unconditionally under rollout: rollout forces `_ignore_eos`
+                # false, and that is precisely the branch which adds it to the
+                # required set.
+                #
+                # Checking it here as well produced two failure_details for one
+                # broken export, and at zero it was worse than redundant -- the
+                # floor announced a policy that had stopped generating, when
+                # `total_output_tokens: 0` alongside completed requests is an
+                # unreadable measurement rather than a collapsed policy. The
+                # audit owns "we could not read it"; the floor owns "we read it
+                # and it is too short".
+                if (
+                    type(total_output) is int
+                    and total_output > 0
+                    and type(completed) is int
+                    and completed > 0
+                ):
                     mean_output = total_output / completed
                     if mean_output < self._min_mean_output_tokens:
                         failure_details.append(
