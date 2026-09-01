@@ -85,6 +85,13 @@ die() { echo "ERROR: $*" >&2; exit 2; }
 [ -n "${HOOK}" ] || die "no hook given; pass --hook /path/to/librocjitsu_dbi_hooks.so"
 [ -f "${HOOK}" ] || die "hook not found: ${HOOK}"
 [ -z "${OBJECT_IN}" ] || [ -f "${OBJECT_IN}" ] || die "object not found: ${OBJECT_IN}"
+# The loader echoes this path on failure and every verdict check below reads the
+# log a line at a time, anchored to the printing component's prefix. A newline in
+# the path would break that one-event-per-line invariant -- the tail would start
+# its own line at column 0 and could impersonate hook output past the anchor.
+case "${OBJECT_IN}" in
+    *$'\n'*) die "--object path must not contain a newline" ;;
+esac
 
 ROCM="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}"
 export PATH="${ROCM}/lib/llvm/bin:${ROCM}/bin:${PATH}"
@@ -184,14 +191,17 @@ rc=$?
 elapsed=$(( $(date +%s) - start ))
 echo "   exit ${rc} after ${elapsed}s"
 
-# Every line the hook emits carries this prefix. Anchoring the checks below to it
-# keeps caller-controlled text out of the verdict: the loader echoes the object
-# path when hipModuleLoad fails, so an --object filename chosen to look like hook
-# output would otherwise land in the same log the verdict is read from.
-HOOK_LINE='\[rocjitsu-dbi-hooks\]'
-# Same reasoning for the loader marker: it is the loader that prints it, but the
-# loader also echoes the object path on failure, so anchor to its prefix too.
-LOADER_LINE='\[consan_4112_load\]'
+# Every line the hook emits starts with this prefix, so both patterns below are
+# start-anchored and every verdict grep is written as "${HOOK_LINE} ..." or
+# "${LOADER_LINE} ...". Requiring the prefix is not enough on its own: the loader
+# echoes the object path when hipModuleLoad fails, and the prefix is itself just
+# text a filename can contain, so an --object named to look like hook output gets
+# echoed into the log the verdict is read from and satisfies an unanchored match.
+# The anchor is what makes it hook-owned -- only the hook can put its prefix at
+# column 0. Leading whitespace is tolerated because indentation is not
+# caller-controlled; anything the loader echoes has its own prefix in front.
+HOOK_LINE='^[[:space:]]*\[rocjitsu-dbi-hooks\]'
+LOADER_LINE='^[[:space:]]*\[consan_4112_load\]'
 
 echo
 echo "== relevant hook output"
@@ -244,15 +254,26 @@ fi
 # fix did not work, which is the most damaging direction this script can be wrong
 # in.
 GROWTH_LINE='ConSan MOI first-light probe rejected patched-image file growth'
+OVERLAP_LINE='ConSan final validation found partially overlapping'
 if grep -qE "${HOOK_LINE} ${GROWTH_LINE}" "${LOG}"; then
-    echo "RESULT: inconclusive -- rejected on the patched-image growth ceiling, which is"
-    echo "        a configurable capacity policy and NOT the overlapping-patch defect."
-    grep -E "${GROWTH_LINE}" "${LOG}" | head -1 | cut -c1-200
-    echo "        The transform never reached final validation, so this run is evidence"
-    echo "        neither for nor against the defect."
-    if grep -qE "${HOOK_LINE} ConSan final validation found partially overlapping" "${LOG}"; then
-        echo "        NOTE: the overlap diagnostic IS present above -- read the log, this"
-        echo "        may still be a reproduction that the ceiling merely truncated."
+    # Both diagnostics can appear in one log when it covers several loads, and
+    # nothing here attributes them to the same object -- so this stays
+    # inconclusive. It gets its own branch because the wording below asserts the
+    # transform stopped before final validation, and the overlap diagnostic is a
+    # final-validation diagnostic: printing both would state as fact something
+    # this script has evidence against.
+    if grep -qE "${HOOK_LINE} ${OVERLAP_LINE}" "${LOG}"; then
+        echo "RESULT: inconclusive -- the log carries BOTH the patched-image growth"
+        echo "        ceiling (a capacity policy) and the overlapping-patch-range"
+        echo "        diagnostic (the defect). Nothing here ties them to the same object,"
+        echo "        so this is not called a reproduction. Read the log."
+        grep -E "${HOOK_LINE} (${GROWTH_LINE}|${OVERLAP_LINE})" "${LOG}" | head -4 | cut -c1-200
+    else
+        echo "RESULT: inconclusive -- rejected on the patched-image growth ceiling, which is"
+        echo "        a configurable capacity policy and NOT the overlapping-patch defect."
+        grep -E "${HOOK_LINE} ${GROWTH_LINE}" "${LOG}" | head -1 | cut -c1-200
+        echo "        The transform never reached final validation, so this run is evidence"
+        echo "        neither for nor against the defect."
     fi
     echo "        Retry with a ceiling above the required total, e.g."
     echo "          RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_PERCENT=900"
@@ -266,9 +287,10 @@ fi
 # bare "status=4112" substring. The loader echoes the object path when
 # hipModuleLoad fails, so an --object argument whose filename contains that
 # substring would otherwise be echoed back into the log and read as a
-# reproduction.
+# reproduction. HOOK_LINE is start-anchored precisely so that echo cannot pass
+# for hook output here.
 if grep -qE "${HOOK_LINE} ConSan load rejection .*reason=transform-error .*status=4112" "${LOG}"; then
-    if ! grep -qE "${HOOK_LINE} ConSan final validation found partially overlapping" "${LOG}"; then
+    if ! grep -qE "${HOOK_LINE} ${OVERLAP_LINE}" "${LOG}"; then
         echo "RESULT: inconclusive -- a status=4112 transform rejection, but WITHOUT the"
         echo "        overlapping-patch-range diagnostic this script tests for, and without"
         echo "        the known growth-ceiling explanation either. 4112 is a shared bucket,"
@@ -281,7 +303,7 @@ if grep -qE "${HOOK_LINE} ConSan load rejection .*reason=transform-error .*statu
     if [ "${rc}" -eq 92 ]; then
         echo "RESULT: reproduced -- transform rejected with status=4112 on overlapping"
         echo "        patch ranges."
-        grep -E "final validation found" "${LOG}" | head -1
+        grep -E "${HOOK_LINE} ${OVERLAP_LINE}" "${LOG}" | head -1 | cut -c1-200
         [ "${KEEP}" -eq 1 ] && echo "log: ${LOG}"
         exit 0
     fi
