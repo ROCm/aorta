@@ -131,7 +131,9 @@ def proton_kwargs(args: argparse.Namespace) -> dict[str, str | None]:
     which keeps a standalone run and a trial configured the same way spelled
     identically. ``AORTA_PROTON_MODE`` carries the recipe's ``backend_mode``
     (``pcsampling`` here), which is the knob that reaches Proton only on this
-    path -- see recipe.yaml.
+    path -- see recipe.yaml. ``AORTA_PROTON_HOOK`` is read for the same reason:
+    a knob the recipe sets and the payload drops would be configured and
+    silently absent from the capture.
     """
     environ = os.environ
     return {
@@ -140,6 +142,7 @@ def proton_kwargs(args: argparse.Namespace) -> dict[str, str | None]:
         "data": environ.get(f"{_ENV_PREFIX}DATA", "tree"),
         "backend": environ.get(f"{_ENV_PREFIX}BACKEND") or args.backend,
         "mode": environ.get(f"{_ENV_PREFIX}MODE") or args.backend_mode,
+        "hook": environ.get(f"{_ENV_PREFIX}HOOK"),
     }
 
 
