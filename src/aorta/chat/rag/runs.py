@@ -34,6 +34,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
+from aorta.artifacts import read_env, read_matrix
 from aorta.chat.config import settings
 from aorta.chat.rag.embeddings.factory import get_provider
 from aorta.chat.rag.retriever import SqliteVecStore
@@ -99,11 +100,7 @@ def _documents_for(path: Path, kind: str, root: Path) -> list[Document]:
     base = {"source": source, "artifact_kind": kind, "run_dir": str(path.parent)}
 
     if kind == "env":
-        from aorta.artifacts import read_env
-
         return [Document(page_content=render_env(read_env(path)), metadata=dict(base))]
-
-    from aorta.artifacts import read_matrix
 
     matrix = read_matrix(path)
     header = render_matrix(matrix, include_cells=False)
