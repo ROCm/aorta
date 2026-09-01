@@ -10,6 +10,10 @@ bring-up questions through an exit code; `mode: probe` has no metrics channel, s
 a serving *number* cannot come out of them. Only a workload class can populate
 `WorkloadResult.metrics`, which is what the sweep machinery aggregates.
 
+If you are reading this cold, [TokenSpeed in `main`](tokenspeed-in-main.md) covers
+both documents in one pass — every route, the committed recipes, the run and test
+instructions, and the measured figures.
+
 | Route | Recipe mode | Answers | Verdict from |
 |---|---|---|---|
 | [Kernel probe](tokenspeed.md#kernel-probe) | `probe` | do the kernels compute the right bytes? | exit code |

@@ -19,6 +19,10 @@ The trade-off is that `mode: probe` carries a verdict but no metrics. Serving
 `WorkloadResult.metrics`; that is the separate `tokenspeed_serve` workload, in
 [TokenSpeed serving benchmarks](tokenspeed-serving.md).
 
+If you are reading this cold, [TokenSpeed in `main`](tokenspeed-in-main.md) covers
+both documents in one pass — every route, the committed recipes, the run and test
+instructions, and the measured figures.
+
 Three probes run today, in increasing order of usefulness-per-second:
 
 | | What it exercises | Cost per trial | Recipe |
