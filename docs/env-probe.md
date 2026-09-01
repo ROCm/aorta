@@ -246,13 +246,14 @@ when the output directory/file cannot be created or validated.
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.16"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.17"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
 | `system_health` | `dict \| null` | `rdhc --quick --json` (subprocess) | verbatim parsed JSON; `null` when rdhc absent / sudo unavailable / timeout / malformed |
 | `rocm` | `dict[str, str \| null]` | `<rocm-root>/.info/version{,-dev}`, `/sys/module/amdgpu/version`, then the TheRock manifest / pip metadata / `torch.__version__` | `version`, `version_dev`, `kmd_version`, plus schema 1.16 attribution: `root`, `lib_root`, `root_source` (`ROCM_PATH`/`ROCM_HOME`/`opt_rocm`/`import:_rocm_sdk_core`/`none`), `layout` (`classic`/`wheel`), `version_source` (`version_file`/`therock_manifest`/`pip:<dist>`/`torch`/null). The root is resolved rather than hardcoded to `/opt/rocm` (issue #381) so a wheel-layout install reads correctly; `root_source: "none"` is what distinguishes "no ROCm install found" from "install found but it has no version file". |
 | `therock` | `dict` | `<rocm-root>/share/therock/therock_manifest.json` | Schema 1.16. Build provenance for a wheel-layout (TheRock) install: `status` (`present`/`absent`/`invalid`/`unknown`), `manifest_path`, `rocm_version`, `rocm_package_version`, `the_rock_commit`, `github_run_id`, `github_job`, `gemm_libraries_commit`, `submodules` (`[{name, url, pin_sha, patches}]`). **Documented absence**: a classic `/opt/rocm` install ships no manifest, so `status:"absent"` there carries no `partial_reason`. `status:"invalid"` is the opposite — the manifest is there but unusable (not JSON, not an object, empty, unreadable) — and *does* carry a `partial_reason`, so a corrupt wheel install is never mistaken for the classic absence. `status:"unknown"` appears only on a pre-1.16 snapshot loaded through `from_dict()`: that producer never looked, so claiming `absent` (and stamping the reading host's `manifest_path` on it) would invent provenance. Where present it is strictly richer than the header parse -- full 40-char upstream pins vs a truncated tweak, plus the applied-patch list, which is the only signal that a built library is *not* just what its pinned commit contains. |
+| `library_linkage` | `dict` | ELF dynamic section (`PT_DYNAMIC` `d_tag` scan) of every shared object in the resolved ROCm lib dirs | Schema 1.17 (issue #413). `status` (`ok`/`unreadable`/`absent`/`unknown`), `rocm_rpath` (`bool \| null`), `tags_observed` (`list[str]`), `census` (`{dirs, unlistable_dirs, scanned, rpath, runpath, none, unreadable, truncated, rpath_examples}`), `libraries` (`[{name, scope, path, dt_tags, effective_tag, reason}]`). Records whether each object carries `DT_RPATH` or `DT_RUNPATH` — the loader searches `DT_RPATH` **before** `LD_LIBRARY_PATH` and `DT_RUNPATH` **after**, so this decides whether a library substitution can take effect at all. **`census` is the evidence; `libraries` is a reading aid.** `libraries` names the same handful of objects the identity blocks hash (`scope:"rocm"` — hipBLASLt / rocBLAS / MIOpen / RCCL / the HIP runtime) plus torch's own (`scope:"pytorch"`, `libtorch_hip.so`), so a tag lines up against a hash already in the snapshot; both scopes appear because both tags demonstrably coexist in one ROCm 10 process, and no per-image or per-version answer is correct. `census` covers the whole population of those directories, non-recursively. `effective_tag` is what the loader honours (`runpath` wins when a file carries both, since glibc then ignores `DT_RPATH`); `dt_tags` keeps the raw co-presence visible. `rocm_rpath` aggregates the **census** with **ANY**, not all — `DT_RPATH` is inherited by every object loaded beneath the one carrying it, so one tagged object anywhere in the chain defeats an override, and a named sample cannot support that claim (the object #413 measured defeating a substitution, `libhipblas.so.3`, is not one of the sampled names and is not reachable by walking their `DT_NEEDED` either — it is their *depender*). The two verdicts have different evidential bars, because `ANY` is asymmetric: `true` needs one tagged object and survives a partial scan, while `false` is a claim about every object and therefore needs the population to have been enumerated. So `truncated:true` (the scan hit its file cap) and a non-empty `unlistable_dirs` (a ROCm lib dir that exists but would not list — stale mount, permissions) each make `rocm_rpath` `null` rather than `false`: a directory we could not open is not a directory with no `DT_RPATH` in it, which is also why an install whose only ROCm lib dirs would not list reads `status:"unreadable"` rather than `absent`. Individual unreadable *files* deliberately do not withhold the verdict — a GNU `ld` script named `libfoo.so` is a normal inhabitant of a lib dir, so `census.unreadable` records the count and the verdict stands. `null` means the answer is unknown, and is not the same claim as `false`. **This block never raises a `partial_reason`**: it reports every failure in-band and positively — `effective_tag:"unknown"` plus a `reason` for a file that is present but unreadable, a `null` `path` for a library that is simply not installed, and a `census.unreadable` count — so no field of it is ever `null`-because-we-gave-up, which is what `partial` describes. `status:"unknown"` appears only on a pre-1.17 snapshot loaded via `from_dict()`. Paired with the triage runner's `LD_LIBRARY_PATH` warning — see [Substituting a library on an RPATH stack](#substituting-a-library-on-an-rpath-stack). |
 | `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names such as `amdgpu-kmod-<kernel>-<driver-version>.<arch>` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
 | `hip` | `dict[str, str \| null]` | `hipconfig --version/--platform/--compiler/--runtime/--cpp_config` | five subprocesses; `--version` and `--platform` cannot be combined (no delimiter) |
 | `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` (and `library/<gfx>/*` on the wheel layout) + the TheRock manifest | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}`, and schema 1.16 `upstream_commit` / `upstream_commit_matches_tweak`. `upstream_commit` is the full 40-char `rocm-libraries` pin from the manifest -- ROCm consolidated hipBLASLt and rocBLAS into that monorepo, so it is now their upstream identity. It matters most on a wheel image, where the version header is a devel-only file that runtime images omit: without it the hipBLASLt provenance would read `null` exactly where the NaN escalations need it. `null` on a classic install is expected, not a fallback. `upstream_commit_matches_tweak` cross-checks the two sources by prefix at the tweak's own length (the tweak is a short hash of unspecified width -- measured 10 chars on ROCm 7.2.4), and is `null` whenever only one source is present. |
@@ -277,7 +278,7 @@ when the output directory/file cannot be created or validated.
 | `execution_context` | `dict` | `--execution-context` CLI flag (self-declared) | Schema 1.11. `probe_invocation` (`"direct"` \| `"buck2_run"` \| `"buck2_action"`; `"direct"` by default) records **how the probe was launched** — set `buck2_action` when running the probe as a Buck2 action so it captures the executor's env, not the invoking shell's. `likely_execution_platform` (`str \| null`) is reserved for phase-2 Buck2 work and is always `null` today. See the design note `docs/env-probe-container-execution-context.md`. The flag also **warns to stderr** when a non-`direct` context is claimed but `container_detected` is `false` and neither `$AORTA_RE_IMAGE` nor `$AORTA_DOCKER_IMAGE` is set (you may have probed the wrong place). |
 | `probe_namespace` | `str \| null` | `/proc/self/ns/mnt` (primary) or `/proc/self/ns/cgroup` (fallback), hashed with `/proc/sys/kernel/random/boot_id` | Schema 1.12. **Mismatch-only namespace observation**, not a durable identity. Value forms: `mnt:<sha256[:16]>` or `cgroup-ns:<sha256[:16]>`; when `boot_id` is unavailable, the source token remains hashed and the prefix becomes `mnt-local:` / `cgroup-ns-local:`. Different values with the same prefix prove a different boot or namespace observation. Equal values are advisory because Linux can recycle non-initial namespace inode numbers after teardown. Different source prefixes are not directly comparable, and `*-local:` values are not cross-host comparable. Missing boot identity, fallback use, and total failure add `partial_reasons`; `null` means neither namespace handle was readable. |
 | `docker` | `dict \| null` | `$AORTA_DOCKER_IMAGE` / `$AORTA_DOCKER_DIGEST` env vars + `/proc/self/cgroup` | `null` on baremetal; image+digest provided by the launcher (the only reliable way from inside a container) |
-| `env_vars` | `dict[str, str \| null]` | explicit canonical list (currently 137 names, generated from `ENV_KNOB_REGISTRY` in `env_knobs.py`; the count is asserted by `test_docs_env_var_count_matches_registry`, so it cannot go stale) | GPU scoping + HSA / runtime + GPU queue / codegen + NCCL/RCCL + AINIC net-plugin/fabric tuning + gfx950 fence-ordering knob + FBGEMM + MIOpen + SDPA backend selection + GEMM backend preference + hipBLASLt autotune + PyTorch / inductor. Build-time cmake flags (`USE_ROCM_CK_SDPA`, `USE_ROCM_CK_GEMM`, `USE_FBGEMM*`) are NOT in this list -- they're surfaced under their respective library blocks instead, parsed from `torch.__config__.show()`. |
+| `env_vars` | `dict[str, str \| null]` | explicit canonical list (currently 138 names, generated from `ENV_KNOB_REGISTRY` in `env_knobs.py`; the count is asserted by `test_docs_env_var_count_matches_registry`, so it cannot go stale) | GPU scoping + HSA / runtime + GPU queue / codegen + NCCL/RCCL + AINIC net-plugin/fabric tuning + gfx950 fence-ordering knob + FBGEMM + MIOpen + SDPA backend selection + GEMM backend preference + hipBLASLt autotune + PyTorch / inductor. Build-time cmake flags (`USE_ROCM_CK_SDPA`, `USE_ROCM_CK_GEMM`, `USE_FBGEMM*`) are NOT in this list -- they're surfaced under their respective library blocks instead, parsed from `torch.__config__.show()`. |
 | `python_version` | `str` | `platform.python_version()` | always populated |
 | `pytorch_version` | `str \| null` | optional `import torch` (no CUDA/HIP context init) | `null` when torch absent |
 | `pytorch_build` | `dict` | `torch.version.{git_version,hip,cuda,debug}` + install-kind detection + optional `git -C <src>/third_party/<sub> rev-parse HEAD` + parse of `torch.__config__.show()` + `nm -D libtorch_hip.so \| c++filt` symbol grep + scan of `<torch>/lib/` + parse of `<source>/build/CMakeCache.txt` + stream of `<source>/build/build.ninja` (modern `enable_language(HIP)` path) or walk of `<source>/build/**/<target>.dir/**/*.hip.o.cmake` (legacy `FindHIP.cmake` fallback) | `git_commit` is the linchpin -- pins every vendored submodule deterministically. Sub-blocks: `flags` (raw `build_settings`, `cxx_defines`, `cxx_flags_raw`, `cuda_flags_raw`, `gpu_arch_list`), `build_flags` (issue #170 stable 17-key parsed bool/str/None subset, with `CAFFE2_USE_MIOPEN` aliased to `USE_MIOPEN`), `binary_introspection` (`libtorch_hip_symbol_counts`, `torch_lib_bundled`, `cxx_flags_use_defines` -- pure facts, no ON/OFF inference), `cmake_cache` (source/editable installs only -- allowlisted entries from CMakeCache.txt), `ninja_hipcc` (source/editable installs only -- per-target HIPCC defines + codegen flags + offload archs; `_parser` discriminates the two parser strategies). See "PyTorch source-tree submodule probing" below. |
@@ -461,13 +462,130 @@ ground truth -- it tells you exactly what failed (PATH, sudo-n,
 timeout, malformed JSON). The `(see docs/env-probe.md#installing-rdhc)`
 hint at the end of those reasons points back at this page.
 
+## Substituting a library on an RPATH stack
+
+Pointing a run at a patched library — a rebuilt hipBLASLt, say — via
+`LD_LIBRARY_PATH` only works if the objects doing the loading were linked
+with `DT_RUNPATH`. The loader searches `DT_RPATH` **before**
+`LD_LIBRARY_PATH` and `DT_RUNPATH` **after** it, and ROCm 10 ships
+`DT_RPATH` where ROCm 7.x shipped `DT_RUNPATH`.
+
+When the substitution loses there is no error to notice: the process
+loads the stock library, runs to completion and exits 0. A trial then
+reports a perfectly clean result about a library the operator believes
+they replaced.
+
+Check `library_linkage` before trusting a substitution:
+
+```bash
+aorta env probe -o /tmp/env.json
+jq '.library_linkage.rocm_rpath' /tmp/env.json          # true -> substitution at risk
+jq '.library_linkage.census' /tmp/env.json              # the evidence behind it
+jq -r '.library_linkage.libraries[] | "\(.effective_tag)\t\(.name)"' /tmp/env.json
+```
+
+`rocm_rpath` is read from every shared object in the resolved ROCm library
+directories, not from a shortlist. The failure in #413 was an inherited
+`DT_RPATH` on `libhipblas.so.3` — a library nothing in aorta had a reason
+to name, and one that no dependency walk from the obvious candidates
+reaches, because it is their *depender* rather than their dependency.
+
+`aorta triage` checks this for you and emits a matrix warning on any cell
+that sets `LD_LIBRARY_PATH` on an RPATH stack. The warning is deliberately
+silent when only one of the two conditions holds — every ROCm 7.x run, and
+every ROCm 10 run that is not substituting anything — so that it means
+something when it does fire.
+
+The reading is taken **per environment**, from that environment's own
+`environments/<env>/env.json`. A docker or venv cell is described by the
+in-container snapshot its workload wrapper produced via the
+`_aorta_env_probe` contract, never by the runner process — a ROCm 10
+container launched from a ROCm 7 host would otherwise be judged by the
+host's `DT_RUNPATH` and stay silent. An environment that produced no
+snapshot (wrapper didn't opt in, container never started) gets **no
+warning at all**: a warning sourced from the wrong stack is worse than
+none, in both directions.
+
+Two things aorta deliberately does **not** do:
+
+- **It does not modify the environment of the process under test.** Your
+  `LD_LIBRARY_PATH` reaches the workload exactly as the recipe resolved
+  it. Prepending the stock ROCm directories to outrank `DT_RPATH` would
+  hijack the substitution you asked for.
+- **It does not try to defeat `DT_RPATH`.** Short of `LD_PRELOAD` that is
+  not reliably possible, and the goal is to make a silent failure loud
+  rather than to restore the old search order.
+
+`LD_PRELOAD` is subject to neither tag and remains the reliable
+substitution mechanism. The recipes under `recipes/hrx/` pair it with
+`LD_LIBRARY_PATH`, and the `hrx` workload fails the trial outright when
+the loader rejects the preload — the pattern to copy. `LD_DEBUG=libs`
+names the winning search path if you want to confirm by hand.
+
 ## Schema changelog
 
 Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.16` (current)
+### `1.17` (current)
+
+`DT_RPATH` vs `DT_RUNPATH` on the resolved libraries (issue #413).
+
+ROCm 10 links its packaged objects with `DT_RPATH`; ROCm 7.x uses
+`DT_RUNPATH`. The dynamic loader searches `DT_RPATH` **before**
+`LD_LIBRARY_PATH` and `DT_RUNPATH` **after** it, so the same
+`LD_LIBRARY_PATH=/patched` substitution that works on one stack is
+silently ignored on the other — no loader diagnostic, exit status 0, and
+a result that describes the stock library. For a tool whose premise is
+"the version running wasn't the version we thought", that is the worst
+available failure mode, so the tag is now a captured environment fact.
+
+One additive top-level block; nothing existing changes shape:
+
+- `library_linkage` records which of the two tags each object's ELF
+  dynamic section actually carries — a `census` over every shared object
+  in the resolved ROCm library directories, a named `libraries` sample
+  lined up with the identity blocks, and a derived `rocm_rpath`.
+
+`rocm_rpath` aggregates the **census**, not the named sample. The sample
+can only support "one of the objects we listed carries `DT_RPATH`", and
+that coincides with the claim being made — "something in the loading chain
+does" — only while the stack is uniform. #413's measured failure was an
+inherited `DT_RPATH` on `libhipblas.so.3`, which no sample listed and no
+`DT_NEEDED` walk from the listed objects reaches (hipBLAS depends on
+rocBLAS and the HIP runtime, not the reverse). Reading the directory also
+covers `dlopen`-ed objects, which no static walk can. It over-approximates
+the loading chain deliberately: a false positive costs one `LD_DEBUG=libs`
+check, a false negative is the confident wrong answer this exists to
+prevent. Measured cost: 57 objects in 4 ms on a classic ROCm 7.0.2 install
+(all `DT_RUNPATH`, so the paired warning stays silent there), 61 objects in
+3 ms in the ROCm 10 wheel image (all `DT_RPATH`).
+
+A malformed dynamic section is reported as **unreadable**, never as
+"carries neither tag". Success requires the whole declared section — the
+full `p_filesz` read, an entry-size multiple, within the byte bound, and
+`DT_NULL`-terminated — because a short read that missed the tag would
+otherwise flow into `rocm_rpath:false` and silence the substitution
+warning: a silent false negative inside the feature built to stop a silent
+failure.
+
+The tag is **read from the file**, never inferred from `rocm.version` or
+`rocm.layout`. Both shortcuts are disproven by measurement: the TheRock
+wheel layout was expected to be exempt from the DEB/RPM switch and is not
+(152 of 196 objects under `_rocm_sdk_core` / `_rocm_sdk_libraries` carry
+`DT_RPATH`, none carry `DT_RUNPATH`), while PyTorch's own
+`libtorch_hip.so` in that same image still carries `DT_RUNPATH` because it
+comes from the manylinux build rather than TheRock. Both tags coexist
+inside a single process, so "does this image use RPATH?" has no single
+answer to infer — only per-file readings.
+
+Parsed with the stdlib `struct` module rather than by shelling out to
+`readelf`. binutils is routinely absent from stripped ROCm runtime
+images, which is exactly where an operator is most likely to be
+substituting a library and least able to check by hand.
+
+### `1.16`
 
 Layout-agnostic ROCm discovery (issue #381). ROCm ships in two on-disk shapes
 — a classic system install rooted at `/opt/rocm`, and TheRock's Python wheel
@@ -1487,7 +1605,7 @@ regenerate.)
 
 <!-- BEGIN GENERATED: env-knob-inventory -->
 
-137 knobs, generated from `ENV_KNOB_REGISTRY` by
+138 knobs, generated from `ENV_KNOB_REGISTRY` by
 `python scripts/audit_env_knobs.py --emit-docs-table`. `library` is the component the variable belongs to. For GEMM knobs present in the reference build, ownership is measured from the shipped shared object's exact string table -- which shows the name, not a call site, so it is ownership and not proof of consumption; forward-compatible absent entries are marked in the manifest and are declared rather than measured. A row's presence records that the variable is preserved in a snapshot -- not that the installed library supports it, that the process exported it, or that it affected a run.
 
 | Category | Library | Variables |
@@ -1507,7 +1625,7 @@ regenerate.)
 | `gemm_solution_selection` | pytorch | `TORCH_HIPBLASLT_TUNING_FILE`, `TORCH_HIPBLASLT_TUNING_OVERRIDE_FILE` |
 | `framework` | pytorch | `TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE`, `PYTORCH_CUDA_ALLOC_CONF` |
 | `loader` | dynamic-loader | `LD_LIBRARY_PATH` |
-| `gemm_loading` | hipblaslt | `HIPBLASLT_TENSILE_LIBPATH`, `HIPBLASLT_EXT_OP_LIBRARY_PATH`, `HIPBLASLT_PRELOAD_KERNELS` |
+| `gemm_loading` | hipblaslt | `HIPBLASLT_TENSILE_LIBPATH`, `HIPBLASLT_EXT_OP_LIBRARY_PATH`, `HIPBLASLT_PRELOAD_KERNELS`, `TENSILE_MAX_DECOMPRESSED_BYTES` |
 | `gemm_loading` | rocblas | `ROCBLAS_TENSILE_LIBPATH` |
 | `gemm_solution_selection` | rocblas | `ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH`, `TENSILE_EXPERIMENTAL_SELECTION`, `TENSILE_TAM_SELECTION_ENABLE` |
 | `gemm_routing` | rocblas | `ROCBLAS_USE_HIPBLASLT`, `ROCBLAS_USE_HIPBLASLT_BATCHED` |

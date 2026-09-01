@@ -11,33 +11,57 @@
 # ROCm/rocm-systems. The former source-build toolchain (cmake, ninja,
 # libzstd-dev, g++-13 from the toolchain PPA, and a baked Findzstd.cmake shim)
 # has therefore been removed from this image. hipcc (from the ROCm base) still
-# builds the HIP repro fixtures and does not need any of those.
+# builds the HIP repro fixtures and does not need any of those -- but on the ROCm
+# 10 wheel base that is true only BECAUSE of the devel-symlink fixup below.
+# Untouched, this base's hipcc compiles and then fails at the link step, and
+# Proton fails to dlopen its rocprofiler backend. If you bump the digest,
+# re-check that fixup; the two smoke tests beside it are there so the build
+# tells you instead of the nightly sanitizer gate or the GPU gate telling you
+# hours later.
 #
-# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 24.04, Python 3.12, PyTorch 2.10.0
+# Base: rocm/pytorch ROCm 10.0, Ubuntu 26.04, Python 3.14, PyTorch 2.13.0
 #
-# This is the newest published combination on every axis at once: ROCm 7.2.4 is
-# the newest classic-layout production release, and 24.04 / py3.12 / torch 2.10.0
-# are the newest Ubuntu, Python and PyTorch that line ships. Our own packaging no
-# longer caps Python here -- pyproject declares through 3.14 and the CPU matrix
-# tests 3.10-3.14 (#383) -- so 3.12 is purely what this ROCm line offers.
+# Still the newest published combination on every axis at once -- the selection
+# rule has not changed, only what satisfies it. This pin is the issue #383 stack
+# flip, retargeted from 7.14 to ROCm 10.0 (released Aug 2026) because 10 landed
+# before the flip did and supersedes it. It moves four axes at once, which is not
+# a shortcut: the ROCm 10 line publishes no torch 2.10 image, so there is no
+# smaller step off the old ROCm 7.2.4 / 24.04 / py3.12 / torch 2.10.0 pin.
 #
-# Two constraints set "newest ROCm", and both are worth knowing before a bump:
+# Python is now the same on both sides of CI: pyproject declares through 3.14 and
+# the CPU matrix tests 3.10-3.14, so the GPU gate is no longer the axis lagging
+# our own declared support -- it was pinned to 3.12 only because the classic ROCm
+# line shipped nothing newer.
 #
-#   * 7.9 through 7.13 are the technology PREVIEW stream, not newer production
-#     releases, so a higher number there is not an upgrade.
-#   * 7.14 onward IS production, and its rocm/pytorch images are wheel-based
-#     (TheRock): ROCm installs under site-packages with no /opt/rocm. That is no
-#     longer a blocker -- issue #381 made discovery layout-agnostic and the
-#     guard below accepts either layout. Flipping the base to that line is a
-#     deliberate, separate step (issue #383), not something to do by digest.
+# What used to bound "newest ROCm" here was a 7.x argument -- 7.9-7.13 being the
+# technology PREVIEW stream, 7.14 being the first wheel-based production release,
+# and the move onto that wheel line being a deliberate separate step. All three
+# are history: this pin IS that move, taken past 7.14 entirely. What bounds a
+# future bump instead:
+#
+#   * THIS base is a wheel-layout (TheRock) image: ROCm lives under
+#     site-packages and there is no /opt/rocm at all -- verified on this digest,
+#     whose PATH carries no /opt/rocm/bin and which sets no LD_LIBRARY_PATH. That
+#     is a property of the `rocm/pytorch` image, NOT of ROCm 10: the release still
+#     ships DEB/RPM/runfile packages that install a classic /opt/rocm tree, which
+#     is a supported path this repo has to keep working (see the classic-layout
+#     sections of docs/ci-testing-plan.md). What changed with ROCm 10 is that the
+#     wheel layout is no longer a variant to opt into on the container line we
+#     track, so the gate now runs on it by default rather than by choice. Issue
+#     #381 made discovery layout-agnostic; the guard below is what re-proves it
+#     on every build, and it accepts either layout precisely because both exist.
+#   * A bump WITHIN the ROCm 10 line is an ordinary digest bump. A bump that
+#     changes the major is not: it drags Ubuntu, Python and PyTorch with it and
+#     needs baselines re-blessed, so it stays a deliberate PR -- which is the
+#     part of the old argument that survives.
 #
 # Pinned as tag@digest (not digest-only): the tag records which ROCm stream the
 # digest is meant to come from, so a bump proposal that silently changes streams
 # is visible in review (and anchors the docker Dependabot ecosystem to that
 # stream for as long as .github/dependabot.yml enables it); the digest keeps the
 # build reproducible. Resolved via:
-#   docker buildx imagetools inspect rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
-FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+#   docker buildx imagetools inspect rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0
+FROM rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c
 
 USER root
 
@@ -50,8 +74,199 @@ USER root
 COPY rocm_layout_guard.py /usr/local/share/aorta/rocm_layout_guard.py
 RUN python /usr/local/share/aorta/rocm_layout_guard.py
 
+# Restore the bare `libfoo.so` devel symlinks this base does not ship.
+#
+# This base ships the ROCm RUNTIME wheels (`_rocm_sdk_core`,
+# `_rocm_sdk_libraries`) but NOT `rocm[devel]` -- `rocm-sdk path --root` reports
+# the devel package as absent. Runtime wheels carry only versioned sonames, so
+# `libamdhip64.so.7` exists and the bare `libamdhip64.so` does not. 44 bare
+# names are missing across the two trees: 27 under `_rocm_sdk_core/lib` and 17
+# under `_rocm_sdk_libraries/lib`.
+#
+# TWO INDEPENDENT CONSUMERS need them, by two different mechanisms:
+#
+#   * hipcc hands the LINKER the bare name as an ABSOLUTE path, so every HIP
+#     link fails:
+#         ld.lld: error: cannot open .../_rocm_sdk_core/lib/libamdhip64.so:
+#                 No such file or directory
+#         clang++: error: linker command failed with exit code 1
+#     hipcc itself resolves fine (/opt/venv/bin/hipcc) -- this is purely the
+#     link step, which is why it survives a `command -v hipcc` check. It breaks
+#     sanitizers-nightly.yml's fixture builds.
+#   * Proton (the profiler shipped inside Triton) DLOPENS bare names at
+#     runtime. `triton/_C/libproton.so` names five of them -- libamdhip64.so,
+#     libhsa-runtime64.so, librocprofiler-sdk.so, libroctracer64.so,
+#     libroctx64.so -- and Triton's own triton/profiler/__init__.py points it at
+#     `_rocm_sdk_core/lib` through TRITON_ROCPROFILER_SDK_LIB_PATH, so
+#     librocprofiler-sdk.so is opened by absolute path and the others by plain
+#     loader search. It breaks tests/instrumentation/test_proton_smoke_gpu.py in
+#     the GPU gate.
+#
+# ALL of them, rather than the two we have watched fail. Measured on this
+# digest: with only libamdhip64.so linked, `proton.start()` dies with
+#   RuntimeError: [PROTON] Could not load `librocprofiler-sdk.so`
+# and adding just that one name moves the same failure to Proton's finalize:
+#   RuntimeError: [PROTON] Could not load `libamdhip64.so`
+# -- so naming libraries one at a time was already 2 of the 5 that a single
+# consumer needs, and the third (libroctracer64.so) is named in that test file's
+# own dlopen-failure skip marker.
+#
+# The earlier argument for the one-at-a-time shape was that fixing all of them
+# papers over a base-image packaging gap with a wider blast radius than the
+# failure warrants. It does not survive the evidence:
+#   * It is not papering over. A bare-soname symlink layer is PRECISELY what
+#     `rocm[devel]` installs; this reconstructs the absent package's link farm
+#     rather than working around it, and it is the mechanism both consumers
+#     were written against.
+#   * The blast radius of one at a time is a red CI round per name on a shared
+#     MI350 runner, hours after the fact. libamdhip64 surfaced through a
+#     nightly fixture build and librocprofiler-sdk through the GPU gate, and
+#     `workload regression (GPU, MI350)` has not yet run against this base at
+#     all, so its consumers are still unexercised.
+#   * The blast radius of all of them is small and measurable: a link is
+#     created only where the versioned file already exists, so no library
+#     appears in the image that was not already there, and all 44 were verified
+#     to dlopen cleanly on this digest.
+# Installing `rocm[devel]` is the true root-cause fix, but it needs network at
+# image build time and adds size to an already ~52 GB image. It stays the thing
+# to do when the base ships it -- at which point every link below is already
+# present and this becomes a no-op.
+#
+# The lib directories are DERIVED, not hardcoded. A literal
+# /opt/venv/lib/python3.14/site-packages/... path would rot silently the first
+# time a base moves the venv or bumps Python -- exactly what issue #381 argued
+# against. This re-implements the resolver's import-based discovery rather than
+# importing aorta.instrumentation.rocm_paths, for the same reason
+# rocm_layout_guard.py does: aorta is not installed at image build time. BOTH
+# trees, because the two consumers above split across them: libamdhip64 is core,
+# libhipblaslt is libraries.
+#
+# The soname is globbed rather than spelled, so a ROCm 10.x base that bumps
+# `.so.7` to `.so.8` still works. `sort -V` rather than `sort`, so a tree that
+# ever carries two majors side by side picks `.so.10` over `.so.9` instead of
+# the lexicographic answer. The links are relative and created only when
+# absent, so a future base that ships `rocm[devel]` makes this a no-op instead
+# of a conflict.
+#
+# A non-wheel base is skipped, not failed: classic installs ship their own devel
+# symlinks. The two smoke tests below are the real assertion either way -- they
+# check the properties we actually depend on rather than the mechanism, so they
+# stay honest if a future base fixes this upstream.
+RUN set -eu; \
+    libdirs="$(python -c 'import importlib.util, os; print(chr(32).join(os.path.join(os.path.dirname(s.origin), "lib") for s in (importlib.util.find_spec(m) for m in ("_rocm_sdk_core", "_rocm_sdk_libraries")) if s and s.origin))')"; \
+    if [ -z "${libdirs}" ]; then \
+      echo "no ROCm wheels (classic layout): skipping devel-symlink fixup"; \
+    else \
+      created=0; \
+      for libdir in ${libdirs}; do \
+        [ -d "${libdir}" ] || { echo "resolved ROCm lib dir does not exist: ${libdir}" >&2; exit 1; }; \
+        cd "${libdir}"; \
+        for versioned in *.so.*; do \
+          [ -f "${versioned}" ] || continue; \
+          bare="${versioned%%.so.*}.so"; \
+          [ -e "${bare}" ] && continue; \
+          newest="$(ls -1 "${bare}".* | sort -V | tail -n1)"; \
+          ln -s "${newest}" "${bare}"; \
+          created=$((created + 1)); \
+          echo "created ${libdir}/${bare} -> ${newest}"; \
+        done; \
+      done; \
+      echo "devel-symlink fixup: created ${created} bare sonames"; \
+    fi
+
+# Prove hipcc can link, at build time. Without the symlinks above this fails,
+# and the failure would otherwise surface hours later as a broken nightly
+# sanitizer fixture build rather than here. Same reasoning as the exact pins
+# below: a broken image should surface during the build.
+#
+# gfx950 because that is what sanitizers-nightly.yml compiles for and this gate
+# runs on MI350; no GPU is needed to compile and link for it. A base that could
+# no longer target gfx950 SHOULD fail this build.
+RUN set -eu; \
+    printf '#include <hip/hip_runtime.h>\n__global__ void k(){}\nint main(){ hipLaunchKernelGGL(k, dim3(1), dim3(1), 0, 0); return 0; }\n' \
+      > /tmp/hipcc_link_check.hip; \
+    hipcc --offload-arch=gfx950 /tmp/hipcc_link_check.hip -o /tmp/hipcc_link_check; \
+    rm -f /tmp/hipcc_link_check.hip /tmp/hipcc_link_check; \
+    echo "hipcc link check: OK"
+
+# And prove Proton can dlopen, at build time. The link check above covers only
+# the hipcc half of the devel-symlink fixup; a missing bare soname that nothing
+# LINKS against is invisible to it, which is how librocprofiler-sdk.so reached
+# the GPU gate. This is that check for the runtime half.
+#
+# It asks libproton.so which ROCm sonames it names rather than repeating a list
+# here. A hardcoded list would have to be re-derived by hand on every Triton
+# bump, and a Triton that starts dlopening a sixth library would pass a stale
+# list and fail in the gate -- the exact loop this fixup exists to break. The
+# names sit in the binary as NUL-terminated strings, which is where they were
+# found in the first place. An empty intersection is a build failure, not a
+# pass: it means the extraction stopped working and the check is asserting
+# nothing.
+#
+# BY BARE NAME, with the lib dirs on LD_LIBRARY_PATH, because that is how Proton
+# opens them -- so this exercises the symlink and the loader search together.
+# Appended, never prepended, mirroring the workflow export for the same reason.
+# No GPU is needed: dlopen resolves and relocates the library without a device,
+# and all 44 links were verified to load this way on a device-less container.
+RUN set -eu; \
+    libdirs="$(python -c 'import importlib.util, os; print(chr(32).join(os.path.join(os.path.dirname(s.origin), "lib") for s in (importlib.util.find_spec(m) for m in ("_rocm_sdk_core", "_rocm_sdk_libraries")) if s and s.origin))')"; \
+    if [ -z "${libdirs}" ]; then \
+      echo "no ROCm wheels (classic layout): skipping the proton dlopen check"; \
+    else \
+      printf '%s\n' \
+        'import ctypes, glob, importlib.util, os, re, sys' \
+        'spec = importlib.util.find_spec("triton")' \
+        'if spec is None or not spec.origin:' \
+        '    sys.exit("no triton installed, so proton cannot be smoke tested")' \
+        'proton = os.path.join(os.path.dirname(spec.origin), "_C", "libproton.so")' \
+        'with open(proton, "rb") as handle:' \
+        '    blob = handle.read()' \
+        'named = {m.decode() for m in re.findall(rb"lib[A-Za-z0-9_.+-]+\.so(?=\x00)", blob)}' \
+        'shipped = sorted(' \
+        '    name' \
+        '    for name in named' \
+        '    if any(glob.glob(os.path.join(d, name) + "*") for d in sys.argv[1:])' \
+        ')' \
+        'if not shipped:' \
+        '    sys.exit(f"{proton} names no ROCm soname under {sys.argv[1:]}")' \
+        'for name in shipped:' \
+        '    ctypes.CDLL(name)' \
+        'print("proton dlopen check: OK -- " + ", ".join(shipped))' \
+        > /tmp/proton_dlopen_check.py; \
+      LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(echo ${libdirs} | tr ' ' ':')" \
+        python /tmp/proton_dlopen_check.py ${libdirs}; \
+      rm -f /tmp/proton_dlopen_check.py; \
+    fi
+
+# NOTE for a future digest bump: hipcc-built binaries in this base carry NEITHER
+# RPATH nor RUNPATH, so they need the ROCm lib dirs on LD_LIBRARY_PATH to RUN,
+# even once they link. That is deliberately not baked in as an ENV here -- see
+# the ROCM_HOME note at the bottom of this file for why this image does not
+# assert ROCm paths, and docs/ci-testing-plan.md for the runtime side.
+#
+# CHECK THE BINARY, NOT THE IMAGE ENVIRONMENT. It is tempting to read the old
+# 7.2.4 base as having been immune because it exported
+# LD_LIBRARY_PATH=/opt/rocm/lib; that is not what protected it. Its hipcc
+# embedded DT_RUNPATH=/opt/rocm-7.2.4/lib in every binary, and a 7.2.4 fixture
+# still gets past the loader with LD_LIBRARY_PATH scrubbed from its environment
+# -- measured, both ways round. ROCm 10 lost the RUNPATH and the base
+# LD_LIBRARY_PATH together, which is why the failure appeared here. So the
+# question a bump has to answer is `readelf -d` on a hipcc-built fixture, not
+# `printenv LD_LIBRARY_PATH` in the image: a base that restored the RUNPATH
+# would be immune with no LD_LIBRARY_PATH at all, and one that only set
+# LD_LIBRARY_PATH would still break any launch that does not inherit it.
+
 # Exact pins for reproducible CI image builds; fail the build if these can't be
 # installed (no `|| true`) so a broken image surfaces here, not at runtime.
+#
+# A Python bump is exactly when exact pins break, so both were re-checked against
+# py3.14 before this base landed, and neither had to move with the interpreter:
+# each is a pure-Python wheel (`py2.py3-none-any` / `py3-none-any`), so neither
+# needs a per-interpreter build at all. The compiled work is all in seaborn's
+# transitive deps -- numpy, pandas, matplotlib, contourpy, kiwisolver, pillow --
+# and this base already ships every one of them at a version satisfying seaborn
+# 0.13.2, so pip resolves this line without building anything. They publish cp314
+# manylinux x86_64 wheels in any case.
 RUN python -m pip install --no-cache-dir \
     "openpyxl==3.1.5" \
     "seaborn==0.13.2"
@@ -66,12 +281,19 @@ RUN python -m pip install --no-cache-dir \
 # /opt/rocm exists in ANY form -- a compat stub with a bin/ in it is enough --
 # it WINS over a correct wheel install and discovery lands on an empty tree.
 #
-# Removing it costs nothing on the classic base, which already exports both
-# paths itself (measured on this digest):
-#   PATH=/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:...
-#   LD_LIBRARY_PATH=/opt/rocm/lib
-# so the PATH/LD_LIBRARY_PATH lines that used to accompany it were re-stating
-# the base image's own environment. Let discovery find the install instead.
+# On the ROCm 10 base that stops being a hazard guarded against in advance and
+# becomes the base's actual state: there is no /opt/rocm here at all, so the line
+# would assert a path that does not exist. Keeping it out is now load-bearing
+# rather than merely tidy.
+#
+# The old reason it cost nothing to drop -- that the classic base exported
+# /opt/rocm/bin on PATH and /opt/rocm/lib on LD_LIBRARY_PATH itself, so the
+# PATH/LD_LIBRARY_PATH lines that used to accompany it merely restated the
+# image's own environment -- does not apply to this digest, which sets neither:
+#   PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:...
+#   LD_LIBRARY_PATH  (unset)
+# There is nothing left to restate. Let discovery find the install under
+# site-packages, which is the only place it is.
 
 WORKDIR /workspace/aorta
 
