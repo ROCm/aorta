@@ -118,6 +118,11 @@ Other optional extras include `analysis`, `report`, `hw-queue-profiling`,
 `agent`, and `ebpf`. The `ebpf` extra has no additional Python packages; its
 runtime needs `bpftrace` and the required permissions.
 
+The `aorta chat` assistant has its own extras — `chat-cli` (Python 3.11+),
+`chat-ui` (adds the web UI; Python 3.11–3.13, since Chainlit declares
+`Requires-Python <3.14`), and `chat-all`. None of them installs PyTorch. See
+[`docs/chat/installation.md`](docs/chat/installation.md).
+
 ## Where commands run
 
 `aorta` runs in the active Python environment, and relative recipe, command,
@@ -308,6 +313,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [TokenSpeed](docs/tokenspeed.md) | Third-party inference engine under `mode: probe` — kernel, operator-suite and serving triage, plus Waitcheck and ConSan over its JIT attention/gemm kernels (gfx950) |
 | [TokenSpeed serving](docs/tokenspeed-serving.md) | `tokenspeed_serve` workload — TTFT / TPOT / ITL / throughput per cell, over model, concurrency and ISL/OSL sweeps (gfx950) |
 | [`aorta agent mitigate`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
+| [`aorta chat`](docs/chat/README.md) | Interactive assistant over the codebase and this machine's run artifacts (opt-in `chat-*` extras) |
 | [`aorta bundle`](docs/probe/bundle.md) | Package sweep artifacts with recipe-driven redaction |
 | [Recipes](recipes/README.md) | Recipe schema and running recipes |
 | [Buck2 Build Reference](docs/buck2-build-reference.md) | Build / run the AORTA CLI via Buck2 |

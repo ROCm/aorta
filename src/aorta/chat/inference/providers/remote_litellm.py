@@ -23,12 +23,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 LITELLM_IMPORT_MESSAGE = (
-    "LLM_PROVIDER=litellm needs both litellm and langchain-litellm. "
+    "llm_provider=litellm needs both litellm and langchain-litellm. "
     "Install them with either:\n"
     "  pip install litellm langchain-litellm\n"
-    '  pip install -e ".[remote]"   # from the repo root (editable + extra)\n'
+    "  pip install 'amd-aorta[chat-all]'\n"
     "Keys normally come from LiteLLM's own environment variables "
-    "(ANTHROPIC_API_KEY, GEMINI_API_KEY, ...). Set REMOTE_LLM_AUTH_HEADER "
+    "(ANTHROPIC_API_KEY, GEMINI_API_KEY, ...). Set remote_llm_auth_header "
     "instead when a gateway wants the key in a named header."
 )
 
@@ -110,7 +110,7 @@ def _load_chat_litellm() -> Any:
     litellm.drop_params = True
 
     # LiteLLM's debug logger prints the outbound request, headers included, so
-    # `--verbose` would put REMOTE_LLM_API_KEY in plaintext into the terminal and
+    # `--verbose` would put remote_llm_api_key in plaintext into the terminal and
     # any captured log. Everything else in this repo is careful never to emit a
     # key -- describe_auth() reports header names only -- and that guarantee is
     # worthless if a dependency prints it instead. WARNING keeps genuine errors.

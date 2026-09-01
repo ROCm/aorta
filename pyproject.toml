@@ -79,6 +79,16 @@ tokenspeed_serve = "aorta.run.validation:PROCESS_OPTIONAL_POLICY"
 [project.entry-points."aorta.workload_startup_env"]
 race = "aorta.run.validation:race_startup_env"
 
+# Extension point for `aorta chat`'s agent tools. The entry-point name is the
+# tool name and must equal the langchain BaseTool's own `name`, since that is
+# what the model is offered and what it asks for. aorta's own tools are NOT
+# listed here -- they register directly in `BUILTIN_CHAT_TOOLS`, the same split
+# `aorta.mitigations` and `aorta.agents` use -- so this group is declared only
+# in a contributing package's pyproject.toml. See docs/chat/extending.md.
+#
+#   [project.entry-points."aorta.chat_tools"]
+#   read_fabric_counters = "my_package.tools:read_fabric_counters"
+
 [project.optional-dependencies]
 # For analysis/visualization scripts
 analysis = [
