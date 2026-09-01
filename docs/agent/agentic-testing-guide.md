@@ -1,13 +1,22 @@
-# Agentic Testing with `aorta agent`
+# Agentic Testing with `aorta agent mitigate`
 
 This guide explains how **agentic testing** works in AORTA: what the
-`aorta agent` command does, whether it uses a real LLM, what happens under
+`aorta agent mitigate` command does, whether it uses a real LLM, what happens under
 the hood, and how to read the output.
 
 For the high-level design rationale, see
 [aorta-probe-agent.md](aorta-probe-agent.md). For probe-mode mechanics
 (recipes, classifiers, artifacts), see
 [probe-188/usage.md](../probe-188/usage.md).
+
+> **Command name.** `aorta agent` is now a namespace: `aorta agent <name>`
+> dispatches to one of the agents registered under the `aorta.agents`
+> entry-point group, and the closed-loop mitigation search described here is
+> `aorta agent mitigate`. The old bare form, `aorta agent -- <command>`, still
+> works for one release; it prints a deprecation notice on **stderr** (so
+> stdout stays parseable) and runs the same command. See
+> [`src/aorta/registry/README.md`](../../src/aorta/registry/README.md) for how
+> to register another agent.
 
 ---
 
@@ -23,7 +32,7 @@ For the high-level design rationale, see
    left to try.
 
 Today, `aorta probe` does step 1–2 across a **fixed matrix** you write in
-YAML. `aorta agent` automates steps 3–5 on top of the same engine.
+YAML. `aorta agent mitigate` automates steps 3–5 on top of the same engine.
 
 The loop is **agentic** because it maintains state, makes sequential
 decisions, and adapts the next experiment from prior results — even when no
@@ -51,7 +60,7 @@ written `result.json`.
 
 ```mermaid
 sequenceDiagram
-    participant CLI as aorta agent
+    participant CLI as aorta agent mitigate
     participant Loop as agent loop
     participant Probe as run_recipe / probe
     participant Classifier as 5-tier classifier
@@ -94,7 +103,7 @@ export OPENAI_API_KEY=...   # or other provider LiteLLM supports
 Then:
 
 ```bash
-aorta agent --llm-backend litellm --llm-model gpt-4o-mini ...
+aorta agent mitigate --llm-backend litellm --llm-model gpt-4o-mini ...
 ```
 
 ---
@@ -122,7 +131,7 @@ mitigation ordering and richer hypotheses — not a requirement.
 
 ```bash
 # From repo root with src on PYTHONPATH, or after pip install -e .
-PYTHONPATH=src aorta agent \
+PYTHONPATH=src aorta agent mitigate \
   --output ./agent_results \
   --ticket ROCM-EXAMPLE \
   -- \
@@ -153,7 +162,7 @@ Useful flags:
 Command:
 
 ```bash
-PYTHONPATH=src aorta agent \
+PYTHONPATH=src aorta agent mitigate \
   --output /tmp/agent_out \
   --ticket smoke-hello \
   -- \
@@ -194,7 +203,7 @@ Baseline cell (none-none) passed. The repro succeeds without mitigations; no sea
 Command:
 
 ```bash
-PYTHONPATH=src aorta agent \
+PYTHONPATH=src aorta agent mitigate \
   --output /tmp/agent_out \
   --ticket smoke-fail \
   --max-iterations 3 \
@@ -247,7 +256,7 @@ Command:
 pip install 'amd-aorta[agent]'
 export OPENAI_API_KEY=sk-...
 
-PYTHONPATH=src aorta agent \
+PYTHONPATH=src aorta agent mitigate \
   --output /tmp/agent_out \
   --ticket smoke-llm \
   --symptom "RCCL hang after checkpoint" \
@@ -282,7 +291,7 @@ in sorted allowlist order.
 Re-run the **same** command with the same `--output` and `--ticket`:
 
 ```bash
-PYTHONPATH=src aorta agent --output /tmp/agent_out --ticket smoke-fail -- ...
+PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail -- ...
 ```
 
 **Under the hood:**
@@ -314,7 +323,7 @@ PYTHONPATH=src aorta agent --output /tmp/agent_out --ticket smoke-fail -- ...
 ## Under the hood — component map
 
 ```
-aorta agent (CLI)
+aorta agent mitigate (CLI)
     └── run_agent_loop()          src/aorta/agent/loop.py
             ├── wake()            replay agent_log.jsonl + cell verdicts
             ├── build_probe_recipe_from_dict()
@@ -375,9 +384,9 @@ Both backends share the same loop, policy, probe engine, and artifact layout.
 
 ---
 
-## Comparison: `aorta probe` vs `aorta agent`
+## Comparison: `aorta probe` vs `aorta agent mitigate`
 
-| | `aorta probe` | `aorta agent` |
+| | `aorta probe` | `aorta agent mitigate` |
 |---|---------------|---------------|
 | Matrix | You write full YAML axes | Grows axis iteration by iteration |
 | Who picks next mitigation | You | Proposer (fake or LLM) |
@@ -387,7 +396,7 @@ Both backends share the same loop, policy, probe engine, and artifact layout.
 | LLM | Never | Optional at propose step only |
 
 For a known matrix (regression gate), use **`aorta probe`**. For exploratory
-“find a mitigation that makes this pass,” use **`aorta agent`**.
+“find a mitigation that makes this pass,” use **`aorta agent mitigate`**.
 
 ---
 

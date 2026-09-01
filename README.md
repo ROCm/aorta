@@ -308,7 +308,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [Choosing a Proton backend](docs/proton-backends.md) | Which of Proton's five backends answers which question — whole-kernel timing vs intra-kernel cycles vs PC sampling, what each costs you, and what is available on which Triton |
 | [TokenSpeed](docs/tokenspeed.md) | Third-party inference engine under `mode: probe` — kernel, operator-suite and serving triage, plus Waitcheck and ConSan over its JIT attention/gemm kernels (gfx950) |
 | [TokenSpeed serving](docs/tokenspeed-serving.md) | `tokenspeed_serve` workload — TTFT / TPOT / ITL / throughput per cell, over model, concurrency and ISL/OSL sweeps (gfx950) |
-| [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
+| [`aorta agent mitigate`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
 | [`aorta bundle`](docs/probe/bundle.md) | Package sweep artifacts with recipe-driven redaction |
 | [Recipes](recipes/README.md) | Recipe schema and running recipes |
 | [Buck2 Build Reference](docs/buck2-build-reference.md) | Build / run the AORTA CLI via Buck2 |

@@ -286,6 +286,11 @@ class LiteLLMProposer:
 
 
 def make_proposer(backend: str, *, model: str = "gpt-4o-mini") -> LLMProposer:
+    # Phase 5b: this factory is the seam where the agent proposer moves onto the
+    # shared chat provider layer, so vllm / openai / litellm are configured once
+    # for both front doors instead of `LiteLLMProposer` calling litellm directly.
+    # Deferred until `aorta.chat` lands; `--llm-backend` keeps its current values
+    # until then.
     if backend == "fake":
         return FakeLLMProposer()
     if backend == "litellm":
