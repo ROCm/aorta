@@ -17,9 +17,12 @@
 # This tracks the ROCm 10 line, which replaces the 7.x preview-vs-production
 # argument that used to sit here (7.9-7.13 preview, 7.14 the first wheel-based
 # production release, moving onto that wheel line a separate step -- issue #383,
-# now done). ROCm 10 ships only on TheRock, so the wheel layout is the only
-# layout: ROCm lives under site-packages and there is no /opt/rocm. Issue #381
-# made discovery layout-agnostic, which is what makes that readable.
+# now done). The `rocm/pytorch` image below is a wheel-layout (TheRock) build:
+# ROCm lives under site-packages and it ships no /opt/rocm. That is a property of
+# this base image and not of ROCm 10 -- the release still ships DEB/RPM/runfile
+# packages that install a classic /opt/rocm tree, and a container built on one of
+# those is a layout this repo still supports. Issue #381 made discovery
+# layout-agnostic, which is what makes either readable.
 #
 # Tag-pinned rather than `:latest`: `rocm/pytorch:latest` moves whenever a new
 # ROCm-tested PyTorch is published, which would silently change the stack under
@@ -35,34 +38,121 @@ USER root
 COPY rocm_layout_guard.py /usr/local/share/aorta/rocm_layout_guard.py
 RUN python /usr/local/share/aorta/rocm_layout_guard.py
 
-# Same `libamdhip64.so` devel-symlink fixup as Dockerfile.ci-gpu, and applied here
-# for the reason stated at the top of this file: local runs are supposed to match
-# what CI validates. Without it hipcc compiles and then fails to link, because
-# this base ships the ROCm runtime wheels but not `rocm[devel]`, so only the
-# versioned `libamdhip64.so.7` exists while hipcc passes the linker the bare name.
-# See Dockerfile.ci-gpu for the full mechanism and the error it produces.
+# Same devel-symlink fixup as Dockerfile.ci-gpu -- the WHOLE link farm, not just
+# `libamdhip64.so` -- applied here for the reason stated at the top of this file:
+# local runs are supposed to match what CI validates.
 #
-# This is not a CI-only concern: the sanitizer dashboard hands developers hipcc
-# rebuild commands to re-run locally, and the failure it produces
+# This base ships the ROCm RUNTIME wheels but not `rocm[devel]`, so only versioned
+# sonames exist and 44 bare names are missing across the two wheel trees. See
+# Dockerfile.ci-gpu for the full mechanism, the measurements and the errors it
+# produces. The short version is that two independent consumers need them: hipcc
+# hands the linker the bare name as an absolute path, and Proton dlopens bare
+# names at runtime.
+#
+# It used to be `libamdhip64.so` alone here, which left this image unable to
+# exercise tooling it ships: the CI image established that Proton also needs
+# librocprofiler-sdk.so, libroctracer64.so and libroctx64.so on this base, and
+# the dev image is the one people actually run TraceLens and Magpie in. Fixing
+# one name per observed failure is also how the CI side burned a red round per
+# name; a dev container fails quieter and costs longer.
+#
+# This is not a CI-only concern either way: the sanitizer dashboard hands
+# developers hipcc rebuild commands to re-run locally, and the failure it produces
 # ("ld.lld: error: cannot open .../libamdhip64.so") points at a missing file
 # rather than at a missing devel package, so it costs real time to diagnose.
 #
-# Derived rather than hardcoded, globbed rather than pinned to `.so.7`, and a
-# no-op when already present or when the base is a classic /opt/rocm layout --
-# same rationale as the CI image. The CI image additionally runs a hipcc link
-# smoke test; this one asserts only that the symlink exists, keeping local
-# builds fast and forgiving in the style of the rest of this file.
+# Derived rather than hardcoded, globbed rather than pinned to `.so.7`, `sort -V`
+# so a tree carrying two majors picks `.so.10` over `.so.9`, links created only
+# where absent, and skipped rather than failed on a classic /opt/rocm layout --
+# all the same rationale as the CI image, and byte-identical to it so the two
+# cannot drift. What this image deliberately does NOT copy are the CI image's
+# hipcc-link and Proton-dlopen smoke tests: those exist to make a digest bump
+# fail loudly in the gate, and local builds stay fast and forgiving in the style
+# of the rest of this file.
 RUN set -eu; \
-    libdir="$(python -c 'import importlib.util, os; s = importlib.util.find_spec("_rocm_sdk_core"); print(os.path.join(os.path.dirname(s.origin), "lib") if s and s.origin else "")')"; \
-    if [ -z "${libdir}" ] || [ ! -d "${libdir}" ]; then \
-      echo "no ROCm wheel layout detected: skipping devel-symlink fixup"; \
-    elif [ -e "${libdir}/libamdhip64.so" ]; then \
-      echo "libamdhip64.so already present in ${libdir}"; \
+    libdirs="$(python -c 'import importlib.util, os; print(chr(32).join(os.path.join(os.path.dirname(s.origin), "lib") for s in (importlib.util.find_spec(m) for m in ("_rocm_sdk_core", "_rocm_sdk_libraries")) if s and s.origin))')"; \
+    if [ -z "${libdirs}" ]; then \
+      echo "no ROCm wheels (classic layout): skipping devel-symlink fixup"; \
     else \
-      versioned="$(find "${libdir}" -maxdepth 1 -name 'libamdhip64.so.*' | sort | head -n1)"; \
-      [ -n "${versioned}" ] || { echo "no libamdhip64.so.* in ${libdir}" >&2; exit 1; }; \
-      ln -s "$(basename "${versioned}")" "${libdir}/libamdhip64.so"; \
-      echo "created ${libdir}/libamdhip64.so -> $(basename "${versioned}")"; \
+      created=0; \
+      for libdir in ${libdirs}; do \
+        [ -d "${libdir}" ] || { echo "resolved ROCm lib dir does not exist: ${libdir}" >&2; exit 1; }; \
+        cd "${libdir}"; \
+        for versioned in *.so.*; do \
+          [ -f "${versioned}" ] || continue; \
+          bare="${versioned%%.so.*}.so"; \
+          [ -e "${bare}" ] && continue; \
+          newest="$(ls -1 "${bare}".* | sort -V | tail -n1)"; \
+          ln -s "${newest}" "${bare}"; \
+          created=$((created + 1)); \
+          echo "created ${libdir}/${bare} -> ${newest}"; \
+        done; \
+      done; \
+      echo "devel-symlink fixup: created ${created} bare sonames"; \
+    fi
+
+# And make those lib directories discoverable to a plain interactive shell, which
+# is the OTHER half of what CI gets and this image did not.
+#
+# hipcc output on this base carries neither DT_RPATH nor DT_RUNPATH and the base
+# sets no LD_LIBRARY_PATH, so linking is necessary but not sufficient: a fixture
+# that links dies before main at exit 127. CI survives that because every launch
+# goes through a workflow step that exports the resolver-derived lib dirs
+# (gpu-tests.yml, sanitizers-nightly.yml, and the same line the sanitizer
+# dashboard publishes beside its rebuild commands). A developer running
+# `docker exec -it <container> bash` has no such step, so the Proton tooling this
+# image ships was unusable here without knowing to export it by hand.
+#
+# NOT an `ENV LD_LIBRARY_PATH=...`, for two separate reasons:
+#
+#   1. Issue #381, restated at the bottom of this file: a literal
+#      /opt/venv/lib/python3.14/site-packages/... path in this Dockerfile rots
+#      silently the first time a base moves the venv or bumps Python. The path
+#      below is DERIVED at build time by the same import-based discovery the link
+#      farm above uses, and written into the image by the build rather than typed
+#      here -- so it is regenerated on every rebuild and cannot outlive its base
+#      the way a hand-written path can.
+#   2. An `ENV` could not preserve operator precedence even if the path were
+#      free. Compose `environment:` REPLACES a variable rather than appending to
+#      it, and docker-compose.rccl.yaml sets
+#      `LD_LIBRARY_PATH=/rccl/build/release:${LD_LIBRARY_PATH:-}` where that
+#      `${...}` interpolates from the HOST, not from the image. An image-level
+#      ENV would therefore be dropped entirely for every custom-RCCL run -- the
+#      exit-127 failure back again, for the users doing the most unusual thing.
+#      A profile script runs AFTER compose has set the variable, so it composes
+#      with the override instead of losing to it.
+#
+# Appended, never prepended, so an inherited substitution -- a custom RCCL, a
+# rebuilt hipBLASLt -- keeps winning. Idempotent, because a nested shell sources
+# this again; the first dir is the sentinel since both are appended together.
+# Sourced from /etc/bash.bashrc as well as /etc/profile.d, because
+# `docker exec -it <container> bash` (what docker/README.md documents) is
+# interactive but NOT a login shell and would otherwise skip profile.d entirely.
+# A non-interactive `docker exec <container> bash -c ...` still gets nothing and
+# should export the dirs itself, exactly as the workflows do.
+RUN set -eu; \
+    libdirs="$(python -c 'import importlib.util, os; print(chr(58).join(os.path.join(os.path.dirname(s.origin), "lib") for s in (importlib.util.find_spec(m) for m in ("_rocm_sdk_core", "_rocm_sdk_libraries")) if s and s.origin))')"; \
+    if [ -z "${libdirs}" ]; then \
+      echo "no ROCm wheels (classic layout): no library path script needed"; \
+    else \
+      mkdir -p /etc/profile.d; \
+      printf '%s\n' \
+        '# Generated by docker/Dockerfile.rocm-latest. Appended, never prepended,' \
+        '# so an operator substitution inherited from compose or docker exec wins.' \
+        "_aorta_rocm_libdirs=\"${libdirs}\"" \
+        'case ":${LD_LIBRARY_PATH:-}:" in' \
+        '  *":${_aorta_rocm_libdirs%%:*}:"*) ;;' \
+        '  *) export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${_aorta_rocm_libdirs}" ;;' \
+        'esac' \
+        'unset _aorta_rocm_libdirs' \
+        > /etc/profile.d/aorta-rocm-libpath.sh; \
+      printf '%s\n' \
+        '' \
+        '# Added by docker/Dockerfile.rocm-latest: profile.d is skipped by the' \
+        '# interactive non-login shell that docker exec gives you.' \
+        '[ -r /etc/profile.d/aorta-rocm-libpath.sh ] && . /etc/profile.d/aorta-rocm-libpath.sh' \
+        >> /etc/bash.bashrc; \
+      echo "ROCm library path script: ${libdirs}"; \
     fi
 
 # Analysis tooling used by the report/trace workflows. Unpinned and non-fatal
@@ -76,10 +166,17 @@ RUN pip install openpyxl seaborn
 # Deliberately NO `ENV ROCM_HOME=/opt/rocm` here -- same reason as
 # Dockerfile.ci-gpu (issue #381): it is an explicit override that ranks above
 # autodetection, so on a wheel base that also has any /opt/rocm stub it wins
-# over the real install. On this ROCm 10 base there is no /opt/rocm at all, so
-# the line would assert a path that does not exist -- and the base exports
-# neither /opt/rocm/bin on PATH nor /opt/rocm/lib on LD_LIBRARY_PATH, so there is
-# nothing for it to restate either.
+# over the real install. On this base there is no /opt/rocm at all, so the line
+# would assert a path that does not exist -- and the base exports neither
+# /opt/rocm/bin on PATH nor /opt/rocm/lib on LD_LIBRARY_PATH, so there is nothing
+# for it to restate either.
+#
+# The profile script above is not a hole in that argument. ROCM_HOME is an input
+# to ROCm discovery that OVERRIDES what resolve_rocm_roots() finds; the root
+# resolver does not read LD_LIBRARY_PATH at all, and the script appends the dirs
+# that same discovery reported rather than asserting where ROCm lives. It derives
+# them at build time instead of naming them here, and appends rather than
+# replaces, so it neither rots nor outranks an operator.
 
 WORKDIR /workspace/aorta
 

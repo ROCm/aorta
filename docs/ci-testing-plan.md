@@ -222,7 +222,7 @@ GPU CI runs inside a privileged ROCm PyTorch container (same device/capability
 model as the existing analysis workflows):
 
 - Compose file: [`docker/docker-compose.build.yaml`](../docker/docker-compose.build.yaml)
-- CI env file: [`docker/.env.ci`](../docker/.env.ci) (committed; pins base image digest)
+- CI env file: [`docker/.env.ci`](../docker/.env.ci) (committed; selects the Dockerfile, image and container names -- carries no digest, see below)
 - CI Dockerfile: [`docker/Dockerfile.ci-gpu`](../docker/Dockerfile.ci-gpu)
 - Container name: `aorta-ci-gpu`
 - Workspace mount: repo root at `/workspace/aorta`
@@ -330,10 +330,12 @@ build's `the_rock_commit`, `github_run_id` and any patches applied on top of
 each upstream pin. Schema 1.16 records all of it under `therock`, and the GEMM
 libraries' `upstream_commit`.
 
-The gate now runs on that layout. ROCm 10 is wheel-only, so this provenance is
-what every *gated* run records rather than something only the canary lane ever
-saw — the payoff for reading the layout instead of merely tolerating it arrives
-with issue #383's flip, not just for the canary.
+The gate now runs on that layout, because the `rocm/pytorch` ROCm 10 images are
+wheel-based — a property of those images, not of the release, which still ships
+DEB/RPM and tarballs rooted at `/opt/rocm` as described above. So this provenance
+is now what every *gated* run records rather than something only the canary lane
+ever saw — the payoff for reading the layout instead of merely tolerating it
+arrived with issue #383's flip, not just for the canary.
 
 #### Library substitution on ROCm 10: check `RPATH` before trusting `LD_LIBRARY_PATH`
 

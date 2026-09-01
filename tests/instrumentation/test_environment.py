@@ -28,6 +28,7 @@ import contextlib
 import hashlib
 import importlib.metadata
 import importlib.util
+import inspect
 import json
 import logging
 import os
@@ -658,6 +659,23 @@ def _example_snapshot(**overrides) -> object:
             "status": "ok",
             "rocm_rpath": True,
             "tags_observed": ["rpath", "runpath"],
+            # The census over the whole ROCm lib dir -- what ``rocm_rpath``
+            # actually aggregates -- rather than the named sample below,
+            # which is a reading aid. Counts mirror the measured gate image
+            # (61 objects, all DT_RPATH), and the examples name
+            # libhipblas.so.3 on purpose: it is the object #413 measured
+            # defeating a substitution and it is NOT in the named sample.
+            "census": {
+                "dirs": ["/opt/rocm/lib"],
+                "unlistable_dirs": [],
+                "scanned": 61,
+                "rpath": 61,
+                "runpath": 0,
+                "none": 0,
+                "unreadable": 0,
+                "truncated": False,
+                "rpath_examples": ["libhipblas.so.3", "libhipblaslt.so.1"],
+            },
             "libraries": [
                 {
                     "name": "libhipblaslt.so",
@@ -12324,6 +12342,7 @@ def _write_elf(
     *,
     bits: int = 64,
     endian: str = "<",
+    terminate: bool = True,
 ) -> Path:
     """Write a minimal but structurally valid ELF carrying *tags* in .dynamic.
 
@@ -12332,7 +12351,9 @@ def _write_elf(
     test must be able to produce an RPATH object on a host whose linker
     defaults to RUNPATH (and vice versa) without needing a compiler at all.
     Only the fields the parser reads are meaningful; everything else is
-    zero-filled.
+    zero-filled. ``terminate=False`` omits the trailing ``DT_NULL`` the ABI
+    requires, producing the malformed shape the parser must reject rather
+    than read as "carries neither tag".
     """
     is_64 = bits == 64
     ehdr_size = 64 if is_64 else 52
@@ -12353,7 +12374,7 @@ def _write_elf(
             3, 3, 1, 0, phoff, 0, 0, ehdr_size, phentsize, 1, 0, 0, 0,
         )
 
-    dyn_entries = [*tags, DT_NULL]
+    dyn_entries = [*tags, DT_NULL] if terminate else list(tags)
     dyn_size = len(dyn_entries) * dyn_entry
     if is_64:
         phdr = struct.pack(
@@ -12439,6 +12460,103 @@ class TestReadElfSearchPathTags:
         tags, error = env_mod._read_elf_search_path_tags(lib)
         assert tags == []
         assert error is not None
+
+
+# Byte offset of ``p_filesz`` in the single 64-bit program header ``_write_elf``
+# emits: 64-byte ELF header, then p_type(4) p_flags(4) p_offset(8) p_vaddr(8)
+# p_paddr(8) before it.
+_P_FILESZ_OFFSET = 64 + 32
+
+
+def _set_declared_dynamic_size(path: Path, size: int) -> None:
+    """Rewrite ``PT_DYNAMIC``'s ``p_filesz`` without touching the bytes it covers."""
+    raw = bytearray(path.read_bytes())
+    struct.pack_into("<Q", raw, _P_FILESZ_OFFSET, size)
+    path.write_bytes(bytes(raw))
+
+
+class TestMalformedDynamicSectionIsUnreadableNotEmpty:
+    """A malformed ``PT_DYNAMIC`` must never read as "carries neither tag".
+
+    ``([], None)`` is a positive claim -- "we read the whole section and no
+    search-path tag was in it" -- which flows into ``rocm_rpath=False`` and
+    silences the triage runner's substitution warning. Reporting it for
+    input we did not actually manage to read whole is a silent false
+    negative inside the one feature whose entire purpose is to stop a
+    silent failure, so every case below must come back as a reason string.
+    """
+
+    def test_truncated_section_is_rejected_even_with_a_complete_entry(
+        self, tmp_path: Path
+    ):
+        """One intact entry before the cut is not the section.
+
+        The file holds a single readable ``DT_SONAME`` entry while
+        ``p_filesz`` declares three, so a length-unchecked parse finds a
+        well-formed entry, no tag, and reports "carries neither" for a
+        library whose ``DT_RPATH`` is in the part that is missing.
+        """
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_SONAME, DT_RPATH))
+        raw = lib.read_bytes()
+        declared = 3 * 16
+        lib.write_bytes(raw[: len(raw) - 2 * 16])  # keep only DT_SONAME
+        _set_declared_dynamic_size(lib, declared)
+        assert env_mod._read_elf_search_path_tags(lib) == (
+            [],
+            "truncated dynamic section",
+        )
+
+    def test_misaligned_section_is_rejected(self, tmp_path: Path):
+        """``p_filesz`` that is not a whole number of entries is not a section."""
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_SONAME, DT_RPATH))
+        _set_declared_dynamic_size(lib, 30)
+        tags, error = env_mod._read_elf_search_path_tags(lib)
+        assert tags == []
+        assert error is not None
+        assert "misaligned" in error
+
+    def test_oversized_section_is_rejected_not_clamped(self, tmp_path: Path):
+        """The regression that motivated the check.
+
+        Clamping the read to the byte bound and parsing what fits is the
+        tempting cheap fix, and it is wrong precisely when it matters: here
+        the ``DT_RPATH`` sits past the clamp, so a clamped parse returns
+        ``([], None)`` -- a confident "this stack is substitution-safe"
+        derived from the half of the section it never looked at.
+        """
+        padding = (env_mod._MAX_DYNAMIC_BYTES // 16 + 8) * (DT_SONAME,)
+        lib = _write_elf(tmp_path / "libfoo.so", (*padding, DT_RPATH))
+        tags, error = env_mod._read_elf_search_path_tags(lib)
+        assert tags == []
+        assert error is not None
+        assert "implausibly large" in error
+
+    def test_section_without_dt_null_is_rejected(self, tmp_path: Path):
+        """The ABI terminator is how we know we saw the whole array."""
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_SONAME,), terminate=False)
+        assert env_mod._read_elf_search_path_tags(lib) == (
+            [],
+            "dynamic section not DT_NULL-terminated",
+        )
+
+    def test_empty_section_is_rejected(self, tmp_path: Path):
+        lib = _write_elf(tmp_path / "libfoo.so", ())
+        _set_declared_dynamic_size(lib, 0)
+        assert env_mod._read_elf_search_path_tags(lib) == (
+            [],
+            "empty dynamic section",
+        )
+
+    def test_a_well_formed_object_is_still_a_clean_read(self, tmp_path: Path):
+        """The strictness must not turn real libraries into unreadable ones.
+
+        Measured alongside this: with these checks in place the census reads
+        57/57 objects on the classic ROCm 7.0.2 host and 61/61 in the ROCm 10
+        wheel image with zero unreadable, so the bar is "malformed", not
+        "unusual".
+        """
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_SONAME,))
+        assert env_mod._read_elf_search_path_tags(lib) == ([], None)
 
 
 class TestCaptureLibraryLinkage:
@@ -12594,10 +12712,222 @@ class TestCaptureLibraryLinkage:
         identity block already recorded.
         """
         (rocm_libs / "libhipblaslt.so.1").write_text("junk")
-        reasons: list[str] = []
-        snapshot_reasons_before = list(reasons)
-        env_mod._capture_library_linkage()
-        assert reasons == snapshot_reasons_before
+        # There is no reasons list to append to -- the contract is structural,
+        # not a promise the body happens to keep. docs/env-probe.md states it
+        # in the same terms ("never raises a partial_reason"); this is what
+        # stops that row from drifting back into describing one.
+        assert not inspect.signature(env_mod._capture_library_linkage).parameters
+
+        block = env_mod._capture_library_linkage()
+        # And the failure is reported positively instead, in-band.
+        entry = next(
+            e for e in block["libraries"] if e["name"] == "libhipblaslt.so"
+        )
+        assert entry["effective_tag"] == "unknown"
+        assert entry["reason"] == "not an ELF file"
+        assert block["census"]["unreadable"] == 1
+
+
+class TestLinkageCensusNotACuratedSample:
+    """``rocm_rpath`` must describe the install, not the five names we picked.
+
+    The aggregate claims "some object in the loading chain carries
+    ``DT_RPATH``". A hand-maintained sample can only support "some object I
+    listed does", and the two coincide only while the stack is uniform. On
+    the pinned ROCm 10 image every object is RPATH, so the sample answered
+    correctly by correlation -- while the object #413 actually measured
+    defeating a ``libhipblaslt`` substitution, ``libhipblas.so.3``, was
+    never in it. These tests pin the aggregate to the directory census so
+    the claim is true by construction instead.
+    """
+
+    @pytest.fixture
+    def rocm_libs(self, tmp_path: Path, monkeypatch):
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        for name in (
+            "ROCM_CORE_LIB_DIR",
+            "HIPBLASLT_LIB_DIR",
+            "ROCBLAS_LIB_DIR",
+            "MIOPEN_LIB_DIR",
+            "RCCL_LIB_DIR",
+        ):
+            monkeypatch.setattr(env_mod, name, lib_dir)
+        monkeypatch.setattr(env_mod, "_torch_native_lib_dir", lambda _mod: None)
+        monkeypatch.setattr(
+            env_mod, "_safe_import_torch", lambda _reasons, _name: None
+        )
+        return lib_dir
+
+    def _mixed_stack(self, lib_dir: Path) -> None:
+        """Every sampled library on RUNPATH; only libhipblas on RPATH.
+
+        The stack the curated list silently got wrong. Nothing here is
+        hypothetical: hipBLAS is the neighbour whose inherited ``DT_RPATH``
+        ``LD_DEBUG=libs`` named in #413's end-to-end reproduction, and it is
+        not one of the libraries the identity blocks hash.
+        """
+        for soname in (
+            "libamdhip64.so.7",
+            "libhipblaslt.so.1",
+            "librocblas.so.5",
+            "libMIOpen.so.1",
+            "librccl.so.1",
+        ):
+            _write_elf(lib_dir / soname, (DT_RUNPATH,))
+        _write_elf(lib_dir / "libhipblas.so.3", (DT_RPATH,))
+
+    def test_unsampled_rpath_library_still_sets_the_trigger(self, rocm_libs):
+        """The case the sampled list would have answered False on."""
+        self._mixed_stack(rocm_libs)
+        block = env_mod._capture_library_linkage()
+
+        # Every named entry reads RUNPATH -- so the verdict cannot be coming
+        # from them, which is exactly the point.
+        assert {e["effective_tag"] for e in block["libraries"]} == {"runpath"}
+        assert block["rocm_rpath"] is True
+
+    def test_the_census_names_the_object_the_sample_omits(self, rocm_libs):
+        """The evidence ships with the verdict, so it is checkable, not trusted."""
+        self._mixed_stack(rocm_libs)
+        census = env_mod._capture_library_linkage()["census"]
+        assert census["rpath_examples"] == ["libhipblas.so.3"]
+        assert census["rpath"] == 1
+        assert census["runpath"] == 5
+        assert census["scanned"] == 6
+        assert census["truncated"] is False
+
+    def test_a_uniformly_runpath_install_still_reads_false(self, rocm_libs):
+        """The census must not manufacture the hazard it is looking for.
+
+        Measured on the classic ROCm 7.0.2 host this repo runs on: 57 of 57
+        objects under ``/opt/rocm/lib`` carry ``DT_RUNPATH`` and none carry
+        ``DT_RPATH``, so widening the aggregate from five names to the whole
+        directory keeps the triage warning silent on every ROCm 7 run.
+        """
+        for soname in ("libamdhip64.so.7", "libhipblas.so.3", "libfoo.so.1"):
+            _write_elf(rocm_libs / soname, (DT_RUNPATH,))
+        block = env_mod._capture_library_linkage()
+        assert block["rocm_rpath"] is False
+        assert block["census"]["rpath"] == 0
+
+    def test_kernel_objects_are_not_counted_as_libraries(self, rocm_libs):
+        """``Kernels.so-000-gfx950.hsaco`` is a code object, not a library.
+
+        It has no ``PT_DYNAMIC``, so counting it would add a permanent
+        ``unreadable`` to every wheel-layout census and make a real
+        unreadable library harder to notice.
+        """
+        _write_elf(rocm_libs / "libamdhip64.so.7", (DT_RUNPATH,))
+        (rocm_libs / "Kernels.so-000-gfx950.hsaco").write_bytes(b"\x7fELFjunk")
+        census = env_mod._capture_library_linkage()["census"]
+        assert census["scanned"] == 1
+        assert census["unreadable"] == 0
+
+    def test_an_unreadable_object_does_not_read_as_no_rpath(self, rocm_libs):
+        """Counted separately, and it cannot be what makes the answer False."""
+        (rocm_libs / "libbroken.so.1").write_text("not an object file")
+        block = env_mod._capture_library_linkage()
+        assert block["census"]["unreadable"] == 1
+        assert block["census"]["rpath"] == 0
+        assert block["rocm_rpath"] is None
+        assert block["status"] == "unreadable"
+
+    def test_an_unreadable_lib_dir_is_not_an_empty_one(
+        self, tmp_path, monkeypatch
+    ):
+        """A directory we cannot list is not a directory with no RPATH in it.
+
+        The census would otherwise scan zero files and hand back the same
+        shape a genuinely clean install produces, which is the "unreadable
+        read as empty" confusion the per-file parse already refuses.
+        """
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        _write_elf(lib_dir / "libamdhip64.so.7", (DT_RPATH,))
+        lib_dir.chmod(0o000)
+        for name in (
+            "ROCM_CORE_LIB_DIR",
+            "HIPBLASLT_LIB_DIR",
+            "ROCBLAS_LIB_DIR",
+            "MIOPEN_LIB_DIR",
+            "RCCL_LIB_DIR",
+        ):
+            monkeypatch.setattr(env_mod, name, lib_dir)
+        monkeypatch.setattr(env_mod, "_torch_native_lib_dir", lambda _mod: None)
+        monkeypatch.setattr(
+            env_mod, "_safe_import_torch", lambda _reasons, _name: None
+        )
+        try:
+            block = env_mod._capture_library_linkage()
+        finally:
+            lib_dir.chmod(0o755)
+
+        assert block["census"]["unlistable_dirs"] == [str(lib_dir)]
+        assert block["status"] == "unreadable"
+        assert block["rocm_rpath"] is None
+
+    def test_a_missing_lib_dir_is_absent_not_unreadable(self, tmp_path, monkeypatch):
+        """The other half of the same distinction: nothing here to fail to read."""
+        missing = tmp_path / "nowhere"
+        for name in (
+            "ROCM_CORE_LIB_DIR",
+            "HIPBLASLT_LIB_DIR",
+            "ROCBLAS_LIB_DIR",
+            "MIOPEN_LIB_DIR",
+            "RCCL_LIB_DIR",
+        ):
+            monkeypatch.setattr(env_mod, name, missing)
+        monkeypatch.setattr(env_mod, "_torch_native_lib_dir", lambda _mod: None)
+        monkeypatch.setattr(
+            env_mod, "_safe_import_torch", lambda _reasons, _name: None
+        )
+        block = env_mod._capture_library_linkage()
+        assert block["census"]["unlistable_dirs"] == []
+        assert block["status"] == "absent"
+
+    def test_a_truncated_census_is_recorded_as_such(self, rocm_libs, monkeypatch):
+        """A capped scan can only support a positive answer, so say when it capped."""
+        monkeypatch.setattr(env_mod, "_MAX_CENSUS_FILES", 2)
+        for index in range(5):
+            _write_elf(rocm_libs / f"lib{index}.so.1", (DT_RUNPATH,))
+        census = env_mod._capture_library_linkage()["census"]
+        assert census["truncated"] is True
+        assert census["scanned"] == 2
+
+    def test_both_wheel_layout_component_dirs_are_scanned(
+        self, tmp_path, monkeypatch
+    ):
+        """The wheel layout splits ROCm across two site-packages components.
+
+        ``_rocm_sdk_core`` holds the HIP runtime and ``_rocm_sdk_libraries``
+        holds hipBLAS(Lt) / rocBLAS / MIOpen / RCCL, so a census that read
+        only one of them would miss half the install -- including, in the
+        measured image, ``libhipblas.so.3``.
+        """
+        core = tmp_path / "_rocm_sdk_core" / "lib"
+        libs = tmp_path / "_rocm_sdk_libraries" / "lib"
+        core.mkdir(parents=True)
+        libs.mkdir(parents=True)
+        _write_elf(core / "libamdhip64.so.7", (DT_RUNPATH,))
+        _write_elf(libs / "libhipblas.so.3", (DT_RPATH,))
+        monkeypatch.setattr(env_mod, "ROCM_CORE_LIB_DIR", core)
+        for name in (
+            "HIPBLASLT_LIB_DIR",
+            "ROCBLAS_LIB_DIR",
+            "MIOPEN_LIB_DIR",
+            "RCCL_LIB_DIR",
+        ):
+            monkeypatch.setattr(env_mod, name, libs)
+        monkeypatch.setattr(env_mod, "_torch_native_lib_dir", lambda _mod: None)
+        monkeypatch.setattr(
+            env_mod, "_safe_import_torch", lambda _reasons, _name: None
+        )
+
+        block = env_mod._capture_library_linkage()
+        assert len(block["census"]["dirs"]) == 2
+        assert block["census"]["scanned"] == 2
+        assert block["rocm_rpath"] is True
 
 
 class TestLibraryLinkageSchemaSurface:
@@ -12630,9 +12960,24 @@ class TestLibraryLinkageSchemaSurface:
             "status",
             "rocm_rpath",
             "tags_observed",
+            "census",
             "libraries",
         }
         assert rebuilt.library_linkage["rocm_rpath"] is None
+
+    def test_census_null_shape_matches_the_emitted_census(self):
+        """The assertion above stops at the top level; ``census`` needs its own.
+
+        ``from_dict`` merges the null shape one level deep, so a key added
+        inside ``census`` is back-filled by nothing: a consumer indexing it on a
+        short artifact gets ``KeyError`` while the top-level key set still
+        matches. Not reachable today -- ``census`` shipped in the same 1.17 that
+        introduced the block, so no artifact predates it -- but the next key
+        added inside it is free to catch here.
+        """
+        emitted = env_mod._capture_library_linkage()["census"]
+        backfilled = env_mod._empty_library_linkage()["census"]
+        assert set(backfilled) == set(emitted)
 
     def test_disaster_snapshot_carries_the_shape_claiming_nothing(self):
         snap = env_mod._disaster_snapshot(

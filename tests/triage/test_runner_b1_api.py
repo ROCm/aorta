@@ -12,6 +12,7 @@ Acceptance criteria (from issue #151 §"Plumbing"):
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -1570,16 +1571,43 @@ def _matrix_warnings(tmp_path: Path) -> list[str]:
     return json.loads(matrix.read_text(encoding="utf-8"))["warnings"]
 
 
-@pytest.fixture
-def rpath_stack(monkeypatch):
-    """Pretend the resolved ROCm libraries carry DT_RPATH."""
-    monkeypatch.setattr(runner, "_rocm_rpath_state", True)
+def _snapshot_with_rocm_rpath(value: bool | None) -> EnvSnapshot:
+    """A snapshot whose ``library_linkage`` reports *value*.
+
+    Fed through ``collect_env`` rather than injected at the predicate, so
+    the tests exercise the real path: the warning must read the linkage
+    block out of the environment's own ``env.json``, which is the only
+    place a truthful per-environment answer exists.
+    """
+    snapshot = _clean_snapshot()
+    return dataclasses.replace(
+        snapshot,
+        library_linkage={
+            **snapshot.library_linkage,
+            "status": "ok" if value is not None else "unreadable",
+            "rocm_rpath": value,
+        },
+    )
 
 
 @pytest.fixture
-def runpath_stack(monkeypatch):
-    """Pretend they carry DT_RUNPATH -- i.e. every ROCm 7.x host."""
-    monkeypatch.setattr(runner, "_rocm_rpath_state", False)
+def rpath_stack(monkeypatch, patched_env):
+    """The local env's own probe reports DT_RPATH on its ROCm libraries."""
+    monkeypatch.setattr(
+        runner,
+        "collect_env",
+        MagicMock(return_value=_snapshot_with_rocm_rpath(True)),
+    )
+
+
+@pytest.fixture
+def runpath_stack(monkeypatch, patched_env):
+    """It reports DT_RUNPATH -- i.e. every ROCm 7.x host."""
+    monkeypatch.setattr(
+        runner,
+        "collect_env",
+        MagicMock(return_value=_snapshot_with_rocm_rpath(False)),
+    )
 
 
 def test_warns_when_ld_library_path_meets_an_rpath_stack(
@@ -1647,7 +1675,11 @@ def test_silent_when_the_link_tags_could_not_be_read(
     ``None`` would read as False (silent, correct here) but the inverse
     check elsewhere would read as True.
     """
-    monkeypatch.setattr(runner, "_rocm_rpath_state", None)
+    monkeypatch.setattr(
+        runner,
+        "collect_env",
+        MagicMock(return_value=_snapshot_with_rocm_rpath(None)),
+    )
     runner.run_recipe(
         _substitution_recipe("/opt/patched/lib"),
         output_dir=tmp_path,
@@ -1681,39 +1713,256 @@ def test_operator_ld_library_path_reaches_the_child_unmodified(
     assert cell["resolved_env_vars"]["LD_LIBRARY_PATH"] == "/opt/patched/lib"
 
 
-def test_link_tags_are_read_once_not_once_per_cell(monkeypatch):
-    """The ELF read is filesystem I/O; it must not sit in the matrix loop.
-
-    The tags belong to the installed libraries, which cannot change under
-    a running matrix, so one read per process is both sufficient and the
-    only affordable option for a 30-cell recipe.
-    """
-    monkeypatch.setattr(runner, "_rocm_rpath_state", runner._RPATH_UNPROBED)
-    calls: list[int] = []
-
-    def counting_capture():
-        calls.append(1)
-        return {"rocm_rpath": True}
-
-    monkeypatch.setattr(runner, "_capture_library_linkage", counting_capture)
-    for _ in range(5):
-        assert runner._rocm_libraries_use_rpath() is True
-    assert len(calls) == 1
-
-
-def test_warning_predicate_is_pure_and_does_not_touch_the_bundle(rpath_stack):
+def test_warning_predicate_is_pure_and_does_not_touch_the_bundle():
     """The detector inspects; the caller decides what to do with the string."""
     bundle = {"LD_LIBRARY_PATH": "/opt/patched/lib", "HSA_XNACK": "1"}
     before = dict(bundle)
-    message = runner._rpath_substitution_warning("cell-a", bundle)
+    message = runner._rpath_substitution_warning("cell-a", bundle, True)
     assert message is not None
     assert bundle == before
 
 
-def test_silent_when_ld_library_path_is_empty(rpath_stack):
+def test_silent_when_ld_library_path_is_empty():
     """An empty LD_LIBRARY_PATH contributes no directory to search.
 
     Set-but-empty is not a substitution attempt, so treating it as one
     would fire the warning on a run with nothing to lose.
     """
-    assert runner._rpath_substitution_warning("cell-a", {"LD_LIBRARY_PATH": ""}) is None
+    assert (
+        runner._rpath_substitution_warning("cell-a", {"LD_LIBRARY_PATH": ""}, True)
+        is None
+    )
+
+
+# ---- Layer 2, per-environment sourcing (issue #413 follow-up) -------------
+#
+# The linkage fact belongs to the environment the cell RUNS in, not to the
+# runner process. This module already refuses a runner-process collect_env()
+# for isolated envs because host state under a docker label is misleading;
+# a warning derived from that same host state breaks the rule less visibly.
+# A ROCm 10 container launched from this ROCm 7 host is the exact case, and
+# it is the one the whole feature exists for.
+
+
+def _isolated_substitution_recipe(ld_library_path: str, image: str = "rocm/x:10"):
+    from aorta.triage.recipe import Cell, ConfoundCfg, InlineEnv, Recipe
+
+    env = InlineEnv(name="_inline_rocm10", docker=image)
+    return Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=1,
+        cells=(
+            Cell(
+                name="patched-in-container",
+                mitigations=("none",),
+                environment=env.name,
+                extra_env={"LD_LIBRARY_PATH": ld_library_path},
+            ),
+        ),
+        confound=ConfoundCfg(baseline_cell="patched-in-container"),
+        inline_environments=(env,),
+    )
+
+
+def _wrapper_writing(rocm_rpath: bool | None):
+    """A ``run_trials`` stand-in that plays the wrapper's half of the contract.
+
+    Writes an in-container snapshot to the reserved ``_aorta_env_probe``
+    output path, which is how an isolated env's real linkage reading gets
+    back to the runner.
+    """
+
+    def fake_run_trials(request):
+        probe = getattr(request, "env_probe", None)
+        if probe:
+            out = Path(probe["out"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(
+                json.dumps(_snapshot_with_rocm_rpath(rocm_rpath).to_dict()),
+                encoding="utf-8",
+            )
+        return [_FakeTrial(), _FakeTrial()]
+
+    return MagicMock(side_effect=fake_run_trials)
+
+
+def test_isolated_env_warning_comes_from_the_container_not_the_host(
+    tmp_path, monkeypatch, runpath_stack
+):
+    """The regression: ROCm 10 container launched from a ROCm 7 host.
+
+    ``collect_env`` in the runner process reports DT_RUNPATH -- true of the
+    host, irrelevant to the cell -- while the container's own probe reports
+    DT_RPATH. Sourcing the warning from the host would stay silent on
+    precisely the substitution that gets silently discarded.
+    """
+    monkeypatch.setattr(runner, "run_trials", _wrapper_writing(True))
+    runner.run_recipe(
+        _isolated_substitution_recipe("/opt/patched/lib"),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+    hits = [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+    assert len(hits) == 1
+    assert "patched-in-container" in hits[0]
+
+
+def test_isolated_env_does_not_inherit_a_host_rpath_reading(
+    tmp_path, monkeypatch, rpath_stack
+):
+    """The mirror image, and the reason this is not just a missed warning.
+
+    Host libraries carry DT_RPATH; the container's do not. A host-sourced
+    warning would fire on a cell whose substitution works perfectly, which
+    is the crying-wolf the two-condition trigger exists to prevent.
+    """
+    monkeypatch.setattr(runner, "run_trials", _wrapper_writing(False))
+    runner.run_recipe(
+        _isolated_substitution_recipe("/opt/patched/lib"),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+    assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+
+
+def test_isolated_env_with_no_container_snapshot_stays_silent(
+    tmp_path, monkeypatch, rpath_stack, patched_run_trials
+):
+    """No per-environment truth available means no warning at all.
+
+    The wrapper never opted into the probe contract, so nothing in this run
+    knows what the container's libraries carry. Falling back to the host
+    reading would be a confident claim about a stack we never looked at,
+    and a warning sourced from the wrong environment is worse than none.
+    """
+    runner.run_recipe(
+        _isolated_substitution_recipe("/opt/patched/lib"),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+    assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+
+
+def test_each_environment_in_a_matrix_gets_its_own_reading(
+    tmp_path, monkeypatch, runpath_stack
+):
+    """A process-global cache would answer for at most one of these cells.
+
+    Two cells, two environments, one substitution attempt each: a local
+    ROCm 7 env where the override works, and a ROCm 10 container where it
+    does not. Exactly one warning, naming the container cell.
+    """
+    from aorta.triage.recipe import Cell, ConfoundCfg, InlineEnv, Recipe
+
+    env = InlineEnv(name="_inline_rocm10", docker="rocm/x:10")
+    recipe = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=1,
+        cells=(
+            Cell(
+                name="host-substitution",
+                mitigations=("none",),
+                environment="local",
+                extra_env={"LD_LIBRARY_PATH": "/opt/patched/lib"},
+            ),
+            Cell(
+                name="container-substitution",
+                mitigations=("none",),
+                environment=env.name,
+                extra_env={"LD_LIBRARY_PATH": "/opt/patched/lib"},
+            ),
+        ),
+        confound=ConfoundCfg(baseline_cell="host-substitution"),
+        inline_environments=(env,),
+    )
+    monkeypatch.setattr(runner, "run_trials", _wrapper_writing(True))
+
+    runner.run_recipe(
+        recipe, output_dir=tmp_path, timestamp="2026-01-01T00-00-00"
+    )
+    hits = [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+    assert len(hits) == 1
+    assert "container-substitution" in hits[0]
+    assert "host-substitution" not in hits[0]
+
+
+def test_reading_is_cached_per_environment_not_re_read_per_cell(tmp_path):
+    """One env.json read per environment, not one per cell.
+
+    The tags belong to the libraries installed in that environment and
+    cannot change under a running matrix, so a 30-cell recipe must not put
+    30 snapshot reads in the loop -- but the cache key has to be the
+    environment, or the first cell's answer is imposed on every other stack
+    in the matrix.
+    """
+    rocm7 = tmp_path / "rocm7.json"
+    rocm10 = tmp_path / "rocm10.json"
+    rocm7.write_text(json.dumps({"library_linkage": {"rocm_rpath": False}}))
+    rocm10.write_text(json.dumps({"library_linkage": {"rocm_rpath": True}}))
+    cache: dict[str, bool | None] = {}
+
+    assert runner._cell_rocm_rpath("local", rocm7, cache) is False
+    assert runner._cell_rocm_rpath("docker", rocm10, cache) is True
+    assert cache == {"local": False, "docker": True}
+
+    # Later cells answer from the cache, not the filesystem.
+    rocm10.unlink()
+    assert runner._cell_rocm_rpath("docker", rocm10, cache) is True
+
+
+def test_a_missing_snapshot_is_not_cached_as_unknown(tmp_path):
+    """An isolated env that answers late must still be allowed to answer.
+
+    Its first cell may fail to produce an in-container snapshot while a
+    later cell of the same env succeeds; caching the first "unknown" would
+    silence the warning for the rest of the run.
+    """
+    target = tmp_path / "env.json"
+    cache: dict[str, bool | None] = {}
+
+    assert runner._cell_rocm_rpath("docker", target, cache) is None
+    assert cache == {}
+
+    target.write_text(json.dumps({"library_linkage": {"rocm_rpath": True}}))
+    assert runner._cell_rocm_rpath("docker", target, cache) is True
+
+
+def test_a_pre_117_snapshot_claims_nothing(tmp_path):
+    """No ``library_linkage`` block means the producer never looked."""
+    target = tmp_path / "env.json"
+    target.write_text(json.dumps({"schema_version": "1.16"}))
+    assert runner._cell_rocm_rpath("local", target, {}) is None
+
+
+def test_a_placeholder_is_not_mistaken_for_a_reading(tmp_path):
+    """The isolated-env placeholder describes the descriptor, not the stack."""
+    target = tmp_path / "env.json"
+    target.write_text(json.dumps({"snapshot_captured": False}))
+    read, value = runner._snapshot_rocm_rpath(target)
+    assert (read, value) == (False, None)
+
+
+@pytest.mark.parametrize("written", ["true", "yes", 1, [], {"rocm_rpath": True}])
+def test_only_a_real_boolean_counts_as_a_reading(tmp_path, written):
+    """``rocm_rpath`` is a tri-state, so a non-boolean is the third state.
+
+    env.json is a file on disk: a hand-edit, a producer from another branch, or
+    a truncated write can all put a string there, and every value here except
+    the empty list is TRUTHY. Passing one straight through would make the
+    substitution warning fire off something nobody measured -- the field says
+    what the ELF dynamic sections carried, and "true" is not that reading.
+
+    The block still counts as read, so a caller may cache the answer instead of
+    re-reading a file that will keep saying the same thing.
+    """
+    target = tmp_path / "env.json"
+    target.write_text(json.dumps({"library_linkage": {"rocm_rpath": written}}))
+
+    read, value = runner._snapshot_rocm_rpath(target)
+
+    assert read is True
+    assert value is None

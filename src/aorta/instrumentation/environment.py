@@ -4044,9 +4044,20 @@ _ELF_MAGIC = b"\x7fELF"
 # Bounds on what we will read from a claimed offset. A real .dynamic holds
 # tens of entries and a real program header table a handful; a corrupt (or
 # adversarial) header could otherwise ask us to allocate gigabytes inside a
-# probe whose contract is "never raises, finishes in seconds".
+# probe whose contract is "never raises, finishes in seconds". Exceeding
+# either is REJECTED rather than clamped -- a clamped read could stop short
+# of the tag and then report "carries neither", which is the one wrong
+# answer this block must never give.
 _MAX_DYNAMIC_BYTES = 1 << 16
 _MAX_PHDR_BYTES = 1 << 16
+# Ceiling on the directory census (see :func:`_census_rocm_link_tags`). A real
+# ROCm lib dir holds ~60 shared objects and each read is a few KB, so this is
+# ~70x headroom rather than a limit anything is expected to reach; it exists so
+# a pathological directory cannot stall a probe with a seconds-level budget.
+_MAX_CENSUS_FILES = 4096
+# How many RPATH-carrying filenames the census names outright. Enough to make
+# the reading self-evidencing without turning the block into a file listing.
+_MAX_RPATH_EXAMPLES = 12
 
 
 def _read_elf_search_path_tags(path: Path) -> tuple[list[str], str | None]:
@@ -4059,6 +4070,18 @@ def _read_elf_search_path_tags(path: Path) -> tuple[list[str], str | None]:
     tell" (``([], "...")``) -- the same distinction ``rocm_paths`` keeps
     with ``source="none"``, and the one that stops an unreadable file
     from being reported as a clean RUNPATH stack.
+
+    That distinction only holds if a partial read is a FAILURE rather
+    than a short answer, so success here requires the whole declared
+    dynamic section: ``p_filesz`` bytes actually read, an exact multiple
+    of the entry size, within the byte bound, and terminated by
+    ``DT_NULL``. A truncated or oversized section that happens to contain
+    one intact entry before the cut is reported as unreadable, not as
+    ``none`` -- reporting ``none`` would flow straight into
+    ``rocm_rpath=False`` and silence the substitution warning, which is a
+    silent false negative in a feature whose entire purpose is to stop a
+    silent failure. Fail-soft means "we could not tell", never "there was
+    nothing there".
 
     NEVER raises. Every malformed-input path returns a reason string.
 
@@ -4155,9 +4178,26 @@ def _read_elf_search_path_tags(path: Path) -> tuple[list[str], str | None]:
                 return [], "no PT_DYNAMIC segment"
 
             entry_size = 16 if is_64 else 8
+            # Reject before reading, so none of these end up looking like a
+            # library that simply carries no search-path tag.
+            if dyn_offset == 0:
+                return [], "PT_DYNAMIC at file offset 0"
+            if dyn_size == 0:
+                return [], "empty dynamic section"
+            if dyn_size % entry_size:
+                return [], f"misaligned dynamic section ({dyn_size} bytes)"
+            if dyn_size > _MAX_DYNAMIC_BYTES:
+                # NOT clamped to the bound and parsed anyway: the tag we are
+                # looking for could be past the clamp, and a clamped read that
+                # missed it would return ([], None) -- indistinguishable from
+                # a library that genuinely carries neither tag.
+                return [], f"dynamic section implausibly large ({dyn_size} bytes)"
             handle.seek(dyn_offset)
-            dynamic = handle.read(min(dyn_size, _MAX_DYNAMIC_BYTES))
-            if len(dynamic) < entry_size:
+            dynamic = handle.read(dyn_size)
+            if len(dynamic) != dyn_size:
+                # p_filesz claims more than the file holds. Whatever entries
+                # survived are not the whole section, so they cannot support
+                # a negative answer.
                 return [], "truncated dynamic section"
             # d_tag is SIGNED (Elf64_Sxword); the DT_LO*/DT_HI* ranges are
             # negative when read that way, so an unsigned read would compare
@@ -4165,14 +4205,22 @@ def _read_elf_search_path_tags(path: Path) -> tuple[list[str], str | None]:
             # harmless -- but a signed read is what the ABI specifies.
             tag_format = f"{endian}{'q' if is_64 else 'i'}"
             tags: set[str] = set()
-            for offset in range(0, len(dynamic) - entry_size + 1, entry_size):
+            terminated = False
+            for offset in range(0, dyn_size, entry_size):
                 (d_tag,) = struct.unpack_from(tag_format, dynamic, offset)
                 if d_tag == _DT_NULL:
+                    terminated = True
                     break
                 if d_tag == _DT_RPATH:
                     tags.add("rpath")
                 elif d_tag == _DT_RUNPATH:
                     tags.add("runpath")
+            if not terminated:
+                # The ABI terminates ``_DYNAMIC`` with DT_NULL and counts it in
+                # p_filesz. Its absence means we reached the end of something
+                # that is not a complete dynamic array, so the scan may have
+                # stopped short of the tag.
+                return [], "dynamic section not DT_NULL-terminated"
             return sorted(tags), None
     except OSError as exc:
         return [], f"unreadable ({type(exc).__name__})"
@@ -4239,6 +4287,157 @@ def _linkage_entry(name: str, scope: str, lib_dir: Path) -> dict[str, Any]:
     }
 
 
+def _looks_like_shared_object(name: str) -> bool:
+    """``libfoo.so`` / ``libfoo.so.1.2`` -- but not ``Kernels.so-000-gfx950.hsaco``.
+
+    The wheel-layout ROCm lib dirs sit above kernel-object trees whose
+    filenames embed ``.so-``; those are AMDGPU code objects with no
+    ``PT_DYNAMIC``, and counting them would inflate the census's
+    ``unreadable`` tally with files that were never libraries.
+    """
+    return name.endswith(".so") or ".so." in name
+
+
+def _rocm_library_dirs() -> list[Path]:
+    """Every directory the resolved ROCm libraries live in, deduplicated.
+
+    One directory on a classic ``/opt/rocm`` install; two distinct
+    site-packages components (``_rocm_sdk_core`` / ``_rocm_sdk_libraries``)
+    in the TheRock wheel layout. Read from the module-level constants at
+    call time so the layout resolution in :mod:`aorta.instrumentation.rocm_paths`
+    stays the single source of truth for where ROCm is.
+    """
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+    for directory in (
+        ROCM_CORE_LIB_DIR,
+        HIPBLASLT_LIB_DIR,
+        ROCBLAS_LIB_DIR,
+        MIOPEN_LIB_DIR,
+        RCCL_LIB_DIR,
+    ):
+        if directory is None:
+            continue
+        try:
+            resolved = Path(directory).resolve()
+        except OSError:  # pragma: no cover - resolve() is non-strict here
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        dirs.append(resolved)
+    return dirs
+
+
+def _census_rocm_link_tags() -> dict[str, Any]:
+    """Tag counts over EVERY shared object in the resolved ROCm lib dirs.
+
+    This -- not the named ``libraries`` list -- is what ``rocm_rpath``
+    aggregates over, and the reason is a hole the named list demonstrably
+    had. ``rocm_rpath`` claims "some object in the loading chain carries
+    ``DT_RPATH``", but a hand-picked sample can only ever claim "some
+    object I happened to pick does", and those coincide only while the
+    stack is uniform. #413's measured failure was an inherited ``DT_RPATH``
+    on ``libhipblas.so.3`` -- which was not in the sample -- defeating a
+    ``libhipblaslt`` substitution. On the pinned image the sample answered
+    correctly only because the whole install is RPATH; a mixed stack with
+    the sampled objects on ``DT_RUNPATH`` and ``libhipblas`` on
+    ``DT_RPATH`` would have answered False and suppressed the warning.
+
+    Walking ``DT_NEEDED`` from the sampled libraries was considered and
+    does NOT close the hole. Measured in the gate image: none of
+    ``libamdhip64`` / ``libhipblaslt`` / ``librocblas`` / ``libMIOpen`` /
+    ``librccl`` names ``libhipblas.so.3`` as a dependency -- hipBLAS is
+    their DEPENDER, not their dependency (it needs ``librocblas`` and
+    ``libamdhip64``). A downward dependency walk from the sample provably
+    cannot reach the object that caused the bug, and it would also miss
+    anything ``dlopen``-ed at runtime. Reading the directory reaches
+    dependers, siblings and ``dlopen`` targets alike, needs no soname
+    resolution, and cannot go stale when ROCm adds a library.
+
+    Deliberately an over-approximation of the loading chain: an object in
+    these directories that the trial never loads still counts. That is the
+    safe direction. A false positive costs an operator one ``LD_DEBUG=libs``
+    check; a false negative is the confident wrong answer #413 exists to
+    prevent. Measured cost of being right about it: 57 objects in 4 ms on
+    the classic ROCm 7.0.2 host (all ``DT_RUNPATH``, so the warning stays
+    silent there), 61 objects in 3 ms in the ROCm 10 wheel image (all
+    ``DT_RPATH``, ``libhipblas.so.3`` among them).
+
+    Non-recursive: the nested ``rocm_sysdeps/`` / ``llvm/`` / ``host-math/``
+    component dirs beneath the wheel layout are vendored dependencies, not
+    the ROCm libraries a trial substitutes, and the top level is where
+    every object named in #413 lives.
+    """
+    counts = {"rpath": 0, "runpath": 0, "none": 0, "unreadable": 0}
+    rpath_examples: list[str] = []
+    scanned_dirs: list[str] = []
+    unlistable_dirs: list[str] = []
+    seen: set[Path] = set()
+    truncated = False
+    for directory in _rocm_library_dirs():
+        try:
+            names = sorted(p.name for p in directory.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            # There is no directory here. "No ROCm libraries at this path" is
+            # a true statement about the install, so it needs no separate
+            # record -- the named entries already say it per library.
+            continue
+        except OSError as exc:
+            # There IS something here and we could not look inside it
+            # (permissions, stale mount, EIO). Recorded, because an empty
+            # scan of an unreadable directory is not evidence that the stack
+            # carries no DT_RPATH -- the same "unreadable is not empty"
+            # distinction the per-file parse keeps.
+            log.debug("linkage census could not list %s: %s", directory, exc)
+            unlistable_dirs.append(str(directory))
+            continue
+        scanned_dirs.append(str(directory))
+        for name in names:
+            if not _looks_like_shared_object(name):
+                continue
+            if len(seen) >= _MAX_CENSUS_FILES:
+                truncated = True
+                break
+            try:
+                resolved = (directory / name).resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if resolved in seen or not resolved.is_file():
+                continue
+            seen.add(resolved)
+            tags, error = _read_elf_search_path_tags(resolved)
+            if error is not None:
+                counts["unreadable"] += 1
+                continue
+            # The EFFECTIVE tag both counts and names the object: an object
+            # carrying both tags is not a hazard (glibc ignores its DT_RPATH),
+            # so naming it here would offer as evidence a file that did not
+            # contribute to the ``rpath`` count beside it.
+            tag = _effective_link_tag(tags)
+            counts[tag] += 1
+            if tag == "rpath" and len(rpath_examples) < _MAX_RPATH_EXAMPLES:
+                rpath_examples.append(resolved.name)
+        if truncated:
+            break
+    return {
+        "dirs": scanned_dirs,
+        "unlistable_dirs": unlistable_dirs,
+        "scanned": sum(counts.values()),
+        "rpath": counts["rpath"],
+        "runpath": counts["runpath"],
+        "none": counts["none"],
+        "unreadable": counts["unreadable"],
+        # Recorded because a truncated census can only support a POSITIVE
+        # answer: an unscanned tail may hold the RPATH object. Read together
+        # with ``unlistable_dirs`` by :func:`_capture_library_linkage`, which
+        # withholds the negative verdict when either says the enumeration was
+        # incomplete.
+        "truncated": truncated,
+        "rpath_examples": rpath_examples,
+    }
+
+
 def _render_tristate(value: bool | None) -> str:
     """``yes`` / ``no`` / ``unknown`` -- never the bare literal ``None``.
 
@@ -4263,6 +4462,17 @@ def _empty_library_linkage(status: str = "absent") -> dict[str, Any]:
         "status": status,
         "rocm_rpath": None,
         "tags_observed": [],
+        "census": {
+            "dirs": [],
+            "unlistable_dirs": [],
+            "scanned": 0,
+            "rpath": 0,
+            "runpath": 0,
+            "none": 0,
+            "unreadable": 0,
+            "truncated": False,
+            "rpath_examples": [],
+        },
         "libraries": [],
     }
 
@@ -4299,6 +4509,17 @@ def _capture_library_linkage() -> dict[str, Any]:
     rescue the substitution (the losing lookup resolved as a dependency
     of a neighbouring ROCm library).
 
+    TWO different things live in this block and they answer different
+    questions. ``libraries`` is a NAMED sample -- the same five ROCm
+    objects the identity blocks hash, plus torch's -- so a reader can
+    line a tag up against the hash and version already recorded for that
+    exact file. ``census`` is the whole population of the resolved ROCm
+    lib dirs, and it is what ``rocm_rpath`` aggregates over. The split
+    is deliberate: the sample is for reading, the census is the evidence.
+    Treating the sample as evidence is what left ``rocm_rpath`` correct
+    only by correlation, since the object #413 measured defeating a
+    substitution (``libhipblas.so.3``) was never in it.
+
     Appends NOTHING to ``partial_reasons``, and takes no ``reasons`` list --
     the only capture function here that does not. ``partial`` means "a field
     the operator expected to be populated came back None", and no field of
@@ -4330,8 +4551,10 @@ def _capture_library_linkage() -> dict[str, Any]:
             _linkage_entry(PYTORCH_HIP_LIB_NAME, "pytorch", torch_lib_dir)
         )
 
+    census = _census_rocm_link_tags()
     read = [e for e in entries if e["effective_tag"] != "unknown"]
-    rocm_read = [e for e in read if e["scope"] == "rocm"]
+    census_read = census["rpath"] + census["runpath"] + census["none"]
+
     # ANY, deliberately -- not "all", not "most". DT_RPATH is inherited by
     # every object loaded below the one carrying it, so a single RPATH
     # anywhere in the chain is sufficient to defeat an LD_LIBRARY_PATH
@@ -4340,22 +4563,70 @@ def _capture_library_linkage() -> dict[str, Any]:
     # libhipblas.so.3, and libtorch_hip.so's own DT_RUNPATH did not save
     # it. A stricter aggregate would look more balanced and under-report
     # the hazard on every mixed stack, which is the common one.
-    rocm_rpath = (
-        any(e["effective_tag"] == "rpath" for e in rocm_read) if rocm_read else None
+    #
+    # Aggregated over the CENSUS -- every shared object in the resolved
+    # ROCm lib dirs -- and not over the named ``libraries`` entries below.
+    # Those five are a sample chosen to mirror the identity blocks, and a
+    # sample can only support "one of the objects I picked carries RPATH",
+    # which is not the claim ``rocm_rpath`` makes. libhipblas.so.3, the
+    # object #413 measured defeating the substitution, is not among them
+    # and is not reachable by walking their dependencies either (it is
+    # their depender). See :func:`_census_rocm_link_tags`. Do NOT "fix"
+    # a future gap here by adding another name to the list below; that is
+    # the failure mode this replaced.
+    named_rpath = any(
+        e["effective_tag"] == "rpath" for e in read if e["scope"] == "rocm"
     )
-    if not entries or all(e["path"] is None for e in entries):
-        status = "absent"
-    elif not read:
+    # ANY is asymmetric in what it needs from the enumeration, so the two
+    # verdicts do not have the same evidential bar. ``True`` needs one tagged
+    # object and survives an incomplete scan. ``False`` is a claim about the
+    # WHOLE population, so it requires that the population was actually
+    # enumerated: a capped scan leaves an unread tail, and a lib dir that would
+    # not list leaves a whole component unread. Either is the directory-level
+    # form of the clamped read :func:`_read_elf_search_path_tags` refuses, and
+    # answering False from it would flow into a silenced substitution warning
+    # -- the one wrong answer this block exists to avoid. Unreadable individual
+    # FILES deliberately do not poison the verdict: a GNU ld script named
+    # ``libfoo.so`` is a normal inhabitant of a lib dir, ``census.unreadable``
+    # records how many there were, and letting one collapse the answer to
+    # unknown would silence the warning on healthy installs.
+    census_enumerated = not census["truncated"] and not census["unlistable_dirs"]
+    if census["rpath"] or named_rpath:
+        rocm_rpath = True
+    elif census_enumerated and (census_read or any(e["scope"] == "rocm" for e in read)):
+        rocm_rpath = False
+    else:
+        rocm_rpath = None
+
+    if read or census_read:
+        status = "ok"
+    elif (
+        any(e["path"] is not None for e in entries)
+        or census["unreadable"]
+        or census["unlistable_dirs"]
+    ):
+        # Something is there and we could not read it. Distinct from
+        # "absent" for the reason the whole block exists: an operator whose
+        # ROCm tree is a stale mount has a different problem from one who
+        # has no ROCm install, and reading them the same way is what makes
+        # a hazard look like a clean bill of health.
         status = "unreadable"
     else:
-        status = "ok"
+        status = "absent"
+
+    # The mixed-stack summary. ``["rpath", "runpath"]`` is the real
+    # ROCm 10 + torch reading and must survive as two values.
+    tags_observed = {e["effective_tag"] for e in read}
+    tags_observed.update(t for t in ("rpath", "runpath", "none") if census[t])
 
     return {
         "status": status,
         "rocm_rpath": rocm_rpath,
-        # The mixed-stack summary. ``["rpath", "runpath"]`` is the real
-        # ROCm 10 + torch reading and must survive as two values.
-        "tags_observed": sorted({e["effective_tag"] for e in read}),
+        "tags_observed": sorted(tags_observed),
+        # The evidence behind ``rocm_rpath``, in the artifact so a reader
+        # can see WHICH objects carry the tag rather than taking the
+        # aggregate on trust -- including ones the named list omits.
+        "census": census,
         "libraries": entries,
     }
 

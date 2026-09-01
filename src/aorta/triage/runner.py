@@ -50,11 +50,7 @@ from typing import Any, Literal
 
 import click
 
-from aorta.instrumentation.environment import (
-    EnvSnapshot,
-    _capture_library_linkage,
-    collect_env,
-)
+from aorta.instrumentation.environment import EnvSnapshot, collect_env
 from aorta.registry import get_environment, get_mitigation
 from aorta.registry.errors import RegistryError
 from aorta.run import RunRequest, TrialResult, run_trials
@@ -629,7 +625,7 @@ def _resolve_cell_env_vars(
     inherited by every object below the one carrying it, so a stock sibling
     on ``$ORIGIN/../lib`` wins instead -- with no loader diagnostic and a zero
     exit status, meaning the cell passes while measuring the library the
-    operator meant to replace.     ``LD_PRELOAD`` is subject to neither and stays
+    operator meant to replace. ``LD_PRELOAD`` is subject to neither and stays
     the reliable way to force a specific object; :mod:`aorta.workloads.hrx`
     pairs the two and fails the trial when the loader ignores the preload.
 
@@ -662,44 +658,83 @@ def _resolve_cell_env_vars(
     return env
 
 
-# Sentinel distinct from ``None``, which is a real answer here ("we could not
-# determine what the libraries carry").
-_RPATH_UNPROBED = object()
-_rocm_rpath_state: Any = _RPATH_UNPROBED
+def _snapshot_rocm_rpath(env_json_path: Path) -> tuple[bool, bool | None]:
+    """``(snapshot_was_read, rocm_rpath)`` from one ``environments/<env>/env.json``.
 
+    Reads the schema-1.17 ``library_linkage.rocm_rpath`` field out of a
+    snapshot that was captured **inside the environment it describes** --
+    in-process for a local env, in-container for an isolated one. It is
+    deliberately not re-derived from the runner process: this module
+    already refuses a runner-process ``collect_env()`` for isolated envs
+    (see :func:`_is_isolated_environment`) because that records host
+    state under a docker label, and a warning sourced from the host stack
+    would break the same rule less visibly -- a ROCm 10 container launched
+    from this ROCm 7 host would read ``rocm_rpath=False`` and stay silent
+    on exactly the substitution it exists to catch.
 
-def _rocm_libraries_use_rpath() -> bool | None:
-    """``True`` / ``False`` / ``None`` -- do the resolved ROCm libraries use RPATH?
-
-    Reads the schema-1.17 ``library_linkage`` block, which parses the ELF
-    dynamic sections directly. Cached for the life of the process: the fact
-    is a property of the installed libraries, which do not change under a
-    running matrix, and this is consulted once per cell -- re-reading six
-    files per cell would put filesystem I/O in the matrix loop for an
-    answer that cannot have changed.
-
-    ``None`` means the libraries could not be read at all, and callers must
-    treat it as "no warrant to warn" rather than as ``False``.
+    The first element distinguishes "there is no snapshot to consult yet"
+    from "the snapshot says we could not tell", so a caller can cache the
+    second and keep retrying the first. Both render as ``None``: a
+    pre-1.17 snapshot has no ``library_linkage`` block at all, and nothing
+    may be claimed on its behalf.
     """
-    global _rocm_rpath_state
-    if _rocm_rpath_state is _RPATH_UNPROBED:
-        _rocm_rpath_state = _capture_library_linkage().get("rocm_rpath")
-    return _rocm_rpath_state
+    try:
+        doc = _read_json_no_follow(env_json_path)
+    except (OSError, json.JSONDecodeError):
+        return False, None
+    if not isinstance(doc, dict) or doc.get("snapshot_captured") is False:
+        return False, None
+    linkage = doc.get("library_linkage")
+    if not isinstance(linkage, dict):
+        return True, None
+    value = linkage.get("rocm_rpath")
+    return True, value if isinstance(value, bool) else None
+
+
+def _cell_rocm_rpath(
+    env_name: str, env_json_path: Path, cache: dict[str, bool | None]
+) -> bool | None:
+    """Per-ENVIRONMENT ``rocm_rpath``, cached by environment name.
+
+    Cached rather than re-read because the tag is a property of the
+    libraries installed in that environment, which do not change under a
+    running matrix; cached *by env name* rather than per process because a
+    matrix can mix a ROCm 7 venv cell with a ROCm 10 docker cell, and one
+    global answer would describe at most one of them.
+
+    Only a successfully-read snapshot is cached. An isolated env whose
+    first cell failed to produce an in-container snapshot must be allowed
+    to answer on a later cell rather than be pinned to "unknown" for the
+    rest of the run.
+    """
+    if env_name in cache:
+        return cache[env_name]
+    read, value = _snapshot_rocm_rpath(env_json_path)
+    if read:
+        cache[env_name] = value
+    return value
 
 
 def _rpath_substitution_warning(
-    cell_name: str, resolved_env_vars: dict[str, str]
+    cell_name: str, resolved_env_vars: dict[str, str], rocm_rpath: bool | None
 ) -> str | None:
     """Warn iff this cell's bundle may be silently ignored by the loader.
 
     Fires only when BOTH hold: the cell sets ``LD_LIBRARY_PATH`` (so a
-    library substitution is actually being attempted) and the resolved
-    ROCm libraries carry ``DT_RPATH`` (so the loader will consult their
-    baked-in paths first). Either alone is unremarkable -- ROCm 7.x runs
-    substitute libraries successfully every day, and a ROCm 10 run that
-    is not substituting anything has nothing to lose -- and warning on
-    either alone would train operators to ignore the message, which
-    costs more than it buys the one time it matters.
+    library substitution is actually being attempted) and *this cell's own
+    environment* carries ``DT_RPATH`` on its ROCm libraries (so the loader
+    will consult their baked-in paths first). Either alone is unremarkable
+    -- ROCm 7.x runs substitute libraries successfully every day, and a
+    ROCm 10 run that is not substituting anything has nothing to lose --
+    and warning on either alone would train operators to ignore the
+    message, which costs more than it buys the one time it matters.
+
+    ``rocm_rpath`` is supplied by the caller, read from the environment's
+    own ``env.json`` (:func:`_cell_rocm_rpath`), never probed here. A
+    warning derived from the wrong stack is worse than no warning: it
+    would be confidently wrong in both directions across a mixed matrix.
+    ``None`` -- no snapshot, or a snapshot that could not read its own
+    libraries -- is therefore silence, not a guess.
 
     Deliberately does NOT repair the situation. Prepending the stock ROCm
     directories to the child's ``LD_LIBRARY_PATH``, or otherwise editing
@@ -714,12 +749,13 @@ def _rpath_substitution_warning(
     # it would be exactly the crying-wolf this predicate exists to avoid.
     if not resolved_env_vars.get("LD_LIBRARY_PATH"):
         return None
-    if _rocm_libraries_use_rpath() is not True:
+    if rocm_rpath is not True:
         return None
     return (
-        f"cell {cell_name!r} sets LD_LIBRARY_PATH, but the resolved ROCm "
-        "libraries are linked with DT_RPATH, which the loader searches "
-        "BEFORE LD_LIBRARY_PATH. A library substitution may be silently "
+        f"cell {cell_name!r} sets LD_LIBRARY_PATH, but the ROCm libraries "
+        "in that cell's own environment (per its environments/<env>/env.json "
+        "library_linkage block) are linked with DT_RPATH, which the loader "
+        "searches BEFORE LD_LIBRARY_PATH. A library substitution may be silently "
         "ignored: the trial still exits 0 with no loader diagnostic, and "
         "the result would describe the stock library rather than the "
         "substituted one. DT_RPATH is also inherited by every object "
@@ -1804,6 +1840,11 @@ def _run_recipe_locked(
     # env name: matrices where many cells share one env would otherwise repeat
     # the resolution once per cell.
     isolation_cache: dict[str, bool] = {}
+    # Per-environment DT_RPATH readings for the #413 substitution warning,
+    # keyed by env name for the same reason isolation_cache is: the answer
+    # belongs to the environment, and a matrix may mix a ROCm 7 venv with a
+    # ROCm 10 container. Populated lazily from each env's own env.json.
+    rpath_by_env: dict[str, bool | None] = {}
 
     for cell_idx, cell in enumerate(recipe.cells, start=1):
         env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
@@ -1863,16 +1904,6 @@ def _run_recipe_locked(
         )
         cell_elapsed = time.perf_counter() - cell_t0
 
-        # Emitted here rather than inside _resolve_cell_env_vars because this
-        # is where a sink exists that an operator actually reads: `warnings`
-        # is rendered into matrix.md and matrix.json. The predicate lives
-        # next to _resolve_cell_env_vars (which owns the hazard docstring);
-        # only the emission is here.
-        rpath_warning = _rpath_substitution_warning(cell.name, resolved_env_vars)
-        if rpath_warning is not None:
-            warnings.append(rpath_warning)
-            log.warning("%s", rpath_warning)
-
         # Promote the wrapper's in-container snapshot if this cell produced
         # one. Retries across cells reusing the env: only cells still in
         # ``pending_envs`` requested a probe, so a container that failed to
@@ -1882,6 +1913,32 @@ def _run_recipe_locked(
             if _is_real_env_snapshot(probe_target, probe_env, warnings):
                 captured_envs.add(cell.environment)
                 del pending_envs[cell.environment]
+
+        # DT_RPATH-vs-LD_LIBRARY_PATH warning (issue #413). Emitted here
+        # rather than inside _resolve_cell_env_vars because this is where a
+        # sink exists that an operator actually reads: `warnings` is rendered
+        # into matrix.md and matrix.json. The predicate lives next to
+        # _resolve_cell_env_vars (which owns the hazard docstring); only the
+        # emission is here.
+        #
+        # AFTER the promotion above, not before, and that ordering is the
+        # whole point: for an isolated env the only truthful reading of the
+        # link tags is the in-container snapshot the block above just
+        # promoted. Reading before it -- or probing the runner process, which
+        # is what this originally did -- would answer for the host, and this
+        # module already establishes (see _is_isolated_environment) that host
+        # state must not be recorded on an isolated env's behalf. A ROCm 10
+        # container launched from a ROCm 7 host would otherwise miss the
+        # warning entirely.
+        rpath_warning = _rpath_substitution_warning(
+            cell.name,
+            resolved_env_vars,
+            _cell_rocm_rpath(cell.environment, env_json_path, rpath_by_env),
+        )
+        if rpath_warning is not None:
+            warnings.append(rpath_warning)
+            log.warning("%s", rpath_warning)
+
         if error is not None:
             log.info(
                 "cell %d/%d: %s -- ERROR (%s) in %.1fs",

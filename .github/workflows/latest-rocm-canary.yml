@@ -29,7 +29,8 @@ name: Latest ROCm canary
 # does change is that a canary row for a given date may describe a tag other than
 # `:latest`, and the recorded base image is the only thing that says so; an
 # override dispatched on a day the cron already ran replaces that date's row on
-# the ci-results branch.
+# the ci-results branch. It is also constrained to the `rocm/pytorch` repository
+# by that same step -- see the check there for why a typo is the threat model.
 #
 # Non-gating is enforced three ways, not just intended:
 #   1. it is its own workflow, so it cannot appear in nightly-eval.yml's graph
@@ -78,7 +79,7 @@ on:
         # input's default would let the two drift, and a stale non-empty default
         # WINS over CANARY_TAG, so editing CANARY_TAG would silently stop
         # affecting dispatched runs. Blank means "use CANARY_TAG".
-        description: "Base image to canary instead of CANARY_TAG (rocm/pytorch:latest). Accepts a tag or tag@digest; resolved to a digest either way. Blank uses CANARY_TAG."
+        description: "Base image to canary instead of CANARY_TAG (rocm/pytorch:latest). Must be in the rocm/pytorch repository; accepts a tag or tag@digest, resolved to a digest either way. Blank uses CANARY_TAG."
         required: false
         default: ""
 
@@ -168,6 +169,77 @@ jobs:
           set -euo pipefail
           requested="$(printf '%s' "${BASE_IMAGE_INPUT:-}" | tr -d '[:space:]')"
           [ -n "${requested}" ] || requested="${CANARY_TAG}"
+          # Constrain the reference to the rocm/pytorch repository BEFORE it
+          # reaches imagetools or a build.
+          #
+          # Not an external-attacker story -- workflow_dispatch needs write
+          # access. It is a TYPO story, and the blast radius is what pays for the
+          # check: whatever this step resolves is handed to
+          # docker-compose.build.yaml, which starts it `privileged: true` with
+          # host networking and devices and this workspace bind-mounted, on the
+          # shared self-hosted gate host. One mistyped reference therefore runs
+          # an arbitrary public image with host-level access there. Nothing
+          # legitimate is lost, because the lane's intent is already exactly this
+          # narrow: the input description and CANARY_TAG both say rocm/pytorch.
+          # CANARY_TAG is checked too rather than only the override, so the
+          # constraint is a property of everything this lane builds.
+          #
+          # Anchored on the REPOSITORY by exact string equality after stripping
+          # the digest and then the tag, so all four accepted shapes reduce to
+          # the same name: `rocm/pytorch`, `rocm/pytorch:TAG`,
+          # `rocm/pytorch@sha256:...`, `rocm/pytorch:TAG@sha256:...`. Deliberately
+          # not a glob on the name -- `rocm/pytorch*` accepts
+          # rocm/pytorch-private and `*rocm/pytorch*` accepts evil/rocm/pytorch,
+          # so a prefix or substring match is the mistake this check exists to
+          # catch rather than a shorter spelling of it.
+          #
+          # The `*@*@*` case is a glob asking "two or more @", which is exactly
+          # what it means: a reference carries at most one, and the strip below
+          # cuts at the FIRST, so `rocm/pytorch@x@sha256:...` would reduce to
+          # `rocm/pytorch` and pass. Docker cannot resolve that reference so it
+          # would fail closed at the digest check anyway -- but a repository
+          # check that leans on the next step for its answer is not one.
+          case "${requested}" in
+            *@*@*)
+              echo "::error::refusing to canary ${requested}: not a valid image reference (more than one @)"
+              exit 1
+              ;;
+          esac
+          # The same hazard in its `:` spelling, which the `@` case above does
+          # not cover. The strip below cuts at the FIRST colon, so
+          # `rocm/pytorch:latest;evil/img` reduces to `rocm/pytorch` and passes
+          # the repository check. Docker cannot resolve that reference either,
+          # so it fails closed at the digest step -- but by the same reasoning
+          # given above, a check that leans on the next step for its answer is
+          # not a check. A tag is [A-Za-z0-9_][A-Za-z0-9._-]{0,127}, so anything
+          # outside that set in the tag position means this is not one tagged
+          # reference.
+          case "${requested%%@*}" in
+            *:*)
+              tag="${requested%%@*}"
+              tag="${tag#*:}"
+              case "${tag}" in
+                "")
+                  echo "::error::refusing to canary ${requested}: empty tag"
+                  exit 1
+                  ;;
+                [!A-Za-z0-9_]*)
+                  echo "::error::refusing to canary ${requested}: tag must begin with an alphanumeric or underscore"
+                  exit 1
+                  ;;
+                *[!A-Za-z0-9._-]*)
+                  echo "::error::refusing to canary ${requested}: tag contains characters outside [A-Za-z0-9._-], so this is not a single tagged reference"
+                  exit 1
+                  ;;
+              esac
+              ;;
+          esac
+          repository="${requested%%@*}"
+          repository="${repository%%:*}"
+          if [ "${repository}" != "rocm/pytorch" ]; then
+            echo "::error::refusing to canary ${requested}: this lane builds only the rocm/pytorch repository, and the resolved image runs privileged with host devices on the gate host. Accepted forms: rocm/pytorch, rocm/pytorch:TAG, rocm/pytorch@sha256:..., rocm/pytorch:TAG@sha256:..."
+            exit 1
+          fi
           # `|| true` so a bad reference reaches the fail-closed check below with
           # a message naming it, instead of `set -e` killing the step wordlessly
           # on the pipeline's exit status. It masks nothing: an empty digest is

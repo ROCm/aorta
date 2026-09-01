@@ -39,11 +39,17 @@
 # are history: this pin IS that move, taken past 7.14 entirely. What bounds a
 # future bump instead:
 #
-#   * ROCm 10 ships ONLY on TheRock, so the wheel layout is not a variant to opt
-#     into any more. ROCm lives under site-packages and there is no /opt/rocm at
-#     all -- verified on this digest, whose PATH carries no /opt/rocm/bin and
-#     which sets no LD_LIBRARY_PATH. Issue #381 made discovery layout-agnostic;
-#     the guard below is what re-proves it on every build.
+#   * THIS base is a wheel-layout (TheRock) image: ROCm lives under
+#     site-packages and there is no /opt/rocm at all -- verified on this digest,
+#     whose PATH carries no /opt/rocm/bin and which sets no LD_LIBRARY_PATH. That
+#     is a property of the `rocm/pytorch` image, NOT of ROCm 10: the release still
+#     ships DEB/RPM/runfile packages that install a classic /opt/rocm tree, which
+#     is a supported path this repo has to keep working (see the classic-layout
+#     sections of docs/ci-testing-plan.md). What changed with ROCm 10 is that the
+#     wheel layout is no longer a variant to opt into on the container line we
+#     track, so the gate now runs on it by default rather than by choice. Issue
+#     #381 made discovery layout-agnostic; the guard below is what re-proves it
+#     on every build, and it accepts either layout precisely because both exist.
 #   * A bump WITHIN the ROCm 10 line is an ordinary digest bump. A bump that
 #     changes the major is not: it drags Ubuntu, Python and PyTorch with it and
 #     needs baselines re-blessed, so it stays a deliberate PR -- which is the

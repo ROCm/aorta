@@ -66,10 +66,14 @@ ROCm 10 line publishes no torch 2.10 image and so offered no smaller step.
 
 That flip also retires the 7.x version-reading rules that used to live here: ROCm
 7.9–7.13 were the technology *preview* stream (a higher number there was not an
-upgrade), and 7.14 was the first wheel-based (TheRock) production line. ROCm 10
-ships **only** on TheRock, so the wheel layout is no longer one option among two
-— ROCm lives under `site-packages` and there is no `/opt/rocm` at all. Issue #381
-made ROCm discovery layout-agnostic, which is what makes that base readable.
+upgrade), and 7.14 was the first wheel-based (TheRock) production line. The ROCm
+10 `rocm/pytorch` images the two tracking Dockerfiles here use are wheel-layout
+(TheRock) builds — in **those images** ROCm lives under `site-packages` and there
+is no `/opt/rocm` at all. That is a property of the image, not of the release:
+ROCm 10 still ships DEB/RPM/runfile packages that install a classic `/opt/rocm`
+tree, so a container built on one of those still has one and is still supported.
+Issue #381 made ROCm discovery layout-agnostic, which is what makes either
+readable.
 
 **Disk:** budget the *uncompressed* size for these ROCm bases. Docker Hub lists
 the ROCm 10 base at around 20.5 GB, but that is the compressed manifest —
@@ -87,6 +91,52 @@ silently reporting `null`. Run it inside a container to debug a bad image:
 ```bash
 docker run --rm --entrypoint python <image> /usr/local/share/aorta/rocm_layout_guard.py
 ```
+
+### Wheel-layout images: bare sonames and the library path
+
+On a wheel-layout `rocm/pytorch` base — what `Dockerfile.rocm-latest`,
+`Dockerfile.ci-gpu` and (in practice) `Dockerfile.rocm-canary` build on — two
+things are missing that a classic `/opt/rocm` install provides, and both bite
+hipcc-built code:
+
+- The base ships the ROCm **runtime** wheels but not `rocm[devel]`, so only
+  versioned sonames (`libamdhip64.so.7`) exist. hipcc hands the linker the bare
+  `libamdhip64.so`, and Proton `dlopen`s bare names, so both fail. All three
+  Dockerfiles rebuild the absent link farm at build time, across
+  `_rocm_sdk_core/lib` and `_rocm_sdk_libraries/lib`, deriving the directories
+  rather than hardcoding them and skipping the step entirely on a classic base.
+  It is 44 links on the digest `Dockerfile.ci-gpu` currently pins; the step is
+  generalized rather than a name list, so that count is an observation and not a
+  contract. The block is byte-identical in all three files and a test holds it
+  that way — the canary in particular is only readable if a canary/gate
+  difference is attributable to ROCm rather than to our own images.
+- hipcc output on this base carries neither `DT_RPATH` nor `DT_RUNPATH` and the
+  base sets no `LD_LIBRARY_PATH`, so a binary that links still dies before `main`
+  at exit 127. In CI every launch goes through a workflow step that exports the
+  resolved lib dirs. `Dockerfile.rocm-latest` instead writes
+  `/etc/profile.d/aorta-rocm-libpath.sh` (also sourced from `/etc/bash.bashrc`,
+  since `docker exec -it … bash` is interactive but not a login shell), which
+  **appends** those dirs — so a substitution you inherited, such as the custom
+  RCCL from `docker-compose.rccl.yaml`, still wins.
+
+A non-interactive `docker exec <container> bash -c '…'` gets neither file. Export
+the dirs yourself there, the way the workflows do:
+
+```bash
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+```
+
+That is byte-identical to the line the sanitizer dashboard publishes beside its
+rebuild commands, which is where it is kept honest.
+
+`Dockerfile.ci-gpu` deliberately ships no profile script: its launches all come
+from workflow steps that export the line above, and the gate is where an image
+that quietly depends on a baked environment instead of on the binary's own
+`RPATH` would hide a regression (see the `readelf -d` note in that file).
+`Dockerfile.rocm-canary` ships none either, for a different reason — it has no
+interactive users, and it exists to predict the gate image, so environment the
+gate does not have would be exactly the canary/gate difference the link farm was
+ported to remove.
 
 ## The latest-ROCm canary (`Dockerfile.rocm-canary`)
 

@@ -4606,3 +4606,299 @@ def test_run_area_renders_em_dash_for_a_report_missing_its_verdict():
     page = gen.build_case_index_html(env, [], built_refs=[], up="../../")
     assert ">None<" not in page
     assert gen._DASH in page
+
+
+# ---------------------------------------------------------------------------
+# The canary lane must not build a reference outside rocm/pytorch (issue #382)
+# ---------------------------------------------------------------------------
+
+
+def _canary_reference_guard() -> str:
+    """The canary resolve step's shell, sliced to end before it calls docker.
+
+    The slice is the assertion, not a convenience: everything the step does
+    BEFORE `imagetools inspect` is pure string handling, so cutting at that
+    call both makes the guard runnable on a CPU box and proves the guard runs
+    ahead of the resolve. A check that landed after it -- or after the build --
+    would leave the slice with nothing in it and fail here.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (_REPO_ROOT / ".github/workflows/latest-rocm-canary.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["canary"]["steps"]
+    resolve = next(s for s in steps if s.get("id") == "resolve")
+    lines = resolve["run"].splitlines()
+    cut = next(i for i, line in enumerate(lines) if "imagetools inspect" in line)
+    guard = "\n".join(lines[:cut])
+    assert "rocm/pytorch" in guard, (
+        "the resolve step reaches imagetools with no repository check ahead of "
+        "it; whatever it resolves is started privileged with host devices"
+    )
+    return guard
+
+
+def _canary_accepts(reference: str) -> bool:
+    guard = _canary_reference_guard()
+    proc = subprocess.run(
+        ["bash", "-c", guard],
+        env={
+            **os.environ,
+            "BASE_IMAGE_INPUT": reference,
+            # The workflow-level default. Only reached when the input is blank,
+            # but it has to be present or the slice dies on `set -u`.
+            "CANARY_TAG": "rocm/pytorch:latest",
+        },
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0
+
+
+_CANARY_DIGEST = "sha256:" + "3174cb70" * 8
+
+
+def test_canary_accepts_every_rocm_pytorch_reference_form():
+    """All four shapes the input documents must still resolve.
+
+    A guard that rejected `rocm/pytorch@sha256:...` would break the one thing
+    the dispatch override exists for -- pointing the lane at a specific
+    newly-published image -- so the accepted set is asserted, not just the
+    rejected one.
+    """
+    tag = "rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0"
+    for reference in (
+        "rocm/pytorch",
+        "rocm/pytorch:latest",
+        f"rocm/pytorch:{tag}",
+        f"rocm/pytorch@{_CANARY_DIGEST}",
+        f"rocm/pytorch:{tag}@{_CANARY_DIGEST}",
+        # Blank input: a schedule run, or a dispatch that left it empty. Falls
+        # back to CANARY_TAG, which goes through the same check.
+        "",
+        "   ",
+    ):
+        assert _canary_accepts(reference), reference
+
+
+def test_canary_rejects_references_outside_the_rocm_pytorch_repository():
+    """The resolved reference runs privileged with host devices, so a typo is
+    the threat model -- dispatch already needs write access.
+
+    The near-misses are the point. A prefix glob (`rocm/pytorch*`) accepts
+    `rocm/pytorch-private`; a substring match accepts `evil/rocm/pytorch`;
+    stripping only the tag accepts `rocm/pytorch@x@sha256:...` because the
+    digest separator was never removed. Each of those is a plausible spelling
+    of this check that does not hold, so each is asserted rather than assumed.
+    """
+    for reference in (
+        # Different namespace, and the two that a loose match lets through.
+        "evil/rocm/pytorch",
+        "evil/rocm/pytorch:latest",
+        "rocm/pytorch-private",
+        "rocm/pytorch-private:latest",
+        "rocm/pytorchevil",
+        "rocm/pytorch/evil:tag",
+        # Any registry prefix, including a benign-looking one: this lane pulls
+        # from the default registry and nothing else needs to work.
+        "docker.io/rocm/pytorch:latest",
+        "ghcr.io/rocm/pytorch:latest",
+        "localhost:5000/rocm/pytorch:latest",
+        f"evil.example/rocm/pytorch@{_CANARY_DIGEST}",
+        # Wholly unrelated images, and a truncated typo of the real one.
+        "ubuntu:24.04",
+        "rocm/pytorc",
+        "pytorch",
+        # Malformed: reduces to `rocm/pytorch` if only the first `@` is cut.
+        f"rocm/pytorch@evil/x@{_CANARY_DIGEST}",
+        f"rocm/pytorch:latest@evil@{_CANARY_DIGEST}",
+    ):
+        assert not _canary_accepts(reference), reference
+
+
+def test_canary_rejects_a_second_repository_hidden_behind_the_tag_separator():
+    """The `:` spelling of the `@` hazard the test above covers.
+
+    The repository strip cuts at the FIRST colon, so `rocm/pytorch:latest;evil/img`
+    reduces to `rocm/pytorch` and passes a check that looks only at the
+    repository. Docker cannot resolve any of these either, so they would fail
+    closed at the digest step -- but that is the reasoning the step itself
+    rejects: a repository check that leans on the next step for its answer is
+    not one. Asserted separately from the near-miss set because the failure is
+    the separator, not the name.
+
+    The accepted half matters as much: a tag charset drawn too tight would
+    reject the real base image, whose tag carries both dots and underscores.
+    """
+    for reference in (
+        # A second reference hiding after the tag, and a second separator.
+        "rocm/pytorch:latest;evil/img",
+        "rocm/pytorch:latest|evil",
+        "rocm/pytorch:a:b",
+        # Shell metacharacters cannot appear in a tag.
+        "rocm/pytorch:latest$(id)",
+        # A tag may not start with `.` or `-`, and may not be empty.
+        "rocm/pytorch:.bad",
+        "rocm/pytorch:-bad",
+        "rocm/pytorch:",
+    ):
+        assert not _canary_accepts(reference), reference
+
+    for reference in (
+        "rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0",
+        "rocm/pytorch:_leading_underscore",
+        "rocm/pytorch:a.b-c_1",
+    ):
+        assert _canary_accepts(reference), reference
+
+
+# ---------------------------------------------------------------------------
+# The dev image must stay in step with the CI image (issue #383)
+# ---------------------------------------------------------------------------
+
+
+def _dockerfile_run_blocks(relative: str) -> list[str]:
+    """Every ``RUN`` instruction, backslash continuations folded back in."""
+    blocks: list[str] = []
+    current: list[str] | None = None
+    for line in (_REPO_ROOT / relative).read_text(encoding="utf-8").splitlines():
+        if line.startswith("RUN "):
+            current = [line]
+        elif current is not None:
+            current.append(line)
+        if current is not None and not line.rstrip().endswith("\\"):
+            blocks.append("\n".join(current))
+            current = None
+    return blocks
+
+
+# Every image whose base can be a wheel-layout (TheRock) ROCm build, and so
+# needs the bare-soname link farm that `rocm[devel]` would have installed. The
+# canary's base is a BASE_IMAGE arg rather than a pinned tag, which is why the
+# block's classic-layout skip is load-bearing there rather than merely tidy.
+_WHEEL_LAYOUT_DOCKERFILES = (
+    "docker/Dockerfile.ci-gpu",
+    "docker/Dockerfile.rocm-latest",
+    "docker/Dockerfile.rocm-canary",
+)
+
+
+def test_devel_symlink_fixup_is_identical_across_the_rocm_images():
+    """Dockerfile.rocm-latest's header promises it is kept in step with
+    Dockerfile.ci-gpu so local runs match what CI validates, and
+    Dockerfile.rocm-canary is only readable if a canary/gate difference is
+    attributable to ROCm rather than to us. Neither promise had a test, and the
+    first one drifted: the CI image grew the generalized link farm while the dev
+    image kept a `libamdhip64.so`-only fixup, leaving the compose-default image
+    unable to dlopen the Proton backend it ships.
+
+    Compared as BYTES rather than by behaviour, because all three comment blocks
+    claim byte-identity and a paraphrase is how the divergence starts. A
+    deliberate divergence should move the claim, not just the code.
+
+    Held over EVERY image with a wheel-capable base rather than a pair, so a
+    fourth one cannot be added with a near-copy -- which is the same
+    one-converted-line-beside-one-stale-one trap the LLVM and library path
+    exports above are checked exhaustively for.
+    """
+    blocks = {}
+    for relative in _WHEEL_LAYOUT_DOCKERFILES:
+        found = [
+            b
+            for b in _dockerfile_run_blocks(relative)
+            if "devel-symlink fixup: created" in b
+        ]
+        assert len(found) == 1, (
+            f"{relative}: expected exactly one link farm; found {len(found)}"
+        )
+        blocks[relative] = found[0]
+
+    reference = blocks["docker/Dockerfile.ci-gpu"]
+    for relative, block in blocks.items():
+        assert block == reference, (
+            f"{relative}: the devel-symlink fixup has drifted from "
+            "docker/Dockerfile.ci-gpu, so this image no longer ships the bare "
+            "sonames the gate does"
+        )
+
+    # Both trees, not just the one holding libamdhip64: Proton's five sonames are
+    # in core, hipBLASLt is in libraries, and a core-only fixup passes a
+    # libamdhip64 smoke test while still failing the math libraries.
+    assert "_rocm_sdk_core" in reference and "_rocm_sdk_libraries" in reference
+    # Generalized, not a name list -- the failure mode was one red round per
+    # library discovered by hand.
+    assert "libamdhip64" not in reference
+    # A classic /opt/rocm base ships its own devel symlinks, so an empty
+    # discovery is skipped and never fatal. Load-bearing for the canary, whose
+    # base is an argument and may legitimately be a classic install.
+    assert "skipping devel-symlink fixup" in reference
+
+
+def test_only_the_gate_image_asserts_hipcc_and_proton_at_build_time():
+    """The smoke tests are a gating decision, not part of image parity.
+
+    They install nothing, so they are outside the "match the gated image" rule
+    that the link farm above answers to -- all they decide is whether a build
+    aborts. That suits the gate, where a base which cannot link or dlopen SHOULD
+    fail review. It does not suit the canary, where an aborted build costs the
+    run its workload verdicts on a release whose PyTorch may be fine, nor the dev
+    image, where it costs a developer build time for a check CI already ran.
+
+    Asserted so the parity test above is not read as "make all three the same".
+    """
+    for relative in _WHEEL_LAYOUT_DOCKERFILES:
+        blocks = "\n".join(_dockerfile_run_blocks(relative))
+        expected = relative == "docker/Dockerfile.ci-gpu"
+        assert ("hipcc_link_check" in blocks) is expected, relative
+        assert ("proton_dlopen_check" in blocks) is expected, relative
+
+
+def test_dev_image_appends_the_rocm_lib_dirs_rather_than_asserting_them():
+    """The dev image has no workflow step to export the lib dirs for it.
+
+    hipcc output on this base carries neither DT_RPATH nor DT_RUNPATH, so a
+    fixture that links still dies at exit 127 unless the lib dirs are on
+    LD_LIBRARY_PATH. CI gets that from a workflow step; a `docker exec` shell
+    does not, which is why this image writes a profile script.
+
+    What is asserted is the SHAPE, because the shape is the argued part
+    (issue #381): appended so an inherited substitution -- notably the custom
+    RCCL that docker-compose.rccl.yaml prepends -- keeps winning, and derived at
+    build time rather than written as a literal site-packages path.
+    """
+    dockerfile = (_REPO_ROOT / "docker/Dockerfile.rocm-latest").read_text(
+        encoding="utf-8"
+    )
+    blocks = [
+        b for b in _dockerfile_run_blocks("docker/Dockerfile.rocm-latest")
+        if "/etc/profile.d/aorta-rocm-libpath.sh" in b
+    ]
+    assert len(blocks) == 1, f"expected one library-path block; found {len(blocks)}"
+    block = blocks[0]
+    # Appended, never prepended: the inherited value comes first.
+    assert (
+        'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}'
+        "${_aorta_rocm_libdirs}\"" in block
+    )
+    # Derived by the same import-based discovery as the link farm, so it cannot
+    # name a path that a base bump moves.
+    assert "_rocm_sdk_core" in block and "_rocm_sdk_libraries" in block
+    assert "site-packages" not in block
+    # Reachable from the interactive non-login shell docker/README.md documents,
+    # not only from a login shell.
+    assert "/etc/bash.bashrc" in block
+    # And still no path ASSERTION anywhere in the image: ROCM_HOME outranks
+    # autodetection, which is the thing #381 argued against. Comment lines are
+    # excluded -- both spellings are discussed at length in the prose that
+    # explains why they are absent.
+    instructions = [
+        line
+        for line in dockerfile.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    for forbidden in ("ENV ROCM_HOME", "ENV LD_LIBRARY_PATH"):
+        offenders = [line for line in instructions if forbidden in line]
+        assert not offenders, f"{forbidden} asserted in the image: {offenders}"

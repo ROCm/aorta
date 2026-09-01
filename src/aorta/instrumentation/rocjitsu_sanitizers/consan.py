@@ -31,8 +31,8 @@ _WAITCHECK_CONTEXT = re.compile(r"^(producer|consumer)\b", re.IGNORECASE)
 _AUTO_REPLAY_DIAGNOSTIC = re.compile(r"\bauto\s+replay\s+diagnostic(?:\s|$)", re.IGNORECASE)
 _KV = re.compile(r"(\w+)=(\S+)")
 # glibc's ld.so message when a needed DT_NEEDED library is not on any search
-# path. Paired with exit 127 it means the repro never reached main -- see
-# ``_launch_diagnostic``.
+# path. Written to stderr, and paired with exit 127 there it means the repro
+# never reached main -- see ``_launch_diagnostic``, which reads that stream only.
 _MISSING_SHARED_OBJECT = re.compile(
     r"error while loading shared libraries:\s*(?P<soname>[^\s:]+):\s*"
     r"cannot open shared object file"
@@ -280,6 +280,31 @@ def _error_result(
     )
 
 
+def _dirs_hold(dirs: tuple[Path, ...], soname: str) -> bool:
+    """True when ``soname`` names a file present in one of ``dirs``.
+
+    A ``DT_NEEDED`` entry containing a separator is resolved by the loader as a
+    path and is never searched for on ``LD_LIBRARY_PATH``, so no directory
+    listing can make a library-path remedy apply to one -- and joining such a
+    name onto a root would walk outside the tree being described. Answer False
+    for it rather than probing.
+
+    Never raises. This runs while explaining a failure, on hosts whose ROCm tree
+    may be a stale mount, for the same reason ``rocm_paths`` routes every probe
+    through :func:`safe_is_dir`; a diagnostic that raises would replace a
+    legible reason with a traceback.
+    """
+    if soname != Path(soname).name:
+        return False
+    for directory in dirs:
+        try:
+            if (directory / soname).exists():
+                return True
+        except OSError:  # stale mount, ELOOP, permission denied
+            continue
+    return False
+
+
 def _launch_diagnostic(process: ProcessResult) -> str:
     """An actionable suffix when exit 127 was the loader, not the sanitizer.
 
@@ -298,32 +323,62 @@ def _launch_diagnostic(process: ProcessResult) -> str:
     ``docs/ci-testing-plan.md`` depend on. What is missing is discoverability,
     so what is added is words.
 
-    Both the exit code and the loader message are required. 127 alone is
-    ambiguous -- a repro may exit 127 for its own reasons -- and the message
-    alone could be text the repro merely printed. Returns ``""`` when this is
-    not that failure, so the reason string is unchanged for every other exit.
+    Both the exit code and the loader message are required, and the message is
+    only read from STDERR. 127 alone is ambiguous -- a repro may exit 127 for
+    its own reasons -- and the message alone could be text the repro merely
+    printed. ``run_argv`` captures the two streams separately and ld.so writes
+    this diagnostic to stderr, so a match on stdout is by construction the
+    repro's own output; reading it would assert a launch failure from program
+    output, which the paragraph above forbids. Returns ``""`` when this is not
+    that failure, so the reason string is unchanged for every other exit.
+
+    The remedy is checked before it is prescribed. Only a soname the resolved
+    ROCm lib dirs actually hold gets the ROCm ``LD_LIBRARY_PATH`` instruction;
+    any other missing dependency (``libstdc++.so.6`` is the realistic case) gets
+    a generic missing-dependency line instead. An authoritative remedy that
+    cannot work is worse than none, because it sends the reader after the wrong
+    library.
     """
     if process.returncode != 127:
         return ""
-    match = _MISSING_SHARED_OBJECT.search(f"{process.stdout}\n{process.stderr}")
+    match = _MISSING_SHARED_OBJECT.search(process.stderr)
     if match is None:
         return ""
+    soname = match.group("soname")
     roots = resolve_rocm_roots()
     # core first: libamdhip64 lives in core_lib_dir, while lib_dir is the math
     # libraries. On a classic install the two coincide and collapse to one entry.
-    dirs = list(dict.fromkeys((str(roots.core_lib_dir), str(roots.lib_dir))))
-    remedy = (
-        f"append {os.pathsep.join(dirs)} to LD_LIBRARY_PATH"
-        if safe_is_dir(roots.core_lib_dir)
-        else f"no ROCm lib dir was found to name (resolver source={roots.source})"
+    dirs = tuple(dict.fromkeys((roots.core_lib_dir, roots.lib_dir)))
+    lead = f": {soname} was not found by the dynamic loader, so the repro never started"
+    listed = os.pathsep.join(str(directory) for directory in dirs)
+    if _dirs_hold(dirs, soname):
+        return (
+            f"{lead}. A hipcc-built binary on a wheel-layout ROCm install carries "
+            "no RPATH or RUNPATH, so the ROCm lib dirs have to be on "
+            f"LD_LIBRARY_PATH in the shell that invokes aorta -- append {listed} "
+            "to LD_LIBRARY_PATH. aorta does not alter the environment of the "
+            "process under test, so it cannot do this for you"
+        )
+    searched = os.pathsep.join(
+        str(directory) for directory in dirs if safe_is_dir(directory)
+    )
+    # The empty case is "resolved, but not a directory" -- a stale mount is the
+    # realistic shape, and ``safe_is_dir`` collapses that to False module-wide.
+    # So it names the paths too: "was found" would read as "the resolver came up
+    # empty" and leave the operator nothing to stat.
+    where = (
+        f"it is not in the resolved ROCm lib dirs ({searched})"
+        if searched
+        else (
+            f"no resolved ROCm lib dir is a directory ({listed}; "
+            f"resolver source={roots.source})"
+        )
     )
     return (
-        f": {match.group('soname')} was not found by the dynamic loader, so the "
-        "repro never started. A hipcc-built binary on a wheel-layout ROCm install "
-        "carries no RPATH or RUNPATH, so the ROCm lib dirs have to be on "
-        f"LD_LIBRARY_PATH in the shell that invokes aorta -- {remedy}. aorta does "
-        "not alter the environment of the process under test, so it cannot do this "
-        "for you"
+        f"{lead}, but {where}, so this is a missing dependency of the repro rather "
+        "than the ROCm library-path problem: install it, or put its own directory "
+        "on LD_LIBRARY_PATH in the shell that invokes aorta. aorta does not alter "
+        "the environment of the process under test, so it cannot do this for you"
     )
 
 

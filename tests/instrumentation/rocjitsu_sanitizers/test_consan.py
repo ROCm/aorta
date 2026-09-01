@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from aorta.instrumentation.rocjitsu_sanitizers import (
@@ -17,6 +20,11 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
 from aorta.instrumentation.rocjitsu_sanitizers import consan as consan_module
 from aorta.instrumentation.rocjitsu_sanitizers.consan import run_consan
 from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
+from aorta.instrumentation.rocm_paths import (
+    LAYOUT_WHEEL,
+    WHEEL_CORE_PACKAGE,
+    RocmRoots,
+)
 
 _PREFIX = "[rocjitsu-dbi-hooks] ConSan"
 
@@ -228,13 +236,58 @@ def test_strict_rejection_never_passes() -> None:
     assert consan.reason == "consan_strict_load_rejection"
 
 
-_LOADER_FAILURE = (
-    "/repro: error while loading shared libraries: libamdhip64.so.7: "
-    "cannot open shared object file: No such file or directory"
-)
+def _loader_failure(soname: str = "libamdhip64.so.7") -> str:
+    return (
+        f"/repro: error while loading shared libraries: {soname}: "
+        "cannot open shared object file: No such file or directory"
+    )
 
 
-def test_loader_failure_is_reported_as_a_missing_library_not_a_bare_exit() -> None:
+_LOADER_FAILURE = _loader_failure()
+
+
+def _pin_rocm_roots(
+    monkeypatch: pytest.MonkeyPatch, core: Path, libraries: Path
+) -> tuple[Path, Path]:
+    """Pin the resolver to a wheel-layout tree rooted at ``core``/``libraries``.
+
+    Returns the two lib dirs the diagnostic will report, core first.
+    """
+    monkeypatch.setattr(
+        consan_module,
+        "resolve_rocm_roots",
+        lambda: RocmRoots(
+            core=core,
+            libraries=libraries,
+            include=core,
+            layout=LAYOUT_WHEEL,
+            source=f"import:{WHEEL_CORE_PACKAGE}",
+        ),
+    )
+    return core / "lib", libraries / "lib"
+
+
+def _rocm_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, *, holds: tuple[str, ...]
+) -> tuple[Path, Path]:
+    """Pin the resolver to a wheel-layout tree holding exactly ``holds``.
+
+    The diagnostic now reads the filesystem to decide whether its remedy would
+    work, so the branch under test must not depend on what ROCm the developer
+    running pytest happens to have installed.
+    """
+    core = tmp_path / "_rocm_sdk_core"
+    libraries = tmp_path / "_rocm_sdk_libraries"
+    for lib_dir in (core / "lib", libraries / "lib"):
+        lib_dir.mkdir(parents=True)
+    for name in holds:
+        (core / "lib" / name).write_bytes(b"")
+    return _pin_rocm_roots(monkeypatch, core, libraries)
+
+
+def test_loader_failure_is_reported_as_a_missing_library_not_a_bare_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     """Exit 127 plus the loader message means the repro never reached main.
 
     Measured on the wheel-layout ROCm base: hipcc output carries no RPATH or
@@ -243,6 +296,8 @@ def test_loader_failure_is_reported_as_a_missing_library_not_a_bare_exit() -> No
     ``combined_hook_exit_127``, which reads like a sanitizer verdict and points
     at nothing.
     """
+    core_lib, lib = _rocm_tree(monkeypatch, tmp_path, holds=("libamdhip64.so.7",))
+
     _waitcheck, consan = evaluate_record_replay(
         ProcessResult(("app",), 127, "", _LOADER_FAILURE)
     )
@@ -252,11 +307,102 @@ def test_loader_failure_is_reported_as_a_missing_library_not_a_bare_exit() -> No
     # unaffected by the added prose.
     assert reason.startswith("combined_hook_exit_127")
     assert "libamdhip64.so.7" in reason
-    assert "LD_LIBRARY_PATH" in reason
+    # Both dirs, core first: the HIP runtime hangs off core, the math libraries
+    # off libraries, and a hipcc-built repro can need either.
+    assert f"append {core_lib}{os.pathsep}{lib} to LD_LIBRARY_PATH" in reason
     # And it says why aorta will not simply fix it, so the next reader does not
     # "fix" it by mutating the child environment.
     assert "environment of the process under test" in reason
     assert consan.verdict is Verdict.ERROR
+
+
+def test_a_dependency_the_rocm_tree_does_not_hold_gets_no_rocm_remedy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """An unrelated missing library must not be answered with a ROCm lib path.
+
+    ``libstdc++.so.6`` is not something appending the ROCm lib dirs will supply,
+    so prescribing them would be authoritative and wrong -- it sends the reader
+    after the wrong library. The soname is still named, because "the repro never
+    started, and here is what it wanted" is the part that was missing from a
+    bare ``combined_hook_exit_127``.
+    """
+    core_lib, _lib = _rocm_tree(monkeypatch, tmp_path, holds=("libamdhip64.so.7",))
+
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 127, "", _loader_failure("libstdc++.so.6"))
+    )
+
+    reason = str(consan.reason)
+    assert reason.startswith("combined_hook_exit_127")
+    assert "libstdc++.so.6" in reason
+    assert "missing dependency of the repro" in reason
+    # The dirs are named as what was SEARCHED, never as a remedy to apply.
+    assert f"not in the resolved ROCm lib dirs ({core_lib}" in reason
+    assert "append" not in reason
+    assert "wheel-layout" not in reason
+
+
+def test_a_path_bearing_soname_gets_no_rocm_remedy_even_when_it_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A ``DT_NEEDED`` entry with a separator is a path, and paths are not searched.
+
+    The loader resolves such an entry directly and never consults
+    ``LD_LIBRARY_PATH`` for it, so the "append the ROCm lib dirs" remedy cannot
+    possibly apply -- however present the file is. The HRX recipes link
+    absolute-path libraries, so this is a shape the diagnostic really meets.
+
+    The decoy has to EXIST for this test to bite. ``Path("/a/lib") / "/b/x.so"``
+    is ``/b/x.so`` -- an absolute right-hand side replaces the root instead of
+    joining onto it -- so without the separator check the probe walks straight
+    out of the tree it was describing, lands on the real file, and prescribes
+    the authoritative remedy for a name that remedy cannot reach.
+    """
+    absolute = tmp_path / "opt" / "hrx" / "lib" / "libamdhip64.so.7"
+    absolute.parent.mkdir(parents=True)
+    absolute.write_bytes(b"")
+    # The ROCm tree itself holds nothing, so the only file that can satisfy the
+    # probe is the decoy, reachable only via the root-replacing join.
+    _rocm_tree(monkeypatch, tmp_path, holds=())
+
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 127, "", _loader_failure(str(absolute)))
+    )
+
+    reason = str(consan.reason)
+    assert str(absolute) in reason
+    assert "missing dependency of the repro" in reason
+    assert "append" not in reason
+
+
+def test_lib_dirs_that_resolved_but_are_not_directories_are_still_named(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """"Nothing to search" must say WHAT was resolved, not just that it failed.
+
+    The resolver answered here -- these are the paths it produced -- and neither
+    is a directory; a stale mount is the realistic case, which
+    ``rocm_paths.safe_is_dir`` collapses to False module-wide. Naming only the
+    resolver source reads as "no ROCm install was found" when the truth is
+    "found, and it is not there any more", and leaves the operator nothing to
+    stat.
+    """
+    absent = tmp_path / "stale"
+    core_lib, lib = _pin_rocm_roots(monkeypatch, absent / "core", absent / "libraries")
+
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 127, "", _LOADER_FAILURE)
+    )
+
+    reason = str(consan.reason)
+    assert str(core_lib) in reason
+    assert str(lib) in reason
+    assert f"resolver source=import:{WHEEL_CORE_PACKAGE}" in reason
+    # Still the missing-dependency arm: an unreachable lib dir is not grounds
+    # for the ROCm library-path remedy.
+    assert "missing dependency of the repro" in reason
+    assert "append" not in reason
 
 
 def test_a_bare_exit_127_gets_no_invented_library_hint() -> None:
@@ -271,12 +417,33 @@ def test_a_bare_exit_127_gets_no_invented_library_hint() -> None:
 
 
 def test_the_loader_message_alone_does_not_trigger_the_hint() -> None:
-    """Output the repro merely printed is not evidence of its own launch failure."""
+    """The message on stderr without exit 127 is not a launch failure either."""
     _waitcheck, consan = evaluate_record_replay(
-        ProcessResult(("app",), 3, _LOADER_FAILURE, "")
+        ProcessResult(("app",), 3, "", _LOADER_FAILURE)
     )
 
     assert str(consan.reason) == "combined_hook_exit_3"
+
+
+def test_the_loader_message_on_stdout_is_never_read_as_a_launch_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A repro that PRINTS the loader text and exits 127 gets no hint.
+
+    ``run_argv`` captures the two streams separately and ld.so writes to stderr,
+    so text on stdout is by construction the repro's own output. Reading it
+    would infer a launch failure from program output -- the exact false positive
+    ``_launch_diagnostic`` documents it must not admit -- and the remedy check
+    does not save us here, because the soname named is one the ROCm tree really
+    does hold.
+    """
+    _rocm_tree(monkeypatch, tmp_path, holds=("libamdhip64.so.7",))
+
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 127, _LOADER_FAILURE, "")
+    )
+
+    assert str(consan.reason) == "combined_hook_exit_127"
 
 
 def test_run_consan_never_injects_a_library_path_into_the_child(
