@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-08-31T125804-33391758880` · commit `c57a1e4b0720` · 2026-08-31 12:58:04 UTC
+Run `2026-09-01T125503-33507543444` · commit `d11092a603d9` · 2026-09-01 12:55:03 UTC
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -58,7 +58,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=38588192 index=0 kind=1 code_object=fnv1a64:7db8350dfcf3fedf report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=28812464 index=0 kind=1 code_object=fnv1a64:7db8350dfcf3fedf report_generation=2 generation=2 epo… |
 
 </details>
 
@@ -96,7 +96,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatc
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `6fca835a6f` |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `e58cbcbf24` |
 
 </details>
 
@@ -110,7 +110,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `5216bfa045` |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `c235fc63ac` |
 
 </details>
 
@@ -136,7 +136,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `6fca835a6f` |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `e58cbcbf24` |
 
 </details>
 
@@ -148,7 +148,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `5216bfa045` |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `c235fc63ac` |
 
 </details>
 
@@ -156,6 +156,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-09-01T125503-33507543444 | `d11092a603d9` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-31T125804-33391758880 | `c57a1e4b0720` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-30T125306-33311286343 | `c57a1e4b0720` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-29T124958-33252284140 | `e61f455a130b` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
@@ -185,4 +186,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-08-11-31511121124 | `fc0a3ff54748` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Failed |
 | 2026-08-11-31508140809 | `1663ad70a9a2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Failed |
 | 2026-08-11-31490825323 | `d1ba9de1aea2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
-| 2026-08-10-31387689897 | `7f3ba90830b9` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
