@@ -35,7 +35,7 @@ from aorta.chat.inference.providers.remote_openai import (
     MISSING_API_KEY_MESSAGE,
     RemoteOpenAIBackend,
 )
-from tests.conftest import NetworkUsed
+from tests.chat.conftest import NetworkUsedError
 
 _LITELLM_INSTALLED = importlib.util.find_spec("litellm") is not None
 
@@ -198,7 +198,7 @@ class TestLocalVLLMBackend:
     @pytest.mark.asyncio
     async def test_preflight_does_reach_for_the_network(self, no_network):
         """Counterpart to the remote no-network test: the guard really bites."""
-        with pytest.raises(NetworkUsed):
+        with pytest.raises(NetworkUsedError):
             await LocalVLLMBackend().preflight(timeout=1, interval=1)
 
     def test_chat_model_is_unchanged_by_the_provider_split(self):

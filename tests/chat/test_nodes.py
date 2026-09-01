@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from tests.conftest import make_fake_llm
+from tests.chat.conftest import make_fake_llm
 
 
 class TestRetrieveNode:
@@ -148,7 +148,7 @@ class TestActNode:
                 "retrieved_context": "",
                 "critic_feedback": "Previous command was wrong: script not found.",
             }
-            result = await act_node(state)
+            await act_node(state)
 
             call_args = fake.ainvoke.call_args[0][0]
             system_texts = [m.content for m in call_args if hasattr(m, "content")]

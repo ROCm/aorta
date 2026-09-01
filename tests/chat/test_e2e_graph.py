@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from tests.conftest import make_fake_llm, make_llm_sequence
+from tests.chat.conftest import make_fake_llm, make_llm_sequence
 
 
 def _patch_settings(

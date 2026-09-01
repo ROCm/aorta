@@ -1,21 +1,30 @@
-"""Shared fixtures for the AORTA Agent test suite."""
+"""Shared fixtures for the ``aorta chat`` test suite."""
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import socket
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# Settings that steer control flow are pinned before anything imports
-# config.settings, whose module-level singleton reads .env at import time.
-# Environment variables outrank the .env file in pydantic-settings, so this
-# makes the suite independent of whatever the developer has configured
-# locally. Without it, a .env containing LLM_TOOL_MODE=native -- the setting
-# a reasoning model needs, so a likely one to have -- sends act_node down the
-# native path in tests written for the text protocol. A test that wants the
-# other value monkeypatches the settings object directly.
+# These tests exercise real langchain/langgraph objects, so they need the
+# chat-cli extra. A base install (pyyaml + click) is a supported and common
+# configuration -- it is what `pip install amd-aorta` gives a customer -- so the
+# directory skips itself rather than erroring at collection. The import-boundary
+# tests deliberately live in tests/cli/ instead, because those are pure AST and
+# must run here too.
+if importlib.util.find_spec("langchain_core") is None:  # pragma: no cover
+    collect_ignore_glob = ["test_*.py"]
+
+# Settings that steer control flow are pinned before anything reads them.
+# Environment outranks the profile file, so this makes the suite independent of
+# whatever the developer has configured locally. Without it, a profile
+# containing llm_tool_mode = "native" -- the setting a reasoning model needs, so
+# a likely one to have -- sends act_node down the native path in tests written
+# for the text protocol. A test that wants the other value monkeypatches the
+# settings object directly.
 os.environ["LLM_TOOL_MODE"] = "text"
 
 import httpx  # noqa: E402
@@ -85,13 +94,13 @@ def mock_settings(fake_aorta_dir: Path, tmp_path: Path):
         yield mock_s
 
 
-class NetworkUsed(RuntimeError):
+class NetworkUsedError(RuntimeError):
     """Raised when a test reaches for the network, which no test here may do."""
 
 
 @pytest.fixture()
 def no_network(monkeypatch):
-    """Turn every outbound connection attempt into a :class:`NetworkUsed`.
+    """Turn every outbound connection attempt into a :class:`NetworkUsedError`.
 
     Both httpx and the raw socket layer are covered, so a code path that
     contacts a provider fails immediately and visibly instead of hanging on a
@@ -99,7 +108,7 @@ def no_network(monkeypatch):
     """
 
     def _refuse(*args, **kwargs):
-        raise NetworkUsed("a test tried to open a network connection")
+        raise NetworkUsedError("a test tried to open a network connection")
 
     monkeypatch.setattr(httpx.AsyncClient, "send", _refuse)
     monkeypatch.setattr(httpx.Client, "send", _refuse)

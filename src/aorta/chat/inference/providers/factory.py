@@ -6,7 +6,7 @@ one is the reverse. Nothing else in the codebase branches on the provider.
 
 from __future__ import annotations
 
-from typing import Callable, Dict
+from collections.abc import Callable
 
 from aorta.chat.config import settings
 from aorta.chat.inference.providers.base import ChatBackend
@@ -14,13 +14,13 @@ from aorta.chat.inference.providers.local_vllm import LocalVLLMBackend
 from aorta.chat.inference.providers.remote_litellm import RemoteLiteLLMBackend
 from aorta.chat.inference.providers.remote_openai import RemoteOpenAIBackend
 
-_BACKENDS: Dict[str, Callable[[], ChatBackend]] = {
+_BACKENDS: dict[str, Callable[[], ChatBackend]] = {
     LocalVLLMBackend.name: LocalVLLMBackend,
     RemoteOpenAIBackend.name: RemoteOpenAIBackend,
     RemoteLiteLLMBackend.name: RemoteLiteLLMBackend,
 }
 
-_instances: Dict[str, ChatBackend] = {}
+_instances: dict[str, ChatBackend] = {}
 
 
 def available_providers() -> tuple[str, ...]:

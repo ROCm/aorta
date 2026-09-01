@@ -21,7 +21,7 @@ from aorta.chat.graph.nodes import (
     _build_answer_message,
     answer_node,
 )
-from tests.conftest import make_fake_llm
+from tests.chat.conftest import make_fake_llm
 
 TOOL_NAMES = [
     "list_files",

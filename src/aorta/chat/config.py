@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     llm_tool_mode: str = "text"
 
     # --- LLM call limits (both providers) ---
-    llm_max_tokens: Optional[int] = None
+    llm_max_tokens: int | None = None
     llm_timeout: float = 120.0
     llm_max_retries: int = 2
 

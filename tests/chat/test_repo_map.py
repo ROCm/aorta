@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 from aorta.chat.rag.repo_map import _build_tree, _extract_python_signatures, generate_repo_map
