@@ -1,0 +1,72 @@
+# Multi-model serving sweep for TokenSpeed.
+#
+# One cell per model, identical load in every cell. The point is NOT to rank the
+# models against each other -- a 0.6B and an 8B doing the same 512/128 request
+# are not competing at anything -- it is to check that the integration holds
+# across model sizes and architectures, and to give each model a baseline its
+# own future runs can be compared against.
+#
+# Each cell is a separate server bring-up, so this recipe costs roughly
+# (weight load + bench) per model. On a cold HF cache add the download.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-models.yaml \
+#     --output-dir /tmp/ts-serve-models
+#
+# Because the cells differ by model rather than by mitigation, the confound
+# ratio in `matrix.md` (which compares step times against the baseline cell) is
+# meaningless here -- a bigger model is legitimately slower. Read `perf.md` for
+# the per-model numbers and ignore the confound column.
+#
+# Adding a model: append a cell overriding `model`. Gated repos additionally
+# need a token on the host in `HF_TOKEN` (forwarded by name, never written into
+# a recipe or a run artifact).
+schema_version: 1
+ticket: TOKENSPEED-SERVE-MODELS
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  # Digest, not the :nightly-20260714 tag it came from: a moving tag would
+  # let the image change underneath a blessed baseline while the recipe still
+  # read as pinned, and the perf gates below would then compare across stacks.
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  warmup_steps: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  # Generous: a cold cache for a multi-billion-parameter model spends most of
+  # this budget downloading weights, and the workload defaults the
+  # orchestrator's own gateway budget to this same value so a slow start is
+  # reported as slow rather than as a dead engine.
+  ready_timeout_sec: 2400
+
+cells:
+  - name: qwen3-0.6b
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-0.6B
+
+  - name: qwen3-1.7b
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-1.7B
+
+  - name: qwen3-4b
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-4B
+
+  - name: qwen3-8b
+    mitigations: [none]
+    environment: local
+    workload_config:
+      model: Qwen/Qwen3-8B

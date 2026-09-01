@@ -33,6 +33,34 @@ _METRIC_POLICIES: dict[str, str] = {
     "prefill_latency_ms": "max",
     "decode_latency_ms": "max",
     "latency_ms": "max",
+    # Online-serving metrics, under the names `tokenspeed bench serve` uses. The
+    # `tokenspeed_serve` workload keeps those names but not those values: each
+    # one published here is the mean across the trial's measured bench steps,
+    # and only when every step reported it. It also adds names of its own --
+    # `tokens_per_sec` aliases `output_throughput` onto the spelling this
+    # allowlist already knew, and `completed_total` / `failed_total` are sums.
+    # Deliberately NOT aliased onto prefill/decode_latency_ms above: TTFT
+    # includes queueing delay and TPOT is an inter-token average, so gating them
+    # under those names would gate a differently-defined quantity. Medians and
+    # p99s only -- means are the noisiest summary of a latency distribution and
+    # the least useful thing to gate on.
+    "median_ttft_ms": "max",
+    "p99_ttft_ms": "max",
+    "median_tpot_ms": "max",
+    "p99_tpot_ms": "max",
+    # ITL is gateable but read the value before blessing a bound on it: the
+    # gateway delivers several tokens per SSE chunk, so most recorded gaps are
+    # ~0 and `median_itl_ms` sits near zero while the real gaps land in the
+    # tail. A relative margin around ~0 is noise, so a median-ITL gate will
+    # flap. Prefer `median_tpot_ms` for per-token latency and treat
+    # `p99_itl_ms` as the useful half of this pair.
+    "median_itl_ms": "max",
+    "p99_itl_ms": "max",
+    "median_e2el_ms": "max",
+    "p99_e2el_ms": "max",
+    "output_throughput": "min",
+    "total_token_throughput": "min",
+    "request_throughput": "min",
     "logits_checksum": "equal",
     "output_checksum": "equal",
     "checksum": "equal",

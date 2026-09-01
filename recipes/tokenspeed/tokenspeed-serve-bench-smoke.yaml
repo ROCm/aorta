@@ -1,0 +1,70 @@
+# Serving-throughput smoke for TokenSpeed, via the `tokenspeed_serve` workload.
+#
+# This is the triage-mode counterpart to `tokenspeed-serve-probe-smoke.yaml`.
+# Both bring a model up in the TokenSpeed container; the difference is what they
+# can report. The probe recipe answers "did it serve?" with an exit code and
+# nothing else -- `mode: probe` has no metrics channel. This recipe answers "how
+# fast did it serve?", because a workload class can populate
+# `WorkloadResult.metrics`, which `aorta sweep run` aggregates into
+# `matrix.json`'s `metrics_summary` and renders in `perf.md`.
+#
+# Small model, small load: this is the shape check you run before spending an
+# hour on the multi-model or concurrency sweeps. Qwen3-0.6B on a warm HF cache
+# is a couple of minutes per cell.
+#
+#   # validate only (no GPU, no container):
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml --dry-run
+#
+#   # real run (needs gfx950/gfx1250 + docker):
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml \
+#     --output-dir /tmp/ts-serve-smoke
+#
+# Read `perf.md` for the per-cell TTFT / TPOT / throughput table and `matrix.md`
+# for the verdicts.
+#
+# The two cells differ only by mitigation, so a delta between them is the
+# mitigation's effect. That works only because the workload forwards the
+# dispatcher's resolved env into the container with `docker_env_flags` -- without
+# that forwarding both cells would benchmark an identical configuration and
+# report a spurious "no effect".
+schema_version: 1
+ticket: TOKENSPEED-SERVE-SMOKE
+workload: tokenspeed_serve
+trials: 1
+# Bench repetitions against ONE server, not servers started. Weight load costs
+# far more than a short bench, so re-serving per step would mostly measure model
+# load; 3 steps gives the matrix real step-to-step variance instead.
+steps: 3
+
+workload_config:
+  # Digest, not the :nightly-20260714 tag it came from: a moving tag would
+  # let the image change underneath a blessed baseline while the recipe still
+  # read as pinned, and the perf gates below would then compare across stacks.
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  model: Qwen/Qwen3-0.6B
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  # Hold OSL fixed. Without it a model that emits EOS early produces short
+  # outputs, so TPOT and throughput would describe a different amount of work
+  # per cell and the two cells would no longer be comparable.
+  ignore_eos: true
+  seed: 0
+  # Node-local: an NFS home under root-squash cannot be bind-mounted into a
+  # container. Keeping the HF cache here across runs is also what stops every
+  # run from re-downloading weights.
+  work_dir: /tmp/ts-work-serve
+  ready_timeout_sec: 900
+
+cells:
+  - name: baseline
+    mitigations: [none]
+    environment: local
+
+  # Scratch reclaim is the knob the Phase 1 serving probe already exercised on
+  # gfx950, so it is the one with prior art on this stack.
+  - name: no-scratch-reclaim
+    mitigations: [hsa_no_scratch_reclaim]
+    environment: local

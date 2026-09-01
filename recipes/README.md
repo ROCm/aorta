@@ -35,7 +35,7 @@ Recipes are grouped by workload:
 | `hrx/` | HRX launch-probe and perf (GEMM / triad) recipes. |
 | `probe/` | Subprocess-flow templates for wrapping opaque launch commands. |
 | `emulated/` | Variants that run under the mirage GPU emulator (no real GPU). |
-| `tokenspeed/` | TokenSpeed (third-party inference engine) kernel, operator-suite and serving probes, gfx950. See [`docs/tokenspeed.md`](../docs/tokenspeed.md). |
+| `tokenspeed/` | TokenSpeed (third-party inference engine) kernel, operator-suite and serving probes, gfx950. See [`docs/tokenspeed.md`](../docs/tokenspeed.md). The `tokenspeed-serve-{bench-smoke,models,load,gptoss,gptoss-tp}.yaml` recipes instead drive the `tokenspeed_serve` workload for serving metrics, the last two on `gpt-oss-20b` (single-GPU and tensor-parallel) — see [`docs/tokenspeed-serving.md`](../docs/tokenspeed-serving.md). |
 
 ## Quick reference
 

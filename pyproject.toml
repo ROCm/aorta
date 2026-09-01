@@ -61,6 +61,10 @@ race = "aorta.workloads.race:RaceWorkload"
 # Single-process GPU smoke test (no torchrun); ideal for emulated/CI runs.
 gpu_smoke = "aorta.workloads.gpu_smoke:GpuSmokeWorkload"
 training = "aorta.workloads.training:TrainingWorkload"
+# TokenSpeed online-serving benchmark (gfx950/gfx1250). Drives TokenSpeed's own
+# `tokenspeed bench serve` in its published container and reports TTFT / TPOT /
+# ITL / throughput, which the `mode: probe` route cannot do (no metrics channel).
+tokenspeed_serve = "aorta.workloads.tokenspeed_serve:TokenSpeedServeWorkload"
 
 # Side-effect-free isolation metadata. The dispatcher reads these entry-point
 # values without importing workload modules, so ``--dry-run`` and ``auto``
@@ -70,6 +74,7 @@ training = "aorta.workloads.training:TrainingWorkload"
 _subprocess = "aorta.run.validation:IN_PROCESS_REQUIRED_POLICY"
 llm_determinism = "aorta.run.validation:PROCESS_OPTIONAL_POLICY"
 race = "aorta.run.validation:PROCESS_REQUIRED_POLICY"
+tokenspeed_serve = "aorta.run.validation:PROCESS_OPTIONAL_POLICY"
 
 [project.entry-points."aorta.workload_startup_env"]
 race = "aorta.run.validation:race_startup_env"
