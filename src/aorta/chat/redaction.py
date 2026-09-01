@@ -27,6 +27,7 @@ from typing import IO, Any
 
 from aorta.chat.config import settings
 
+
 def _notice_stream() -> IO[str]:
     """Where the notice goes: stderr, resolved at call time.
 

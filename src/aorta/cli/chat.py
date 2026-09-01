@@ -405,6 +405,14 @@ def _common_options(command: Any) -> Any:
                 is_flag=True,
                 help="Skip the LLM backend preflight check.",
             ),
+            click.option(
+                "--no-redact",
+                is_flag=True,
+                help=(
+                    "Send filesystem paths and IP addresses to the LLM unredacted "
+                    "(default: redact, and say so on stderr)."
+                ),
+            ),
             click.option("-v", "--verbose", is_flag=True, help="Debug-level logging."),
         )
     ):
@@ -419,6 +427,7 @@ def _dispatch(
     llm_provider: str | None,
     llm_model: str | None,
     no_wait: bool,
+    no_redact: bool,
     verbose: bool,
 ) -> None:
     """Shared body of the bare group and ``ask``."""
@@ -431,7 +440,14 @@ def _dispatch(
     import asyncio
 
     config = _load("config")
-    config.apply_cli_overrides(provider=llm_provider, model=llm_model)
+    # One call, because `configure` rebuilds the settings from its arguments
+    # alone -- a second call would drop the first one's overrides. redact stays
+    # None unless the flag was given, so a profile's `redact = false` survives.
+    config.apply_cli_overrides(
+        provider=llm_provider,
+        model=llm_model,
+        redact=False if no_redact else None,
+    )
     quiet = _setup_logging(verbose)
     asyncio.run(_run(query, _output_mode(as_json, plain), quiet, no_wait))
 
@@ -449,6 +465,7 @@ def chat(
     llm_provider: str | None,
     llm_model: str | None,
     no_wait: bool,
+    no_redact: bool,
     verbose: bool,
 ) -> None:
     """Ask questions about the AORTA codebase (interactive REPL).
@@ -460,7 +477,7 @@ def chat(
     """
     if ctx.invoked_subcommand is not None:
         return
-    _dispatch(None, as_json, plain, llm_provider, llm_model, no_wait, verbose)
+    _dispatch(None, as_json, plain, llm_provider, llm_model, no_wait, no_redact, verbose)
 
 
 @chat.command(name="ask")
@@ -473,10 +490,11 @@ def ask(
     llm_provider: str | None,
     llm_model: str | None,
     no_wait: bool,
+    no_redact: bool,
     verbose: bool,
 ) -> None:
     """Answer QUERY once and exit."""
-    _dispatch(query, as_json, plain, llm_provider, llm_model, no_wait, verbose)
+    _dispatch(query, as_json, plain, llm_provider, llm_model, no_wait, no_redact, verbose)
 
 
 @chat.command(name="ui")
