@@ -524,7 +524,7 @@ here; it is filed under Not done below.
 **What this means for quoting these numbers.** Clean steady-state serving
 throughput on this cell reproduces to 1.13% CV, which is in line with the
 0.15–2.63% the sibling gating work measured across byte-identical
-configurations, and the two TP recipes below reproduce to 0.06% across their
+configurations, and the two TP recipes above reproduce to 0.06% across their
 three steps. The harness is not noisy. What is unsafe is the *three-step mean*
 on this particular cell: three samples from an 8%-bimodal population is too
 small, and it is the sample size, not the measurement, that produced a 25%
