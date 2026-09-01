@@ -69,6 +69,7 @@ Then read:
 | `tokenspeed-serve-load-high.yaml` | Concurrency 64 → 256, bracketing the ceiling the six-cell sweep left open. |
 | `tokenspeed-serve-models-large.yaml` | Qwen3 8B / 32B dense, extending the dense curve a factor of four past where it stopped. |
 | `tokenspeed-serve-moe-vs-dense.yaml` | Qwen3-30B-A3B against Qwen3-32B, both eager — the pair that separates MoE from MXFP4. |
+| `tokenspeed-serve-tp-large.yaml` | Qwen3-32B at `--tensor-parallel-size` 1 / 2 / 4 / **8**. The TP axis on a model that needs the cards. |
 
 In the multi-model and load recipes the cells differ by *workload*, not by
 mitigation, so `matrix.md`'s confound ratio (a step-time comparison against the
@@ -232,6 +233,43 @@ the TP≤2 axis it was measured as. Do not add one without bounding the tier:
 ranks that die this way hold their GPU memory past the workload's five-minute
 wait, and reclaiming it needs a `rocm-smi --gpureset` an unprivileged user on an
 allocated node cannot issue.
+
+### Tensor parallelism on a model that needs it (`tokenspeed-serve-tp-large.yaml`)
+
+The axis above measures whether the multi-GPU path *works*. It cannot measure
+whether it *scales*, because gpt-oss-20b does not care: 21B at MXFP4 with 3.6B
+active fits on one MI355X, and the whole TP=1 to TP=8 range peaks at 7.4%. This
+recipe runs the same axis on Qwen3-32B — dense, BF16, ~65 GB of weights — with
+the host KV tier bounded at 128 GB per rank throughout. All four cells passed,
+96/96 requests each, same load as the gpt-oss axis.
+
+| Cell | Startup (s) | TTFT p50 (ms) | TTFT p99 (ms) | TPOT p50 (ms) | Output tok/s | vs TP=1 |
+|---|---|---|---|---|---|---|
+| `tp1` | 117 | 98.6 | 1335.7 | 14.11 | 541.1 | 1.00× |
+| `tp2` | 115 | 91.2 | 1032.6 | 10.72 | 704.1 | 1.30× |
+| `tp4` | 115 | 95.8 | 845.4 | 8.54 | 867.4 | 1.60× |
+| `tp8` | 114 | 108.1 | 862.1 | 8.60 | 852.3 | 1.58× |
+
+**TP=8 comes up, serves correctly, and returns nothing over TP=4** — 1.7% below
+it on throughput, 13% worse on median TTFT. The marginal return was already
+falling: 1.30× for the first doubling, 1.23× for the second, 0.98× for the
+third. Four cards is the peak for this model on this node and this load.
+
+Two things to take from that. The first is that TP does pay on a model that
+needs the cards, 1.60× against gpt-oss-20b's 1.074×, so the earlier "TP barely
+helps" reading was about the model rather than the stack. The second is that
+nothing currently in the matrix needs eight cards, so the `tp8` row is here as
+the row that shows where saturation is, not as a configuration to run.
+
+At TP=8 all eight ranks logged `Allocating 128.00 GB pinned host memory for the
+flat host tier`, so 1024 GB node-wide against 3 TB. Unbounded, the same eight
+ranks would each have asked for the ~494 GB per-rank constant — 3952 GB — and
+died the way TP=4 did. The bound is what makes this axis exist.
+
+Per-step spread across the twelve measured steps in this table was under 0.1%,
+and `tp1` reproduced to 1.0% against a separate run of the same configuration
+earlier in the same allocation. Compare the load cell above, which is bimodal;
+these cells are not.
 
 ### Across load shapes (`tokenspeed-serve-load.yaml`)
 
@@ -682,6 +720,33 @@ regression purely because it went first.
 the compile cache. `warmup_steps` (default 1) runs whole discarded bench steps,
 whose exports use a `bench-warmup.` prefix the host never globs.
 
+### gpt-oss bring-up needs live network, and the HF cache does not cover it
+
+Pre-warming the HF cache makes a Qwen3 cell offline-capable. It does not do the
+same for gpt-oss, which failed to come up here with:
+
+```
+Failed to load Harmony encoding: error downloading or loading vocab file
+  https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken
+  ... client error (Connect) / dns error
+```
+
+The Harmony encoding is a tiktoken vocabulary the Rust model gateway fetches
+from an OpenAI blob endpoint. It is not a Hub artefact, `snapshot_download`
+never sees it, and `hf_offline: true` does not describe it. The same bring-up
+then also failed the gateway's own tokenizer registration against
+`huggingface.co/api/models/openai/gpt-oss-20b` — a separate fetch from the
+weights the ranks had already loaded from cache.
+
+Both hosts resolved and answered 200 from the node itself at the time, so this
+was the container losing egress rather than the network being absent. Either
+way the consequence is the same and it applies to every gpt-oss cell: **a
+gpt-oss bring-up can fail on a network fetch no cache pre-warm removes**, and
+it fails late, after the ranks have loaded weights and allocated their KV
+pools. Budget for it in `ready_timeout_sec`, and do not read a gpt-oss
+bring-up failure as a model or a tensor-parallelism failure without checking
+the server log for these two lines first.
+
 ### `--user <uid>` breaks torch's cache directory
 
 Running the container as the calling uid keeps the HF cache and the exported JSON
@@ -1016,11 +1081,12 @@ off `output_len` there rejected a correct export.
   `aorta-internal`, where perf gating is still awaiting review.
 - **`sharegpt` measured on hardware.** The plumbing is tested; no run has been
   made against a real ShareGPT file, so there are no numbers from it yet.
-- **TP=8 and above.** TP 1, 2 and 4 work, the last of them once the KVStore
-  host tier is bounded (see above). TP=8 is untested, and the RCCL mitigations
-  that would become relevant at wider TP are still untouched — as is a model
-  large enough for a TP number to mean anything, since gpt-oss-20b gains 7.6%
-  between TP=1 and TP=4. See
+- **RCCL mitigations at wide TP.** TP 1, 2, 4 and 8 all work, the last two once
+  the KVStore host tier is bounded (see above), and `tokenspeed-serve-tp-large.yaml`
+  runs the whole axis on Qwen3-32B — 1.60× throughput at TP=4, saturating there,
+  with TP=8 1.7% below it. The RCCL mitigations that axis exists to exercise are
+  still untouched, and no model in the matrix needs more than four cards, so
+  what eight cards buy is unanswered rather than answered negatively. See
   [Widening the TokenSpeed serving matrix](tokenspeed-matrix-widening.md).
 - **Why crashed TP ranks keep their memory.** A clean teardown clears in 30-45s
   and the workload waits it out. Ranks that die during startup hold theirs past

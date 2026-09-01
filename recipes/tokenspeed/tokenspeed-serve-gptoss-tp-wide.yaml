@@ -3,7 +3,7 @@
 # `tokenspeed-serve-gptoss-tp.yaml` stops at TP=2 because TP=4 would not come
 # up: ranks died with an out-of-memory raised from `flat_host_mirror.py:127`,
 # inside a `torch.zeros(..., pin_memory=True)`. This recipe is the same axis
-# with the cause removed, so it runs 1 / 2 / 4.
+# with the cause removed, so it runs 1 / 2 / 4 / 8.
 #
 # What the cause turned out to be, since the flag below looks arbitrary
 # otherwise. `FlatMemoryExecutor` sizes its pinned host mirror from
@@ -22,9 +22,10 @@
 #
 # `--kvstore-size` replaces the ratio with an explicit per-rank budget in GB,
 # which is what makes the footprint flat instead of linear in TP: 128 GB per
-# rank is 512 GB across the node at TP=4, roughly what TP=1 asks for by
-# default. Every cell carries the same value, because a TP axis whose host
-# tier changes per cell is measuring two things at once.
+# rank is 512 GB across the node at TP=4 and 1024 GB at TP=8, against the
+# 1976 and 3952 the default ratio would ask for. Every cell carries the same
+# value, because a TP axis whose host tier changes per cell is measuring two
+# things at once.
 #
 # Why this is nearly free here: the KVStore host tier is an L2 cache for
 # *prefix reuse*. These cells run `dataset: random`, whose prompts share no
@@ -36,7 +37,7 @@
 # Why gpt-oss-20b, and why the same load as the other TP recipe: so these rows
 # can be read against that recipe's. See its header for the model choice.
 #
-# Requires 4 visible GPUs. Each cell pins exactly the ones it needs -- that is
+# Requires all 8 GPUs. Each cell pins exactly the ones it needs -- that is
 # what makes the post-teardown VRAM watch specific to this trial rather than to
 # whatever else is on the node. See "A tensor-parallel teardown returns before
 # the GPUs are actually free" in docs/tokenspeed-serving.md.
@@ -88,3 +89,14 @@ cells:
     workload_config:
       hip_visible_devices: "0,1,2,3"
       serve_args: ["--tensor-parallel-size", "4", "--kvstore-size", "128"]
+
+  # Eight ranks × 128 GB is 1024 GB of pinned host memory against 3 TB, which is
+  # what they were observed to allocate. Unbounded it would be 8 × 494 GB and
+  # the ranks would die the way TP=4 did, so this cell exists only because the
+  # flag above does.
+  - name: tp8
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0,1,2,3,4,5,6,7"
+      serve_args: ["--tensor-parallel-size", "8", "--kvstore-size", "128"]

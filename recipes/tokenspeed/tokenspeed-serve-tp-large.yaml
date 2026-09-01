@@ -1,0 +1,104 @@
+# TokenSpeed serving: the tensor-parallel axis on a model that needs the cards.
+#
+# `tokenspeed-serve-gptoss-tp-wide.yaml` runs TP 1 / 2 / 4 / 8 on gpt-oss-20b and
+# the honest reading of its table is that the axis barely moves: TP=2 buys
+# 5.4% and TP=4 peaks at 7.4% over TP=1, because 21B at MXFP4 with 3.6B active
+# parameters fits comfortably on one MI355X and a second rank relieves no real
+# constraint while paying collective cost on every step. That recipe measures
+# whether the multi-GPU path *works*. It cannot measure whether it *scales*,
+# because its model does not care.
+#
+# This one uses Qwen3-32B: dense rather than 3.6B-active, BF16 rather than
+# MXFP4, and about 65 GB of weights against gpt-oss-20b's ~13 GB. It does
+# materially more arithmetic per token, which is the condition under which
+# sharding the model across cards can return anything. Measured here, TP=8
+# returns 1.59x the throughput of TP=1 and 1.66x lower per-token latency --
+# against 1.074x at the peak of the whole gpt-oss-20b axis. Same harness,
+# same load, same bound; the difference is the model.
+#
+# Read this recipe *and* the gpt-oss one, not one instead of the other. Between
+# them they separate "the eight-way path works" from "the eight-way path pays",
+# and those have different answers on this stack.
+#
+# `--kvstore-size 128` on every cell, including TP=1. Two reasons, and the
+# first is not optional. `FlatMemoryExecutor` sizes its pinned host mirror at
+# `--kvstore-ratio` (default 2.0) times *this rank's* device KV pool, and every
+# rank fills its own card, so the mirror is a per-rank constant of roughly
+# 494 GB and the node-wide pinned footprint is linear in TP. At TP=8 that is
+# ~3952 GB against 3 TB of host RAM, and the ranks die inside
+# `torch.zeros(..., pin_memory=True)`. Bounded at 128 GB per rank it is 1024 GB
+# node-wide, which is what the eight ranks were observed to allocate. Second,
+# the same value has to be on every cell regardless: a TP axis whose host tier
+# changes per cell is measuring two things at once.
+#
+# Why that bound costs nothing here: the KVStore host tier is an L2 cache for
+# *prefix reuse*, and these cells run `dataset: random`, whose prompts share no
+# prefixes. The tier is allocated and never hit. Do not carry the value over to
+# a prefix-caching benchmark without re-measuring it.
+#
+# Load is identical to the gpt-oss TP recipe (32 requests per step, ISL 512 /
+# OSL 128, concurrency 8) so the two axes can be read side by side. The repo is
+# ungated. Pre-warm the cache as the uid the trial runs as -- about 65 GB --
+# with the per-uid directory mode 0700.
+#
+# Requires all 8 GPUs. Each cell pins exactly the ones it needs, which is what
+# makes the post-teardown VRAM watch specific to this trial. Run it on an
+# allocation where `rocm-smi` shows the cards clean: TP=8 needs all eight, and
+# one stranded rank from an earlier experiment is enough to block it -- which
+# is exactly what blocked TP=8 the first time it was attempted.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-tp-large.yaml \
+#     --output-dir /tmp/ts-serve-tp-large
+schema_version: 1
+ticket: TOKENSPEED-SERVE-TP-LARGE
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  model: Qwen/Qwen3-32B
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  warmup_steps: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  # 2400 as in the other 32B recipes. Bring-up was 112-123 s measured here with
+  # a warm cache, but a 65 GB checkpoint read against a cold page cache plus
+  # Triton compilation is a much wider distribution than that, and startup is
+  # noisy independently of size -- 189 to 379 s across repeats elsewhere in this
+  # integration. This is headroom, not an estimate.
+  ready_timeout_sec: 2400
+
+cells:
+  - name: tp1
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0"
+      serve_args: ["--tensor-parallel-size", "1", "--kvstore-size", "128"]
+
+  - name: tp2
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0,1"
+      serve_args: ["--tensor-parallel-size", "2", "--kvstore-size", "128"]
+
+  - name: tp4
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0,1,2,3"
+      serve_args: ["--tensor-parallel-size", "4", "--kvstore-size", "128"]
+
+  - name: tp8
+    mitigations: [none]
+    environment: local
+    workload_config:
+      hip_visible_devices: "0,1,2,3,4,5,6,7"
+      serve_args: ["--tensor-parallel-size", "8", "--kvstore-size", "128"]

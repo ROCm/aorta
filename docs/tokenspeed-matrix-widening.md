@@ -51,7 +51,7 @@ each is the kind of thing that document might contradict:
 | Repo access | ungated only | the `hf_token_env` path has never run | unchanged; no token on this machine |
 | Concurrency | 1, 8, 32, 64 | curve still rising at 64 | 128 and 256 added; ceiling found |
 | Request shape | ISL 4096/OSL 128, ISL 128/OSL 1024 | adequate | unchanged |
-| Tensor parallelism | 1, 2 | 4 did not come up | **4 works**, once the host KV tier is bounded |
+| Tensor parallelism | 1, 2 | 4 did not come up | **1 / 2 / 4 / 8 all work**, once the host KV tier is bounded, and 8 is worth having on a model that needs it |
 
 ## Workstream 3: tensor parallelism beyond TP=2
 
@@ -223,29 +223,40 @@ well under TP=2's 884 GB.
 
 ### What the axis measures once it runs
 
-All three cells passed, 96/96 requests served each, none failed. Load is the
+All four cells passed, 96/96 requests served each, none failed. Load is the
 same as the existing TP recipe (32 requests per step, ISL 512 / OSL 128,
-concurrency 8, three measured steps) so the rows are comparable to it.
+concurrency 8, three measured steps) so the rows are comparable to it. This
+table is the recipe as committed, measured end to end in one allocation on one
+node, so the rows are joinable to each other as well.
 
-| Cell | Startup (s) | TTFT p50 (ms) | TTFT p99 (ms) | TPOT p50 (ms) | Output tok/s |
-|---|---|---|---|---|---|
-| tp1 | 939 | 68.1 | 69.4 | 7.98 | 948.9 |
-| tp2 | 133 | 66.4 | 68.2 | 7.67 | 984.2 |
-| tp4 | 111 | 67.8 | 69.6 | 7.36 | 1021.0 |
+| Cell | Startup (s) | TTFT p50 (ms) | TTFT p99 (ms) | TPOT p50 (ms) | Output tok/s | vs TP=1 |
+|---|---|---|---|---|---|---|
+| tp1 | 127 | 67.3 | 69.1 | 7.70 | 980.8 | 1.000× |
+| tp2 | 129 | 65.7 | 66.9 | 7.27 | 1033.6 | 1.054× |
+| tp4 | 114 | 67.0 | 68.7 | 7.11 | 1053.5 | **1.074×** |
+| tp8 | 127 | 72.3 | 73.9 | 7.49 | 999.5 | 1.019× |
 
-**TP=4 works, and it buys almost nothing.** 1021 tok/s against 948.9 at TP=1 is
-7.6% more throughput for four times the hardware, and TP=2 already had 3.7% of
-that. TTFT is flat across the axis to within 2.5%, which is the expected shape:
-at 21B with MXFP4 the model fits comfortably in one MI355X, so extra ranks
-relieve no constraint and pay collective cost on every step. The result worth
-recording is that the path works and reports coherently at four ranks, not that
-it is fast — and that a model this size is the wrong instrument for measuring TP
-scaling, which is the argument for a larger model before TP=8.
+**The whole axis works, and it buys almost nothing.** TP=4 is the peak at 7.4%
+more throughput for four times the hardware; TP=8 gives most of that back and
+ends 1.9% above a single card while being 7% worse on TTFT. TTFT is otherwise
+flat across the axis to within 2.5%, which is the expected shape: at 21B with
+MXFP4 the model fits comfortably in one MI355X, so extra ranks relieve no
+constraint and pay collective cost on every step. The result worth recording is
+that the path works and reports coherently at up to eight ranks, not that it is
+fast — and that a model this size is the wrong instrument for measuring TP
+scaling. See `tokenspeed-serve-tp-large.yaml` below for the same axis on a
+model that is not.
 
-Do not read the startup column as scaling with TP. tp1 ran first against a cold
-Gluon cache and paid 939 s for it; tp2 and tp4 reused what it compiled. The
-TP=4 cell in the earlier single-cell run, also against a cold cache, became
-ready in 180 s. Startup here measures cache state, not rank count.
+An earlier measurement of the first three cells, on a different node and a
+different allocation, returned 948.9 / 984.2 / 1021.0. That is 3.2% / 4.8% /
+3.1% below the table above — same ordering, same conclusion, and a useful
+number to have: it is what cross-node run-to-run agreement looks like on a cell
+that does not stall, against the 25% the `conc-64` cell produced.
+
+Do not read the startup column as scaling with TP. Every cell here ran against
+a warm Gluon cache and came in at 114-129 s. The first cell of the earlier
+run, against a cold one, paid 939 s. Startup measures cache state, not rank
+count.
 
 The obvious next move is to have `setup()` reject a wide-TP cell that does not
 bound the tier. It is deliberately not done, because the threshold is a
@@ -270,32 +281,108 @@ have — the remaining validation for this document had to be moved to GPUs 4–
 So one naked TP=4 cell does not just fail; it strands half the node for
 everything that runs after it, for the life of the allocation.
 
-### TP=8, and what to try next
+### TP=8, measured
 
-TP=8 is untested and is the obvious next cell: at `--kvstore-size 128` it asks
-for 1024 GB node-wide, which fits. It is not in the committed recipe because
-nothing here has run it, and the recipe rule in this repo is that a cell known
-not to come up stays in the document rather than in the matrix. Two things make
-it worth a deliberate experiment rather than an assumption:
+TP=8 was the open experiment: at `--kvstore-size 128` the arithmetic says it
+asks for 1024 GB of pinned host memory node-wide, which fits in 3 TB, and the
+arithmetic said TP=4 would fail too and it did, so it was worth measuring
+rather than asserting. It could not be measured on the previous allocation for
+a mundane reason — the failing TP=4 control had stranded 251 GiB on GPUs 0-3
+and TP=8 needs all eight. This was run on a fresh node with `rocm-smi`
+confirmed clean beforehand.
 
-1. **The collective changes shape.** TP=8 spans whatever the node's slowest
-   link is, and the RCCL mitigations in aorta's registry — untouched by any TP
-   cell so far — become the interesting axis rather than a formality.
-2. **gpt-oss-20b may be too small to say anything.** TP=2 already buys only
-   ~4.5% throughput because 21B at MXFP4 does not need a second card. At TP=8
-   the collective cost per step is likely to dominate outright, and the honest
-   read of a bad number would be "wrong model for this axis", not "the stack
-   scales badly". A larger model — see the next section — is the precondition
-   for TP=8 meaning anything.
+**The memory question is answered, and directly.** All eight ranks logged the
+allocation:
 
-Two further experiments, in the order worth doing them:
+```
+[ATTN TP RANK 0..7] Allocating 128.00 GB pinned host memory for the flat host
+  tier (num_host_pages=651041 bytes_per_host_page=196608 host_size_gb=128
+  host_ratio=2.0 device_pool.size=78514816)
+```
+
+Eight ranks × 128 GB = 1024 GB, allocated, on a 3 TB node. Unbounded at the
+default `host_ratio=2.0` the same eight ranks would have asked for the per-rank
+~494 GB constant each — 3952 GB — and died the way TP=4 died. The bound is not
+a nicety at TP=8; it is the difference between running and not.
+
+**The performance question needs a different model, which is the caveat this
+document raised before running it and which the numbers confirm.** The
+gpt-oss-20b TP=8 row is in the table above and it is a control, not a result:
+999.5 tok/s, 1.019× TP=1, below both TP=2 and TP=4. 21B at MXFP4 with 3.6B
+active fits on one MI355X with room to spare, so the axis was never going to
+say anything about scaling on that model, and it does not.
+
+So the axis was run again on Qwen3-32B — dense, BF16, ~65 GB of weights,
+materially more arithmetic per token — as
+`recipes/tokenspeed/tokenspeed-serve-tp-large.yaml`. All four cells passed,
+96/96 requests each:
+
+| Cell | Startup (s) | TTFT p50 (ms) | TTFT p99 (ms) | TPOT p50 (ms) | Output tok/s | vs TP=1 |
+|---|---|---|---|---|---|---|
+| tp1 | 117 | 98.6 | 1335.7 | 14.11 | 541.1 | 1.00× |
+| tp2 | 115 | 91.2 | 1032.6 | 10.72 | 704.1 | 1.30× |
+| tp4 | 115 | 95.8 | 845.4 | 8.54 | 867.4 | **1.60×** |
+| tp8 | 114 | 108.1 | 862.1 | 8.60 | 852.3 | 1.58× |
+
+**TP=8 comes up, serves correctly, and returns nothing.** It is 1.7% *below*
+TP=4 on throughput and 13% worse on median TTFT, which is what paying
+collective cost for capacity you do not need looks like. The curve peaks at
+TP=4 and the marginal return is already falling before it: 1.30× for the first
+doubling, 1.23× for the second, 0.98× for the third.
+
+So the axis demonstrates three things, and they should not be collapsed into
+one:
+
+1. **The eight-way path is correct.** Eight ranks initialise, allocate their
+   bounded host tier, capture graphs and serve every request. Nothing about
+   TP=8 is broken.
+2. **A model that needs the cards does scale, up to a point.** Qwen3-32B
+   returns 1.60× over four cards where gpt-oss-20b returns 1.074×. The earlier
+   "TP barely helps" reading was a property of the model, not of the stack —
+   which is what the caveat predicted, and it is worth having falsified
+   cheaply.
+3. **Nothing in this matrix needs eight cards.** The largest model available
+   here saturates at four. A TP=8 row is worth keeping as the row that shows
+   where saturation is, in the same way `conc-256` is kept as the row that
+   shows where the concurrency cliff is — not as a configuration to recommend.
+
+A gpt-oss-20b TP=8 cell **is committed**, as `tp8` in
+`tokenspeed-serve-gptoss-tp-wide.yaml`, but it took two attempts and the first
+failure is worth recording because it looks like a TP failure and is not. On
+the first attempt the eight ranks allocated their host tier exactly as above
+and torch distributed initialised across the eight-way mapping. What then
+failed was the Rust model gateway, on two network fetches that the pre-warmed
+HF cache does not cover:
+
+```
+Failed to load Harmony encoding: error downloading or loading vocab file
+  https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken
+  ... client error (Connect) / dns error
+Failed to load tokenizer 'openai/gpt-oss-20b': ... error sending request for
+  url (https://huggingface.co/api/models/openai/gpt-oss-20b/revision/main)
+```
+
+Both hosts resolve and answer 200 from the node itself, so the container lost
+egress rather than the network being absent — and the identical cell, re-run
+unchanged twenty minutes later on the same node, came up in 118 s and served
+96/96. So it was transient. The Harmony encoding is the interesting half: it is
+a tiktoken vocabulary fetched from an OpenAI blob endpoint, it is not in the HF
+cache and pre-warming that cache does not pre-warm it, so **every gpt-oss
+bring-up on this stack depends on a live network fetch that no amount of cache
+pre-warming removes**. That is a reliability hazard for the whole gpt-oss line,
+not a TP=8 one, and it is recorded in `tokenspeed-serving.md` as such. It also
+cost 26 minutes of node time to fail, because it fails after the ranks have
+loaded weights and allocated their KV pools rather than before.
+
+Two further items, the first of them now cheap:
 
 - **Confirm the per-rank constant directly at TP=1 and TP=2.** The 494 GB
   figure is measured at TP=4 and derived algebraically for the others. The
-  sizing log prints `bytes_per_host_page` and `device_pool.size` on every rank,
-  so one run of the committed recipe at default settings records all three
-  points and turns the derivation into a measurement. Cheap: it is a log grep
-  on a run that is happening anyway.
+  TP=8 log above adds a fourth point at the *bounded* size, which confirms the
+  page arithmetic but not the ratio. The sizing log prints `bytes_per_host_page`
+  and `device_pool.size` on every rank, so one run of the committed recipe at
+  default settings records all of them and turns the derivation into a
+  measurement. Cheap: it is a log grep on a run that is happening anyway.
 - **Report it upstream.** Done, as evidence on
   [lightseekorg/tokenspeed#297](https://github.com/lightseekorg/tokenspeed/issues/297),
   which reports the same per-process guard in the radix `HostKVCache` path on
@@ -551,7 +638,14 @@ estimate.
 | `tokenspeed-serve-load-high.yaml` | 3 | **0.31** | Qwen3-0.6B bring-up is the cost; the bench adds under 30 s/cell |
 | `tokenspeed-serve-models-large.yaml` | 2 | **0.19** | 32B weight load is 65 GB |
 | `tokenspeed-serve-moe-vs-dense.yaml` | 2 | **0.19** | eager, so no capture time, but slower steps |
-| **widened matrix, incremental** | 10 | **~1.1** | on top of the existing recipes |
+| `tokenspeed-serve-tp-large.yaml` | 4 | **0.24** | 848 s measured end to end; bring-up 114-117 s per cell against a warm cache |
+| **widened matrix, incremental** | 14 | **~1.3** | on top of the existing recipes |
+
+`tokenspeed-serve-tp-large.yaml` is the cheapest cell-for-cell of the five,
+which is worth noting because it is the one that needs the whole node: its
+Qwen3-32B bring-up was 114-117 s in every cell including TP=8, against the
+189-379 s the smaller models have posted. A 65 GB read from a warm page cache
+beats a small model's Triton compilation.
 
 The tp-wide figure needs its caveat: its first cell paid 939 s of Gluon
 compilation against a cold cache while the other two, reusing it, became ready
@@ -578,12 +672,12 @@ which `elapsed_sec` includes and `container_elapsed_sec` does not.
 
 ## Not done
 
-- **TP=8.** Argued for above; needs a model large enough for the answer to mean
-  something, so it is blocked behind the same thing the MoE comparison is. It
-  was also not testable on this allocation for a more mundane reason: the
-  failing TP=4 control stranded 251 GiB on two of the eight GPUs, and TP=8
-  needs all of them. Run it first on a fresh allocation, before any experiment
-  that can leave a rank dead.
+- **RCCL mitigations at wide TP.** Still untouched. TP=8 now runs, so the axis
+  they would apply to exists; nothing has varied them.
+- **TP=8 on a model that saturates above four cards.** Qwen3-32B peaks at TP=4,
+  which means the TP=8 row here shows where saturation is rather than what
+  eight cards buy. Answering the second question needs a model this node cannot
+  hold on one card, and there is not one in the matrix.
 - **A BF16 MoE model with CUDA graph capture.** Blocked on the upstream host
   sync in `moe_align_block_size_device`, filed as
   [tokenspeed#1329](https://github.com/lightseekorg/tokenspeed/issues/1329).
