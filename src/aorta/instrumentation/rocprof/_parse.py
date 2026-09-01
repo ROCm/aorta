@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import csv
 import math
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 #: How many kernel names to carry in the non-numeric ``rocprof_top_kernels``
 #: channel. Kept small: it is a triage breadcrumb, not a report.
@@ -41,8 +41,8 @@ _TRACE_END = "End_Timestamp"
 _KERNEL_DISPATCH = "KERNEL_DISPATCH"
 
 
-def _iter_rows(path: Path) -> Iterator[dict[str, str]]:
-    """Stream a CSV as dict rows, yielding nothing more on a read/parse error.
+def _iter_rows(stream: TextIO) -> Iterator[dict[str, str]]:
+    """Stream an open CSV handle as dict rows, stopping on a read/parse error.
 
     A generator rather than a list: with ``stats: false`` a
     ``*_kernel_trace.csv`` carries one row per dispatch and can reach hundreds
@@ -51,12 +51,14 @@ def _iter_rows(path: Path) -> Iterator[dict[str, str]]:
     pass, so no caller needs the rows twice.
 
     Fail-soft like the rest of the module: a truncated or undecodable file
-    contributes the rows read so far and then stops, rather than raising.
+    contributes the rows read so far and then stops, rather than raising. The
+    caller owns the handle -- taking an already-open stream (rather than a path)
+    lets the collector supply one opened ``O_NOFOLLOW`` under a directory fd, so
+    a payload symlink swapped in after the guard cannot redirect the read.
     """
     try:
-        with path.open(newline="", encoding="utf-8") as stream:
-            for row in csv.DictReader(stream):
-                yield dict(row)
+        for row in csv.DictReader(stream):
+            yield dict(row)
     except (OSError, csv.Error, UnicodeDecodeError):
         return
 
@@ -77,7 +79,9 @@ def _to_float(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, int] | None]:
+def _totals_from_stats(
+    streams: Iterable[TextIO],
+) -> tuple[dict[str, float], dict[str, int] | None]:
     """Aggregate ``*_kernel_stats.csv`` into per-kernel ns totals + call counts.
 
     Returns ``None`` for the counts when any otherwise-usable row had an
@@ -91,8 +95,8 @@ def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
     ns_by_kernel: dict[str, float] = {}
     calls_by_kernel: dict[str, int] = {}
     counts_trustworthy = True
-    for path in paths:
-        for row in _iter_rows(path):
+    for stream in streams:
+        for row in _iter_rows(stream):
             name = (row.get(_STATS_NAME) or "").strip()
             total_ns = _to_float(row.get(_STATS_TOTAL_NS))
             calls = _to_float(row.get(_STATS_CALLS))
@@ -114,7 +118,9 @@ def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
     return ns_by_kernel, (calls_by_kernel if counts_trustworthy else None)
 
 
-def _totals_from_trace(paths: list[Path]) -> tuple[dict[str, float], dict[str, int] | None]:
+def _totals_from_trace(
+    streams: Iterable[TextIO],
+) -> tuple[dict[str, float], dict[str, int] | None]:
     """Aggregate ``*_kernel_trace.csv`` dispatch rows into the same shape.
 
     Counts are always trustworthy here: a trace row *is* one dispatch, so
@@ -122,8 +128,8 @@ def _totals_from_trace(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
     """
     ns_by_kernel: dict[str, float] = {}
     calls_by_kernel: dict[str, int] = {}
-    for path in paths:
-        for row in _iter_rows(path):
+    for stream in streams:
+        for row in _iter_rows(stream):
             kind = (row.get(_TRACE_KIND) or "").strip()
             if kind and kind != _KERNEL_DISPATCH:
                 continue
@@ -137,50 +143,42 @@ def _totals_from_trace(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
     return ns_by_kernel, calls_by_kernel
 
 
-def parse_summary(out_dir: Path | str) -> dict[str, Any]:
-    """Summarise a ``rocprofv3`` output directory into trial metrics.
+def parse_summary_from_streams(
+    artifact_dir: str,
+    stats_streams: Iterable[TextIO],
+    trace_streams: Iterable[TextIO],
+) -> dict[str, Any]:
+    """Summarise pre-opened ``rocprofv3`` CSV handles into trial metrics.
 
-    Prefers the ``--stats`` CSVs (rocprofv3 already did the aggregation) and
-    falls back to summing dispatch spans from the kernel trace whenever the
-    stats CSVs are absent *or* yield no usable rows -- a truncated or
-    column-renamed stats file must not mask a readable trace.
+    The stream-taking core of :func:`parse_summary`. The caller supplies the
+    ``*_kernel_stats.csv`` and ``*_kernel_trace.csv`` handles -- the collector
+    path opens them ``O_NOFOLLOW`` under a directory fd so a payload symlink
+    swapped in after the guard cannot redirect the read -- and the display
+    string for ``rocprof_artifact_dir``. Same metrics contract as
+    :func:`parse_summary`.
 
-    Args:
-        out_dir: The directory passed to ``rocprofv3 -d``.
+    Each group may be a **lazy** iterator that opens one file at a time (both
+    callers pass one), so a multi-rank capture never needs a descriptor per
+    artifact. Each is consumed at most once, and the trace group is not
+    consumed at all when the stats group yielded data.
 
-    Returns:
-        ``{}`` when the directory does not exist. Otherwise
-        ``{"rocprof_artifact_dir": str}`` plus, when kernel data was found,
-        the flat numeric ``rocprof_kernel_count`` / ``rocprof_gpu_time_ms`` /
-        ``rocprof_top_kernel_ms`` and the non-numeric ``rocprof_top_kernels``
-        name list. ``rocprof_kernel_count`` is omitted -- while the timings
-        are still reported -- when a stats row's ``Calls`` column was
-        unreadable, because a per-kernel aggregate row gives no basis for
-        guessing how many dispatches it stood for. Never raises: an unreadable
-        or malformed artifact tree degrades to the artifact-dir-only result.
+    Raises nothing of its own -- a malformed, truncated or undecodable artifact
+    yields fewer metrics -- but an exception from the caller's iterator
+    propagates. That is deliberate: the collector's iterator re-raises
+    descriptor exhaustion so its metrics are dropped rather than published as
+    totals covering only the ranks read before the limit.
     """
-    root = Path(out_dir)
-    try:
-        if not root.is_dir():
-            return {}
-        stats_paths = sorted(root.rglob("*_kernel_stats.csv"))
-        trace_paths = sorted(root.rglob("*_kernel_trace.csv"))
-    except OSError:
-        return {}
-
-    metrics: dict[str, Any] = {"rocprof_artifact_dir": str(root)}
+    metrics: dict[str, Any] = {"rocprof_artifact_dir": artifact_dir}
 
     # The fallback keys off absence of *data*, not absence of files. A stats
     # CSV that exists but yields nothing -- rocprofv3 killed mid-write by a
     # trial timeout, or a future release renaming the columns pinned above --
     # would otherwise suppress a complete kernel trace sitting beside it, and
-    # report no kernels on a host where profiling works.
-    ns_by_kernel: dict[str, float] = {}
-    calls_by_kernel: dict[str, int] | None = {}
-    if stats_paths:
-        ns_by_kernel, calls_by_kernel = _totals_from_stats(stats_paths)
-    if not ns_by_kernel and trace_paths:
-        ns_by_kernel, calls_by_kernel = _totals_from_trace(trace_paths)
+    # report no kernels on a host where profiling works. An empty stats group
+    # aggregates to nothing and falls through the same way.
+    ns_by_kernel, calls_by_kernel = _totals_from_stats(stats_streams)
+    if not ns_by_kernel:
+        ns_by_kernel, calls_by_kernel = _totals_from_trace(trace_streams)
     if not ns_by_kernel:
         return metrics
 
@@ -204,4 +202,68 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     return metrics
 
 
-__all__ = ["TOP_N", "parse_summary"]
+def parse_summary(out_dir: Path | str) -> dict[str, Any]:
+    """Summarise a ``rocprofv3`` output directory into trial metrics.
+
+    Prefers the ``--stats`` CSVs (rocprofv3 already did the aggregation) and
+    falls back to summing dispatch spans from the kernel trace whenever the
+    stats CSVs are absent *or* yield no usable rows -- a truncated or
+    column-renamed stats file must not mask a readable trace.
+
+    Path-based convenience wrapper over :func:`parse_summary_from_streams`: it
+    globs the two CSV families and opens them itself, one at a time -- a
+    distributed run emits a CSV pair per rank and holding them all open at once
+    could exceed ``RLIMIT_NOFILE``, which would have dropped the later ranks
+    from the totals without saying so. The collector post-run path uses the
+    stream entrypoint instead, opening each file ``O_NOFOLLOW`` under a
+    directory fd so a payload symlink cannot redirect the read; this wrapper
+    follows symlinks like any ``open`` and is for callers that already hold a
+    trusted directory (tests, an operator's own ``rocprofv3 -d`` tree).
+
+    Args:
+        out_dir: The directory passed to ``rocprofv3 -d``.
+
+    Returns:
+        ``{}`` when the directory does not exist. Otherwise
+        ``{"rocprof_artifact_dir": str}`` plus, when kernel data was found,
+        the flat numeric ``rocprof_kernel_count`` / ``rocprof_gpu_time_ms`` /
+        ``rocprof_top_kernel_ms`` and the non-numeric ``rocprof_top_kernels``
+        name list. ``rocprof_kernel_count`` is omitted -- while the timings
+        are still reported -- when a stats row's ``Calls`` column was
+        unreadable, because a per-kernel aggregate row gives no basis for
+        guessing how many dispatches it stood for. Never raises: an unreadable
+        or malformed artifact tree degrades to the artifact-dir-only result.
+    """
+    root = Path(out_dir)
+    try:
+        if not root.is_dir():
+            return {}
+        stats_paths = sorted(root.rglob("*_kernel_stats.csv"))
+        trace_paths = sorted(root.rglob("*_kernel_trace.csv"))
+    except OSError:
+        return {}
+    return parse_summary_from_streams(
+        str(root), _open_each(stats_paths), _open_each(trace_paths)
+    )
+
+
+def _open_each(paths: Sequence[Path]) -> Iterator[TextIO]:
+    """Yield each CSV as an open handle, closing it before opening the next.
+
+    One descriptor at a time: ``rocprofv3`` writes a stats/trace pair per
+    process, so a large distributed capture holds more artifacts than the soft
+    fd limit allows, and an ``EMFILE`` partway through a batch open would have
+    left the remaining ranks out of the totals with nothing in the output to
+    say so. A file that cannot be opened is skipped -- this wrapper promises
+    never to raise.
+    """
+    for path in paths:
+        try:
+            handle = path.open(newline="", encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            yield handle
+
+
+__all__ = ["TOP_N", "parse_summary", "parse_summary_from_streams"]

@@ -21,7 +21,9 @@ from aorta.run.collectors import (
     CONFIG_KEY_COLLECT,
     CONFIG_KEY_COLLECT_DIR,
     CONFIG_KEY_COLLECT_OPTIONS,
+    CONFIG_KEY_RESULTS_ROOT,
 )
+from aorta.workloads import _subprocess as subprocess_module
 from aorta.workloads._subprocess import (
     CONFIG_KEY_LOG_PREFIX,
     CONFIG_KEY_PROBE_EXTRAS,
@@ -228,10 +230,12 @@ def test_run_collector_cannot_shadow_the_platform_keys(tmp_path, monkeypatch, ro
     """The collector summary is merged UNDER the platform bookkeeping, so a
     collector emitting ``verdict`` / ``exit_code`` cannot rewrite the trial's
     outcome."""
+    shadow = {"verdict": "pass", "exit_code": 0, "rocprof_gpu_time_ms": 1.0}
+    # Patch both entrypoints: the fd-relative (streams) path used on POSIX and
+    # the pathname fallback, so the merge-order contract is pinned on either.
+    monkeypatch.setattr(rocprof, "parse_summary", lambda _out: shadow)
     monkeypatch.setattr(
-        rocprof,
-        "parse_summary",
-        lambda _out: {"verdict": "pass", "exit_code": 0, "rocprof_gpu_time_ms": 1.0},
+        rocprof, "parse_summary_from_streams", lambda *_args, **_kwargs: shadow
     )
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
     (collect_dir / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
@@ -407,6 +411,90 @@ def test_collector_subdir_swapped_for_a_symlink_is_refused(
     assert "leaked_kernel" not in str(result.metrics)
     # ...and nothing out there may be deleted.
     assert victim.read_text(encoding="utf-8").endswith("7,7000000\n")
+
+
+def test_retention_prunes_rocprof_when_a_sibling_collector_wrote_nothing(
+    tmp_path, rocprofv3_on_path
+):
+    """One never-created collector directory must not retain the others.
+
+    ``layer_numerics`` is validated-only, so nothing in the platform makes its
+    output directory. When absence counted as an unsafe path, the guard reported
+    it, ``_prune_collector_tree`` bailed before pruning anything, and
+    ``retain.on_pass: none`` silently kept the whole rocprof capture -- the
+    hundreds of MB per trial retention exists to drop.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    wl = _make_workload(
+        tmp_path,
+        ["true"],
+        collect=["rocprof", "layer_numerics"],
+        retain={"on_pass": "none"},
+    )
+    wl.setup()
+    _rocprof_artifacts(collect_dir)
+    assert not (collect_dir / "layer_numerics").exists()
+
+    result = wl.run()
+
+    # Parsed before pruning, so the metric survives the trace it came from.
+    assert result.metrics.get("rocprof_kernel_count") == 23
+    assert not (collect_dir / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv").exists()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    deleted = doc.get("capture", {}).get("retention", {}).get("deleted", [])
+    assert any(entry.endswith("aorta_kernel_stats.csv") for entry in deleted)
+
+
+def test_retention_prune_uses_the_same_anchor_as_its_own_pre_filter(
+    tmp_path, rocprofv3_on_path, monkeypatch
+):
+    """The destructive prune must run under the anchor its pre-filter guarded.
+
+    A direct or legacy config threads ``_aorta_collect_dir`` without
+    ``_aorta_results_root`` -- which is exactly the shape ``_make_workload``
+    builds, and what a trial config written before that key existed looks like.
+    ``unsafe_collector_paths()`` still guards such a config using its
+    ``collect_root.parent`` fallback, but the anchor was derived a second time
+    for ``apply_retention()``, by a function without that fallback, so the prune
+    received ``None`` and silently dropped to the pathname engine. The
+    pre-filter then guarded a pathname that the prune re-resolved -- the
+    time-of-check/time-of-use gap this whole change exists to close.
+
+    Asserted as an agreement between the two halves rather than by racing them:
+    the defect is that one question had two spellings, so what needs pinning is
+    that they now give the same answer.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"], retain={"on_pass": "none"})
+    assert CONFIG_KEY_RESULTS_ROOT not in wl.config, (
+        "precondition: this is the no-threaded-anchor config shape"
+    )
+
+    seen: dict = {}
+    real_apply = subprocess_module.apply_retention
+
+    def spy(trial_dir, level, *, trusted_root=None):
+        seen[str(trial_dir)] = trusted_root
+        return real_apply(trial_dir, level, trusted_root=trusted_root)
+
+    monkeypatch.setattr(subprocess_module, "apply_retention", spy)
+
+    wl.setup()
+    _rocprof_artifacts(collect_dir)
+    wl.run()
+
+    anchor = seen.get(str(collect_dir))
+    assert anchor is not None, "the collector prune ran without a trusted anchor"
+    # The same fallback the pre-filter uses, so the two cannot disagree.
+    assert anchor.path == collect_dir.parent
+    # ...and the prune still did its job.
+    assert not (collect_dir / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv").exists()
+    # The sibling probe trial tree is payload-writable too (the command runs as
+    # the same user), so it now carries its own fd-relative anchor rather than
+    # dropping to the pathname engine.
+    trial_anchor = seen.get(str(tmp_path / "trial_0"))
+    assert trial_anchor is not None
+    assert trial_anchor.path == tmp_path
 
 
 def test_retention_full_keeps_the_collector_tree(tmp_path, rocprofv3_on_path):

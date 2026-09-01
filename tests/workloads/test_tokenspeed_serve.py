@@ -434,10 +434,24 @@ def test_unknown_config_key_warns_but_does_not_fail(tmp_path, caplog):
 
 
 def test_request_rate_accepts_inf_spellings(tmp_path):
-    for value in ("inf", "INF", float("inf")):
+    for value in ("inf", "INF", "+inf", "Infinity"):
         wl = _make(tmp_path, request_rate=value)
         wl.setup()
         assert wl._request_rate == "inf"
+
+
+def test_an_infinite_float_is_not_the_unlimited_token(tmp_path):
+    """YAML reads `.inf` and `1.0e999` as the same value.
+
+    Accepting an infinite float therefore accepted an overflowed finite rate as
+    the heaviest load the harness can generate, with the trial still reporting
+    the rate the recipe asked for -- the one failure this validation exists to
+    prevent, arriving through the YAML parser instead of through `float()`.
+    Unlimited has to be written as the quoted string, which the accident cannot
+    produce.
+    """
+    with pytest.raises(ValueError, match="indistinguishable"):
+        _make(tmp_path, request_rate=float("inf")).setup()
 
 
 @pytest.mark.parametrize("value", ["1e999", "-1e999", 10**400, "10" * 400])
@@ -794,6 +808,28 @@ def test_per_step_detail_is_retained(tmp_path, monkeypatch):
     metrics = wl.run().metrics
     assert len(metrics["steps"]) == 2
     assert len(metrics["result_files"]) == 2
+
+
+def test_per_step_counters_stay_counters(tmp_path, monkeypatch):
+    """The aggregate is arithmetic; the per-step detail is a record of the run.
+
+    Every scalar is floated for the means, sums and gate comparisons, and the
+    same dict is what lands in the trial JSON -- where `completed: 32.0` reads
+    as a measurement of a quantity that is counted, and a consumer expecting an
+    exact counter has to guess whether the .0 means anything.
+    """
+    wl = _make(tmp_path, steps=1, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    step = wl.run().metrics["steps"][0]
+
+    assert isinstance(step["step"], int)
+    assert step["completed"] == 32 and isinstance(step["completed"], int)
+    assert isinstance(step["failed"], int)
+    # Measurements keep their float type: the export gave them that way, and
+    # rounding a latency into a counter would be the same mislabelling in
+    # reverse.
+    assert isinstance(step["median_ttft_ms"], float)
 
 
 def test_startup_seconds_parsed_from_stdout(tmp_path, monkeypatch):
@@ -1287,6 +1323,49 @@ def test_every_gate_spec_names_a_real_comparison():
     for gate, (metric, comparison) in mod._GATE_SPECS.items():
         assert comparison in {"min", "max"}, gate
         assert metric
+
+
+@pytest.mark.parametrize("gate", ["max_p99_itl_ms", "max_p99_e2el_ms"])
+def test_a_tail_latency_gate_breach_fails_the_trial(tmp_path, monkeypatch, gate):
+    """The p99 of ITL and E2EL is gateable, not only the median.
+
+    `median_itl_ms` sits near zero because the gateway delivers several tokens
+    per SSE chunk, so the stalls a serving regression produces are visible only
+    in the tail -- and a median-only gate set therefore could not express the
+    one ITL bound worth writing. That the median's value makes a *margin-derived*
+    baseline degenerate (0.0 x 1.25 == 0.0) is an argument about the nightly
+    arming a ceiling automatically, not about a recipe stating an absolute one.
+    """
+    wl = _make(tmp_path, gates={gate: 1.0})
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    result = wl.run()
+    assert result.passed is False
+    breach = next(d for d in result.failure_details if d["reason"] == "perf_gate_breached")
+    assert breach["gate"] == gate
+    assert breach["metric"] == mod._GATE_SPECS[gate][0]
+
+
+def test_satisfied_tail_latency_gates_pass(tmp_path, monkeypatch):
+    wl = _make(tmp_path, gates={"max_p99_itl_ms": 100, "max_p99_e2el_ms": 500})
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    assert wl.run().passed is True
+
+
+def test_the_percentile_metrics_the_bench_reports_are_all_gateable():
+    """The gate set and the emitted percentile set have to stay in step.
+
+    `percentile_metrics` defaults to all four families and each is exported with
+    a median and a p99, but only ttft and tpot had both halves here -- so
+    `max_p99_itl_ms` named a metric that was in every export, in the CI gating
+    allowlist and recommended by the docs, and was still rejected as unknown.
+    """
+    for family in mod._DEFAULT_PERCENTILE_METRICS.split(","):
+        for summary in ("median", "p99"):
+            gate = f"max_{summary}_{family}_ms"
+            assert gate in mod._GATE_SPECS, gate
+            assert mod._GATE_SPECS[gate] == (f"{summary}_{family}_ms", "max")
 
 
 # --------------------------------------------------------------- cleanup
@@ -2213,14 +2292,20 @@ def test_sharegpt_requires_tpot_from_the_export_not_from_output_len(tmp_path, mo
 
 
 def test_tpot_is_not_required_when_eos_may_end_a_request_early(tmp_path, monkeypatch):
-    """`ignore_eos: false` is supported, and it unpins the output length.
+    """`ignore_eos: false` unpins the output length, on the one dataset that can
+    express it.
 
     Without `--ignore-eos` the model stops at its first EOS token, which for a
     short prompt can be immediately -- so every request may emit exactly one
-    token however large `output_len` is, and TPOT is genuinely undefined. The
-    audit keyed off `output_len > 1` and rejected that correct export.
+    token, and TPOT is genuinely undefined. The audit keyed off `output_len > 1`
+    and rejected that correct export. `sharegpt` because the bench CLI forces
+    EOS to be ignored for `random`, so the combination is rejected up front.
     """
-    wl = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False)
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    kwargs = {"dataset": "sharegpt", "dataset_path": str(dataset)}
+
+    wl = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False, **kwargs)
     wl.setup()
 
     doc = _bench_doc(completed=32, failed=0)
@@ -2234,7 +2319,7 @@ def test_tpot_is_not_required_when_eos_may_end_a_request_early(tmp_path, monkeyp
     assert result.passed is True, result.failure_details
 
     # Still required when the export shows a second token was emitted.
-    wl2 = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False)
+    wl2 = _make(tmp_path, num_prompts=32, output_len=128, ignore_eos=False, **kwargs)
     wl2.setup()
     doc2 = _bench_doc(completed=32, failed=0)
     doc2["total_output_tokens"] = 4096
@@ -2362,6 +2447,23 @@ def test_the_derived_drain_always_fits_inside_the_grace(tmp_path, grace):
 
     assert drain > 0, f"grace {grace} produced a non-positive drain {drain}"
     assert drain < grace, f"grace {grace} produced a drain of {drain} that does not fit"
+
+
+def test_the_two_layers_agree_on_how_many_warmup_steps_there_are(tmp_path):
+    """A hand-run of the script must measure what the recipes measure.
+
+    The script defaulted to 0 while the workload defaults to 1, and the script's
+    header documented the 0 -- so reproducing a cell by running the script
+    directly silently included the step that pays Triton JIT, which is the one
+    the recipes throw away.
+    """
+    script = (Path(mod.__file__).with_name("tokenspeed") / "ts_bench_serve.sh").read_text()
+    default = re.search(r'WARMUP_STEPS="\$\{TS_BENCH_WARMUP_STEPS:-(\d+)\}"', script)
+    assert default, "could not find the warmup default"
+    wl = _make(tmp_path)
+    wl.setup()
+    assert int(default.group(1)) == wl._warmup_steps
+    assert "(default 1," in script, "the header no longer states the default it uses"
 
 
 def test_a_bringup_failure_still_reports_that_nothing_was_measured(tmp_path, monkeypatch):
@@ -3114,6 +3216,39 @@ def test_an_unknown_dataset_is_rejected(tmp_path):
         _make(tmp_path, dataset="wikitext").setup()
 
 
+def test_ignore_eos_false_is_rejected_for_the_random_dataset(tmp_path):
+    """It could never have taken effect, and the trial reported it anyway.
+
+    `tokenspeed bench serve` sets `ignore_eos = True` for the random dataset on
+    an OpenAI-compatible backend after parsing its arguments -- after it has
+    honoured `--disable-ignore-eos` -- so no argv reaches it and the requests go
+    out at a pinned length. Accepting the setting published `ignore_eos: false`
+    on a run that ignored EOS throughout: the reported configuration is not the
+    one that ran, which is the mislabelled pass the owned-flag guards exist for.
+    """
+    with pytest.raises(ValueError, match="cannot take effect with dataset: random"):
+        _make(tmp_path, ignore_eos=False).setup()
+
+
+def test_the_rejection_names_the_payload_route(tmp_path):
+    """Refusing without naming `--extra-body` would read as "not supported",
+    when the payload is applied over the forced value and does reach it."""
+    with pytest.raises(ValueError, match="--extra-body"):
+        _make(tmp_path, ignore_eos=False).setup()
+
+
+def test_ignore_eos_false_is_accepted_for_sharegpt(tmp_path):
+    """The bench CLI keys the override on the dataset name, so ShareGPT honours
+    the flag -- the guard must not spread to the case that works."""
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    wl = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset), ignore_eos=False)
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    assert wl._container_env()["TS_IGNORE_EOS"] == "0"
+
+
 @pytest.mark.parametrize(
     "env_overrides,expect",
     [
@@ -3122,6 +3257,12 @@ def test_an_unknown_dataset_is_rejected(tmp_path):
         (
             {"TS_DATASET": "sharegpt", "TS_DATASET_PATH": "/nonexistent/ds.json"},
             "is not readable",
+        ),
+        # Hand-run, this is the setting that quietly does nothing: the bench CLI
+        # pins the output length for `random` whatever the argv says.
+        (
+            {"TS_DATASET": "random", "TS_IGNORE_EOS": "0"},
+            "cannot take effect with TS_DATASET=random",
         ),
     ],
 )
@@ -3443,6 +3584,52 @@ def test_the_reserved_secret_name_follows_hf_token_env(tmp_path):
     wl = _make(tmp_path, hf_token_env="MY_HF_TOKEN")
     wl.setup()
     assert wl._secret_env_names() == {"HF_TOKEN", "MY_HF_TOKEN"}
+
+
+@pytest.mark.parametrize(
+    "docker_args",
+    [
+        ["-e", "HF_TOKEN=hf_secret_value"],
+        ["-eHF_TOKEN=hf_secret_value"],
+        ["-e=HF_TOKEN=hf_secret_value"],
+        ["--env", "HF_TOKEN=hf_secret_value"],
+        ["--env=HF_TOKEN=hf_secret_value"],
+    ],
+)
+def test_docker_args_cannot_carry_a_credential_by_value(tmp_path, docker_args):
+    """And it has to fail on the CPU gate, not after the trial takes a node.
+
+    `docker_args` is spliced into the client's argv, so this is the same
+    world-readable `/proc/<pid>/cmdline` exposure the by-name path exists to
+    avoid, reached by a route the mitigation guard does not cover. It was
+    rejected -- but only inside `_docker_argv`, which runs after `setup()` has
+    passed and the trial has been scheduled onto a GPU. A recipe that cannot
+    work should say so before it occupies anything.
+    """
+    with pytest.raises(ValueError, match="HF_TOKEN"):
+        _make(tmp_path, docker_args=docker_args).setup()
+
+
+def test_the_docker_args_credential_guard_follows_hf_token_env(tmp_path):
+    """Same ordering point from the other side: the guard runs during
+    validation, so `hf_token_env` has to be resolved before it, not with the
+    rest of the HF settings further down."""
+    with pytest.raises(ValueError, match="MY_HF_TOKEN"):
+        _make(
+            tmp_path,
+            hf_token_env="MY_HF_TOKEN",
+            docker_args=["-e", "MY_HF_TOKEN=hf_secret_value"],
+        ).setup()
+
+
+def test_the_credential_rejection_does_not_advise_a_field_that_does_not_exist(tmp_path):
+    """The owned-key message says to set the corresponding workload_config
+    field. No field carries a token -- the value is read from the environment
+    aorta runs in -- so a secret name needs its own message."""
+    with pytest.raises(ValueError) as excinfo:
+        _make(tmp_path, docker_args=["-e", "HF_TOKEN=hf_secret_value"]).setup()
+    assert "hf_token_env" in str(excinfo.value)
+    assert "corresponding workload_config field" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize(

@@ -48,7 +48,8 @@
 #                         of strings, e.g. ["--foo","bar baz"]
 #   TS_BENCH_STEPS        measured bench repetitions      (default 1)
 #   TS_BENCH_WARMUP_STEPS discarded bench repetitions run
-#                         first, to absorb Triton JIT     (default 0)
+#                         first, to absorb Triton JIT     (default 1, matching
+#                         the workload's `warmup_steps`)
 #   TS_GATEWAY_STARTUP_TIMEOUT  orchestrator gateway budget (default READY_TIMEOUT)
 #   TS_DRAIN_TIMEOUT      gateway drain on shutdown       (default TEARDOWN_GRACE - 5)
 #   TS_NUM_PROMPTS        requests per bench step         (default 64)
@@ -277,7 +278,12 @@ reject_owned_flags TS_BENCH_ARGS "${BENCH_EXTRA_ARGS[@]+"${BENCH_EXTRA_ARGS[@]}"
 
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 BENCH_STEPS="${TS_BENCH_STEPS:-1}"
-WARMUP_STEPS="${TS_BENCH_WARMUP_STEPS:-0}"
+# 1, matching the workload's `warmup_steps`, for the same reason it defaults
+# there: the first bench against a fresh server pays Triton JIT and runs several
+# times slower than the rest. The workload always sets this, so the default is
+# what a hand-run gets -- and a hand-run that disagreed with the recipes was
+# measuring something they do not.
+WARMUP_STEPS="${TS_BENCH_WARMUP_STEPS:-1}"
 DATASET="${TS_DATASET:-random}"
 case "${DATASET}" in
   random)
@@ -324,6 +330,21 @@ OUT_DIR="${TS_OUT_DIR:-/ts-out}"
 TOKEN="${TS_RUN_TOKEN:-$$}"
 GATEWAY="http://127.0.0.1:${PORT}"
 CONTROL="http://127.0.0.1:${CONTROL_PORT}"
+
+# `tokenspeed bench serve` sets ignore_eos back on for the random dataset on an
+# OpenAI-compatible backend -- which this always is, `--backend openai` below --
+# and it does so after parsing, so it overwrites both an absent --ignore-eos and
+# an explicit --disable-ignore-eos. Running anyway would serve a pinned output
+# length while the caller believed EOS was being respected, and the export would
+# not say otherwise. Refuse instead, and name the one route that reaches it: the
+# request payload, since extra_body is merged over the forced value.
+if [ "${DATASET}" = "random" ] && [ "${IGNORE_EOS}" != "1" ]; then
+  echo "TS_BENCH_FAIL: usage TS_IGNORE_EOS=${IGNORE_EOS} cannot take effect with TS_DATASET=random"
+  echo "  The bench CLI forces ignore_eos on for the random dataset after it"
+  echo "  parses its arguments. Use TS_DATASET=sharegpt, or ask for it in the"
+  echo "  payload: TS_BENCH_ARGS='[\"--extra-body\",\"{\\\"ignore_eos\\\": false}\"]'"
+  exit 64
+fi
 
 # Day-long ceilings are sanity rails, not policy: they catch a millisecond value
 # passed as seconds. The grace period bounds a `seq` loop, and at 0 teardown

@@ -67,7 +67,8 @@ Then read:
 | `tokenspeed-serve-gptoss-tp.yaml` | gpt-oss-20b at `--tensor-parallel-size` 1 / 2. |
 | `tokenspeed-serve-gptoss-tp-wide.yaml` | The same axis at 1 / 2 / **4**, with the KVStore host tier bounded per rank so TP=4 fits. |
 | `tokenspeed-serve-load-high.yaml` | Concurrency 64 → 256, bracketing the ceiling the six-cell sweep left open. |
-| `tokenspeed-serve-models-large.yaml` | Qwen3 8B / 30B-A3B / 32B — MoE against dense at the same size, which separates architecture from MXFP4. |
+| `tokenspeed-serve-models-large.yaml` | Qwen3 8B / 32B dense, extending the dense curve a factor of four past where it stopped. |
+| `tokenspeed-serve-moe-vs-dense.yaml` | Qwen3-30B-A3B against Qwen3-32B, both eager — the pair that separates MoE from MXFP4. |
 
 In the multi-model and load recipes the cells differ by *workload*, not by
 mitigation, so `matrix.md`'s confound ratio (a step-time comparison against the
@@ -282,10 +283,10 @@ matter most:
 | `dataset` | `random` | `random` or `sharegpt`. See [Datasets](#datasets). |
 | `dataset_path` | — | Host path to a ShareGPT JSON. Required for `sharegpt`, rejected for `random`. |
 | `max_concurrency` | unbounded | In-flight request cap. |
-| `request_rate` | `inf` | `inf` submits everything at once. |
+| `request_rate` | `inf` | The quoted string `"inf"` submits everything at once; an unquoted infinite float is rejected. See below. |
 | `warmup_steps` | `1` | Discarded bench steps. See below. |
 | `num_warmups` | `1` | Warmup requests *within* a bench step. |
-| `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. |
+| `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. `false` is only accepted for `sharegpt`; on `random` the bench CLI pins it regardless, so the combination is rejected. See below. |
 | `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch and the HF cache are per-uid beneath it, at `<work_dir>/u<uid>`. See below. |
 | `hf_home` | `<work_dir>/u<uid>/hf` | Set it to share one pre-populated cache between users; see below for why that has to be deliberate. |
 | `hip_visible_devices` | unset | Which GPUs the container sees. A visibility filter, not an allocation. |
@@ -308,6 +309,13 @@ workload_config:
     max_p99_tpot_ms: 10
     min_output_throughput: 1000
 ```
+
+The keys are `max_{median,p99}_{ttft,tpot,itl,e2el}_ms` and
+`min_{output_throughput,total_token_throughput,request_throughput}`; anything
+else is rejected at validation. `max_p99_itl_ms` is the ITL half worth using,
+for the reason above — a bound on `median_itl_ms` is a bound on a number that
+sits near zero. That is also why the nightly does not arm an ITL ceiling from a
+baseline margin, but a bound written out in a recipe does not have that problem.
 
 A gate naming a metric the bench did not report fails the trial rather than
 being skipped, so a recipe cannot believe it is gated when it is not.
@@ -527,6 +535,64 @@ declaration cannot overreach and forbid a legitimate mitigation.
 Any `TS_*` knob the workload does not set — an engine
 tunable, an attention backend — is forwarded normally; all 22 mitigations in
 aorta's registry pass through untouched.
+
+### Unlimited has to be written as a quoted `"inf"`
+
+`request_rate: "inf"`, `"+inf"` and `"Infinity"` mean submit everything at once.
+An infinite *float* is rejected, which looks pedantic and is not: YAML reads
+`.inf` and `1.0e999` as the same value, and so does `float("1e999")`, so by the
+time the value arrives there is no way to tell a deliberate unlimited from a
+finite rate whose exponent was mistyped. Accepting it turned that typo into the
+heaviest load the harness can generate while the trial went on reporting the
+rate the recipe asked for — a green cell describing a run that did not happen.
+The quotes cost the deliberate case nothing and the accident cannot produce them.
+
+### `ignore_eos: false` has never reached the random dataset
+
+`tokenspeed bench serve` decides this for itself. In `bench.py`, the flag is
+honoured first:
+
+```python
+if args.disable_ignore_eos:
+    args.ignore_eos = False
+```
+
+and then, further down the same function and after the tokenizer is loaded, the
+dataset rule overwrites it unconditionally:
+
+```python
+if args.dataset_name == "random" and args.backend in OPENAI_COMPATIBLE_BACKENDS:
+    args.ignore_eos = True
+```
+
+`OPENAI_COMPATIBLE_BACKENDS` is `{"openai", "tokenspeed"}` and this workload
+benches the gateway with `--backend openai`, so on `dataset: random` there is no
+argv that turns EOS back on: omitting `--ignore-eos` does not, and neither does
+`--disable-ignore-eos`. Every request goes out with `ignore_eos` in its payload
+and runs to `output_len`.
+
+The config table used to present `ignore_eos` as a plain boolean, so a recipe
+setting it to `false` on the random dataset ran at a pinned length while the
+trial reported `ignore_eos: false` — the reported configuration is not the one
+that ran, and nothing in the export contradicts it. That is the same shape as a
+`bench_args` override of `--max-concurrency`, and it is treated the same way:
+the combination is **rejected** during validation, on the host and again in
+`ts_bench_serve.sh`, rather than warned about.
+
+The route that does work is the request payload:
+
+```yaml
+bench_args: ["--extra-body", '{"ignore_eos": false}']
+```
+
+`_update_payload_common` writes the forced `ignore_eos` into the payload and
+*then* merges `extra_body` over it, and `--extra-body` is not one of the flags
+this workload reserves. Expect the cells to stop doing equal work once you do
+this — output lengths become whatever the model chooses, so `perf.md` is
+comparing runs of different sizes. That is why the default is `true`.
+
+`dataset: sharegpt` is unaffected. The rule is keyed on the dataset name, so
+`ignore_eos: false` is honoured there and stays accepted.
 
 ### Extra arguments cannot shadow the flags the workload owns
 
@@ -932,13 +998,16 @@ label the result with a shape the run did not have, and a matrix mixing the two
 datasets would compare those labels as though they meant the same thing.
 
 The TPOT audit follows from the same question — does the configuration actually
-determine the output length? Only `random` **with** `ignore_eos: true` does, and
-there the audit asks whether `output_len` exceeds 1. Everywhere else it asks the
-export whether more output tokens were produced than requests completed. That
-covers `sharegpt`, and it also covers `ignore_eos: false`, where the model stops
-at its first EOS token: for a short prompt that can be immediately, so every
-request may emit exactly one token however large `output_len` is, and TPOT is
-genuinely undefined. Keying off `output_len` there rejected a correct export.
+determine the output length? Only `random` does, and it always does, since EOS
+is ignored there whatever the recipe says (see [`ignore_eos: false` has never
+reached the random dataset](#ignore_eos-false-has-never-reached-the-random-dataset)),
+so the audit asks whether `output_len` exceeds 1. For `sharegpt` it asks the
+export instead, whether more output tokens were produced than requests
+completed: the lengths come from the conversations rather than from the recipe,
+and with `ignore_eos: false` — which only `sharegpt` can express — the model
+stops at its first EOS token, which for a short prompt can be immediately, so
+every request may emit exactly one token and TPOT is genuinely undefined. Keying
+off `output_len` there rejected a correct export.
 
 ## Not done yet
 
