@@ -45,8 +45,10 @@ sanitizer_plan:
     # than the work this case represents. A budget measured against a failing run is
     # a lower bound, not an estimate.
     #
-    # #10378 is now fixed (dc7c8e04) and published in bundle 4227d40fb5, which the
-    # downloader selects. Re-measured against it, the same object transforms cleanly
+    # #10378 is now fixed (dc7c8e04) and was published in bundle 4227d40fb5. The
+    # downloader selects the newest successful run, not that one, so the nightly has
+    # since moved past it -- run 32967422099 consumed 97c1640b. Re-measured against
+    # 4227d40fb5 on the 16,265,200-byte object, that object transforms cleanly
     # (outcome=modified-valid, 75978 patches over 68894 access sites) and takes
     # 3696s and 4152s across two runs -- ~62-69 min -- before ending on strict
     # require-records at exit 86. 2000s would have guaranteed combined_hook_timeout:

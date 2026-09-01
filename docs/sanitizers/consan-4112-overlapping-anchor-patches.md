@@ -45,9 +45,23 @@ downloader selects the newest successful run, the next nightly picks that up
 rather than `db0c47df`.
 
 So the `db0c47df` numbers here are historical from the next nightly onward.
+
+> **What actually happened, recorded 2026-08-27.** Everything from "A bundle
+> carrying both fixes is now published" down to the end of this section was
+> written before the nightly consumed one, and it is kept as the prediction it
+> was. Two things in it are wrong as a description of CI. The nightly did not
+> land on `4227d40fb5` — the downloader selects the newest successful run, and by
+> the time one ran that was `97c1640b`. And `consan-gemm` did **not** stop
+> reporting `status=4112`: the anchor-overlap defect is gone from the log, but
+> the patched-image growth ceiling now rejects the object first, on the much
+> larger fixture ROCm 7.2.4 ships. See
+> [`consan-gemm-patched-image-growth-cap.md`](consan-gemm-patched-image-growth-cap.md)
+> and the CI column in the table below.
+
 Re-running this document's own reproducer against `4227d40fb5` confirms the fix
-end to end, and the prediction below held exactly — `consan-gemm` stops reporting
-`status=4112` and ends on strict require-records instead:
+end to end **on the 15.5 MB source-build object**, and the prediction held
+exactly for it — that object stops reporting `status=4112` and ends on strict
+require-records instead:
 
 ```
 ConSan MOI inventory end   elapsed_ms=246060.502

@@ -1,13 +1,22 @@
-"""Verdict-discrimination tests for ``docs/sanitizers/repro/consan_4112_repro.sh``.
+"""Verdict tests for ``docs/sanitizers/repro/consan_4112_repro.sh``.
 
-The script itself needs a GPU, a ROCm install and a rocjitsu hook, so none of
-that is exercised here. What *is* testable without hardware -- and what has now
-been got wrong twice (#385 §26, #409) -- is which log lines the verdict is
-allowed to read.
+Running the script for real needs a GPU, a ROCm install and a rocjitsu hook, so
+none of that is exercised here. Everything after the hooked run is just a log
+being read, and that is where this script has been wrong three times now
+(#385 §21, #385 §26, #409) -- so that part is tested.
 
-The patterns are lifted out of the script rather than restated, so a future edit
-that drops an anchor fails these tests instead of shipping a reproducer that can
-be made to confirm a defect on demand.
+Two layers, because they fail differently:
+
+* ``_verdict`` executes the script's real verdict section against a synthetic
+  log, and asserts the exit code and message. This is what catches a deleted
+  branch, an inverted branch order, or a branch reaching the wrong conclusion.
+* the pattern tests below check individual regexes in isolation, which is what
+  catches an anchor being dropped from one check while the branch structure
+  stays intact.
+
+Neither restates anything: both lift the patterns and the code out of the script
+itself, so an edit that breaks the contract fails here rather than shipping a
+reproducer that can be made to confirm a defect on demand.
 """
 
 from __future__ import annotations
@@ -26,6 +35,24 @@ _SCRIPT = _REPO_ROOT / "docs" / "sanitizers" / "repro" / "consan_4112_repro.sh"
 # cannot be satisfied by caller-controlled text.
 _LOADER_ECHO = "[consan_4112_load] hipModuleLoad failed for /tmp/objects/"
 
+_HOOK = "[rocjitsu-dbi-hooks] "
+_INSTALLED = f"{_HOOK}installed ConSan hook"
+_REJECTION = (
+    f"{_HOOK}ConSan load rejection reason=transform-error status=4112 "
+    "policy=strict action=terminate exit_code=92"
+)
+_GROWTH = (
+    f"{_HOOK}ConSan MOI first-light probe rejected patched-image file growth: "
+    "required total 1492987904 bytes, limit 419430400 bytes"
+)
+_OVERLAP = f"{_HOOK}ConSan final validation found partially overlapping patch ranges: 3 pairs"
+
+# The verdict section is everything from the emitter-prefix definitions to the
+# end of the file. HOOK_LINE is the landmark because every check below it is
+# written in terms of HOOK_LINE or LOADER_LINE -- if that stops being true the
+# extraction is meaningless, so the test says so rather than silently passing.
+_VERDICT_START = re.compile(r"^HOOK_LINE=", re.MULTILINE)
+
 
 def _pattern(name: str) -> str:
     """Return the single-quoted value of a top-level ``NAME='...'`` assignment."""
@@ -34,6 +61,39 @@ def _pattern(name: str) -> str:
     )
     assert match, f"{name} is no longer a single-quoted assignment in {_SCRIPT.name}"
     return match.group(1)
+
+
+def _verdict(log: str, rc: int, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the script's own verdict section over ``log`` with the run's exit code.
+
+    The section is sliced out of the script rather than reimplemented, so these
+    tests exercise the branch order and the messages that will actually ship.
+    The variables it reads from the part we skip are supplied here.
+    """
+    body = _SCRIPT.read_text()
+    start = _VERDICT_START.search(body)
+    assert start, (
+        "cannot find the HOOK_LINE definition that begins the verdict section; "
+        "if the script was restructured, re-point this extraction"
+    )
+    log_path = tmp_path / "hook.log"
+    log_path.write_text(log)
+    driver = tmp_path / "verdict.sh"
+    driver.write_text(
+        "set -uo pipefail\n"
+        f'LOG={log_path}\nrc={rc}\nKEEP=0\nHOOK=/nonexistent/hook.so\nTIMEOUT=6000\n'
+        + body[start.start() :]
+    )
+    return subprocess.run(
+        ["bash", str(driver)], capture_output=True, text=True, check=False
+    )
+
+
+def _result_line(proc: subprocess.CompletedProcess[str]) -> str:
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT:"):
+            return line
+    raise AssertionError(f"no RESULT line in output:\n{proc.stdout}")
 
 
 def _matches(pattern: str, log: str, tmp_path: Path) -> bool:
@@ -49,6 +109,111 @@ def _matches(pattern: str, log: str, tmp_path: Path) -> bool:
 @pytest.fixture(scope="module")
 def patterns() -> dict[str, str]:
     return {name: _pattern(name) for name in ("HOOK_LINE", "LOADER_LINE", "GROWTH_LINE", "OVERLAP_LINE")}
+
+
+# --------------------------------------------------------------------------
+# Verdict control flow: exit code and conclusion for each shape of log.
+#
+# The exit codes are the script's published contract (see its header): 0
+# reproduced, 1 fixed, 2 environment unusable, 3 inconclusive. Callers upstream
+# branch on them, so each case asserts the code and not just the wording.
+# --------------------------------------------------------------------------
+
+
+def test_verdict_overlap_only_is_reproduced(tmp_path: Path) -> None:
+    """The one case that may exit 0: the hook's own overlap diagnostic, at exit 92."""
+    proc = _verdict(f"{_INSTALLED}\n{_OVERLAP}\n{_REJECTION}\n", 92, tmp_path)
+    assert proc.returncode == 0
+    assert "reproduced" in _result_line(proc)
+
+
+def test_verdict_growth_only_is_inconclusive_and_names_the_knob(tmp_path: Path) -> None:
+    """A capacity rejection must never read as the defect, and must be actionable."""
+    proc = _verdict(f"{_INSTALLED}\n{_GROWTH}\n{_REJECTION}\n", 92, tmp_path)
+    assert proc.returncode == 3
+    assert "inconclusive" in _result_line(proc)
+    assert "growth ceiling" in proc.stdout
+    assert "RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_PERCENT" in proc.stdout
+    # Raising the ceiling without raising the timeout just buys a different
+    # inconclusive result, so the hint has to say so.
+    assert "--timeout" in proc.stdout
+
+
+def test_verdict_both_diagnostics_is_inconclusive_without_contradicting_itself(
+    tmp_path: Path,
+) -> None:
+    """Several loads can share one log, so the script cannot attribute the two lines.
+
+    It also must not claim the transform stopped before final validation, since
+    the overlap diagnostic *is* a final-validation diagnostic.
+    """
+    proc = _verdict(f"{_INSTALLED}\n{_GROWTH}\n{_OVERLAP}\n{_REJECTION}\n", 92, tmp_path)
+    assert proc.returncode == 3
+    assert "inconclusive" in _result_line(proc)
+    assert "never reached final validation" not in proc.stdout
+    assert "NOT the overlapping-patch defect" not in proc.stdout
+
+
+def test_verdict_unknown_4112_is_inconclusive_not_reproduced(tmp_path: Path) -> None:
+    """4112 is a shared bucket, so one with no explanation is a third thing."""
+    proc = _verdict(f"{_INSTALLED}\n{_REJECTION}\n", 92, tmp_path)
+    assert proc.returncode == 3
+    assert "reproduced" not in _result_line(proc)
+    assert "shared bucket" in proc.stdout
+
+
+def test_verdict_growth_branch_precedes_the_4112_branch(tmp_path: Path) -> None:
+    """Branch order is load-bearing, and inverting it is silent.
+
+    A growth-only log also matches the generic 4112 rejection, so if the 4112
+    branch ran first this would take the "third transform error" path instead of
+    naming the capacity policy the reader can actually do something about.
+    """
+    proc = _verdict(f"{_INSTALLED}\n{_GROWTH}\n{_REJECTION}\n", 92, tmp_path)
+    assert "growth ceiling" in _result_line(proc) or "growth ceiling" in proc.stdout
+    assert "some third transform error" not in proc.stdout
+
+
+def test_verdict_clean_transform_is_fixed_only_at_exit_86(tmp_path: Path) -> None:
+    """The loader marker alone would also appear with no hook loaded (#385 §21)."""
+    log = f"{_INSTALLED}\n[consan_4112_load] loaded and instrumented\n"
+    assert _verdict(log, 86, tmp_path).returncode == 1
+    other = _verdict(log, 0, tmp_path)
+    assert other.returncode == 3
+    assert "fixed" not in _result_line(other)
+
+
+def test_verdict_requires_the_hook_to_have_announced_itself(tmp_path: Path) -> None:
+    """Without it, a missing or non-rocjitsu HSA_TOOLS_LIB reads as evidence."""
+    proc = _verdict(f"{_OVERLAP}\n{_REJECTION}\n", 92, tmp_path)
+    assert proc.returncode == 3
+    assert "never announced itself" in proc.stdout
+
+
+@pytest.mark.parametrize("rc", [124, 137])
+def test_verdict_timeout_is_inconclusive(tmp_path: Path, rc: int) -> None:
+    """timeout(1) reports 124 on TERM and 137 when the follow-up KILL was needed."""
+    proc = _verdict(f"{_INSTALLED}\n{_OVERLAP}\n", rc, tmp_path)
+    assert proc.returncode == 3
+    assert "ceiling" in _result_line(proc)
+
+
+def test_verdict_spoofed_overlap_path_is_not_reproduced(tmp_path: Path) -> None:
+    """End-to-end version of the #409 review's vector, through the real branches."""
+    log = (
+        f"{_LOADER_ECHO}{_OVERLAP}.hsaco\n"
+        f"{_INSTALLED}\n"
+        f"{_REJECTION}\n"
+    )
+    proc = _verdict(log, 92, tmp_path)
+    assert proc.returncode == 3, "an echoed --object path must not manufacture a reproduction"
+    assert "reproduced" not in _result_line(proc)
+
+
+# --------------------------------------------------------------------------
+# Individual patterns, which fail differently: an anchor can be dropped from one
+# check while the branch structure above still looks correct.
+# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", ["HOOK_LINE", "LOADER_LINE"])
