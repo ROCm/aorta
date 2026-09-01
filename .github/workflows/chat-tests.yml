@@ -159,13 +159,8 @@ jobs:
       #     to nothing rather than failing, and "quietly resolved to nothing" is
       #     exactly the state that makes an install look successful and a
       #     feature look broken.
-      #
-      # No leg installs chat-all. It still carries chat-embeddings-torch, the
-      # transitional sentence-transformers path, and on a runner with no torch
-      # present pip resolves the default PyPI wheel -- which is the CUDA build.
-      # Measured: 5.1 GB of site-packages, versus 417 MB for the same stack
-      # asked for directly. Decision 19a deletes that extra; this can collapse
-      # back to `chat-all` once it is gone.
+      #   * chat-all is chat-ui plus LiteLLM and nothing else, so the py3.13 leg
+      #     asks for it directly. There is no torch tier for it to drag in.
       matrix:
         include:
           - python-version: "3.11"
@@ -176,7 +171,7 @@ jobs:
           # of Chainlit's supported range, which is where a `Requires-Python`
           # bump on its side will show up first.
           - python-version: "3.13"
-            extras: chat-ui
+            extras: chat-all
             litellm: "yes"
           - python-version: "3.14"
             extras: chat-cli
@@ -198,12 +193,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[${{ matrix.extras }},tests]"
 
-      # The two packages chat-all would add, asked for directly. See the matrix
-      # comment for why chat-all itself is not used.
-      - name: Install the LiteLLM backend
-        if: matrix.litellm == 'yes'
-        run: pip install litellm langchain-litellm
-
       # Without this the gate can pass by doing nothing. tests/chat/conftest.py
       # collect-ignores the whole directory when langchain_core is missing, so a
       # resolution that silently dropped the extra -- an environment marker that
@@ -221,7 +210,14 @@ jobs:
           import sys
 
           extras = os.environ["EXTRAS"]
-          required = ["langchain_core", "langchain_openai", "langgraph", "openai", "sqlite_vec"]
+          required = [
+              "langchain_core",
+              "langchain_openai",
+              "langgraph",
+              "openai",
+              "sqlite_vec",
+              "fastembed",
+          ]
           if extras in ("chat-ui", "chat-all"):
               required.append("chainlit")
           if os.environ.get("WITH_LITELLM") == "yes":
