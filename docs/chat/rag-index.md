@@ -53,16 +53,11 @@ else, and after changing the chunk settings.
 
 ## Managing it
 
-> **Landing separately.** The `aorta chat index` subcommands below, the index
-> manifest that makes drift detectable, and `aorta chat doctor` arrive with the
-> prebuilt-index work; the manifest records the AORTA version, embedding model,
-> dimensions and chunk parameters, and refuses an index whose model or
-> dimensions disagree with the running configuration. Until that lands, build
-> locally with
-> `python -c 'from aorta.chat.rag.indexer import index_codebase; index_codebase()'`,
-> and note that `embedding_provider = "local"` currently also needs
-> `pip install 'amd-aorta[chat-embeddings-torch]'` — the torch-free replacement
-> ships with the same work. Everything above this heading is current.
+> **Every index carries a manifest.** It records the AORTA version, embedding
+> model, dimensions and chunk parameters, which is what makes drift detectable:
+> an index whose model or dimensions disagree with the running configuration is
+> refused rather than queried, because a silent mismatch returns plausible
+> nonsense instead of an error. `aorta chat doctor` reports what it finds.
 
 ```bash
 aorta chat index build           # build locally from aorta_path

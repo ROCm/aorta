@@ -10,21 +10,22 @@ Sizes are measured `site-packages` on Python 3.12, base install included.
 
 | Extra | Adds | Python | Size |
 | --- | --- | --- | --- |
-| `chat-cli` (alias: `chat`) | LangChain / LangGraph, the OpenAI client, sqlite-vec, rich | 3.11+ | ~210 MB |
+| `chat-cli` (alias: `chat`) | LangChain / LangGraph, the OpenAI client, sqlite-vec, fastembed, rich | 3.11+ | ~210 MB |
 | `chat-ui` | `chat-cli` plus Chainlit, for `aorta chat ui` | 3.11–3.13 | ~305 MB |
 | `chat-all` | `chat-ui` plus LiteLLM, for native Anthropic / Gemini / Bedrock | 3.11–3.13 | ~420 MB |
 
 The embedding model's weights (~130 MB) are fetched on first use and cached
 outside the environment, so they are not in those numbers.
 
-> **One current exception, and it is a large one.** `chat-all` presently also
-> pulls `chat-embeddings-torch`, the transitional sentence-transformers
-> embedding path, which hard-requires PyTorch — and on a machine without torch
-> already present, pip resolves the default PyPI wheel, which is the **CUDA**
-> build. That takes `chat-all` to about 5.1 GB and deposits NVIDIA CUDA
-> libraries on an AMD node. Until the torch-free replacement lands, prefer
-> `pip install 'amd-aorta[chat-ui]' litellm langchain-litellm` over `chat-all`
-> if you want the LiteLLM backends.
+> **There is deliberately no torch tier, not even an opt-in one.** Embeddings
+> run `BAAI/bge-small-en-v1.5` on `onnxruntime` via `fastembed`, so no extra can
+> resolve a PyTorch build. This is a choice about what pip resolves rather than
+> a performance preference: `sentence-transformers` hard-requires torch, and on
+> a machine without torch already present pip resolves the default PyPI wheel,
+> which is the **CUDA** build — roughly 2.7 GB of `nvidia-*` libraries for a
+> 384-dimension text embedder, on an AMD node. The nightly and release index
+> jobs fail if `torch`, any `nvidia-*` wheel, `chromadb` or
+> `sentence-transformers` appears in the environment.
 
 ```bash
 # Published package
@@ -38,8 +39,8 @@ uv pip install -e ".[chat-cli]"
 most people type first.
 
 **No GPU.** Retrieval runs a small embedding model on CPU and generation happens
-wherever your provider lives; `chat-cli` and `chat-ui` pull no torch build at
-all, which matters on a ROCm node for the reason in the callout above.
+wherever your provider lives; no extra pulls a torch build at all, which matters
+on a ROCm node for the reason in the callout above.
 
 ## Python range
 
