@@ -29,8 +29,9 @@ _INSTALL_HINT = (
     "with no local model at all."
 )
 
-#: The historical collection name. Kept verbatim so indexes built before the
-#: provider split keep working without a re-index.
+#: The historical collection name, kept verbatim. It no longer buys index
+#: compatibility -- the sqlite-vec swap invalidated every Chroma directory --
+#: but it is what the remote provider's prefix is chosen to stay clear of.
 LOCAL_COLLECTION_NAME = "aorta"
 
 #: What ``HuggingFaceBgeEmbeddings.query_instruction`` defaulted to. BGE models

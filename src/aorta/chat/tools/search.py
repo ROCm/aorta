@@ -1,4 +1,4 @@
-"""Code search tools: semantic (ChromaDB), regex (grep), and repo map search."""
+"""Code search tools: semantic (sqlite-vec), regex (grep), and repo map search."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from aorta.chat.rag.walk import prune_dirnames
 
 
 def _search_docs(query: str, k: int) -> list:
-    """Lazy-load the ChromaDB vectorstore and retrieve exactly k results."""
+    """Lazy-load the sqlite-vec vectorstore and retrieve exactly k results."""
     from aorta.chat.rag.retriever import search_docs
 
     return search_docs(query, k)

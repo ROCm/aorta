@@ -102,7 +102,13 @@ def mock_settings(fake_aorta_dir: Path, tmp_path: Path):
     with patch("aorta.chat.config.settings") as mock_s:
         mock_s.aorta_path = str(fake_aorta_dir)
         mock_s.aorta_root = fake_aorta_dir
+        # Both halves of the pair. ``index_file`` is a property on the real
+        # Settings, so a MagicMock answers it with another MagicMock -- and the
+        # retriever does `settings.index_file.exists()`, which is truthy on a
+        # mock, then hands the mock to Path() and raises TypeError several
+        # frames from the cause.
         mock_s.index_path = str(tmp_path / "index.sqlite")
+        mock_s.index_file = tmp_path / "index.sqlite"
         mock_s.repo_map_path = str(tmp_path / "repo_map.md")
         mock_s.embedding_model = "BAAI/bge-small-en-v1.5"
         mock_s.chunk_size = 512

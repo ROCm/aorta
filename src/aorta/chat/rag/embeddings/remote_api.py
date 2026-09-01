@@ -12,12 +12,17 @@ from aorta.chat.remote_auth import build_auth, describe_auth
 #: Prefix keeping remote collections out of the local provider's "aorta".
 REMOTE_COLLECTION_PREFIX = "aorta_remote_"
 
-#: Chroma rejects collection names longer than this.
+#: Cap on the generated name. sqlite imposes no such limit -- this is ours,
+#: kept so a long model id cannot produce an unreadable table name.
 _MAX_COLLECTION_NAME = 63
 
 
 def _model_slug(model: str) -> str:
-    """Reduce a model id to the alphanumerics/underscores Chroma accepts."""
+    """Reduce a model id to the bare identifier the store requires.
+
+    The collection lands in a table name, which cannot be a bound parameter,
+    so SqliteVecStore rejects anything outside ``[A-Za-z0-9_]``.
+    """
     slug = re.sub(r"[^a-z0-9]+", "_", model.strip().lower()).strip("_")
     return slug or "model"
 

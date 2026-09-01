@@ -49,10 +49,12 @@ def get_embeddings() -> Embeddings:
 
 
 def collection_name() -> str:
-    """Chroma collection for the configured provider.
+    """Collection for the configured provider.
 
-    Local returns "aorta" -- the pre-split name -- so existing on-disk indexes
-    are read unchanged. Remote returns a per-model name, because the two
-    providers emit different vector dimensions and cannot share a collection.
+    Local returns the bare "aorta"; remote returns a per-model name, because
+    the two emit different vector dimensions and cannot share a collection.
+    The names predate the sqlite-vec swap, which invalidated every on-disk
+    index -- they are kept for continuity of the config surface, not because
+    an older index can still be read.
     """
     return get_provider().collection_name()
