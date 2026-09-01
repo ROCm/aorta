@@ -160,6 +160,13 @@ class Settings(BaseSettings):
     # way that the index and repo-map paths below are not.
     aorta_path: str = str(_AORTA_PACKAGE_ROOT)
 
+    # --- Run artifacts ---
+    # Where this user's own aorta run directories live, for the run-artifact
+    # tools and the second RAG collection (Decision 11b). Empty means the
+    # working directory, because `aorta sweep run --output` is normally a
+    # relative path and the operator runs the assistant from the same place.
+    runs_path: str = ""
+
     # --- Vector store ---
     # A single sqlite-vec database file (not a Chroma directory): one file to
     # checksum, side-load, or delete. A default_factory rather than a literal so
@@ -167,6 +174,13 @@ class Settings(BaseSettings):
     # first imported -- otherwise a test (or a job script) that sets it would be
     # silently ignored.
     index_path: str = Field(default_factory=lambda: str(chat_cache_dir() / "index.sqlite"))
+
+    # --- Egress redaction (Decision 16) ---
+    # On by default. The run-artifact collection puts the user's own env.json
+    # and matrix.json into retrieval, so a retrieved chunk can carry customer
+    # paths and addresses towards a third-party API. Opt out per invocation
+    # with `aorta chat --no-redact`, or permanently with `redact = false`.
+    redact: bool = True
 
     # --- Embedding provider selector ---
     # "local" uses the LOCAL block below; "remote" uses the REMOTE block.
@@ -314,6 +328,17 @@ class Settings(BaseSettings):
     def index_file(self) -> Path:
         return Path(self.index_path).expanduser()
 
+    @property
+    def runs_root(self) -> Path:
+        """Sandbox root for the run-artifact tools and the run collection.
+
+        Resolved on every access rather than cached, because the default is the
+        working directory and a REPL session can outlive a ``cd``.
+        """
+        if not self.runs_path.strip():
+            return Path.cwd().resolve()
+        return Path(self.runs_path).expanduser().resolve()
+
 
 #: Field names whose value is a credential. ``aorta chat config show`` masks
 #: these unless ``--reveal`` is passed (the second half of Decision 9b, the
@@ -360,18 +385,33 @@ def configure(**overrides: Any) -> Settings:
     return _cached
 
 
-def apply_cli_overrides(provider: str | None = None, model: str | None = None) -> Settings:
-    """Apply ``--llm-provider`` / ``--llm-model`` and return the new settings.
+def apply_cli_overrides(
+    provider: str | None = None,
+    model: str | None = None,
+    redact: bool | None = None,
+) -> Settings:
+    """Apply the chat CLI's setting flags and return the new settings.
+
+    Every CLI override is composed here rather than through separate
+    :func:`configure` calls, because ``configure`` rebuilds the settings from
+    the named arguments alone -- so a second call would discard the first
+    call's overrides rather than adding to them.
 
     ``--llm-model`` names a model without saying which provider's field it
     belongs to, and the answer depends on the *resolved* provider -- which may
     itself have come from the profile file. So the provider is settled first and
     the model is folded in on a second pass, rather than both being guessed up
     front.
+
+    ``redact`` is tri-state: ``None`` means the flag was absent, which must
+    leave a profile's ``redact = false`` in force rather than re-asserting the
+    default.
     """
     overrides: dict[str, Any] = {}
     if provider:
         overrides["llm_provider"] = provider
+    if redact is not None:
+        overrides["redact"] = redact
     resolved = configure(**overrides)
     if model:
         field = "vllm_model" if resolved.llm_provider == "vllm" else "remote_llm_model"
