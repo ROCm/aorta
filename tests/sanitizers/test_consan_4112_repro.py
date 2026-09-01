@@ -310,29 +310,64 @@ def test_anchoring_still_matches_genuine_hook_output(
     assert _matches(f"{patterns['HOOK_LINE']} {patterns[key]}", log, tmp_path)
 
 
-def test_newline_in_object_path_is_rejected(tmp_path: Path) -> None:
-    """A path whose tail starts its own line at column 0 defeats any `^` anchor.
+def _run_script(object_path: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(_SCRIPT), "--hook", "/bin/true", "--object", object_path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
-    The log is read one event per line, so the invariant is enforced on input
-    rather than patched around in each verdict grep.
+
+@pytest.mark.parametrize(
+    ("name", "why"),
+    [
+        ("a\n[rocjitsu-dbi-hooks] ConSan.hsaco", "a real newline defeats the ^ anchor directly"),
+        (
+            "a\\n[rocjitsu-dbi-hooks] ConSan.hsaco",
+            "the compiler unescapes \\n in the -DOBJECT literal into that same newline",
+        ),
+        ('a"; system("id"); ".hsaco', "a quote closes the literal and injects C into the loader"),
+    ],
+)
+def test_hostile_object_path_is_rejected(tmp_path: Path, name: str, why: str) -> None:
+    """The path is baked into the loader as a C string and echoed back into the log.
+
+    Rejecting is deliberate rather than escaping: no legitimate code object needs
+    these characters, so refusing is honest where escaping would be a guess.
+    """
+    spoof = tmp_path / name
+    spoof.write_bytes(b"")
+    proc = _run_script(str(spoof))
+    assert proc.returncode == 2, why
+    assert "must not contain a newline, backslash or double quote" in proc.stderr
+
+
+def test_ordinary_object_path_is_not_rejected(tmp_path: Path) -> None:
+    """The guard must not fire on real paths.
+
+    This run fails later for want of ROCm, so assert only that it cleared
+    validation -- otherwise the test above would pass against a guard that
+    rejects everything.
     """
     target = tmp_path / "obj.hsaco"
     target.write_bytes(b"")
-    spoof = tmp_path / "a\n[rocjitsu-dbi-hooks] ConSan.hsaco"
-    spoof.write_bytes(b"")
+    assert "must not contain a newline" not in _run_script(str(target)).stderr
 
-    def run(object_path: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(_SCRIPT), "--hook", "/bin/true", "--object", str(object_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
 
-    rejected = run(spoof)
-    assert rejected.returncode == 2
-    assert "must not contain a newline" in rejected.stderr
-
-    # The guard must not fire on ordinary paths; this run fails later (no ROCm),
-    # so assert only that it got past argument validation.
-    assert "must not contain a newline" not in run(target).stderr
+def test_object_path_guard_covers_the_workdir_path_too(tmp_path: Path) -> None:
+    """`--workdir` also feeds the path that gets embedded, so it needs the same check."""
+    workdir = tmp_path / 'w"quote'
+    workdir.mkdir()
+    proc = subprocess.run(
+        [str(_SCRIPT), "--hook", "/bin/true", "--workdir", str(workdir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Reaching the guard needs a local hipBLASLt bundle to extract; where that is
+    # absent the run dies earlier, and the guard is unreachable rather than wrong.
+    if "no gfx950 f32 SS Tensile bundle" in proc.stderr:
+        pytest.skip("no local hipBLASLt bundle, so extraction dies before the guard")
+    assert proc.returncode == 2
+    assert "must not contain a newline, backslash or double quote" in proc.stderr

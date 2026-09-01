@@ -89,13 +89,6 @@ die() { echo "ERROR: $*" >&2; exit 2; }
 [ -n "${HOOK}" ] || die "no hook given; pass --hook /path/to/librocjitsu_dbi_hooks.so"
 [ -f "${HOOK}" ] || die "hook not found: ${HOOK}"
 [ -z "${OBJECT_IN}" ] || [ -f "${OBJECT_IN}" ] || die "object not found: ${OBJECT_IN}"
-# The loader echoes this path on failure and every verdict check below reads the
-# log a line at a time, anchored to the printing component's prefix. A newline in
-# the path would break that one-event-per-line invariant -- the tail would start
-# its own line at column 0 and could impersonate hook output past the anchor.
-case "${OBJECT_IN}" in
-    *$'\n'*) die "--object path must not contain a newline" ;;
-esac
 
 ROCM="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}"
 export PATH="${ROCM}/lib/llvm/bin:${ROCM}/bin:${PATH}"
@@ -160,6 +153,25 @@ else
     clang-offload-bundler --type=o --unbundle --input="${BUNDLE}" --output="${OBJECT}" \
         --targets=hipv4-amdgcn-amd-amdhsa--gfx950 || die "unbundle failed"
 fi
+
+# The path is about to be baked into the loader as a C string literal
+# (-DOBJECT below), and the loader echoes it when hipModuleLoad fails, into the
+# log every verdict check below reads a line at a time. So three characters are
+# refused rather than escaped:
+#
+#   newline      breaks one-event-per-line directly -- the tail starts at column
+#                0 and can impersonate hook output past the ^ anchor
+#   backslash    the compiler unescapes it, so the two characters \n in a
+#                filename become that same real newline in OBJECT
+#   double quote closes the literal, which is arbitrary C in the loader
+#
+# Checked here rather than at parse time so it covers the path built from
+# --workdir as well as the one --object supplies. No legitimate code object
+# needs them, so refusing is honest where escaping would be a guess.
+case "${OBJECT}" in
+    *$'\n'*|*\\*|*'"'*)
+        die "object path must not contain a newline, backslash or double quote: ${OBJECT}" ;;
+esac
 
 bytes=$(stat -c%s "${OBJECT}")
 # Kernel count is informational only, so a missing llvm-readelf should say so
