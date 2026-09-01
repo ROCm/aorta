@@ -82,16 +82,16 @@ class TestPublicTreeGuard:
         corpus_mod.assert_public_tree(repo)
 
     def test_an_internal_remote_refuses(self, repo: Path):
-        _git(repo, "remote", "set-url", "origin", "git@github.com:AMD-ROCm-Internal/aorta.git")
+        _git(repo, "remote", "set-url", "origin", "git@github.com:example-internal-org/aorta.git")
         with pytest.raises(PublicTreeError) as exc:
             corpus_mod.assert_public_tree(repo)
         message = str(exc.value)
-        assert "AMD-ROCm-Internal/aorta" in message
+        assert "example-internal-org/aorta" in message
         assert "verbatim" in message
 
     def test_a_lookalike_remote_refuses(self, repo: Path):
-        """``ROCm/aorta-internal`` must not pass a prefix check."""
-        _git(repo, "remote", "set-url", "origin", "https://github.com/ROCm/aorta-internal.git")
+        """``ROCm/aorta-fork`` must not pass a prefix check."""
+        _git(repo, "remote", "set-url", "origin", "https://github.com/ROCm/aorta-fork.git")
         with pytest.raises(PublicTreeError):
             corpus_mod.assert_public_tree(repo)
 

@@ -1,6 +1,6 @@
 """Tool results reaching the critic, and conversations ending in a user turn.
 
-Two bugs found running an action query against Claude behind AMD's gateway:
+Two bugs found running an action query against Claude behind an APIM gateway:
 
 * The critic looked for tool results in ``state["messages"]``, but act appends
   them to its own working list and returns only its final answer, and

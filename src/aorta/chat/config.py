@@ -1,7 +1,8 @@
 """Configuration for ``aorta chat``.
 
-Replaces ``aorta_llm``'s ``config/settings.py``. Three things changed in the
-move, and all three are load-bearing:
+Replaces the ``config/settings.py`` of the standalone tool in an internal AMD
+repository that this was ported from. Three things changed in the move, and all
+three are load-bearing:
 
 1. **Defaults are re-anchored on the user, not on the package.** The original
    anchored the ``.env`` file, the AORTA path, the vector store and the repo map
@@ -429,8 +430,8 @@ def apply_cli_overrides(
 class _LazySettings:
     """Module-level ``settings`` that materialises on first attribute access.
 
-    Call sites keep the ``settings.chunk_size`` shape they had in ``aorta_llm``,
-    so the move did not touch ~15 modules, but importing any of them no longer
+    Call sites keep the ``settings.chunk_size`` shape they had in the original
+    tool, so the move did not touch ~15 modules, but importing any of them no longer
     validates the environment. Attribute *writes* forward to the real object as
     well, which is what lets a test ``monkeypatch.setattr(settings, ...)``.
     """
