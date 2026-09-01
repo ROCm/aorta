@@ -43,9 +43,17 @@ sanitizer_plan:
   policy:
     consan_policy: strict
     on_missing_backend: fail
-    # Large production code object: the ConSan MOI transform can exceed the
-    # default ceiling and fail closed (consan_strict_load_rejection); keep the
-    # observed error as survey data rather than a false pass.
-    timeout_seconds: 300
+    # Large production code object: the ConSan MOI transform fails closed
+    # (consan_strict_load_rejection); keep the observed error as survey data
+    # rather than a false pass.
+    #
+    # 300s was sized when the extracted object was 15.5 MB. On the ~183 MiB object
+    # ROCm 7.2.4 ships it takes ~730s to reach that rejection (waitcheck 447s + MOI
+    # inventory 131s + patch 152s), so 300s would record combined_hook_timeout
+    # instead -- i.e. regenerating the committed gemm_f32_consan fixture from this
+    # recipe would not reproduce the verdict the fixture holds. Matched to
+    # daily-consan-gemm.yaml's budget; the caveats on that number apply here too.
+    # See docs/sanitizers/consan-gemm-patched-image-growth-cap.md.
+    timeout_seconds: 6000
   output:
     report: sanitizer_report.json

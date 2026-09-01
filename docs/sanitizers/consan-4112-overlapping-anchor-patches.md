@@ -1,10 +1,26 @@
 # ConSan transform rejection `status=4112` — overlapping anchor patches
 
-**Status: fixed upstream and now published.** Fixed in `dc7c8e04`; a bundle
-carrying it (and the #9972 fix) went green on 2026-08-24, so the next nightly
-picks it up. This document is kept as the record of the defect and of what it
-predicted, since the dashboard row it explains only changes once that bundle is
-consumed.
+**Status: fixed upstream, published, and confirmed consumed.** Fixed in
+`dc7c8e04`; a bundle carrying it (and the #9972 fix) went green on 2026-08-24,
+and the nightly has since run on `97c1640b` with no overlapping-patch complaint
+anywhere in its log. This document is kept as the record of the defect and of
+what it predicted.
+
+> ⚠️ **`consan-gemm` on Tab 2 still shows `status=4112` / exit 92 — for an
+> unrelated reason.** `status=4112` is a generic `transform-error` bucket, and the
+> row it produces is indistinguishable from the pre-fix one. The current
+> rejection is ConSan's *patched-image growth* ceiling (400 MiB against a
+> ~1.39 GiB requirement), triggered because the extracted fixture grew from
+> 15.5 MB to 183 MiB with the move to ROCm 7.2.4. That is a configurable
+> capacity policy, not a defect, and it is written up separately in
+> [`consan-gemm-patched-image-growth-cap.md`](consan-gemm-patched-image-growth-cap.md).
+>
+> Consequence for this document: the prediction below — that the fix moves
+> `consan-gemm` to exit 86 on strict require-records — **has not been observed in
+> CI and cannot be**, because the growth ceiling now intervenes before the
+> transform completes. The prediction was verified against the 15.5 MB object on
+> a source build, and it remains correct *for that object*. It is not what the
+> nightly reports.
 
 Found while verifying the upstream fixes claimed for ROCm/rocm-systems#9964,
 #9970 and #9972, and filed as
@@ -29,9 +45,23 @@ downloader selects the newest successful run, the next nightly picks that up
 rather than `db0c47df`.
 
 So the `db0c47df` numbers here are historical from the next nightly onward.
+
+> **What actually happened, recorded 2026-08-27.** Everything from "A bundle
+> carrying both fixes is now published" down to the end of this section was
+> written before the nightly consumed one, and it is kept as the prediction it
+> was. Two things in it are wrong as a description of CI. The nightly did not
+> land on `4227d40fb5` — the downloader selects the newest successful run, and by
+> the time one ran that was `97c1640b`. And `consan-gemm` did **not** stop
+> reporting `status=4112`: the anchor-overlap defect is gone from the log, but
+> the patched-image growth ceiling now rejects the object first, on the much
+> larger fixture ROCm 7.2.4 ships. See
+> [`consan-gemm-patched-image-growth-cap.md`](consan-gemm-patched-image-growth-cap.md)
+> and the CI column in the table below.
+
 Re-running this document's own reproducer against `4227d40fb5` confirms the fix
-end to end, and the prediction below held exactly — `consan-gemm` stops reporting
-`status=4112` and ends on strict require-records instead:
+end to end **on the 15.5 MB source-build object**, and the prediction held
+exactly for it — that object stops reporting `status=4112` and ends on strict
+require-records instead:
 
 ```
 ConSan MOI inventory end   elapsed_ms=246060.502
@@ -53,6 +83,11 @@ the run early; now the transform succeeds and the object is genuinely instrument
 work the old path never reached. Any timeout for this case has to be sized against
 the ~69 min figure, not the ~24 min one — see the ceiling discussion in
 `daily-consan-gemm.yaml`.
+
+That remains a lower bound rather than a budget: everything in this section was
+measured on the 15.5 MB object, and the one CI extracts has 9.3x the access
+sites. Nobody has instrumented it end-to-end, because the growth ceiling stops it
+first.
 
 Affects: `daily-consan-gemm.yaml` (dashboard Tab 2, observed-only, non-gating).
 Repro: [`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh).
@@ -123,16 +158,21 @@ No load rejection: the transform succeeded and the failure moved to the
 require-records check. So:
 
 The first column is what the dashboard showed while `db0c47df` was the newest
-bundle. The second is measured from source builds of the fixes, not predicted, and
-is what the nightly should start reporting once it picks up `4227d40fb5`. The
-third remains a projection — it needs work nobody has done yet.
+bundle. The second is measured from source builds of the fixes, not predicted. The
+third is what the nightly **actually** reported once it picked up a bundle with
+both fixes (`97c1640b`, run 32967422099, 2026-08-26). The fourth remains a
+projection — it needs work nobody has done yet.
 
-| Case | On `db0c47df` (through 2026-08-24) | With the `dc7c8e04` / `15275dad` fixes (measured, source build) | Additionally **with a dispatching driver** (not built) |
-|---|---|---|---|
-| `consan-gemm` (Tab 2) | `error`, exit 92 `consan_strict_load_rejection` | `error`, exit 86 `combined_hook_exit_86` — transform now succeeds | could reach a real `pass`/`fail` verdict |
-| `consan-lds-dispatch` (Tab 2) | `error`, exit 86 | records captured, `dynamic_complete=true`, exit 0 at `STRIDE=16` | `pass`/`fail` |
-| `consan-tiny` (Tab 2) | `error`, exit 86 | unchanged (no sites, by design) | unchanged |
-| `consan-clean` / `consan-racy` (Tab 1) | `pass` / `fail` | unchanged | unchanged |
+| Case | On `db0c47df` (through 2026-08-24) | With the `dc7c8e04` / `15275dad` fixes (measured, source build, 15.5 MB object) | Observed in CI on `97c1640b` (183 MiB object) | Additionally **with a dispatching driver** (not built) |
+|---|---|---|---|---|
+| `consan-gemm` (Tab 2) | `error`, exit 92 `consan_strict_load_rejection` | `error`, exit 86 `combined_hook_exit_86` — transform now succeeds | ❌ **still `error`, exit 92** — different cause: patched-image growth ceiling, see [the growth-cap doc](consan-gemm-patched-image-growth-cap.md) | could reach a real `pass`/`fail` verdict |
+| `consan-lds-dispatch` (Tab 2) | `error`, exit 86 | records captured, `dynamic_complete=true`, exit 0 at `STRIDE=16` | ✅ **`pass`**, `access=5/5 barrier=2/2`, `visible_evidence=3216` | already there |
+| `consan-tiny` (Tab 2) | `error`, exit 86 | unchanged (no sites, by design) | `error`, exit 86 — as designed | unchanged; a dispatching driver does **not** help (measured) |
+| `consan-clean` / `consan-racy` (Tab 1) | `pass` / `fail` | unchanged | `pass` / `fail` | unchanged |
+
+The second column's `consan-gemm` prediction is the one entry that CI never
+reached. It was measured against the 15.5 MB ROCm 7.0.2.2 object and holds for it;
+the object CI extracts is 11.8x larger and is rejected earlier, on capacity.
 
 The concrete thing that started working is the **ConSan transform of a large
 production code object**. On `dc7c8e04` the same object patches cleanly —
@@ -144,8 +184,13 @@ script makes, and it now reports `fixed` rather than `reproduced`.
 prediction stands: the driver is load-only, so the run ends on strict
 require-records at exit 86. Turning it into a genuine pass/fail additionally needs
 a driver that dispatches a GEMM kernel from the instrumented module (hipBLASLt, or
-a hand-written launcher for one extracted Tensile kernel). That is unbuilt, and it
-is the only remaining blocker now that #9972 is fixed.
+a hand-written launcher for one extracted Tensile kernel). That is unbuilt.
+
+It is **not** the only remaining blocker, and the exit 86 above is what the
+15.5 MB object does, not what CI sees. On the 183 MiB object CI extracts, the
+growth ceiling rejects the transform first, so the run never reaches
+require-records at all — that has to be settled before the dispatching driver
+matters. See the [growth-cap doc](consan-gemm-patched-image-growth-cap.md).
 
 ## Reproducing
 
@@ -165,7 +210,21 @@ docs/sanitizers/repro/consan_4112_repro.sh --hook /path/to/librocjitsu_dbi_hooks
 
 It exits `0` when it reproduces the 4112 rejection, `1` when the defect is fixed,
 `2` when the environment is unusable, and `3` when no verdict could be
-established. `1` requires *both* that the module loaded and that the hook ended
+established.
+
+> **Updated 2026-08-27.** The script used to key "reproduced" off
+> `status=4112` + exit 92 alone. Because 4112 is a shared `transform-error`
+> bucket, the patched-image growth ceiling produces that same signature — so on a
+> modern ROCm base (large Tensile bundle, ~183 MiB object) the script would have
+> reported this *fixed* defect as still present. It now requires the
+> `final validation found partially overlapping patch ranges` diagnostic for a
+> reproduction, and reports a growth-ceiling rejection as inconclusive with the
+> knob to retry under. See
+> [`consan-gemm-patched-image-growth-cap.md`](consan-gemm-patched-image-growth-cap.md).
+> The shared status code is filed upstream as
+> [ROCm/rocm-systems#10950](https://github.com/ROCm/rocm-systems/issues/10950).
+
+`1` requires *both* that the module loaded and that the hook ended
 the run with its own exit 86 — the load-only driver never dispatches, so strict
 require-records is expected to fail afterwards, and that is the post-fix state
 described above rather than a second defect. Demanding the hook-owned exit code
@@ -178,7 +237,14 @@ still has the defect rejects the object after ~1420 s, but a fixed hook
 instruments it and runs for ~4150 s, so a ceiling sized against the defect would
 kill the very case it is meant to confirm. Hitting the ceiling reports `3`, not a
 hang, which matters because a pre-#9964 hook never terminates MOI inventory for
-this object at all. If the
+this object at all.
+
+Both figures are for the 15.5 MB object, and 6000 s is not a budget for anything
+larger. The object a modern hipBLASLt ships has 9.3x the access sites and has
+never been instrumented end-to-end, because the growth ceiling stops it earlier —
+so raising that ceiling without also raising `--timeout` mostly trades one
+inconclusive result for another. The script says so at the point it suggests the
+retry. If the
 local hipBLASLt does not carry the Tensile bundle — it has shipped both flat
 under `library/` and under `library/gfx950/`, and slim installs may omit it —
 pass `--object` with an already-unbundled gfx950 code object.
