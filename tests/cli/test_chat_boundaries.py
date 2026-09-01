@@ -4,14 +4,31 @@ Four invariants, all of which conventions alone would erode:
 
 1. ``aorta.chat`` contains no Click. The Click layer is ``aorta.cli``, and
    nothing else.
-2. Nothing in ``aorta.*`` imports ``aorta.chat``, except ``aorta.cli.chat``,
-   which is the single sanctioned entry. This is what keeps a later extraction
-   into its own distribution a directory move rather than an archaeology
-   project.
-3. ``aorta.cli.chat`` imports ``aorta.chat`` only inside function bodies. Its
-   module scope is click plus stdlib.
+2. Nothing in ``aorta.*`` imports ``aorta.chat`` except the two sanctioned
+   importers below. This is what keeps a later extraction into its own
+   distribution a directory move rather than an archaeology project.
+3. Each sanctioned importer imports ``aorta.chat`` only inside function bodies.
 4. ``import aorta.cli`` does not pull in langchain. Rules 1-3 are the mechanism;
    this is the property they exist to protect, so it is asserted directly.
+
+**Why there are two sanctioned importers, not one.** ``aorta/cli/chat.py`` is
+the original: the Click entry for the chat command. ``aorta/agent/llm.py`` was
+added by Phase 5b, because locked Decision 7a makes the chat provider factory
+*the* provider layer and ports the agent's proposer onto it -- so that
+``vllm`` / ``openai`` / ``litellm`` are configured once for both front doors
+instead of twice. That decision and this rule are in genuine tension, and the
+resolution is recorded here rather than left as an undocumented erosion:
+
+* The edge is **deferred**, so the cost is zero for anyone not using it, and
+  ``import aorta.agent`` stays free of langchain. Asserted below.
+* The edge is **one function**, ``ChatProviderProposer._chat_model``.
+* Extraction is still a directory move, but it would have to take the provider
+  layer with it or leave a shim -- ``aorta agent --llm-backend=openai`` depends
+  on it. That is the price of 7a, and it is deliberate.
+
+If a third importer ever wants to join, that is the signal that the provider
+layer belongs in core rather than under ``aorta.chat``, and this list should be
+replaced by that move instead of being extended again.
 
 These live under ``tests/cli/`` rather than ``tests/chat/`` on purpose: they are
 pure AST and stdlib, so they must run on a base install, where ``tests/chat/``
@@ -30,9 +47,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
 _CHAT_PKG = _SRC / "aorta" / "chat"
 _CLI_CHAT = _SRC / "aorta" / "cli" / "chat.py"
+_AGENT_LLM = _SRC / "aorta" / "agent" / "llm.py"
 
-#: The one module allowed to import ``aorta.chat``.
-_SANCTIONED_IMPORTER = _CLI_CHAT
+#: The only modules allowed to import ``aorta.chat``, and each one's reason.
+#: See the module docstring before adding a third.
+_SANCTIONED_IMPORTERS = {
+    _CLI_CHAT: "the Click entry for `aorta chat`",
+    _AGENT_LLM: "Decision 7a: the agent proposer on the shared provider layer",
+}
 
 #: Third-party packages ``aorta/cli/chat.py`` may import at module scope.
 #: Everything else there must be stdlib.
@@ -113,22 +135,43 @@ def test_aorta_chat_contains_no_click():
 # ── Rule 2: only aorta.cli.chat may import aorta.chat ─────────────────────
 
 
-def test_only_cli_chat_imports_aorta_chat():
+def test_only_sanctioned_modules_import_aorta_chat():
     """Keeps the dependency arrow pointing one way: chat -> core, never back."""
     offenders: list[str] = []
     for path in _python_files(_SRC / "aorta"):
-        if path == _SANCTIONED_IMPORTER or _CHAT_PKG in path.parents or path.parent == _CHAT_PKG:
+        if path in _SANCTIONED_IMPORTERS or _CHAT_PKG in path.parents or path.parent == _CHAT_PKG:
             continue
         rel = path.relative_to(_REPO_ROOT)
         for node in ast.walk(_parse(path)):
             for name in _imported_names(node):
                 if name == "aorta.chat" or name.startswith("aorta.chat."):
                     offenders.append(f"{rel}:{node.lineno}: imports {name!r}")
+    allowed = ", ".join(sorted(p.relative_to(_SRC).as_posix() for p in _SANCTIONED_IMPORTERS))
     assert not offenders, (
-        "aorta.chat imported from outside aorta/cli/chat.py:\n  "
+        "aorta.chat imported from an unsanctioned module:\n  "
         + "\n  ".join(offenders)
-        + "\n\naorta.chat may import aorta.*; the reverse must go through "
-        "aorta/cli/chat.py so the subpackage stays extractable."
+        + f"\n\naorta.chat may import aorta.*; the reverse may only go through {allowed}, "
+        "so the subpackage stays extractable. Adding a third importer is the signal "
+        "that the provider layer belongs in core -- see this module's docstring."
+    )
+
+
+@pytest.mark.parametrize(
+    "path", sorted(_SANCTIONED_IMPORTERS, key=lambda p: p.as_posix()), ids=lambda p: p.name
+)
+def test_sanctioned_importers_defer_every_chat_import(path: Path):
+    """The exception is deferred imports only.
+
+    A module-scope ``aorta.chat`` import in either sanctioned module would put
+    langchain on the critical path of every ``aorta`` invocation, which is the
+    cost rule 2 exists to prevent -- the extractability argument is the second
+    reason, not the only one.
+    """
+    module_scope = {name for _, name in _module_scope_imports(_parse(path))}
+    leaked = {n for n in module_scope if n == "aorta.chat" or n.startswith("aorta.chat.")}
+    assert not leaked, (
+        f"{path.relative_to(_SRC)} imports {sorted(leaked)} at module scope; move it "
+        "into the function that needs it so the chat extra stays optional."
     )
 
 
@@ -150,16 +193,6 @@ def test_cli_chat_module_scope_is_click_and_stdlib():
             continue
         offenders.append(f"aorta/cli/chat.py:{lineno}: imports {name!r} at module scope")
     assert not offenders, "\n  ".join(["module scope must be click + stdlib:", *offenders])
-
-
-def test_cli_chat_imports_aorta_chat_only_inside_functions():
-    """Every ``aorta.chat`` import must sit in a callback, behind ``_load``."""
-    module_scope = {name for _, name in _module_scope_imports(_parse(_CLI_CHAT))}
-    leaked = {n for n in module_scope if n == "aorta.chat" or n.startswith("aorta.chat.")}
-    assert not leaked, (
-        f"aorta/cli/chat.py imports {sorted(leaked)} at module scope; move it "
-        "into the command callback so the chat extra stays optional."
-    )
 
 
 def test_load_turns_a_missing_extra_into_an_install_hint(monkeypatch):
@@ -239,6 +272,39 @@ def test_importing_aorta_cli_does_not_pull_in_langchain():
         f"import aorta.cli pulled in {leaked}. Every chat import in "
         "aorta/cli/chat.py must live inside a command callback."
     )
+
+
+def test_importing_the_agent_proposer_does_not_pull_in_langchain():
+    """The other half of the Decision 7a exception being affordable.
+
+    ``aorta.agent.llm`` is imported by every ``aorta agent mitigate`` run,
+    including the default ``--llm-backend=fake``, which must stay fully offline.
+    If its chat seam ever moved to module scope, the fake path would start
+    paying for langchain -- and on a base install it would stop working.
+    """
+    import subprocess
+
+    probe = (
+        "import sys, json, aorta.agent.llm;"
+        f"heavy={_HEAVY_PREFIXES!r};"
+        "print(json.dumps(sorted(m for m in sys.modules "
+        "if m.split('.')[0] in heavy)))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    leaked = __import__("json").loads(out.stdout)
+    assert leaked == [], (
+        f"import aorta.agent.llm pulled in {leaked}. The chat provider seam must "
+        "stay inside ChatProviderProposer._chat_model."
+    )
+
+
+def test_the_default_agent_backend_is_offline_and_needs_no_extra():
+    """``fake`` is the default, and is what the test suite and --dry-run rely on."""
+    from aorta.agent.llm import FakeLLMProposer, make_proposer
+
+    assert isinstance(make_proposer("fake"), FakeLLMProposer)
 
 
 def test_importing_aorta_cli_does_not_pull_in_asyncio():
