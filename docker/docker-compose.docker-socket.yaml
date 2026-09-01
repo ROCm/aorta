@@ -1,0 +1,80 @@
+# Optional override: let the container drive the HOST docker daemon.
+#
+# Needed by exactly one thing today: the `tokenspeed_serve` workload, which runs
+# the TokenSpeed engine in its own published container. The nightly eval harness
+# runs *inside* aorta-ci-gpu, so without this the workload's `setup()` fails on
+# "'docker' not on PATH" (the client comes from docker/Dockerfile.ci-gpu) or, with
+# the client but no socket, on "Cannot connect to the Docker daemon".
+#
+# Usage:
+#   docker compose -f docker-compose.build.yaml -f docker-compose.docker-socket.yaml up -d
+#
+# Do not use this file if you do not need it; omit -f docker-compose.docker-socket.yaml.
+# It is a separate file rather than a volume in the base compose precisely so the
+# default container has no route to the daemon -- see the security note below.
+#
+# ---------------------------------------------------------------------------
+# SECURITY: this grants effective root on the HOST
+# ---------------------------------------------------------------------------
+# A process that can talk to the docker daemon can start a container that is
+# privileged and bind-mounts `/`, which is root on the host with no further
+# exploit -- so this mount hands anything running in the container, including
+# any code the nightly installs from an index, the whole node. The base compose
+# is already `privileged: true` with `seccomp=unconfined`, so on a dedicated,
+# trusted, single-tenant CI runner this widens an already-wide posture rather
+# than opening a new one. On a shared or multi-tenant runner it is NOT
+# acceptable, and the alternatives, in order of preference, are:
+#
+#   1. Run the serving workload outside the CI container -- as a step on the
+#      runner host, which already has a docker client and the socket, publishing
+#      its results JSON into the harness's results directory. The nightly keeps
+#      the socket out of the container entirely.
+#   2. A socket proxy (e.g. tecnativa/docker-socket-proxy) mounted instead of
+#      the raw socket, allowlisting only the container create/start/logs/remove
+#      calls this workload makes. Still a privilege boundary worth reviewing,
+#      but not a blanket one.
+#   3. Rootless docker or a per-runner daemon in a user namespace, so "root on
+#      the host" is root on an unprivileged uid.
+#
+# Nested docker-in-docker (a dockerd inside this container) is deliberately NOT
+# on that list: it needs `privileged` too, so it trades no privilege away, and
+# it gives the engine container a different view of the filesystem, which breaks
+# the bind mounts described below.
+#
+# ---------------------------------------------------------------------------
+# Why the second mount, and why source == target
+# ---------------------------------------------------------------------------
+# With the socket mounted, the engine container is a SIBLING of this one: this
+# container asks the host daemon to start it. The `-v` sources in that request
+# are strings the HOST daemon resolves against the HOST filesystem, not paths
+# this container can see. `tokenspeed_serve` builds them from `work_dir`
+# (`<work_dir>/u<uid>/{scripts,out,hf}`), so if `work_dir` names a path that
+# exists only inside this container, the daemon does not error -- it CREATES the
+# missing source on the host and mounts that. The engine container then gets an
+# empty /ts-scripts and dies on a missing script, or worse comes up against an
+# empty /ts-out and the harvest reports no results for a run that happened.
+#
+# Mounting the same host path at the same path inside the container makes the
+# string mean the same directory on both sides, which is what the workload needs
+# and cannot check for itself. `work_dir` must then be set to TS_SERVE_WORK_DIR
+# explicitly in the recipe -- it happens to equal the workload default, but a
+# default that must match a mount is a coincidence, not a configuration.
+#
+# The directory must be node-local (the workload rejects NFS under root-squash)
+# and is created on the host by the compose run if absent. Ownership matters:
+# the base compose runs this container as root, so the workload sees uid 0,
+# writes `<work_dir>/u0`, and re-checks that it is owned by uid 0 and not
+# group/world-writable. That holds because a root-owned directory created
+# through this mount is root-owned on the host too. Change `user:` in the base
+# compose, or introduce userns-remap on the daemon, and that check starts
+# failing with an ownership error that does not mention either.
+
+services:
+  torchenv:
+    volumes:
+      # The daemon socket. Read-write is required: the workload creates, starts,
+      # inspects and removes a container. `user: root` in the base compose means
+      # no group_add is needed to open it.
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      # Shared scratch, at an identical path on both sides. See above.
+      - ${TS_SERVE_WORK_DIR:-/tmp/ts-work-serve}:${TS_SERVE_WORK_DIR:-/tmp/ts-work-serve}

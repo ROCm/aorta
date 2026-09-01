@@ -271,6 +271,46 @@ RUN python -m pip install --no-cache-dir \
     "openpyxl==3.1.5" \
     "seaborn==0.13.2"
 
+# Docker CLI -- the CLIENT only, no daemon.
+#
+# The nightly eval harness runs INSIDE this image (`docker exec aorta-ci-gpu
+# python scripts/ci/nightly_eval.py`), and one of the workloads it drives,
+# `tokenspeed_serve`, runs the TokenSpeed engine in a published container of its
+# own. Its `setup()` starts with `shutil.which("docker")` and raises
+# "'docker' not on PATH" without it, which fails the cell -- so a serving recipe
+# in the nightly matrix reddens the nightly every night until this exists.
+#
+# What the workload needs is a client that can reach the HOST daemon over the
+# socket bind-mounted by docker-compose.build.yaml, i.e. the sibling-container
+# pattern -- the engine comes up next to this container, not nested inside it.
+# So this deliberately installs no dockerd, no containerd and no runc: the
+# static tarball ships all of them and only `docker` is extracted. Nothing here
+# grants the container anything on its own; the socket mount is what does that,
+# it is opt-in per .env file, and docker/README.md documents why.
+#
+# Pinned by version AND sha256, like the base image is pinned by digest, and for
+# the same reason: the static channel keeps old versions, but a bare URL still
+# names a moving target the day the version is bumped without review. The digest
+# is the tarball's, resolved with `sha256sum docker-<version>.tgz`. Pinning a
+# prebuilt artifact by URL is this repo's established pattern for non-PyPI
+# tooling, and it avoids adding Docker's apt repo, whose signing key and
+# floating package versions would both become things to maintain for one file.
+#
+# Fetched with python rather than curl or wget on purpose: this image's only
+# guaranteed tooling is python (the layer above and the guard below both run it)
+# and neither downloader is promised by the base. Verifying before extracting,
+# and extracting exactly one member by name, means a wrong or truncated download
+# fails the build instead of producing an image with a partial binary in it.
+#
+# The client negotiates its API version down to whatever the daemon on the
+# runner speaks, so it need not match the host's Docker version.
+# A COPY + RUN pair rather than an inline heredoc, matching the layout guard
+# below: heredocs in a RUN need BuildKit, and a runner with DOCKER_BUILDKIT=0
+# would fail on syntax rather than on anything real. The script is also testable
+# on its own, which an inline blob is not.
+COPY install_docker_cli.py /usr/local/share/aorta/install_docker_cli.py
+RUN python /usr/local/share/aorta/install_docker_cli.py && docker --version
+
 # Deliberately NO `ENV ROCM_HOME=/opt/rocm` here (issue #381).
 #
 # ROCM_HOME is an explicit operator override, so it ranks ABOVE autodetection in
