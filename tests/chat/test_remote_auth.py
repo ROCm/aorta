@@ -16,7 +16,7 @@ from aorta.chat.inference.providers.remote_openai import RemoteOpenAIBackend
 from aorta.chat.rag.embeddings.remote_api import RemoteApiProvider
 from aorta.chat.remote_auth import PLACEHOLDER_API_KEY, build_auth, describe_auth
 
-#: The shape AMD's internal gateway uses: an Azure API Management front end.
+#: The shape a corporate gateway uses: an Azure API Management front end.
 APIM_HEADER = "Ocp-Apim-Subscription-Key"
 
 
@@ -151,7 +151,7 @@ class TestExtraHeaderParsing:
 
 @pytest.fixture()
 def amd_gateway(monkeypatch):
-    """Configure both remote flows the way AMD's internal gateway needs."""
+    """Configure both remote flows the way an APIM-fronted gateway needs."""
     monkeypatch.setattr(settings, "remote_llm_model", "GPT-oss-20B")
     monkeypatch.setattr(settings, "remote_llm_api_key", "sk-super-secret")
     monkeypatch.setattr(

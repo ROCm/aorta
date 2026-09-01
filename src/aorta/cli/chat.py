@@ -13,8 +13,9 @@ behind :func:`_load`, which is the same discipline (and the same
 external-versus-internal ``ModuleNotFoundError`` distinction) as
 ``aorta/cli/bench.py``.
 
-Ported from ``aorta_llm``'s ``src/cli.py``, which was argparse; the REPL, the
-three output modes and the quiet-mode logging setup are that module's.
+Ported from the ``src/cli.py`` of a standalone tool in an internal AMD
+repository, which was argparse; the REPL, the three output modes and the
+quiet-mode logging setup are that module's.
 """
 
 from __future__ import annotations
@@ -207,8 +208,8 @@ PROMPT_COLOUR = f"\001\033[1;32m\002{PROMPT}\001\033[0m\002"
 def _history_path() -> Path:
     """Where the REPL remembers past queries between sessions.
 
-    ``~/.aorta_llm_history`` in the standalone tool; now under the XDG cache
-    with the rest of chat's regenerable state.
+    A dotfile directly in ``$HOME`` in the original standalone tool; now under
+    the XDG cache with the rest of chat's regenerable state.
     """
     from aorta._user_paths import chat_cache_dir
 

@@ -1,7 +1,7 @@
 """The LiteLLM backend behind a gateway, and the secret it must not print.
 
-All three behaviours here come from getting Claude working through AMD's
-Anthropic gateway path, and each was a hard failure or a leak:
+All three behaviours here come from getting Claude working through an
+APIM-fronted Anthropic gateway path, and each was a hard failure or a leak:
 
 * The gateway authenticates with `Ocp-Apim-Subscription-Key`, but this backend
   passed no headers at all, so a gateway was unreachable via LiteLLM.
@@ -37,8 +37,8 @@ SECRET = "sk-not-a-real-subscription-key"
 
 @pytest.fixture()
 def gateway(monkeypatch):
-    """AMD's Anthropic path: native Anthropic protocol behind APIM."""
-    monkeypatch.setattr(settings, "remote_llm_model", "anthropic/Claude-Opus-4.7")
+    """The gateway's Anthropic path: native Anthropic protocol behind APIM."""
+    monkeypatch.setattr(settings, "remote_llm_model", "anthropic/claude-example")
     monkeypatch.setattr(
         settings, "remote_llm_base_url", "https://gateway.example.com/anthropic"
     )
@@ -53,7 +53,7 @@ def gateway(monkeypatch):
 @pytest.fixture()
 def plain_provider(monkeypatch):
     """A provider reached directly, with LiteLLM reading its own env vars."""
-    monkeypatch.setattr(settings, "remote_llm_model", "claude-opus-5")
+    monkeypatch.setattr(settings, "remote_llm_model", "claude-example")
     monkeypatch.setattr(settings, "remote_llm_base_url", "")
     monkeypatch.setattr(settings, "remote_llm_api_key", "")
     monkeypatch.setattr(settings, "remote_llm_auth_header", "")
@@ -134,5 +134,5 @@ class TestTheKeyIsNotLogged:
 
         from aorta.cli import chat as cli
 
-        source = inspect.getsource(cli.main)
+        source = inspect.getsource(cli._setup_logging)
         assert 'getLogger("LiteLLM")' in source

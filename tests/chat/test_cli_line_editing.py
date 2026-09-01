@@ -111,7 +111,7 @@ class TestFailuresAreNotFatal:
 
 class TestHistoryLocation:
     def test_history_lives_under_the_xdg_cache(self, monkeypatch, tmp_path: Path):
-        """Not ``~/.aorta_llm_history``: chat's state is XDG-anchored now."""
+        """Not a dotfile in ``$HOME``: chat's state is XDG-anchored now."""
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         path = cli._history_path()
         assert path.parent == tmp_path / "aorta" / "chat"
