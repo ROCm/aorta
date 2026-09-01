@@ -174,16 +174,27 @@ class _MitigateCommand(click.Command):
 )
 @click.option(
     "--llm-backend",
-    type=click.Choice(["fake", "litellm"]),
+    # Hard-coded rather than read from aorta.agent.llm: this decorator runs at
+    # import time, and `aorta --help` must not pay for that module's imports.
+    # tests/agent/test_llm_providers.py fails if this list and
+    # CHAT_PROVIDER_BACKENDS drift apart.
+    type=click.Choice(["fake", "litellm", "openai", "vllm"]),
     default="fake",
     show_default=True,
-    help="Proposer backend: fake (offline) or litellm (requires amd-aorta[agent]).",
+    help=(
+        "Proposer backend: fake (offline, no network). litellm, openai and vllm "
+        "are configured by the shared chat provider settings and need "
+        "amd-aorta[chat-cli]; litellm also still works on amd-aorta[agent] alone."
+    ),
 )
 @click.option(
     "--llm-model",
-    default="gpt-4o-mini",
-    show_default=True,
-    help="Model name when --llm-backend=litellm.",
+    default=None,
+    help=(
+        "Override the model name for the selected backend. Defaults to whatever "
+        "the chat provider settings configure (gpt-4o-mini on the standalone "
+        "litellm path)."
+    ),
 )
 @click.option(
     "--mitigation",
@@ -229,7 +240,7 @@ def mitigate(
     max_iterations: int,
     max_walltime_sec: float | None,
     llm_backend: str,
-    llm_model: str,
+    llm_model: str | None,
     mitigation_allowlist: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
     require_approval: bool,
