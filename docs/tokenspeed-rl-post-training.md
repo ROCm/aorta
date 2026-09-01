@@ -107,7 +107,7 @@ image (`lightseekorg/tokenspeed-amd@sha256:60c12e37…`), on a gfx950 node.
 | EOS-respecting generation | **Yes, but not through the flag** — see below | `bench.py:1911-1912` |
 | Generated-token counts | **Yes**, from the response's `usage.completion_tokens` | `bench.py:1258-1270` |
 | Per-request lengths | **Yes**, `output_lens`, but only with `--save-detailed` | `bench.py:1639,1972` |
-| Weight reload without cold start | **Yes, purpose-built** | `runtime/engine/weight_transfer/`, `runtime/entrypoints/control_server.py:399+` |
+| Weight reload without cold start | **Yes, purpose-built — but `nccl` only**, `ipc` raises `NotImplementedError` ([Phase 2](#phase-2-validate-the-weight-sync-path)) | `runtime/engine/weight_transfer/`, `runtime/entrypoints/control_server.py:399+` |
 | Logprobs for the trainer's importance ratios | **Yes**, `/generate` with `return_logprob` | `control_server.py:262-290` |
 | OpenAI *and* SGLang dialects | **Yes**, both, deliberately | `control_server.py:209` names "sglang-native /generate clients (e.g. slime, verl)" |
 
@@ -131,10 +131,15 @@ weights**, against roughly 2.5 hours of actual generation for the same run (see
 [cost](#5-cost-does-the-claim-hold)). Cold-starting per iteration would make
 bring-up eleven times the cost of the work.
 
-What is **not** established: that the path works on this image, on gfx950, at the
-tensor-parallel widths a real run would use. Nothing in this repository has
-exercised it, and `docs/tokenspeed-serving.md` records that TP=4 does not come up
-at all on this image. Validating it is [Phase 2](#phase-2-validate-the-weight-sync-path).
+What [Phase 2](#phase-2-validate-the-weight-sync-path) since established, by
+running it: the control plane works on this image on gfx950, and costs 1-5 ms
+against a 322 s cold start. But **`ipc` is not implemented** — its receive path
+raises — so of the two backends named above only `nccl` is real, and the
+colocated deployment this section implies is not available. What is still not
+established is the NCCL transport itself under a real trainer peer, and any of
+this at the tensor-parallel widths a real run would use;
+`docs/tokenspeed-serving.md` records that TP=4 does not come up at all on this
+image.
 
 ### The EOS trap, which cost the most to find
 
@@ -545,16 +550,60 @@ the mean-completion-length assumption behind it becomes a measurement.**
 
 ### Phase 2 — validate the weight-sync path
 
-A probe route, not a workload: exercise `/init_weight_transfer_engine` →
-`/start_weight_update` → `/update_weights` → `/finish_weight_update` against a
-served model, with a trivial "trainer" that broadcasts a known perturbation, and
-assert the served outputs change. Measure the update's wall clock, which is the
-number that replaces 250 s of bring-up in the cost model. Verdict from an exit
-code, in the band `ts_serve_probe.sh` uses.
+**Partly done, and it changed the plan's shape.** Measured on gfx950
+(`cv350-rck-g03-c10-18`, one GPU, Qwen3-0.6B, the image the recipes pin), by
+driving the control plane against a live `tokenspeed serve`.
 
-Do this **before** committing to a trainer. It is the single assumption the whole
-architecture rests on, it is cheap to test, and if it fails on this image the plan
-changes shape rather than schedule.
+**The control plane is real, always on, and effectively free.** `tokenspeed
+serve` assigns `--rl-control-port` itself, so the weight routes are live on the
+control port without asking. Against a **322 s** cold start for a 0.6B model at
+TP=1 — the top of the 189-319 s band section 2 records, for the smallest model
+in play:
+
+| Operation | Wall clock |
+|---|---|
+| `/pause` (`abort`, `wait`, `keep`) | 1–5 ms |
+| `/resume` | ~1 ms |
+| `/is_paused`, `/get_world_size` | ~1 ms |
+| full `init → start → update → finish` | ~5 ms |
+| cold start, for comparison | **322 s** |
+
+That is five orders of magnitude, and it is the number the cost model needed:
+the control plane is not what a weight update will cost. Generation was verified
+before, between and after — the server served identical completions throughout
+and never restarted, so **pause/resume against a running server is settled**.
+
+**The colocated path is not available.** `backend: ipc` accepts `init` and
+`start`, parses `update_info` in full, and then raises `NotImplementedError` —
+see [A6](#assumptions-to-confirm-with-manoj). Phase 4's "colocated (`ipc`) on
+one 8-GPU node" has to become disaggregated `nccl`, which doubles the nodes.
+This is exactly the assumption that was worth breaking early, and it broke.
+
+**Two contract details a trainer will hit.** The lifecycle guards are real —
+start-before-init, update-with-no-active-update, finish-with-none-active and
+double-start all refuse — but they surface as **500**, not the **409** the
+manager's own docstring promises ("The HTTP layer maps this to 409 Conflict"; it
+does not). Bad `update_info` — an unknown key, `update_kind: sparse` — is also a
+500 rather than a 400, because the handlers validate only that the field is
+present and let manager errors through. A trainer that distinguishes retryable
+conflicts from bugs by status code will misclassify both. Malformed requests the
+*handlers* do check (`init_info` missing, an invalid pause mode) are correctly
+400 with useful messages.
+
+**The surface is wider than section 2 lists.** Also present: `/get_world_size`,
+`/is_paused`, and a complete SGLang dialect — `/init_weights_update_group`,
+`/update_weights_from_distributed`, `/update_weights_from_tensor`,
+`/update_weights_from_disk`, `/pause_generation`, `/continue_generation`,
+`/release_memory_occupation`, `/resume_memory_occupation`. slime and verl's
+SGLang rollout should drive this unchanged, which widens the trainer choice.
+
+**What is still open**, and needs a second process rather than more reading: an
+actual NCCL broadcast from a trainer peer, asserting the served outputs change,
+and the same at TP > 1. The `nccl` metadata contract is known —
+`init_info: {master_address, master_port, rank_offset, world_size, group_name?}`
+and `update_info: {names, dtype_names, shapes, packed?, group_name?,
+flush_cache?}` — so the remaining work is a peer that joins the group and
+broadcasts, not discovery.
 
 ### Phase 3 — reward functions and a supervised baseline
 
@@ -568,7 +617,9 @@ that number rather than against zero.
 ### Phase 4 — the RL loop
 
 verl or slime, with TokenSpeed as the rollout engine over the weight-transfer
-path, colocated (`ipc`) on one 8-GPU node. GRPO rather than PPO: no value network
+path. **Disaggregated (`nccl`), not colocated:** Phase 2 established that the
+`ipc` receive path is not implemented, so trainer and engine need separate GPUs
+and the node budget is two 8-GPU nodes rather than one. GRPO rather than PPO: no value network
 to fit, which matters when the reward is a graded checker rather than a learned
 model. Success is tier-1-5 pass rate and classifier agreement on held-out
 prompts, against the Phase 3 baseline.
@@ -614,16 +665,32 @@ domain, on the grounds that it is the one with an automatic reward. A
 customer-facing vertical would need its own reward design and probably human
 labelling.
 
-**A6 — The rollout engine may take the whole node.** The colocated (`ipc`)
-configuration assumes trainer and engine share GPUs on one node. If the engine
-must be disaggregated onto separate GPUs (`nccl`), the node count doubles and the
-"no cluster" claim gets tighter.
+**A6 — The rollout engine may take the whole node. RESOLVED, against us.** The
+colocated (`ipc`) configuration assumed trainer and engine could share GPUs on
+one node. They cannot, on this image: the IPC receive path is not implemented.
+Driving `/update_weights` under `backend: ipc` parses the metadata in full and
+then raises
+
+```
+NotImplementedError: IPC weight receive is not yet implemented on the worker
+side; use backend='nccl' for now.
+```
+
+which matches the source (`weight_transfer/manager.py`, the `else` branch of
+`update()`). `nccl` is therefore the only wired backend, the engine must be
+disaggregated onto separate GPUs, the node count doubles and the "no cluster"
+claim gets tighter — exactly the branch this assumption was written to catch.
+Measured in [Phase 2](#phase-2-validate-the-weight-sync-path).
 
 ## Known gaps
 
-- **The weight-transfer path is unexercised here.** Everything in section 2 about
-  it is read from source, not run. Phase 2 exists for this, and it is the
-  assumption most worth breaking early.
+- **The weight-transfer path is exercised, but not end to end.** The control
+  plane, its lifecycle guards, its validation and pause/resume are measured
+  against a live server in [Phase 2](#phase-2-validate-the-weight-sync-path);
+  `ipc` is settled and negative. What remains unrun is the one thing needing a
+  second process: an actual NCCL tensor broadcast from a trainer peer, and the
+  same at TP > 1. Until that runs, "weights can be updated in place" is
+  established for the control plane and assumed for the transport.
 - **The committed recipes cannot show a real length distribution**, because
   `dataset: random` prompts do not induce EOS. Their throughput and sample-count
   numbers are valid; `generated_tokens_*` will read as a constant at the cap.

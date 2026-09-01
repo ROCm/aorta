@@ -10,6 +10,37 @@ Background and the plan these support: [`docs/tokenspeed-rl-post-training.md`](.
 | | What it demonstrates | Needs |
 |---|---|---|
 | [`recipe_reward.py`](recipe_reward.py) | A graded reward for recipe synthesis, computed by calling aorta's own validators | nothing — no GPU, no container |
+| [`probe_weight_transfer.py`](probe_weight_transfer.py) | Whether an RL iteration costs a weight update or a cold restart: drives TokenSpeed's weight-sync control plane and times it | a running `tokenspeed serve` |
+
+## `probe_weight_transfer.py`
+
+The Phase 2 probe route. Point it at a running `tokenspeed serve` and it records
+what every weight-transfer endpoint accepts and returns, and how long the
+operations in an RL loop's inner cycle take.
+
+```bash
+python examples/rl/probe_weight_transfer.py \
+  --control http://127.0.0.1:8001 \
+  --gateway http://127.0.0.1:8000 \
+  --model Qwen/Qwen3-0.6B \
+  --out weight_transfer_probe.json
+```
+
+Stdlib only, so it runs from a compute node's system Python without a venv.
+
+What one run established on gfx950 (one GPU, Qwen3-0.6B, the image the recipes
+pin) is written up in
+[`docs/tokenspeed-rl-post-training.md`](../../docs/tokenspeed-rl-post-training.md)
+under Phase 2. The short version: pause/resume costs 1–5 ms against a 322 s cold
+start, the server serves identical completions throughout without restarting,
+the lifecycle guards refuse correctly but report 500 where their own docstring
+promises 409 — and `backend: ipc` parses its metadata and then raises
+`NotImplementedError`, so the colocated deployment is not available and an RL
+run has to disaggregate over `nccl`.
+
+It does **not** exercise the NCCL tensor broadcast itself, which needs a trainer
+peer joining the process group. The metadata contract for it is exercised; the
+transport is not.
 
 ## `recipe_reward.py`
 
