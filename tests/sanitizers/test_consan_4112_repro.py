@@ -30,10 +30,13 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "docs" / "sanitizers" / "repro" / "consan_4112_repro.sh"
 
-# The loader prints this in front of anything it echoes, including the object
-# path on a failed hipModuleLoad. It is the reason an anchored hook pattern
-# cannot be satisfied by caller-controlled text.
-_LOADER_ECHO = "[consan_4112_load] hipModuleLoad failed for /tmp/objects/"
+# Exactly what consan_4112_load.hip:19 prints when hipModuleLoad fails -- note
+# there is no [consan_4112_load] prefix on this one, unlike the success marker at
+# :22. That is the line that puts a caller-supplied path into the log, so the
+# spoof fixtures below have to use its real shape or they prove nothing.
+_LOADER_FAIL = "hipModuleLoad(/tmp/objects/{path}) failed: shared object initialization failed"
+# The success marker, which does carry the prefix, and also echoes the path.
+_LOADER_OK = "[consan_4112_load] loaded and instrumented {path} (no dispatch)"
 
 _HOOK = "[rocjitsu-dbi-hooks] "
 _INSTALLED = f"{_HOOK}installed ConSan hook"
@@ -201,7 +204,7 @@ def test_verdict_timeout_is_inconclusive(tmp_path: Path, rc: int) -> None:
 def test_verdict_spoofed_overlap_path_is_not_reproduced(tmp_path: Path) -> None:
     """End-to-end version of the #409 review's vector, through the real branches."""
     log = (
-        f"{_LOADER_ECHO}{_OVERLAP}.hsaco\n"
+        _LOADER_FAIL.format(path=f"{_OVERLAP}.hsaco") + "\n"
         f"{_INSTALLED}\n"
         f"{_REJECTION}\n"
     )
@@ -255,9 +258,9 @@ def test_overlap_spoof_via_object_path_is_not_a_reproduction(
     rejection into "reproduced -- defect still present", reported upstream.
     """
     log = (
-        f"{_LOADER_ECHO}[rocjitsu-dbi-hooks] {patterns['OVERLAP_LINE']} patch ranges.hsaco\n"
-        "[rocjitsu-dbi-hooks] installed ConSan hook\n"
-        "[rocjitsu-dbi-hooks] ConSan load rejection reason=transform-error status=4112 exit_code=92\n"
+        _LOADER_FAIL.format(path=f"{_HOOK}{patterns['OVERLAP_LINE']} patch ranges.hsaco") + "\n"
+        f"{_INSTALLED}\n"
+        f"{_REJECTION}\n"
     )
     assert not _matches(f"{patterns['HOOK_LINE']} {patterns['OVERLAP_LINE']}", log, tmp_path)
 
@@ -272,10 +275,10 @@ def test_growth_spoof_via_object_path_does_not_mask_a_real_reproduction(
     negative on the one signal the script exists to report.
     """
     log = (
-        f"{_LOADER_ECHO}[rocjitsu-dbi-hooks] {patterns['GROWTH_LINE']}.hsaco\n"
-        "[rocjitsu-dbi-hooks] installed ConSan hook\n"
-        f"[rocjitsu-dbi-hooks] {patterns['OVERLAP_LINE']} patch ranges: 3 pairs\n"
-        "[rocjitsu-dbi-hooks] ConSan load rejection reason=transform-error status=4112 exit_code=92\n"
+        _LOADER_FAIL.format(path=f"{_HOOK}{patterns['GROWTH_LINE']}.hsaco") + "\n"
+        f"{_INSTALLED}\n"
+        f"{_OVERLAP}\n"
+        f"{_REJECTION}\n"
     )
     assert not _matches(f"{patterns['HOOK_LINE']} {patterns['GROWTH_LINE']}", log, tmp_path)
     assert _matches(f"{patterns['HOOK_LINE']} {patterns['OVERLAP_LINE']}", log, tmp_path)
@@ -284,10 +287,46 @@ def test_growth_spoof_via_object_path_does_not_mask_a_real_reproduction(
 def test_loader_success_marker_cannot_be_spoofed(patterns: dict[str, str], tmp_path: Path) -> None:
     """`loaded and instrumented` gates the "fixed" verdict, so it needs the same anchor."""
     log = (
-        "[rocjitsu-dbi-hooks] installed ConSan hook\n"
-        f"{_LOADER_ECHO}[consan_4112_load] loaded and instrumented.hsaco\n"
+        f"{_INSTALLED}\n"
+        + _LOADER_FAIL.format(path="[consan_4112_load] loaded and instrumented.hsaco")
+        + "\n"
     )
     assert not _matches(f"{patterns['LOADER_LINE']} loaded and instrumented", log, tmp_path)
+
+
+def test_the_loader_success_line_echoes_the_path_too(
+    patterns: dict[str, str], tmp_path: Path
+) -> None:
+    """consan_4112_load.hip:22 puts the path *after* its own prefix, on the same line.
+
+    That line legitimately matches LOADER_LINE, so the anchor alone does not keep
+    caller text out of it -- what does is that the path lands mid-line, behind the
+    prefix, and cannot start a new one (the object-path guard forbids newlines).
+    """
+    log = (
+        f"{_INSTALLED}\n"
+        + _LOADER_OK.format(path=f"/tmp/{_HOOK}{patterns['OVERLAP_LINE']} patch ranges.hsaco")
+        + "\n"
+    )
+    assert _matches(f"{patterns['LOADER_LINE']} loaded and instrumented", log, tmp_path)
+    assert not _matches(f"{patterns['HOOK_LINE']} {patterns['OVERLAP_LINE']}", log, tmp_path)
+
+
+def test_loader_fixtures_match_the_real_loader_source() -> None:
+    """The spoof fixtures are only evidence if they are the loader's actual output.
+
+    An invented shape proves nothing about the real vector, so pin both lines to
+    the format strings in consan_4112_load.hip. If that file changes its wording,
+    this fails here rather than leaving the spoof tests quietly testing fiction.
+    """
+    loader = (_SCRIPT.parent / "consan_4112_load.hip").read_text()
+    # The failure line deliberately has no [consan_4112_load] prefix; the success
+    # line does. That asymmetry is the whole reason the anchor has to do the work.
+    assert '"hipModuleLoad(%s) failed: %s\\n"' in loader
+    assert '"[consan_4112_load] loaded and instrumented %s (no dispatch)\\n"' in loader
+    assert _LOADER_FAIL.startswith("hipModuleLoad(")
+    assert "[consan_4112_load]" not in _LOADER_FAIL
+    assert _LOADER_OK.startswith("[consan_4112_load] loaded and instrumented ")
 
 
 @pytest.mark.parametrize(

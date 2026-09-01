@@ -210,13 +210,23 @@ echo "   exit ${rc} after ${elapsed}s"
 
 # Every line the hook emits starts with this prefix, so both patterns below are
 # start-anchored and every verdict grep is written as "${HOOK_LINE} ..." or
-# "${LOADER_LINE} ...". Requiring the prefix is not enough on its own: the loader
-# echoes the object path when hipModuleLoad fails, and the prefix is itself just
-# text a filename can contain, so an --object named to look like hook output gets
-# echoed into the log the verdict is read from and satisfies an unanchored match.
-# The anchor is what makes it hook-owned -- only the hook can put its prefix at
-# column 0. Leading whitespace is tolerated because indentation is not
-# caller-controlled; anything the loader echoes has its own prefix in front.
+# "${LOADER_LINE} ...". Requiring the prefix is not enough on its own: the object
+# path reaches this log twice -- consan_4112_load.hip prints
+# "hipModuleLoad(<path>) failed:" on failure and "[consan_4112_load] loaded and
+# instrumented <path>" on success -- and the prefix is itself just text a
+# filename can contain, so an unanchored match reads caller input as tool output.
+#
+# Two things make a match tool-owned, and both are needed:
+#
+#   the ^ anchor      only the emitter can put its prefix at column 0. In both
+#                     lines above the path lands mid-line, behind text the
+#                     emitter chose, so it can never satisfy an anchored pattern.
+#   the path guard    a path containing a newline (or a backslash the -DOBJECT
+#                     literal unescapes into one) would start a fresh line at
+#                     column 0 and clear the anchor, so those are refused where
+#                     OBJECT is resolved, above.
+#
+# Leading whitespace is tolerated because indentation is not caller-controlled.
 HOOK_LINE='^[[:space:]]*\[rocjitsu-dbi-hooks\]'
 LOADER_LINE='^[[:space:]]*\[consan_4112_load\]'
 
