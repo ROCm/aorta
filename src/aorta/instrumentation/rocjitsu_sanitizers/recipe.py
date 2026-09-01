@@ -300,8 +300,6 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
     elif source_kind == "consan_repro":
         source_path = _resolve_path(_require_str(source, "hip"), recipe_path=path)
         repro_variant = _require_str(source, "variant")
-        if "command" in source:
-            consan_command = _resolve_path(_require_str(source, "command"), recipe_path=path)
     elif source_kind == "kernel_list":
         names = source.get("kernels")
         if not isinstance(names, list) or not names:
@@ -314,6 +312,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         kernel = _require_mapping(source.get("kernel"), name="sanitizer_plan.source.kernel")
         kernel_specs = (_parse_kernel_spec(kernel, context="sanitizer_plan.source.kernel"),)
 
+<<<<<<< Updated upstream
     if source_kind in {"kernel", "kernel_list"}:
         # Resolve each kernel's code object relative to the recipe and auto-hash it
         # (see _resolve_kernel_object) so a digest-less waitcheck lane can run.
@@ -328,6 +327,14 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
     # ``not_checked`` behavior; the ``consan_repro`` kind uses ``command``.
     if source_kind != "consan_repro" and "consan_command" in source:
         consan_command = _resolve_path(_require_str(source, "consan_command"), recipe_path=path)
+=======
+    # ConSan executes a program rather than a kernel, so every source kind that can
+    # name a kernel also needs a way to say which binary dispatches it. Gating this
+    # to consan_repro limited ConSan to the two built-in repro variants and left
+    # kernel/kernel_list recipes with no runnable command at all.
+    if "command" in source:
+        consan_command = _resolve_path(_require_str(source, "command"), recipe_path=path)
+>>>>>>> Stashed changes
 
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)

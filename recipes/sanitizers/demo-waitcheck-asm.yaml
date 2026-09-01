@@ -1,0 +1,32 @@
+schema_version: 1
+mode: sanitizer
+ticket: DEMO-WAITCHECK-ASM
+description: >
+  Waitcheck over a hand-tuned gfx950 assembly kernel whose prologue issues two
+  scalar loads writing the same SGPR with no wait ordering them (expect WARN).
+
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel_list
+    kernels:
+      # Waitcheck pins kernel identity by hash, so the sha256 has to match the
+      # code object on disk. Rebuilding the assembly changes it; regenerate with
+      # sha256sum tile_reverse_bug.hsaco.
+      - name: tile_reverse
+        code_object: /apps/avsharma/waitcheck-demo/tile_reverse_bug.hsaco
+        code_object_sha256: 94a1703f38af1888c5eab1294a698539e057d9fa38472845e9220a2834968451
+        code_object_index: 0
+        entry_offset: 0
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json
