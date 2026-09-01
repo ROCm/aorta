@@ -243,10 +243,11 @@ def test_python_context_attributes_to_call_paths(tmp_path):
 # ---- Pinning an explicit AMD backend ------------------------------------
 #
 # Proton's CLI front-end calls ``_select_backend()`` only when ``-b`` is
-# absent, and that call is what initialises the HIP driver. A queue-intercepting
-# backend pinned through ``mode: cli`` therefore attaches ahead of the runtime
-# it is meant to trace and records nothing, exiting 0 with a hatchet holding a
-# bare ROOT frame. ``wrap_argv`` refuses that combination and names
+# absent, and that call is what initialises the HIP driver. ``roctracer`` pinned
+# through ``mode: cli`` therefore attaches ahead of the runtime it is meant to
+# trace and records nothing, exiting 0 with a hatchet holding a bare ROOT frame.
+# Only ``roctracer``: ``rocprofiler`` is configured from a ``libproton.so``
+# constructor and wants to land before the runtime, so its CLI pin is allowed. ``wrap_argv`` refuses that combination and names
 # ``mode: env``, where the payload starts Proton itself; these two tests are the
 # regression that would have caught the empty capture, and the check that the
 # upstream ordering it works around is still there.

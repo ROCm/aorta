@@ -458,9 +458,10 @@ def test_wrap_forwards_env_to_proton(profilers_on_path, tmp_path):
 
 
 def test_wrap_propagates_the_proton_backend_pin_rejection(profilers_on_path, tmp_path):
-    """A pinned queue-intercepting backend under ``mode: cli`` captures an empty
-    tree, so the collector seam has to surface the refusal rather than run the
-    trial and report no metrics."""
+    """A pinned ``roctracer`` under ``mode: cli`` captures an empty tree, so the
+    collector seam has to surface the refusal rather than run the trial and
+    report no metrics. Scoped to that backend on purpose -- ``rocprofiler``
+    intercepts queues too but its CLI pin is deliberately allowed."""
     config = _config(
         ["proton"], collect_dir=tmp_path, options={"proton": {"backend": "roctracer"}}
     )

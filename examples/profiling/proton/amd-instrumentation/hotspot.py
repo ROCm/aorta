@@ -25,9 +25,12 @@ import sys
 
 # ``torch`` is imported at module scope, before ``proton.start()`` runs in
 # main(). For the queue-intercepting backends that ordering is load-bearing --
-# they record nothing unless the HIP runtime is already up, which is what
-# importing torch does. This backend is *not* one of them: it installs no queue
-# interceptor, and a CLI pin of it captures correctly whatever the ordering. The
+# ``roctracer`` records nothing unless the HIP runtime is already up, which is
+# what importing torch does. That is a ``roctracer`` property and not an AMD one:
+# ``rocprofiler`` wants the reverse (it is configured from a ``libproton.so``
+# constructor, so it must land *before* HSA), and this backend has no ordering
+# requirement at all -- it installs no queue interceptor, and a CLI pin of it
+# captures correctly whatever the order. The
 # reason this example chooses ``mode: env`` is narrower and version-independent:
 # Triton 3.7.1's CLI parses ``--mode`` and then calls ``start()`` without it, so
 # ``instrumentation_mode`` would be dropped there. 3.8.0 forwards it, but this

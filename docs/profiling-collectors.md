@@ -212,7 +212,7 @@ Precedence and scope:
 |---|---|---|---|
 | `mode` | `cli`, `env` | `cli` | See [Attach modes](#proton-attach-modes). |
 | `backend` | `auto`, `rocprofiler`, `roctracer`, `instrumentation`, `cupti` | `auto` | `auto` omits Proton's `-b` and lets Proton pick the backend matching the active runtime. On AMD that resolution is version-dependent — `select_profiler_from_triton_backend('hip')` returns `rocprofiler` on Triton 3.8.0 and newer and `roctracer` on 3.7.1 and earlier; on NVIDIA it is `cupti` either way. It is the only spelling correct on every version and is why it is the default: **naming a backend is a version commitment, and naming `roctracer` is an attach-mode commitment too.** `rocprofiler` is the preferred AMD backend upstream and has been a released backend since Triton 3.8.0 (2026-08-28), whose CLI advertises `-b {cupti,rocprofiler,roctracer,instrumentation}`; 3.7.x and earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an argparse `invalid choice: 'rocprofiler'` before the payload runs. `roctracer` is the deprecated AMD predecessor, and the one *whole-kernel* AMD backend present in *every* release including the oldest; `instrumentation` the intra-kernel path, also present in every release; `cupti` the NVIDIA one, accepted so a recipe stays portable even though aorta's examples are AMD. Pinning `roctracer` means `mode: env` and a payload that drives Proton itself: under the default `mode: cli` such a pin captures an empty tree, and the collector refuses that one pairing. The two AMD tracing backends have *opposite* initialisation contracts, so `rocprofiler` is not covered — it configures itself when `libproton` loads, which makes `mode: cli` the ordering upstream prefers for it — see [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend). `instrumentation` measures *inside* a kernel and publishes **no numeric metrics** — its leaves carry `cycles` / `normalized_cycles`, never `time (<unit>)`, so such a trial reports `proton_artifact_dir` and nothing else. |
-| `backend_mode` | `pcsampling`, `periodic_flushing` | (unset) | Proton's per-backend `--mode`. **Requires an explicit (non-`auto`) backend**, because which values are valid depends on which backend runs: `rocprofiler` takes both, `roctracer` only `periodic_flushing`, `cupti` both. Not valid on `backend: instrumentation`, whose modes are the `instrumentation_mode` key, and rejected together with `instrumentation_mode` — both render into Proton's single `--mode` argument. What the schema accepts is the backend's documented domain, not what a given build implements: `rocprofiler` + `pcsampling` is rejected by Triton 3.8.0 itself with `ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling`, because AMD PC sampling landed upstream after the 3.8.0 tag. `roctracer` + `periodic_flushing` is accepted by `start()` on 3.8.0, but **accepted is not the same as working**: on Triton 3.7.1 / ROCm 7.0.2 that pair kills the workload with SIGSEGV (exit 139) once kernels dispatch — verified on two payloads — so leave it unset there. Reaching Proton through `mode: cli` is version-dependent — see the paragraph below the table. |
+| `backend_mode` | `pcsampling`, `periodic_flushing` | (unset) | Proton's per-backend `--mode`. **Requires an explicit (non-`auto`) backend**, because which values are valid depends on which backend runs: `rocprofiler` takes both, `roctracer` only `periodic_flushing`, `cupti` both. Not valid on `backend: instrumentation`, whose modes are the `instrumentation_mode` key, and rejected together with `instrumentation_mode` *or* `granularity` — all three render into Proton's single `--mode` argument, so only one may be set. What the schema accepts is the backend's documented domain, not what a given build implements: `rocprofiler` + `pcsampling` is rejected by Triton 3.8.0 itself with `ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling`, because AMD PC sampling landed upstream after the 3.8.0 tag. `roctracer` + `periodic_flushing` is accepted by `start()` on 3.8.0, but **accepted is not the same as working**: on Triton 3.7.1 / ROCm 7.0.2 that pair kills the workload with SIGSEGV (exit 139) once kernels dispatch — verified on two payloads — so leave it unset there. Reaching Proton through `mode: cli` is version-dependent — see the paragraph below the table. |
 | `context` | `shadow`, `python` | `shadow` | How a kernel's time is attributed to a calling frame. |
 | `data` | `tree`, `trace` | `tree` | `tree` writes the `.hatchet` file the parser reads; `trace` writes a chrome trace instead, so it produces no numeric metrics. |
 | `instrumentation_mode` | `default`, `mma`, `pcsampling` | (unset) | **Requires `backend: instrumentation`.** Renders into Proton's single `--mode` argument, so under `mode: cli` it reaches Proton on Triton 3.8.0 and newer and is silently dropped on 3.7.1 and earlier; `mode: env` carries it on every version. See the paragraph below the table. |
@@ -330,8 +330,12 @@ merge into the subprocess env. It never mutates `os.environ`.
 #### Pinning an explicit AMD backend
 
 The two AMD tracing backends look like a pair and are not one. Their
-initialisation contracts are **opposite**, and each needs the attach mode the
-other cannot use:
+initialisation contracts are **opposite**, so what is safe for one is the
+failure mode of the other. Note the incompatibility is in *initialisation
+order*, not in the attach modes themselves: `roctracer` is the only backend an
+attach mode is forced on, while `rocprofiler` works under either — `mode: cli`
+loads `libproton` before the payload, and `mode: env` is equally safe provided
+the payload imports Proton before torch, as `amd-rocprofiler/gelu.py` does.
 
 | Backend | Configures itself | Runtime state it needs at that moment | Attach mode |
 |---|---|---|---|
@@ -436,8 +440,9 @@ would imply more than it knows. The Triton version in the run's env snapshot is
 what disambiguates which backend produced a given set of numbers — read it
 before comparing `proton_gpu_time_ms` across runs from different environments.
 
-To pin a backend, use `mode: env` and a payload that imports torch and then
-calls `proton.start()` itself:
+To pin `roctracer`, use `mode: env` and a payload that imports torch and then
+calls `proton.start()` itself (`rocprofiler` needs the reverse import order, and
+also accepts `mode: cli`):
 
 ```yaml
 collect:

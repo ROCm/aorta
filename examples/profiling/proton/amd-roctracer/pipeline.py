@@ -5,8 +5,10 @@ bias+GELU, and a row-sum reduction, launched in that order so the hatchet tree
 carries a real launch sequence rather than a single kernel.
 
 Unlike the ``triton-vecadd`` / ``triton-softmax`` payloads this one drives
-Proton itself, because pinning an AMD backend only works from inside a live HIP
-runtime -- see the ``import torch`` comment below and ``recipe.yaml``.
+Proton itself, because pinning ``roctracer`` only works from inside a live HIP
+runtime -- see the ``import torch`` comment below and ``recipe.yaml``. That is
+specific to this backend: ``rocprofiler`` needs the opposite load order, and
+``instrumentation`` needs no particular one.
 
 Constexpr kernel parameters are spelled lowercase (``block_size`` rather than
 Triton's conventional ``BLOCK_SIZE``) to satisfy this repository's lint

@@ -204,8 +204,7 @@ def validate_options(options: Mapping[str, str] | None) -> dict[str, str]:
                 f"from {sorted(BACKEND_MODES)} -- Proton's '--mode' domain is "
                 "backend-specific, so there is nothing to validate it against "
                 f"under backend: {effective['backend']}. Pin the backend "
-                "(which needs mode: env for rocprofiler / roctracer), or drop "
-                "the option."
+                "(roctracer additionally needs mode: env), or drop the option."
             )
         if effective["backend_mode"] not in allowed:
             raise ValueError(
