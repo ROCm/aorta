@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "mitigations": {
+    "ts_suite_attention": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel/test/ops/test_attention.py"
+    },
+    "ts_suite_attention_mla": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel/test/ops/test_attention_mla.py"
+    },
+    "ts_suite_attention_dsa": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel/test/ops/test_attention_dsa.py"
+    },
+    "ts_suite_attention_gdn": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel/test/ops/test_attention_gdn.py"
+    },
+    "ts_suite_quantization": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel/test/ops/test_quantization.py"
+    },
+    "ts_suite_transform": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel/test/ops/test_transform.py"
+    },
+    "ts_suite_moe_gluon_bf16": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel-amd/test/ops/test_moe_gluon_bf16_gfx950.py"
+    },
+    "ts_suite_moe_sorting": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel-amd/test/ops/test_moe_sorting_gfx950.py"
+    },
+    "ts_suite_sampling_gluon": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel-amd/test/ops/test_sampling_gluon_gfx950.py"
+    },
+    "ts_suite_mm_a16w16": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel-amd/test/ops/test_mm_a16w16_gfx950.py"
+    },
+    "ts_suite_amd_ops_all": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel-amd/test/ops"
+    },
+    "ts_suite_upstream_ops_all": {
+      "TS_PYTEST_SUITE": "tokenspeed-kernel/test/ops"
+    }
+  }
+}

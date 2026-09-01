@@ -1,0 +1,116 @@
+# TokenSpeed kernel execution through aorta: gemm.mm on gfx950.
+#
+# This is the kernel half of the TokenSpeed integration -- running TokenSpeed's
+# own AMD kernels under aorta's triage machinery rather than its serving stack.
+# It is ~17s per trial against ~5.5min for a serving bring-up, so it is the cheap
+# path for anything iterative.
+#
+# The matrix is solution x ROCm knob: each mitigation cell pins one gemm.mm
+# solution (Gluon vs torch) and each diagnostic cell applies a launch-behaviour
+# knob. Every cell runs the same argv; the sidecar's TS_KERNEL_NAME is what
+# differs. Verification runs alongside the benchmark, so a cell fails on a wrong
+# answer as well as on a crash.
+#
+# SCOPE, measured on tokenspeed-amd:nightly-20260714 (see
+# docs/tokenspeed.md for the full survey):
+# gemm.mm is the ONLY operator that can be driven through TokenSpeed's kernel
+# harness today. 20 of its 21 registered operator families -- including every
+# attention kernel (mha/mla/dsa/gdn) and moe.apply -- have no numerics input
+# generator, so `--op attention.mha_prefill` dies in the harness before any
+# kernel launches. That is an upstream TokenSpeed gap, not an aorta one.
+#
+# What THIS file runs, precisely: two gemm.mm solutions (Gluon and torch, both
+# bf16) across two launch-behaviour columns. It is a smoke, not a survey -- the
+# point is a fast solution-vs-knob contrast, so it deliberately does not sweep
+# every gemm.mm kernel. tokenspeed-kernel-sidecar.json carries three more
+# selectors (ts_gemm_triton_fp8_blockscale, ts_gemm_torch_fp8_blockscale,
+# ts_gemm_all_bf16); add them to mitigation_axis to widen the matrix, at ~17s
+# per trial x trials x diagnostic columns.
+#
+# Pre-reqs: gfx950 node, image pulled, scripts staged node-locally. See
+# tokenspeed-serve-probe-smoke.yaml for the exact commands.
+#
+# Run:
+#   export TS_IMAGE=lightseekorg/tokenspeed-amd:nightly-20260714
+#   export TS_SCRIPTS_DIR=/tmp/ts-work/scripts
+#   export TS_ENTRY=ts_kernel_probe.sh
+#   aorta sweep run \
+#     --recipe recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml \
+#     --mitigations-file recipes/tokenspeed/tokenspeed-kernel-sidecar.json \
+#     --output-dir /tmp/ts-work/kernel-out --ticket TOKENSPEED-KERNEL \
+#     -- bash /tmp/ts-work/scripts/host_launch.sh
+
+schema_version: 1
+mode: probe
+
+ticket: TOKENSPEED-KERNEL
+
+# Kernel trials are cheap, and p99 latency across repeats is the interesting
+# signal, so more than one trial per cell is affordable here (unlike serving).
+trials: 3
+
+# Rows: which gemm.mm solution to run.
+mitigation_axis:
+  - ts_gemm_gluon_bf16
+  - ts_gemm_torch_bf16
+
+# Columns: launch behaviour. hip_launch_blocking serializes every kernel launch;
+# it is the standard first question for an async-ordering bug, and comparing the
+# two columns separates "the kernel is wrong" from "the pipelining around it
+# is wrong".
+diagnostic_axis:
+  - none
+  - hip_launch_blocking
+
+# docker does not inherit the parent environment, so the per-cell kernel
+# selection has to arrive as a file that host_launch.sh turns into --env-file.
+# With `inherit`, every cell would silently run the same default kernel.
+env_passthrough_mode: file
+
+# Generous next to a ~15s trial, but the first trial on a cold container pays
+# Triton/Gluon JIT compilation for each shape.
+timeout_per_trial: 900
+
+# Same false-positive as the serving probe: the monitored PID is the bash
+# wrapper blocking on `docker run`, so its stdout and /proc io look idle while
+# the container works. See tokenspeed-serve-probe-smoke.yaml for the detail.
+hang_grace_period_at_start: 900
+
+custom_patterns:
+  # ts_kernel_probe.sh re-reads the exported JSON and exits 32 on a mismatch,
+  # because tokenspeed_kernel.benchmark returns 0 even when --verify fails.
+  # This pattern is what names it as a numerics problem in the matrix.
+  - id: ts_kernel_numerics_mismatch
+    match:
+      regex: 'TS_KERNEL_FAIL: numerics_mismatch'
+    on_match: fail
+
+  # An empty export means the kernel/dtype/role triple matched nothing, which
+  # is a recipe bug rather than a GPU finding -- distinct detector, so it does
+  # not get mistaken for a regression.
+  - id: ts_kernel_no_records
+    match:
+      regex: 'TS_KERNEL_FAIL: benchmark_exported_no_records'
+    on_match: fail
+
+  - id: ts_kernel_cli_failed
+    match:
+      regex: 'TS_KERNEL_FAIL: (numerics|benchmark)_cli_rc='
+    on_match: fail
+
+  # The harness gap above: surfaced as its own detector so that pointing a
+  # recipe at an unsupported operator is self-diagnosing.
+  - id: ts_kernel_no_input_generator
+    match:
+      regex: 'No input generator registered for'
+    on_match: fail
+
+  - id: ts_kernel_no_standard_shapes
+    match:
+      regex: 'No standard shapes registered for'
+    on_match: fail
+
+  - id: ts_unsupported_arch
+    match:
+      regex: 'Detected unsupported AMD GPU architecture'
+    on_match: fail

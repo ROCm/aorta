@@ -1,0 +1,113 @@
+# Phase 0 smoke: bring-up triage for TokenSpeed serving on gfx950.
+#
+# What this proves: aorta can drive a third-party inference engine it knows
+# nothing about, across a mitigation axis, and produce a real pass/fail verdict
+# plus the full artifact tree (stdout/stderr, env.json, result.json, bundle).
+# No new workload code -- this runs on the built-in `_subprocess` probe path.
+#
+# What it does NOT do: measure serving performance. `tokenspeed serve` is
+# started, proven healthy, asked for one completion, and torn down. TTFT / TPOT
+# / throughput would need a workload class, because the probe path has no
+# metrics channel -- see docs/tokenspeed.md, "Not done yet".
+#
+# Hardware: gfx950 only. TokenSpeed's platform check accepts gfx950 and gfx1250
+# and raises on anything else, so MI300X (gfx942) cannot run this.
+#
+# Pre-reqs:
+#   1. A gfx950 node with docker. On the SLURM cluster:
+#        salloc --no-shell -p interactive -N1 -t 4:00:00
+#   2. The image pulled on that node. If ~/.docker/config.json holds an expired
+#      Docker Hub credential, docker uses it instead of falling back to
+#      anonymous and every pull fails with "authentication required"; override
+#      it rather than editing the file:
+#        mkdir -p /tmp/dockercfg-anon && echo '{}' > /tmp/dockercfg-anon/config.json
+#        DOCKER_CONFIG=/tmp/dockercfg-anon \
+#          docker pull lightseekorg/tokenspeed-amd:nightly-20260714
+#   3. Scripts staged node-locally (the docker daemon cannot read the
+#      root-squashed NFS home). Stage from the compute node, not the login
+#      node -- /tmp is per-node, so staging on the login node leaves the trials
+#      running whatever older copy the compute node already had:
+#        srun --jobid=$JOBID --overlap \
+#          bash src/aorta/workloads/tokenspeed/stage_scripts.sh
+#
+# Run:
+#   export TS_IMAGE=lightseekorg/tokenspeed-amd:nightly-20260714
+#   export TS_SCRIPTS_DIR=/tmp/ts-work/scripts
+#   export TS_MODEL=Qwen/Qwen3-0.6B
+#   aorta sweep run \
+#     --recipe recipes/tokenspeed/tokenspeed-serve-probe-smoke.yaml \
+#     --output-dir /tmp/ts-work/probe-out --ticket TOKENSPEED-PHASE0 \
+#     -- bash /tmp/ts-work/scripts/host_launch.sh
+
+schema_version: 1
+mode: probe
+
+ticket: TOKENSPEED-PHASE0
+
+# One trial per cell: this recipe answers "does it come up", which is not a
+# flaky question. Raise trials only once you are hunting an intermittent
+# startup failure.
+trials: 1
+
+# Baseline vs one cheap allocator knob. Deliberately small: the point of the
+# smoke is the plumbing, and a wide axis multiplies a multi-minute model load.
+# hsa_no_scratch_reclaim is the interesting one on gfx950 -- scratch reclaim
+# interacts with the large per-workgroup scratch that the Gluon attention
+# kernels allocate.
+mitigation_axis:
+  - none
+  - hsa_no_scratch_reclaim
+diagnostic_axis:
+  - none
+
+# Docker needs the cell's mitigations as a file: `docker run` does not inherit
+# the parent's environment, so `inherit` mode would silently drop them and every
+# cell would be the baseline. `file` mode writes probe.env and exports
+# AORTA_ENV_FILE, which host_launch.sh turns into --env-file.
+env_passthrough_mode: file
+
+# Budget: image is local, but a cold HF download plus weight load plus server
+# init is minutes. 0.6B on one GPU lands well inside this.
+timeout_per_trial: 1800
+
+# The monitored PID is `bash host_launch.sh`, which blocks on `docker run` while
+# the real work happens in the container under a PID the monitor cannot see.
+# Its stdout and /proc/<pid>/io stay quiet, tripping stdout_silent + io_idle and
+# latching tier2:hang as a false positive. A grace period >= timeout_per_trial
+# short-circuits the hang predicate for the whole trial. (The workload also
+# reconciles a latched hang away on a clean exit 0, but a *failing* trial would
+# otherwise be reported as a hang rather than its real cause.)
+hang_grace_period_at_start: 1800
+
+# The exit code is the primary verdict (Tier 1). These patterns exist to name
+# the failing step in `failure_detectors_fired`, so the matrix distinguishes
+# "died loading weights" from "came up but would not generate" without anyone
+# opening stdout.log.
+custom_patterns:
+  - id: ts_server_exited_during_startup
+    match:
+      regex: 'TS_PROBE_FAIL: server_exited_during_startup'
+    on_match: fail
+
+  - id: ts_readiness_timeout
+    match:
+      regex: 'TS_PROBE_FAIL: readiness_timeout'
+    on_match: fail
+
+  - id: ts_health_generate_unhealthy
+    match:
+      regex: 'TS_PROBE_FAIL: health_generate_unhealthy'
+    on_match: fail
+
+  - id: ts_completion_failed
+    match:
+      regex: 'TS_PROBE_FAIL: completion_(http_[0-9]+|empty|unparseable)'
+    on_match: fail
+
+  # TokenSpeed's own guard when the GPU is not gfx950/gfx1250. Worth naming
+  # explicitly: on the wrong node every cell fails identically and the matrix
+  # should say why rather than showing a bare non-zero exit.
+  - id: ts_unsupported_arch
+    match:
+      regex: 'Detected unsupported AMD GPU architecture'
+    on_match: fail
