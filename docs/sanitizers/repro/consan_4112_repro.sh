@@ -178,15 +178,21 @@ bytes=$(stat -c%s "${OBJECT}")
 # rather than silently reporting "0 kernels" and looking like a wrong object.
 # --dyn-syms, not --symbols: --symbols prints .dynsym AND .symtab, and a kernel is
 # in both, so it reports exactly twice the kernel count. That is where the "490"
-# below (and the counts in daily-consan-gemm.yaml) came from before the fix.
+# below came from before the fix, as did every other figure counted that way.
 if command -v llvm-readelf >/dev/null; then
     kernels="$(llvm-readelf --dyn-syms "${OBJECT}" 2>/dev/null | grep -c 'FUNC.*GLOBAL')"
+    # 0 here means the object has no .dynsym, not that it has no kernels. Report
+    # it as unknown for the same reason as the missing-tool case above.
+    if [ "${kernels}" = "0" ]; then
+        kernels="unknown (no .dynsym in object)"
+    fi
 else
     kernels="unknown (llvm-readelf not on PATH)"
 fi
 echo "   object: ${bytes} bytes, ${kernels} kernels"
 echo "   (originally observed at 16265200 bytes / 245 kernels on ROCm 7.0.2.2;"
-echo "    the byte figure is the compressed CCOB bundle expanded ~40x by unbundling)"
+echo "    the byte figure is the shipped CCOB bundle after unbundling, so it is"
+echo "    larger than the .co hipBLASLt installs -- the ratio was not measured)"
 
 echo "== building load-only driver"
 hipcc --offload-arch=gfx950 -DOBJECT="\"${OBJECT}\"" "${LOADER_SRC}" -o "${LOADER}" \
