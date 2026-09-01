@@ -197,39 +197,75 @@ Confidence is reported, not hidden, and it tracks how hard the evidence is:
 wave, `0.62` when only a log said so, `0.55` for a static hazard on a path that
 may never execute.
 
-## 5. Sequencing
+## 5. Sequencing, and the tests that gate each PR
 
-Three PRs off `feat/aorta-agent`, each independently reviewable:
+Three PRs off `feat/aorta-agent`, each independently reviewable and each
+carrying the tests that prove it. Tests mirror the source tree
+(`tests/cia/`, `tests/chat/`), markers come from the registered set in
+`pytest.ini` (`unit`, `integration`, `slow`, `gpu`, `rocm`) because
+`--strict-markers` is on.
 
-1. **The agents.** `src/aorta/cia/` with Launch, Watch, Autopsy; taxonomy
-   unified per F1; paths and hosts made settings per F3; Slurm behind the seam
-   per F4; the degraded-router log per F2. No chat changes. Provable with a
-   command and no chatbot.
-2. **The tools.** Catalogue, harnesses, the general `triage_workload`, and the
-   selector node. Chat gains the ability to choose and run a tool on pasted
-   code.
-3. **The reporting.** Streamed steps, the tool-start events, and the three-part
-   answer.
+### PR 1 — the agents
 
-## 6. Verification
+`src/aorta/cia/` with Launch, Watch and Autopsy. Taxonomy unified (F1), paths
+and hosts become settings (F3), Slurm goes behind one seam (F4), Autopsy logs a
+degraded router (F2). **No chat changes**: this PR is provable with a command
+and no chatbot installed.
 
-Per PR:
+| test | proves |
+| --- | --- |
+| `tests/cia/test_taxonomy.py` | Autopsy's categories *are* `AUTOPSY_CATEGORIES`; the three new members are present; no second category list ships |
+| `tests/cia/test_adapters.py` | each adapter maps its fixture artifact to the expected signal; an absent artifact yields no signal rather than a false clean |
+| `tests/cia/test_autopsy_router.py` | signal combinations produce the documented category and confidence band — debugger evidence outranks a log signature, an observed race outranks a static hazard |
+| `tests/cia/test_router_degraded.py` | **with the LLM unreachable, Autopsy still classifies *and emits a warning*** — the F2 failure made visible |
+| `tests/cia/test_watch_threshold.py` | Watch acts at ≥ 0.70 and stays silent below it, on recorded assessments |
+| `tests/cia/test_launch_seam.py` | the launcher seam builds the expected sbatch script; env vars requested by the caller reach it as exports |
+| `tests/cia/test_settings_neutral.py` | no site-specific default survives — no absolute home path, hostname or partition name in the shipped defaults (F3) |
+| `tests/cli/test_chat_boundaries.py` (extended) | no Click in `aorta.cia`; `aorta.cia` imports nothing from `aorta.chat` (F5, F6) |
 
-1. Registry/catalogue: every tool has a non-empty description; no tool declares
-   a symptom keyword.
-2. Structural gating: pasted-source tools are dropped when nothing is pasted,
-   kept when something is.
-3. Selector: four pasted-code prompts, including a bug never seen before, each
-   selecting a tool that acts on the pasted code.
-4. Boundary: `tests/cli/test_chat_boundaries.py` extended — no Click in
-   `aorta.cia`, no `aorta.chat` import from `aorta.cia`.
-5. Headless: Launch→Watch→Autopsy driven from a script with the chat extras
-   uninstalled.
-6. End to end, on hardware, for each of the three instruments: the sanitizer
-   actually ran (state `ran`, not `not_checked`), Watch alerted on its own
-   evidence, and Autopsy was triggered *by Watch* rather than by the fallback.
+`test_settings_neutral.py` and the extended boundary test are the two that would
+have caught the mistakes this port is most likely to repeat.
+
+### PR 2 — the tools and selection
+
+Catalogue, harnesses, the general `triage_workload`, and the selector node.
+
+| test | proves |
+| --- | --- |
+| `tests/chat/test_capabilities.py` | every tool has a non-empty description; descriptions carry no symptom keywords (*race*, *NaN*, *hazard*, *deadlock*); no two tools claim the same finding code |
+| `tests/chat/test_requirements_gating.py` | pasted-source tools are dropped when nothing is pasted and kept when something is — the one rule enforced in code, not by the model |
+| `tests/chat/test_source_detection.py` | pasted HIP, gfx950 assembly and Python training code are all detected; prose alone is not |
+| `tests/chat/test_harness.py` | a bare instruction sequence is wrapped into an assemblable unit; prose around a fenced block is discarded rather than compiled |
+| `tests/chat/test_selector_offline.py` | with a scripted model, the selector's JSON is parsed, capped, and filtered to known tools; a malformed reply degrades to "all tools" rather than raising |
+| `tests/chat/test_selector_live.py` (`integration`) | four pasted-code prompts including a bug never seen before; each selects a tool that acts on *the pasted code* |
+
+`test_selector_live.py` needs a model and is marked `integration`; everything
+else is offline and runs in the default gate.
+
+### PR 3 — the reporting
+
+Streamed steps, tool-start events, the three-part answer.
+
+| test | proves |
+| --- | --- |
+| `tests/chat/test_stream_callback.py` | streaming yields the same final state as awaiting; the callback fires once per node with that node's delta |
+| `tests/chat/test_tool_start_event.py` | a tool announces itself **before** it blocks — the event is observed while the tool is still running, not after its node completes |
+| `tests/chat/test_answer_shape.py` | the answer carries all three parts, and the evidence part names the tool and cites a file and line |
+| `tests/chat/test_no_callback_unchanged.py` | with no callback supplied the non-streaming path is byte-identical — the CLI is unaffected |
+
+## 6. Cross-cutting verification
+
+Once per PR, and again before the branch merges:
+
+1. **Headless.** Launch→Watch→Autopsy driven from a script with the chat extras
+   uninstalled. Catches any accidental dependency from `cia` on `chat` (F5).
+2. **On hardware** (`gpu`, `slow`), for each of the three instruments:
+   - the sanitizer actually ran — state `ran`, not `not_checked`;
+   - Watch alerted on its own evidence;
+   - Autopsy was triggered **by Watch**, not by the fallback path.
 
 That last check is not pedantry. In the source repo all three demos returned a
 correct-looking verdict while the sanitizer had not run, Watch had not alerted
-and Autopsy had reached its answer through a fallback path — because every layer
-degrades quietly. A verdict alone does not prove the pipeline ran.
+and Autopsy had reached its answer through a fallback — because every layer
+degrades quietly. A verdict alone does not prove the pipeline ran, and no
+offline test can prove it either.
