@@ -59,6 +59,13 @@ def isolated_chat_config(monkeypatch, tmp_path_factory):
     root = tmp_path_factory.mktemp("xdg")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))
+    # XDG alone is not enough: AORTA_CHAT_* outranks it, so a developer with
+    # AORTA_CHAT_INDEX_PATH exported would see the XDG defaults ignored and
+    # tests fail in a way that looks like a code bug. Everything is cleared
+    # except the tool mode this module pins deliberately above.
+    for name in list(os.environ):
+        if name.startswith(config.ENV_PREFIX) and name != "AORTA_CHAT_LLM_TOOL_MODE":
+            monkeypatch.delenv(name)
     config.reset_settings()
     yield
     config.reset_settings()

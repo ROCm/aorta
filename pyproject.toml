@@ -279,6 +279,9 @@ include = ["aorta*"]
 aorta = [
     "py.typed",
     "chat/ui/chainlit.md",
+    # The retrieval eval question set (Decision 19b). Shipped so `aorta chat
+    # index eval` works with no arguments on an installed wheel.
+    "chat/rag/eval_questions.json",
     "ebpf/scripts/*.bt",
     "ebpf/scripts/PROVENANCE.md",
     "workloads/hrx_kernels/*.cpp",

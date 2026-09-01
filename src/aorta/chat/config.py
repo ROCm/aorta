@@ -174,6 +174,13 @@ class Settings(BaseSettings):
 
     # --- LOCAL: embeddings ---
     embedding_model: str = "BAAI/bge-small-en-v1.5"
+    # Where the ONNX weights are cached. An explicit path rather than
+    # fastembed's own default, which is /tmp/fastembed_cache: that is wiped on
+    # reboot, so every reboot would cost a 90 MB re-download, and on a shared
+    # node it is a directory other users can write. ``HF_HOME`` overrides it, so
+    # the pre-seed procedure in rag/embeddings/fastembed_bge.py stays the
+    # HuggingFace idiom a user already knows.
+    model_cache_path: str = Field(default_factory=lambda: str(chat_cache_dir() / "models"))
 
     # --- REMOTE: embeddings ---
     # Vector dimensions differ from the local model, so the two providers

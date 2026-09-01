@@ -176,11 +176,16 @@ class TestModelCacheProbe:
         monkeypatch.setenv("HF_HOME", str(tmp_path))
         assert not fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
-    def test_onnx_weights_under_the_hub_dir_count(self, monkeypatch, tmp_path: Path):
+    def test_weights_under_the_source_repo_name_count(self, monkeypatch, tmp_path: Path):
+        """fastembed downloads from its own re-host, not from the model id.
+
+        ``BAAI/bge-small-en-v1.5`` arrives from
+        ``qdrant/bge-small-en-v1.5-onnx-q``, so that is the directory name the
+        cache actually carries.
+        """
         monkeypatch.setenv("HF_HOME", str(tmp_path))
         weights = (
             tmp_path
-            / "hub"
             / "models--qdrant--bge-small-en-v1.5-onnx-q"
             / "snapshots"
             / "abc"
@@ -190,15 +195,53 @@ class TestModelCacheProbe:
         weights.write_bytes(b"\x00")
         assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
+    def test_a_hub_seeded_cache_is_recognised_too(self, monkeypatch, tmp_path: Path):
+        """Plain huggingface_hub writes under $HF_HOME/hub, not beside it."""
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        weights = tmp_path / "hub" / "models--qdrant--bge-small-en-v1.5-onnx-q" / "m.onnx"
+        weights.parent.mkdir(parents=True)
+        weights.write_bytes(b"\x00")
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
+
     def test_a_directory_without_weights_does_not_count(self, monkeypatch, tmp_path: Path):
         """A half-finished download must not read as a warm cache."""
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        (tmp_path / "hub" / f"models--{DEFAULT_MODEL.replace('/', '--')}").mkdir(parents=True)
+        (tmp_path / f"models--{DEFAULT_MODEL.replace('/', '--')}").mkdir(parents=True)
         assert not fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
     def test_hf_home_is_honoured(self, monkeypatch, tmp_path: Path):
         monkeypatch.setenv("HF_HOME", str(tmp_path / "elsewhere"))
-        assert fastembed_bge.hf_home() == tmp_path / "elsewhere"
+        assert fastembed_bge.model_cache_dir() == tmp_path / "elsewhere"
+
+    def test_without_hf_home_it_is_aortas_own_cache_not_fastembeds_tmpdir(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """fastembed's default is /tmp/fastembed_cache: wiped on reboot, shared.
+
+        Verified against fastembed 0.8.0 rather than assumed. Leaving it there
+        would cost a 90 MB re-download after every reboot and put the weights in
+        a directory other users on a shared node can write.
+        """
+        monkeypatch.delenv("HF_HOME", raising=False)
+        monkeypatch.setattr(settings, "model_cache_path", str(tmp_path / "models"))
+        resolved = fastembed_bge.model_cache_dir()
+        assert resolved == tmp_path / "models"
+        assert "fastembed_cache" not in str(resolved)
+
+    def test_the_resolved_cache_dir_is_what_gets_passed_to_fastembed(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The probe and the download must agree, or doctor lies."""
+        monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+        seen = {}
+
+        def _capture(model, cache_dir):
+            seen["cache_dir"] = cache_dir
+            return _FakeModel()
+
+        monkeypatch.setattr(fastembed_bge, "_text_embedding", _capture)
+        FastembedBgeEmbeddings().embed_query("q")
+        assert seen["cache_dir"] == tmp_path / "hf"
 
     def test_describe_model_state_reports_the_offline_flag(self, monkeypatch, tmp_path: Path):
         monkeypatch.setenv("HF_HOME", str(tmp_path))
@@ -240,7 +283,7 @@ class TestDownloadFailureCarriesThePreSeedProcedure:
         assert "ConnectionError" in message
         assert "timed out" in message
 
-    def test_it_also_points_at_side_loading_the_index(self, monkeypatch, tmp_path):
+    def test_it_also_points_at_side_loading_the_index(self):
         """The two blockers are separate, so the message names both fixes."""
         assert "index fetch --from" in PRE_SEED_PROCEDURE
 

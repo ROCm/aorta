@@ -66,14 +66,18 @@ PRE_SEED_PROCEDURE = (
     "\n"
     "To pre-seed the cache from a machine that does have egress:\n"
     "  1. On the connected machine, with the same aorta version installed:\n"
-    "       export HF_HOME={cache}\n"
+    "       export HF_HOME=/tmp/aorta-model-cache\n"
+    "       aorta chat doctor            # downloads nothing\n"
     "       python -c 'from fastembed import TextEmbedding; "
-    'TextEmbedding("{model}")\'\n'
+    'TextEmbedding("{model}", cache_dir="/tmp/aorta-model-cache")\'\n'
     "  2. Copy that directory to this machine (it is ~90 MB):\n"
-    "       rsync -a {cache}/ <this-host>:{cache}/\n"
+    "       rsync -a /tmp/aorta-model-cache/ <this-host>:{cache}/\n"
     "  3. On this machine, point at it and forbid network lookups:\n"
     "       export HF_HOME={cache}\n"
     "       export HF_HUB_OFFLINE=1\n"
+    "\n"
+    "{cache} is where this install looks. Setting HF_HOME moves it; without "
+    "HF_HOME it is\nAORTA_CHAT_MODEL_CACHE_PATH, defaulting under the XDG cache.\n"
     "\n"
     "The prebuilt index is a separate artifact and a separate problem: fetch it\n"
     "elsewhere and side-load it with 'aorta chat index fetch --from <file>'."
@@ -88,23 +92,28 @@ class ModelUnavailableError(RuntimeError):
     """
 
 
-def hf_home() -> Path:
-    """Where ``huggingface_hub`` keeps its cache, honouring ``HF_HOME``.
+def model_cache_dir() -> Path:
+    """Where this install keeps the ONNX weights.
 
-    Resolved the same way the hub itself does, so the path named in
-    :data:`PRE_SEED_PROCEDURE` is the path the download would actually use.
+    An explicit directory, not fastembed's default. Verified rather than
+    assumed: fastembed ignores ``HF_HOME`` and caches under
+    ``/tmp/fastembed_cache``, which is wiped on reboot -- so every reboot would
+    cost a 90 MB re-download -- and is world-writable on a shared node.
+
+    ``HF_HOME`` still wins when set, because a user who set it did so
+    deliberately and because pre-seeding through it is the HuggingFace idiom
+    :data:`PRE_SEED_PROCEDURE` documents. fastembed lays out
+    ``models--org--name`` directly under whatever directory it is given, so this
+    coexists with ``huggingface_hub``'s own ``$HF_HOME/hub``.
     """
     raw = os.environ.get("HF_HOME", "").strip()
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".cache" / "huggingface"
+    return Path(settings.model_cache_path).expanduser()
 
 
 def _model_dir_slug(model: str) -> str:
-    """The HuggingFace cache directory name for a repo id.
-
-    ``huggingface_hub`` stores ``org/name`` as ``models--org--name``.
-    """
+    """The cache directory name for a repo id: ``org/name`` -> ``models--org--name``."""
     return "models--" + model.replace("/", "--")
 
 
@@ -112,17 +121,18 @@ def model_is_cached(model: str | None = None) -> bool:
     """Whether the ONNX weights are already on disk.
 
     Deliberately a filesystem check rather than a ``TextEmbedding(...)``
-    construction: ``doctor`` must be able to answer this without a 90 MB
-    download as a side effect. fastembed resolves the *source* repo rather than
-    the model id, so both are accepted -- a cache seeded through either name
-    counts.
+    construction: ``doctor`` must answer this without a 90 MB download as a side
+    effect. fastembed downloads from a *source* repo rather than from the model
+    id, so both names are accepted -- a cache seeded through either counts. The
+    ``hub`` subdirectory is checked too, so a cache seeded by plain
+    ``huggingface_hub`` into ``$HF_HOME/hub`` is recognised.
     """
     model = model or settings.embedding_model
-    roots = [hf_home() / "hub", hf_home()]
+    root = model_cache_dir()
     candidates = {_model_dir_slug(model), _model_dir_slug(_source_repo(model))}
-    for root in roots:
+    for base in (root, root / "hub"):
         for candidate in candidates:
-            directory = root / candidate
+            directory = base / candidate
             if directory.is_dir() and any(directory.rglob("*.onnx")):
                 return True
     return False
@@ -165,7 +175,7 @@ def _text_embedding(model: str, cache_dir: Path | None) -> TextEmbedding:
         if model_is_cached(model):
             raise
         raise ModelUnavailableError(
-            PRE_SEED_PROCEDURE.format(model=model, cache=hf_home())
+            PRE_SEED_PROCEDURE.format(model=model, cache=model_cache_dir())
             + f"\n\nUnderlying error: {type(exc).__name__}: {exc}"
         ) from exc
 
@@ -187,12 +197,14 @@ class FastembedBgeEmbeddings(Embeddings):
 
     def __init__(self, model_name: str = DEFAULT_MODEL, cache_dir: Path | None = None) -> None:
         self.model_name = model_name
+        # Resolved on first embed, not here, so a test or a job script that sets
+        # HF_HOME after constructing the provider is still honoured.
         self.cache_dir = cache_dir
         self._model: TextEmbedding | None = None
 
     def _get_model(self) -> TextEmbedding:
         if self._model is None:
-            self._model = _text_embedding(self.model_name, self.cache_dir)
+            self._model = _text_embedding(self.model_name, self.cache_dir or model_cache_dir())
         return self._model
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
@@ -247,7 +259,7 @@ def describe_model_state(model: str | None = None) -> dict[str, Any]:
     return {
         "model": model,
         "source_repo": _source_repo(model),
-        "cache_dir": str(hf_home()),
+        "cache_dir": str(model_cache_dir()),
         "cached": model_is_cached(model),
         "offline": os.environ.get("HF_HUB_OFFLINE", "").strip() not in ("", "0"),
     }
