@@ -119,7 +119,11 @@ def proton_kwargs(backend: str | None) -> dict[str, str | None]:
     A variable aorta did not export falls back to the collector's own default,
     which keeps a standalone run and a trial configured the same way spelled
     identically. ``backend`` is the one knob a standalone run needs on the
-    command line, since it is what this example exists to pin.
+    command line, since it is what this example exists to pin. Every variable
+    ``build_env`` can export is read, including ``AORTA_PROTON_HOOK``: a knob
+    the recipe sets and the payload drops would be configured and silently
+    absent from the capture, which is the failure this example exists to
+    demonstrate the absence of.
     """
     environ = os.environ
     return {
@@ -128,6 +132,7 @@ def proton_kwargs(backend: str | None) -> dict[str, str | None]:
         "data": environ.get(f"{_ENV_PREFIX}DATA", "tree"),
         "backend": environ.get(f"{_ENV_PREFIX}BACKEND") or backend,
         "mode": environ.get(f"{_ENV_PREFIX}MODE"),
+        "hook": environ.get(f"{_ENV_PREFIX}HOOK"),
     }
 
 

@@ -225,6 +225,15 @@ def build_argv_prefix(
     front-end collects them with ``argparse.REMAINDER``, so there is no ``--``
     separator (unlike rocprofv3).
 
+    This renders whatever the validated options ask for, including a ``-b`` for
+    a backend :func:`wrap_argv` would refuse to pin (see
+    :data:`_CLI_UNPINNABLE_BACKENDS`). The split is deliberate -- this function
+    is the renderer and :func:`wrap_argv` is where the attach decision is made,
+    so a caller that only wants to display or log the flags still can -- but it
+    means a consumer building its own CLI attach out of this prefix has to
+    apply that policy itself. Everything inside aorta reaches Proton through
+    :func:`wrap_argv`.
+
     Args:
         out_dir: Directory the profile is written into.
         options: Recipe-supplied options; see :func:`validate_options`.
