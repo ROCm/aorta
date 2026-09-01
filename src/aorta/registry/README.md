@@ -1,6 +1,6 @@
-# `aorta.registry` — mitigations + environments
+# `aorta.registry` — mitigations + environments + agents
 
-Two small registries that ship with aorta:
+Three small registries that ship with aorta:
 
 - **Mitigations** (`name → env vars`) — process-level flags applied just before
   the workload subprocess launches. Examples: `tf32_off`, `xnack`.
@@ -9,8 +9,11 @@ Two small registries that ship with aorta:
   Launch hints include `docker`, `venv`, and `buck_target`; `env` is an
   optional `dict[str, str]` intrinsic to that environment. Examples: `local`,
   `default`.
+- **Agents** (`name → Click command`) — autonomous workflows that run
+  unattended to a verdict and write artifacts, surfaced as `aorta agent <name>`.
+  Example: `mitigate`.
 
-Both follow the same shape: built-ins ship from this package; external
+All three follow the same shape: built-ins ship from this package; external
 contributions arrive via Python entry-points and are merged at runtime.
 
 ## Adding a mitigation
@@ -297,10 +300,70 @@ Adding a fourth tier later (e.g. Bazel) follows the same pattern: extend
 `Environment`, extend `_VALID_ENV_KEYS`, document the read pattern here.
 The dispatcher round-trips the field for free (`asdict(env_descriptor)`).
 
+## Adding an agent
+
+An **agent** is autonomous: it runs unattended, reaches a verdict, and writes
+artifacts. That is the line against interactive, human-in-the-loop surfaces —
+if a human sits and watches it, it is not an agent and does not belong here.
+
+`aorta agent <name>` resolves `<name>` through this registry, so the group
+never hard-codes its subcommands. The payload is the `click.Command` that
+implements the agent.
+
+### Built-in
+
+Built-ins register directly in `BUILTIN_AGENTS` in
+`src/aorta/registry/agents.py`, as a `"module:attr"` target string pointing at
+a Click command under `src/aorta/cli/` (Click code stays in the CLI layer;
+`aorta.registry` must not import `aorta.cli`, which is why the value is a
+string and not an import):
+
+```python
+BUILTIN_AGENTS: dict[str, str] = {
+    "mitigate": "aorta.cli.agent_mitigate:mitigate",
+    "autopsy":  "aorta.cli.agent_autopsy:autopsy",   # <-- your addition
+}
+```
+
+The entry-point group below is **reserved for third-party packages** — do not
+route a built-in through it.
+
+### Plugin
+
+Ship the agent from your own package via the `aorta.agents` entry-point group.
+The entry-point name IS the name `aorta agent <name>` dispatches on:
+
+```toml
+[project.entry-points."aorta.agents"]
+autopsy = "my_package.cli:autopsy"
+```
+
+```python
+# my_package/cli.py
+import click
+
+
+@click.command(name="autopsy")
+@click.option("--bundle", type=click.Path(exists=True))
+def autopsy(bundle):
+    """Post-mortem triage over a collected bundle."""
+```
+
+An entry that fails to import, or that does not resolve to a `click.Command`,
+is logged via the `aorta.registry.agents` logger and skipped — one broken
+plugin cannot take the whole `aorta agent` namespace down. A **name collision**
+is different and still raises, per the rule below.
+
+### Deprecated: bare `aorta agent -- <command>`
+
+Before the namespace existed, `aorta agent` *was* the mitigation search. That
+spelling keeps working for one release: it prints a stderr deprecation notice
+and runs `aorta agent mitigate` unchanged.
+
 ## Collisions
 
 If two contributors register the same name (built-in vs plugin, or plugin vs
-plugin), `load_mitigations()` / `load_environments()` raises
+plugin), `load_mitigations()` / `load_environments()` / `load_agents()` raises
 `RegistryCollisionError` naming both packages. There is no winner — the human
 resolves it by renaming or removing one of the entries. This is intentional:
 silent overrides cause hours of "why does my mitigation behave wrong"
@@ -342,6 +405,7 @@ Tracked in issue #195.
 ```bash
 aorta mitigations list
 aorta environments list
+aorta agent --help          # lists every registered agent
 ```
 
 Each shows every registered entry plus its source package — useful when
