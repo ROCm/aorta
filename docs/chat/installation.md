@@ -1,17 +1,30 @@
 # Installing `aorta chat`
 
 Chat is an extra, not part of the base install. `pip install amd-aorta` remains
-`pyyaml` plus `click`, which is what makes it a few seconds on a customer node;
-chat adds roughly 400 MB and ~120 distributions, so it is opted into
-deliberately.
+`pyyaml` plus `click` — about 9 MB and a few seconds on a customer node — and
+chat is a couple of hundred megabytes on top, so it is opted into deliberately.
 
 ## The three extras
 
-| Extra | Adds | Python | Rough size |
+Sizes are measured `site-packages` on Python 3.12, base install included.
+
+| Extra | Adds | Python | Size |
 | --- | --- | --- | --- |
-| `chat-cli` (alias: `chat`) | LangChain / LangGraph, the OpenAI client, sqlite-vec, rich | 3.11+ | ~400 MB |
-| `chat-ui` | `chat-cli` plus Chainlit, for `aorta chat ui` | 3.11–3.13 | ~460 MB |
-| `chat-all` | `chat-ui` plus LiteLLM, for native Anthropic / Gemini / Bedrock | 3.11–3.13 | ~560 MB |
+| `chat-cli` (alias: `chat`) | LangChain / LangGraph, the OpenAI client, sqlite-vec, rich | 3.11+ | ~210 MB |
+| `chat-ui` | `chat-cli` plus Chainlit, for `aorta chat ui` | 3.11–3.13 | ~305 MB |
+| `chat-all` | `chat-ui` plus LiteLLM, for native Anthropic / Gemini / Bedrock | 3.11–3.13 | ~420 MB |
+
+The embedding model's weights (~130 MB) are fetched on first use and cached
+outside the environment, so they are not in those numbers.
+
+> **One current exception, and it is a large one.** `chat-all` presently also
+> pulls `chat-embeddings-torch`, the transitional sentence-transformers
+> embedding path, which hard-requires PyTorch — and on a machine without torch
+> already present, pip resolves the default PyPI wheel, which is the **CUDA**
+> build. That takes `chat-all` to about 5.1 GB and deposits NVIDIA CUDA
+> libraries on an AMD node. Until the torch-free replacement lands, prefer
+> `pip install 'amd-aorta[chat-ui]' litellm langchain-litellm` over `chat-all`
+> if you want the LiteLLM backends.
 
 ```bash
 # Published package
@@ -24,11 +37,9 @@ uv pip install -e ".[chat-cli]"
 `pip install 'amd-aorta[chat]'` is an alias for `chat-cli`, because that is what
 most people type first.
 
-**No PyTorch, no CUDA, no GPU.** Retrieval runs a small embedding model on CPU
-and generation happens wherever your provider lives. Nothing in these extras
-pulls a torch build, which matters on a ROCm node: a dependency that
-hard-requires torch makes pip resolve the default PyPI wheel, and that is the
-**CUDA** build.
+**No GPU.** Retrieval runs a small embedding model on CPU and generation happens
+wherever your provider lives; `chat-cli` and `chat-ui` pull no torch build at
+all, which matters on a ROCm node for the reason in the callout above.
 
 ## Python range
 

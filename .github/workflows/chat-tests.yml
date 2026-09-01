@@ -152,13 +152,20 @@ jobs:
       #     reads the profile with stdlib `tomllib`. The 3.10 leg that
       #     cpu-tests.yml runs covers the only thing 3.10 must still do here,
       #     which is print an install hint instead of an ImportError.
-      #   * chat-ui adds Chainlit, which declares `Requires-Python <3.14`. So
-      #     the py3.14 leg installs chat-cli and NOT chat-all: chat-all pulls
-      #     chat-ui, and while the marker on that dependency means pip would
-      #     quietly resolve to nothing rather than fail, "quietly resolves to
-      #     nothing" is exactly the state that makes an install look successful
-      #     and a feature look broken. Asking for it explicitly per leg keeps
-      #     the matrix honest about what each interpreter is actually testing.
+      #   * chat-ui adds Chainlit, which declares `Requires-Python <3.14`, so it
+      #     can only be asked for on a leg below that. The py3.14 leg installs
+      #     chat-cli. Naming the extra per leg rather than letting Chainlit's
+      #     marker sort it out is deliberate: the marker means pip resolves it
+      #     to nothing rather than failing, and "quietly resolved to nothing" is
+      #     exactly the state that makes an install look successful and a
+      #     feature look broken.
+      #
+      # No leg installs chat-all. It still carries chat-embeddings-torch, the
+      # transitional sentence-transformers path, and on a runner with no torch
+      # present pip resolves the default PyPI wheel -- which is the CUDA build.
+      # Measured: 5.1 GB of site-packages, versus 417 MB for the same stack
+      # asked for directly. Decision 19a deletes that extra; this can collapse
+      # back to `chat-all` once it is gone.
       matrix:
         include:
           - python-version: "3.11"
@@ -169,7 +176,8 @@ jobs:
           # of Chainlit's supported range, which is where a `Requires-Python`
           # bump on its side will show up first.
           - python-version: "3.13"
-            extras: chat-all
+            extras: chat-ui
+            litellm: "yes"
           - python-version: "3.14"
             extras: chat-cli
     steps:
@@ -190,6 +198,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[${{ matrix.extras }},tests]"
 
+      # The two packages chat-all would add, asked for directly. See the matrix
+      # comment for why chat-all itself is not used.
+      - name: Install the LiteLLM backend
+        if: matrix.litellm == 'yes'
+        run: pip install litellm langchain-litellm
+
       # Without this the gate can pass by doing nothing. tests/chat/conftest.py
       # collect-ignores the whole directory when langchain_core is missing, so a
       # resolution that silently dropped the extra -- an environment marker that
@@ -199,6 +213,7 @@ jobs:
       - name: Verify the chat extra actually installed
         env:
           EXTRAS: ${{ matrix.extras }}
+          WITH_LITELLM: ${{ matrix.litellm }}
         run: |
           python - <<'PY'
           import importlib.util
@@ -207,8 +222,10 @@ jobs:
 
           extras = os.environ["EXTRAS"]
           required = ["langchain_core", "langchain_openai", "langgraph", "openai", "sqlite_vec"]
-          if extras == "chat-all":
-              required += ["chainlit", "litellm", "langchain_litellm"]
+          if extras in ("chat-ui", "chat-all"):
+              required.append("chainlit")
+          if os.environ.get("WITH_LITELLM") == "yes":
+              required += ["litellm", "langchain_litellm"]
           missing = [name for name in required if importlib.util.find_spec(name) is None]
           if missing:
               sys.exit(
@@ -218,6 +235,25 @@ jobs:
               )
           print(f"{extras} present:", ", ".join(required))
           PY
+
+      # The plan's worst outcome, asserted rather than trusted: a chat extra
+      # that reaches torch makes pip resolve the default PyPI wheel, which is
+      # the CUDA build, and deposits ~2.7 GB of nvidia-* onto what is supposed
+      # to be an AMD toolkit. Nothing here should get near it, so a leg that
+      # does has regressed something and must say so loudly.
+      - name: Assert no torch and no CUDA wheels came along
+        run: |
+          set -euo pipefail
+          # Captured first, so a pip that failed to run aborts the step rather
+          # than reading as an empty (and therefore clean) package list.
+          installed="$(python -m pip list --format=freeze)"
+          found="$(printf '%s\n' "$installed" | grep -E '^(torch|nvidia-)' || true)"
+          if [ -n "$found" ]; then
+            echo "A chat extra pulled in torch or CUDA wheels:"
+            echo "$found"
+            exit 1
+          fi
+          echo "No torch, no nvidia-* wheels in $(printf '%s\n' "$installed" | grep -c .) packages."
 
       # The chat suite plus the four import-boundary tests, which live under
       # tests/cli/ because they are pure AST and must also run on a base

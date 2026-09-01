@@ -13,6 +13,10 @@ retrieval then costs nothing.
 | `openai` | OpenAI wire | OpenAI, OpenRouter, Groq, Together, Fireworks, DeepSeek, Mistral, xAI, and any gateway speaking the same protocol | `chat-cli` |
 | `litellm` | LiteLLM's routing | Anthropic, Gemini and Bedrock, whose wire protocols are not OpenAI-compatible; also Azure OpenAI Service | `chat-all` |
 
+`chat-all` currently carries a transitional torch dependency — see the callout
+in [installation](installation.md#the-three-extras) for the smaller way to get
+the LiteLLM backends until that is removed.
+
 Adding a backend is a new module under `aorta/chat/inference/providers/`
 exposing `name`, `get_chat_model()`, `preflight()` and `describe()`, plus one
 entry in that package's factory. No node, graph or tool code changes.
