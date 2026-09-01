@@ -239,3 +239,22 @@ def test_importing_aorta_cli_does_not_pull_in_langchain():
         f"import aorta.cli pulled in {leaked}. Every chat import in "
         "aorta/cli/chat.py must live inside a command callback."
     )
+
+
+def test_importing_aorta_cli_does_not_pull_in_asyncio():
+    """A stdlib guard, because the rule's reason is cost, not third-partyness.
+
+    ``asyncio`` costs ~33 ms to import -- about 12% of ``aorta --help`` -- and
+    only ``aorta chat`` needs it. It passes the module-scope rule on a
+    technicality, so it gets its own assertion.
+    """
+    import subprocess
+
+    probe = "import sys, aorta.cli; print('asyncio' in sys.modules)"
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False", (
+        "import aorta.cli now pulls in asyncio; move the import into the "
+        "command callback that awaits the agent."
+    )

@@ -19,7 +19,6 @@ three output modes and the quiet-mode logging setup are that module's.
 
 from __future__ import annotations
 
-import asyncio
 import atexit
 import importlib
 import json
@@ -421,6 +420,12 @@ def _dispatch(
     """Shared body of the bare group and ``ask``."""
     if as_json and plain:
         raise click.UsageError("--json and --plain are mutually exclusive.")
+    # asyncio is stdlib, so it does not break the module-scope rule -- but it
+    # costs ~33 ms to import, which is 12% of `aorta --help` for a command
+    # almost nobody is running. The rule's reason applies even where its letter
+    # does not.
+    import asyncio
+
     config = _load("config")
     config.apply_cli_overrides(provider=llm_provider, model=llm_model)
     quiet = _setup_logging(verbose)
