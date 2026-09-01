@@ -280,36 +280,66 @@ RUN python -m pip install --no-cache-dir \
 # "'docker' not on PATH" without it, which fails the cell -- so a serving recipe
 # in the nightly matrix reddens the nightly every night until this exists.
 #
-# What the workload needs is a client that can reach the HOST daemon over the
-# socket bind-mounted by docker-compose.build.yaml, i.e. the sibling-container
-# pattern -- the engine comes up next to this container, not nested inside it.
-# So this deliberately installs no dockerd, no containerd and no runc: the
-# static tarball ships all of them and only `docker` is extracted. Nothing here
-# grants the container anything on its own; the socket mount is what does that,
-# it is opt-in per .env file, and docker/README.md documents why.
+# What the workload needs is a client that can reach the HOST daemon over a
+# bind-mounted socket, i.e. the SIBLING-container pattern -- the engine comes up
+# next to this container, not nested inside it. So this installs no dockerd, no
+# containerd and no runc: the static tarball ships all of them and only the
+# `docker` client is extracted. Nothing here grants the container anything on
+# its own. The socket is what would, and it is deliberately NOT in the base
+# compose: it lives in the opt-in docker-compose.docker-socket.yaml override,
+# whose header carries the security argument and the alternatives. Read that
+# before enabling it -- a container that can reach the daemon has effective root
+# on the host.
 #
-# Pinned by version AND sha256, like the base image is pinned by digest, and for
-# the same reason: the static channel keeps old versions, but a bare URL still
-# names a moving target the day the version is bumped without review. The digest
-# is the tarball's, resolved with `sha256sum docker-<version>.tgz`. Pinning a
-# prebuilt artifact by URL is this repo's established pattern for non-PyPI
-# tooling, and it avoids adding Docker's apt repo, whose signing key and
-# floating package versions would both become things to maintain for one file.
+# Pinned by version AND sha256, the same way the base above is pinned by
+# manifest digest and the pins below are exact, and for the same reason: the
+# static channel keeps old versions, but a bare URL still names a moving target
+# the day the version is bumped without review. Both live in the script.
 #
-# Fetched with python rather than curl or wget on purpose: this image's only
-# guaranteed tooling is python (the layer above and the guard below both run it)
-# and neither downloader is promised by the base. Verifying before extracting,
-# and extracting exactly one member by name, means a wrong or truncated download
-# fails the build instead of producing an image with a partial binary in it.
+# Not apt. This image has no apt layer at all, and adding one for a single
+# binary would mean Docker's own repo (Ubuntu's `docker.io` pulls in the daemon
+# this deliberately excludes), which means a signing key to rotate and package
+# versions that float between builds -- three new maintenance surfaces against
+# one pinned file. A pinned prebuilt artifact is also what #350 moved the
+# sanitizer toolchain TO, so it is the direction this image already went.
 #
-# The client negotiates its API version down to whatever the daemon on the
-# runner speaks, so it need not match the host's Docker version.
+# Fetched with python rather than curl or wget because this base guarantees
+# neither downloader but does guarantee python -- the layout guard above, the
+# two fixup blocks and the pip pins below all run it. Stdlib only, so a Python
+# bump moves it for free; verified against 3.14 with the rest of #411.
+#
 # A COPY + RUN pair rather than an inline heredoc, matching the layout guard
-# below: heredocs in a RUN need BuildKit, and a runner with DOCKER_BUILDKIT=0
-# would fail on syntax rather than on anything real. The script is also testable
-# on its own, which an inline blob is not.
+# above: heredoc RUNs need BuildKit, and a runner with DOCKER_BUILDKIT=0 (this
+# repo has hosts still on the legacy builder, with no buildx installed) would
+# fail on syntax rather than on anything real. Where this file needs inline
+# python it uses the `printf > /tmp/x.py` form for the same reason. A COPY'd
+# script is also testable on its own, which neither form is.
 COPY install_docker_cli.py /usr/local/share/aorta/install_docker_cli.py
-RUN python /usr/local/share/aorta/install_docker_cli.py && docker --version
+RUN python /usr/local/share/aorta/install_docker_cli.py
+
+# And prove the client is usable, at build time -- same reasoning as the hipcc
+# link check and the proton dlopen check above. A docker client that is present
+# but cannot execute is indistinguishable from a working one until a nightly
+# cell fails hours later, which is the loop those checks exist to break.
+#
+# `docker --version` is answered by the binary alone, with no daemon contacted,
+# which is exactly the property wanted here: the build must not depend on a
+# daemon (there is none inside a build step) and must not appear to pass because
+# one happened to be reachable.
+#
+# The daemon-absence assertions are the other half. They are what keeps "client
+# only" true: extracting one member from a tarball that also ships dockerd,
+# containerd and runc is a one-word edit away from shipping a daemon, and
+# nothing else in this image would notice.
+RUN set -eu; \
+    docker --version; \
+    for daemon in dockerd containerd runc containerd-shim-runc-v2; do \
+      if command -v "${daemon}" >/dev/null 2>&1; then \
+        echo "${daemon} is on PATH: this image is meant to carry the docker CLIENT only" >&2; \
+        exit 1; \
+      fi; \
+    done; \
+    echo "docker client check: OK -- $(command -v docker), no daemon on PATH"
 
 # Deliberately NO `ENV ROCM_HOME=/opt/rocm` here (issue #381).
 #

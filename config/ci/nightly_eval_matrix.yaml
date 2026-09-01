@@ -118,14 +118,31 @@ pending_entries:
     timeout_sec: 3600
     # The nightly runs `nightly_eval.py` INSIDE the aorta-ci-gpu container
     # (eval-reusable.yml -> docker_cmd.sh exec), and `tokenspeed_serve` runs the
-    # TokenSpeed engine in its own container -- so the entry needs a docker
-    # client and a daemon socket in there. Dockerfile.ci-gpu installs no docker
-    # CLI and docker-compose.build.yaml mounts no /var/run/docker.sock, so
-    # `setup()` would raise "'docker' not on PATH", the cell would error, and
-    # fail-closed would redden the nightly every night -- record-only does not
-    # protect against this, it only defers perf bounds.
-    # See docs/tokenspeed-gating-rollout.md for the enabling change.
-    blocked_on: "no docker client or daemon socket inside the aorta-ci-gpu container"
+    # TokenSpeed engine in its own container, so the entry needs a docker client
+    # and a route to a daemon in there. Both now EXIST but neither is switched
+    # on, and nothing has been observed working:
+    #
+    #   * Dockerfile.ci-gpu installs the client (docker/install_docker_cli.py).
+    #     The installer was run for real and the binary it produces drives a
+    #     live daemon, but the CI IMAGE has never been built -- the ROCm 10 base
+    #     is ~52 GB and no machine with that much free disk has run the build.
+    #   * The socket is a per-lane opt-in (`docker-socket: true` on the
+    #     rocm-ci-setup action, mounting docker-compose.docker-socket.yaml). No
+    #     lane sets it, deliberately: it grants effective root on the runner and
+    #     that is the CI owner's call, not this branch's.
+    #   * work_dir must then be set explicitly to the path that override mounts
+    #     at the SAME string on both sides. The default is not sufficient by
+    #     being equal to it -- see the work_dir section in the rollout doc.
+    #
+    # So the failure mode has moved from "'docker' not on PATH" to "cannot
+    # connect to the Docker daemon", which reddens the nightly exactly as hard.
+    # Promotion needs an observed container launch, not these three edits.
+    # See docs/tokenspeed-gating-rollout.md for the remaining steps.
+    blocked_on: >-
+      docker client and socket override exist but are unproven and unswitched:
+      the CI image has not been built, no lane sets docker-socket: true (a
+      root-equivalent grant needing CI-owner sign-off), and no container launch
+      from inside aorta-ci-gpu has been demonstrated
 
 # dtype axis (fp32/fp16/bf16) is a follow-up: the smoke recipes pin one dtype
 # each, so per-dtype coverage needs dtype recipe variants (or workload_config

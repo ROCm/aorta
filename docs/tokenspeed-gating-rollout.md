@@ -230,10 +230,13 @@ not gating policy.
 `nightly_eval.py` runs *inside* the `aorta-ci-gpu` container
 (`eval-reusable.yml` → `docker_cmd.sh exec`), and `tokenspeed_serve` runs the
 TokenSpeed engine in a container of its own. So the entry needs a Docker client
-and a daemon socket in there, and it has neither: `Dockerfile.ci-gpu` installs no
-Docker CLI, and `docker-compose.build.yaml` mounts only the repo. The workload's
-`setup()` raises `'docker' not on PATH`, the cell errors, and fail-closed reddens
-the nightly. Record-only does not help — it defers perf bounds, not failures.
+and a route to a daemon in there. It had neither, and the workload's `setup()`
+raised `'docker' not on PATH` before anything else happened. Record-only does not
+help — it defers perf bounds, not failures.
+
+Both pieces now exist. Neither is switched on, and nothing has been observed
+working, so the entry stays staged; see [What is still
+missing](#what-is-still-missing) below for exactly what is left.
 
 The entry therefore lives under `pending_entries` in
 `config/ci/nightly_eval_matrix.yaml`. Nothing reads that key: both consumers
@@ -244,29 +247,145 @@ entry — recipe path, loadability through the real parser, field names, metric
 names against the policy table. Promoting it is then a move of five lines, not a
 bet on whether it still parses.
 
-The enabling change, which this document does not make because it alters the
-container every other workload shares:
+### The enabling change
 
-1. Install a Docker CLI in `docker/Dockerfile.ci-gpu` (client only; the daemon is
-   the host's).
-2. Mount the socket. `docker-compose.build.yaml` already has commented
-   `EXTRA_MOUNT_SRC_1`/`EXTRA_MOUNT_DST_1` placeholders for exactly this, so it
-   is uncommenting the volume line and setting the pair in `docker/.env.ci` to
-   `/var/run/docker.sock`.
-3. Decide, deliberately, that this is acceptable. A socket mount gives the CI
-   container control of the host daemon. The container is already `privileged:
-   true` on a self-hosted runner, so the marginal exposure is small, but it
-   should be a decision someone made rather than one that arrived with a
-   serving recipe.
-4. Confirm `work_dir` resolves somewhere the *host* daemon can bind-mount. The
-   recipe's `/tmp/ts-work-serve` is a path inside the CI container; the nested
-   `docker run -v` is interpreted by the host daemon, so the two must refer to
-   the same directory or the mount silently lands somewhere else. This is the
-   detail most likely to be missed, because it fails at weight-load time and
-   reads as a model problem.
+**1. A Docker client in the CI image.** `docker/install_docker_cli.py`, invoked
+from `Dockerfile.ci-gpu`, fetches the pinned static tarball, checks its sha256
+before extracting, and extracts exactly one member — `docker/docker`. The same
+tarball ships `dockerd`, `containerd` and `runc`; naming the member is what keeps
+a daemon out of the image, and a build-time check fails the build if any of them
+reaches `PATH`. The engine container is a **sibling**, started by the host daemon
+next to `aorta-ci-gpu`, not nested inside it.
 
-Until then, the cheapest way to get the ten record-only runs is to run the recipe
-by hand on a gfx950 node and record `matrix.json`, which needs none of the above.
+**2. A route to the daemon, opt-in per lane.** `docker-compose.docker-socket.yaml`
+is an override, which is the mechanism the base compose already documents for
+optional mounts ("Do not add a volume here"), so the default container still has
+no route to the daemon. `rocm-ci-setup` takes a `docker-socket` input, default
+`false`, and adds the override's `-f` only when it is `true`. **No lane sets it**,
+which is deliberate — see the security note below.
+
+**3. `work_dir` must be an explicitly configured shared path.** This is the detail
+most likely to be missed, because nothing reports it as a path problem.
+
+With the socket mounted, the `-v` sources in the `docker run` the workload builds
+are strings the **host daemon** resolves against the **host** filesystem. The
+workload builds them from `work_dir` — `<work_dir>/u<uid>/{scripts,out,hf}` — using
+paths as seen from *inside* `aorta-ci-gpu`. Those are different namespaces. A
+missing bind source is not an error to the daemon: it **creates** the directory on
+the host and mounts that. So the engine container comes up with an empty
+`/ts-scripts` and dies on a missing script, or — worse — with an empty writable
+`/ts-out`, and the harvest reports no results for a run that really happened.
+
+The default `work_dir` does **not** fix this by being `/tmp/ts-work-serve` on both
+sides. `/tmp` inside the CI container is the container's own `/tmp`, not the
+host's, so the two are different directories that share a name — which is the
+failure above with the confusing property that the path looks right in every log.
+
+What the nightly needs, concretely:
+
+- The socket override bind-mounts `${TS_SERVE_WORK_DIR:-/tmp/ts-work-serve}` at
+  **the same path** inside the container. Source and target are identical on
+  purpose, and a test asserts they stay identical; that is what makes one string
+  name one directory on both sides of the boundary.
+- The recipe sets `work_dir` to that same path **explicitly**. It happens to equal
+  the workload default, but a default that must agree with a mount is a
+  coincidence, not a configuration: change either one alone and the run breaks
+  quietly.
+- The path must be node-local. The workload already rejects an NFS home, for the
+  root-squash reason documented in
+  [tokenspeed-serving.md](tokenspeed-serving.md), and that reason is stronger
+  here, not weaker.
+
+**The uid has to agree too**, and this is a second way the same boundary bites.
+The workload uses a per-uid scratch root and then *verifies* it: `<work_dir>/u<uid>`
+must be a real directory (not a symlink), owned by the running uid, and not group-
+or world-writable. Inside `aorta-ci-gpu` the process is **root** (`user: root` in
+the base compose), so it writes and checks `u0`. That works — a root-owned
+directory created through the shared mount is root-owned on the host too, so the
+host daemon and the checking process agree. But it holds only because both sides
+are uid 0. Change `user:` in the base compose, run the harness as a non-root uid,
+or turn on userns-remap on the daemon, and `<work_dir>/u<uid>` is created by one
+uid and inspected by another: the check fails with an ownership error that does
+not mention containers, uids-across-a-boundary, or the mount. Anyone changing
+either should expect that error to be the symptom.
+
+One consequence worth stating: with `run_as_current_user` defaulting true, the
+engine container also runs as uid 0, so exports land on the host owned by root,
+outside the workspace that `eval-reusable.yml`'s "Reclaim results ownership" step
+chowns. They are cleaned per trial unless `keep_work_dir` is set, but a runner
+that fills `/tmp` with root-owned scratch is a plausible future complaint.
+
+### Security: this grants effective root on the runner
+
+Stated plainly, because it is the part most easily lost in a diff: a process that
+can talk to the Docker daemon can ask it for a privileged container that
+bind-mounts `/`. That is root on the host, with no exploit involved. Mounting the
+socket into `aorta-ci-gpu` therefore hands the host to anything running in that
+container — including every package the nightly installs from an index.
+
+The mitigating argument is real but partial. The container is already
+`privileged: true` with `seccomp=unconfined` on a self-hosted runner, so on a
+dedicated, trusted, single-tenant node this widens an already-wide posture rather
+than opening a new one. The argument fails on a shared or multi-tenant runner.
+
+**If the CI owner is not willing to accept it, the recommended alternative is to
+run the serving workload outside the CI container entirely** — as a step on the
+runner host, which already has a client and the socket, publishing its results
+JSON into the harness's results directory. The nightly keeps the socket out of
+the container, and the only cost is that this one cell is invoked differently
+from the other sixteen. A socket proxy allowlisting just the container
+create/start/logs/remove calls is a middle option; rootless Docker is a third.
+Nested docker-in-docker is not on the list: it needs `privileged` too, so it
+trades no privilege away, and it gives the engine a different filesystem view,
+which breaks exactly the bind mounts described above.
+
+This branch deliberately leaves the decision open: the mechanism is in place and
+switched off, and turning it on is one flag plus a named sign-off.
+
+### What is still missing
+
+1. **The CI image has never been built.** The installer has been run for real and
+   the client it produces drives a live daemon, but no machine available to this
+   work had the disk for the ~52 GB ROCm 10 base. See
+   [Verification](#verification-status) for what a human must run.
+2. **No lane enables the socket**, pending the decision above.
+3. **No container launch from inside `aorta-ci-gpu` has been observed.** Until one
+   has, the failure mode has merely moved from `'docker' not on PATH` to
+   `Cannot connect to the Docker daemon`, which reddens the nightly just as hard.
+
+### Verification status
+
+Verified here, against the real artifact rather than by inspection:
+
+- the installer downloads, rejects a wrong sha256 without leaving a binary
+  behind, and extracts only the client;
+- the extracted client reports `29.7.2` and negotiates against a `29.1.3` daemon,
+  which is the claim that it need not match the runner's version;
+- `docker compose config` over the base plus the override resolves all three
+  mounts, with the scratch mount identical on both sides;
+- the file-shape invariants above, as tests in `tests/ci/test_dashboard_and_alert.py`.
+
+Not verified, and requiring a machine with ~60 GB free and access to the base
+image:
+
+```bash
+cd docker
+bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
+# the build's own checks assert the client is present and no daemon came with it
+docker run --rm aorta:ci-gpu docker --version
+
+# then, on a gfx950 node, the launch this promotion actually waits on:
+bash ../scripts/ci/docker_compose.sh --env-file .env.ci \
+  -f docker-compose.build.yaml -f docker-compose.docker-socket.yaml up -d
+docker exec aorta-ci-gpu docker ps            # client reaches the host daemon
+docker exec aorta-ci-gpu python -m aorta.cli run \
+  recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml   # with work_dir set as above
+```
+
+Until that last command produces a bench export, the entry stays in
+`pending_entries`. The cheapest way to get the ten record-only runs meanwhile is
+to run the recipe by hand on a gfx950 node and record `matrix.json`, which needs
+none of this.
 
 ## The rollout sequence
 
