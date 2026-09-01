@@ -119,6 +119,34 @@ _SKIP_REASON = _skip_reason()
 skip_no_proton = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 
+def _raw_proton_env(**extra: str) -> dict[str, str]:
+    """Child env for a test that drives Proton directly, bypassing the collector.
+
+    Proton refuses ``HIP_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES`` on AMD
+    before it does anything else, and the collector's ``_device_env_prefix``
+    normally translates them. A test that builds its own argv skips that
+    translation, so on a runner that pins devices the refusal would preempt
+    whatever the test is actually about -- the empty-tree capture, or the
+    unsupported-mode path -- and fail for a reason unrelated to the assertion.
+
+    Translated rather than merely dropped, and with the collector's own
+    precedence: the HIP spelling wins when both are set, and an explicit
+    ``ROCR_VISIBLE_DEVICES`` already in the environment is left alone. Dropping
+    the selection instead would quietly widen the test to every GPU on the host.
+    """
+    env = {**os.environ, **extra}
+    present = [
+        (name, env[name])
+        for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+        if env.get(name) is not None
+    ]
+    for name, _ in present:
+        env.pop(name, None)
+    if present and env.get("ROCR_VISIBLE_DEVICES") is None:
+        env["ROCR_VISIBLE_DEVICES"] = present[0][1]
+    return env
+
+
 def _capture(example: str, payload: str, args: list[str], out_root: Path, options: dict):
     """Run one example under the collector seam; return (proc, metrics)."""
     config = {
@@ -280,7 +308,7 @@ def test_cli_mode_pin_would_still_capture_nothing(tmp_path):
         capture_output=True,
         text=True,
         timeout=3600,
-        env={**os.environ, "TRITON_CACHE_DIR": str(tmp_path / "triton-cache")},
+        env=_raw_proton_env(TRITON_CACHE_DIR=str(tmp_path / "triton-cache")),
     )
     missing = _dlopen_failure(proc.stderr)
     if missing is not None:
@@ -314,15 +342,16 @@ def test_a_backend_that_refuses_the_mode_exits_two_not_a_traceback(tmp_path):
         capture_output=True,
         text=True,
         timeout=3600,
-        env={
-            **os.environ,
-            "TRITON_CACHE_DIR": str(tmp_path / "triton-cache"),
-            f"{ENV_PREFIX}NAME": str(out_dir / "proton"),
-            f"{ENV_PREFIX}BACKEND": "roctracer",
-            f"{ENV_PREFIX}MODE": "definitely_not_a_mode",
-            f"{ENV_PREFIX}CONTEXT": "shadow",
-            f"{ENV_PREFIX}DATA": "tree",
-        },
+        env=_raw_proton_env(
+            **{
+                "TRITON_CACHE_DIR": str(tmp_path / "triton-cache"),
+                f"{ENV_PREFIX}NAME": str(out_dir / "proton"),
+                f"{ENV_PREFIX}BACKEND": "roctracer",
+                f"{ENV_PREFIX}MODE": "definitely_not_a_mode",
+                f"{ENV_PREFIX}CONTEXT": "shadow",
+                f"{ENV_PREFIX}DATA": "tree",
+            }
+        ),
     )
     missing = _dlopen_failure(proc.stderr)
     if missing is not None:
