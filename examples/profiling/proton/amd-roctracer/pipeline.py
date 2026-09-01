@@ -150,7 +150,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         default=None,
-        choices=("roctracer", "rocprofiler"),
+        # ``roctracer`` only. This module imports torch before Proton, which is
+        # what roctracer needs and what rocprofiler cannot tolerate -- it is
+        # configured from a ``libproton.so`` constructor and wants to land before
+        # HSA. Use ``../amd-rocprofiler/gelu.py``, whose imports are the other
+        # way round, for that backend.
+        choices=("roctracer",),
         help="Proton backend for a standalone capture; ignored when $AORTA_PROTON_BACKEND is set",
     )
     args = parser.parse_args(argv)

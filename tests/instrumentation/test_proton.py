@@ -666,8 +666,16 @@ def test_wrap_argv_cli_still_pins_a_non_intercepting_backend(tmp_path, backend):
 
 @pytest.mark.parametrize("backend", ["roctracer", "rocprofiler"])
 def test_wrap_argv_env_mode_pins_the_same_backend_happily(tmp_path, env_on_path, backend):
-    """The route the rejection names: the payload starts Proton itself, after
-    its own ``import torch`` has brought the runtime up."""
+    """``mode: env`` accepts either backend -- but what the payload must then do
+    differs, and the collector cannot enforce it from here.
+
+    For ``roctracer`` this is the route the CLI rejection names: the payload
+    starts Proton after its own ``import torch`` has brought the runtime up. For
+    ``rocprofiler`` the responsibility is the opposite one -- import Proton
+    *before* torch, so its ``libproton.so`` constructor configures the SDK
+    before HSA exists (see ``amd-rocprofiler/gelu.py``). Env mode is safe for
+    both; only the payload's import order distinguishes them.
+    """
     argv = wrap_argv(
         ["python", "pipeline.py"],
         tmp_path,
