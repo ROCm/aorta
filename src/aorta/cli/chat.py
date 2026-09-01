@@ -546,6 +546,37 @@ def ui(host: str, port: int) -> None:
     )
 
 
+@chat.command(name="tools")
+@click.option("--json", "as_json", is_flag=True, help="Emit the registry as JSON.")
+def tools(as_json: bool) -> None:
+    """List the agent tools, built-in and plugin-contributed.
+
+    A package that registers an `aorta.chat_tools` entry point but does not
+    appear here was skipped at load, and said why on stderr.
+    """
+    plugins = _load("plugins")
+    registry = plugins.load_chat_tools()
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    name: {
+                        "source_package": entry.source_package,
+                        "description": entry.tool.description,
+                    }
+                    for name, entry in sorted(registry.items())
+                },
+                indent=2,
+            )
+        )
+        return
+    for name, entry in sorted(registry.items()):
+        summary = (entry.tool.description or "").strip().splitlines()
+        click.echo(f"{name}  [{entry.source_package}]")
+        if summary:
+            click.echo(f"    {summary[0]}")
+
+
 @chat.group(name="config")
 def config_group() -> None:
     """Create and inspect the chat profile (~/.config/aorta/chat.toml)."""
