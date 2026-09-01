@@ -11,6 +11,7 @@ from aorta.run.results import TrialResult
 from aorta.workloads import Workload, WorkloadResult
 
 if TYPE_CHECKING:
+    from aorta.run._fsafe import TrustedAnchor
     from aorta.run.dispatcher import RunRequest
 
 
@@ -24,6 +25,7 @@ def execute_trial(
     results_dir: Path,
     should_write: bool,
     persist_result: bool,
+    results_root: TrustedAnchor | None = None,
     result_transform: (Callable[[WorkloadResult, str], tuple[WorkloadResult, str]] | None) = None,
     skip_cleanup_on_error: bool = False,
 ) -> TrialResult:
@@ -38,6 +40,7 @@ def execute_trial(
         mitigation_env=mitigation_env,
         results_dir=results_dir,
         should_write=should_write,
+        results_root=results_root,
         persist_result=persist_result,
         result_transform=result_transform,
         skip_cleanup_on_error=skip_cleanup_on_error,

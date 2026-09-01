@@ -350,7 +350,21 @@ _GATE_SPECS: dict[str, tuple[str, str]] = {
     "max_median_tpot_ms": ("median_tpot_ms", "max"),
     "max_p99_tpot_ms": ("p99_tpot_ms", "max"),
     "max_median_itl_ms": ("median_itl_ms", "max"),
+    # p99, for both of these, is the half worth gating. The gateway delivers
+    # several tokens per SSE chunk, so most recorded inter-token gaps are ~0 and
+    # `median_itl_ms` sits near zero while the real stalls land in the tail --
+    # `scripts/ci/eval_lib.py` says the same thing about the nightly allowlist.
+    #
+    # That observation rules out arming an ITL ceiling *automatically*, the way
+    # the nightly does, by taking a margin around a blessed baseline: 0.0 x 1.25
+    # is 0.0 and the gate fires on the first non-zero sample. It says nothing
+    # against a gate a recipe writes out as an absolute number, which is what
+    # these are -- `max_p99_itl_ms: 50` is a stated bound on tail stalls, and it
+    # is unaffected by where the median happens to sit. Leaving it out meant the
+    # one summary the docs recommend was the one a recipe could not gate on.
+    "max_p99_itl_ms": ("p99_itl_ms", "max"),
     "max_median_e2el_ms": ("median_e2el_ms", "max"),
+    "max_p99_e2el_ms": ("p99_e2el_ms", "max"),
     "min_output_throughput": ("output_throughput", "min"),
     "min_total_token_throughput": ("total_token_throughput", "min"),
     "min_request_throughput": ("request_throughput", "min"),
@@ -378,6 +392,23 @@ def _is_scalar(value: Any) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return math.isfinite(value)
+
+
+def _step_detail(record: _StepRecord) -> dict[str, Any]:
+    """One step's scalars, with the export's integers still integers.
+
+    ``scalars`` is float-typed because what is done with it is arithmetic --
+    means, sums, gate comparisons -- but the same dict is also published per
+    step, and there ``completed: 32.0`` is a counter that has been made to look
+    like a measurement. The type comes back from the parsed document, which
+    still has it; ``type(...) is int`` rather than ``isinstance`` because a JSON
+    boolean is an ``int`` to ``isinstance``.
+    """
+    detail: dict[str, Any] = {"step": record.step}
+    for key, value in record.scalars.items():
+        original = record.doc.get(key)
+        detail[key] = original if type(original) is int else value
+    return detail
 
 
 def _mean(values: list[float]) -> float:
@@ -436,7 +467,14 @@ class TokenSpeedServeWorkload(Workload):
             default is 60s, which a cold start exceeds.
         ignore_eos: hold OSL fixed so every cell does the same work
             (default ``True``, or ``False`` under ``rollout``, where an
-            explicit ``True`` is rejected as a contradiction).
+            explicit ``True`` is rejected as a contradiction). Outside
+            ``rollout``, ``False`` is only accepted for ``dataset: sharegpt``:
+            the bench CLI forces it back on for the random dataset after
+            parsing, so the setting could not have taken effect. Use
+            ``bench_args: ["--extra-body", '{"ignore_eos": false}']`` to reach
+            it on ``random``. Under ``rollout`` the workload already sends that
+            payload itself, so ``False`` takes effect on ``random`` and is
+            reported truthfully.
         rollout: shape the load like an RL rollout instead of like a serving
             benchmark (default ``False``): ``rollout_samples`` sampled
             completions per prompt at ``temperature``, stopping on EOS, with
@@ -570,18 +608,54 @@ class TokenSpeedServeWorkload(Workload):
         if max_conc is None:
             self._max_concurrency: int | None = None
         else:
-            self._max_concurrency = self._positive_int("max_concurrency", 1)
-            if self._max_concurrency < 1:
-                raise ValueError(
-                    "tokenspeed_serve: max_concurrency "
-                    f"({self._max_concurrency}) must be >= 1 (omit it for unbounded)"
-                )
+            try:
+                self._max_concurrency = self._positive_int("max_concurrency", 1)
+            except ValueError as exc:
+                # The bound is _positive_int's; only the way out of it is local,
+                # since 0 is the spelling someone reaches for to mean unbounded
+                # and this field expresses that by being absent.
+                raise ValueError(f"{exc} (omit it for unbounded)") from exc
 
         self._request_rate = self._validated_request_rate(
             cfg.get("request_rate", _DEFAULT_REQUEST_RATE)
         )
 
+        # Resolves `_rollout` and `_ignore_eos` together, so both are settled
+        # before the guard below reads them.
         self._validated_rollout()
+        # `random` pins the output length whatever the argv says. `tokenspeed
+        # bench serve` sets `ignore_eos = True` for the random dataset on an
+        # OpenAI-compatible backend *after* parsing, which is after it has
+        # honoured `--disable-ignore-eos` -- so neither omitting `--ignore-eos`
+        # nor passing the disable flag reaches the request. Accepting `false`
+        # would publish `ignore_eos: false` on a trial that served a pinned
+        # length: the reported configuration is not the one that ran, which is
+        # the mislabelled pass the owned-flag guards exist to prevent. The
+        # payload route does work -- `extra_body` is applied over the forced
+        # value -- so the message names it rather than only refusing.
+        #
+        # Rollout is exempt because it *is* that payload route. It always sends
+        # an extra_body carrying `ignore_eos: false`, and it is the one mode
+        # that reserves `--extra-body` in the owned-flag set, so no `bench_args`
+        # copy can shadow it as a later occurrence. Under rollout the forced
+        # flag is overridden on every request, which makes the reported
+        # `ignore_eos: false` the setting that actually ran -- so here the guard
+        # would reject the one configuration where the value is truthful, and
+        # every rollout recipe would raise at setup().
+        if (
+            self._dataset == _DEFAULT_DATASET
+            and not self._ignore_eos
+            and not self._rollout
+        ):
+            raise ValueError(
+                "tokenspeed_serve: ignore_eos: false cannot take effect with "
+                "dataset: random. The bench CLI forces EOS to be ignored for "
+                "that dataset after parsing its arguments, so the trial would "
+                "report a setting the run did not have. Use dataset: sharegpt, "
+                "or rollout: true, or ask for it in the request payload with "
+                "bench_args: [\"--extra-body\", '{\"ignore_eos\": false}']."
+            )
+
         self._run_as_current_user = self._bool("run_as_current_user", True)
         self._keep_work_dir = self._bool("keep_work_dir", True)
 
@@ -630,10 +704,24 @@ class TokenSpeedServeWorkload(Workload):
         self._validate_drain_timeout()
         self._bench_args = self._arg_list("bench_args")
         self._docker_args = self._arg_list("docker_args")
+        # Resolved here rather than beside `hf_home` below, because the guard on
+        # the next line needs it: `_secret_env_names` reads it, and a recipe
+        # naming another variable makes that name the credential on this node.
+        self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
         # Checked here as well as at argv-build time so a recipe naming an owned
-        # flag fails before a node is occupied. The env-name half of the check
-        # needs the resolved run token, so it can only run later.
-        self._reject_owned_docker_args()
+        # flag fails before a node is occupied. The protocol floor and the secret
+        # names are both available now -- the latter unconditionally, which is
+        # the point of `_secret_env_names` not depending on the host having a
+        # token. Only the keys whose *value* this run computes (TS_PORT and the
+        # rest, which need the resolved run token) have to wait for
+        # `_docker_argv`, and `_PROTOCOL_ENV_KEYS` already reserves their names.
+        #
+        # Without the secret half here, `docker_args: ["-e", "HF_TOKEN=..."]`
+        # passed validation and `--dry-run` and was only refused inside
+        # `_docker_argv`, after the trial had taken a GPU node -- so the recipe
+        # that cannot work failed late, and the credential it was trying to put
+        # into a world-readable argv was not named until then.
+        self._reject_owned_docker_args(owned_env=self._secret_env_names())
 
         self._shm_size = str(cfg.get("shm_size") or _DEFAULT_SHM_SIZE)
         hip_devices = cfg.get("hip_visible_devices")
@@ -734,7 +822,6 @@ class TokenSpeedServeWorkload(Workload):
         # than an accident of who got there first.
         hf_home = cfg.get("hf_home")
         self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_dir / "hf"
-        self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
 
         self._gates = self._validated_gates()
 
@@ -1021,19 +1108,20 @@ class TokenSpeedServeWorkload(Workload):
                 'a rate; use a positive number, or "inf" to submit every '
                 "request at once"
             ) from exc
-        if math.isinf(rate) and rate > 0 and isinstance(value, float) and math.isinf(value):
-            return "inf"
         if math.isnan(rate) or math.isinf(rate):
-            # Reached by a *finite* spelling that overflows, "1e999" being the
-            # short one: `float()` turns it into +inf, and reading that as the
-            # unlimited token promoted a typo'd rate to the heaviest load the
-            # harness can generate -- while the trial still reported the rate
-            # the recipe asked for. Only the spellings handled above and a value
-            # that was already an infinite float mean "unlimited".
+            # Only the string spellings above mean "unlimited". An infinite
+            # *float* does not, because by the time it arrives here there is no
+            # way to tell which one it was: YAML reads `.inf` and `1.0e999` as
+            # the same value, and so does `float("1e999")` -- so accepting it
+            # promoted a typo'd finite rate to the heaviest load the harness can
+            # generate, while the trial went on reporting the rate the recipe
+            # asked for. The quoted token costs the deliberate case one pair of
+            # quotes and makes the accident impossible.
             raise ValueError(
                 f"tokenspeed_serve: request_rate ({value!r}) is not a usable "
-                'rate; use a positive number, or "inf" to submit every request '
-                "at once"
+                'rate; use a positive number, or the quoted string "inf" to '
+                "submit every request at once (an unquoted infinite float is "
+                "indistinguishable from a finite rate that overflowed)"
             )
         if rate <= 0:
             raise ValueError(
@@ -1325,10 +1413,24 @@ class TokenSpeedServeWorkload(Workload):
     def _container_env(self) -> dict[str, str]:
         """Env for the container: TS_* knobs, then the cell's mitigations.
 
-        Mitigations are applied last so a cell can override a default knob, and
-        because they are the whole point of the matrix -- a mitigation silently
-        losing to a workload default would make two cells identical while
-        reporting them as different.
+        Mitigations are merged last, but "last" here settles precedence between
+        a mitigation and *anything else a mitigation may legitimately set* --
+        not between a mitigation and the knobs below. A mitigation naming a key
+        this workload owns is rejected outright rather than allowed to win: the
+        host would keep auditing and reporting its own value while the container
+        ran the other one. The owned set is everything in ``env``, plus
+        ``_PROTOCOL_ENV_KEYS`` for the keys whose configured value is absence,
+        plus the secret names. So of the ``TS_*`` namespace, only what this
+        workload does not own is a mitigation's to set -- in practice
+        ``TS_DRAIN_TIMEOUT``, which ``ts_bench_serve.sh`` reads, bounds against
+        the teardown grace, and this class never sets. Everything else a
+        mitigation carries (engine and runtime variables, which is what the
+        matrix mostly varies) is untouched by the guard and lands here.
+
+        Anything the workload does set is therefore configured through
+        ``workload_config``, which is the only route that keeps the host's
+        expectations, its audit and its reported configuration in step with the
+        run.
         """
         env: dict[str, str] = {
             "TS_MODEL": self._model,
@@ -1894,8 +1996,24 @@ class TokenSpeedServeWorkload(Workload):
         container capped while the host reported ``max_concurrency: None``.
         Fixing that for mitigations and not here just moved the same hole one
         field sideways.
+
+        A secret name gets its own message: there is no workload_config field
+        that carries a token, so pointing the caller at one would be advice that
+        cannot be followed.
         """
-        if name and name in (owned_env or set()) | _PROTOCOL_ENV_KEYS:
+        if not name:
+            return
+        if name in self._secret_env_names():
+            raise ValueError(
+                f"tokenspeed_serve: docker_args may not set {name}; it is a "
+                "credential, and this workload already forwards it. `-e "
+                "NAME=value` would put the value in the docker client's argv, "
+                "which /proc/<pid>/cmdline exposes to every user on the node "
+                "for the life of the trial. Export it in the environment you "
+                "run aorta from, where it is forwarded by name instead, and "
+                "use hf_token_env to name a different variable."
+            )
+        if name in (owned_env or set()) | _PROTOCOL_ENV_KEYS:
             raise ValueError(
                 f"tokenspeed_serve: docker_args may not set {name}; this "
                 "workload sets it as part of its contract with "
@@ -2221,18 +2339,21 @@ class TokenSpeedServeWorkload(Workload):
         # average and an absent or zero value is correct, not a fault.
         #
         # Which source answers that depends on whether the configuration
-        # actually determines the output length. `random` *with* `--ignore-eos`
-        # does: the recipe pins the length and ignoring EOS holds it there, so
-        # `output_len` is exact.
+        # actually determines the output length. `random` does: the recipe pins
+        # the length and EOS is ignored -- forced on by the bench CLI and
+        # required to be so by validation above -- which holds it there, so
+        # `output_len` is exact. The `_ignore_eos` half of the condition is
+        # therefore redundant today and kept as the statement of what the branch
+        # depends on.
         #
-        # Nothing else does. ShareGPT takes its lengths from the conversations
-        # and the bench CLI never sees `output_len` at all. And `ignore_eos:
-        # false` -- a supported setting -- lets the model stop whenever it emits
+        # ShareGPT does not. It takes its lengths from the conversations and the
+        # bench CLI never sees `output_len` at all, and with `ignore_eos: false`
+        # -- which only ShareGPT can express -- the model stops whenever it emits
         # an EOS token, which for a short prompt can be immediately, so every
-        # request may produce exactly one token however large `output_len` is.
-        # Deciding from `output_len` in either case makes a step's validity
-        # hinge on a number the run was free to ignore, and rejects a correct
-        # export for not carrying a metric that was genuinely undefined.
+        # request may produce exactly one token. Deciding from `output_len` there
+        # makes a step's validity hinge on a number the run never saw, and
+        # rejects a correct export for not carrying a metric that was genuinely
+        # undefined.
         #
         # The export is the only source that knows: more output tokens than
         # completed requests means at least one request emitted a second token.
@@ -2914,7 +3035,7 @@ class TokenSpeedServeWorkload(Workload):
         # Per-step detail lands in the trial JSON. The matrix aggregates only
         # scalars, so this list is carried without being summarised -- which is
         # what makes step-to-step variance recoverable after the fact.
-        metrics["steps"] = [{"step": r.scalars.get("step", r.step), **r.scalars} for r in records]
+        metrics["steps"] = [_step_detail(r) for r in records]
         metrics["result_files"] = [str(r.path) for r in records]
         return metrics
 

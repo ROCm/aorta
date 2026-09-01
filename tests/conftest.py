@@ -38,6 +38,48 @@ except Exception:
         del sys.modules[_mod]
 
 
+class BlockedTooLong(BaseException):
+    """A call guarded by :func:`no_hang` did not return in time.
+
+    Deliberately a :class:`BaseException` rather than an :class:`Exception`.
+    The code under test is exactly the kind that catches broadly -- collector
+    summarization swallows ``Exception`` so an opt-in measurement can never fail
+    a healthy trial, and the artifact reader skips on ``OSError`` -- and
+    ``TimeoutError`` is an ``OSError``, so a timeout raised as one gets absorbed
+    and the test passes while the code hangs. Sitting outside ``Exception`` is
+    what makes the alarm reach the test runner.
+    """
+
+
+@pytest.fixture
+def no_hang():
+    """Bound a call that could block forever, failing instead of stalling.
+
+    Yields a context-manager factory: ``with no_hang(5): ...``. Use it where the
+    defect under test is an indefinite block rather than a wrong value, so a
+    regression surfaces as a failure. ``SIGALRM`` is the mechanism because the
+    block happens inside a single syscall, which a thread-based watchdog cannot
+    interrupt. Main-thread only, like any signal-based timeout.
+    """
+    import contextlib
+    import signal
+
+    @contextlib.contextmanager
+    def _guard(seconds: int = 10):
+        def _raise(_signum, _frame):
+            raise BlockedTooLong(f"blocked for more than {seconds}s")
+
+        previous = signal.signal(signal.SIGALRM, _raise)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    return _guard
+
+
 @pytest.fixture
 def sample_trace_event():
     """Create a sample trace event for testing."""

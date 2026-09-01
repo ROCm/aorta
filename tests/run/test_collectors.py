@@ -10,7 +10,9 @@ summary merge.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -27,11 +29,15 @@ from aorta.run.collectors import (
     CONFIG_KEY_COLLECT,
     CONFIG_KEY_COLLECT_DIR,
     CONFIG_KEY_COLLECT_OPTIONS,
+    CONFIG_KEY_RESULTS_ROOT,
+    CONFIG_KEY_RESULTS_ROOT_ID,
     KNOWN_RECIPES,
     WRAP_ORDER,
     CollectorSpec,
     active_collectors,
     summarize_collectors,
+    trusted_collector_anchor,
+    unsafe_collector_paths,
     validate_collectors,
     wrap_argv_for_collectors,
 )
@@ -55,12 +61,21 @@ def profilers_on_path(tmp_path, monkeypatch):
     return bin_dir
 
 
-def _config(names, *, collect_dir=None, options=None):
+def _config(
+    names, *, collect_dir=None, options=None, results_root=None, pin_results_root=False
+):
     config = {CONFIG_KEY_COLLECT: list(names)}
     if collect_dir is not None:
         config[CONFIG_KEY_COLLECT_DIR] = str(collect_dir)
     if options is not None:
         config[CONFIG_KEY_COLLECT_OPTIONS] = options
+    if results_root is not None:
+        config[CONFIG_KEY_RESULTS_ROOT] = str(results_root)
+    if pin_results_root:
+        # What the dispatcher threads alongside the path: the anchor's inode as
+        # of before the first trial launched.
+        info = os.stat(results_root)
+        config[CONFIG_KEY_RESULTS_ROOT_ID] = [info.st_dev, info.st_ino]
     return config
 
 
@@ -240,6 +255,58 @@ def test_wrap_fails_when_the_output_dir_cannot_be_created(profilers_on_path, tmp
         wrap_argv_for_collectors(config, _INNER)
 
 
+def test_wrap_refuses_a_symlink_in_any_component_below_the_trusted_root(
+    profilers_on_path, tmp_path
+):
+    """A symlink *anywhere* at or below the trusted root redirects the delete.
+
+    Checking only the leaf and its parent is not enough: ``is_dir()`` and
+    ``rmtree()`` follow links in every component, so a link further up -- but
+    still inside the payload-writable run tree -- reaches outside just as well.
+    Here ``<results>/linked -> <outside>`` with the collector root two levels
+    below it, and neither the leaf nor its parent is itself a symlink.
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "trial_d0_m0_t0" / "rocprof").mkdir(parents=True)
+    victim = outside / "trial_d0_m0_t0" / "rocprof" / "precious.txt"
+    victim.write_text("not yours to delete", encoding="utf-8")
+    (results / "linked").symlink_to(outside, target_is_directory=True)
+
+    collect_dir = results / "linked" / "trial_d0_m0_t0"
+    assert not collect_dir.is_symlink()  # the gap: nothing local looks wrong
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()), _INNER
+        )
+    assert victim.read_text(encoding="utf-8") == "not yours to delete"
+
+
+def test_wrap_allows_a_results_dir_that_legitimately_lives_under_a_symlink(
+    profilers_on_path, tmp_path
+):
+    """The operator's own layout above the trusted root must keep working.
+
+    A ``--results-dir`` under a symlink (a mounted scratch path, a symlinked
+    home) is ordinary. The dispatcher canonicalizes that path *before* launch
+    and threads the resolved prefix as both the trust anchor and the collect
+    dir, so the payload-symlink walk never sees the operator's link.
+    """
+    real = tmp_path / "real_results"
+    real.mkdir()
+    link = tmp_path / "results_link"
+    link.symlink_to(real, target_is_directory=True)
+
+    argv = wrap_argv_for_collectors(
+        _config(["rocprof"], collect_dir=link.resolve() / "trial_d0_m0_t0", results_root=link.resolve()),
+        _INNER,
+    )
+    assert argv != _INNER  # the collector attached rather than being refused
+    assert (real / "trial_d0_m0_t0" / "rocprof").is_dir()
+
+
 def test_wrap_refuses_to_clear_through_a_symlinked_collect_root(profilers_on_path, tmp_path):
     """A symlinked collector root must not let ``rmtree`` escape the run tree.
 
@@ -248,20 +315,73 @@ def test_wrap_refuses_to_clear_through_a_symlinked_collect_root(profilers_on_pat
     it and delete the link target -- a tree outside the results directory
     entirely. This is the destructive case, so it fails closed.
     """
+    # ``precious`` sits outside the results directory, which is the boundary
+    # the guard is defending -- not merely outside the trial directory.
+    results = tmp_path / "results"
+    results.mkdir()
     outside = tmp_path / "precious"
     outside.mkdir()
     (outside / "rocprof").mkdir()
     (outside / "rocprof" / "keep_me.txt").write_text("not yours to delete", encoding="utf-8")
 
-    link = tmp_path / "trial_d0_m0_t0"
+    link = results / "trial_d0_m0_t0"
     link.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
-        wrap_argv_for_collectors(_config(["rocprof"], collect_dir=link), _INNER)
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=link, results_root=results.resolve()), _INNER
+        )
     # The whole point: the tree behind the symlink is untouched.
     assert (outside / "rocprof" / "keep_me.txt").read_text(encoding="utf-8") == (
         "not yours to delete"
     )
+
+
+def test_wrap_refuses_a_symlink_to_a_sibling_inside_the_results_tree(
+    profilers_on_path, tmp_path
+):
+    """Containment alone is not enough: a link to a sibling still resolves inside.
+
+    ``trial -> <results>/other_trial`` (or ``rocprof -> <results>``) stays
+    inside the trusted root after ``resolve()``, so a containment-only guard
+    would let ``rmtree`` erase the sibling. The payload-symlink walk refuses
+    any link at or below the anchor even when the target is in-tree.
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    sibling = results / "trial_other"
+    (sibling / "rocprof").mkdir(parents=True)
+    victim = sibling / "rocprof" / "keep_me.txt"
+    victim.write_text("sibling trial", encoding="utf-8")
+
+    collect_dir = results / "trial_d0_m0_t0"
+    collect_dir.symlink_to(sibling, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()),
+            _INNER,
+        )
+    assert victim.read_text(encoding="utf-8") == "sibling trial"
+
+
+def test_wrap_refuses_a_collector_subdir_symlinked_at_the_results_root(
+    profilers_on_path, tmp_path
+):
+    """``<trial>/rocprof -> <results>`` would let ``rmtree`` wipe the whole tree."""
+    results = tmp_path / "results"
+    collect_dir = results / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    (collect_dir / "rocprof").symlink_to(results, target_is_directory=True)
+    marker = results / "keep_me.txt"
+    marker.write_text("results tree", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()),
+            _INNER,
+        )
+    assert marker.read_text(encoding="utf-8") == "results tree"
 
 
 # ---- wrap_argv_for_collectors: attaching -------------------------------
@@ -439,11 +559,598 @@ def test_summarize_metric_keys_are_namespaced_by_collector(tmp_path):
 def test_summarize_survives_a_parser_that_raises(tmp_path, monkeypatch, caplog):
     """An opt-in measurement must never turn a healthy trial into a failure."""
 
-    def boom(_out_dir):
+    def boom(*_args, **_kwargs):
         raise RuntimeError("parser exploded")
 
+    # Patch both entrypoints so the test holds on the fd-relative (streams) path
+    # and the non-POSIX (pathname) fallback alike.
     monkeypatch.setattr(rocprof, "parse_summary", boom)
+    monkeypatch.setattr(rocprof, "parse_summary_from_streams", boom)
     (tmp_path / rocprof.OUTPUT_SUBDIR).mkdir()
     with caplog.at_level("WARNING"):
         assert summarize_collectors(_config(["rocprof"], collect_dir=tmp_path)) == {}
     assert "summary parsing failed" in caplog.text
+
+
+def test_summarize_does_not_re_resolve_a_results_dir_swapped_for_a_symlink(tmp_path, caplog):
+    """The saved trust anchor must not be resolved again after the payload runs.
+
+    If the profiled process replaces the results directory with a symlink to
+    ``/outside``, resolving *both* the candidate and the anchor through that
+    link would make containment succeed and parse planted metrics. The
+    dispatcher stores a pre-launch ``resolve()``; this test keeps that string
+    and swaps the directory out from under it.
+    """
+    results = tmp_path / "results"
+    trial = results / "trial_d0_m0_t0"
+    (trial / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
+    trusted = str(results.resolve())
+    collect = str(trial)
+
+    outside = tmp_path / "outside"
+    planted = outside / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted.mkdir(parents=True)
+    (planted / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"sgemm",7,1000\n', encoding="utf-8"
+    )
+
+    results.rename(tmp_path / "results_orig")
+    (tmp_path / "results").symlink_to(outside, target_is_directory=True)
+
+    with caplog.at_level("WARNING"):
+        metrics = summarize_collectors(
+            _config(["rocprof"], collect_dir=collect, results_root=trusted)
+        )
+    assert metrics == {}
+    assert "rocprof_kernel_count" not in metrics
+    assert "symlink" in caplog.text
+
+
+# ---- fd-relative TOCTOU hardening ---------------------------------------
+
+from aorta.run import _fsafe  # noqa: E402 -- grouped with the guard tests below
+
+_needs_fd = pytest.mark.skipif(
+    not _fsafe.HAVE_FD_TRAVERSAL, reason="fd-relative traversal unsupported here"
+)
+
+
+@_needs_fd
+def test_reset_ancestor_swap_after_fd_open_is_inert(profilers_on_path, tmp_path, monkeypatch):
+    """A swap of the collector dir's ancestor *after* the fd is held is defeated.
+
+    This is the mid-use-swap proof: the guard no longer re-resolves the pathname
+    for the destructive step, so a payload that replaces an ancestor between the
+    check and the delete cannot redirect it. We simulate the race deterministically
+    by planting the swap inside ``open_dir_nofollow`` right after it yields the
+    parent fd, then assert the unlink/mkdir landed on the ORIGINAL inode and the
+    planted external tree survived untouched.
+    """
+    results = tmp_path / "results"
+    workload = results / "wl"
+    collect_dir = workload / "trial_d0_m0_t0"
+    (collect_dir / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
+    (collect_dir / rocprof.OUTPUT_SUBDIR / "stale.txt").write_text("old", encoding="utf-8")
+
+    outside = tmp_path / "outside"
+    planted = outside / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted.mkdir(parents=True)
+    victim = planted / "precious.txt"
+    victim.write_text("keep me", encoding="utf-8")
+
+    real_open = _fsafe.open_dir_nofollow
+    swapped = {"done": False}
+
+    @contextlib.contextmanager
+    def swapping_open(trusted_root, components, **kwargs):
+        with real_open(trusted_root, components, **kwargs) as fd:
+            if not swapped["done"]:
+                swapped["done"] = True
+                # Rename <workload> aside (the held fds still track the real
+                # inodes) and drop a symlink to the planted external tree in its
+                # place -- exactly the pathname swap a surviving payload
+                # descendant would perform mid-run.
+                workload.rename(results / "wl_real")
+                workload.symlink_to(outside, target_is_directory=True)
+            yield fd
+
+    monkeypatch.setattr(_fsafe, "open_dir_nofollow", swapping_open)
+
+    wrap_argv_for_collectors(
+        _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()),
+        _INNER,
+    )
+
+    # The delete + recreate ran against the held fd, not the swapped pathname, so
+    # the planted external victim is untouched and the real (renamed) tree got
+    # the fresh rocprof dir.
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert (results / "wl_real" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR).is_dir()
+
+
+@_needs_fd
+def test_reset_falls_back_to_lexical_guard_without_fd_traversal(
+    profilers_on_path, tmp_path, monkeypatch
+):
+    """With the fd primitives unavailable, the lexical guard still fails closed."""
+    monkeypatch.setattr(_fsafe, "HAVE_FD_TRAVERSAL", False)
+    results = tmp_path / "results"
+    collect_dir = results / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (results / "wl").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(
+                ["rocprof"],
+                collect_dir=results / "wl" / "trial_d0_m0_t0",
+                results_root=results.resolve(),
+            ),
+            _INNER,
+        )
+
+
+@_needs_fd
+def test_summarize_reads_real_artifacts_through_fd(profilers_on_path, tmp_path):
+    """Parity: the fd-relative streams path parses a clean tree like the shim."""
+    subdir = tmp_path / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir()
+    (subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"sgemm",7,1000\n', encoding="utf-8"
+    )
+    metrics = summarize_collectors(
+        _config(["rocprof"], collect_dir=tmp_path, results_root=tmp_path.resolve())
+    )
+    assert metrics["rocprof_kernel_count"] == 7
+    assert metrics["rocprof_top_kernels"] == ["sgemm"]
+
+
+@_needs_fd
+def test_summarize_swap_after_fd_open_does_not_leak_external_metrics(
+    profilers_on_path, tmp_path, monkeypatch
+):
+    """A read-path ancestor swap after the fd is held cannot pull outside data."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    (subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"real",1,10\n', encoding="utf-8"
+    )
+    outside = tmp_path / "outside"
+    planted = outside / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted.mkdir(parents=True)
+    (planted / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"leak",999,9\n', encoding="utf-8"
+    )
+
+    real_open = _fsafe.open_dir_nofollow
+    swapped = {"done": False}
+
+    @contextlib.contextmanager
+    def swapping_open(trusted_root, components, **kwargs):
+        with real_open(trusted_root, components, **kwargs) as fd:
+            if not swapped["done"]:
+                swapped["done"] = True
+                (results / "wl").rename(results / "wl_real")
+                (results / "wl").symlink_to(outside, target_is_directory=True)
+            yield fd
+
+    monkeypatch.setattr(_fsafe, "open_dir_nofollow", swapping_open)
+
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=results / "wl" / "trial_d0_m0_t0",
+            results_root=results.resolve(),
+        )
+    )
+    # We read the real file through the held fd; the planted "leak" kernel with
+    # its count of 999 never appears.
+    assert metrics.get("rocprof_top_kernels") == ["real"]
+    assert metrics.get("rocprof_kernel_count") == 1
+
+
+# ---- Absent collector directories -----------------------------------------
+
+
+def test_missing_collector_subdir_is_not_unsafe(tmp_path):
+    """A never-created output directory must not read as a hostile path.
+
+    ``layer_numerics`` is validated-only: no platform code makes its
+    subdirectory, so ``collect: [rocprof, layer_numerics]`` leaves it absent.
+    Reporting it here makes the caller keep *every* collector's artifacts, which
+    silently turned ``retain.on_pass: none`` into a no-op for the rocprof
+    capture sitting beside it.
+    """
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    (collect_dir / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
+    config = _config(
+        ["rocprof", "layer_numerics"],
+        collect_dir=collect_dir,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    assert not (collect_dir / "layer_numerics").exists()
+    assert unsafe_collector_paths(config) == []
+
+
+def test_symlinked_collector_subdir_is_still_unsafe(tmp_path):
+    """The absence carve-out must not swallow a planted link.
+
+    Guards the boundary of the test above: a broken link is refused with ELOOP,
+    not mistaken for "nothing is there".
+    """
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    (collect_dir / rocprof.OUTPUT_SUBDIR).symlink_to(tmp_path / "never_existed")
+    config = _config(
+        ["rocprof"],
+        collect_dir=collect_dir,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    assert unsafe_collector_paths(config) == [collect_dir / rocprof.OUTPUT_SUBDIR]
+
+
+def test_summarize_of_a_missing_subdir_yields_no_metrics(profilers_on_path, tmp_path):
+    """An absent collector directory contributes nothing and raises nothing."""
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=collect_dir,
+            results_root=results.resolve(),
+            pin_results_root=True,
+        )
+    )
+    assert metrics == {}
+
+
+# ---- Trust-anchor inode pinning -------------------------------------------
+
+
+def test_trusted_anchor_carries_the_threaded_identity(tmp_path):
+    results = tmp_path / "results"
+    results.mkdir()
+    root = results / "wl" / "trial_d0_m0_t0"
+    anchor = trusted_collector_anchor(
+        _config(["rocprof"], results_root=results, pin_results_root=True), root
+    )
+    assert anchor.path == results
+    info = os.stat(results)
+    assert anchor.identity == (info.st_dev, info.st_ino)
+
+
+def test_trusted_anchor_falls_back_to_the_collect_roots_parent(tmp_path):
+    """A config with no threaded anchor still gets one, unpinned.
+
+    Returning ``None`` here is what let the retention pre-filter guard
+    ``collect_root.parent`` while the destructive prune it gates received
+    nothing and silently dropped to the pathname engine. One function, one
+    answer, so the two cannot disagree.
+    """
+    root = tmp_path / "wl" / "trial_d0_m0_t0"
+    anchor = trusted_collector_anchor(_config(["rocprof"]), root)
+    assert anchor.path == root.parent
+    assert anchor.identity is None
+
+
+@pytest.mark.parametrize("bad", ["nope", [1], [1, 2, 3], ["a", "b"], 7])
+def test_unparseable_threaded_identity_degrades_to_unpinned_and_warns(
+    tmp_path, bad, caplog
+):
+    """A malformed pin must not raise, but must not be silent either.
+
+    The key is written only by the dispatcher, so a bad value is our bug and it
+    quietly drops the guard to its weaker no-follow-only form.
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    config = _config(["rocprof"], results_root=results)
+    config[CONFIG_KEY_RESULTS_ROOT_ID] = bad
+    with caplog.at_level("WARNING"):
+        anchor = trusted_collector_anchor(config, results / "wl" / "trial_d0_m0_t0")
+    assert anchor.identity is None
+    assert any(CONFIG_KEY_RESULTS_ROOT_ID in r.getMessage() for r in caplog.records)
+
+
+def test_absent_threaded_identity_is_not_warned_about(tmp_path, caplog):
+    """A direct programmatic caller threads no pin; that is not a defect."""
+    results = tmp_path / "results"
+    results.mkdir()
+    with caplog.at_level("WARNING"):
+        anchor = trusted_collector_anchor(
+            _config(["rocprof"], results_root=results), results / "wl" / "t"
+        )
+    assert anchor.path == results
+    assert anchor.identity is None
+    assert not caplog.records
+
+
+@_needs_fd
+def test_reset_refuses_a_real_directory_moved_into_the_results_pathname(
+    profilers_on_path, tmp_path
+):
+    """The cross-trial swap that no ``O_NOFOLLOW`` check can see.
+
+    Trial 0's payload renames the results directory aside and moves a real
+    directory into its pathname. Every component of the new path is a genuine
+    directory, so only the frozen inode distinguishes it from the operator's
+    tree -- and without that, trial 1's reset would clear the planted tree.
+    """
+    results = tmp_path / "results"
+    collect_dir = results / "wl" / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    config = _config(
+        ["rocprof"],
+        collect_dir=collect_dir,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+
+    results.rename(tmp_path / "results.moved")
+    planted = tmp_path / "planted"
+    seeded = planted / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR / "precious.csv"
+    seeded.parent.mkdir(parents=True)
+    seeded.write_text("keep me", encoding="utf-8")
+    planted.rename(results)
+    # The planted tree now answers to the results pathname the guard was given.
+    victim = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR / "precious.csv"
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(config, _INNER)
+    assert victim.read_text(encoding="utf-8") == "keep me"
+
+
+@_needs_fd
+def test_summarize_refuses_a_swapped_results_root(profilers_on_path, tmp_path):
+    """The same swap on the read path publishes no metrics from the planted tree."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    config = _config(
+        ["rocprof"],
+        collect_dir=subdir.parent,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+
+    results.rename(tmp_path / "results.moved")
+    planted = tmp_path / "planted"
+    planted_subdir = planted / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted_subdir.mkdir(parents=True)
+    (planted_subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"leak",999,9\n', encoding="utf-8"
+    )
+    planted.rename(results)
+
+    assert summarize_collectors(config) == {}
+
+
+@_needs_fd
+def test_unpinned_anchor_keeps_working(profilers_on_path, tmp_path):
+    """A config with no threaded pin still parses a clean tree.
+
+    Back-compat for a trial JSON written before the pin existed, and for a
+    direct programmatic caller.
+    """
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    (subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"sgemm",3,1000\n', encoding="utf-8"
+    )
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=subdir.parent,
+            results_root=results.resolve(),
+        )
+    )
+    assert metrics.get("rocprof_kernel_count") == 3
+
+
+# ---- Bounded artifact descriptors -----------------------------------------
+
+
+_needs_proc_fd = pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="descriptor accounting needs /proc"
+)
+
+
+def _rocprof_capture(subdir: Path, calls: int = 4, name: str = "real") -> Path:
+    """Write one parseable stats CSV, so a skip is observable as a kept metric."""
+    subdir.mkdir(parents=True, exist_ok=True)
+    path = subdir / f"{name}_kernel_stats.csv"
+    path.write_text(
+        f'"Name","Calls","TotalDurationNs"\n"sgemm",{calls},1000\n', encoding="utf-8"
+    )
+    return path
+
+
+def _peak_fds_while_summarizing(tmp_path, monkeypatch, ranks):
+    """Highest descriptor count observed while parsing ``ranks`` stats CSVs."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    for rank in range(ranks):
+        (subdir / f"rank{rank:03d}_kernel_stats.csv").write_text(
+            '"Name","Calls","TotalDurationNs"\n"sgemm",1,10\n', encoding="utf-8"
+        )
+    config = _config(
+        ["rocprof"],
+        collect_dir=subdir.parent,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    seen = []
+
+    def probe(artifact_dir, stats_streams, trace_streams):
+        # Sample inside the parse, per stream, so an implementation that opens
+        # everything up front is caught as well as one that accumulates.
+        for _stream in stats_streams:
+            seen.append(len(os.listdir("/proc/self/fd")))
+        return {}
+
+    monkeypatch.setattr(rocprof, "parse_summary_from_streams", probe)
+    summarize_collectors(config)  # warm lazy imports before the baseline
+    baseline = len(os.listdir("/proc/self/fd"))
+    seen.clear()
+    summarize_collectors(config)
+    assert len(seen) == ranks
+    return max(seen) - baseline
+
+
+@_needs_fd
+@_needs_proc_fd
+def test_summarize_descriptor_use_does_not_scale_with_artifact_count(
+    profilers_on_path, tmp_path, monkeypatch
+):
+    """Descriptor use must not scale with the number of per-rank artifacts.
+
+    rocprof writes a CSV pair per process, so a large distributed capture can
+    hold more artifacts than ``RLIMIT_NOFILE`` allows. Opening them all up
+    front hit ``EMFILE`` partway through and published totals covering only the
+    ranks before the limit. Comparing an 8-artifact capture against a
+    64-artifact one is what pins the bound: an absolute number would pass for
+    the eager version too on a small enough tree.
+    """
+    small = _peak_fds_while_summarizing(tmp_path / "small", monkeypatch, 8)
+    large = _peak_fds_while_summarizing(tmp_path / "large", monkeypatch, 64)
+    assert small == large
+    # One artifact handle plus the directory fds held across the read.
+    assert large <= 4
+
+
+@_needs_fd
+def test_summarize_aggregates_every_rank_artifact(profilers_on_path, tmp_path):
+    """Bounding the descriptors must not cost a file: all 16 ranks are summed."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    (subdir / "nested").mkdir(parents=True)
+    for rank in range(16):
+        # Half flat, half under a hostname subdirectory -- the layout depends on
+        # whether ``-o`` was passed, and the per-file reopen has to descend for
+        # the nested ones.
+        parent = subdir if rank % 2 else subdir / "nested"
+        (parent / f"rank{rank:02d}_kernel_stats.csv").write_text(
+            '"Name","Calls","TotalDurationNs"\n"sgemm",1,10\n', encoding="utf-8"
+        )
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=subdir.parent,
+            results_root=results.resolve(),
+            pin_results_root=True,
+        )
+    )
+    assert metrics.get("rocprof_kernel_count") == 16
+    assert metrics.get("rocprof_gpu_time_ms") == pytest.approx(160 / 1_000_000.0)
+
+
+@_needs_fd
+def test_summarize_ignores_a_fifo_that_was_never_a_regular_file(
+    profilers_on_path, tmp_path, no_hang
+):
+    """The walk filters non-regular entries, so a pre-planted FIFO never opens.
+
+    Worth pinning on its own, and it is also why the swap test below has to
+    plant the FIFO *after* the walk: one that is already there when the
+    directory is listed is dropped before any open is attempted, so it cannot
+    demonstrate the blocking-open exposure. My first version of that test made
+    exactly this mistake and passed under mutation.
+    """
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    _rocprof_capture(subdir)
+    os.mkfifo(subdir / "trap_kernel_stats.csv")
+
+    with no_hang(10):
+        metrics = summarize_collectors(
+            _config(
+                ["rocprof"],
+                collect_dir=subdir.parent,
+                results_root=results.resolve(),
+                pin_results_root=True,
+            )
+        )
+    assert metrics.get("rocprof_kernel_count") == 4
+
+
+@_needs_fd
+def test_summarize_skips_an_artifact_swapped_for_a_fifo_after_the_walk(
+    profilers_on_path, tmp_path, monkeypatch, no_hang
+):
+    """A FIFO swapped in after the walk must not hang the post-run summary.
+
+    The walk selects regular files, but the open that follows is a separate
+    syscall -- and bounding descriptor use widened that window on purpose, since
+    artifacts are now listed first and reopened one at a time. A surviving
+    payload process that unlinks a matched CSV and ``mkfifo``s in its place makes
+    a blocking ``O_RDONLY`` wait for a writer that never comes, stalling the
+    trial rather than degrading its metrics.
+
+    The swap is planted at the end of the walk, which is exactly the moment the
+    real race occupies: everything is listed, nothing is open yet.
+    """
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    _rocprof_capture(subdir, calls=4, name="aaa_real")
+    trap = _rocprof_capture(subdir, calls=999, name="zzz_trap")
+
+    real_walk = _fsafe.iter_regular_files
+
+    def swapping_walk(base_fd):
+        yield from real_walk(base_fd)
+        # Both files are in the caller's match list now, and none is open yet.
+        trap.unlink()
+        os.mkfifo(trap)
+
+    monkeypatch.setattr(_fsafe, "iter_regular_files", swapping_walk)
+
+    # A regression here is a hang, not a wrong value, so bound the call. The
+    # alarm raises outside ``Exception`` on purpose: ``summarize_collectors``
+    # swallows ``Exception`` and the artifact reader skips on ``OSError``, and
+    # ``TimeoutError`` is an ``OSError`` -- so a timeout raised as one would be
+    # absorbed into a clean skip and this test would pass while the code hung.
+    with no_hang(10):
+        metrics = summarize_collectors(
+            _config(
+                ["rocprof"],
+                collect_dir=subdir.parent,
+                results_root=results.resolve(),
+                pin_results_root=True,
+            )
+        )
+    # The good capture is still reported; the trap contributes nothing.
+    assert metrics.get("rocprof_kernel_count") == 4
+    assert metrics.get("rocprof_top_kernels") == ["sgemm"]
+
+
+@_needs_fd
+@_needs_proc_fd
+def test_summarize_does_not_leak_fds_across_artifacts(profilers_on_path, tmp_path):
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    for rank in range(12):
+        (subdir / f"rank{rank:02d}_kernel_stats.csv").write_text(
+            '"Name","Calls","TotalDurationNs"\n"sgemm",1,10\n', encoding="utf-8"
+        )
+    config = _config(
+        ["rocprof"],
+        collect_dir=subdir.parent,
+        results_root=results.resolve(),
+        pin_results_root=True,
+    )
+    summarize_collectors(config)  # warm any lazy imports first
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(10):
+        summarize_collectors(config)
+    assert len(os.listdir("/proc/self/fd")) == before

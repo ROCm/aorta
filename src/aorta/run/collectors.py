@@ -23,12 +23,18 @@ package docstring).
 
 from __future__ import annotations
 
+import errno
+import fnmatch
 import logging
+import os
 import shutil
-from collections.abc import Callable, Mapping, Sequence
+import stat
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
+
+from aorta.run import _fsafe
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +54,21 @@ KNOWN_RECIPES: frozenset[str] = frozenset(
 CONFIG_KEY_COLLECT = "_aorta_collect"
 CONFIG_KEY_COLLECT_OPTIONS = "_aorta_collect_options"
 CONFIG_KEY_COLLECT_DIR = "_aorta_collect_dir"
+#: The dispatcher's ``--results-dir``, canonicalized with :meth:`Path.resolve`
+#: **before any trial runs** and threaded so the symlink guards have a trust
+#: anchor that does **not** come from the path being validated -- and that is
+#: not re-resolved after the payload runs. Every directory at or below this
+#: root is payload-writable during the run, including the results directory
+#: inode itself, so a boundary derived from a live ``resolve()`` of this path
+#: after launch proves nothing.
+CONFIG_KEY_RESULTS_ROOT = "_aorta_results_root"
+#: The ``(st_dev, st_ino)`` of :data:`CONFIG_KEY_RESULTS_ROOT`, read at the same
+#: pre-launch moment and threaded as a two-element list so the trial JSON stays
+#: plain JSON. The path alone is not a trust anchor: a payload can rename the
+#: results directory aside and move a *real* directory into its pathname, which
+#: leaves every ``O_NOFOLLOW`` check on that pathname satisfied. Naming the inode
+#: is what makes the anchor immutable across the run.
+CONFIG_KEY_RESULTS_ROOT_ID = "_aorta_results_root_id"
 
 #: Argv-wrapping order, outermost first. ``rocprof`` runs a whole command under
 #: the profiler while ``proton`` takes over a Python script's execution, so
@@ -71,7 +92,24 @@ class CollectorSpec:
         wrap: Rewrites the launch argv to attach the collector, or ``None``
             for a collector the platform does not launch itself.
         summarize: Parses the collector's artifacts into flat trial metrics,
-            or ``None`` for a collector the platform does not parse.
+            or ``None`` for a collector the platform does not parse. Follows
+            symlinks; used only on the non-POSIX fallback path where the
+            fd-relative reader is unavailable.
+        summarize_streams: Parses artifacts supplied as open text handles into
+            the same metrics. The POSIX post-run path opens each matching file
+            ``O_NOFOLLOW`` under a directory fd and calls this, so a payload
+            symlink swapped in after the guard cannot redirect the read.
+            Signature: ``(artifact_dir: str, *stream_groups) -> dict``, with one
+            positional stream group per entry of ``glob_groups``. Each group is
+            a **lazy iterator** that opens one file at a time -- a distributed
+            capture can hold more artifacts than ``RLIMIT_NOFILE`` allows -- so
+            an implementation must iterate each group at most once, must not
+            call ``len()`` on it, and must not hold a group to consume after
+            returning: the directory fds the handles come from are closed then.
+            A group it never iterates is never opened at all.
+        glob_groups: One basename glob per stream group the parser expects, in
+            the order ``summarize_streams`` takes them. ``rocprof`` reads two
+            families (stats, then trace); ``proton`` reads one (``*.hatchet``).
     """
 
     name: str
@@ -79,6 +117,8 @@ class CollectorSpec:
     validate: Callable[[Mapping[str, str] | None], Any]
     wrap: Callable[..., list[str]] | None = None
     summarize: Callable[[Path], dict[str, Any]] | None = None
+    summarize_streams: Callable[..., dict[str, Any]] | None = None
+    glob_groups: tuple[str, ...] = ()
 
 
 def _accept_any(options: Mapping[str, str] | None) -> dict[str, str]:
@@ -108,6 +148,8 @@ def _registry() -> dict[str, CollectorSpec]:
             validate=rocprof.validate_options,
             wrap=rocprof.wrap_argv,
             summarize=rocprof.parse_summary,
+            summarize_streams=rocprof.parse_summary_from_streams,
+            glob_groups=("*_kernel_stats.csv", "*_kernel_trace.csv"),
         ),
         "proton": CollectorSpec(
             name="proton",
@@ -115,6 +157,8 @@ def _registry() -> dict[str, CollectorSpec]:
             validate=proton.validate_options,
             wrap=proton.wrap_argv,
             summarize=proton.parse_summary,
+            summarize_streams=proton.parse_summary_from_streams,
+            glob_groups=("*.hatchet",),
         ),
         "numerics": CollectorSpec("numerics", None, _accept_any),
         "layer_numerics": CollectorSpec("layer_numerics", "layer_numerics", _accept_any),
@@ -159,6 +203,86 @@ def _collect_root(config: Mapping[str, Any]) -> Path | None:
     return Path(raw) if isinstance(raw, str) and raw else None
 
 
+def _threaded_anchor(config: Mapping[str, Any]) -> _fsafe.TrustedAnchor | None:
+    """The dispatcher's frozen ``--results-dir`` anchor, or ``None`` if unthreaded.
+
+    Reads :data:`CONFIG_KEY_RESULTS_ROOT` (canonicalized at dispatch) together
+    with :data:`CONFIG_KEY_RESULTS_ROOT_ID` (that directory's inode identity,
+    read at the same pre-launch moment). Callers must **not**
+    :meth:`~pathlib.Path.resolve` the path again: the profiled process can
+    replace that directory with a symlink, and resolving both the candidate and
+    the anchor through the same link would make containment succeed for a path
+    that has left the operator's tree.
+
+    Private on purpose: every guard goes through
+    :func:`trusted_collector_anchor` so the fallback is applied in exactly one
+    place. A caller that took the bare ``None`` from here would silently get a
+    weaker guard than the pre-filter beside it.
+    """
+    raw = config.get(CONFIG_KEY_RESULTS_ROOT)
+    if not isinstance(raw, str) or not raw:
+        return None
+    return _fsafe.TrustedAnchor(Path(raw), _threaded_identity(config))
+
+
+def _threaded_identity(config: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Parse :data:`CONFIG_KEY_RESULTS_ROOT_ID`, or ``None`` when unusable.
+
+    Absent is normal: a direct programmatic caller threads no pin, and a trial
+    config written before the key existed has none. Present-but-unparseable is
+    not, so it is logged -- the key is written only by the dispatcher, which
+    means a bad value is our bug, and it silently weakens a guard.
+
+    Either way the result is an unpinned anchor rather than an exception. This
+    is a deliberate line: the degradation is to the *previous* shipped guard
+    (the full ``O_NOFOLLOW`` descent below the anchor path), not to no guard,
+    and failing the run's whole collection over a config-shape bug in code the
+    payload cannot reach would cost more than it protects. Nothing here weakens
+    on input a payload controls -- it cannot write the trial config.
+    """
+    raw = config.get(CONFIG_KEY_RESULTS_ROOT_ID)
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        try:
+            return (int(raw[0]), int(raw[1]))
+        except (TypeError, ValueError):
+            pass
+    log.warning(
+        "collect: ignoring unusable %s=%r; expected [st_dev, st_ino]. Path "
+        "guards fall back to no-follow-only, which cannot detect the results "
+        "directory being renamed aside and replaced by a real one.",
+        CONFIG_KEY_RESULTS_ROOT_ID,
+        raw,
+    )
+    return None
+
+
+def trusted_collector_anchor(
+    config: Mapping[str, Any], root: Path
+) -> _fsafe.TrustedAnchor:
+    """The directory every collector path for ``root`` must stay inside.
+
+    The dispatcher-threaded ``--results-dir`` when there is one (see
+    :func:`_threaded_anchor`), else ``root.parent``. The fallback only fires for
+    a direct programmatic caller that threaded no anchor. Being lexical and
+    unpinned, it fails closed rather than guessing: a symlink anywhere above the
+    collector root makes the containment check refuse, even when the operator
+    put it there.
+
+    **The single source of the anchor**, for the read path, the reset, the
+    retention pre-filter and the destructive prune alike. Deriving it twice is
+    how the pre-filter came to use ``root.parent`` while the prune it guards
+    received ``None`` and quietly dropped to the pathname engine -- a
+    time-of-check/time-of-use gap opened by the two spellings disagreeing, not
+    by either one being wrong on its own.
+    """
+    anchor = _threaded_anchor(config)
+    if anchor is not None:
+        return anchor
+    return _fsafe.TrustedAnchor(root.parent)
+
+
 def unsafe_collector_paths(config: Mapping[str, Any]) -> list[Path]:
     """Every collector path for this trial that cannot be safely traversed.
 
@@ -171,41 +295,125 @@ def unsafe_collector_paths(config: Mapping[str, Any]) -> list[Path]:
 
     Empty when there is nothing to guard (no collector active, no threaded
     collector directory) or when every path is a real directory.
+
+    A path that does not exist is not reported: the caller treats any entry
+    here as "keep every collector artifact", and a validated-only collector
+    such as ``layer_numerics`` has no output directory unless a wrapper made
+    one, so counting absence as unsafe would let one never-created directory
+    retain the rocprof capture sitting beside it.
     """
     root = _collect_root(config)
     if root is None:
         return []
     registry = _registry()
+    trusted = trusted_collector_anchor(config, root)
     candidates = [root]
     for name in active_collectors(config):
         spec = registry.get(name)
         if spec is not None and spec.output_subdir is not None:
             candidates.append(root / spec.output_subdir)
-    return [path for path in candidates if not collector_root_is_traversable(path)]
+    return [path for path in candidates if not collector_root_is_traversable(path, trusted)]
 
 
-def collector_root_is_traversable(root: Path) -> bool:
-    """True when ``root`` can be walked without following a symlink out of the tree.
+def collector_root_is_traversable(
+    root: Path, trusted_root: _fsafe.TrustedAnchor | Path | None = None
+) -> bool:
+    """True when ``root`` can be walked without following a payload-owned symlink.
 
     Checked **again after the command has run**, not only before it launches.
     The profiled command is handed this path (``rocprofv3 -d``, ``proton -n``),
-    so between the pre-launch reset and any post-run pass it can delete the
+    so between the pre-launch reset and any post-run pass it can delete a
     directory and leave a symlink in its place. Every later step --
     ``Path.is_dir()``, ``rglob``, and :func:`aorta.run.retention.apply_retention`
-    -- follows links, so traversing one would read, and for retention *delete*,
-    files outside the results tree entirely.
+    -- follows links in *every* path component, so traversing one would read,
+    and for retention *delete*, through the link.
 
-    The parent is checked too, for the same reason
-    :func:`_reset_output_dir` checks it: ``is_dir()`` resolves every component,
-    not just the last.
+    Three checks, all required:
+
+    * **Containment.** ``root.resolve()`` must stay inside ``trusted_root``.
+      ``trusted_root`` is a pre-launch canonical path and is **not** resolved
+      again: resolving both sides after the payload replaced the results
+      directory with a symlink would make the escape look contained.
+    * **No payload symlink at or below the anchor.** A link whose target is
+      still inside the results tree (``trial -> sibling_trial``,
+      ``rocprof -> <results>``) also fails: ``rmtree`` / ``rglob`` would then
+      operate on the sibling. Operator-owned links *above* the anchor are
+      already folded away because the dispatcher stores
+      ``--results-dir.resolve()``.
+    * **The anchor is still the same inode** (POSIX, and only when the caller
+      threaded a pinned :class:`~aorta.run._fsafe.TrustedAnchor`). Neither check
+      above asks whether the trusted root is still the operator's directory: a
+      payload can rename it aside and move a *real* directory into its
+      pathname, and every symlink check on that pathname then passes.
+
+    A path that is simply **absent** -- every component that does exist checks
+    out, the leaf was never created -- is traversable: there is nothing there to
+    read or delete through, so absence is not an escape. (An absent leaf
+    *under* a symlinked or escaping ancestor is still a refusal; the symlink is
+    met first.) That distinction matters because
+    :func:`unsafe_collector_paths` asks about every active collector's output
+    subdirectory, and a validated-only collector such as ``layer_numerics``
+    has no subdirectory unless a wrapper made one.
+
+    ``trusted_root`` defaults to ``root.parent`` when the caller omits it.
+    That fallback is only for a programmatic caller that did not thread
+    :data:`CONFIG_KEY_RESULTS_ROOT`; it still misses a swapped ancestor, which
+    is why the dispatcher always supplies the operator's ``--results-dir``.
+
+    On POSIX this is a *probe*: it descends the path once with ``O_NOFOLLOW``
+    and reports whether the leaf is reachable without crossing a symlink. It is
+    a pre-filter and a log-message source -- the race-free guarantee comes from
+    the caller (:func:`_reset_output_dir`, :func:`summarize_collectors`,
+    :func:`aorta.run.retention.apply_retention`) *holding* the dir fd across the
+    operation, not from this check. Where the platform lacks the fd primitives
+    it keeps the historical lexical ``resolve()`` + component-walk.
     """
+    anchor = _fsafe.as_anchor(trusted_root if trusted_root is not None else root.parent)
+    if _fsafe.HAVE_FD_TRAVERSAL:
+        components = _fsafe.relative_components(anchor.path, root)
+        if components is None:
+            return False
+        try:
+            with _fsafe.open_dir_nofollow(anchor, components):
+                return True
+        except _fsafe.UnsafePathError as exc:
+            # ENOENT is "nothing is there", not "something hostile is there".
+            # A symlink refused by O_NOFOLLOW surfaces as ELOOP even when it
+            # dangles, so absence cannot be faked with a broken link.
+            return exc.errno == errno.ENOENT
+        except OSError:
+            return False
     try:
-        return not (root.is_symlink() or root.parent.is_symlink())
-    except OSError:
+        # A missing path needs no special case here: non-strict ``resolve()``
+        # keeps the lexical tail, so containment and the symlink walk both still
+        # apply -- an absent leaf under a symlinked ancestor stays a refusal.
+        if not root.resolve().is_relative_to(anchor.path):
+            return False
+        return not _payload_symlink_at_or_below(root, anchor.path)
+    except (OSError, RuntimeError):
+        # RuntimeError: a symlink loop that ``resolve()`` refuses to follow.
         return False
 
 
-def _reset_output_dir(out_dir: Path) -> None:
+def _payload_symlink_at_or_below(path: Path, trusted: Path) -> bool:
+    """True when any component of ``path`` below ``trusted`` is a symlink.
+
+    ``trusted`` itself is not inspected: that inode is the operator's
+    ``--results-dir``. Everything below it is payload-writable.
+    """
+    current = path
+    while current != trusted:
+        if current.parent == current:
+            # Walked to the filesystem root without meeting the anchor, so
+            # ``path`` is not lexically inside the canonical results tree.
+            return True
+        if current.is_symlink():
+            return True
+        current = current.parent
+    return False
+
+
+def _reset_output_dir(out_dir: Path, trusted_root: _fsafe.TrustedAnchor) -> None:
     """Create ``out_dir`` empty, discarding any earlier attempt's artifacts.
 
     Probe resume replays an interrupted trial onto the *same* paths, so a
@@ -216,22 +424,27 @@ def _reset_output_dir(out_dir: Path) -> None:
     one trial of one collector: nothing else writes here, and the trial record
     (``result.json``) lives in a different tree.
 
+    Args:
+        out_dir: The collector's output directory for this trial.
+        trusted_root: Pre-launch canonical results directory. ``out_dir`` must
+            stay inside it with no payload-owned symlink on the path.
+            ``rmtree`` is recursive and ``is_dir()`` follows links in *every*
+            component, so a link at or below this root -- even to a sibling
+            inside the tree -- would redirect the delete.
+
     Raises:
-        OSError: the directory could not be cleared or created, or its parent is
-            a symlink (see below).
+        OSError: the directory could not be cleared or created, or it is not
+            traversable inside ``trusted_root``.
     """
-    # ``Path.is_dir()`` follows symlinks in *every* component, not just the
-    # last, so checking ``out_dir`` alone is not enough: if the per-trial
-    # collector root is a pre-existing symlink, ``out_dir`` resolves through it
-    # and ``rmtree`` would recursively delete the link target -- a tree outside
-    # the results directory entirely. The results tree is created by the
-    # dispatcher, so a symlink here is anomalous; refuse rather than guess.
-    parent = out_dir.parent
-    if parent.is_symlink():
+    if _fsafe.HAVE_FD_TRAVERSAL:
+        _reset_output_dir_fd(out_dir, trusted_root)
+        return
+    if not collector_root_is_traversable(out_dir, trusted_root):
         raise OSError(
-            f"refusing to prepare {out_dir}: its parent {parent} is a symlink, "
-            "and clearing through it would delete the link target outside the "
-            "results tree. Remove the symlink or point --results-dir at a real "
+            f"refusing to prepare {out_dir}: a path component at or below "
+            f"{trusted_root.path} is a symlink or resolves outside that "
+            "directory, so clearing it would delete through the link. Remove "
+            "the symlink in that path, or point --results-dir at a real "
             "directory."
         )
     if out_dir.is_symlink() or out_dir.is_file():
@@ -239,6 +452,52 @@ def _reset_output_dir(out_dir: Path) -> None:
     elif out_dir.is_dir():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
+
+
+def _reset_output_dir_fd(out_dir: Path, trusted_root: _fsafe.TrustedAnchor) -> None:
+    """Race-free :func:`_reset_output_dir`: clear+recreate through directory fds.
+
+    The parent chain below ``trusted_root`` (``<workload>/<trial>``) is opened
+    -- and created if a first attempt has not made it yet -- with ``O_NOFOLLOW``
+    on every component, so the reset holds a fd to the collector directory's
+    parent that no ancestor swap can redirect. The leaf (``rocprof`` / ``proton``)
+    is then inspected ``lstat``-style and removed **relative to that parent fd**:
+    a symlink or file is unlinked, a real directory is recursively emptied and
+    ``rmdir``-ed, and the fresh directory is ``mkdir``-ed back -- all by name
+    under the held fd, never by re-resolving the pathname the payload can swap.
+    """
+    parent = out_dir.parent
+    leaf = out_dir.name
+    components = _fsafe.relative_components(trusted_root.path, parent)
+    if components is None or not leaf:
+        raise OSError(
+            f"refusing to prepare {out_dir}: it is not lexically inside "
+            f"{trusted_root.path}, so clearing it could delete outside that "
+            "directory. Point --results-dir at a real directory."
+        )
+    try:
+        with _fsafe.open_dir_nofollow(
+            trusted_root, components, create_missing=True
+        ) as parent_fd:
+            info = _fsafe.stat_at(parent_fd, leaf)
+            if info is not None and stat.S_ISLNK(info.st_mode):
+                # A symlink where the collector output dir belongs is never a
+                # legitimate prior attempt -- the payload planted it. Refuse
+                # rather than unlink-and-recreate, matching the pre-launch
+                # contract that a swapped leaf aborts the trial's collection.
+                raise _fsafe.UnsafePathError(
+                    f"{out_dir} is a symlink; refusing to clear it"
+                )
+            _fsafe.remove_entry_at(parent_fd, leaf)
+            os.mkdir(leaf, dir_fd=parent_fd)
+    except _fsafe.UnsafePathError as exc:
+        raise OSError(
+            f"refusing to prepare {out_dir}: a path component at or below "
+            f"{trusted_root.path} is a symlink, resolves outside that "
+            "directory, or is no longer the directory frozen before the run, "
+            "so clearing it would delete through the swap. Remove the symlink "
+            f"in that path, or point --results-dir at a real directory. ({exc})"
+        ) from exc
 
 
 def validate_collectors(
@@ -351,7 +610,7 @@ def wrap_argv_for_collectors(
             continue
         out_dir = root / spec.output_subdir
         try:
-            _reset_output_dir(out_dir)
+            _reset_output_dir(out_dir, trusted_collector_anchor(config, root))
         except OSError as exc:
             raise RuntimeError(
                 f"collect: cannot prepare the {name} artifact directory "
@@ -385,28 +644,49 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
     root = _collect_root(config)
     if root is None:
         return {}
-    unsafe = unsafe_collector_paths(config)
-    if unsafe:
-        # Read-only here, but the parsers ``rglob`` these directories, so one
-        # swapped for a symlink while the command ran would pull file contents
-        # from outside the results tree into the trial metrics. Checked per
-        # collector directory, not just the shared root -- the payload can swap
-        # either. Same guard as the retention pass, which has the destructive
-        # version of this exposure.
-        log.warning(
-            "collect: %s is (or is under) a symlink after the run; refusing to "
-            "parse artifacts through it. No collector metrics for this trial.",
-            ", ".join(str(path) for path in unsafe),
-        )
-        return {}
+    trusted = trusted_collector_anchor(config, root)
     metrics: dict[str, Any] = {}
     registry = _registry()
     for name in active_collectors(config):
         spec = registry.get(name)
-        if spec is None or spec.summarize is None or spec.output_subdir is None:
+        if spec is None or spec.output_subdir is None:
             continue
+        subdir = root / spec.output_subdir
         try:
-            metrics.update(spec.summarize(root / spec.output_subdir))
+            if _fsafe.HAVE_FD_TRAVERSAL and spec.summarize_streams is not None:
+                metrics.update(_summarize_streamed(spec, subdir, trusted))
+            elif spec.summarize is not None:
+                # Non-POSIX fallback: guard lexically, then parse by pathname.
+                # The parsers ``rglob`` the subdirectory, so one swapped for a
+                # symlink while the command ran would pull file contents from
+                # outside the results tree into the trial metrics.
+                if not collector_root_is_traversable(subdir, trusted):
+                    log.warning(
+                        "collect: %s is (or is under) a symlink after the run; "
+                        "refusing to parse artifacts through it. No %s metrics "
+                        "for this trial.",
+                        subdir,
+                        name,
+                    )
+                    continue
+                metrics.update(spec.summarize(subdir))
+        except _fsafe.UnsafePathError as exc:
+            if exc.errno == errno.ENOENT:
+                # The collector wrote nothing at all -- a validated-only
+                # collector whose wrapper made no directory, or a command that
+                # did no GPU work. Not a swap, and not worth an operator
+                # warning: the parsers treat a missing tree as no metrics too.
+                log.debug("collect: %s does not exist; no %s metrics.", subdir, name)
+                continue
+            # A component of the collector directory was a symlink after the
+            # run: refuse to read through it (same exposure the destructive
+            # retention pass guards). Skip this collector, keep the trial.
+            log.warning(
+                "collect: %s is (or is under) a symlink after the run; refusing "
+                "to parse artifacts through it. No %s metrics for this trial.",
+                subdir,
+                name,
+            )
         except Exception:
             # An opt-in measurement must never turn a healthy trial into a
             # failure, so the catch is deliberately unbounded.
@@ -414,16 +694,88 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
     return metrics
 
 
+def _summarize_streamed(
+    spec: CollectorSpec, subdir: Path, trusted: _fsafe.TrustedAnchor
+) -> dict[str, Any]:
+    """Parse one collector's artifacts through no-follow, fd-relative reads.
+
+    Descends to the collector subdirectory holding a dir fd no ancestor swap can
+    redirect, walks it without following any symlink to list the files whose
+    basename matches one of ``spec.glob_groups``, then hands the parser one lazy
+    iterator of open handles per group (in ``glob_groups`` order). Each handle is
+    opened ``O_NOFOLLOW`` under the held directory fd and closed before the next
+    one is opened, so a capture with more per-rank artifacts than
+    ``RLIMIT_NOFILE`` allows still aggregates every file instead of silently
+    dropping the ranks that came after the limit.
+
+    Raises:
+        UnsafePathError: a component of the collector directory is a symlink or
+            does not exist.
+    """
+    components = _fsafe.relative_components(trusted.path, subdir)
+    if components is None:
+        raise _fsafe.UnsafePathError(
+            f"{subdir} is not lexically inside the trusted root {trusted.path}"
+        )
+    assert spec.summarize_streams is not None  # guarded by the caller
+    with _fsafe.open_dir_nofollow(trusted, components) as base_fd:
+        matched: list[list[str]] = [[] for _ in spec.glob_groups]
+        for rel, _dir_fd, fname, _size in _fsafe.iter_regular_files(base_fd):
+            for index, pattern in enumerate(spec.glob_groups):
+                if fnmatch.fnmatch(fname, pattern):
+                    matched[index].append(rel)
+                    break
+        groups = [_open_artifacts(base_fd, rels) for rels in matched]
+        return spec.summarize_streams(str(subdir), *groups)
+
+
+def _open_artifacts(base_fd: int, relative_paths: Sequence[str]) -> Iterator[TextIO]:
+    """Yield each artifact under ``base_fd`` as an open handle, one at a time.
+
+    The handle is closed before the next is opened, bounding this pass to a
+    single artifact descriptor no matter how many ranks the capture holds.
+    Reopening a directory chain per file is safe because ``base_fd`` names an
+    inode: the descent below it is fd-relative and ``O_NOFOLLOW``, so the swap
+    the held fd protects against stays defeated.
+
+    A file that cannot be opened at all is skipped: it vanished, or a payload
+    replaced the regular file the walk saw with a symlink or a FIFO (which
+    :func:`~aorta.run._fsafe.secure_open_read` refuses rather than blocking on).
+    Descriptor exhaustion is **not** skipped: it means the remaining artifacts
+    would be missing from the totals, and a confidently-wrong
+    ``rocprof_gpu_time_ms`` covering a prefix of the ranks is worse than no
+    metric, so it propagates and the caller drops the collector's metrics
+    entirely.
+    """
+    for rel in relative_paths:
+        *parents, name = rel.split("/")
+        try:
+            with (
+                _fsafe.open_dir_at(base_fd, parents) as dir_fd,
+                _fsafe.secure_open_read(
+                    dir_fd, name, encoding="utf-8", newline=""
+                ) as stream,
+            ):
+                yield stream
+        except OSError as exc:
+            if exc.errno in (errno.EMFILE, errno.ENFILE):
+                raise
+            log.debug("collect: skipping unreadable artifact %s (%s)", rel, exc)
+
+
 __all__ = [
     "CONFIG_KEY_COLLECT",
     "CONFIG_KEY_COLLECT_DIR",
     "CONFIG_KEY_COLLECT_OPTIONS",
+    "CONFIG_KEY_RESULTS_ROOT",
+    "CONFIG_KEY_RESULTS_ROOT_ID",
     "KNOWN_RECIPES",
     "WRAP_ORDER",
     "CollectorSpec",
     "active_collectors",
     "collector_root_is_traversable",
     "summarize_collectors",
+    "trusted_collector_anchor",
     "unsafe_collector_paths",
     "validate_collectors",
     "wrap_argv_for_collectors",

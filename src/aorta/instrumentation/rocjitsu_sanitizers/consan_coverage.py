@@ -30,6 +30,20 @@ _VERDICT_COUNTS = (
     "replay_unsupported_fences",
     "replay_metadata_full",
 )
+_SITE_FIELDS = (
+    "reader",
+    "kind",
+    "disposition",
+    "reason",
+    "outcome",
+    "lowering_reason",
+    "resource_reason",
+    "container",
+    "scope",
+    "text",
+    "mnemonic",
+)
+_NO_REASON = "none"
 
 
 class CoverageParseError(ValueError):
@@ -85,6 +99,35 @@ class CoverageDecision:
     reasons: tuple[str, ...]
     coverage: tuple[CoverageRecord, ...]
     verdict: AnalysisVerdict
+
+
+@dataclass(frozen=True)
+class _SiteRecord:
+    """One itemized ``coverage_site`` line."""
+
+    reader: int
+    load: int | None
+    kind: str
+    disposition: str
+    outcome: str
+    lowering_reason: str
+    resource_reason: str
+
+    @property
+    def identity(self) -> tuple[int, int | None]:
+        return self.reader, self.load
+
+    @property
+    def failure_reason(self) -> str | None:
+        """Why this site failed, or None if it succeeded or gave no reason."""
+
+        if self.outcome == "placement_or_lowering_failed":
+            reason = self.lowering_reason
+        elif self.outcome == "resource_failed":
+            reason = self.resource_reason
+        else:
+            return None
+        return None if reason == _NO_REASON else reason
 
 
 def _fields(payload: str, context: str) -> dict[str, str]:
@@ -246,56 +289,64 @@ def _aggregate(verdicts: list[AnalysisVerdict]) -> AnalysisVerdict:
     )
 
 
+def _failure_attributions(sites: list[_SiteRecord]) -> list[str]:
+    """Name why sites failed, so a report says more than "0 patched"."""
+
+    tally: dict[tuple[str, str, str], int] = {}
+    for site in sites:
+        reason = site.failure_reason
+        if reason is None:
+            continue
+        key = (site.kind, site.outcome, reason)
+        tally[key] = tally.get(key, 0) + 1
+    return [
+        f"{kind} {outcome}: {count} {reason}"
+        for (kind, outcome, reason), count in sorted(tally.items())
+    ]
+
+
 def parse_coverage_decision(log_text: str) -> CoverageDecision:
-    """Parse and independently cross-check complete coverage evidence."""
+    """Parse and independently cross-check complete coverage evidence.
+
+    Raises ``CoverageParseError`` when the evidence is malformed or internally
+    inconsistent. A kind the hook counted but never itemized is neither: it is
+    a coverage gap, so it is returned as a rejected decision naming the gap
+    rather than raised. Both outcomes fail closed -- the difference is that a
+    rejected decision still carries the per-object counts and any race finding,
+    while a raised error discards them.
+    """
 
     coverage: list[CoverageRecord] = []
     verdicts: list[AnalysisVerdict] = []
-    site_records: list[tuple[int, int | None, str, str, str]] = []
+    site_records: list[_SiteRecord] = []
     for line_number, line in enumerate(log_text.splitlines(), 1):
         marker = line.find(_PREFIX)
         if marker < 0:
             continue
-        record = line[marker + len(_PREFIX) :]
-        if record.startswith("coverage "):
-            coverage.append(_parse_coverage(record[len("coverage ") :], line_number))
-        elif record.startswith("coverage_site "):
-            fields = _fields(
-                record[len("coverage_site ") :],
-                f"coverage_site line {line_number}",
-            )
-            _require(
-                fields,
-                (
-                    "reader",
-                    "kind",
-                    "disposition",
-                    "reason",
-                    "outcome",
-                    "lowering_reason",
-                    "resource_reason",
-                    "container",
-                    "scope",
-                    "text",
-                    "mnemonic",
-                ),
-                f"coverage_site line {line_number}",
-            )
+        payload = line[marker + len(_PREFIX) :]
+        if payload.startswith("coverage "):
+            coverage.append(_parse_coverage(payload[len("coverage ") :], line_number))
+        elif payload.startswith("coverage_site "):
+            context = f"coverage_site line {line_number}"
+            fields = _fields(payload[len("coverage_site ") :], context)
+            _require(fields, _SITE_FIELDS, context)
             if fields["kind"] not in _SITE_KINDS:
-                raise CoverageParseError(f"coverage_site line {line_number}: unsupported kind")
+                raise CoverageParseError(f"{context}: unsupported kind")
             site_records.append(
-                (
-                    _count(fields, "reader", f"coverage_site line {line_number}"),
-                    _load(fields, f"coverage_site line {line_number}"),
-                    fields["kind"],
-                    fields["disposition"],
-                    fields["outcome"],
+                _SiteRecord(
+                    reader=_count(fields, "reader", context),
+                    load=_load(fields, context),
+                    kind=fields["kind"],
+                    disposition=fields["disposition"],
+                    outcome=fields["outcome"],
+                    lowering_reason=fields["lowering_reason"],
+                    resource_reason=fields["resource_reason"],
                 )
             )
-        elif record.startswith("analysis verdict "):
+        elif payload.startswith("analysis verdict "):
             verdicts.append(
                 _parse_verdict(
-                    record[len("analysis verdict ") :],
+                    payload[len("analysis verdict ") :],
                     line_number,
                 )
             )
@@ -308,19 +359,32 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
     if len(identities) != len(set(identities)):
         raise CoverageParseError("ambiguous duplicate coverage identities")
     identity_set = set(identities)
-    if any(
-        (reader, load) not in identity_set
-        for reader, load, _kind, _disposition, _outcome in site_records
-    ):
+    if any(site.identity not in identity_set for site in site_records):
         raise CoverageParseError("coverage_site references an unknown load")
+    unitemized: list[str] = []
     for record in coverage:
         counts = record.count_map
         for kind in _SITE_KINDS:
-            retained = [site for site in site_records if site[:3] == (*record.identity, kind)]
-            if len(retained) != counts[f"{kind}_discovered"]:
+            retained = [
+                site
+                for site in site_records
+                if site.identity == record.identity and site.kind == kind
+            ]
+            discovered = counts[f"{kind}_discovered"]
+            if discovered and not retained:
+                # The hook counts these sites but emits no per-site line for any
+                # of them, so there is nothing to reconcile against. Coverage
+                # this run cannot see is still refused below; naming the gap
+                # keeps the rest of the evidence readable instead of aborting
+                # the whole parse (ROCm/aorta#405).
+                unitemized.append(
+                    f"reader {record.reader} {kind} sites not itemized: 0 of {discovered}"
+                )
+                continue
+            if len(retained) != discovered:
                 raise CoverageParseError(f"reader {record.reader} {kind} site count mismatch")
-            supported = sum(site[3] == "supported" for site in retained)
-            unsupported = sum(site[3] == "unsupported" for site in retained)
+            supported = sum(site.disposition == "supported" for site in retained)
+            unsupported = sum(site.disposition == "unsupported" for site in retained)
             if supported != counts[f"{kind}_supported"]:
                 raise CoverageParseError(f"reader {record.reader} {kind} supported count mismatch")
             if unsupported != counts[f"{kind}_unsupported"]:
@@ -328,15 +392,11 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
                     f"reader {record.reader} {kind} unsupported count mismatch"
                 )
             if not record.expert_limit:
-                for outcome, suffix in (
-                    ("patched", "patched"),
-                    ("resource_failed", "resource_failed"),
-                    (
-                        "placement_or_lowering_failed",
-                        "placement_or_lowering_failed",
-                    ),
-                ):
-                    if sum(site[4] == outcome for site in retained) != counts[f"{kind}_{suffix}"]:
+                for outcome in ("patched", "resource_failed", "placement_or_lowering_failed"):
+                    if (
+                        sum(site.outcome == outcome for site in retained)
+                        != counts[f"{kind}_{outcome}"]
+                    ):
                         raise CoverageParseError(
                             f"reader {record.reader} {kind} {outcome} count mismatch"
                         )
@@ -376,6 +436,8 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
     for kind, patched, supported in verdict.patched_supported:
         if patched != supported:
             reasons.append(f"{kind} patched/supported mismatch: {patched}/{supported}")
+    reasons.extend(_failure_attributions(site_records))
+    reasons.extend(unitemized)
     if any(record.expert_limit for record in coverage):
         reasons.append("expert patch limit enabled")
     return CoverageDecision(
