@@ -5,10 +5,13 @@ description: >
   Workload-survey (observed-only, Tab 2, #367) reproduction over the synthetic
   lds_reduce control kernel -- an ordinary, independently-authored shared-memory
   (LDS) reduction repro with no customer association. Runs BOTH sanitizers:
-  waitcheck (static, observes a clean pass) and ConSan (dynamic, fails closed
-  with exit 86 on the current rocjitsu build; see ROCm/rocm-systems#9972).
-  Reproduction path for the committed survey fixtures
-  reports/lds_reduce_waitcheck and reports/lds_reduce_consan.
+  waitcheck (static, observes a clean pass) and ConSan (dynamic). ConSan used to
+  fail closed with exit 86 on this kernel (ROCm/rocm-systems#9972, zero captured
+  records); that is fixed in 15275dad and the equivalent nightly lane
+  (daily-consan-lds-dispatch) now observes a clean pass. The committed fixture
+  reports/lds_reduce_consan still records the old exit-86 outcome and is stale
+  until regenerated on a gfx950 host. Reproduction path for the committed survey
+  fixtures reports/lds_reduce_waitcheck and reports/lds_reduce_consan.
 sanitizer_plan:
   target: gfx950
   source:

@@ -366,42 +366,82 @@ def _check_env_slug_collisions(cells: tuple) -> None:
         seen[slug] = cell.environment
 
 
-def _is_isolated_environment(
+# What sits between the runner process and the trial. Three values rather
+# than a bool because two different questions are asked of it and their
+# answers do not coincide -- see :func:`_environment_boundary`.
+_EnvBoundary = Literal["local", "venv", "container"]
+
+
+def _environment_boundary(
     env_name: str,
     inline_envs: tuple[InlineEnv, ...],
     sidecar_files: tuple[Path, ...] = (),
-) -> bool:
-    """Return True iff the env would isolate the trial from the runner process.
+) -> _EnvBoundary:
+    """Classify what separates the runner process from the trial.
 
-    Inline-docker envs always count as isolated (the cell shorthand
-    explicitly declares a docker ref). Registered envs count as isolated if
-    their :class:`aorta.registry.Environment` descriptor sets ``docker`` or
-    ``venv`` -- in either case, a runner-process ``collect_env()`` call would
-    record the host's state, not the trial's, and therefore the resulting
-    ``environments/<name>/env.json`` would be misleading. Isolated envs
-    instead rely on the workload wrapper to capture an in-container snapshot
-    via the ``_aorta_env_probe`` contract, which the runner promotes after
-    the cell runs (falling back to a placeholder if none appears). This
-    predicate gates that path: True routes the env to wrapper-driven probing,
-    False to the in-process ``collect_env()``.
+    ONE classification, consulted by two callers that ask different
+    questions of it. Enumerating the tiers separately per question is how
+    the two would drift apart when a third tier is added:
+
+    * :func:`_is_isolated_environment` asks "would a runner-process
+      ``collect_env()`` describe the wrong stack?". True of ``"venv"`` and
+      ``"container"`` alike -- both run the trial somewhere the host
+      snapshot does not describe.
+    * :func:`_substitution_ld_library_path` asks "does this process's
+      ambient environment reach the workload?". False for ``"container"``
+      only; a venv wrapper launches a subprocess on this host, which
+      inherits it.
+
+    Inline envs are ``{docker: <ref>}`` by construction
+    (:class:`aorta.triage.recipe.InlineEnv` has no venv field), so the cell
+    shorthand always names a container. ``docker`` outranks ``venv`` if a
+    descriptor somehow carries both: the container boundary is the one that
+    drops the ambient environment, and reporting the weaker of the two would
+    claim an inheritance that does not happen.
 
     ``sidecar_files`` MUST be threaded through so envs defined only in a
     ``--mitigations-file`` JSON are visible to the registry resolver. Without
-    it, sidecar-defined docker/venv envs would mis-classify as "local" and
-    pick up a misleading host-state snapshot under their name. Lookup
-    failures still fall back to "treat as local" so probe behaviour is
-    unchanged for envs we genuinely don't know about; the pre-flight
+    it, sidecar-defined docker/venv envs would mis-classify as ``"local"``
+    and pick up a misleading host-state snapshot under their name. Lookup
+    failures still fall back to ``"local"`` so probe behaviour is unchanged
+    for envs we genuinely don't know about; the pre-flight
     :func:`_validate_names_resolve` would already have failed if the name
     were truly unknown.
     """
     if any(env_name == e.name for e in inline_envs):
-        return True
+        return "container"
     extra = list(sidecar_files) if sidecar_files else None
     try:
         descriptor = get_environment(env_name, extra_files=extra)
     except RegistryError:
-        return False
-    return bool(descriptor.docker or descriptor.venv)
+        return "local"
+    if descriptor.docker:
+        return "container"
+    if descriptor.venv:
+        return "venv"
+    return "local"
+
+
+def _is_isolated_environment(boundary: _EnvBoundary) -> bool:
+    """Return True iff the env would isolate the trial from the runner process.
+
+    Both non-local boundaries count: for a docker OR a venv env, a
+    runner-process ``collect_env()`` call would record the host's state, not
+    the trial's, and therefore the resulting ``environments/<name>/env.json``
+    would be misleading. Isolated envs instead rely on the workload wrapper
+    to capture an in-container snapshot via the ``_aorta_env_probe``
+    contract, which the runner promotes after the cell runs (falling back to
+    a placeholder if none appears). This predicate gates that path: True
+    routes the env to wrapper-driven probing, False to the in-process
+    ``collect_env()``.
+
+    Takes the already-computed :func:`_environment_boundary` rather than
+    resolving the environment itself, so this question and the
+    ambient-environment one in :func:`_substitution_ld_library_path` are
+    answers to a single classification and cannot come to disagree about
+    which tiers exist.
+    """
+    return boundary != "local"
 
 
 def _write_isolated_env_placeholder(
@@ -614,6 +654,25 @@ def _resolve_cell_env_vars(
     legacy callers that only care about the mitigation+extra_env layers still
     work; when provided, the named environment's baseline ``env`` seeds the
     bundle so the recorded set matches what the workload actually observes.
+
+    The bundle is applied as environment variables only, so a cell that
+    substitutes a library via ``LD_LIBRARY_PATH`` -- pointing the run at a
+    patched hipBLASLt / rocBLAS build to test a hypothesis -- depends on how
+    the ROCm objects in play were linked, which aorta does not control.
+    ``DT_RUNPATH`` (ROCm 7.x, and tarball installs generally) is searched
+    AFTER ``LD_LIBRARY_PATH``, so the substitution takes effect. ``DT_RPATH``
+    (ROCm 10 DEB / RPM / runfile installs) is searched BEFORE it and is
+    inherited by every object below the one carrying it, so a stock sibling
+    on ``$ORIGIN/../lib`` wins instead -- with no loader diagnostic and a zero
+    exit status, meaning the cell passes while measuring the library the
+    operator meant to replace. ``LD_PRELOAD`` is subject to neither and stays
+    the reliable way to force a specific object; :mod:`aorta.workloads.hrx`
+    pairs the two and fails the trial when the loader ignores the preload.
+
+    This function only COMPUTES the bundle -- it never mutates it to work
+    around the above. :func:`_rpath_substitution_warning` inspects the
+    result and warns; see its docstring for why aorta must not "fix" the
+    search order on the operator's behalf.
     """
     extra = list(sidecar_files) if sidecar_files else None
     env: dict[str, str] = {}
@@ -637,6 +696,222 @@ def _resolve_cell_env_vars(
         env.update(get_mitigation(name, extra_files=extra))
     env.update(cell_extra_env)
     return env
+
+
+def _snapshot_rocm_rpath(env_json_path: Path) -> tuple[bool, bool | None]:
+    """``(snapshot_was_read, rocm_rpath)`` from one ``environments/<env>/env.json``.
+
+    Reads the schema-1.17 ``library_linkage.rocm_rpath`` field out of a
+    snapshot that was captured **inside the environment it describes** --
+    in-process for a local env, in-container for an isolated one. It is
+    deliberately not re-derived from the runner process: this module
+    already refuses a runner-process ``collect_env()`` for isolated envs
+    (see :func:`_is_isolated_environment`) because that records host
+    state under a docker label, and a warning sourced from the host stack
+    would break the same rule less visibly -- a ROCm 10 container launched
+    from this ROCm 7 host would read ``rocm_rpath=False`` and stay silent
+    on exactly the substitution it exists to catch.
+
+    The first element distinguishes "there is no snapshot to consult yet"
+    from "the snapshot says we could not tell", so a caller can cache the
+    second and keep retrying the first. Both render as ``None``: a
+    pre-1.17 snapshot has no ``library_linkage`` block at all, and nothing
+    may be claimed on its behalf.
+    """
+    try:
+        doc = _read_json_no_follow(env_json_path)
+    except (OSError, json.JSONDecodeError):
+        return False, None
+    if not isinstance(doc, dict) or doc.get("snapshot_captured") is False:
+        return False, None
+    linkage = doc.get("library_linkage")
+    if not isinstance(linkage, dict):
+        return True, None
+    value = linkage.get("rocm_rpath")
+    return True, value if isinstance(value, bool) else None
+
+
+def _cell_rocm_rpath(
+    env_name: str, env_json_path: Path, cache: dict[str, bool | None]
+) -> bool | None:
+    """Per-ENVIRONMENT ``rocm_rpath``, cached by environment name.
+
+    Cached rather than re-read because the tag is a property of the
+    libraries installed in that environment, which do not change under a
+    running matrix; cached *by env name* rather than per process because a
+    matrix can mix a ROCm 7 venv cell with a ROCm 10 docker cell, and one
+    global answer would describe at most one of them.
+
+    Only a successfully-read snapshot is cached. An isolated env whose
+    first cell failed to produce an in-container snapshot must be allowed
+    to answer on a later cell rather than be pinned to "unknown" for the
+    rest of the run.
+    """
+    if env_name in cache:
+        return cache[env_name]
+    read, value = _snapshot_rocm_rpath(env_json_path)
+    if read:
+        cache[env_name] = value
+    return value
+
+
+def _substitution_ld_library_path(
+    resolved_env_vars: dict[str, str], boundary: _EnvBoundary
+) -> tuple[str | None, bool]:
+    """``(path, inherited)`` -- the ``LD_LIBRARY_PATH`` the workload will see.
+
+    The cell's resolved bundle is an OVERLAY, not the whole environment.
+    ``aorta.run.dispatcher`` applies it with a single
+    ``os.environ.update(effective_overlay)`` over the ambient environment
+    and then runs the workload in that process (a subprocess workload gets
+    a snapshot of the same ``os.environ`` at fork). So the commonest
+    substitution there is -- ``LD_LIBRARY_PATH=/patched aorta triage ...``
+    -- contributes no bundle entry at all and still reaches the workload.
+    Inspecting only the bundle made the #413 warning blind to exactly the
+    invocation it exists to catch.
+
+    An explicit bundle entry therefore wins outright, INCLUDING an empty
+    one. ``extra_env`` replaces rather than appends, so a cell that sets
+    ``LD_LIBRARY_PATH: ""`` has deliberately cleared the ambient value; that
+    is an operator turning a substitution off, not one attempting it, and
+    the returned ``""`` is falsy so the caller stays silent.
+
+    ONLY a container boundary suppresses the ambient reading, and the
+    asymmetry with ``"venv"`` is deliberate rather than an oversight:
+
+    * ``"container"`` -- the controlled overlay is the only thing aorta
+      guarantees crosses the boundary (the documented contract forwards
+      ``config['_aorta_trial_env']`` via ``aorta.run.docker_env_flags``,
+      which never reads ``os.environ``), and a host path handed to a
+      container names a directory that is not mounted there. Reading the
+      runner's environment on a container's behalf would be the same
+      category of error as reading the runner's ROCm libraries on its
+      behalf, which :func:`_is_isolated_environment` already forbids.
+    * ``"venv"`` -- the wrapper launches a plain subprocess on THIS host,
+      which inherits the ambient value, and the host path it names is real.
+      Staying silent here would reproduce, for venv cells, the exact bug
+      just fixed for local ones: the operator exports ``LD_LIBRARY_PATH``,
+      the child inherits it, ROCm 10 ignores it, and the run reports a
+      confident conclusion about the stock library. This feature exists to
+      stop a silent wrong answer, and a wrong root cause propagates into
+      what a customer is told; a spurious warning costs one
+      ``LD_DEBUG=libs`` check and is self-correcting. Aorta does not own
+      that launch (wrappers retain the complete command; see
+      ``src/aorta/registry/README.md``) so it cannot confirm the wrapper
+      forwarded the variable -- hence the hedge in the emitted message
+      rather than silence. The false-positive rate is bounded by needing a
+      venv cell AND an exported variable AND a wrapper that passes its own
+      ``env=``, which is nothing like the every-run rate that got a
+      version-based trigger rejected in #413.
+    """
+    if "LD_LIBRARY_PATH" in resolved_env_vars:
+        return resolved_env_vars["LD_LIBRARY_PATH"], False
+    if boundary == "container":
+        return None, False
+    return os.environ.get("LD_LIBRARY_PATH"), True
+
+
+def _rpath_substitution_warning(
+    cell_name: str,
+    resolved_env_vars: dict[str, str],
+    rocm_rpath: bool | None,
+    *,
+    boundary: _EnvBoundary,
+) -> str | None:
+    """Warn iff a substitution this cell will see may be silently ignored.
+
+    Fires only when BOTH hold: the workload will run with a non-empty
+    ``LD_LIBRARY_PATH`` (so a library substitution is actually being
+    attempted) and *this cell's own environment* carries ``DT_RPATH`` on
+    its ROCm libraries (so the loader will consult their baked-in paths
+    first). Either alone is unremarkable -- ROCm 7.x runs substitute
+    libraries successfully every day, and a ROCm 10 run that is not
+    substituting anything has nothing to lose -- and warning on either
+    alone would train operators to ignore the message, which costs more
+    than it buys the one time it matters.
+
+    "Will run with" is not the same as "the bundle sets", and the
+    difference is the common case: see
+    :func:`_substitution_ld_library_path`, which owns the resolution of
+    the cell's overlay against the ambient environment the dispatcher
+    overlays it onto. The message names which of the two the value came
+    from, because the fix differs -- edit the recipe, or edit the shell
+    that invoked aorta.
+
+    An inherited value on a ``"venv"`` cell additionally gets a hedge,
+    because there aorta hands the variable to a wrapper it does not own and
+    cannot confirm forwards it. The hedge is scoped to that case on
+    purpose: for a ``"local"`` cell the dispatcher overlays onto this very
+    process's ``os.environ``, so the inheritance is a fact, and softening
+    that wording would make the unambiguous majority case read like a
+    guess.
+
+    ``rocm_rpath`` is supplied by the caller, read from the environment's
+    own ``env.json`` (:func:`_cell_rocm_rpath`), never probed here. A
+    warning derived from the wrong stack is worse than no warning: it
+    would be confidently wrong in both directions across a mixed matrix.
+    ``None`` -- no snapshot, or a snapshot that could not read its own
+    libraries -- is therefore silence, not a guess.
+
+    Deliberately does NOT repair the situation, and reads both the bundle
+    and ``os.environ`` without writing to either. Prepending the stock ROCm
+    directories to the child's ``LD_LIBRARY_PATH``, or otherwise editing
+    the bundle, would hijack the very substitution the operator asked
+    for; and short of ``LD_PRELOAD`` there is no way to outrank
+    ``DT_RPATH`` anyway. The goal is to make a silent failure loud, not
+    to restore the old search order. The environment handed to the
+    process under test is exactly what the recipe resolved over the one
+    the operator invoked aorta with.
+    """
+    ld_library_path, inherited = _substitution_ld_library_path(
+        resolved_env_vars, boundary
+    )
+    # Truthy, whichever source it came from: an empty LD_LIBRARY_PATH
+    # contributes no search directory, so it is not a substitution attempt
+    # and warning on it would be exactly the crying-wolf this predicate
+    # exists to avoid.
+    if not ld_library_path:
+        return None
+    if rocm_rpath is not True:
+        return None
+    hedge = ""
+    if not inherited:
+        source = "sets LD_LIBRARY_PATH"
+        provenance = "reaches the workload exactly as the recipe resolved it"
+    elif boundary == "venv":
+        source = "inherits LD_LIBRARY_PATH from the environment that invoked aorta"
+        provenance = (
+            "is handed to the venv wrapper exactly as it was exported to aorta"
+        )
+        # Hedged only here. aorta hands the variable to a wrapper that owns
+        # the child launch, so unlike the local case the inheritance is an
+        # expectation rather than an observation.
+        hedge = (
+            " This cell runs in a venv environment whose wrapper owns the "
+            "child launch, so aorta cannot confirm the variable was "
+            "forwarded: a wrapper that passes an explicit environment would "
+            "drop it, and this warning would not apply."
+        )
+    else:
+        source = "inherits LD_LIBRARY_PATH from the environment that invoked aorta"
+        provenance = "reaches the workload exactly as it was exported to aorta"
+    return (
+        f"cell {cell_name!r} {source}, but the ROCm libraries "
+        "in that cell's own environment (per its environments/<env>/env.json "
+        "library_linkage block) are linked with DT_RPATH, which the loader "
+        "searches BEFORE LD_LIBRARY_PATH. A library substitution may be silently "
+        "ignored: the trial still exits 0 with no loader diagnostic, and "
+        "the result would describe the stock library rather than the "
+        "substituted one. DT_RPATH is also inherited by every object "
+        "loaded beneath the one carrying it, so a neighbouring ROCm "
+        "library can defeat the override even when the library being "
+        "replaced does not itself carry the tag. LD_PRELOAD is subject "
+        "to neither tag and remains reliable -- the recipes under "
+        "recipes/hrx/ pair the two, and the hrx workload fails the trial "
+        "when the loader rejects the preload. Verify with "
+        "LD_DEBUG=libs. aorta has NOT altered the environment; "
+        f"LD_LIBRARY_PATH {provenance}.{hedge}"
+    )
 
 
 def _cells_dir(run_dir: Path) -> Path:
@@ -1707,15 +1982,25 @@ def _run_recipe_locked(
     # Isolation status is per-environment (a registry lookup), so cache it by
     # env name: matrices where many cells share one env would otherwise repeat
     # the resolution once per cell.
-    isolation_cache: dict[str, bool] = {}
+    boundary_cache: dict[str, _EnvBoundary] = {}
+    # Per-environment DT_RPATH readings for the #413 substitution warning,
+    # keyed by env name for the same reason isolation_cache is: the answer
+    # belongs to the environment, and a matrix may mix a ROCm 7 venv with a
+    # ROCm 10 container. Populated lazily from each env's own env.json.
+    rpath_by_env: dict[str, bool | None] = {}
 
     for cell_idx, cell in enumerate(recipe.cells, start=1):
         env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
-        if cell.environment not in isolation_cache:
-            isolation_cache[cell.environment] = _is_isolated_environment(
+        if cell.environment not in boundary_cache:
+            boundary_cache[cell.environment] = _environment_boundary(
                 cell.environment, recipe.inline_environments, sidecar_files
             )
-        is_isolated = isolation_cache[cell.environment]
+        # Both consumers read this one classification: probe routing needs
+        # only "is it local?", while the #413 warning needs venv and
+        # container told apart (a venv child inherits this process's
+        # environment, a container's does not).
+        boundary = boundary_cache[cell.environment]
+        is_isolated = _is_isolated_environment(boundary)
         # Local envs: probe in-process once, before the env's first cell.
         # Isolated envs: defer to the wrapper (post-cell promotion below).
         if cell.environment not in seen_envs:
@@ -1776,6 +2061,33 @@ def _run_recipe_locked(
             if _is_real_env_snapshot(probe_target, probe_env, warnings):
                 captured_envs.add(cell.environment)
                 del pending_envs[cell.environment]
+
+        # DT_RPATH-vs-LD_LIBRARY_PATH warning (issue #413). Emitted here
+        # rather than inside _resolve_cell_env_vars because this is where a
+        # sink exists that an operator actually reads: `warnings` is rendered
+        # into matrix.md and matrix.json. The predicate lives next to
+        # _resolve_cell_env_vars (which owns the hazard docstring); only the
+        # emission is here.
+        #
+        # AFTER the promotion above, not before, and that ordering is the
+        # whole point: for an isolated env the only truthful reading of the
+        # link tags is the in-container snapshot the block above just
+        # promoted. Reading before it -- or probing the runner process, which
+        # is what this originally did -- would answer for the host, and this
+        # module already establishes (see _is_isolated_environment) that host
+        # state must not be recorded on an isolated env's behalf. A ROCm 10
+        # container launched from a ROCm 7 host would otherwise miss the
+        # warning entirely.
+        rpath_warning = _rpath_substitution_warning(
+            cell.name,
+            resolved_env_vars,
+            _cell_rocm_rpath(cell.environment, env_json_path, rpath_by_env),
+            boundary=boundary,
+        )
+        if rpath_warning is not None:
+            warnings.append(rpath_warning)
+            log.warning("%s", rpath_warning)
+
         if error is not None:
             log.info(
                 "cell %d/%d: %s -- ERROR (%s) in %.1fs",

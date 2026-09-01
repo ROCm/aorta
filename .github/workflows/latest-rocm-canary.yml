@@ -16,6 +16,22 @@ name: Latest ROCm canary
 #     attributable; "ran :latest, which resolved to sha256:..., ROCm 7.14.0,
 #     torch 2.12.0" is.
 #
+# `workflow_dispatch` takes an optional `base_image` input that replaces the tag
+# this lane follows, for that one run. It exists because the early-warning promise
+# fails exactly when it matters most: a major ROCm release is published under a
+# versioned tag days or weeks before AMD moves `:latest`, so until then the lane
+# cannot see the release it exists to warn about. ROCm 10 was the case in point.
+#
+# The override does not weaken attributability. It is handed to the SAME resolve
+# step, which digest-resolves it by the same code path and fails closed the same
+# way, so an overridden run records `tag@sha256:...` exactly like a scheduled one
+# -- there is no path to a canary build that skipped digest resolution. What it
+# does change is that a canary row for a given date may describe a tag other than
+# `:latest`, and the recorded base image is the only thing that says so; an
+# override dispatched on a day the cron already ran replaces that date's row on
+# the ci-results branch. It is also constrained to the `rocm/pytorch` repository
+# by that same step -- see the check there for why a typo is the threat model.
+#
 # Non-gating is enforced three ways, not just intended:
 #   1. it is its own workflow, so it cannot appear in nightly-eval.yml's graph
 #      and cannot be added to branch protection by accident;
@@ -56,6 +72,16 @@ on:
   schedule:
     - cron: "0 15 * * *"
   workflow_dispatch:
+    inputs:
+      base_image:
+        # No default value on purpose. CANARY_TAG below stays the single source
+        # of truth for the tag this lane follows; restating it here as the
+        # input's default would let the two drift, and a stale non-empty default
+        # WINS over CANARY_TAG, so editing CANARY_TAG would silently stop
+        # affecting dispatched runs. Blank means "use CANARY_TAG".
+        description: "Base image to canary instead of CANARY_TAG (rocm/pytorch:latest). Must be in the rocm/pytorch repository; accepts a tag or tag@digest, resolved to a digest either way. Blank uses CANARY_TAG."
+        required: false
+        default: ""
 
 concurrency:
   group: latest-rocm-canary-${{ github.ref }}
@@ -65,6 +91,8 @@ permissions:
   contents: read
 
 env:
+  # The tag this lane follows by default, and the only place it is written. The
+  # `base_image` dispatch input overrides it for a single run.
   CANARY_TAG: rocm/pytorch:latest
   CONTAINER_NAME: aorta-rocm-canary
   DEV_WHEELS_INDEX: https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
@@ -126,24 +154,116 @@ jobs:
             echo "::warning::Docker Hub login failed; continuing with anonymous pulls."
           fi
 
-      # The step that makes this lane attributable. Resolve the moving tag ONCE,
-      # here, and use the digest for both the build and the recorded results --
-      # so even a tag that moves mid-run cannot make the row ambiguous.
-      - name: Resolve :latest to a digest
+      # The step that makes this lane attributable. Resolve the requested tag
+      # ONCE, here, and use the digest for both the build and the recorded
+      # results -- so even a tag that moves mid-run cannot make the row
+      # ambiguous. The `base_image` dispatch override deliberately enters here
+      # and nowhere else, so it cannot bypass this.
+      - name: Resolve the canary base image to a digest
         id: resolve
+        env:
+          # Empty string on a schedule run, and on a dispatch that left the
+          # input blank.
+          BASE_IMAGE_INPUT: ${{ inputs.base_image }}
         run: |
           set -euo pipefail
-          digest="$(bash scripts/ci/docker_cmd.sh buildx imagetools inspect "${CANARY_TAG}" \
-            --format '{{println .Manifest.Digest}}' | head -n1 | tr -d '[:space:]')"
-          if [ -z "${digest}" ]; then
-            echo "::error::could not resolve ${CANARY_TAG} to a digest; refusing to build an unattributable canary"
+          requested="$(printf '%s' "${BASE_IMAGE_INPUT:-}" | tr -d '[:space:]')"
+          [ -n "${requested}" ] || requested="${CANARY_TAG}"
+          # Constrain the reference to the rocm/pytorch repository BEFORE it
+          # reaches imagetools or a build.
+          #
+          # Not an external-attacker story -- workflow_dispatch needs write
+          # access. It is a TYPO story, and the blast radius is what pays for the
+          # check: whatever this step resolves is handed to
+          # docker-compose.build.yaml, which starts it `privileged: true` with
+          # host networking and devices and this workspace bind-mounted, on the
+          # shared self-hosted gate host. One mistyped reference therefore runs
+          # an arbitrary public image with host-level access there. Nothing
+          # legitimate is lost, because the lane's intent is already exactly this
+          # narrow: the input description and CANARY_TAG both say rocm/pytorch.
+          # CANARY_TAG is checked too rather than only the override, so the
+          # constraint is a property of everything this lane builds.
+          #
+          # Anchored on the REPOSITORY by exact string equality after stripping
+          # the digest and then the tag, so all four accepted shapes reduce to
+          # the same name: `rocm/pytorch`, `rocm/pytorch:TAG`,
+          # `rocm/pytorch@sha256:...`, `rocm/pytorch:TAG@sha256:...`. Deliberately
+          # not a glob on the name -- `rocm/pytorch*` accepts
+          # rocm/pytorch-private and `*rocm/pytorch*` accepts evil/rocm/pytorch,
+          # so a prefix or substring match is the mistake this check exists to
+          # catch rather than a shorter spelling of it.
+          #
+          # The `*@*@*` case is a glob asking "two or more @", which is exactly
+          # what it means: a reference carries at most one, and the strip below
+          # cuts at the FIRST, so `rocm/pytorch@x@sha256:...` would reduce to
+          # `rocm/pytorch` and pass. Docker cannot resolve that reference so it
+          # would fail closed at the digest check anyway -- but a repository
+          # check that leans on the next step for its answer is not one.
+          case "${requested}" in
+            *@*@*)
+              echo "::error::refusing to canary ${requested}: not a valid image reference (more than one @)"
+              exit 1
+              ;;
+          esac
+          # The same hazard in its `:` spelling, which the `@` case above does
+          # not cover. The strip below cuts at the FIRST colon, so
+          # `rocm/pytorch:latest;evil/img` reduces to `rocm/pytorch` and passes
+          # the repository check. Docker cannot resolve that reference either,
+          # so it fails closed at the digest step -- but by the same reasoning
+          # given above, a check that leans on the next step for its answer is
+          # not a check. A tag is [A-Za-z0-9_][A-Za-z0-9._-]{0,127}, so anything
+          # outside that set in the tag position means this is not one tagged
+          # reference.
+          case "${requested%%@*}" in
+            *:*)
+              tag="${requested%%@*}"
+              tag="${tag#*:}"
+              case "${tag}" in
+                "")
+                  echo "::error::refusing to canary ${requested}: empty tag"
+                  exit 1
+                  ;;
+                [!A-Za-z0-9_]*)
+                  echo "::error::refusing to canary ${requested}: tag must begin with an alphanumeric or underscore"
+                  exit 1
+                  ;;
+                *[!A-Za-z0-9._-]*)
+                  echo "::error::refusing to canary ${requested}: tag contains characters outside [A-Za-z0-9._-], so this is not a single tagged reference"
+                  exit 1
+                  ;;
+              esac
+              ;;
+          esac
+          repository="${requested%%@*}"
+          repository="${repository%%:*}"
+          if [ "${repository}" != "rocm/pytorch" ]; then
+            echo "::error::refusing to canary ${requested}: this lane builds only the rocm/pytorch repository, and the resolved image runs privileged with host devices on the gate host. Accepted forms: rocm/pytorch, rocm/pytorch:TAG, rocm/pytorch@sha256:..., rocm/pytorch:TAG@sha256:..."
             exit 1
           fi
-          base="${CANARY_TAG}@${digest}"
+          # `|| true` so a bad reference reaches the fail-closed check below with
+          # a message naming it, instead of `set -e` killing the step wordlessly
+          # on the pipeline's exit status. It masks nothing: an empty digest is
+          # still fatal one line down. A typo in the dispatch input is now a
+          # likely failure mode here, so saying which reference failed matters.
+          digest="$(bash scripts/ci/docker_cmd.sh buildx imagetools inspect "${requested}" \
+            --format '{{println .Manifest.Digest}}' | head -n1 | tr -d '[:space:]' || true)"
+          if [ -z "${digest}" ]; then
+            echo "::error::could not resolve ${requested} to a digest; refusing to build an unattributable canary"
+            exit 1
+          fi
+          # Strip any digest the requester already supplied before appending the
+          # resolved one, so a `tag@sha256:...` input cannot build a
+          # double-pinned reference. Re-resolving such an input is not redundant:
+          # it is what proves the reference is real and still pullable, and it
+          # keeps every run on one code path.
+          base="${requested%@*}@${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "base_image=${base}" >> "$GITHUB_OUTPUT"
-          echo "Resolved ${CANARY_TAG} -> ${base}"
-          { echo "### Latest ROCm canary"; echo; echo "- base image: \`${base}\`"; } >> "$GITHUB_STEP_SUMMARY"
+          echo "Resolved ${requested} -> ${base}"
+          # `requested` is recorded alongside the resolved reference so an
+          # overridden run is visibly an override, not a `:latest` row that
+          # happens to disagree with the tag.
+          { echo "### Latest ROCm canary"; echo; echo "- requested: \`${requested}\`"; echo "- base image: \`${base}\`"; } >> "$GITHUB_STEP_SUMMARY"
 
       # Written to RUNNER_TEMP rather than exported: scripts/ci/docker_env.sh may
       # resolve docker to `sudo docker`, and sudo strips the environment, so a
@@ -166,7 +286,7 @@ jobs:
 
       # A non-zero EVALUATOR verdict is suppressed (see the non-gating note in
       # the header) -- but only once a results document exists. A failure BEFORE
-      # nightly_eval.py writes one (image start, wheel install, a :latest that
+      # nightly_eval.py writes one (image start, wheel install, a base image that
       # cannot even be set up) leaves nothing behind, the publish step skips it,
       # and the run vanishes from history -- losing precisely the
       # latest-ROCm incompatibility this lane exists to surface. So a missing
@@ -176,7 +296,7 @@ jobs:
         # always(), gated on the digest having resolved. Without this the step
         # keeps its implicit success() and is SKIPPED when the build/start step
         # fails -- including the case that matters most, where the layout guard
-        # rejects a newly published :latest. The synthesis path below would then
+        # rejects a newly published base image. The synthesis path below would then
         # never run, no attributable row would be uploaded, and the broken
         # release would vanish from history: the exact hole the synthesis was
         # added to close, one step earlier in the job. Gated on `resolve` because
@@ -366,7 +486,7 @@ jobs:
     steps:
       - name: Download canary results
         # Non-fatal: the upload step is `if-no-files-found: warn`, so a canary
-        # that died before producing a row (a registry hiccup resolving :latest
+        # that died before producing a row (a registry hiccup resolving the tag
         # skips the eval step) leaves NO artifact, and download-artifact treats
         # that as an error. Failing here would put a red X on a deliberately
         # non-gating lane, and it would make the "no results JSON; skipping

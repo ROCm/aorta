@@ -48,6 +48,9 @@ Captured blocks:
   invocation context when Buck introspection is requested.
 * ``docker`` -- image + digest when in a container.
 * ``env_vars`` -- canonical list of HSA / RCCL / FBGEMM / PyTorch vars.
+* ``library_linkage`` -- whether each resolved ROCm library (and torch's
+  own HIP library) carries ``DT_RPATH`` or ``DT_RUNPATH``, which decides
+  whether an ``LD_LIBRARY_PATH`` substitution can take effect at all.
 * ``python_version``, ``pytorch_version``.
 
 Fail-soft contract: ``collect_env()`` NEVER raises. Every probe that falls
@@ -73,6 +76,7 @@ import platform
 import re
 import shutil
 import stat as stat_module
+import struct
 import subprocess
 import sys
 import tempfile
@@ -99,7 +103,25 @@ from aorta.instrumentation.rocm_paths import (
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.16"
+SCHEMA_VERSION = "1.17"
+# 1.16 -> 1.17 (issue #413: DT_RPATH vs DT_RUNPATH on the resolved libraries).
+# ROCm 10 links its packaged objects with ``DT_RPATH``, which the loader
+# consults BEFORE ``LD_LIBRARY_PATH``; ROCm 7.x uses ``DT_RUNPATH``, consulted
+# after. So the same ``LD_LIBRARY_PATH=/patched`` substitution that works on
+# one stack is silently ignored on the other -- no diagnostic, exit 0, and a
+# trial that confidently measures the stock library. A snapshot gains one
+# top-level block:
+#   - ``library_linkage`` records, per resolved library, which of the two tags
+#     the ELF dynamic section actually carries. It is read from the file, not
+#     inferred from the ROCm version or the install layout: #413 measured 152
+#     of 196 wheel-layout objects carrying ``DT_RPATH`` (the layout that was
+#     expected exempt), while PyTorch's own ``libtorch_hip.so`` in the SAME
+#     image still carries ``DT_RUNPATH``. Both tags coexist in one process, so
+#     no version- or layout-derived answer can be correct.
+# Nothing existing changes shape. On a ROCm 7.x host every entry reads
+# ``runpath`` and the derived ``rocm_rpath`` is False, which is what keeps the
+# triage runner's paired warning silent there (see
+# ``aorta.triage.runner._rpath_substitution_warning``).
 # 1.15 -> 1.16 (issue #381: layout-agnostic ROCm discovery). ROCm paths are no
 # longer hardcoded to /opt/rocm, so the probe reads a TheRock wheel install as
 # well as a classic one. What a snapshot emits changes in four ways:
@@ -640,6 +662,12 @@ _ROCM_ROOTS = resolve_rocm_roots()
 ROCM_ROOT = _ROCM_ROOTS.core
 ROCM_LIB_ROOT = _ROCM_ROOTS.libraries
 ROCM_INCLUDE_ROOT = _ROCM_ROOTS.include
+# The HIP runtime's own lib dir. Equal to ``ROCM_LIB_ROOT / "lib"`` on a
+# classic install; a different site-packages component in the wheel layout
+# (see ``RocmRoots.core_lib_dir``). libamdhip64 is the object every hipcc-built
+# binary loads, so its link tags are the most load-bearing single reading in
+# the ``library_linkage`` block.
+ROCM_CORE_LIB_DIR = _ROCM_ROOTS.core_lib_dir
 # Recorded in the snapshot so a null ROCm version is attributable: "found an
 # install but it has no version file" and "found no install at all" are
 # different operator problems that used to look identical.
@@ -1230,6 +1258,17 @@ class EnvSnapshot:
     # Defaulted so pre-1.14 snapshots round-trip via ``from_dict()`` and older
     # direct constructors don't raise. Populated by ``_capture_torchrec()``.
     torchrec: dict = field(default_factory=lambda: _empty_torchrec())
+    # library_linkage: issue #413 (schema 1.17). Which search-path tag
+    # (``DT_RPATH`` / ``DT_RUNPATH``) each resolved ROCm library -- and torch's
+    # own HIP library -- actually carries, read from the ELF dynamic section.
+    # Decides whether an ``LD_LIBRARY_PATH`` substitution can take effect at
+    # all, so it is an environment fact on the same footing as the library
+    # hashes next to it. Defaulted so pre-1.17 snapshots round-trip via
+    # ``from_dict()`` and older direct constructors still work. Populated by
+    # ``_capture_library_linkage()``.
+    library_linkage: dict = field(
+        default_factory=lambda: _empty_library_linkage()
+    )
 
     # Curated emit order for ``to_dict()`` / ``env.json`` (JSON is written
     # sort_keys=False, so THIS is the artifact's key order). Grouped so
@@ -1260,6 +1299,11 @@ class EnvSnapshot:
         # without an entry here it fell to the appended tail, landing AFTER
         # `partial_reasons` and breaking the trailer convention below.
         "therock",
+        # How that install was LINKED, next to what it is. Deliberately after
+        # `therock` rather than between it and `rocm`: the rocm/therock
+        # adjacency is pinned by a test, since therock is that install's build
+        # provenance and belongs immediately beside it.
+        "library_linkage",
         "amdgpu_driver",
         "hip",
         # GPU + fabric hardware
@@ -1356,6 +1400,10 @@ class EnvSnapshot:
           additive, so a pre-1.16 snapshot that lacks it entirely gets
           ``status="unknown"`` (see :func:`_null_therock`), not the ``"absent"``
           the local default would assert on its behalf.
+        * ``library_linkage`` -> ``status="unknown"`` (added in schema 1.17;
+          see :func:`_null_library_linkage`). Same rule as ``therock``: a
+          pre-1.17 producer never looked at the dynamic sections, so nothing
+          may be claimed on its behalf about what its libraries carried.
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -1404,6 +1452,13 @@ class EnvSnapshot:
         # no manifest" and stamp the reading host's manifest_path onto someone
         # else's capture.
         kwargs.setdefault("therock", _null_therock())
+        # Same reasoning one more time for the 1.17 addition: the dataclass
+        # default asserts "no readable ROCm library here", which is this
+        # host's answer, not the producer's. See :func:`_null_library_linkage`.
+        kwargs["library_linkage"] = {
+            **_null_library_linkage(),
+            **(kwargs.get("library_linkage") or {}),
+        }
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -1441,6 +1496,7 @@ class EnvSnapshot:
         gpu_arch = self.gpu_arch or {}
         host = self.host or {}
         amdgpu = self.amdgpu_driver or {}
+        linkage = self.library_linkage or {}
         # Use ``is not None`` -- RDHC may return an empty dict on a healthy
         # host with nothing to report, which is still a successful capture
         # and must NOT be summarised as "unavailable".
@@ -1533,6 +1589,12 @@ class EnvSnapshot:
                 f"machine={host.get('machine') or '?'}  "
                 f"glibc={host.get('glibc_version') or '?'}",
                 f"  rocm:      {rocm.get('version', '?')} (dev: {rocm.get('version_dev', '?')})",
+                # Right under rocm because it qualifies that same install:
+                # `rpath` here means an LD_LIBRARY_PATH library substitution
+                # is silently ignored, which no other line would reveal.
+                f"  linkage:   {linkage.get('status') or '?'} "
+                f"tags={','.join(linkage.get('tags_observed') or []) or '-'}  "
+                f"rocm_rpath={_render_tristate(linkage.get('rocm_rpath'))}",
                 # amdgpu_driver is HOST-KERNEL scope: even inside a
                 # container this reflects the shared host driver, unlike the
                 # rocm/hip lines around it (container userspace). Placed
@@ -2333,6 +2395,11 @@ def collect_env(
         )
         rocfft_catalog = _build_rocfft_catalog(reasons)
         rccl = _capture_rccl(reasons)
+        # Reads the dynamic section of the same files the identity blocks
+        # above hashed -- cheap (a few KB each) next to those SHA-256s.
+        # Takes no `reasons`: it reports its own failures in-band. See its
+        # docstring.
+        library_linkage = _capture_library_linkage()
         nics = _capture_nics(reasons)
         gpu_arch = _capture_gpu_arch(reasons)
         host = _capture_host(reasons)
@@ -2401,6 +2468,7 @@ def collect_env(
             pytorch_sdpa=pytorch_sdpa,
             nics=nics,
             therock=therock,
+            library_linkage=library_linkage,
         )
     except Exception as exc:  # noqa: BLE001 -- this is the never-raises gate
         # Restore stdio before logging so the disaster trace reaches the
@@ -2540,6 +2608,9 @@ def _disaster_snapshot(
         },
         hipblaslt=_empty_gemm_library(),
         rocblas=_empty_gemm_library(),
+        # Shaped, not read: the crash may well have happened before (or
+        # inside) the linkage probe, so this claims nothing about the tags.
+        library_linkage=_empty_library_linkage(status="unknown"),
         composable_kernel={
             "system": {
                 "version": None,
@@ -3863,8 +3934,8 @@ def _parse_soname_version(filename: str, soname: str) -> tuple[int, ...] | None:
         return None
 
 
-def _hash_shared_library(lib_dir: Path, soname: str) -> str | None:
-    """SHA-256 a shared library, resolving symlinks first.
+def _shared_library_candidates(lib_dir: Path, soname: str) -> list[Path]:
+    """Resolved, deduplicated, existing files that could BE ``soname``, best first.
 
     Tries the unversioned ``soname`` (e.g. ``libfoo.so``) first; if
     absent, falls back to the highest-versioned matching filename
@@ -3875,16 +3946,26 @@ def _hash_shared_library(lib_dir: Path, soname: str) -> str | None:
     ``lib_hash=None`` plus a misleading "missing or unreadable" reason
     on a host where the library is fully present and being used.
 
-    Resolves through symlinks so e.g. ``libfoo.so`` -> ``libfoo.so.1`` ->
-    ``libfoo.so.1.2.3`` collapses to one hash regardless of which name
-    the consumer linked against. Returns ``"sha256:<hex>"`` or ``None``.
+    Versioned siblings rank highest-first by integer-tuple (NOT
+    lexicographic) so a mid-upgrade pair like ``.so.5.10.0`` vs
+    ``.so.5.9.0`` resolves to the actually-newer file. Any sibling whose
+    suffix isn't pure dotted-decimal falls into a second tier and is
+    lex-sorted -- it's an oddly-named file and we still want a
+    deterministic pick.
+
+    Symlinks are resolved, so ``libfoo.so`` -> ``libfoo.so.1`` ->
+    ``libfoo.so.1.2.3`` collapses to a single entry regardless of which
+    name the consumer linked against. Never raises: an unreadable
+    directory yields whatever the glob managed, or ``[]``.
+
+    Factored out of :func:`_hash_shared_library` so the schema-1.17
+    linkage probe reads the DT tags of exactly the file whose hash the
+    identity blocks record, rather than re-deriving "which file is this
+    library" under a second, drifting rule. Ordering alone was not enough
+    to guarantee that -- see :func:`_accepted_shared_library`, which owns
+    the matching ACCEPTANCE rule. The expensive part (hashing, GBs on a
+    populated install) still happens once, in the one caller that needs it.
     """
-    # Build candidate list: unversioned first, then versioned files
-    # ranked highest-first by integer-tuple (NOT lexicographic) so a
-    # mid-upgrade pair like ``.so.5.10.0`` vs ``.so.5.9.0`` resolves to
-    # the actually-newer file. Any sibling whose suffix isn't pure
-    # dotted-decimal falls into a second tier and is lex-sorted -- it's
-    # an oddly-named file and we still want a deterministic pick.
     candidates: list[Path] = [lib_dir / soname]
     try:
         siblings = list(lib_dir.glob(f"{soname}.*"))
@@ -3904,33 +3985,692 @@ def _hash_shared_library(lib_dir: Path, soname: str) -> str | None:
     candidates.extend(p for _, p in parsed)
     candidates.extend(unparsed)
 
+    resolved_candidates: list[Path] = []
     seen_resolved: set[Path] = set()
     for candidate in candidates:
         try:
             resolved = candidate.resolve(strict=True)
         except (FileNotFoundError, OSError):
             continue
-        # Symlink chains may collapse to the same file; only hash once.
+        # Symlink chains may collapse to the same file; only keep it once.
         if resolved in seen_resolved:
             continue
         seen_resolved.add(resolved)
         if not resolved.is_file():
             continue
+        resolved_candidates.append(resolved)
+    return resolved_candidates
+
+
+def _accepted_shared_library(lib_dir: Path, soname: str) -> Path | None:
+    """THE file *soname* resolves to under *lib_dir* -- one answer, one rule.
+
+    Walks :func:`_shared_library_candidates` in order and accepts the first
+    one that can actually be opened and read from. Both consumers use this:
+    :func:`_hash_shared_library` for the identity blocks' ``lib_hash`` and
+    :func:`_linkage_entry` for the schema-1.17 DT-tag record. They MUST
+    describe the same file -- the named ``libraries`` list exists so a
+    reader can line a tag up against the hash already in the snapshot, and
+    a pair that can drift makes that alignment a lie.
+
+    Acceptance is deliberately "readable", NOT "parses as an ELF", and the
+    asymmetry is the point. Requiring ELF-ness here would push the skip
+    into the hash path, where it does not belong: hashing a file needs no
+    ELF header, and a real-but-unparseable library (truncated, stripped of
+    its program header table, a stale-mount read error) would stop being
+    recorded at all -- ``lib_hash=None`` for a file that is plainly there.
+    So the ld-script case resolves the other way: a GNU ``ld`` script named
+    ``libfoo.so`` is a normal inhabitant of a lib dir, and the pair reports
+    it honestly as the hashed file with ``effective_tag="unknown"`` rather
+    than quietly reporting one file's hash beside another file's tags.
+
+    Nothing is lost from the ``rocm_rpath`` verdict by that choice: the
+    verdict aggregates over :func:`_census_rocm_link_tags`, which reads
+    every shared object in the directory and therefore still sees the
+    versioned ELF sitting behind the ld script. The named entry going
+    ``unknown`` costs a line of the reading aid, not a detection.
+    """
+    for resolved in _shared_library_candidates(lib_dir, soname):
         try:
-            digest = hashlib.sha256()
-            with resolved.open("rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    digest.update(chunk)
-            return f"sha256:{digest.hexdigest()}"
+            with resolved.open("rb") as handle:
+                handle.read(1)
         except OSError as exc:
-            log.debug("hash failed for %s: %s", resolved, exc)
+            log.debug("cannot read shared library candidate %s: %s", resolved, exc)
             continue
+        return resolved
     return None
+
+
+def _hash_shared_library(lib_dir: Path, soname: str) -> str | None:
+    """SHA-256 a shared library, resolving symlinks first.
+
+    Hashes whichever candidate :func:`_accepted_shared_library` accepts --
+    the same file the linkage entry reads its DT tags from, so the two
+    cannot describe different files. Returns ``"sha256:<hex>"`` or ``None``.
+
+    A read that fails PART WAY through the accepted file yields ``None``
+    rather than falling through to a versioned sibling: a sibling's digest
+    recorded under this soname would be the very hash/file mismatch the
+    shared acceptance rule exists to prevent.
+    """
+    resolved = _accepted_shared_library(lib_dir, soname)
+    if resolved is None:
+        return None
+    try:
+        digest = hashlib.sha256()
+        with resolved.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+    except OSError as exc:
+        log.debug("hash failed for %s: %s", resolved, exc)
+        return None
 
 
 def _hash_hipblaslt_library() -> str | None:
     """Backward-compat wrapper. Kept so existing tests keep their call shape."""
     return _hash_shared_library(HIPBLASLT_LIB_DIR, "libhipblaslt.so")
+
+
+# ---------------------------------------------------------------------------
+# Library linkage: DT_RPATH vs DT_RUNPATH (schema 1.17, issue #413)
+# ---------------------------------------------------------------------------
+
+# The two dynamic-section tags that carry a library search path, and the
+# entire reason this block exists: the loader searches ``DT_RPATH`` BEFORE
+# ``LD_LIBRARY_PATH`` and ``DT_RUNPATH`` AFTER it. So an operator pointing a
+# trial at a patched hipBLASLt takes effect on a RUNPATH stack (ROCm 7.x) and
+# is silently ignored on an RPATH one (ROCm 10) -- no loader diagnostic, exit
+# status 0, and a result describing the stock library.
+_DT_NULL = 0
+_DT_RPATH = 15
+_DT_RUNPATH = 29
+_PT_DYNAMIC = 2
+_ELF_MAGIC = b"\x7fELF"
+# Bounds on what we will read from a claimed offset. A real .dynamic holds
+# tens of entries and a real program header table a handful; a corrupt (or
+# adversarial) header could otherwise ask us to allocate gigabytes inside a
+# probe whose contract is "never raises, finishes in seconds". Exceeding
+# either is REJECTED rather than clamped -- a clamped read could stop short
+# of the tag and then report "carries neither", which is the one wrong
+# answer this block must never give.
+_MAX_DYNAMIC_BYTES = 1 << 16
+_MAX_PHDR_BYTES = 1 << 16
+# Ceiling on the directory census (see :func:`_census_rocm_link_tags`). A real
+# ROCm lib dir holds ~60 shared objects and each read is a few KB, so this is
+# ~70x headroom rather than a limit anything is expected to reach; it exists so
+# a pathological directory cannot stall a probe with a seconds-level budget.
+_MAX_CENSUS_FILES = 4096
+# How many RPATH-carrying filenames the census names outright. Enough to make
+# the reading self-evidencing without turning the block into a file listing.
+_MAX_RPATH_EXAMPLES = 12
+
+
+def _read_elf_search_path_tags(path: Path) -> tuple[list[str], str | None]:
+    """Which of ``DT_RPATH`` / ``DT_RUNPATH`` *path* carries -- ``(tags, error)``.
+
+    Returns a sorted subset of ``["rpath", "runpath"]`` and ``None`` on a
+    successful read; ``([], reason)`` when the file could not be
+    interpreted. Exactly one of the two is meaningful, so a caller
+    distinguishes "carries neither" (``([], None)``) from "we could not
+    tell" (``([], "...")``) -- the same distinction ``rocm_paths`` keeps
+    with ``source="none"``, and the one that stops an unreadable file
+    from being reported as a clean RUNPATH stack.
+
+    That distinction only holds if a partial read is a FAILURE rather
+    than a short answer, so success here requires the whole declared
+    dynamic section: ``p_filesz`` bytes actually read, an exact multiple
+    of the entry size, within the byte bound, and terminated by
+    ``DT_NULL``. A truncated or oversized section that happens to contain
+    one intact entry before the cut is reported as unreadable, not as
+    ``none`` -- reporting ``none`` would flow straight into
+    ``rocm_rpath=False`` and silence the substitution warning, which is a
+    silent false negative in a feature whose entire purpose is to stop a
+    silent failure. Fail-soft means "we could not tell", never "there was
+    nothing there".
+
+    NEVER raises. Every malformed-input path returns a reason string.
+
+    Parsed with :mod:`struct` rather than shelled out to ``readelf`` /
+    ``objdump``, even though this module does shell out elsewhere
+    (``hipconfig``, ``nm | c++filt``, ``git``). Two reasons specific to
+    this fact:
+
+    * binutils is routinely absent from stripped ROCm runtime images --
+      ``_capture_pytorch_build`` already records a partial reason for
+      exactly that -- and a stripped container is precisely where an
+      operator is most likely to be substituting a library and least
+      able to check the tag by hand.
+    * this runs once per resolved library, inside a probe with a <5 s
+      budget without rdhc; six subprocesses to read six 16-byte fields
+      is a poor trade against ~40 lines of header arithmetic.
+
+    Only the ELF header, the program header table and ``PT_DYNAMIC``'s
+    ``d_tag`` fields are read -- a few KB regardless of library size, so
+    this costs nothing next to the SHA-256 the identity blocks already
+    take over the same files. Handles both ELF classes and both
+    endiannesses because the parse is the same shape either way; the
+    values themselves (``DT_RPATH`` is 15 on every ABI) are not
+    architecture-specific.
+    """
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(64)
+            if len(header) < 16 or header[:4] != _ELF_MAGIC:
+                return [], "not an ELF file"
+            ei_class, ei_data = header[4], header[5]
+            if ei_class == 2:
+                is_64 = True
+            elif ei_class == 1:
+                is_64 = False
+            else:
+                return [], f"unknown ELF class {ei_class}"
+            if ei_data == 1:
+                endian = "<"
+            elif ei_data == 2:
+                endian = ">"
+            else:
+                return [], f"unknown ELF data encoding {ei_data}"
+
+            if is_64:
+                if len(header) < 64:
+                    return [], "truncated ELF header"
+                (e_phoff,) = struct.unpack_from(f"{endian}Q", header, 0x20)
+                e_phentsize, e_phnum = struct.unpack_from(f"{endian}HH", header, 0x36)
+                min_phentsize = 56
+            else:
+                if len(header) < 52:
+                    return [], "truncated ELF header"
+                (e_phoff,) = struct.unpack_from(f"{endian}I", header, 0x1C)
+                e_phentsize, e_phnum = struct.unpack_from(f"{endian}HH", header, 0x2A)
+                min_phentsize = 32
+
+            if e_phoff == 0 or e_phnum == 0:
+                return [], "no program header table"
+            if e_phnum == 0xFFFF:
+                # PN_XNUM: the real count lives in section header 0. No shared
+                # library comes close to 65535 program headers, so record the
+                # case honestly rather than grow a second parser for it.
+                return [], "program header count is PN_XNUM"
+            if e_phentsize < min_phentsize:
+                return [], f"implausible e_phentsize {e_phentsize}"
+            phdr_bytes = e_phentsize * e_phnum
+            if phdr_bytes > _MAX_PHDR_BYTES:
+                return [], "program header table implausibly large"
+            handle.seek(e_phoff)
+            phdrs = handle.read(phdr_bytes)
+            if len(phdrs) < phdr_bytes:
+                return [], "truncated program header table"
+
+            dyn_offset: int | None = None
+            dyn_size = 0
+            for index in range(e_phnum):
+                base = index * e_phentsize
+                (p_type,) = struct.unpack_from(f"{endian}I", phdrs, base)
+                if p_type != _PT_DYNAMIC:
+                    continue
+                if is_64:
+                    # 64-bit Phdr: p_type, p_flags, then p_offset/vaddr/paddr/filesz.
+                    dyn_offset, _vaddr, _paddr, dyn_size = struct.unpack_from(
+                        f"{endian}QQQQ", phdrs, base + 8
+                    )
+                else:
+                    # 32-bit Phdr: p_type, then p_offset/vaddr/paddr/filesz.
+                    dyn_offset, _vaddr, _paddr, dyn_size = struct.unpack_from(
+                        f"{endian}IIII", phdrs, base + 4
+                    )
+                break
+            if dyn_offset is None:
+                return [], "no PT_DYNAMIC segment"
+
+            entry_size = 16 if is_64 else 8
+            # Reject before reading, so none of these end up looking like a
+            # library that simply carries no search-path tag.
+            if dyn_offset == 0:
+                return [], "PT_DYNAMIC at file offset 0"
+            if dyn_size == 0:
+                return [], "empty dynamic section"
+            if dyn_size % entry_size:
+                return [], f"misaligned dynamic section ({dyn_size} bytes)"
+            if dyn_size > _MAX_DYNAMIC_BYTES:
+                # NOT clamped to the bound and parsed anyway: the tag we are
+                # looking for could be past the clamp, and a clamped read that
+                # missed it would return ([], None) -- indistinguishable from
+                # a library that genuinely carries neither tag.
+                return [], f"dynamic section implausibly large ({dyn_size} bytes)"
+            handle.seek(dyn_offset)
+            dynamic = handle.read(dyn_size)
+            if len(dynamic) != dyn_size:
+                # p_filesz claims more than the file holds. Whatever entries
+                # survived are not the whole section, so they cannot support
+                # a negative answer.
+                return [], "truncated dynamic section"
+            # d_tag is SIGNED (Elf64_Sxword); the DT_LO*/DT_HI* ranges are
+            # negative when read that way, so an unsigned read would compare
+            # them against 15 / 29 as huge positives and never match, which is
+            # harmless -- but a signed read is what the ABI specifies.
+            tag_format = f"{endian}{'q' if is_64 else 'i'}"
+            tags: set[str] = set()
+            terminated = False
+            for offset in range(0, dyn_size, entry_size):
+                (d_tag,) = struct.unpack_from(tag_format, dynamic, offset)
+                if d_tag == _DT_NULL:
+                    terminated = True
+                    break
+                if d_tag == _DT_RPATH:
+                    tags.add("rpath")
+                elif d_tag == _DT_RUNPATH:
+                    tags.add("runpath")
+            if not terminated:
+                # The ABI terminates ``_DYNAMIC`` with DT_NULL and counts it in
+                # p_filesz. Its absence means we reached the end of something
+                # that is not a complete dynamic array, so the scan may have
+                # stopped short of the tag.
+                return [], "dynamic section not DT_NULL-terminated"
+            return sorted(tags), None
+    except OSError as exc:
+        return [], f"unreadable ({type(exc).__name__})"
+    except (struct.error, ValueError) as exc:
+        return [], f"malformed ELF ({type(exc).__name__})"
+
+
+def _effective_link_tag(tags: list[str]) -> str:
+    """The tag the loader will actually honour, given what the file carries.
+
+    ``DT_RUNPATH`` wins when both are present: glibc ignores ``DT_RPATH``
+    entirely on an object that also has a ``DT_RUNPATH`` entry. The raw
+    ``dt_tags`` list is recorded alongside this, so the co-presence stays
+    visible rather than being collapsed away.
+    """
+    if "runpath" in tags:
+        return "runpath"
+    if "rpath" in tags:
+        return "rpath"
+    return "none"
+
+
+def _linkage_entry(name: str, scope: str, lib_dir: Path) -> dict[str, Any]:
+    """One ``library_linkage.libraries`` record for *name* under *lib_dir*.
+
+    Reads the dynamic section of :func:`_accepted_shared_library`'s pick --
+    the same file, under the same acceptance rule, that the identity blocks
+    hash. It does NOT fall through to a later candidate when that file
+    fails to parse: skipping past it is what let this record name one file
+    while ``lib_hash`` described another. An accepted file we cannot
+    interpret is reported in place, as ``effective_tag="unknown"`` plus the
+    parser's reason, which keeps "no such library here" and "there it is,
+    unreadable" distinguishable without splitting the pair.
+    """
+    accepted = _accepted_shared_library(lib_dir, name)
+    if accepted is None:
+        # Either nothing exists under this name, or everything that does is
+        # unopenable. Name the best-ranked candidate in the latter case so
+        # ``path`` still separates a missing install from a broken one; the
+        # tag read below supplies the reason it could not be opened.
+        candidates = _shared_library_candidates(lib_dir, name)
+        if not candidates:
+            return {
+                "name": name,
+                "scope": scope,
+                "path": None,
+                "dt_tags": [],
+                "effective_tag": "unknown",
+                "reason": f"no {name} under {lib_dir}",
+            }
+        accepted = candidates[0]
+    tags, error = _read_elf_search_path_tags(accepted)
+    return {
+        "name": name,
+        "scope": scope,
+        "path": str(accepted),
+        "dt_tags": tags,
+        "effective_tag": "unknown" if error is not None else _effective_link_tag(tags),
+        "reason": error,
+    }
+
+
+def _looks_like_shared_object(name: str) -> bool:
+    """``libfoo.so`` / ``libfoo.so.1.2`` -- but not ``Kernels.so-000-gfx950.hsaco``.
+
+    The wheel-layout ROCm lib dirs sit above kernel-object trees whose
+    filenames embed ``.so-``; those are AMDGPU code objects with no
+    ``PT_DYNAMIC``, and counting them would inflate the census's
+    ``unreadable`` tally with files that were never libraries.
+    """
+    return name.endswith(".so") or ".so." in name
+
+
+def _rocm_library_dirs() -> list[Path]:
+    """Every directory the resolved ROCm libraries live in, deduplicated.
+
+    One directory on a classic ``/opt/rocm`` install; two distinct
+    site-packages components (``_rocm_sdk_core`` / ``_rocm_sdk_libraries``)
+    in the TheRock wheel layout. Read from the module-level constants at
+    call time so the layout resolution in :mod:`aorta.instrumentation.rocm_paths`
+    stays the single source of truth for where ROCm is.
+    """
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+    for directory in (
+        ROCM_CORE_LIB_DIR,
+        HIPBLASLT_LIB_DIR,
+        ROCBLAS_LIB_DIR,
+        MIOPEN_LIB_DIR,
+        RCCL_LIB_DIR,
+    ):
+        if directory is None:
+            continue
+        try:
+            resolved = Path(directory).resolve()
+        except OSError:  # pragma: no cover - resolve() is non-strict here
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        dirs.append(resolved)
+    return dirs
+
+
+def _census_rocm_link_tags() -> dict[str, Any]:
+    """Tag counts over EVERY shared object in the resolved ROCm lib dirs.
+
+    This -- not the named ``libraries`` list -- is what ``rocm_rpath``
+    aggregates over, and the reason is a hole the named list demonstrably
+    had. ``rocm_rpath`` claims "some object in the loading chain carries
+    ``DT_RPATH``", but a hand-picked sample can only ever claim "some
+    object I happened to pick does", and those coincide only while the
+    stack is uniform. #413's measured failure was an inherited ``DT_RPATH``
+    on ``libhipblas.so.3`` -- which was not in the sample -- defeating a
+    ``libhipblaslt`` substitution. On the pinned image the sample answered
+    correctly only because the whole install is RPATH; a mixed stack with
+    the sampled objects on ``DT_RUNPATH`` and ``libhipblas`` on
+    ``DT_RPATH`` would have answered False and suppressed the warning.
+
+    Walking ``DT_NEEDED`` from the sampled libraries was considered and
+    does NOT close the hole. Measured in the gate image: none of
+    ``libamdhip64`` / ``libhipblaslt`` / ``librocblas`` / ``libMIOpen`` /
+    ``librccl`` names ``libhipblas.so.3`` as a dependency -- hipBLAS is
+    their DEPENDER, not their dependency (it needs ``librocblas`` and
+    ``libamdhip64``). A downward dependency walk from the sample provably
+    cannot reach the object that caused the bug, and it would also miss
+    anything ``dlopen``-ed at runtime. Reading the directory reaches
+    dependers, siblings and ``dlopen`` targets alike, needs no soname
+    resolution, and cannot go stale when ROCm adds a library.
+
+    Deliberately an over-approximation of the loading chain: an object in
+    these directories that the trial never loads still counts. That is the
+    safe direction. A false positive costs an operator one ``LD_DEBUG=libs``
+    check; a false negative is the confident wrong answer #413 exists to
+    prevent. Measured cost of being right about it: 57 objects in 4 ms on
+    the classic ROCm 7.0.2 host (all ``DT_RUNPATH``, so the warning stays
+    silent there), 61 objects in 3 ms in the ROCm 10 wheel image (all
+    ``DT_RPATH``, ``libhipblas.so.3`` among them).
+
+    Non-recursive: the nested ``rocm_sysdeps/`` / ``llvm/`` / ``host-math/``
+    component dirs beneath the wheel layout are vendored dependencies, not
+    the ROCm libraries a trial substitutes, and the top level is where
+    every object named in #413 lives.
+    """
+    counts = {"rpath": 0, "runpath": 0, "none": 0, "unreadable": 0}
+    rpath_examples: list[str] = []
+    scanned_dirs: list[str] = []
+    unlistable_dirs: list[str] = []
+    seen: set[Path] = set()
+    truncated = False
+    for directory in _rocm_library_dirs():
+        try:
+            names = sorted(p.name for p in directory.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            # There is no directory here. "No ROCm libraries at this path" is
+            # a true statement about the install, so it needs no separate
+            # record -- the named entries already say it per library.
+            continue
+        except OSError as exc:
+            # There IS something here and we could not look inside it
+            # (permissions, stale mount, EIO). Recorded, because an empty
+            # scan of an unreadable directory is not evidence that the stack
+            # carries no DT_RPATH -- the same "unreadable is not empty"
+            # distinction the per-file parse keeps.
+            log.debug("linkage census could not list %s: %s", directory, exc)
+            unlistable_dirs.append(str(directory))
+            continue
+        scanned_dirs.append(str(directory))
+        for name in names:
+            if not _looks_like_shared_object(name):
+                continue
+            if len(seen) >= _MAX_CENSUS_FILES:
+                truncated = True
+                break
+            try:
+                resolved = (directory / name).resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if resolved in seen or not resolved.is_file():
+                continue
+            seen.add(resolved)
+            tags, error = _read_elf_search_path_tags(resolved)
+            if error is not None:
+                counts["unreadable"] += 1
+                continue
+            # The EFFECTIVE tag both counts and names the object: an object
+            # carrying both tags is not a hazard (glibc ignores its DT_RPATH),
+            # so naming it here would offer as evidence a file that did not
+            # contribute to the ``rpath`` count beside it.
+            tag = _effective_link_tag(tags)
+            counts[tag] += 1
+            if tag == "rpath" and len(rpath_examples) < _MAX_RPATH_EXAMPLES:
+                rpath_examples.append(resolved.name)
+        if truncated:
+            break
+    return {
+        "dirs": scanned_dirs,
+        "unlistable_dirs": unlistable_dirs,
+        "scanned": sum(counts.values()),
+        "rpath": counts["rpath"],
+        "runpath": counts["runpath"],
+        "none": counts["none"],
+        "unreadable": counts["unreadable"],
+        # Recorded because a truncated census can only support a POSITIVE
+        # answer: an unscanned tail may hold the RPATH object. Read together
+        # with ``unlistable_dirs`` by :func:`_capture_library_linkage`, which
+        # withholds the negative verdict when either says the enumeration was
+        # incomplete.
+        "truncated": truncated,
+        "rpath_examples": rpath_examples,
+    }
+
+
+def _render_tristate(value: bool | None) -> str:
+    """``yes`` / ``no`` / ``unknown`` -- never the bare literal ``None``.
+
+    ``rocm_rpath`` has three meanings and an operator reading ``None`` in a
+    brief cannot tell "we read the libraries and none carried RPATH" from
+    "we could not read them", which is the distinction the whole block is
+    built around.
+    """
+    if value is None:
+        return "unknown"
+    return "yes" if value else "no"
+
+
+def _empty_library_linkage(status: str = "absent") -> dict[str, Any]:
+    """The ``library_linkage`` block with nothing read.
+
+    ``rocm_rpath`` is ``None``, not ``False``: "we located no ROCm library
+    to read" is not evidence that the stack is substitution-safe, and the
+    triage runner treats only a positive ``True`` as grounds to warn.
+    """
+    return {
+        "status": status,
+        "rocm_rpath": None,
+        "tags_observed": [],
+        "census": {
+            "dirs": [],
+            "unlistable_dirs": [],
+            "scanned": 0,
+            "rpath": 0,
+            "runpath": 0,
+            "none": 0,
+            "unreadable": 0,
+            "truncated": False,
+            "rpath_examples": [],
+        },
+        "libraries": [],
+    }
+
+
+def _null_library_linkage() -> dict[str, Any]:
+    """The same shape for a snapshot that PREDATES the block (pre-1.17).
+
+    Distinct from :func:`_empty_library_linkage` for the reason
+    :func:`_null_therock` is distinct from :func:`_empty_therock`:
+    ``status="absent"`` claims "this host has no readable ROCm libraries",
+    which a 1.16 producer never claimed and may well have contradicted.
+    ``status="unknown"`` says only that the artifact predates the block.
+    """
+    return _empty_library_linkage(status="unknown")
+
+
+def _capture_library_linkage() -> dict[str, Any]:
+    """Record which search-path tag each resolved library actually carries.
+
+    Read from the ELF dynamic section of the files themselves. It is NOT
+    derived from ``rocm.version`` or ``rocm.layout``, and the measurements
+    in issue #413 disprove both shortcuts: the TheRock wheel layout was
+    expected to be exempt from the DEB/RPM switch and is not (152 of 196
+    objects carry ``DT_RPATH``, none carry ``DT_RUNPATH``), while
+    PyTorch's ``libtorch_hip.so`` in that same image still carries
+    ``DT_RUNPATH`` because it comes from the manylinux build. Both tags
+    coexist in one process, so there is no single per-image answer to
+    infer -- only per-file readings.
+
+    ``libtorch_hip.so`` is included, at ``scope="pytorch"``, precisely
+    because it is the counter-example: a reader who sees only the ROCm
+    entries could conclude the process is uniformly RPATH, and #413's
+    end-to-end failure is one where torch's own ``DT_RUNPATH`` did NOT
+    rescue the substitution (the losing lookup resolved as a dependency
+    of a neighbouring ROCm library).
+
+    TWO different things live in this block and they answer different
+    questions. ``libraries`` is a NAMED sample -- the same five ROCm
+    objects the identity blocks hash, plus torch's -- so a reader can
+    line a tag up against the hash and version already recorded for that
+    exact file. ``census`` is the whole population of the resolved ROCm
+    lib dirs, and it is what ``rocm_rpath`` aggregates over. The split
+    is deliberate: the sample is for reading, the census is the evidence.
+    Treating the sample as evidence is what left ``rocm_rpath`` correct
+    only by correlation, since the object #413 measured defeating a
+    substitution (``libhipblas.so.3``) was never in it.
+
+    Appends NOTHING to ``partial_reasons``, and takes no ``reasons`` list --
+    the only capture function here that does not. ``partial`` means "a field
+    the operator expected to be populated came back None", and no field of
+    this block is ever None: an unreadable or non-ELF file is reported
+    positively as ``effective_tag="unknown"`` with a ``reason``, and a
+    library that is simply not installed as ``path=None``. That is the
+    ``rocm_paths`` ``source="none"`` principle -- the absence is a recorded
+    value, not a hole -- and it keeps "no install found" distinguishable
+    from "found, could not read" in-band, where a reader of the block sees
+    it, rather than in a list they must cross-reference. A genuinely broken
+    library is already reported once by the identity block that failed to
+    hash it; a second copy here would be noise.
+    """
+    entries = [
+        _linkage_entry("libamdhip64.so", "rocm", ROCM_CORE_LIB_DIR),
+        _linkage_entry("libhipblaslt.so", "rocm", HIPBLASLT_LIB_DIR),
+        _linkage_entry("librocblas.so", "rocm", ROCBLAS_LIB_DIR),
+        _linkage_entry("libMIOpen.so", "rocm", MIOPEN_LIB_DIR),
+        _linkage_entry("librccl.so", "rocm", RCCL_LIB_DIR),
+    ]
+    # Discarded reasons list: torch's absence is already reported once by
+    # ``_capture_pytorch_version``, and this block needs the module only to
+    # locate a directory.
+    torch_lib_dir = _torch_native_lib_dir(
+        _safe_import_torch([], "library_linkage")
+    )
+    if torch_lib_dir is not None:
+        entries.append(
+            _linkage_entry(PYTORCH_HIP_LIB_NAME, "pytorch", torch_lib_dir)
+        )
+
+    census = _census_rocm_link_tags()
+    read = [e for e in entries if e["effective_tag"] != "unknown"]
+    census_read = census["rpath"] + census["runpath"] + census["none"]
+
+    # ANY, deliberately -- not "all", not "most". DT_RPATH is inherited by
+    # every object loaded below the one carrying it, so a single RPATH
+    # anywhere in the chain is sufficient to defeat an LD_LIBRARY_PATH
+    # override. #413 measured exactly that: the substitution of
+    # libhipblaslt was beaten by an RPATH on the NEIGHBOURING
+    # libhipblas.so.3, and libtorch_hip.so's own DT_RUNPATH did not save
+    # it. A stricter aggregate would look more balanced and under-report
+    # the hazard on every mixed stack, which is the common one.
+    #
+    # Aggregated over the CENSUS -- every shared object in the resolved
+    # ROCm lib dirs -- and not over the named ``libraries`` entries below.
+    # Those five are a sample chosen to mirror the identity blocks, and a
+    # sample can only support "one of the objects I picked carries RPATH",
+    # which is not the claim ``rocm_rpath`` makes. libhipblas.so.3, the
+    # object #413 measured defeating the substitution, is not among them
+    # and is not reachable by walking their dependencies either (it is
+    # their depender). See :func:`_census_rocm_link_tags`. Do NOT "fix"
+    # a future gap here by adding another name to the list below; that is
+    # the failure mode this replaced.
+    named_rpath = any(
+        e["effective_tag"] == "rpath" for e in read if e["scope"] == "rocm"
+    )
+    # ANY is asymmetric in what it needs from the enumeration, so the two
+    # verdicts do not have the same evidential bar. ``True`` needs one tagged
+    # object and survives an incomplete scan. ``False`` is a claim about the
+    # WHOLE population, so it requires that the population was actually
+    # enumerated: a capped scan leaves an unread tail, and a lib dir that would
+    # not list leaves a whole component unread. Either is the directory-level
+    # form of the clamped read :func:`_read_elf_search_path_tags` refuses, and
+    # answering False from it would flow into a silenced substitution warning
+    # -- the one wrong answer this block exists to avoid. Unreadable individual
+    # FILES deliberately do not poison the verdict: a GNU ld script named
+    # ``libfoo.so`` is a normal inhabitant of a lib dir, ``census.unreadable``
+    # records how many there were, and letting one collapse the answer to
+    # unknown would silence the warning on healthy installs.
+    census_enumerated = not census["truncated"] and not census["unlistable_dirs"]
+    if census["rpath"] or named_rpath:
+        rocm_rpath = True
+    elif census_enumerated and (census_read or any(e["scope"] == "rocm" for e in read)):
+        rocm_rpath = False
+    else:
+        rocm_rpath = None
+
+    if read or census_read:
+        status = "ok"
+    elif (
+        any(e["path"] is not None for e in entries)
+        or census["unreadable"]
+        or census["unlistable_dirs"]
+    ):
+        # Something is there and we could not read it. Distinct from
+        # "absent" for the reason the whole block exists: an operator whose
+        # ROCm tree is a stale mount has a different problem from one who
+        # has no ROCm install, and reading them the same way is what makes
+        # a hazard look like a clean bill of health.
+        status = "unreadable"
+    else:
+        status = "absent"
+
+    # The mixed-stack summary. ``["rpath", "runpath"]`` is the real
+    # ROCm 10 + torch reading and must survive as two values.
+    tags_observed = {e["effective_tag"] for e in read}
+    tags_observed.update(t for t in ("rpath", "runpath", "none") if census[t])
+
+    return {
+        "status": status,
+        "rocm_rpath": rocm_rpath,
+        "tags_observed": sorted(tags_observed),
+        # The evidence behind ``rocm_rpath``, in the artifact so a reader
+        # can see WHICH objects carry the tag rather than taking the
+        # aggregate on trust -- including ones the named list omits.
+        "census": census,
+        "libraries": entries,
+    }
 
 
 def _kernel_db_filename_fingerprint(
