@@ -16,6 +16,11 @@ from aorta.chat.rag.embeddings.remote_api import RemoteApiProvider
 _PROVIDERS = {
     "local": LocalBgeProvider,
     "remote": RemoteApiProvider,
+    # Phase 4 (Decision 19a): "onnx" -> FastembedBgeProvider, in a new sibling
+    # module fastembed_bge.py. Same BGE-small model and therefore the same
+    # vectors, on onnxruntime instead of torch, which removes the CUDA-wheels
+    # hazard the "local" provider carries. It becomes the default and the
+    # "local" entry above is deleted with it.
 }
 
 

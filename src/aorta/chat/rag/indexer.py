@@ -1,4 +1,4 @@
-"""Index the AORTA codebase into ChromaDB using tree-sitter or fallback splitting."""
+"""Index the AORTA codebase into sqlite-vec using language-aware splitting."""
 
 from __future__ import annotations
 
@@ -14,16 +14,8 @@ from langchain_text_splitters import (
 
 from aorta.chat.config import settings
 from aorta.chat.rag.embeddings.factory import get_provider
-from aorta.chat.rag.sqlite_compat import ensure_modern_sqlite
+from aorta.chat.rag.retriever import SqliteVecStore
 from aorta.chat.rag.walk import prune_dirnames
-
-# ``langchain_chroma`` imports ``chromadb`` at module import time, where the
-# deprecated ``langchain_community.vectorstores.Chroma`` imported it lazily
-# inside its constructor. The sqlite swap therefore has to happen before the
-# import below, not merely before the first Chroma() call.
-ensure_modern_sqlite()
-
-from langchain_chroma import Chroma  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +39,11 @@ CODE_EXTENSIONS = {
     ".yaml", ".yml", ".json", ".toml", ".cfg", ".ini",
     ".md", ".rst", ".txt",
 }
+
+#: Chunks embedded and written per call. A real AORTA tree splits into ~15,000
+#: chunks, and embedding them in one call holds every vector in memory at once;
+#: the remote provider would also send them all as a single request body.
+_WRITE_BATCH = 500
 
 
 
@@ -125,14 +122,14 @@ def _split_documents(docs: list[Document]) -> list[Document]:
 
 def index_codebase(
     codebase_path: str | Path | None = None,
-) -> Chroma:
-    """Index the AORTA codebase into ChromaDB.
+) -> SqliteVecStore:
+    """Index the AORTA codebase into the sqlite-vec index file.
 
     Args:
         codebase_path: Override path; defaults to settings.aorta_path.
 
     Returns:
-        The populated Chroma vector store.
+        The populated sqlite-vec store.
     """
     root = Path(codebase_path or settings.aorta_path).resolve()
     if not root.exists():
@@ -150,20 +147,22 @@ def index_codebase(
     logger.info("Building embeddings with %s ...", provider.describe())
     embeddings = provider.get_embeddings()
 
-    chroma_dir = Path(settings.chroma_path)
-    chroma_dir.mkdir(parents=True, exist_ok=True)
+    index_file = settings.index_file
+    index_file.parent.mkdir(parents=True, exist_ok=True)
 
     collection = provider.collection_name()
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
+    store = SqliteVecStore(
+        path=index_file,
         embedding=embeddings,
-        persist_directory=str(chroma_dir),
-        collection_name=collection,
+        collection=collection,
     )
+    store.reset()
+    for start in range(0, len(chunks), _WRITE_BATCH):
+        store.add_documents(chunks[start : start + _WRITE_BATCH], provider=provider.describe())
     logger.info(
-        "Indexed %d chunks into ChromaDB at %s (collection %s)",
+        "Indexed %d chunks into %s (collection %s)",
         len(chunks),
-        chroma_dir,
+        index_file,
         collection,
     )
-    return vectorstore
+    return store

@@ -1,25 +1,391 @@
-"""Retriever that loads the persisted ChromaDB collection."""
+"""Retriever over the persisted sqlite-vec index, and the store it reads.
+
+``SqliteVecStore`` lives here rather than in ``indexer.py`` because this is the
+module every query path already reaches through -- ``graph.nodes`` and
+``tools.search`` both import it -- and Phase 4 moves index building out behind
+``aorta chat index build``. The reader must not have to import the builder.
+"""
 
 from __future__ import annotations
 
+import json
+import logging
+import math
+import re
+import struct
+from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from langchain_core.vectorstores import VectorStoreRetriever
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_core.vectorstores import VectorStore, VectorStoreRetriever
 
 from aorta.chat.config import settings
 from aorta.chat.rag.embeddings.factory import get_provider
-from aorta.chat.rag.sqlite_compat import ensure_modern_sqlite
+from aorta.chat.rag.sqlite_compat import ensure_loadable_extensions, ensure_modern_sqlite
 
-# ``langchain_chroma`` imports ``chromadb`` at module import time, where the
-# deprecated ``langchain_community.vectorstores.Chroma`` imported it lazily
-# inside its constructor. The sqlite swap therefore has to happen before the
-# import below, not merely before the first Chroma() call.
-ensure_modern_sqlite()
+if TYPE_CHECKING:  # ``sqlite3`` is imported per call, after the guards run.
+    import sqlite3
 
-from langchain_chroma import Chroma  # noqa: E402
+logger = logging.getLogger(__name__)
+
+#: One row per collection, recording the dimension its vectors were written at.
+#: sqlite-vec fixes a vec0 table's dimension in its CREATE statement, so two
+#: embedding providers cannot share one table and the collection has to be part
+#: of the *table names* rather than a column. This registry is what turns a
+#: provider switch into a named error instead of an OperationalError raised from
+#: inside the extension, and it is how the reader discovers a collection exists.
+_REGISTRY_TABLE = "aorta_collections"
+
+#: Table names are interpolated, not bound, so the collection has to be an
+#: identifier and not merely a string. Both providers already produce this shape.
+_SAFE_COLLECTION = re.compile(r"\A[A-Za-z0-9_]+\Z")
+
+_MISSING_INDEX = (
+    "No chat index at {path}. Build one with:\n"
+    "  python -c 'from aorta.chat.rag.indexer import index_codebase; "
+    "index_codebase()'"
+)
+# Phase 4: this becomes `aorta chat index build` for a local build and
+# `aorta chat index fetch` for a prebuilt one, and this message names those.
+
+_MISSING_COLLECTION = (
+    "The chat index at {path} holds no collection named {collection!r}, which is "
+    "what the configured embedding provider reads ({provider}). Either re-index "
+    "with this provider, or set EMBEDDING_PROVIDER back to the one that built "
+    "the index. Collections present: {present}."
+)
+
+
+def _serialise(vector: list[float]) -> bytes:
+    """Pack a vector the way sqlite-vec reads it: little-endian float32."""
+    return struct.pack(f"<{len(vector)}f", *vector)
+
+
+def _deserialise(blob: bytes) -> list[float]:
+    return list(struct.unpack(f"<{len(blob) // 4}f", blob))
+
+
+def _normalise(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0.0:
+        return vector
+    return [value / norm for value in vector]
+
+
+def _dot(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right, strict=True))
+
+
+def _mmr(
+    query_vector: list[float],
+    candidates: list[list[float]],
+    k: int,
+    lambda_mult: float,
+) -> list[int]:
+    """Greedy maximal marginal relevance, returning candidate indices best-first.
+
+    sqlite-vec ranks by distance alone, so the diversity half of what Chroma's
+    ``search_type="mmr"`` did has to happen here. Brute force is the right shape:
+    fetch_k is 30 by default and the vectors are already in memory, so this is
+    microseconds and costs the chat-cli extra no numpy dependency.
+    """
+    if k <= 0 or not candidates:
+        return []
+
+    query = _normalise(query_vector)
+    vectors = [_normalise(vector) for vector in candidates]
+    relevance = [_dot(query, vector) for vector in vectors]
+
+    selected = [max(range(len(vectors)), key=relevance.__getitem__)]
+    while len(selected) < min(k, len(vectors)):
+        best_index = -1
+        best_score = -math.inf
+        for index, vector in enumerate(vectors):
+            if index in selected:
+                continue
+            redundancy = max(_dot(vector, vectors[chosen]) for chosen in selected)
+            score = lambda_mult * relevance[index] - (1.0 - lambda_mult) * redundancy
+            if score > best_score:
+                best_index = index
+                best_score = score
+        selected.append(best_index)
+    return selected
+
+
+class SqliteVecStore(VectorStore):
+    """Chunk rows in a plain table, vectors in a vec0 table, joined on rowid.
+
+    Subclasses ``VectorStore`` so ``as_retriever(search_type="mmr")`` keeps
+    working untouched: ``VectorStoreRetriever`` dispatches straight to
+    :meth:`max_marginal_relevance_search`, and ``graph.nodes`` still gets back a
+    list of ``Document`` from ``.invoke()``.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        embedding: Embeddings,
+        collection: str,
+    ) -> None:
+        if not _SAFE_COLLECTION.match(collection):
+            raise ValueError(
+                f"collection name {collection!r} is not a bare identifier; it "
+                "becomes part of a table name and cannot be bound as a parameter"
+            )
+        self._path = Path(path)
+        self._embedding = embedding
+        self._collection = collection
+        self._chunks_table = f"chunks_{collection}"
+        self._vec_table = f"vec_{collection}"
+        self._conn: sqlite3.Connection | None = None
+
+    # -- connection -------------------------------------------------------
+
+    @property
+    def embeddings(self) -> Embeddings:
+        return self._embedding
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is not None:
+            return self._conn
+
+        # Both guards belong here rather than at module import: sqlite-vec is
+        # loaded per connection, so nothing is decided before this point.
+        ensure_modern_sqlite()
+        ensure_loadable_extensions()
+
+        # Imported here, not at module scope, so the name resolves to whatever
+        # ensure_modern_sqlite just put in sys.modules.
+        import sqlite3
+
+        import sqlite_vec
+
+        # check_same_thread=False because the graph may run a retrieval on a
+        # worker thread; the connection is read-mostly and used one call at a
+        # time, so sqlite's own serialisation is enough.
+        conn = sqlite3.connect(self._path, check_same_thread=False)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        self._conn = conn
+        return conn
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    # -- schema -----------------------------------------------------------
+
+    def _ensure_registry(self) -> sqlite3.Connection:
+        conn = self._connection()
+        conn.execute(
+            f'CREATE TABLE IF NOT EXISTS "{_REGISTRY_TABLE}" ('
+            "collection TEXT PRIMARY KEY, "
+            "dimension INTEGER NOT NULL, "
+            "provider TEXT NOT NULL DEFAULT '')"
+        )
+        return conn
+
+    def _ensure_schema(self, dimension: int, provider: str = "") -> None:
+        conn = self._ensure_registry()
+        conn.execute(
+            f'CREATE TABLE IF NOT EXISTS "{self._chunks_table}" ('
+            "id INTEGER PRIMARY KEY, "
+            "content TEXT NOT NULL, "
+            "metadata TEXT NOT NULL)"
+        )
+        conn.execute(
+            f'CREATE VIRTUAL TABLE IF NOT EXISTS "{self._vec_table}" '
+            f"USING vec0(embedding float[{dimension}])"
+        )
+        conn.execute(
+            f'INSERT INTO "{_REGISTRY_TABLE}" (collection, dimension, provider) '
+            "VALUES (?, ?, ?) ON CONFLICT(collection) DO UPDATE SET "
+            "dimension = excluded.dimension, provider = excluded.provider",
+            (self._collection, dimension, provider),
+        )
+        conn.commit()
+
+    def reset(self) -> None:
+        """Drop this collection, leaving the rest of the file alone.
+
+        Indexing is a rebuild, not an append: re-running it against a live file
+        would otherwise stack a second copy of every chunk behind the first and
+        halve what a fixed-k retrieval can reach. The next write recreates the
+        tables, at whatever dimension the provider turns out to emit.
+        """
+        conn = self._ensure_registry()
+        conn.execute(f'DROP TABLE IF EXISTS "{self._chunks_table}"')
+        conn.execute(f'DROP TABLE IF EXISTS "{self._vec_table}"')
+        conn.execute(
+            f'DELETE FROM "{_REGISTRY_TABLE}" WHERE collection = ?',
+            (self._collection,),
+        )
+        conn.commit()
+
+    def _registry_exists(self) -> bool:
+        """Whether anything has ever been written to this file.
+
+        Read paths ask before querying the registry, so opening a fresh or
+        foreign ``.sqlite`` reports a missing collection rather than raising
+        ``no such table`` -- and never creates a table just by looking.
+        """
+        row = (
+            self._connection()
+            .execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (_REGISTRY_TABLE,),
+            )
+            .fetchone()
+        )
+        return row is not None
+
+    def collection_exists(self) -> bool:
+        if not self._registry_exists():
+            return False
+        found = (
+            self._connection()
+            .execute(
+                f'SELECT 1 FROM "{_REGISTRY_TABLE}" WHERE collection = ?',
+                (self._collection,),
+            )
+            .fetchone()
+        )
+        return found is not None
+
+    def collection_names(self) -> list[str]:
+        if not self._registry_exists():
+            return []
+        return [
+            name
+            for (name,) in self._connection().execute(
+                f'SELECT collection FROM "{_REGISTRY_TABLE}" ORDER BY collection'
+            )
+        ]
+
+    def dimension(self) -> int:
+        row = None
+        if self._registry_exists():
+            row = (
+                self._connection()
+                .execute(
+                    f'SELECT dimension FROM "{_REGISTRY_TABLE}" WHERE collection = ?',
+                    (self._collection,),
+                )
+                .fetchone()
+            )
+        if row is None:
+            raise ValueError(f"collection {self._collection!r} is not present in {self._path}")
+        return int(row[0])
+
+    # -- writing ----------------------------------------------------------
+
+    def add_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: list[dict] | None = None,
+        **kwargs: Any,
+    ) -> list[str]:
+        contents = list(texts)
+        if not contents:
+            return []
+        metadata_list = list(metadatas or [{} for _ in contents])
+
+        vectors = self._embedding.embed_documents(contents)
+        self._ensure_schema(len(vectors[0]), kwargs.get("provider", ""))
+
+        conn = self._connection()
+        ids: list[str] = []
+        for content, metadata, vector in zip(contents, metadata_list, vectors, strict=True):
+            cursor = conn.execute(
+                f'INSERT INTO "{self._chunks_table}" (content, metadata) VALUES (?, ?)',
+                (content, json.dumps(metadata or {})),
+            )
+            rowid = cursor.lastrowid
+            conn.execute(
+                f'INSERT INTO "{self._vec_table}" (rowid, embedding) VALUES (?, ?)',
+                (rowid, _serialise(vector)),
+            )
+            ids.append(str(rowid))
+        conn.commit()
+        return ids
+
+    @classmethod
+    def from_texts(
+        cls,
+        texts: list[str],
+        embedding: Embeddings,
+        metadatas: list[dict] | None = None,
+        **kwargs: Any,
+    ) -> SqliteVecStore:
+        path = kwargs.pop("path")
+        collection = kwargs.pop("collection")
+        store = cls(path=path, embedding=embedding, collection=collection)
+        store.add_texts(texts, metadatas, **kwargs)
+        return store
+
+    # -- reading ----------------------------------------------------------
+
+    def _knn(self, vector: list[float], fetch_k: int) -> list[tuple[Document, list[float]]]:
+        expected = self.dimension()
+        if len(vector) != expected:
+            raise ValueError(
+                f"the configured embedding provider produced a {len(vector)}-"
+                f"dimension query vector, but collection {self._collection!r} in "
+                f"{self._path} was built at {expected} dimensions. Re-index with "
+                "this provider, or switch EMBEDDING_PROVIDER back to the one "
+                "that built it."
+            )
+
+        conn = self._connection()
+        # LIMIT rather than the older `k = ?` constraint: it needs sqlite 3.41,
+        # which is what MIN_SQLITE_VERSION is pinned to. The KNN scan is its own
+        # subquery so the bound reaches vec0 rather than the join.
+        rows = conn.execute(
+            "SELECT c.content, c.metadata, m.embedding FROM ("
+            f'  SELECT rowid, distance, embedding FROM "{self._vec_table}"'
+            "  WHERE embedding MATCH ? LIMIT ?"
+            f') m JOIN "{self._chunks_table}" c ON c.id = m.rowid'
+            " ORDER BY m.distance",
+            (_serialise(vector), fetch_k),
+        ).fetchall()
+
+        return [
+            (
+                Document(page_content=content, metadata=json.loads(metadata)),
+                _deserialise(embedding),
+            )
+            for content, metadata, embedding in rows
+        ]
+
+    def similarity_search(self, query: str, k: int = 4, **kwargs: Any) -> list[Document]:
+        vector = self._embedding.embed_query(query)
+        return [document for document, _ in self._knn(vector, k)]
+
+    def max_marginal_relevance_search(
+        self,
+        query: str,
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> list[Document]:
+        vector = self._embedding.embed_query(query)
+        candidates = self._knn(vector, max(fetch_k, k))
+        picked = _mmr(
+            vector,
+            [candidate_vector for _, candidate_vector in candidates],
+            k,
+            lambda_mult,
+        )
+        return [candidates[index][0] for index in picked]
+
 
 _retriever_cache: VectorStoreRetriever | None = None
-_vectorstore_cache: Chroma | None = None
+_vectorstore_cache: SqliteVecStore | None = None
 
 
 def reset_caches() -> None:
@@ -29,36 +395,47 @@ def reset_caches() -> None:
     together when the configured provider changes within a process.
     """
     global _retriever_cache, _vectorstore_cache
+    if isinstance(_vectorstore_cache, SqliteVecStore):
+        _vectorstore_cache.close()
     _retriever_cache = None
     _vectorstore_cache = None
 
 
-def _get_vectorstore() -> Chroma:
-    """Return the cached ChromaDB vectorstore, initialising it on first call."""
+def _get_vectorstore() -> SqliteVecStore:
+    """Return the cached sqlite-vec store, opening it on first call."""
     global _vectorstore_cache
     if _vectorstore_cache is not None:
         return _vectorstore_cache
 
-    chroma_dir = Path(settings.chroma_path)
-    if not chroma_dir.exists():
-        raise FileNotFoundError(
-            f"ChromaDB directory not found at {chroma_dir}. "
-            "Run `python scripts/index_aorta.py` first."
-        )
+    index_file = settings.index_file
+    if not index_file.exists():
+        raise FileNotFoundError(_MISSING_INDEX.format(path=index_file))
 
-    # One provider decides both halves: embeddings and the collection they
-    # were written to. Mixing them would query the wrong vector dimension.
+    # One provider decides both halves: embeddings and the collection they were
+    # written to. Mixing them would query the wrong vector dimension.
     provider = get_provider()
-    _vectorstore_cache = Chroma(
-        persist_directory=str(chroma_dir),
-        embedding_function=provider.get_embeddings(),
-        collection_name=provider.collection_name(),
+    store = SqliteVecStore(
+        path=index_file,
+        embedding=provider.get_embeddings(),
+        collection=provider.collection_name(),
     )
+    if not store.collection_exists():
+        present = ", ".join(store.collection_names()) or "none"
+        store.close()
+        raise FileNotFoundError(
+            _MISSING_COLLECTION.format(
+                path=index_file,
+                collection=provider.collection_name(),
+                provider=provider.describe(),
+                present=present,
+            )
+        )
+    _vectorstore_cache = store
     return _vectorstore_cache
 
 
 def get_retriever(k: int | None = None) -> VectorStoreRetriever:
-    """Return a retriever over the persisted AORTA ChromaDB collection.
+    """Return a retriever over the persisted AORTA sqlite-vec collection.
 
     Uses MMR (Maximal Marginal Relevance) to balance relevance and diversity.
     Results are cached after the first call.
@@ -77,7 +454,7 @@ def get_retriever(k: int | None = None) -> VectorStoreRetriever:
 
 
 def search_docs(query: str, k: int) -> list:
-    """Search the ChromaDB collection for exactly k results using MMR.
+    """Search the sqlite-vec collection for exactly k results using MMR.
 
     Unlike the cached retriever (which has a fixed k), this function queries
     the vectorstore directly so callers can request any k at call time.
