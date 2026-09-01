@@ -482,7 +482,7 @@ conclusion, because the per-step breakdown is not unimodal.
 | Population | n | Mean tok/s | CV | Range |
 |---|---|---|---|---|
 | clean | 33 | 20200 | 1.13% | 19594 – 20530 |
-| stalled | 3 | 12897 | 0.25% | 12857 – 12921 |
+| stalled | 3 | 12897 | 0.27% | 12857 – 12921 |
 
 A step is either clean or it is 36% slower, with nothing in between, at a
 measured rate of 3 in 36 (8%). The three stalls all landed in one of the three
