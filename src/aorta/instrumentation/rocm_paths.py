@@ -159,7 +159,32 @@ class RocmRoots:
 
     @property
     def lib_dir(self) -> Path:
+        """The MATH libraries: hipBLASLt, rocBLAS, MIOpen, Tensile databases.
+
+        Read the name as "the libraries root's lib", not "the ROCm lib dir".
+        In the wheel layout this is ``_rocm_sdk_libraries/lib``, which does NOT
+        hold the HIP runtime -- see :attr:`core_lib_dir`.
+        """
         return self.libraries / "lib"
+
+    @property
+    def core_lib_dir(self) -> Path:
+        """The CORE libraries, ``libamdhip64`` among them.
+
+        Distinct from :attr:`lib_dir` in the wheel layout, and the distinction
+        is load-bearing rather than cosmetic. ``lib_dir`` hangs off the
+        *libraries* root and holds the math libraries; the HIP runtime that a
+        hipcc-built binary needs in order to LAUNCH hangs off the *core* root.
+        So anything assembling an ``LD_LIBRARY_PATH`` for such a binary needs
+        BOTH, core first -- with only ``lib_dir`` the fixture dies before main
+        with ``libamdhip64.so.N: cannot open shared object file`` at exit 127,
+        which is exactly how the sanitizer nightly broke on the ROCm 10 base.
+
+        On a classic install ``core`` and ``libraries`` are the same directory,
+        so this and :attr:`lib_dir` are equal and a caller joining the two gets
+        one entry.
+        """
+        return self.core / "lib"
 
     @property
     def include_dir(self) -> Path:
