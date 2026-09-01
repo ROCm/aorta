@@ -181,13 +181,15 @@ That is the *only* reason this example uses `mode: env`, and it is worth being
 precise about, because the sibling [`../amd-roctracer`](../amd-roctracer/README.md)
 needs it for a different and much harder one. There, the same snippet's
 `_select_backend()` — called only when `-b` is absent — is what initialises the
-Triton HIP driver, and a queue-intercepting backend pinned ahead of the runtime
-records nothing; that line is unchanged in 3.8.0, so no version fixes it. This
-backend installs no queue interceptor: a `-b instrumentation` CLI wrap of this
-payload captures both scopes correctly (verified on 3.7.1: 1738 bytes, cycle
-counts intact). So the collector's refusal to pin a backend under `mode: cli`
-covers `roctracer` and `rocprofiler` and not this one — what `mode: cli` costs
-here is a version guarantee on the mode knob, not the capture.
+Triton HIP driver, and `roctracer` records nothing unless it starts after that;
+that line is unchanged in 3.8.0, so no version fixes it. This backend installs
+no queue interceptor: a `-b instrumentation` CLI wrap of this payload captures
+both scopes correctly (verified on 3.7.1: 1738 bytes, cycle counts intact). So
+the collector's refusal to pin a backend under `mode: cli` covers `roctracer`
+alone and not this one — what `mode: cli` costs here is a version guarantee on
+the mode knob, not the capture. (`rocprofiler` is outside the guard too, for a
+third reason: its initialisation contract is the reverse of `roctracer`'s, so
+a CLI pin is the ordering it wants.)
 
 ## Notes
 

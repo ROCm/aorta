@@ -33,24 +33,32 @@ diagnostic_axis: [none]
 
 env_passthrough_mode: inherit
 
-# `mode: env`, not `mode: cli`, for two independent reasons.
+# `mode: env`, not `mode: cli`, for one reason -- and it is *not* the reason
+# the sibling `amd-roctracer` recipe has: this backend is not refused under
+# `mode: cli`.
 #
-# First, Triton's Proton CLI front-end calls its own `_select_backend()` only
-# when `-b` is *absent*, and that call initialises the Triton HIP driver as a
-# side effect. A queue-tracing AMD backend records nothing when it attaches
-# ahead of the runtime it traces, so pinning one through `mode: cli` yields a
-# 160-byte hatchet with a bare ROOT frame and an exit status of 0 -- the trial
-# looks successful and carries no Proton metrics. The collector rejects
-# `mode: cli` with an explicit roctracer/rocprofiler backend for that reason.
-# Triton 3.8.0 does not fix this: line 73 of `third_party/proton/proton/proton.py`
-# at the `v3.8.0` tag is still `backend = args.backend if args.backend else
-# _select_backend()`.
+# Whether the CLI forwards `-m/--mode` to `start()` depends on the version:
+# Triton 3.8.0 passes `mode=args.mode` through, while 3.7.1 and earlier parse
+# the flag and then call `start()` without it, dropping `backend_mode` below.
+# In `mode: env` it is exported as `AORTA_PROTON_MODE` and the payload passes
+# it to `proton.start(mode=...)` itself, which works on every version.
 #
-# Second, whether the CLI forwards `-m/--mode` to `start()` depends on the
-# version: Triton 3.8.0 passes `mode=args.mode` through, while 3.7.1 and earlier
-# parse the flag and then call `start()` without it, dropping `backend_mode`
-# below. In `mode: env` it is exported as `AORTA_PROTON_MODE` and the payload
-# passes it to `proton.start(mode=...)` itself, which works on every version.
+# `mode: cli` would also be correct for `rocprofiler`, and on initialisation
+# ordering alone it is what upstream prefers. `libproton.so` calls
+# `rocprofiler_force_configure` from an `__attribute__((constructor))`, so the
+# backend is configured at library load, and Triton v3.8.0's
+# `RocprofSDKProfiler.cpp` warns that letting HSA come up first -- it names "a
+# torch import chain" -- makes rocprofiler-sdk skip dispatch-buffer tracing on
+# already-existing queues and return an empty buffer. That is the opposite of
+# `roctracer`, which installs its interceptor at session start and needs the
+# runtime already up.
+#
+# Env mode is therefore safe here only because `gelu.py` imports
+# `triton.profiler` and `libproton` *before* `torch`. That import order is
+# load-bearing and is the reverse of `../amd-roctracer/pipeline.py`; see the
+# comment at the top of the payload. This ordering requirement is taken from
+# upstream's source comment, not measured -- no environment on hand can run
+# this backend -- unlike the roctracer measurement in the sibling recipe.
 #
 # `backend_mode: pcsampling` asks rocprofiler-sdk for statistical
 # instruction-level attribution -- where in the kernel the samples land --

@@ -66,17 +66,26 @@ convenience has a cost worth knowing: what `auto` resolves to on AMD is
 Triton version that settles it.
 
 The three `amd-*` examples pin a backend instead, and all use `mode: "env"`
-with a payload that calls `proton.start()` itself — but for two different
-reasons, which are worth keeping apart.
+with a payload that calls `proton.start()` itself — but for three different
+reasons, which are worth keeping apart. Only one of the three is forced.
 
-For `amd-roctracer` and `amd-rocprofiler` it is forced. Proton's CLI front-end
-initialises the HIP runtime only on the path where `-b` is absent, so one of
-those queue-intercepting backends pinned under the default `mode: "cli"`
-attaches before the first HSA queue exists and captures an empty tree; the
-collector refuses that combination rather than letting a trial pass with
-nothing in it.
+For `amd-roctracer` it is forced. Proton's CLI front-end initialises the HIP
+runtime only on the path where `-b` is absent, and `roctracer` records nothing
+unless it starts after that runtime is up, so a `roctracer` pin under the
+default `mode: "cli"` captures an empty tree; the collector refuses that one
+combination rather than letting a trial pass with nothing in it.
 
-For `amd-instrumentation` it is a choice. That backend installs no queue
+For `amd-rocprofiler` it is a choice, and the backend's contract is the
+*opposite* of its sibling's rather than the same. `libproton.so` configures
+rocprofiler-sdk from an `__attribute__((constructor))` at load time, so it
+needs to be set up *before* HSA comes up — which makes `mode: "cli"` legal for
+it, and on ordering grounds the shape upstream prefers. That example uses
+`mode: "env"` so `backend_mode` reaches Proton on every Triton version, and it
+is safe there only because the payload imports Proton before `torch`. This
+ordering is taken from upstream's source comments, not measured here, unlike
+the `roctracer` behaviour above.
+
+For `amd-instrumentation` it is a choice too. That backend installs no queue
 interceptor, so a CLI pin of it captures correctly and the collector allows it.
 It uses `mode: "env"` only so that `instrumentation_mode` reaches Proton on
 Triton 3.7.1 and earlier, whose CLI parses `--mode` and then drops it.

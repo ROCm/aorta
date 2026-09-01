@@ -133,10 +133,9 @@ instead of a full matrix. Read the raw tree with `proton-viewer -m time/s
 
 ## Why `mode: env`
 
-Pinning an explicit AMD backend through `mode: cli` **silently captures
-nothing**, and the mechanism is worth knowing because it is not a bug you would
-guess from the output. Triton's Proton CLI front-end resolves the backend like
-this:
+Pinning `roctracer` through `mode: cli` **silently captures nothing**, and the
+mechanism is worth knowing because it is not a bug you would guess from the
+output. Triton's Proton CLI front-end resolves the backend like this:
 
 ```python
 backend = args.backend if args.backend else _select_backend()
@@ -158,9 +157,20 @@ skips the driver-initialising call on the `-b` path exactly as 3.7.1 does.
 `mode: env` avoids this entirely. aorta exports `AORTA_PROTON_*` and leaves
 argv alone; the payload imports `torch` at module scope — which brings the HIP
 runtime up — and only then calls `proton.start(backend=...)` itself. The
-collector enforces this: `mode: cli` with an explicit `roctracer` or
-`rocprofiler` backend raises `ProtonWrapError` and names `mode: env` as the
-route, so a `mode: cli` version of this recipe would not run at all.
+collector enforces this: `mode: cli` with an explicit `roctracer` backend
+raises `ProtonWrapError` and names `mode: env` as the route, so a `mode: cli`
+version of this recipe would not run at all.
+
+The guard stops at `roctracer`. `rocprofiler` looks like the same case and is
+the opposite one: it is configured by an `__attribute__((constructor))` when
+`libproton.so` loads, so it wants to be set up *before* HSA rather than after,
+and its CLI pin is allowed for that reason. The import order in this example's
+payload — torch first, `proton.start()` after — is therefore the reverse of
+[`../amd-rocprofiler/gelu.py`](../amd-rocprofiler/gelu.py)'s, deliberately.
+See [Pinning an explicit AMD
+backend](../../../../docs/profiling-collectors.md#pinning-an-explicit-amd-backend)
+for both contracts side by side, including which one is measured and which is
+taken from upstream's source.
 
 ## Notes
 

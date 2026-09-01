@@ -97,14 +97,16 @@ Read the raw tree yourself with `proton-viewer -m time/s <file>.hatchet`
   3.7.1 and earlier. Naming one is a version commitment: `rocprofiler` is
   the preferred AMD backend upstream and released as of 3.8.0, but 3.7.x and
   earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an
-  argparse `invalid choice: 'rocprofiler'` before the payload runs. It is an
-  attach-mode commitment too: Proton's CLI front-end initialises the HIP
-  runtime only on the path where `-b` is absent — still true in 3.8.0 — so
-  pinning `roctracer` or `rocprofiler` under this recipe's `mode: "cli"`
-  captures an empty `ROOT`-only tree and still exits 0. The collector refuses
-  that pairing and names `mode: "env"`, where the payload drives Proton
-  itself; [`../amd-roctracer/`](../amd-roctracer/README.md) is the worked
-  case.
+  argparse `invalid choice: 'rocprofiler'` before the payload runs. For
+  `roctracer` it is an attach-mode commitment too: Proton's CLI front-end
+  initialises the HIP runtime only on the path where `-b` is absent — still
+  true in 3.8.0 — and `roctracer` records nothing unless it starts after that,
+  so pinning it under this recipe's `mode: "cli"` captures an empty
+  `ROOT`-only tree and still exits 0. The collector refuses that pairing and
+  names `mode: "env"`, where the payload drives Proton itself;
+  [`../amd-roctracer/`](../amd-roctracer/README.md) is the worked case.
+  `rocprofiler` carries no such commitment — it is configured when
+  `libproton.so` loads, so `mode: "cli"` suits it and is allowed.
 - **What `auto` resolved to is not in the artifact.** The `.hatchet`
   metadata carries the device type and never the backend name, and the
   collector publishes no `proton_backend` metric. Two captures of this

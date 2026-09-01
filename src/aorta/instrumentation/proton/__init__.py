@@ -39,12 +39,18 @@ Naming a backend explicitly costs more than a version commitment (though it is
 also that: ``rocprofiler`` arrived in Triton 3.8.0, so 3.7.x and earlier reject
 the name at argparse before the payload ever runs). Proton's front-end calls
 ``_select_backend()`` only on the path
-where ``-b`` is absent, and that call is what brings the GPU runtime up, so an
-AMD queue-intercepting backend pinned through ``mode: cli`` starts before the
-first HSA queue exists and records nothing -- a 160-byte profile holding an
-empty ``ROOT`` frame, from a run that exits 0. :func:`wrap_argv` refuses that
-combination and names ``mode: env`` instead, where the payload starts Proton
-itself after the runtime is up.
+where ``-b`` is absent, and that call is what brings the GPU runtime up, so
+``roctracer`` pinned through ``mode: cli`` starts before the first HSA queue
+exists and records nothing -- a 160-byte profile holding an empty ``ROOT``
+frame, from a run that exits 0. :func:`wrap_argv` refuses that combination and
+names ``mode: env`` instead, where the payload starts Proton after the runtime
+is up.
+
+That is a ``roctracer`` property, not an AMD one. ``rocprofiler`` has the
+opposite contract -- it is configured from a ``libproton.so`` constructor at
+load time, and upstream warns that letting HSA come up first yields an empty
+dispatch buffer -- so its CLI pin is allowed and is the better ordering. See
+:data:`_CLI_UNPINNABLE_BACKENDS`.
 """
 
 from __future__ import annotations
@@ -119,12 +125,26 @@ _AMD_BACKENDS: frozenset[str] = frozenset({"rocprofiler", "roctracer"})
 #: on AMD; ``HIP_VISIBLE_DEVICES`` is the one it refuses.
 _AMD_ENV_SIGNALS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
 
-#: Backends ``mode: cli`` cannot pin, because a queue interceptor has to be
-#: installed before the first HSA queue is created and Proton's front-end only
-#: initialises the runtime on the ``-b``-absent path. Derived from the schema's
-#: interception set rather than spelled out, so a backend added to one is
-#: covered by the other: ``auto`` comes out because it *is* that path.
-_CLI_UNPINNABLE_BACKENDS: frozenset[str] = QUEUE_INTERCEPTING_BACKENDS - {AUTO_BACKEND}
+#: Backends ``mode: cli`` cannot pin. Spelled out rather than derived from
+#: :data:`QUEUE_INTERCEPTING_BACKENDS`, because the two AMD backends turn out to
+#: have *opposite* initialisation contracts and deriving it treated them alike:
+#:
+#: * ``roctracer`` installs its interceptor when the session starts, and
+#:   Proton's front-end brings the GPU runtime up only on the ``-b``-absent
+#:   path -- so a CLI pin starts it before the first HSA queue exists and
+#:   records nothing. Measured: a 160-byte profile holding a bare ``ROOT``.
+#: * ``rocprofiler`` is the reverse, and the CLI path is the *safe* one for it.
+#:   Triton 3.8.0 calls ``rocprofiler_force_configure`` from an
+#:   ``__attribute__((constructor))`` in ``libproton.so``, so it is configured
+#:   at library load, before any user code. Its own source warns that letting
+#:   HSA come up first -- naming "a torch import chain" -- makes rocprofiler-sdk
+#:   skip dispatch-buffer tracing on already-existing queues and yield an empty
+#:   buffer. Refusing the CLI pin would push operators toward exactly that.
+#:
+#: ``auto`` is absent for the reason it always was: omitting ``-b`` is the
+#: working path. A future intercepting backend has to be classified by its own
+#: contract, which is why this is no longer a set operation.
+_CLI_UNPINNABLE_BACKENDS: frozenset[str] = frozenset({"roctracer"})
 
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
 # Interpreter flags that take no argument and can safely stay in front of
@@ -525,20 +545,23 @@ def wrap_argv(
 
     # Checked before the argv shape, because ``mode: env`` is the fix for both
     # and this is the one an operator cannot see failing: an unwrappable argv
-    # at least stops the trial, while a pinned queue-intercepting backend
-    # produces a clean exit 0 carrying an empty profile.
+    # at least stops the trial, while this produces a clean exit 0 carrying an
+    # empty profile.
     if effective["backend"] in _CLI_UNPINNABLE_BACKENDS:
         raise ProtonWrapError(
             f"proton mode 'cli' cannot pin backend {effective['backend']!r}. "
             "Proton's command front-end calls _select_backend() only when '-b' "
-            "is absent, and that call is what initialises the GPU runtime, so a "
-            "pinned queue-intercepting backend starts before the first HSA "
-            "queue exists and records nothing: the profile comes back as an "
-            "empty ROOT frame and the trial reports no proton metrics while "
-            "exiting 0. Use 'proton: {mode: env}' with a payload that calls "
+            "is absent, and that call is what initialises the GPU runtime, so "
+            "roctracer's interceptor is installed before the first HSA queue "
+            "exists and records nothing: the profile comes back as an empty "
+            "ROOT frame and the trial reports no proton metrics while exiting "
+            "0. Use 'proton: {mode: env}' with a payload that calls "
             "proton.start() after the runtime is up (see "
             "examples/profiling/proton/amd-roctracer), or leave "
-            f"'backend: {AUTO_BACKEND}', which omits '-b' and is unaffected."
+            f"'backend: {AUTO_BACKEND}', which omits '-b' and is unaffected. "
+            "Note this applies to roctracer only -- rocprofiler configures "
+            "itself when libproton loads, so its CLI pin is allowed and is the "
+            "ordering upstream prefers."
         )
 
     flags, target = _split_python_launch(inner)

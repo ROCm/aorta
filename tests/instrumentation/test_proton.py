@@ -610,16 +610,32 @@ def test_wrap_argv_does_not_mutate_the_input(tmp_path):
 # nothing. In aorta that surfaced as a trial with no proton metrics at all,
 # since ``parse_summary`` degrades to the artifact directory for an empty tree.
 #
-# The guard covers the queue-intercepting pair only. ``instrumentation`` needs
-# no interceptor and captures correctly under a CLI pin, so refusing it would
-# cost a working configuration; the ``granularity`` / ``instrumentation_mode``
-# knobs are what ``mode: cli`` costs there, and the schema documents that.
+# The guard covers ``roctracer`` and nothing else, and the exclusions are not
+# one rule but three:
+#
+# * ``instrumentation`` needs no interceptor and captures correctly under a CLI
+#   pin, so refusing it would cost a working configuration; what ``mode: cli``
+#   costs there is the ``--mode`` knobs, which the schema documents.
+# * ``rocprofiler`` has the *opposite* contract. Triton 3.8.0 calls
+#   ``rocprofiler_force_configure`` from an ``__attribute__((constructor))`` in
+#   ``libproton.so``, and its source warns that letting HSA come up first -- "a
+#   torch import chain" -- yields an empty dispatch buffer. The CLI path loads
+#   libproton before the payload, so it is the ordering upstream *wants*.
+# * ``auto`` is the ``-b``-absent path, i.e. the working one.
 
 
-@pytest.mark.parametrize("backend", ["roctracer", "rocprofiler"])
-def test_wrap_argv_cli_refuses_to_pin_a_queue_intercepting_backend(tmp_path, backend):
+def test_wrap_argv_cli_refuses_to_pin_roctracer(tmp_path):
     with pytest.raises(ProtonWrapError, match="cannot pin backend"):
-        wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": backend}, env={})
+        wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"}, env={})
+
+
+@pytest.mark.parametrize("backend", ["rocprofiler", "instrumentation", "cupti"])
+def test_wrap_argv_cli_allows_the_backends_whose_ordering_it_does_not_break(tmp_path, backend):
+    """Only ``roctracer`` is refused. ``rocprofiler`` in particular must stay
+    allowed: refusing it would push operators onto the env-mode ordering its own
+    upstream source warns produces an empty dispatch buffer."""
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": backend}, env={})
+    assert argv[argv.index("-b") + 1] == backend
 
 
 def test_cli_backend_pin_rejection_names_the_mechanism_and_the_route(tmp_path):

@@ -251,19 +251,33 @@ payload does publish all three.
   attribution on a backend whose mode is available on a released Triton, use
   [`../amd-instrumentation`](../amd-instrumentation/README.md) instead — it
   counts cycles per source-level scope rather than sampling.
-- **Why `mode: env`.** Two reasons, both mechanical, and only the first is a
-  hard requirement. Triton's Proton CLI calls `_select_backend()` — which
-  initialises the HIP driver as a side effect — only when `-b` is absent, so
-  pinning a queue-tracing backend on the CLI attaches the profiler before the
-  runtime exists and writes a hatchet with a bare `ROOT` frame while exiting 0.
-  That is still true on 3.8.0: line 73 of `third_party/proton/proton/proton.py`
-  at the `v3.8.0` tag is unchanged. The collector rejects `mode: cli` with an
-  explicit `roctracer` / `rocprofiler` backend outright for that reason. Second,
-  `--mode` reaches Proton through the CLI only on 3.8.0 and newer — 3.7.1 and
-  earlier parse `-m/--mode` and then call `start()` without it — so `mode: env`
-  is also what makes `backend_mode` version-independent. In `mode: env` the
-  payload imports `torch` first and then passes both values to
-  `proton.start()` itself.
+- **Why `mode: env`.** One reason, and it is not the one that forces the
+  sibling example's hand. `--mode` reaches Proton through the CLI only on 3.8.0
+  and newer — 3.7.1 and earlier parse `-m/--mode` and then call `start()`
+  without it — so `mode: env` is what makes `backend_mode` version-independent.
+  Unlike [`../amd-roctracer`](../amd-roctracer/README.md), this backend is
+  *not* refused under `mode: cli`: `mode: cli` would be correct here too, and
+  on ordering grounds it is the shape upstream prefers, since it loads
+  `libproton` before the payload runs. Env mode is chosen for the `--mode`
+  portability and is safe here only because of the next bullet.
+- **The payload's import order is load-bearing, and it is the reverse of the
+  sibling's.** `libproton.so` calls `rocprofiler_force_configure` from an
+  `__attribute__((constructor))`, so importing Proton is what configures
+  rocprofiler-sdk. Triton v3.8.0's
+  `third_party/proton/csrc/lib/Profiler/RocprofSDK/RocprofSDKProfiler.cpp`
+  warns, in the comment above that call, that "any code that fully initializes
+  HSA beforehand (e.g. triton's HIP driver query at pytest collection time, or
+  a torch import chain) causes rocprofiler-sdk 1.2.0 to silently skip
+  kernel-dispatch buffer tracing installation on already-existing queues,
+  producing an empty dispatch buffer and no per-kernel timing data." So
+  [`gelu.py`](gelu.py) imports `triton.profiler` and `libproton` **before**
+  `torch`, and says so at the import site. `../amd-roctracer/pipeline.py` does
+  the opposite deliberately — roctracer needs the runtime already up. Two
+  backends, two contracts; do not normalise the two payloads to one import
+  order. Note this ordering claim comes from upstream's source comment and was
+  not measured here — nothing in reach can run this backend (see
+  [Availability](#availability)) — whereas the `roctracer` claim next door is
+  measured.
 - **Device selection.** Proton on AMD reads `ROCR_VISIBLE_DEVICES` and rejects
   `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` for the queue-intercepting
   backends. aorta's collector translates the rejected spellings automatically

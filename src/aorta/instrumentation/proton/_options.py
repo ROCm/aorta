@@ -27,25 +27,28 @@ AUTO_BACKEND: str = "auto"
 #: release and what ``auto`` still resolves to below 3.8.0;
 #: ``instrumentation`` is the intra-kernel path; ``cupti`` is the NVIDIA one,
 #: accepted so a recipe stays portable even though aorta's examples are AMD.
-#: Naming either *queue-intercepting* AMD backend (``rocprofiler`` /
-#: ``roctracer``) also commits the recipe to ``mode: env``: the collector
-#: refuses to pin those two under ``mode: cli``, where the capture would come
-#: back empty (see :func:`aorta.instrumentation.proton.wrap_argv`).
-#: ``instrumentation`` is an AMD backend too and is deliberately *not* covered
-#: -- it installs no interceptor, so a CLI pin of it captures correctly.
+#: Naming ``roctracer`` also commits the recipe to ``mode: env``: the collector
+#: refuses to pin *that one* under ``mode: cli``, where the capture comes back
+#: empty (see :func:`aorta.instrumentation.proton.wrap_argv`). The other two AMD
+#: backends are not covered, for different reasons -- ``instrumentation``
+#: installs no interceptor, and ``rocprofiler`` configures itself when
+#: ``libproton`` loads, so for it the CLI path is the *preferred* ordering.
 BACKENDS: frozenset[str] = frozenset(
     {"auto", "cupti", "rocprofiler", "roctracer", "instrumentation"}
 )
 
 #: Backends that install an HSA queue interceptor and therefore cannot share a
-#: process with ``rocprofv3``. Consumed by two guards outside this module --
-#: the collector registry's ``rocprof`` conflict check and the collector's own
-#: refusal to pin one of these under ``mode: cli`` -- which is why it lives in
-#: the schema rather than in either. ``auto`` is included because on AMD it
-#: resolves to ``rocprofiler`` or ``roctracer`` -- both intercepting -- and the
-#: conflict guard has to reject a pairing it cannot prove is safe. The cli
-#: guard excludes it explicitly instead, since omitting ``-b`` is the very
-#: thing that keeps that path working.
+#: process with ``rocprofv3``. Consumed by the collector registry's ``rocprof``
+#: conflict check, which is why it lives in the schema rather than in the guard.
+#: ``auto`` is included because on AMD it resolves to ``rocprofiler`` or
+#: ``roctracer`` -- both intercepting -- and the conflict guard has to reject a
+#: pairing it cannot prove is safe.
+#:
+#: **Not** the source of the ``mode: cli`` pin refusal, which it used to be.
+#: Interception and initialisation ordering are independent questions:
+#: ``rocprofiler`` intercepts queues (so it belongs here) and yet configures
+#: itself at ``libproton`` load time, so its CLI pin is safe. See
+#: ``_CLI_UNPINNABLE_BACKENDS`` in the collector, which is now spelled out.
 QUEUE_INTERCEPTING_BACKENDS: frozenset[str] = frozenset({"auto", "rocprofiler", "roctracer"})
 
 #: ``backend_mode`` values per backend: Proton's ``--mode`` is backend-specific,

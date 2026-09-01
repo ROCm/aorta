@@ -38,16 +38,27 @@ import argparse
 import os
 import sys
 
-# ``torch`` is imported at module scope, not lazily inside main(), and that
-# ordering is load-bearing: a queue-tracing backend records nothing when it
-# attaches before the HIP runtime it is tracing, and importing torch is what
-# brings that runtime up. It is also why this example is driven by
-# ``mode: env`` -- see recipe.yaml.
+# THE ORDER OF THE NEXT TWO IMPORT BLOCKS IS LOAD-BEARING, and it is the
+# opposite of what the sibling `amd-roctracer` example needs.
+#
+# `libproton.so` calls `rocprofiler_force_configure` from an
+# `__attribute__((constructor))`, so importing Proton is what configures
+# rocprofiler-sdk -- and Triton 3.8.0's own source warns that letting HSA come
+# up first, naming "a torch import chain", makes the SDK skip dispatch-buffer
+# tracing on already-existing queues and hand back an empty buffer
+# (`RocprofSDKProfiler.cpp`, the comment above its `forceConfigure` call). So
+# Proton must be imported BEFORE torch here.
+#
+# `roctracer` is the reverse -- it installs its interceptor at session start and
+# needs the runtime already up -- which is why `amd-roctracer/pipeline.py`
+# imports torch at module scope and starts Proton after it. Two backends, two
+# contracts; do not "tidy" these into one order.
+import triton.profiler as proton  # isort: skip  # noqa: I001
+from triton._C.libproton import proton as libproton  # isort: skip  # noqa: I001
+
 import torch
 import triton
 import triton.language as tl
-import triton.profiler as proton
-from triton._C.libproton import proton as libproton
 
 #: Prefix of the variables aorta's ``proton`` collector exports in ``mode: env``.
 _ENV_PREFIX = "AORTA_PROTON_"
@@ -161,12 +172,21 @@ def start_failure_reason(exc: Exception, capture: dict[str, str | None]) -> str 
     """
     message = str(exc)
     if "unsupported mode" in message:
-        return (
+        reason = (
             f"the {capture['backend']!r} backend is present but does not accept "
-            f"mode={capture['mode']!r}. AMD PC sampling landed upstream after the "
-            "3.8.0 tag, so pcsampling needs a post-3.8 `main` build; 3.8.0 itself "
-            "takes only periodic_flushing."
+            f"mode={capture['mode']!r}."
         )
+        # The PC-sampling advice belongs only to the pair it is about. Appended
+        # unconditionally it would tell someone who mistyped a mode, or who hit
+        # this on roctracer, that a post-3.8 build fixes it -- which is false and
+        # sends them to rebuild Triton for nothing.
+        if capture["backend"] == "rocprofiler" and capture["mode"] == "pcsampling":
+            reason += (
+                " AMD PC sampling landed upstream after the 3.8.0 tag, so this"
+                " pair needs a post-3.8 `main` build; 3.8.0 itself takes only"
+                " periodic_flushing."
+            )
+        return reason
     if "Could not load" in message:
         return (
             "Proton could not dlopen the backend's library. A ROCm that came "
