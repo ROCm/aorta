@@ -4,7 +4,9 @@ Verified against `ROCm/aorta` `main` at commit `7f82258`, which contains
 [#404](https://github.com/ROCm/aorta/pull/404) (`8e14505`, probe integration) and
 [#407](https://github.com/ROCm/aorta/pull/407) (`7f82258`, serving workload).
 Everything below was read out of the tree at that commit; nothing here describes
-unmerged work.
+unmerged work. `main` has since advanced to `30dcc05`, but nothing under
+`docs/tokenspeed*.md`, `recipes/tokenspeed/`, `src/aorta/workloads/tokenspeed*`
+or the two test suites changed in between, so every fact below still holds.
 
 ## What this is
 
