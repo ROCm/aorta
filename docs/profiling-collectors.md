@@ -636,12 +636,21 @@ uses `-m triton.profiler.proton` rather than the `proton` console script
 precisely because the console script's shebang is frequently the wrong
 interpreter.
 
-**`RuntimeError: Could not load \`libroctracer64.so\`` from Proton.** The
-environment's ROCm ships only the versioned soname
-(`libroctracer64.so.4`) while Proton `dlopen`s the unversioned name. Seen on
-container images whose ROCm comes from Python wheels rather than a system
-install. Add a directory of unversioned symlinks to `$LD_LIBRARY_PATH`, or
-run on a host with a system ROCm install (where both spellings exist).
+**``RuntimeError: Could not load `lib<something>.so` `` from Proton.** The
+environment's ROCm ships only the versioned soname (`libroctracer64.so.4`)
+while Proton `dlopen`s the unversioned name. Seen on container images whose
+ROCm comes from Python wheels rather than a system install. Add a directory of
+unversioned symlinks to `$LD_LIBRARY_PATH`, or run on a host with a system ROCm
+install (where both spellings exist).
+
+**Which** library it names follows the backend, so it changed with Triton
+3.8.0: `libroctracer64.so` for `roctracer`, and `librocprofiler-sdk.so` for the
+`rocprofiler` backend that 3.8.0 added. That matters for `backend: auto`
+specifically, because `auto` resolves to `rocprofiler` from 3.8.0 — measured in
+aorta's ROCm 10 base image, where the default example fails on
+`librocprofiler-sdk.so`. The remedy is the same for either name. Note this says
+nothing about whether the backend or its mode is supported; it is purely a
+packaging problem.
 
 **`invalid choice: 'rocprofiler'` from Proton, before the payload runs.**
 The installed Triton predates the `rocprofiler` backend, which was released in

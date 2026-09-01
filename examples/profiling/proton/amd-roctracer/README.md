@@ -187,7 +187,10 @@ route, so a `mode: cli` version of this recipe would not run at all.
 - **`Could not load libroctracer64.so`.** Some container images get ROCm from
   Python wheels, which ship only `libroctracer64.so.4` while Proton `dlopen`s
   the unversioned name. Add a directory of unversioned symlinks to
-  `$LD_LIBRARY_PATH`, or use an image with a system ROCm install.
+  `$LD_LIBRARY_PATH`, or use an image with a system ROCm install. This example
+  pins `roctracer`, so that is the name you will see here; the sibling
+  `rocprofiler` example (and `backend: auto` from Triton 3.8.0) fails on
+  `librocprofiler-sdk.so` instead, with the same remedy.
 - Triton compiles on first launch. The unprofiled correctness pass absorbs that
   compile, which is why the capture's launch count is exact.
 

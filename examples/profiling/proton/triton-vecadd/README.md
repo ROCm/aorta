@@ -115,10 +115,14 @@ Read the raw tree yourself with `proton-viewer -m time/s <file>.hatchet`
   queues, and so does `rocprofv3`; running both fights over the same
   interception point, and the pairing is rejected at recipe load. Only the
   `instrumentation` backend coexists with `rocprof`.
-- **`Could not load libroctracer64.so`.** Some container images get ROCm
-  from Python wheels, which ship only `libroctracer64.so.4` while Proton
-  `dlopen`s the unversioned name. Add a directory of unversioned symlinks
-  to `$LD_LIBRARY_PATH`, or use an image with a system ROCm install.
+- **``Could not load `lib<something>.so` ``.** Some container images get
+  ROCm from Python wheels, which ship only the versioned soname while Proton
+  `dlopen`s the unversioned name. Add a directory of unversioned symlinks to
+  `$LD_LIBRARY_PATH`, or use an image with a system ROCm install. The library
+  named follows whichever backend ran: `libroctracer64.so` below Triton 3.8.0,
+  and `librocprofiler-sdk.so` from 3.8.0 on, since that is where `auto` starts
+  resolving to `rocprofiler` — measured on a ROCm 10 image. Same remedy
+  either way.
 - Triton compiles on first launch, so a cold kernel cache dominates wall
   time. That compile does not dispatch a kernel and so does not appear in
   the tree.

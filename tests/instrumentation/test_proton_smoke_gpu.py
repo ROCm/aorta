@@ -373,6 +373,78 @@ def test_a_backend_that_refuses_the_mode_exits_two_not_a_traceback(tmp_path):
     assert "ROCR_VISIBLE_DEVICES instead" not in proc.stderr, proc.stderr
 
 
+def _pcsampling_skip_reason(tmp_path) -> str | None:
+    """Report why ``rocprofiler`` + ``pcsampling`` cannot run here, or ``None``.
+
+    Asked by attempting it, because there is no way to ask directly: the backend
+    being listed in ``get_available_profilers()`` does not mean the mode is
+    implemented (Triton 3.8.0 lists the backend and rejects the mode), and
+    neither answers whether the backend's library will load.
+    """
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import triton.profiler as proton;"
+            "proton.start('probe', backend='rocprofiler', mode='pcsampling');"
+            "proton.finalize()",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=_raw_proton_env(TRITON_CACHE_DIR=str(tmp_path / "triton-cache")),
+    )
+    if probe.returncode == 0:
+        return None
+    tail = [line for line in probe.stderr.strip().splitlines() if line.strip()]
+    return tail[-1] if tail else f"probe exited {probe.returncode} with no stderr"
+
+
+@skip_no_proton
+def test_pcsampling_captures_once_the_environment_can_do_it(tmp_path):
+    """The success path `amd-rocprofiler` advertises, gated on being possible.
+
+    Every other test around this example asserts a *handled failure*, which
+    leaves the advertised capture untested -- so the example could stay broken
+    after a capable Triton finally reaches CI, and nothing would say so. This
+    runs the recipe's real option pair and skips, with the reason, wherever that
+    pair cannot run: no Triton obtainable today can (3.8.0 rejects the mode, and
+    aorta's ROCm 10 base cannot even load `librocprofiler-sdk.so`), so it is a
+    skip everywhere for now and starts enforcing by itself when that changes.
+
+    The assertion is deliberately shape-agnostic. What PC-sampling leaves in a
+    hatchet tree has not been observed here, so requiring particular metric keys
+    would be guessing; requiring the tree to carry something under ROOT is the
+    property that distinguishes a real capture from the empty one.
+    """
+    reason = _pcsampling_skip_reason(tmp_path)
+    if reason is not None:
+        pytest.skip(f"this Proton cannot do rocprofiler+pcsampling: {reason}")
+
+    proc, metrics = _capture(
+        "amd-rocprofiler",
+        "gelu.py",
+        ["--size", "262144", "--iters", "10"],
+        tmp_path,
+        {
+            "mode": "env",
+            "backend": "rocprofiler",
+            "backend_mode": "pcsampling",
+            "context": "shadow",
+            "data": "tree",
+        },
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "PASS" in proc.stdout, proc.stdout
+    profile = tmp_path / OUTPUT_SUBDIR / f"{PROFILE_BASENAME}.hatchet"
+    assert profile.is_file(), sorted(str(q) for q in (tmp_path / OUTPUT_SUBDIR).rglob("*"))
+    tree = json.loads(profile.read_text(encoding="utf-8"))
+    root = tree[0] if isinstance(tree, list) else tree
+    assert root.get("children"), f"PC-sampling capture is an empty ROOT tree: {tree}"
+    assert metrics["proton_artifact_dir"] == str(tmp_path / OUTPUT_SUBDIR)
+
+
 @skip_no_proton
 def test_instrumentation_captures_scopes_inside_one_kernel(tmp_path):
     """The intra-kernel backend attributes cycles to regions within a kernel.
