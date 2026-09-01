@@ -11,22 +11,15 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.tools import BaseTool
 
 from aorta.chat.config import settings
 from aorta.chat.graph.state import AgentState
 from aorta.chat.inference.vllm_client import get_chat_llm
+from aorta.chat.plugins import BUILTIN_CHAT_TOOLS, ChatTool, load_chat_tools
 from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
 from aorta.chat.redaction import redact_for_send
-from aorta.chat.tools.artifacts import (
-    list_runs,
-    read_run_env,
-    read_run_matrix,
-    search_run_artifacts,
-)
-from aorta.chat.tools.files import list_files, read_file
-from aorta.chat.tools.run import run_terminal_command
-from aorta.chat.tools.search import grep_code, search_code, search_repo_map
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +99,7 @@ If in doubt, classify as action.
 Reply with ONLY the single word: question or action
 """
 
-PLAN_PROMPT = """\
+_BUILTIN_PLAN_PROMPT = """\
 You are a planning agent. Given the user request and the repository map, \
 break down the task into concrete steps.
 
@@ -129,20 +122,14 @@ For each step, specify which tool to use and what arguments. For "find all" or \
 Output your plan as a numbered list. Be specific about file paths.
 """
 
-TOOL_REGISTRY: dict[str, callable] = {
-    "list_files": list_files,
-    "read_file": read_file,
-    "search_code": search_code,
-    "grep_code": grep_code,
-    "search_repo_map": search_repo_map,
-    "run_terminal_command": run_terminal_command,
-    "list_runs": list_runs,
-    "read_run_matrix": read_run_matrix,
-    "read_run_env": read_run_env,
-    "search_run_artifacts": search_run_artifacts,
-}
+#: Resolved once, at import: the graph is built per process and re-reading the
+#: entry points on every act round would buy nothing. A plugin installed while
+#: a REPL session is open is not picked up until the next one.
+CHAT_TOOLS: dict[str, ChatTool] = load_chat_tools()
 
-TOOL_DESCRIPTIONS = """\
+TOOL_REGISTRY: dict[str, BaseTool] = {name: entry.tool for name, entry in CHAT_TOOLS.items()}
+
+_BUILTIN_TOOL_DESCRIPTIONS = """\
 You have these tools. To call one, output EXACTLY this format on its own line:
 
 ACTION: tool_name(arg1="value1", arg2="value2")
@@ -180,6 +167,42 @@ IMPORTANT:
   "NOT RECORDED". Never read one as zero or as a pass. If the field that decides \
   the question is unknown, say the run did not record it.
 """
+
+
+def _summary_line(tool: BaseTool) -> str:
+    """First line of a tool's description, which is the model's only summary.
+
+    ``@tool`` refuses a function with no docstring, so an empty description
+    means a hand-built ``BaseTool`` -- possible, and not worth an IndexError.
+    """
+    lines = (tool.description or "").strip().splitlines()
+    return lines[0].strip() if lines else "no description"
+
+
+def _plugin_tool_help(tools: dict[str, ChatTool]) -> str:
+    """Advertise plugin-contributed tools, or return "" when there are none.
+
+    The hand-written lists above cover the built-ins; a tool discovered from the
+    ``aorta.chat_tools`` entry-point group has to describe itself. Only the text
+    protocol needs this -- ``bind_tools()`` sends every tool's real schema, so
+    the native protocol offers plugin tools whether or not the prompt says so.
+
+    Returns the empty string when nothing is installed, so both prompts stay
+    byte-identical to what a user with no plugins had before.
+    """
+    extra = [entry for entry in tools.values() if entry.source_package != "aorta"]
+    if not extra:
+        return ""
+    lines = [
+        f"{index}. {entry.name}(...) - {_summary_line(entry.tool)} "
+        f"[from {entry.source_package}]"
+        for index, entry in enumerate(extra, start=len(BUILTIN_CHAT_TOOLS) + 1)
+    ]
+    return "\nAdditional tools contributed by installed plugins:\n\n" + "\n".join(lines) + "\n"
+
+
+TOOL_DESCRIPTIONS = _BUILTIN_TOOL_DESCRIPTIONS + _plugin_tool_help(CHAT_TOOLS)
+PLAN_PROMPT = _BUILTIN_PLAN_PROMPT + _plugin_tool_help(CHAT_TOOLS)
 
 
 def _get_llm(**kwargs):
