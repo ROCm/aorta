@@ -98,10 +98,17 @@ jobs:
             # without it, so a PR touching only the probe ran neither the audit
             # nor the GPU-gated tests in that file.
             'src/aorta/instrumentation/environment.py'
+            # The Proton collector attaches a profiler to a real GPU launch, so
+            # its behaviour is only observable on hardware: the CPU suite can
+            # assert the argv and the env bundle, but not that the capture came
+            # back with kernels in it. Listed with its smoke test because a
+            # backend pin that silently records nothing passes every CPU check.
+            'src/aorta/instrumentation/proton/*'
             'scripts/audit_env_knobs.py'
             'tests/hw_queue_eval/*'
             'tests/instrumentation/test_environment.py'
             'tests/instrumentation/test_env_knob_audit.py'
+            'tests/instrumentation/test_proton_smoke_gpu.py'
             'tests/instrumentation/rocjitsu_sanitizers/*'
             'tests/sanitizers/*'
             'tests/test_marker_partition.py'
