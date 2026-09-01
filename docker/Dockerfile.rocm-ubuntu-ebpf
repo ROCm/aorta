@@ -1,5 +1,5 @@
 # Start from the existing PyTorch ROCm image (same as working Dockerfile)
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 #FROM rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
 
 # Switch to root to install packages
