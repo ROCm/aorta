@@ -1,7 +1,11 @@
-"""Data types for the mitigations + environments registry."""
+"""Data types for the mitigations + environments + agents registry."""
 
 import copy
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import click
 
 
 @dataclass(frozen=True)
@@ -75,3 +79,19 @@ class Environment:
         # caller cannot mutate an environment's baseline env after construction
         # (same defensive pattern as ``RunRequest.__post_init__``).
         object.__setattr__(self, "env", copy.deepcopy(self.env))
+
+
+@dataclass(frozen=True)
+class Agent:
+    """An autonomous, run-to-verdict workflow exposed as ``aorta agent <name>``.
+
+    The payload is the Click command that implements the agent, because the
+    registry's consumer is the ``aorta agent`` group and a group needs a command
+    to dispatch to. ``click`` stays a ``TYPE_CHECKING`` import here so this
+    shared types module keeps its stdlib-only import cost; the runtime
+    ``isinstance`` check lives in ``aorta.registry.agents``.
+    """
+
+    name: str
+    command: "click.Command"
+    source_package: str  # "aorta" for built-ins, dist name for entry-point contributors
