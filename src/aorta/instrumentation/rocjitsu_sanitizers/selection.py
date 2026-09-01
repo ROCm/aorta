@@ -61,8 +61,7 @@ def sha256_code_object(path: Path) -> str | None:
     """Lowercase SHA-256 of a non-empty code object, or ``None`` if unreadable.
 
     Streams the file so a large code object (hundreds of MB for an unbundled
-    Tensile object -- the shipped bundle itself is compressed and far smaller)
-    is not read into memory at once. Returns ``None`` for a missing / empty /
+    Tensile object) is not read into memory at once. Returns ``None`` for a missing / empty /
     unreadable path so callers can degrade gracefully rather than crash: the
     identity stays digest-less and Waitcheck fails closed
     (``code_object_identity_required``) exactly as it does today for a kernel

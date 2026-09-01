@@ -7,6 +7,11 @@ Tensile object (490 / 1554 / 682 kernels) were all 2x for this reason, and the
 490 was quoted in four places before it was caught. ``--dyn-syms`` reads the one
 table and is the correct source.
 
+The flag has spellings. ``-s`` and ``--syms`` are aliases of ``--symbols``, and
+``-a`` / ``--all`` expands to ``-h -l -S -s -r -d -V -A -I`` -- which includes
+``-s``, so it double-counts too. All five are rejected; matching only the long
+form would let the same bug back in under a shorter name.
+
 The check is phrased as the property rather than as a diff against one known-bad
 line, so a new caller anywhere in the tree inherits it.
 
@@ -25,6 +30,7 @@ That is a real double count, and matching physical lines would miss it.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -41,6 +47,11 @@ _COUNTING_MARKERS = ("FUNC", ".kd")
 # Only files that can run a command. Markdown and friends are excluded on
 # purpose: they describe call sites rather than being them.
 _COMMAND_SUFFIXES = frozenset({".sh", ".bash", ".zsh", ".py", ".yaml", ".yml"})
+
+# Every spelling that makes llvm-readelf emit .symtab alongside .dynsym. Matched
+# as whole tokens: a substring test for "-s" would fire on "--dyn-syms", which is
+# the flag we want people to use.
+_DOUBLE_COUNTING_FLAGS = re.compile(r"(?<![\w-])(?:--symbols|--syms|--all|-s|-a)(?![\w-])")
 
 # A physical line ending in one of these operators is continued by the next one,
 # so the two are a single command as far as the shell is concerned. A trailing
@@ -119,14 +130,15 @@ def _kernel_counting_readelf_commands() -> list[tuple[Path, int, str]]:
 
 
 def test_kernel_counts_never_come_from_the_double_counting_table() -> None:
-    """No kernel count is derived from ``--symbols``, which reports 2x."""
+    """No kernel count is derived from ``--symbols`` or an alias, which report 2x."""
     offenders = [
         (path, lineno, command)
         for path, lineno, command in _kernel_counting_readelf_commands()
-        if "--symbols" in command
+        if _DOUBLE_COUNTING_FLAGS.search(command)
     ]
     assert not offenders, (
-        "llvm-readelf --symbols prints .dynsym and .symtab, so counting kernel "
+        "llvm-readelf --symbols (and its aliases -s / --syms, and -a / --all, "
+        "which includes -s) prints .dynsym and .symtab, so counting kernel "
         "symbols across it double-counts; use --dyn-syms:\n"
         + "\n".join(f"  {path}:{lineno}: {cmd}" for path, lineno, cmd in offenders)
     )
@@ -163,6 +175,21 @@ def test_a_wrapped_pipeline_is_still_seen_as_one_command() -> None:
     assert lineno == 2, "the comment above it is not part of the command"
     assert "--symbols" in command and "FUNC" in command
     assert "\\" not in command, "the continuation marker is consumed by the fold"
+
+
+def test_every_spelling_of_the_double_counting_flag_is_rejected() -> None:
+    """The bug can come back under a shorter name, so pin all of them.
+
+    ``-s`` and ``--syms`` are aliases of ``--symbols``; ``-a`` / ``--all``
+    expands to a set that includes ``-s``. ``--dyn-syms`` is the correct flag
+    and must not be caught by the ``-s`` arm -- it contains those two characters.
+    """
+    for flag in ("--symbols", "--syms", "-s", "--all", "-a"):
+        command = f"kernels=$(llvm-readelf {flag} \"${{OBJECT}}\" | grep -c 'FUNC.*GLOBAL')"
+        assert _DOUBLE_COUNTING_FLAGS.search(command), f"{flag} double-counts but is accepted"
+
+    good = "kernels=$(llvm-readelf --dyn-syms \"${OBJECT}\" | grep -c 'FUNC.*GLOBAL')"
+    assert not _DOUBLE_COUNTING_FLAGS.search(good), "the correct flag must not be flagged"
 
 
 def test_prose_is_not_a_call_site() -> None:
