@@ -39,7 +39,7 @@ from pathlib import Path
 from ._options import OPTION_KEYS, OUTPUT_FORMATS, SUMMARY_UNITS, TRACE_FLAGS, validate_options
 from ._options import as_bool as _as_bool
 from ._options import split_tokens as _split_tokens
-from ._parse import parse_summary
+from ._parse import parse_summary, parse_summary_from_streams
 
 #: Subdirectory (under the trial's collector directory) rocprofv3 writes into.
 OUTPUT_SUBDIR: str = "rocprof"
@@ -191,6 +191,7 @@ __all__ = [
     "RocprofUnavailableError",
     "build_argv_prefix",
     "parse_summary",
+    "parse_summary_from_streams",
     "resolve_binary",
     "validate_options",
     "wrap_argv",
