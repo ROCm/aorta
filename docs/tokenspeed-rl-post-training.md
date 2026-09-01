@@ -634,15 +634,30 @@ must be disaggregated onto separate GPUs (`nccl`), the node count doubles and th
   configuration; not to be read as per-token latency.
 - **`--extra-body` outside rollout can still change the load silently.** Named
   above; a pre-existing hole this change neither widens nor closes.
-- **No perf gates on rollout metrics.** `mean_output_tokens_per_request` and
-  `generated_tokens_p50` are in the CI gating allowlist, so they are gateable
-  once baselines exist, but no rollout recipe is in the nightly matrix and
-  nothing is gated. Gating a *length* is also a judgement call: under
-  EOS-respecting generation the length is the model's choice, so a lower bound
-  protects against the engine returning less text while an upper bound would
-  redden a run for producing more.
+- **No perf gates on rollout metrics, by decision.** An earlier revision of this
+  branch added `mean_output_tokens_per_request` and `generated_tokens_p50` to
+  `_METRIC_POLICIES` in `scripts/ci/eval_lib.py`. They have been removed again.
+  That table is not a description of which metrics exist, it is the set
+  `refresh_baselines --perf-gate` arms automatically, from a single observation
+  and a flat margin — so listing a name elects to gate it.
+
+  A generated length is the wrong thing to arm that way. Under EOS-respecting
+  generation at temperature 1.0 it is the policy's choice and varies between
+  runs by construction, so a margin-derived floor flaps; and on the `random`
+  dataset both rollout recipes use, nothing induces EOS, so the value sits near
+  `output_len * n` and a floor under it measures the recipe rather than the
+  engine. The invariant actually worth enforcing — a collapsed policy answering
+  every request with an immediate EOS — is already covered by
+  `min_mean_output_tokens`, a hand-set per-step floor that fails the trial as
+  `rollout_output_too_short`. A threshold someone chose beats one derived from a
+  baseline. Both metrics remain captured for trends, which is the right
+  treatment for a diagnostic.
 - **The 8B concurrency figure is extrapolated.** Section 5 marks it; Phase 1
   removes it.
-- **`ignore_eos: false` has never worked on the `random` dataset.** Documented in
-  section 2 rather than fixed, because the fix is the rollout body and the
-  setting remains meaningful for `sharegpt`.
+- **`ignore_eos: false` reaches the `random` dataset only under `rollout`.** The
+  bench CLI forces EOS to be ignored for that dataset after parsing, so no argv
+  reaches it; main rejects the combination outright for that reason. Rollout is
+  exempt because it takes the one route that does work — `ignore_eos: false` in
+  `--extra-body`, which is merged over the forced value, and which rollout
+  reserves so no `bench_args` copy can shadow it. Outside rollout the rejection
+  stands, and `sharegpt` is unaffected either way.
