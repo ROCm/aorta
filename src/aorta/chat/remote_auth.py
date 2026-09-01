@@ -8,7 +8,7 @@ those are still a single static header, so one mechanism covers them.
 
 Auth styles that are *not* a static header -- OAuth token exchange, AWS SigV4 --
 are out of scope here on purpose: they need refresh or signing logic, which is
-what ``LLM_PROVIDER=litellm`` already provides.
+what ``llm_provider=litellm`` already provides.
 
 This module belongs to the remote flows only. Removing them means deleting it
 along with ``providers/remote_*.py`` and ``rag/embeddings/remote_api.py``.

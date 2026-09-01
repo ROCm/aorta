@@ -21,11 +21,12 @@ from aorta.chat.remote_auth import build_auth, describe_auth
 logger = logging.getLogger(__name__)
 
 MISSING_API_KEY_MESSAGE = (
-    "REMOTE_LLM_API_KEY is not set, and LLM_PROVIDER=openai requires it.\n"
-    "Set it in your .env file or the environment:\n"
-    "  REMOTE_LLM_API_KEY=sk-...\n"
+    "remote_llm_api_key is not set, and llm_provider=openai requires it.\n"
+    "Set it in the profile with 'aorta chat config init', or in the "
+    "environment:\n"
+    "  export AORTA_CHAT_REMOTE_LLM_API_KEY=sk-...\n"
     "For an OpenAI-compatible provider other than OpenAI, also set "
-    "REMOTE_LLM_BASE_URL (for example https://openrouter.ai/api/v1)."
+    "remote_llm_base_url (for example https://openrouter.ai/api/v1)."
 )
 
 
