@@ -17,6 +17,13 @@ from aorta.chat.graph.state import AgentState
 from aorta.chat.inference.vllm_client import get_chat_llm
 from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
+from aorta.chat.redaction import redact_for_send
+from aorta.chat.tools.artifacts import (
+    list_runs,
+    read_run_env,
+    read_run_matrix,
+    search_run_artifacts,
+)
 from aorta.chat.tools.files import list_files, read_file
 from aorta.chat.tools.run import run_terminal_command
 from aorta.chat.tools.search import grep_code, search_code, search_repo_map
@@ -31,7 +38,10 @@ RULES:
 1. Only answer questions about the AORTA codebase. Politely refuse anything else.
 2. When referencing code, always cite file paths and line numbers.
 3. You have tools to explore the codebase: list_files, read_file, search_code, \
-   grep_code, search_repo_map, and run_terminal_command (sandboxed).
+   grep_code, search_repo_map, and run_terminal_command (sandboxed). You also have \
+   tools for this machine's own AORTA run results: list_runs, read_run_matrix, \
+   read_run_env, and search_run_artifacts. Use those when the question is about \
+   what a run did rather than what the code says.
 4. NEVER fabricate or guess commands. Before suggesting any command, you MUST first \
    use search_code or read_file to find the actual scripts, entry points, or \
    configuration in the codebase. Only generate commands that are grounded in real \
@@ -48,6 +58,8 @@ RULES:
 9. Before answering broad queries, use search_repo_map to cross-reference the \
    function/class index for any matching signatures you may have overlooked.
 10. When multiple files are relevant, list ALL of them with file paths.
+11. A run artifact that reports a field as "unknown" or "NOT RECORDED" did not \
+   record it. That is not zero and not a pass -- say the run did not record it.
 
 RETRIEVED CONTEXT:
 {context}
@@ -105,6 +117,10 @@ Available tools:
 4. grep_code(pattern, path) - Regex search across files (e.g. "def.*config").
 5. search_repo_map(query) - Search the function/class index for matching entries.
 6. run_terminal_command(command) - Run a sandboxed terminal command.
+7. list_runs(path) - List this machine's AORTA run directories.
+8. read_run_matrix(path) - Read a run's per-cell pass/fail matrix.
+9. read_run_env(path) - Read a run's environment snapshot.
+10. search_run_artifacts(query) - Semantic search over indexed run artifacts.
 
 For each step, specify which tool to use and what arguments. For "find all" or \
 "search for" queries, plan MULTIPLE searches with different phrasings and tools \
@@ -120,6 +136,10 @@ TOOL_REGISTRY: dict[str, callable] = {
     "grep_code": grep_code,
     "search_repo_map": search_repo_map,
     "run_terminal_command": run_terminal_command,
+    "list_runs": list_runs,
+    "read_run_matrix": read_run_matrix,
+    "read_run_env": read_run_env,
+    "search_run_artifacts": search_run_artifacts,
 }
 
 TOOL_DESCRIPTIONS = """\
@@ -135,6 +155,10 @@ Available tools:
 4. grep_code(pattern="regex", path=".") - Regex search across files (e.g. "def.*config", "class.*Config").
 5. search_repo_map(query="keyword") - Search the function/class index for matching entries.
 6. run_terminal_command(command="cmd") - Run a sandboxed terminal command in the AORTA directory.
+7. list_runs(path=".") - List this machine's AORTA run directories and their artifacts.
+8. read_run_matrix(path="run_dir") - Read a run's matrix.json: per-cell pass/fail and failure hints.
+9. read_run_env(path="run_dir") - Read a run's environment snapshot (ROCm version, probe completeness).
+10. search_run_artifacts(query="terms") - Semantic search over this machine's indexed run artifacts.
 
 After receiving tool results, you may call another tool or provide your final answer.
 When you are done gathering information and ready to answer, output your final response \
@@ -152,11 +176,24 @@ IMPORTANT:
   what is in the RETRIEVED CONTEXT.
 - For questions about file counts, directory contents, or running experiments, ALWAYS \
   use list_files or run_terminal_command to get real data.
+- Run artifacts report fields they did not record as "unknown", listed under \
+  "NOT RECORDED". Never read one as zero or as a pass. If the field that decides \
+  the question is unknown, say the run did not record it.
 """
 
 
 def _get_llm(**kwargs):
     return get_chat_llm(**kwargs)
+
+
+async def _send(llm: Any, messages: list[Any]) -> Any:
+    """Invoke *llm*, redacting the messages on their way out (Decision 16).
+
+    Every node sends through here rather than calling ``ainvoke`` directly, so
+    the gate cannot be bypassed by a node added later. It takes the already-
+    bound model, so the tool-calling path is covered too.
+    """
+    return await llm.ainvoke(redact_for_send(messages))
 
 
 def _build_system_message(context: str = "") -> SystemMessage:
@@ -251,7 +288,8 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     llm = _get_llm(temperature=0.0, streaming=False)
     last_msg = state["messages"][-1]
 
-    response = await llm.ainvoke(
+    response = await _send(
+        llm,
         [
             SystemMessage(content=ROUTER_PROMPT),
             HumanMessage(content=last_msg.content),
@@ -272,7 +310,8 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
     repo_map = load_repo_map()
     last_msg = state["messages"][-1]
 
-    response = await llm.ainvoke(
+    response = await _send(
+        llm,
         [
             SystemMessage(
                 content=PLAN_PROMPT + f"\n\nREPOSITORY MAP:\n{repo_map}"
@@ -472,7 +511,7 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
     trace: list[str] = []
 
     for round_num in range(max_rounds):
-        response = await llm.ainvoke(messages)
+        response = await _send(llm, messages)
         tool_calls = getattr(response, "tool_calls", None) or []
         text = str(response.content or "").strip()
 
@@ -537,7 +576,7 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
     # system prompt while the conversation still ended on tool results, and the
     # model carried on working. As a user turn it is positionally last.
     messages.append(HumanMessage(content=_FINAL_ANSWER_MSG))
-    final = await plain.ainvoke(messages)
+    final = await _send(plain, messages)
     text = str(final.content or "").strip()
     if not text:
         _log_empty_content(final, "act_node final")
@@ -592,7 +631,7 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
     unproductive = 0
 
     for round_num in range(max_rounds):
-        response = await llm.ainvoke(messages)
+        response = await _send(llm, messages)
         text = str(response.content or "").strip()
 
         action = _parse_action(text)
@@ -669,7 +708,7 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
     )
     # Same user-turn instruction as the native path, and for the same reason.
     messages.append(HumanMessage(content=_FINAL_ANSWER_MSG))
-    final = await llm.ainvoke(messages)
+    final = await _send(llm, messages)
     text = str(final.content or "").strip()
     if not text:
         _log_empty_content(final, "act_node final")
@@ -764,7 +803,8 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 
     if failures:
         error_summary = "\n---\n".join(failures)
-        analysis = await llm.ainvoke(
+        analysis = await _send(
+            llm,
             [SystemMessage(content=_CRITIC_FAILURE_PROMPT.format(errors=error_summary))]
         )
         logger.info("Critic found %d failure(s), iteration %d", len(failures), iteration)
@@ -772,7 +812,8 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 
     if command_output:
         tool_context = "\n---\n".join(tool_results[:10]) if tool_results else "(no tool results gathered)"
-        validation = await llm.ainvoke(
+        validation = await _send(
+            llm,
             [
                 SystemMessage(content=_CRITIC_VALIDATION_PROMPT),
                 HumanMessage(
@@ -801,7 +842,7 @@ async def answer_node(state: AgentState) -> dict[str, Any]:
     system = _build_answer_message(context)
     messages = [system] + list(state["messages"])
 
-    response = await llm.ainvoke(messages)
+    response = await _send(llm, messages)
     if not str(response.content).strip():
         _log_empty_content(response, "answer_node")
         response = AIMessage(

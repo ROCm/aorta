@@ -148,6 +148,15 @@ def mock_settings(fake_aorta_dir: Path, tmp_path: Path):
         mock_s.remote_embedding_base_url = ""
         mock_s.remote_embedding_auth_header = ""
         mock_s.remote_embedding_extra_headers = {}
+        # Pinned rather than left to MagicMock: `redact` steers the egress gate
+        # every graph node now sends through, and a MagicMock is truthy, so
+        # leaving it out would enable redaction by accident rather than on
+        # purpose. Production default is on, so that is what the suite runs.
+        mock_s.redact = True
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir(exist_ok=True)
+        mock_s.runs_path = str(runs_root)
+        mock_s.runs_root = runs_root
         yield mock_s
 
 
