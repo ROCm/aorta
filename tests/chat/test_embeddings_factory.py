@@ -93,17 +93,17 @@ class TestCollectionNames:
         )
         assert get_provider("remote").collection_name() != small
 
-    def test_model_slug_keeps_only_what_chroma_accepts(self):
+    def test_model_slug_keeps_only_what_the_store_accepts(self):
         assert _model_slug("text-embedding-3-small") == "text_embedding_3_small"
         assert _model_slug("Voyage/Voyage-3") == "voyage_voyage_3"
         assert _model_slug("  spaced  model  ") == "spaced_model"
 
     def test_model_slug_never_returns_an_empty_name(self):
-        """Chroma rejects an empty collection name, so fall back to a literal."""
+        """An empty name is not a legal table suffix, so fall back to a literal."""
         assert _model_slug("") == "model"
         assert _model_slug("---") == "model"
 
-    def test_long_model_names_stay_within_the_chroma_limit(self, monkeypatch):
+    def test_long_model_names_stay_within_our_own_length_cap(self, monkeypatch):
         monkeypatch.setattr(
             settings, "remote_embedding_model", "x" * 49 + "-" + "y" * 20
         )

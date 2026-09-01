@@ -5,9 +5,9 @@ us that its replacement does not: it prepended a query instruction, and it
 collapsed newlines. BGE models are trained asymmetrically -- queries carry the
 prefix, passages do not -- so dropping it changes what gets embedded.
 
-Nothing would have failed. Documents already in Chroma stay readable and every
-test still passes; queries simply stop pairing with them the way they were
-indexed, and retrieval quietly degrades. Measured drift from a naive swap was
+Nothing would have failed. Indexed documents stay readable and every test still
+passes; queries simply stop pairing with them the way they were indexed, and
+retrieval quietly degrades. Measured drift from a naive swap was
 0.026 per component on a 384-dimension unit vector.
 
 These tests do not load the model. They assert the text handed to the parent
