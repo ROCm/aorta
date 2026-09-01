@@ -258,12 +258,11 @@ pass `--object` with an already-unbundled gfx950 code object.
   `moi_profile=standard-v1`
 - Object: `TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bjlk_Cijk_Dijk_gfx950.co`,
   unbundled for `hipv4-amdgcn-amd-amdhsa--gfx950` → 16,265,200 bytes, 245 kernels.
-  The byte count is the shipped bundle *expanded*: the `.co` is a zlib-compressed
-  offload bundle (`CCOB`), so the file hipBLASLt installs is substantially
-  smaller than this. The ratio was never measured for this object; the
-  comparable ROCm 10 CU256 SS layouts inflate 38-45x on unbundling, but that is
-  a different object on a different stack and is not carried over here. The
-  kernel count was recorded as 490 until it was found to be a 2x
+  The byte count is measured *after* unbundling. What the `.co` occupied on disk on
+  this release was never measured, and whether ROCm 7.0.2 shipped compressed
+  offload bundles at all is unknown -- the ~40x `CCOB` inflation recorded elsewhere
+  in this repo was measured on ROCm 10 only and must not be read back onto this
+  row. The kernel count was recorded as 490 until it was found to be a 2x
   double count — `llvm-readelf --symbols` prints `.dynsym` and `.symtab` both, so
   each `.kd` was counted twice. 245 is that correction, not a re-measurement: no
   ROCm 7.0.2.2 image remains on the gate host. Nothing in the analysis above

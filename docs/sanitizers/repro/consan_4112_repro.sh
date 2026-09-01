@@ -190,9 +190,9 @@ else
     kernels="unknown (llvm-readelf not on PATH)"
 fi
 echo "   object: ${bytes} bytes, ${kernels} kernels"
-echo "   (originally observed at 16265200 bytes / 245 kernels on ROCm 7.0.2.2;"
-echo "    the byte figure is the shipped CCOB bundle after unbundling, so it is"
-echo "    larger than the .co hipBLASLt installs -- the ratio was not measured)"
+echo "   (originally observed at 16265200 bytes / 245 kernels on ROCm 7.0.2.2,"
+echo "    post-unbundle -- the size of the shipped .co on that release was never"
+echo "    measured, so no compression ratio is claimed for it)"
 
 echo "== building load-only driver"
 hipcc --offload-arch=gfx950 -DOBJECT="\"${OBJECT}\"" "${LOADER_SRC}" -o "${LOADER}" \
