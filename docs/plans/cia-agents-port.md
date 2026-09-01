@@ -199,8 +199,24 @@ may never execute.
 
 ## 5. Sequencing, and the tests that gate each PR
 
-Three PRs off `feat/aorta-agent`, each independently reviewable and each
-carrying the tests that prove it. Tests mirror the source tree
+`feat/aorta-agent` is the **integration branch**, not where the work is
+committed: each PR below is its own topic branch targeting it, so every diff is
+only that PR's slice. When all three have landed, `feat/aorta-agent` holds the
+whole feature and gets its own PR upward -- into `feat/aorta-chat`, or straight
+to `main` if #422 has merged by then.
+
+```
+feat/aorta-agent          <- base for all three
+├── feat/cia-agents       PR 1
+├── feat/cia-tools        PR 2
+└── feat/cia-reporting    PR 3
+```
+
+Run them sequentially -- merge one, branch the next off the updated base --
+rather than stacking. The dependency is real (PR 2's tools call PR 1's agents),
+so parallel review would mean reviewing against code that can still move.
+
+Each PR carries the tests that prove it. Tests mirror the source tree
 (`tests/cia/`, `tests/chat/`), markers come from the registered set in
 `pytest.ini` (`unit`, `integration`, `slow`, `gpu`, `rocm`) because
 `--strict-markers` is on.
