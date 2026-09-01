@@ -720,6 +720,34 @@ regression purely because it went first.
 the compile cache. `warmup_steps` (default 1) runs whole discarded bench steps,
 whose exports use a `bench-warmup.` prefix the host never globs.
 
+### Three measured steps is not enough for a load cell
+
+`warmup_steps` handles the cold first step above. It does not handle this one,
+which is a different shape of problem: on the `conc-64` cell, about 8% of
+*warm* measured steps come in 36% slow, and which step it happens to be is
+unpredictable. 36 byte-identical steps across three server instances split into
+33 clean ones at 20200 tok/s (1.13% CV) and 3 stalled ones at 12897 — bimodal,
+with nothing in between.
+
+A three-step mean is then three draws from that, and rolling three-step windows
+over the same data span 15368 to 20511, a 33% spread. That is not hypothetical:
+`tokenspeed-serve-load.yaml` and `tokenspeed-serve-load-high.yaml` declare
+`conc-64` identically and published 20125 and 14996 for it, and the difference
+is entirely how many stalls each drew. Neither number is wrong and neither is
+quotable on its own.
+
+So: **quote a load number with the step count it was measured at, and do not
+compare two three-step means as though the difference were signal.** Twelve
+steps costs about 20 extra seconds against a 300 s bring-up, which is the
+cheapest variance reduction available anywhere in this workload. The stall
+itself — a fixed ~0.93 s delay to the tail of time-to-first-token, with decode
+untouched and nothing in the server log — is undiagnosed; see
+[Widening the TokenSpeed serving matrix](tokenspeed-matrix-widening.md).
+
+The committed recipes still say `steps: 3`. They are left that way deliberately:
+changing it would invalidate every table in this document that was measured at
+three, and the fix belongs with the re-measure rather than ahead of it.
+
 ### gpt-oss bring-up needs live network, and the HF cache does not cover it
 
 Pre-warming the HF cache makes a Qwen3 cell offline-capable. It does not do the

@@ -11,8 +11,13 @@
 # Measured in the same run for the same reason `tokenspeed-serve-load-high.yaml`
 # repeats its conc-64 cell -- and for the reason that recipe's anchor
 # demonstrated, where the repeated cell came out 25% below its previously
-# recorded value. A denominator borrowed across runs carries that run's spread
-# into every ratio built on it.
+# recorded value. That gap has since been measured: it is not node-to-node
+# spread but sample size, since about 8% of that cell's steps stall and a
+# three-step mean is three draws from a bimodal population. Model cells like
+# these do not stall -- their steps reproduce to under 0.1% -- so the anchor
+# here is cheap insurance rather than a known hazard. It is still worth having:
+# a denominator borrowed across runs carries whatever that run drew into every
+# ratio built on it, and this pair of anchors is how we found that out.
 #
 # An MoE cell at this size belongs here and is not here, because it cannot come
 # up. `Qwen/Qwen3-30B-A3B` -- the obvious BF16 MoE partner for the 32B dense

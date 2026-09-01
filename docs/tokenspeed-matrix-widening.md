@@ -462,14 +462,77 @@ is worth keeping in the recipe only as the row that shows where the cliff is.
 
 One result the anchor cell exists to catch, and did: `conc-64` reports 14996
 tok/s here against the 20125 the existing load recipe recorded for an
-identical configuration — 25% lower. The two tables are therefore **not**
-joinable as absolute numbers, and every ratio quoted above is computed within
-this run for exactly that reason. What causes the gap is not established here;
-the plausible candidates are node-to-node variation and cell ordering (the
-existing recipe reaches conc-64 after three lighter cells, this one starts
-there). Either way, an absolute serving number from this integration should be
-read as node-and-run-specific until someone repeats it, which is a finding
-about the harness rather than about the load curve.
+identical configuration — 25% lower. Every ratio quoted above is therefore
+computed within this run. The section below measures what that gap is.
+
+### What the 25% gap actually is
+
+Measured, on one node in one allocation, with the `conc-64` cell byte-identical
+to the way both committed recipes declare it. Two runs: three repeats at the
+committed three measured steps, then three fresh server instances at twelve
+measured steps each, for 36 step samples.
+
+The cell aggregate is *stable*. Three repeats of the three-step cell returned
+17731 / 18062 / 18348 tok/s — 1.7% CV, a 3.5% spread. Taken alone that would
+say the 25% gap is not run-to-run noise at all, and it would be the wrong
+conclusion, because the per-step breakdown is not unimodal.
+
+**A single bench step is bimodal.** Across the 36 twelve-step samples:
+
+| Population | n | Mean tok/s | CV | Range |
+|---|---|---|---|---|
+| clean | 33 | 20200 | 1.13% | 19594 – 20530 |
+| stalled | 3 | 12897 | 0.25% | 12857 – 12921 |
+
+A step is either clean or it is 36% slower, with nothing in between, at a
+measured rate of 3 in 36 (8%). The three stalls all landed in one of the three
+server instances (steps 3, 10 and 11 of `inst-1`); the other two instances had
+none in twelve steps each, so the propensity looks like a property of a server
+instance rather than an independent per-step coin flip.
+
+That reproduces both published numbers without either being wrong. A rolling
+three-step mean over this population spans 15368 to 20511 — a **33% spread**,
+which contains the 25% gap comfortably. Three clean draws average 20.3k, which
+is the 20125 in `tokenspeed-serve-load.yaml`. Two stalls out of three average
+about 15.3k, which is the 14996 here. **The two tables differ by how many
+stalls each happened to draw, not by node, recipe, cell ordering or cache
+warmth.** Cell ordering was the leading hypothesis before this run and it is
+ruled out: the stalls did not prefer the first step, or the first cell.
+
+What the stall is, as far as the exports show. Its signature is specific and it
+is the same every time:
+
+| | clean step | stalled step |
+|---|---|---|
+| duration | 1.60 – 1.62 s | 2.54 – 2.55 s |
+| p50 TTFT | 76.7 – 79.9 ms | 77.6 – 84.9 ms |
+| p90 TTFT | 80.2 – 84.0 ms | 1001 – 1015 ms |
+| p50 TPOT | 2.43 – 2.47 ms | 2.44 ms |
+| p99 ITL | 4.02 – 5.49 ms | 4.05 – 4.31 ms |
+
+Decode is untouched — TPOT and ITL are identical to three significant figures.
+So is median TTFT. What moves is the *tail* of time-to-first-token, by almost
+exactly 0.93 s, and the step duration grows by almost exactly the same 0.93 s.
+So the tail of the batch waits about a second to be admitted and then runs at
+full speed. The magnitude repeats to within 1.4% across all three occurrences,
+which argues for a fixed-duration blocking event in the prefill or scheduling
+path rather than contention, which would vary. One of the three also admitted
+128 concurrent requests instead of the usual 192. Nothing in the server log
+marks the event. Attributing it needs server-side profiling and is not done
+here; it is filed under Not done below.
+
+**What this means for quoting these numbers.** Clean steady-state serving
+throughput on this cell reproduces to 1.13% CV, which is in line with the
+0.15–2.63% the sibling gating work measured across byte-identical
+configurations, and the two TP recipes below reproduce to 0.06% across their
+three steps. The harness is not noisy. What is unsafe is the *three-step mean*
+on this particular cell: three samples from an 8%-bimodal population is too
+small, and it is the sample size, not the measurement, that produced a 25%
+discrepancy in a published table. Concurrency figures from this integration can
+be quoted, with two conditions — quote them with the step count they were
+measured at, and do not compare two three-step means as though the difference
+between them were signal. Twelve steps costs about 20 extra seconds on a cell
+whose bring-up is 300; there is no reason for a load cell to run three.
 
 Not proposed: raising the cap past 256 in the same recipe, and adding a
 `request_rate` axis. The first is unjustified until 128 and 256 say whether
@@ -544,9 +607,19 @@ BF16 MoE cell that runs like every other cell. Filed as
 The anchor agrees with the existing model sweep to within 1% on TTFT, 5% on
 TPOT and 4% on throughput (61.1 / 4.46 / 1625 there). That is worth stating
 beside the load recipe's anchor, which came out 25% low: repeated cells agree
-here and did not there, so the discrepancy is specific to that recipe or that
-run rather than a general property of the harness. Both anchors were cheap and
-one of them changed a conclusion, which is the argument for keeping them.
+here and did not there. Both anchors were cheap and one of them changed a
+conclusion, which is the argument for keeping them — and the follow-up above
+explains why the two behaved differently. Model cells run at concurrency 8 and
+their steps do not stall; the load cell runs at 64 and 8% of its steps do. The
+harness reproduces in both cases. What differs is whether three steps is enough
+to average the cell.
+
+The 32B row here is 499.4 tok/s against the 541.1 the TP=1 cell of
+`tokenspeed-serve-tp-large.yaml` later measured for the same model and load. The
+difference is the KVStore bound — this recipe leaves the host tier at its
+default and that one caps it at 128 GB per rank — plus a different node, and
+neither row is a control for the other. If the two need to be joinable, the
+bound has to match.
 
 4× the parameters costs 3.3× the per-token time and 3.1× the throughput —
 close to linear, which is the expected shape for a dense model where decode is
@@ -672,6 +745,14 @@ which `elapsed_sec` includes and `container_elapsed_sec` does not.
 
 ## Not done
 
+- **What the ~0.93 s serving stall is.** Measured above at 8% of bench steps on
+  the `conc-64` cell, with a signature specific enough to chase: fixed
+  magnitude, tail-of-TTFT only, decode untouched, and nothing in the server
+  log. Ruling it in or out needs server-side profiling across a run long enough
+  to catch three or four of them — `rocprof` or `proton` against a
+  twelve-step cell would do it. Until then, load cells should run twelve steps
+  rather than three so the mean is not a sample of three from a bimodal
+  population.
 - **RCCL mitigations at wide TP.** Still untouched. TP=8 now runs, so the axis
   they would apply to exists; nothing has varied them.
 - **TP=8 on a model that saturates above four cards.** Qwen3-32B peaks at TP=4,

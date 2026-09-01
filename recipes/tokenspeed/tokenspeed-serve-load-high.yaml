@@ -22,6 +22,22 @@
 # recipe's, the run-to-run spread is the story and the ratios above it are not
 # yet evidence.
 #
+# It disagreed, by 25%, and the spread was the story. What it turned out to be
+# is not run-to-run noise but sample size: about 8% of measured steps on this
+# cell come in 36% slow, unpredictably, and a three-step mean is three draws
+# from that. Rolling three-step windows over 36 byte-identical steps span 33%.
+# Clean steps themselves reproduce to 1.13% CV. See
+# docs/tokenspeed-matrix-widening.md for the measurement and the stall's
+# signature.
+#
+# **`steps: 3` below is therefore known to be too few for this cell**, and is
+# left at 3 anyway: every table measured from this recipe and its sibling was
+# measured at three, and raising it belongs with the re-measure rather than
+# ahead of it. Twelve is the right number when that happens -- it costs about
+# 20 extra seconds against a 300 s bring-up. Until then, read a number from
+# this recipe together with its step count, and do not difference two
+# three-step means.
+#
 # `num_prompts` stays at 4x the cap, which is the ratio the existing recipe
 # uses at 8 / 32 / 64. It is not a taste: requests that drain before the server
 # reaches steady state measure the ramp instead of the throughput, and holding
