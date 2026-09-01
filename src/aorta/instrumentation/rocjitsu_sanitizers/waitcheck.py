@@ -462,8 +462,8 @@ def run_waitcheck(
         )
 
     # Each selected code object is an independent rj_waitcheck subprocess doing
-    # CPU-bound static disassembly (~a minute on a real ~16MB / ~490-kernel
-    # Tensile object, #366), so scan distinct objects concurrently to cut
+    # CPU-bound static disassembly (~a minute on a real ~16MB / ~245-kernel
+    # unbundled Tensile object, #366), so scan distinct objects concurrently to cut
     # wall-clock time. This is coverage-preserving -- every selected object is
     # still scanned with its full per-scan timeout -- so the gate is unchanged;
     # it only removes the serialization penalty when the worklist spans more

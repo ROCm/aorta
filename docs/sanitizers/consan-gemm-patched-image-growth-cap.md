@@ -43,7 +43,12 @@ MOI inventory 131 s + patch 152 s is roughly 730 s before the rejection.
 ## Why the ceiling is exceeded: the fixture grew 11.8x
 
 Every prior sizing and upstream-verification exercise for this case used a
-**16,265,200-byte (15.5 MB)** object with 490 kernels, measured on ROCm 7.0.2.2.
+**16,265,200-byte (15.5 MB)** object with 245 kernels, measured on ROCm 7.0.2.2.
+(The count was recorded as 490 until `llvm-readelf --symbols` was found to print
+`.dynsym` and `.symtab` both, doubling it; see
+[`consan-4112-overlapping-anchor-patches.md`](consan-4112-overlapping-anchor-patches.md).
+The byte figure is unaffected, and so is every ratio below -- they are
+byte- and access-site-derived, with no kernel-count term.)
 The object CI now extracts is **191,935,808 bytes (183 MiB)**:
 
 | | Verification object (ROCm 7.0.2.2) | CI object (ROCm 7.2.4) | Ratio |
