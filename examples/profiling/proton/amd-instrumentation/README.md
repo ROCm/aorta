@@ -156,10 +156,12 @@ start(args.name, context=args.context, data=args.data, backend=backend, hook=arg
 ```
 
 There is no `mode=` in that call. So `instrumentation_mode` (and
-`granularity`) are silent no-ops under `mode: cli` on every released Triton —
-upstream `main` does pass the value through. `mode: env` exports it as
-`AORTA_PROTON_MODE` and the payload hands it to `proton.start()` itself, which
-is the only way the knob takes effect today.
+`granularity`, and `backend_mode`) cannot reach Proton through the CLI wrap on
+any released Triton — upstream `main` does pass the value through. Rather than
+render a flag that gets dropped, the collector **requires `mode: env`** for
+every option that produces `--mode`, and refuses a `mode: cli` recipe that sets
+one. `mode: env` exports it as `AORTA_PROTON_MODE` and the payload hands it to
+`proton.start()` itself, which is the only way the knob takes effect today.
 
 That is the *only* reason this example needs `mode: env`, and it is worth being
 precise about, because the sibling [`../amd-roctracer`](../amd-roctracer/README.md)

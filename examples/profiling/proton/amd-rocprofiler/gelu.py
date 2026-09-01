@@ -55,6 +55,16 @@ _BLOCK_SIZE = 1024
 #: that cannot be asked, since ``rocprofiler`` is precisely what is missing.
 _PRE_REGISTRY_BACKENDS = frozenset({"cupti", "roctracer", "instrumentation"})
 
+#: Proton's ``--mode`` domain per backend, mirroring aorta's own
+#: ``BACKEND_MODES``. Duplicated rather than imported because this payload has
+#: to run standalone, with no aorta on the path -- but it has to agree, or the
+#: standalone command would accept a pair the recipe path rejects and fail
+#: inside Proton instead of at its own argument check.
+_BACKEND_MODES = {
+    "rocprofiler": frozenset({"pcsampling", "periodic_flushing"}),
+    "roctracer": frozenset({"periodic_flushing"}),
+}
+
 #: Absolute-error ceiling against ``torch.nn.functional.gelu``. Not exact
 #: equality: the device ``erf`` and torch's fused activation differ in the last
 #: bits. Elementwise, so nothing accumulates and the ceiling stays tight.
@@ -173,6 +183,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"--{name} must be >= 1")
     if args.backend_mode is not None and args.backend is None:
         parser.error("--backend-mode needs --backend: Proton's --mode is per-backend")
+    if args.backend_mode is not None:
+        allowed = _BACKEND_MODES[args.backend]
+        if args.backend_mode not in allowed:
+            parser.error(
+                f"--backend-mode {args.backend_mode} is not valid for "
+                f"--backend {args.backend}; it takes {sorted(allowed)}"
+            )
     return args
 
 

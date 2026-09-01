@@ -254,6 +254,28 @@ def test_payload_failure_path_still_exits_nonzero(payload, code):
 _OPTIONAL_ENV_SUFFIXES = frozenset({"DIR"})
 
 
+def _interpolated_env_suffixes(payload: Path) -> set[str]:
+    """Names the payload interpolates after ``_ENV_PREFIX`` in executable code.
+
+    Read out of the f-string nodes rather than searched for in the text. Every
+    one of these names also appears in prose -- the docstrings that explain
+    which variable carries which knob name them -- so a substring check over the
+    file would be satisfied by the explanation alone, and a payload that stopped
+    reading a variable would still pass. An f-string cannot appear in a
+    docstring, so what this collects is what the code actually looks up.
+    """
+    suffixes: set[str] = set()
+    for node in ast.walk(ast.parse(payload.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        suffixes.update(
+            part.value
+            for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return suffixes
+
+
 def _env_mode_proton_examples() -> list[Path]:
     proton = [example for example in _EXAMPLE_DIRS if example.parent.name == "proton"]
     return [
@@ -288,8 +310,10 @@ def test_env_mode_payload_reads_every_session_variable(example, tmp_path):
         if suffix not in _OPTIONAL_ENV_SUFFIXES
     )
     assert required, "build_env exported nothing to check; the bundle or the prefix moved"
-    source = "\n".join(path.read_text(encoding="utf-8") for path in sorted(example.glob("*.py")))
-    missing = [suffix for suffix in required if suffix not in source]
+    looked_up: set[str] = set()
+    for payload in sorted(example.glob("*.py")):
+        looked_up |= _interpolated_env_suffixes(payload)
+    missing = [suffix for suffix in required if suffix not in looked_up]
     assert not missing, (
         f"{_rel(example)} never reads {[ENV_PREFIX + s for s in missing]}; a recipe can "
         "set those knobs and the payload would start Proton without them, so the trial "

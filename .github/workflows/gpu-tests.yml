@@ -109,6 +109,11 @@ jobs:
             'tests/instrumentation/test_environment.py'
             'tests/instrumentation/test_env_knob_audit.py'
             'tests/instrumentation/test_proton_smoke_gpu.py'
+            # The Proton smoke test runs these payloads, so they are code the
+            # GPU job covers: a PR that breaks pipeline.py or hotspot.py while
+            # touching no collector or test file would otherwise skip the only
+            # job that would have caught it.
+            'examples/profiling/proton/*'
             'tests/instrumentation/rocjitsu_sanitizers/*'
             'tests/sanitizers/*'
             'tests/test_marker_partition.py'

@@ -1,8 +1,9 @@
 # Proton capture of a three-kernel Triton pipeline on the `roctracer` backend.
 #
 # The portable AMD path: `roctracer` is Proton's deprecated but universally
-# present AMD backend -- it is the one every released Triton accepts, where
-# `rocprofiler` exists only on Triton `main`. See README.md.
+# present whole-kernel AMD backend -- the one every released Triton accepts for
+# timing kernels, where `rocprofiler` exists only on Triton `main`.
+# `instrumentation` is released too, but measures inside a kernel. See README.md.
 #
 #   aorta sweep run \
 #       --recipe examples/profiling/proton/amd-roctracer/recipe.yaml \

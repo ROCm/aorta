@@ -23,10 +23,14 @@ import argparse
 import os
 import sys
 
-# ``torch`` is imported at module scope, not lazily inside main(), and that
-# ordering is load-bearing for every Proton backend: the profiler has to attach
-# to a live HIP runtime, and importing torch is what brings that runtime up.
-# It is also why this example is driven by ``mode: env`` -- see recipe.yaml.
+# ``torch`` is imported at module scope, before ``proton.start()`` runs in
+# main(). For the queue-intercepting backends that ordering is load-bearing --
+# they record nothing unless the HIP runtime is already up, which is what
+# importing torch does. This backend is *not* one of them: it installs no queue
+# interceptor, and a CLI pin of it captures correctly whatever the ordering. The
+# reason this example needs ``mode: env`` is narrower: no released Triton's CLI
+# forwards ``--mode``, so ``instrumentation_mode`` only reaches Proton when the
+# payload passes it to ``start()`` itself -- see recipe.yaml.
 import torch
 import triton
 import triton.language as tl

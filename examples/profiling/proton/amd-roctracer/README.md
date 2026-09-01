@@ -3,8 +3,10 @@
 Three distinct Triton kernels — an elementwise scale, a fused bias+GELU, and a
 row-sum reduction — launched in sequence, captured by Proton's `roctracer`
 backend. This is the example to reach for when you want to know *which kernel*
-in a launch sequence owns the GPU time, on the one AMD backend that exists in
-every released Triton.
+in a launch sequence owns the GPU time, on the one *whole-kernel* AMD backend
+that exists in every released Triton. (`instrumentation` ships in every release
+too, but it measures *inside* one kernel — see
+[`../amd-instrumentation`](../amd-instrumentation/README.md).)
 
 It differs from [`triton-vecadd`](../triton-vecadd/README.md) and
 [`triton-softmax`](../triton-softmax/README.md) in two ways that matter: the
@@ -159,8 +161,10 @@ route, so a `mode: cli` version of this recipe would not run at all.
 
 - **Why `roctracer` and not `rocprofiler`.** `roctracer` is deprecated
   upstream in favour of the rocprofiler-sdk backend, but it is the only AMD
-  backend present in every *released* Triton: 3.6.0, 3.7.0 and 3.7.1 all offer
-  `cupti` / `roctracer` / `instrumentation` and nothing else.
+  backend present in every *released* Triton that traces whole kernels:
+  3.6.0, 3.7.0 and 3.7.1 all offer `cupti` / `roctracer` / `instrumentation`
+  and nothing else, and of those `cupti` is NVIDIA's while `instrumentation`
+  measures inside a kernel rather than timing it.
   [`../amd-rocprofiler`](../amd-rocprofiler/README.md) is the same idea on the
   newer backend, and needs Triton `main`.
 - **Device selection.** Proton on AMD reads `ROCR_VISIBLE_DEVICES` and

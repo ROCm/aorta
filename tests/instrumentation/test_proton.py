@@ -21,6 +21,7 @@ from aorta.instrumentation.proton import (
     ENV_PREFIX,
     ENV_PROTON_PYTHON,
     HOOKS,
+    MODE_BEARING_KEYS,
     OPTION_KEYS,
     OUTPUT_SUBDIR,
     PROFILE_BASENAME,
@@ -164,24 +165,24 @@ def test_validate_options_normalises_case_and_whitespace():
 
 @pytest.mark.parametrize("name", ["default", "mma", "pcsampling"])
 def test_validate_options_accepts_every_instrumentation_mode(name):
-    effective = validate_options({"backend": "instrumentation", "instrumentation_mode": name})
+    effective = validate_options({"mode": "env", "backend": "instrumentation", "instrumentation_mode": name})
     assert effective["instrumentation_mode"] == name
 
 
 def test_validate_options_rejects_unknown_instrumentation_mode():
     with pytest.raises(ValueError, match="instrumentation_mode"):
-        validate_options({"backend": "instrumentation", "instrumentation_mode": "nope"})
+        validate_options({"mode": "env", "backend": "instrumentation", "instrumentation_mode": "nope"})
 
 
 @pytest.mark.parametrize("granularity", ["cta", "warp", "warp_4", "warp_group_8"])
 def test_validate_options_accepts_granularities(granularity):
-    effective = validate_options({"backend": "instrumentation", "granularity": granularity})
+    effective = validate_options({"mode": "env", "backend": "instrumentation", "granularity": granularity})
     assert effective["granularity"] == granularity
 
 
 def test_validate_options_rejects_unknown_granularity():
     with pytest.raises(ValueError, match="'granularity'"):
-        validate_options({"backend": "instrumentation", "granularity": "thread"})
+        validate_options({"mode": "env", "backend": "instrumentation", "granularity": "thread"})
 
 
 @pytest.mark.parametrize("key", ["instrumentation_mode", "granularity"])
@@ -197,7 +198,7 @@ def test_validate_options_rejects_intra_kernel_knob_on_wrong_backend(key):
     sorted((backend, mode) for backend, modes in BACKEND_MODES.items() for mode in modes),
 )
 def test_validate_options_accepts_every_backend_mode_of_its_backend(backend, backend_mode):
-    effective = validate_options({"backend": backend, "backend_mode": backend_mode})
+    effective = validate_options({"mode": "env", "backend": backend, "backend_mode": backend_mode})
     assert effective["backend_mode"] == backend_mode
 
 
@@ -206,7 +207,36 @@ def test_validate_options_rejects_a_backend_mode_the_backend_does_not_have():
     mode, and roctracer only has ``periodic_flushing``. A flat union would
     accept this and fail later inside Proton."""
     with pytest.raises(ValueError, match="not one of.*for backend: roctracer"):
-        validate_options({"backend": "roctracer", "backend_mode": "pcsampling"})
+        validate_options({"mode": "env", "backend": "roctracer", "backend_mode": "pcsampling"})
+
+
+@pytest.mark.parametrize("key", MODE_BEARING_KEYS)
+def test_validate_options_rejects_a_mode_bearing_knob_under_cli(key):
+    """Triton 3.7.1's front-end parses ``-m/--mode`` and then calls ``start()``
+    without it, so any of these under ``mode: cli`` would be accepted, rendered,
+    and dropped -- a capture reporting success while configured as if nothing had
+    been asked. Rejecting is the same call the intra-kernel backend gate makes."""
+    values = {
+        "backend_mode": ("cupti", "pcsampling"),
+        "instrumentation_mode": ("instrumentation", "mma"),
+        "granularity": ("instrumentation", "warp"),
+    }
+    backend, value = values[key]
+    with pytest.raises(ValueError, match="require mode: env"):
+        validate_options({"mode": "cli", "backend": backend, key: value})
+
+
+@pytest.mark.parametrize("key", MODE_BEARING_KEYS)
+def test_validate_options_takes_the_default_attach_mode_into_account(key):
+    """``mode`` defaults to ``cli``, so omitting it must not slip past the gate."""
+    values = {
+        "backend_mode": ("cupti", "pcsampling"),
+        "instrumentation_mode": ("instrumentation", "mma"),
+        "granularity": ("instrumentation", "warp"),
+    }
+    backend, value = values[key]
+    with pytest.raises(ValueError, match="require mode: env"):
+        validate_options({"backend": backend, key: value})
 
 
 def test_validate_options_rejects_unknown_backend_mode():
@@ -269,7 +299,7 @@ def test_option_keys_match_the_validator():
     render the same ``--mode`` and are rejected together, so no single mapping
     can carry every declared key."""
     intra_kernel = {
-        "mode": "cli",
+        "mode": "env",
         "backend": "instrumentation",
         "context": "shadow",
         "data": "tree",
@@ -297,18 +327,27 @@ def test_mode_argument_absent_without_intra_kernel_knobs():
 
 
 def test_mode_argument_name_only():
-    effective = validate_options({"backend": "instrumentation", "instrumentation_mode": "mma"})
+    effective = validate_options(
+        {"mode": "env", "backend": "instrumentation", "instrumentation_mode": "mma"}
+    )
     assert mode_argument(effective) == "mma"
 
 
 def test_mode_argument_granularity_only_defaults_the_name():
-    effective = validate_options({"backend": "instrumentation", "granularity": "warp"})
+    effective = validate_options(
+        {"mode": "env", "backend": "instrumentation", "granularity": "warp"}
+    )
     assert mode_argument(effective) == "default:granularity=warp"
 
 
 def test_mode_argument_name_and_granularity():
     effective = validate_options(
-        {"backend": "instrumentation", "instrumentation_mode": "mma", "granularity": "cta"}
+        {
+            "mode": "env",
+            "backend": "instrumentation",
+            "instrumentation_mode": "mma",
+            "granularity": "cta",
+        }
     )
     assert mode_argument(effective) == "mma:granularity=cta"
 
@@ -317,7 +356,9 @@ def test_mode_argument_renders_backend_mode():
     """``backend_mode`` is Proton's ``--mode`` for the whole-kernel backends, so
     it renders as the bare name -- no ``granularity=`` grammar, which belongs to
     the instrumentation backend."""
-    effective = validate_options({"backend": "roctracer", "backend_mode": "periodic_flushing"})
+    effective = validate_options(
+        {"mode": "env", "backend": "roctracer", "backend_mode": "periodic_flushing"}
+    )
     assert mode_argument(effective) == "periodic_flushing"
 
 
@@ -434,16 +475,26 @@ def test_build_argv_prefix_defaults_to_sys_executable(tmp_path):
     assert build_argv_prefix(tmp_path)[0] == sys.executable
 
 
-def test_build_argv_prefix_includes_mode_for_intra_kernel(tmp_path):
-    argv = build_argv_prefix(
-        tmp_path, {"backend": "instrumentation", "instrumentation_mode": "mma"}
-    )
-    assert argv[argv.index("--mode") + 1] == "mma"
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"backend": "instrumentation", "instrumentation_mode": "mma"},
+        {"backend": "instrumentation", "granularity": "warp"},
+        {"backend": "cupti", "backend_mode": "pcsampling"},
+    ],
+    ids=["instrumentation_mode", "granularity", "backend_mode"],
+)
+def test_build_argv_prefix_never_renders_mode(tmp_path, options):
+    """The CLI wrap has no ``--mode`` to render: Triton 3.7.1 parses the flag and
+    then calls ``start()`` without it, so every option that produces it requires
+    ``mode: env``. The refusal is the point -- rendering a dropped flag would
+    report a configured capture that Proton never configured."""
+    with pytest.raises(ValueError, match="require mode: env"):
+        build_argv_prefix(tmp_path, options)
 
 
-def test_build_argv_prefix_includes_mode_for_a_backend_mode(tmp_path):
-    argv = build_argv_prefix(tmp_path, {"backend": "cupti", "backend_mode": "pcsampling"})
-    assert argv[argv.index("--mode") + 1] == "pcsampling"
+def test_build_argv_prefix_omits_mode_when_no_knob_asks_for_it(tmp_path):
+    assert "--mode" not in build_argv_prefix(tmp_path, {"backend": "cupti"})
 
 
 def test_build_argv_prefix_omits_the_hook_flag_by_default(tmp_path):
@@ -890,12 +941,16 @@ def test_build_env_carries_an_explicit_backend(tmp_path):
 
 
 def test_build_env_includes_mode_for_intra_kernel(tmp_path):
-    env = build_env(tmp_path, {"backend": "instrumentation", "granularity": "warp"})
+    env = build_env(
+        tmp_path, {"mode": "env", "backend": "instrumentation", "granularity": "warp"}
+    )
     assert env[f"{ENV_PREFIX}MODE"] == "default:granularity=warp"
 
 
 def test_build_env_includes_mode_for_a_backend_mode(tmp_path):
-    env = build_env(tmp_path, {"backend": "rocprofiler", "backend_mode": "pcsampling"})
+    env = build_env(
+        tmp_path, {"mode": "env", "backend": "rocprofiler", "backend_mode": "pcsampling"}
+    )
     assert env[f"{ENV_PREFIX}MODE"] == "pcsampling"
 
 

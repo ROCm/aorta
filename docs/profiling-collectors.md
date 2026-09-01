@@ -212,11 +212,11 @@ Precedence and scope:
 |---|---|---|---|
 | `mode` | `cli`, `env` | `cli` | See [Attach modes](#proton-attach-modes). |
 | `backend` | `auto`, `rocprofiler`, `roctracer`, `instrumentation`, `cupti` | `auto` | `auto` omits Proton's `-b` and lets Proton pick the backend matching the active runtime — `rocprofiler` where rocprofiler-sdk is available, `roctracer` otherwise. It is the only portable spelling and is why it is the default: **naming a backend is a version commitment, and on AMD it is an attach-mode commitment too.** `rocprofiler` is the preferred AMD backend upstream but Triton 3.7.x and earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an argparse `invalid choice: 'rocprofiler'` before the payload runs. `roctracer` is the deprecated AMD predecessor; `instrumentation` the intra-kernel path; `cupti` the NVIDIA one, accepted so a recipe stays portable even though aorta's examples are AMD. Pinning `roctracer` or `rocprofiler` means `mode: env` and a payload that drives Proton itself: under the default `mode: cli` such a pin captures an empty tree, and the collector refuses the combination — see [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend). `instrumentation` measures *inside* a kernel and publishes **no numeric metrics** — its leaves carry `cycles` / `normalized_cycles`, never `time (<unit>)`, so such a trial reports `proton_artifact_dir` and nothing else. |
-| `backend_mode` | `pcsampling`, `periodic_flushing` | (unset) | Proton's per-backend `--mode`. **Requires an explicit (non-`auto`) backend**, because which values are valid depends on which backend runs: `rocprofiler` takes both, `roctracer` only `periodic_flushing`, `cupti` both. Not valid on `backend: instrumentation`, whose modes are the `instrumentation_mode` key, and rejected together with `instrumentation_mode` — both render into Proton's single `--mode` argument. The two AMD backends it applies to need `mode: env` for the reason given in the `backend` row. |
+| `backend_mode` | `pcsampling`, `periodic_flushing` | (unset) | Proton's per-backend `--mode`. **Requires an explicit (non-`auto`) backend**, because which values are valid depends on which backend runs: `rocprofiler` takes both, `roctracer` only `periodic_flushing`, `cupti` both. Not valid on `backend: instrumentation`, whose modes are the `instrumentation_mode` key, and rejected together with `instrumentation_mode` — both render into Proton's single `--mode` argument. **Requires `mode: env`**, like every `--mode`-bearing option: no released Triton's CLI forwards the flag, so a `mode: cli` recipe is refused rather than run with the value dropped. |
 | `context` | `shadow`, `python` | `shadow` | How a kernel's time is attributed to a calling frame. |
 | `data` | `tree`, `trace` | `tree` | `tree` writes the `.hatchet` file the parser reads; `trace` writes a chrome trace instead, so it produces no numeric metrics. |
-| `instrumentation_mode` | `default`, `mma`, `pcsampling` | (unset) | **Requires `backend: instrumentation`.** Takes effect only under `mode: env`: the shipped Triton CLI parses `-m/--mode` and never forwards it to `start()`, so it is a silent no-op under `mode: cli`. |
-| `granularity` | `cta`, `warp`, `warp_2`, `warp_4`, `warp_8`, `warp_group`, `warp_group_2`, `warp_group_4`, `warp_group_8` | (unset) | **Requires `backend: instrumentation`.** Unusable on Triton 3.7.1 in either attach mode: dropped by the CLI like `instrumentation_mode`, and under `mode: env` the rendered `default:granularity=warp` string fails at kernel exit with `RuntimeError: Only warp granularity is supported for now`. Warp is that backend's own default there, so leave it unset. |
+| `instrumentation_mode` | `default`, `mma`, `pcsampling` | (unset) | **Requires `backend: instrumentation` and `mode: env`.** The shipped Triton CLI parses `-m/--mode` and never forwards it to `start()`, so under `mode: cli` the value would be dropped; the collector refuses that combination instead of running it as a no-op. |
+| `granularity` | `cta`, `warp`, `warp_2`, `warp_4`, `warp_8`, `warp_group`, `warp_group_2`, `warp_group_4`, `warp_group_8` | (unset) | **Requires `backend: instrumentation` and `mode: env`.** Unusable on Triton 3.7.1 regardless: refused under `mode: cli` like `instrumentation_mode`, and under `mode: env` the rendered `default:granularity=warp` string fails at kernel exit with `RuntimeError: Only warp granularity is supported for now`. Warp is that backend's own default there, so leave it unset. |
 | `hook` | `triton` | (unset) | Renders Proton's `-k triton` under `mode: cli`; exported as `AORTA_PROTON_HOOK` under `mode: env`. Registers Proton's launch hook, which records Triton kernel launch metadata alongside the timing. |
 
 `instrumentation_mode` and `granularity` are rejected with an actionable
@@ -229,12 +229,16 @@ set. `backend_mode` renders into that same argument, which is why the two
 cannot be combined. When none of them is set the collector omits `--mode`
 entirely and Proton keeps its own default.
 
-Both intra-kernel knobs are **`mode: env` knobs today**, whatever the recipe
-says. Triton 3.7.1's Proton front-end parses `-m/--mode` and then calls
-`start()` without it, so the value the CLI wrap renders is dropped on the
-floor; upstream `main` forwards it. Under `mode: env` the payload reads
-`AORTA_PROTON_MODE` and passes it to `proton.start(mode=...)` itself, which
-is the only route by which either knob reaches Proton on a released Triton.
+Every `--mode`-bearing option — `backend_mode`, `instrumentation_mode`,
+`granularity` — **requires `mode: env`**, and a `mode: cli` recipe that sets
+one is refused at recipe load. Triton 3.7.1's Proton front-end parses
+`-m/--mode` and then calls `start()` without it, so the value the CLI wrap
+would render is dropped on the floor; upstream `main` forwards it. Under
+`mode: env` the payload reads `AORTA_PROTON_MODE` and passes it to
+`proton.start(mode=...)` itself, which is the only route by which any of them
+reaches Proton on a released Triton. Because the gate makes it unreachable, the
+CLI wrap no longer renders `--mode` at all. `hook` is not in this family: the
+shipped CLI does forward `-k`, so it works in either attach mode.
 `granularity` does not survive even that route on Triton 3.7.1: the rendered
 `default:granularity=warp` is rejected inside
 `libproton.exit_instrumented_op` (the bare `default` and other knobs such as

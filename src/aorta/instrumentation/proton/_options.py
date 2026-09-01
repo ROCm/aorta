@@ -26,9 +26,12 @@ AUTO_BACKEND: str = "auto"
 #: ``roctracer`` is the deprecated AMD predecessor Proton still falls back to;
 #: ``instrumentation`` is the intra-kernel path; ``cupti`` is the NVIDIA one,
 #: accepted so a recipe stays portable even though aorta's examples are AMD.
-#: Naming either AMD backend also commits the recipe to ``mode: env``: the
-#: collector refuses to pin them under ``mode: cli``, where the capture would
-#: come back empty (see :func:`aorta.instrumentation.proton.wrap_argv`).
+#: Naming either *queue-intercepting* AMD backend (``rocprofiler`` /
+#: ``roctracer``) also commits the recipe to ``mode: env``: the collector
+#: refuses to pin those two under ``mode: cli``, where the capture would come
+#: back empty (see :func:`aorta.instrumentation.proton.wrap_argv`).
+#: ``instrumentation`` is an AMD backend too and is deliberately *not* covered
+#: -- it installs no interceptor, so a CLI pin of it captures correctly.
 BACKENDS: frozenset[str] = frozenset(
     {"auto", "cupti", "rocprofiler", "roctracer", "instrumentation"}
 )
@@ -60,7 +63,18 @@ BACKEND_MODES: dict[str, frozenset[str]] = {
 
 #: ``hook`` values (Proton's ``-k``). ``triton`` registers Proton's launch
 #: hook, which records Triton kernel launch metadata alongside the timing.
+#: Unlike the ``--mode`` knobs below, ``-k`` *is* forwarded by the shipped CLI,
+#: so this option works in either attach mode.
 HOOKS: frozenset[str] = frozenset({"triton"})
+
+#: Options that render Proton's single ``--mode`` argument, and therefore
+#: require ``mode: env``. Triton 3.7.1's front-end parses ``-m/--mode`` and then
+#: calls ``start()`` without it, so a CLI wrap would render the flag and Proton
+#: would never see the value -- a configured knob that silently does nothing,
+#: which is worse than a rejected one. Upstream ``main`` forwards it, so this is a
+#: version gate aorta cannot evaluate at recipe-load time and resolves the safe
+#: way.
+MODE_BEARING_KEYS: tuple[str, ...] = ("backend_mode", "granularity", "instrumentation_mode")
 
 #: ``proton --context`` values.
 CONTEXTS: frozenset[str] = frozenset({"shadow", "python"})
@@ -137,7 +151,10 @@ def validate_options(options: Mapping[str, str] | None) -> dict[str, str]:
             ask for -- or a ``backend_mode`` that its backend does not accept,
             that collides with an intra-kernel knob over Proton's single
             ``--mode``, or that was set without an explicit backend to
-            validate it against.
+            validate it against. Any of :data:`MODE_BEARING_KEYS` outside
+            ``mode: env`` is refused for the same reason the intra-kernel gate
+            exists: the shipped CLI drops ``--mode``, so accepting it there
+            would hand back a capture configured as if nothing had been asked.
     """
     raw = dict(options or {})
     unknown = sorted(set(raw) - set(OPTION_KEYS))
@@ -190,6 +207,21 @@ def validate_options(options: Mapping[str, str] | None) -> dict[str, str]:
                 f"proton option 'backend_mode': {effective['backend_mode']!r} is "
                 f"not one of {sorted(allowed)} for backend: {effective['backend']}"
             )
+    # Last, so a wrong value or a wrong backend is reported as itself rather
+    # than as an attach-mode problem.
+    mode_bearing = sorted(key for key in MODE_BEARING_KEYS if key in effective)
+    if mode_bearing and effective["mode"] != "env":
+        raise ValueError(
+            f"proton option(s) {mode_bearing} require mode: env. They render "
+            "Proton's '--mode', and no released Triton's command front-end "
+            "forwards it: 3.7.1 parses '-m/--mode' and then calls start() "
+            "without it, so under mode: cli the value is dropped and the "
+            "capture comes back configured as if you had asked for nothing. "
+            "Under mode: env the payload reads AORTA_PROTON_MODE and passes it "
+            "to proton.start() itself, which is the only route that reaches "
+            "Proton today (upstream main forwards it; this gate can relax when "
+            "that ships)."
+        )
     return effective
 
 
@@ -200,8 +232,10 @@ def mode_argument(options: Mapping[str, str]) -> str | None:
     argument; :func:`validate_options` rejects them together, so reading
     ``backend_mode`` first is a precedence in spelling only.
 
-    Returns ``None`` when no mode knob is set, so the CLI wrap omits ``--mode``
-    entirely and Proton keeps its own default.
+    Returns ``None`` when no mode knob is set, so ``mode: env`` exports no
+    ``AORTA_PROTON_MODE`` and Proton keeps its own default. Only the env bundle
+    consumes this: every knob it reads requires ``mode: env``
+    (:data:`MODE_BEARING_KEYS`), so the CLI wrap has no ``--mode`` to render.
     """
     backend_mode = options.get("backend_mode")
     if backend_mode is not None:
@@ -225,6 +259,7 @@ __all__ = [
     "GRANULARITIES",
     "HOOKS",
     "INSTRUMENTATION_MODES",
+    "MODE_BEARING_KEYS",
     "MODES",
     "OPTION_KEYS",
     "QUEUE_INTERCEPTING_BACKENDS",

@@ -62,6 +62,7 @@ from ._options import (
     GRANULARITIES,
     HOOKS,
     INSTRUMENTATION_MODES,
+    MODE_BEARING_KEYS,
     MODES,
     OPTION_KEYS,
     QUEUE_INTERCEPTING_BACKENDS,
@@ -265,9 +266,12 @@ def build_argv_prefix(
         "--data",
         effective["data"],
     ]
-    mode = mode_argument(effective)
-    if mode is not None:
-        argv += ["--mode", mode]
+    # No ``--mode`` here. Every option that renders it now requires
+    # ``mode: env`` (:data:`MODE_BEARING_KEYS`), because Triton 3.7.1's
+    # front-end parses ``-m/--mode`` and then calls ``start()`` without it.
+    # Rendering the flag anyway would be unreachable after that gate, and would
+    # claim a capability no released Triton has. ``-k`` is different: the
+    # shipped CLI does forward the hook.
     hook = effective.get("hook")
     if hook is not None:
         argv += ["-k", hook]
@@ -552,6 +556,7 @@ __all__ = [
     "GRANULARITIES",
     "HOOKS",
     "INSTRUMENTATION_MODES",
+    "MODE_BEARING_KEYS",
     "MODES",
     "OPTION_KEYS",
     "OUTPUT_SUBDIR",

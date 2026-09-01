@@ -62,8 +62,9 @@ The evidence, from querying the images and indexes directly:
 | PyTorch ROCm nightly | `pytorch-triton-rocm` 3.6.0 | same three |
 | Upstream `main` | — | from `libproton.get_available_profilers()`; **includes `rocprofiler`**, modes `[None, "pcsampling", "periodic_flushing"]` |
 
-So `roctracer` — deprecated upstream — remains the only AMD backend you can
-name on a released Triton, which is why
+So `roctracer` — deprecated upstream — remains the only *whole-kernel* AMD
+backend you can name on a released Triton (`instrumentation` is nameable there
+too, but it measures inside a kernel), which is why
 [`../amd-roctracer`](../amd-roctracer/README.md) is the example to start from
 and this one is the forward-looking sibling.
 
