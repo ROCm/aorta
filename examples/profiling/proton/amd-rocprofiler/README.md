@@ -1,13 +1,20 @@
 # amd-rocprofiler — the rocprofiler-sdk backend, with PC sampling
 
-> **This example needs Triton built from upstream `main`. No released Triton
-> has the `rocprofiler` backend**, so unlike every other example in this tree
-> **its capture has never been verified** — no obtainable wheel or container
-> image provides the backend. What *was* exercised on a released Triton
-> (3.7.1): the payload itself, its self-check, and the availability guard
-> below, which fails the trial with the message it promises rather than a
-> traceback. See [Availability](#availability) for the evidence and the check
-> to run first.
+> **This example needs Triton built from upstream `main`, past the `v3.8.0`
+> tag — for the mode, not for the backend.** `rocprofiler` itself is released:
+> Triton 3.8.0 (2026-08-28) ships it, and
+> `libproton.get_available_profilers()` there returns
+> `['cupti', 'rocprofiler', 'roctracer', 'instrumentation']`. Its `pcsampling`
+> mode is not. On 3.8.0,
+> `proton.start(backend="rocprofiler", mode="pcsampling")` raises
+> `ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling`,
+> because AMD PC sampling landed upstream after that tag. So unlike every other
+> example in this tree **its PC-sampling capture has never been verified** — no
+> obtainable wheel or container image takes the measurement this recipe asks
+> for. What *was* exercised: the payload and its self-check on a released
+> Triton (3.7.1), and both guards below, which fail the trial with the message
+> they promise rather than a traceback. See [Availability](#availability) for
+> the evidence and the checks to run first.
 
 One transcendental-heavy Triton GELU launched in a loop, captured by Proton's
 `rocprofiler` backend with `backend_mode: "pcsampling"`. Where
@@ -20,69 +27,105 @@ stream of instructions to sample.
 
 ## Check this first
 
+Two independent questions — is the backend present, and does this build's
+`rocprofiler` support `pcsampling`? Since 3.8.0 the answers can differ, so ask
+both.
+
 ```bash
 python -c "from triton._C.libproton import proton as p; print(p.get_available_profilers())"
 ```
 
-- A list containing `rocprofiler` — you can run this example.
+- A list containing `rocprofiler` — your Triton has the backend. Triton 3.8.0
+  returns `['cupti', 'rocprofiler', 'roctracer', 'instrumentation']`.
 - A list without it — your Triton has the registry but not the backend.
-- **`AttributeError`** — the installed Triton predates the feature entirely.
+- **`AttributeError`** — the installed Triton predates the registry entirely.
   Upstream builds the CLI's `-b` choices from this very function; a Triton
-  without it has no backend registry at all. This is what every released Triton
-  does.
+  without it has no backend registry at all. Triton 3.7.1 and earlier are in
+  this case.
 
-The payload runs the same check itself and exits **2** — the "this environment
-cannot run this" code it also uses for a missing GPU, so a failed trial reads
-as an environment problem rather than a bad result — with a message naming the
-requirement:
+Then the mode, which that list does not answer:
+
+```bash
+python -c "import triton.profiler as proton; proton.start('probe', backend='rocprofiler', mode='pcsampling')"
+```
+
+On 3.8.0 this raises
+`ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling`, and a
+post-3.8 `main` build is what the recipe as written needs.
+`mode='periodic_flushing'` is accepted on 3.8.0, so it is the way to exercise
+the rest of the plumbing on a released Triton.
+
+The payload covers both cases itself — the availability question up front, the
+mode question by catching what `proton.start()` raises — and exits **2** for
+either. That is the "this environment cannot run this" code it also uses for a
+missing GPU, so a failed trial reads as an environment problem rather than a
+bad result. The two exits carry different messages, because they have different
+fixes. On Triton 3.7.1 the backend is missing:
 
 ```
 gelu: Triton 3.7.1 has no libproton.get_available_profilers, so its Proton
 predates the backend registry and cannot offer 'rocprofiler' (it has only
-['cupti', 'instrumentation', 'roctracer']). This example needs Triton built
-from upstream main; no released wheel or container image ships the rocprofiler
-backend.
+['cupti', 'instrumentation', 'roctracer']). ...
 ```
 
-The check is answered from the pre-registry backend set when
+and on 3.8.0 the backend check passes, `proton.start()` raises, and the payload
+reports the mode instead:
+
+```
+gelu: Proton refused backend='rocprofiler' with mode='pcsampling': [PROTON]
+RocprofSDKProfiler: unsupported mode: pcsampling
+gelu: the backend exists on this Triton but does not support that mode. AMD
+pcsampling landed after the 3.8.0 tag, so it needs an upstream `main` build;
+`periodic_flushing` works on 3.8.0.
+```
+
+The availability check is answered from the pre-registry backend set when
 `get_available_profilers` is missing, rather than refusing every explicit
 backend: `--backend roctracer` still profiles fine on Triton 3.7.1, and the
 message exists to name the fix, not to be conservative.
 
 ## Availability
 
-The evidence, from querying the images and indexes directly:
+The evidence, from querying the images and indexes directly and from an
+isolated `triton==3.8.0` install:
 
-| Source | Triton | Proton `-b` choices |
-|---|---|---|
-| `rocm/pytorch:rocm7.14_...pytorch_release_2.12.0` | 3.7.1 | `cupti`, `roctracer`, `instrumentation` |
-| Triton 3.7.0 | 3.7.0 | same three |
-| Triton 3.6.0+rocm7.2.4 | 3.6.0 | same three |
-| PyPI `triton` (latest) | 3.7.1 | same three |
-| PyTorch ROCm nightly | `pytorch-triton-rocm` 3.6.0 | same three |
-| Upstream `main` | — | from `libproton.get_available_profilers()`; **includes `rocprofiler`**, modes `[None, "pcsampling", "periodic_flushing"]` |
+| Source | Triton | Proton `-b` choices | `rocprofiler` modes |
+|---|---|---|---|
+| `rocm/pytorch:rocm7.14_...pytorch_release_2.12.0` | 3.7.1 | `cupti`, `roctracer`, `instrumentation` | backend absent |
+| Triton 3.7.0 | 3.7.0 | same three | backend absent |
+| Triton 3.6.0+rocm7.2.4 | 3.6.0 | same three | backend absent |
+| PyTorch ROCm nightly | `pytorch-triton-rocm` 3.6.0 | same three | backend absent |
+| PyPI `triton` (latest, released 2026-08-28) | 3.8.0 | `cupti`, **`rocprofiler`**, `roctracer`, `instrumentation` | `periodic_flushing` only — `pcsampling` raises `unsupported mode` |
+| Upstream `main`, past `v3.8.0` | — | same four | `pcsampling` and `periodic_flushing` |
 
-So `roctracer` — deprecated upstream — remains the only *whole-kernel* AMD
-backend you can name on a released Triton (`instrumentation` is nameable there
-too, but it measures inside a kernel), which is why
-[`../amd-roctracer`](../amd-roctracer/README.md) is the example to start from
-and this one is the forward-looking sibling.
+Two consequences worth keeping apart. The backend became nameable in 3.8.0, so
+a `backend: rocprofiler` recipe now runs on a released Triton — but this
+example's `backend_mode: pcsampling` does not, which is why the capture is
+still unverified. And `roctracer`, deprecated upstream, is no longer the only
+whole-kernel AMD backend on the newest release; it is the one present in
+*every* release, including those predating 3.8.0
+(`instrumentation` is in every release too, but measures inside a kernel).
+That is why [`../amd-roctracer`](../amd-roctracer/README.md) remains the
+example to start from on an arbitrary image and this one is the
+forward-looking sibling.
 
 ## Requirements
 
 | | |
 |---|---|
 | Runtime | Triton + PyTorch built for ROCm, one AMD GPU |
-| Triton version | **Upstream `main`, built from source.** Released Triton does not have the backend |
+| Triton version | **Upstream `main` past `v3.8.0`, built from source**, for `backend_mode: pcsampling`. The `rocprofiler` backend alone needs only 3.8.0; `backend_mode: periodic_flushing` runs there |
 | Profiler | Proton, which ships inside Triton — no separate install |
 | ROCm | rocprofiler-sdk available to the Triton build |
 | Python deps | `torch`, `triton` |
 
 ## Run it in a container
 
-The image has to carry a `main`-built Triton, so the usual `rocm/pytorch:latest`
-will not do — build Triton from source inside it, or start from an image that
-already did:
+The image has to carry a `main`-built Triton past `v3.8.0` for the recipe's
+`pcsampling` mode, so the usual `rocm/pytorch:latest` will not do — build Triton
+from source inside it, or start from an image that already did. An image with a
+plain 3.8.0 gets you as far as the backend and then fails the mode check, which
+is what the `get_available_profilers()` line below will *not* tell you:
 
 ```bash
 docker run --rm -it \
@@ -123,7 +166,7 @@ gelu: PASS
 `AORTA_PROTON_*` in the environment the payload takes no capture at all — it
 just runs the kernel and checks it. That is deliberate: you can confirm the
 payload itself is sound on the Triton you actually have, and only the capture
-is gated on the backend.
+is gated on the backend and its mode.
 
 Tolerance is `1e-6` absolute against `torch.nn.functional.gelu`, not exact
 equality: the device `erf` and torch's fused activation differ in the last
@@ -155,8 +198,12 @@ env AORTA_PROTON_DIR=./proton_out \
   python examples/profiling/proton/amd-rocprofiler/gelu.py
 ```
 
-Substituting `--backend roctracer` is a useful control on a released Triton:
-same payload, same env-mode plumbing, whole-kernel spans instead of samples.
+On Triton 3.8.0 that command reaches `proton.start()` and stops there with the
+unsupported-mode error. Two controls run to completion on a released Triton:
+`--backend rocprofiler --backend-mode periodic_flushing` on 3.8.0, which
+exercises this backend without asking for PC sampling, and `--backend
+roctracer` on any release — same payload, same env-mode plumbing, whole-kernel
+spans instead of samples.
 
 ## What you get
 
@@ -165,33 +212,39 @@ A `.hatchet` JSON tree in the trial's `proton/` directory, reported as
 (`proton_kernel_count`, `proton_gpu_time_ms`, `proton_top_kernel_ms`) also
 appear depends on whether a PC-sampling tree carries `time (<unit>)` leaves —
 aorta's parser keys on that metric and nothing else. **We have not been able to
-check**, having no Triton with the backend, so treat the artifact as the
-deliverable and read it with `proton-viewer` in the same environment as the
-capture. The comparable `roctracer` capture of the same payload does publish
-all three.
+check**: the newest obtainable Triton (3.8.0) has the backend but refuses
+`pcsampling`, so no PC-sampling tree has been produced to look at. Treat the
+artifact as the deliverable and read it with `proton-viewer` in the same
+environment as the capture. The comparable `roctracer` capture of the same
+payload does publish all three.
 
 ## Notes
 
 - **`backend_mode`, not `instrumentation_mode`.** Both render Proton's single
   `--mode`, so the schema makes them mutually exclusive, and `backend_mode`
-  requires an explicit (non-`auto`) backend. Valid values here are
-  `pcsampling` and `periodic_flushing`; `roctracer` accepts only
-  `periodic_flushing`.
+  requires an explicit (non-`auto`) backend. The backend's documented domain is
+  `pcsampling` and `periodic_flushing`, and that is what aorta's schema
+  accepts; what a given build *implements* is the separate question above.
+  `roctracer` accepts only `periodic_flushing`.
 - **PC sampling is statistical.** It reports where samples landed, not an exact
   per-instruction cost, so short runs are noisy. That is why the payload
   defaults to 50 launches rather than one. For deterministic intra-kernel
-  attribution on a backend that exists today, use
+  attribution on a backend whose mode is available on a released Triton, use
   [`../amd-instrumentation`](../amd-instrumentation/README.md) instead — it
   counts cycles per source-level scope rather than sampling.
-- **Why `mode: env`.** Two reasons, both mechanical. Triton's Proton CLI calls
-  `_select_backend()` — which initialises the HIP driver as a side effect —
-  only when `-b` is absent, so pinning a queue-tracing backend on the CLI
-  attaches the profiler before the runtime exists and writes a hatchet with a
-  bare `ROOT` frame while exiting 0. And the shipped CLI parses `-m/--mode`
-  without forwarding it to `start()`, so `backend_mode` would be a silent
-  no-op there. In `mode: env` the payload imports `torch` first and then passes
-  both values to `proton.start()` itself. The collector rejects `mode: cli`
-  with an explicit `roctracer` / `rocprofiler` backend outright.
+- **Why `mode: env`.** Two reasons, both mechanical, and only the first is a
+  hard requirement. Triton's Proton CLI calls `_select_backend()` — which
+  initialises the HIP driver as a side effect — only when `-b` is absent, so
+  pinning a queue-tracing backend on the CLI attaches the profiler before the
+  runtime exists and writes a hatchet with a bare `ROOT` frame while exiting 0.
+  That is still true on 3.8.0: line 73 of `third_party/proton/proton/proton.py`
+  at the `v3.8.0` tag is unchanged. The collector rejects `mode: cli` with an
+  explicit `roctracer` / `rocprofiler` backend outright for that reason. Second,
+  `--mode` reaches Proton through the CLI only on 3.8.0 and newer — 3.7.1 and
+  earlier parse `-m/--mode` and then call `start()` without it — so `mode: env`
+  is also what makes `backend_mode` version-independent. In `mode: env` the
+  payload imports `torch` first and then passes both values to
+  `proton.start()` itself.
 - **Device selection.** Proton on AMD reads `ROCR_VISIBLE_DEVICES` and rejects
   `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` for the queue-intercepting
   backends. aorta's collector translates the rejected spellings automatically

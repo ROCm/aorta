@@ -28,9 +28,10 @@ import sys
 # they record nothing unless the HIP runtime is already up, which is what
 # importing torch does. This backend is *not* one of them: it installs no queue
 # interceptor, and a CLI pin of it captures correctly whatever the ordering. The
-# reason this example needs ``mode: env`` is narrower: no released Triton's CLI
-# forwards ``--mode``, so ``instrumentation_mode`` only reaches Proton when the
-# payload passes it to ``start()`` itself -- see recipe.yaml.
+# reason this example chooses ``mode: env`` is narrower and version-independent:
+# Triton 3.7.1's CLI parses ``--mode`` and then calls ``start()`` without it, so
+# ``instrumentation_mode`` would be dropped there. 3.8.0 forwards it, but this
+# route reaches Proton on both -- see recipe.yaml.
 import torch
 import triton
 import triton.language as tl

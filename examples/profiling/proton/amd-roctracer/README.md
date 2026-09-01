@@ -3,8 +3,9 @@
 Three distinct Triton kernels — an elementwise scale, a fused bias+GELU, and a
 row-sum reduction — launched in sequence, captured by Proton's `roctracer`
 backend. This is the example to reach for when you want to know *which kernel*
-in a launch sequence owns the GPU time, on the one *whole-kernel* AMD backend
-that exists in every released Triton. (`instrumentation` ships in every release
+in a launch sequence owns the GPU time, on the *whole-kernel* AMD backend that
+exists in every released Triton — including the releases that predate
+`rocprofiler`, which arrived in 3.8.0. (`instrumentation` ships in every release
 too, but it measures *inside* one kernel — see
 [`../amd-instrumentation`](../amd-instrumentation/README.md).)
 
@@ -21,7 +22,7 @@ recipe pins the backend explicitly through `mode: env` instead of leaving
 |---|---|
 | Runtime | Triton + PyTorch built for ROCm, one AMD GPU |
 | Profiler | Proton, which ships inside Triton — no separate install |
-| Triton version | **Any released Triton.** `roctracer` has been in Proton's backend list since it was introduced; unlike `rocprofiler` it needs no source build |
+| Triton version | **Any released Triton.** `roctracer` has been in Proton's backend list since it was introduced, so this example does not care which release you have. `rocprofiler` needs 3.8.0 or newer |
 | Python deps | `torch`, `triton` |
 
 ## Run it in a container
@@ -150,6 +151,10 @@ metrics. aorta's parser finds no `time (<unit>)` leaves, degrades to
 `proton_artifact_dir`, and the trial carries no Proton metrics while looking
 like a success.
 
+Upgrading Triton does not help. That line is line 73 of
+`third_party/proton/proton/proton.py` at the `v3.8.0` tag, unchanged, so 3.8.0
+skips the driver-initialising call on the `-b` path exactly as 3.7.1 does.
+
 `mode: env` avoids this entirely. aorta exports `AORTA_PROTON_*` and leaves
 argv alone; the payload imports `torch` at module scope — which brings the HIP
 runtime up — and only then calls `proton.start(backend=...)` itself. The
@@ -160,13 +165,16 @@ route, so a `mode: cli` version of this recipe would not run at all.
 ## Notes
 
 - **Why `roctracer` and not `rocprofiler`.** `roctracer` is deprecated
-  upstream in favour of the rocprofiler-sdk backend, but it is the only AMD
-  backend present in every *released* Triton that traces whole kernels:
-  3.6.0, 3.7.0 and 3.7.1 all offer `cupti` / `roctracer` / `instrumentation`
-  and nothing else, and of those `cupti` is NVIDIA's while `instrumentation`
-  measures inside a kernel rather than timing it.
+  upstream in favour of the rocprofiler-sdk backend, and as of Triton 3.8.0 it
+  is no longer the only whole-kernel AMD backend you can name on a release. It
+  is still the one present in *every* release: 3.6.0, 3.7.0 and 3.7.1 offer
+  `cupti` / `roctracer` / `instrumentation` and nothing else — of those `cupti`
+  is NVIDIA's and `instrumentation` measures inside a kernel rather than timing
+  it — while 3.8.0 adds `rocprofiler` alongside them. So this example is the one
+  that runs on whatever image you have, and
   [`../amd-rocprofiler`](../amd-rocprofiler/README.md) is the same idea on the
-  newer backend, and needs Triton `main`.
+  newer backend; that one still needs a post-3.8 `main` build, for its
+  `pcsampling` mode rather than for the backend.
 - **Device selection.** Proton on AMD reads `ROCR_VISIBLE_DEVICES` and
   *rejects* `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` outright for
   `roctracer` — `proton.start()` raises `ValueError` before any kernel runs.

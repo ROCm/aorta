@@ -147,7 +147,8 @@ runs with different grids.
 
 ## Why `mode: env`
 
-**The shipped Triton CLI drops `--mode`.** Triton 3.7.1's
+**Whether the CLI forwards `--mode` depends on the Triton version, and
+`mode: env` is the spelling that does not.** Triton 3.7.1's
 `triton/profiler/proton.py` parses `-m/--mode` and then never forwards it:
 
 ```python
@@ -155,24 +156,33 @@ backend = args.backend if args.backend else _select_backend()
 start(args.name, context=args.context, data=args.data, backend=backend, hook=args.hook)
 ```
 
-There is no `mode=` in that call. So `instrumentation_mode` (and
-`granularity`, and `backend_mode`) cannot reach Proton through the CLI wrap on
-any released Triton — upstream `main` does pass the value through. Rather than
-render a flag that gets dropped, the collector **requires `mode: env`** for
-every option that produces `--mode`, and refuses a `mode: cli` recipe that sets
-one. `mode: env` exports it as `AORTA_PROTON_MODE` and the payload hands it to
-`proton.start()` itself, which is the only way the knob takes effect today.
+There is no `mode=` in that call, so on 3.7.1 and earlier
+`instrumentation_mode` (and `granularity`, and `backend_mode`) is rendered into
+the wrap and dropped on the floor. Triton 3.8.0 fixed it — line 75 of
+`third_party/proton/proton/proton.py` at the `v3.8.0` tag is
+`start(args.name, context=args.context, data=args.data, backend=backend,
+mode=args.mode, hook=args.hook)` — so a `mode: cli` recipe does carry the knob
+there. The collector renders `--mode` on every version rather than refusing the
+combination, because it validates in aorta's own interpreter and cannot know
+which Triton will run the wrap.
 
-That is the *only* reason this example needs `mode: env`, and it is worth being
+This example keeps `mode: env` because that route is version-independent: it
+exports the value as `AORTA_PROTON_MODE` and the payload hands it to
+`proton.start()` itself, so `instrumentation_mode: default` takes effect on
+3.7.1 and 3.8.0 alike. An example that only worked on the newest release would
+be a poor thing to point someone at an arbitrary container image with.
+
+That is the *only* reason this example uses `mode: env`, and it is worth being
 precise about, because the sibling [`../amd-roctracer`](../amd-roctracer/README.md)
-needs it for a different one. There, the same snippet's `_select_backend()` —
-called only when `-b` is absent — is what initialises the Triton HIP driver, and
-a queue-intercepting backend pinned ahead of the runtime records nothing. This
+needs it for a different and much harder one. There, the same snippet's
+`_select_backend()` — called only when `-b` is absent — is what initialises the
+Triton HIP driver, and a queue-intercepting backend pinned ahead of the runtime
+records nothing; that line is unchanged in 3.8.0, so no version fixes it. This
 backend installs no queue interceptor: a `-b instrumentation` CLI wrap of this
-payload captures both scopes correctly (verified: 1738 bytes, cycle counts
-intact). So the collector's refusal to pin a backend under `mode: cli` covers
-`roctracer` and `rocprofiler` and not this one — what `mode: cli` costs here is
-the mode knob, which is enough on its own.
+payload captures both scopes correctly (verified on 3.7.1: 1738 bytes, cycle
+counts intact). So the collector's refusal to pin a backend under `mode: cli`
+covers `roctracer` and `rocprofiler` and not this one — what `mode: cli` costs
+here is a version guarantee on the mode knob, not the capture.
 
 ## Notes
 
@@ -191,8 +201,9 @@ the mode knob, which is enough on its own.
   `triton.profiler.mode.Default(granularity="warp")`. Other mode knobs pass
   through as strings fine (`mode="default:buffer_size=4096"` works). Warp
   granularity is this backend's own default on this version anyway — the
-  working captures are per-warp — so omitting the key costs nothing. Spell it
-  explicitly only on Triton `main`.
+  working captures are per-warp — so omitting the key costs nothing. Whether a
+  later release accepts the string spelling was not checked on 3.8.0; spell the
+  key explicitly only on a build where you have confirmed it.
 - **Instrumenting Triton-DSL kernels is opt-in, and the opt-in is a
   trade-off.** `triton/profiler/language.py` enables only the Gluon semantic by
   default, because Triton's higher-level IR undergoes aggressive rewrites —

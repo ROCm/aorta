@@ -92,18 +92,25 @@ Read the raw tree yourself with `proton-viewer -m time/s <file>.hatchet`
   `HIP_VISIBLE_DEVICES`; use `ROCR_VISIBLE_DEVICES` to pin a GPU or the
   device ids in the tree will not match the ones you expect.
 - **Backend.** The recipe leaves `backend: "auto"`, which omits Proton's
-  `-b` so Proton picks the backend matching the active runtime
-  (`rocprofiler` where rocprofiler-sdk is available, `roctracer`
-  otherwise). Naming one is a version commitment: `rocprofiler` is the
-  preferred AMD backend upstream, but Triton 3.7.x and earlier accept only
-  `cupti`/`roctracer`/`instrumentation` and exit with an argparse
-  `invalid choice: 'rocprofiler'` before the payload runs. It is an
+  `-b` so Proton picks the backend matching the active runtime. On AMD that
+  resolves to `rocprofiler` from Triton 3.8.0 onward and to `roctracer` on
+  3.7.1 and earlier. Naming one is a version commitment: `rocprofiler` is
+  the preferred AMD backend upstream and released as of 3.8.0, but 3.7.x and
+  earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an
+  argparse `invalid choice: 'rocprofiler'` before the payload runs. It is an
   attach-mode commitment too: Proton's CLI front-end initialises the HIP
-  runtime only on the path where `-b` is absent, so pinning `roctracer` or
-  `rocprofiler` under this recipe's `mode: "cli"` captures an empty
-  `ROOT`-only tree and still exits 0. The collector refuses that pairing
-  and names `mode: "env"`, where the payload drives Proton itself;
-  [`../amd-roctracer/`](../amd-roctracer/README.md) is the worked case.
+  runtime only on the path where `-b` is absent — still true in 3.8.0 — so
+  pinning `roctracer` or `rocprofiler` under this recipe's `mode: "cli"`
+  captures an empty `ROOT`-only tree and still exits 0. The collector refuses
+  that pairing and names `mode: "env"`, where the payload drives Proton
+  itself; [`../amd-roctracer/`](../amd-roctracer/README.md) is the worked
+  case.
+- **What `auto` resolved to is not in the artifact.** The `.hatchet`
+  metadata carries the device type and never the backend name, and the
+  collector publishes no `proton_backend` metric. Two captures of this
+  payload taken on a 3.7.1 image and a 3.8.0 image look alike and come from
+  different backends, so read the Triton version out of the run's env
+  snapshot before comparing their numbers.
 - **Do not stack this with `rocprof`.** Proton's AMD backends intercept HSA
   queues, and so does `rocprofv3`; running both fights over the same
   interception point, and the pairing is rejected at recipe load. Only the

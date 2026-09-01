@@ -1,13 +1,19 @@
 # Proton capture on the `rocprofiler` backend, with PC sampling.
 #
-# SHIPPED UNVERIFIED. The `rocprofiler` backend exists only on Triton `main`:
-# no released Triton, wheel, or container image has it, so this recipe was
-# never run end-to-end. Everything else in this tree was. Check first with
+# SHIPPED UNVERIFIED -- for the mode, not the backend. `rocprofiler` is
+# released as of Triton 3.8.0 (2026-08-28), whose CLI advertises
+# `-b {cupti,rocprofiler,roctracer,instrumentation}`. Its `pcsampling` mode is
+# not: on 3.8.0, `proton.start(backend="rocprofiler", mode="pcsampling")` raises
+#   ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling
+# because AMD PC sampling landed upstream after the 3.8.0 tag. So this recipe as
+# written needs a post-3.8 `main` build and was never run end-to-end; everything
+# else in this tree was. Check the backend with
 #
 #   python -c "from triton._C.libproton import proton as p; print(p.get_available_profilers())"
 #
-# -- an AttributeError means the installed Triton predates the feature. See
-# README.md.
+# -- an AttributeError means the installed Triton predates the backend registry
+# entirely (3.7.1 and earlier). That list does not answer the mode question;
+# `backend_mode: periodic_flushing` is what runs on a plain 3.8.0. See README.md.
 #
 #   aorta sweep run \
 #       --recipe examples/profiling/proton/amd-rocprofiler/recipe.yaml \
@@ -36,16 +42,21 @@ env_passthrough_mode: inherit
 # 160-byte hatchet with a bare ROOT frame and an exit status of 0 -- the trial
 # looks successful and carries no Proton metrics. The collector rejects
 # `mode: cli` with an explicit roctracer/rocprofiler backend for that reason.
+# Triton 3.8.0 does not fix this: line 73 of `third_party/proton/proton/proton.py`
+# at the `v3.8.0` tag is still `backend = args.backend if args.backend else
+# _select_backend()`.
 #
-# Second, the shipped CLI parses `-m/--mode` and never forwards it to
-# `start()`, so `backend_mode` below would be a silent no-op there. In
-# `mode: env` it is exported as `AORTA_PROTON_MODE` and the payload passes it
-# to `proton.start(mode=...)` itself.
+# Second, whether the CLI forwards `-m/--mode` to `start()` depends on the
+# version: Triton 3.8.0 passes `mode=args.mode` through, while 3.7.1 and earlier
+# parse the flag and then call `start()` without it, dropping `backend_mode`
+# below. In `mode: env` it is exported as `AORTA_PROTON_MODE` and the payload
+# passes it to `proton.start(mode=...)` itself, which works on every version.
 #
 # `backend_mode: pcsampling` asks rocprofiler-sdk for statistical
 # instruction-level attribution -- where in the kernel the samples land --
-# rather than the whole-kernel spans `roctracer` reports. The backend's other
-# valid `backend_mode` is `periodic_flushing`.
+# rather than the whole-kernel spans `roctracer` reports. This is the line that
+# needs a post-3.8 `main` build; the backend's other valid `backend_mode`,
+# `periodic_flushing`, is accepted on 3.8.0.
 collect:
   proton:
     mode: "env"

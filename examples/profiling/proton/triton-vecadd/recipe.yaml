@@ -31,13 +31,15 @@ env_passthrough_mode: inherit
 # people copy.
 #
 # `backend: "auto"` omits Proton's `-b` and lets Proton pick the backend
-# matching the active runtime: `rocprofiler` where rocprofiler-sdk is
-# available, `roctracer` otherwise. That is the only portable spelling --
-# naming `rocprofiler` explicitly is correct on current upstream Triton but
-# exits with an argparse "invalid choice: 'rocprofiler'" on Triton 3.7.x and
-# earlier, before your payload runs. Pinning either AMD backend also means
-# leaving `mode: cli`: Proton's front-end initialises the HIP runtime only on
-# the path where `-b` is absent, so a pinned queue-intercepting backend
+# matching the active runtime. On AMD that is `rocprofiler` from Triton 3.8.0
+# onward and `roctracer` on 3.7.1 and earlier -- so `auto` is the only spelling
+# correct on every version, at the cost of the artifact not recording which of
+# the two ran (the run's env snapshot has the Triton version that settles it).
+# Naming `rocprofiler` explicitly works on Triton 3.8.0 and newer but exits with
+# an argparse "invalid choice: 'rocprofiler'" on 3.7.x and earlier, before your
+# payload runs. Pinning either AMD backend also means leaving `mode: cli`:
+# Proton's front-end initialises the HIP runtime only on the path where `-b` is
+# absent -- still true in 3.8.0 -- so a pinned queue-intercepting backend
 # captures an empty tree and the collector refuses the pairing. See
 # examples/profiling/proton/amd-roctracer for the `mode: env` shape that
 # pinning requires.

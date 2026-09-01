@@ -17,9 +17,9 @@ at.
 | [`rocprof/torch-matmul`](rocprof/torch-matmul/) | hipBLASLt / rocBLAS GEMM kernels PyTorch picks for `a @ b` | `torch` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/rocprof/torch-matmul/recipe.yaml --output ./profiling_results -- python examples/profiling/rocprof/torch-matmul/matmul.py` |
 | [`proton/triton-vecadd`](proton/triton-vecadd/) | One Triton elementwise kernel, launch-site attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-vecadd/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-vecadd/vecadd.py` |
 | [`proton/triton-softmax`](proton/triton-softmax/) | A Triton fused reduction, Python-frame attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-softmax/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-softmax/softmax.py` |
-| [`proton/amd-roctracer`](proton/amd-roctracer/) | Three Triton kernels in sequence, whole-kernel attribution on a pinned `roctracer` backend | `torch` + `triton` for ROCm. Container. `roctracer` is the one *whole-kernel* AMD backend every released Triton has (`instrumentation` is released too, but measures inside a kernel). | `aorta sweep run --recipe examples/profiling/proton/amd-roctracer/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-roctracer/pipeline.py` |
+| [`proton/amd-roctracer`](proton/amd-roctracer/) | Three Triton kernels in sequence, whole-kernel attribution on a pinned `roctracer` backend | `torch` + `triton` for ROCm. Container. `roctracer` is the *whole-kernel* AMD backend present in every released Triton, including the ones predating `rocprofiler` (added in 3.8.0). `instrumentation` is in every release too, but measures inside a kernel. | `aorta sweep run --recipe examples/profiling/proton/amd-roctracer/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-roctracer/pipeline.py` |
 | [`proton/amd-instrumentation`](proton/amd-instrumentation/) | Two named scopes *inside* one unbalanced Triton kernel — intra-kernel attribution | `torch` + `triton` for ROCm. Container. The only Proton backend that coexists with `rocprofv3`; publishes no numeric metrics, only `proton_artifact_dir`. | `aorta sweep run --recipe examples/profiling/proton/amd-instrumentation/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-instrumentation/hotspot.py` |
-| [`proton/amd-rocprofiler`](proton/amd-rocprofiler/) | Statistical instruction-level attribution (`backend_mode: pcsampling`) instead of whole-kernel spans | `torch` + `triton` for ROCm. Container. **Triton `main`**: no released Triton carries the `rocprofiler` backend, so this one ships documented but unverified. | `aorta sweep run --recipe examples/profiling/proton/amd-rocprofiler/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-rocprofiler/gelu.py` |
+| [`proton/amd-rocprofiler`](proton/amd-rocprofiler/) | Statistical instruction-level attribution (`backend_mode: pcsampling`) instead of whole-kernel spans | `torch` + `triton` for ROCm. Container. **A post-3.8 Triton `main` build**: the `rocprofiler` backend is released as of 3.8.0, but AMD `pcsampling` landed after that tag, so this example's capture ships documented but unverified. | `aorta sweep run --recipe examples/profiling/proton/amd-rocprofiler/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-rocprofiler/gelu.py` |
 
 ## Start here
 
@@ -57,9 +57,13 @@ together, so the pairing is rejected at recipe load. Only Proton's
 The two Triton examples leave `backend: "auto"`, which omits Proton's `-b`
 and lets Proton pick the backend matching the active runtime. That is what
 makes them run out of the box across Triton versions: `rocprofiler` is the
-preferred AMD backend upstream, but Triton 3.7.x and earlier accept only
-`cupti`/`roctracer`/`instrumentation` and exit with an argparse
-`invalid choice: 'rocprofiler'` before the payload runs.
+preferred AMD backend upstream and released as of Triton 3.8.0, but 3.7.x and
+earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an
+argparse `invalid choice: 'rocprofiler'` before the payload runs. The
+convenience has a cost worth knowing: what `auto` resolves to on AMD is
+`rocprofiler` from 3.8.0 onward and `roctracer` below it, and nothing in the
+`.hatchet` records which one ran — the run's env snapshot is where you read the
+Triton version that settles it.
 
 The three `amd-*` examples pin a backend instead, and therefore all use
 `mode: "env"` with a payload that calls `proton.start()` itself. Proton's CLI

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from aorta.instrumentation.proton import (
+    ENV_PREFIX,
     OUTPUT_SUBDIR,
     PROFILE_BASENAME,
     build_argv_prefix,
@@ -71,10 +73,22 @@ _EXAMPLES = [
 _CHILD_TIMEOUT_S = 120
 
 #: Proton's dlopen failure on an image whose ROCm comes from Python wheels:
-#: those ship only ``libroctracer64.so.4`` while Proton dlopens the unversioned
-#: name. An environment defect with a known fix, not a collector bug, so it
-#: skips with that fix named rather than failing.
-_DLOPEN_MARKER = "Could not load `libroctracer64.so`"
+#: those ship only versioned sonames (``libroctracer64.so.4``) while Proton
+#: dlopens the unversioned name. An environment defect with a known fix, not a
+#: collector bug, so it skips with that fix named rather than failing.
+#:
+#: Matched by shape rather than by one filename, because which library is missing
+#: depends on the backend: ``libroctracer64.so`` for ``roctracer`` and
+#: ``librocprofiler-sdk.so`` for the ``rocprofiler`` backend that Triton 3.8.0
+#: made reachable -- and on 3.8.0 ``backend: auto`` resolves to the latter, so a
+#: single-name match would start failing where it used to skip.
+_DLOPEN_RE = re.compile(r"Could not load `lib[^`]+`")
+
+
+def _dlopen_failure(stderr: str) -> str | None:
+    """Return Proton's dlopen complaint from ``stderr``, or ``None``."""
+    found = _DLOPEN_RE.search(stderr)
+    return found.group(0) if found else None
 
 
 def _skip_reason() -> str | None:
@@ -122,9 +136,10 @@ def _capture(example: str, payload: str, args: list[str], out_root: Path, option
         timeout=_CHILD_TIMEOUT_S,
         env={**os.environ, "TRITON_CACHE_DIR": str(out_root / "triton-cache")},
     )
-    if _DLOPEN_MARKER in proc.stderr:
+    missing = _dlopen_failure(proc.stderr)
+    if missing is not None:
         pytest.skip(
-            f"{_DLOPEN_MARKER}: this environment's ROCm ships only versioned "
+            f"{missing}: this environment's ROCm ships only versioned "
             "sonames (a wheel-provided ROCm), while Proton dlopens the "
             "unversioned name. Add the unversioned symlinks to "
             "$LD_LIBRARY_PATH, or run on a host with a system ROCm install."
@@ -267,13 +282,58 @@ def test_cli_mode_pin_would_still_capture_nothing(tmp_path):
         timeout=3600,
         env={**os.environ, "TRITON_CACHE_DIR": str(tmp_path / "triton-cache")},
     )
-    if _DLOPEN_MARKER in proc.stderr:
-        pytest.skip(_DLOPEN_MARKER)
+    missing = _dlopen_failure(proc.stderr)
+    if missing is not None:
+        pytest.skip(missing)
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert "PASS" in proc.stdout, "the payload itself must still have run"
     # The silent part of the failure: a clean exit, an artifact directory, and no
     # measurement anywhere in it.
     assert parse_summary(out_dir) == {"proton_artifact_dir": str(out_dir)}
+
+
+@skip_no_proton
+def test_a_backend_that_refuses_the_mode_exits_two_not_a_traceback(tmp_path):
+    """A backend can be present and still refuse the mode, and that has to read
+    as "this environment cannot take the measurement" rather than as a crash.
+
+    Triton 3.8.0 is the case that motivates it: it registers ``rocprofiler``, so
+    the payload's availability probe passes, but its ``RocprofSDKProfiler``
+    accepts only ``periodic_flushing`` and raises ``ValueError: [PROTON]
+    RocprofSDKProfiler: unsupported mode: pcsampling``. That version is not
+    installable here, so the same path is driven through a mode no backend
+    accepts -- what is under test is the payload's handling, not Proton's
+    taxonomy of modes.
+    """
+    out_dir = tmp_path / "proton"
+    out_dir.mkdir()
+    script = PROTON_EXAMPLES / "amd-rocprofiler" / "gelu.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--size", "262144", "--iters", "5"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        env={
+            **os.environ,
+            "TRITON_CACHE_DIR": str(tmp_path / "triton-cache"),
+            f"{ENV_PREFIX}NAME": str(out_dir / "proton"),
+            f"{ENV_PREFIX}BACKEND": "roctracer",
+            f"{ENV_PREFIX}MODE": "definitely_not_a_mode",
+            f"{ENV_PREFIX}CONTEXT": "shadow",
+            f"{ENV_PREFIX}DATA": "tree",
+        },
+    )
+    missing = _dlopen_failure(proc.stderr)
+    if missing is not None:
+        pytest.skip(missing)
+    assert proc.returncode == 2, (
+        "an unsupported mode must exit 2, the same code an unobtainable backend "
+        f"gets, not crash or traceback:\n{proc.stdout}\n{proc.stderr}"
+    )
+    assert "Proton refused backend=" in proc.stderr, proc.stderr
+    assert "does not support that mode" in proc.stderr, proc.stderr
+    assert "Traceback" not in proc.stderr, f"should be handled, not raised:\n{proc.stderr}"
 
 
 @skip_no_proton

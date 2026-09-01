@@ -2,8 +2,9 @@
 #
 # The portable AMD path: `roctracer` is Proton's deprecated but universally
 # present whole-kernel AMD backend -- the one every released Triton accepts for
-# timing kernels, where `rocprofiler` exists only on Triton `main`.
-# `instrumentation` is released too, but measures inside a kernel. See README.md.
+# timing kernels, including the releases predating `rocprofiler`, which arrived
+# in Triton 3.8.0. `instrumentation` is in every release too, but measures
+# inside a kernel. See README.md.
 #
 #   aorta sweep run \
 #       --recipe examples/profiling/proton/amd-roctracer/recipe.yaml \
@@ -33,7 +34,10 @@ env_passthrough_mode: inherit
 # no Proton metrics at all. `mode: env` instead exports `AORTA_PROTON_*` and
 # lets the payload call `proton.start()` after its own `import torch`, so the
 # backend attaches to a live runtime. The collector rejects `mode: cli` with
-# an explicit roctracer/rocprofiler backend for exactly this reason.
+# an explicit roctracer/rocprofiler backend for exactly this reason. No Triton
+# version fixes it: line 73 of `third_party/proton/proton/proton.py` at the
+# `v3.8.0` tag is still `backend = args.backend if args.backend else
+# _select_backend()`.
 #
 # `context: shadow` attributes time to the launch site, which for this payload
 # means one node per Triton kernel; `data: tree` is the `.hatchet` the

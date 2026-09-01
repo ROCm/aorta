@@ -31,10 +31,14 @@ so a device-pinned cell still profiles the device it asked for.
 The default backend is :data:`AUTO_BACKEND`, which omits Proton's ``-b``
 entirely. Proton then picks the backend matching the active runtime --
 ``rocprofiler`` where rocprofiler-sdk is available, ``roctracer`` otherwise.
+Which one that is depends on the version: ``select_profiler_from_triton_backend``
+maps the ``hip`` target to ``rocprofiler`` on Triton 3.8.0 and to ``roctracer``
+on 3.7.1, and nothing in the capture records which ran.
+
 Naming a backend explicitly costs more than a version commitment (though it is
-also that: ``rocprofiler`` is the preferred AMD backend upstream but was added
-after Triton 3.7, whose CLI rejects the name at argparse before the payload
-ever runs). Proton's front-end calls ``_select_backend()`` only on the path
+also that: ``rocprofiler`` arrived in Triton 3.8.0, so 3.7.x and earlier reject
+the name at argparse before the payload ever runs). Proton's front-end calls
+``_select_backend()`` only on the path
 where ``-b`` is absent, and that call is what brings the GPU runtime up, so an
 AMD queue-intercepting backend pinned through ``mode: cli`` starts before the
 first HSA queue exists and records nothing -- a 160-byte profile holding an
@@ -266,12 +270,14 @@ def build_argv_prefix(
         "--data",
         effective["data"],
     ]
-    # No ``--mode`` here. Every option that renders it now requires
-    # ``mode: env`` (:data:`MODE_BEARING_KEYS`), because Triton 3.7.1's
-    # front-end parses ``-m/--mode`` and then calls ``start()`` without it.
-    # Rendering the flag anyway would be unreachable after that gate, and would
-    # claim a capability no released Triton has. ``-k`` is different: the
-    # shipped CLI does forward the hook.
+    # ``--mode`` is rendered, but reaches Proton only on Triton 3.8.0 and newer:
+    # 3.7.1's front-end parses the flag and then calls ``start()`` without it.
+    # Rendered anyway rather than refused, because 3.8.0 is the current release
+    # and aorta cannot tell from here which Triton will run the wrap -- see
+    # :data:`MODE_BEARING_KEYS`. ``mode: env`` is the version-independent route.
+    mode = mode_argument(effective)
+    if mode is not None:
+        argv += ["--mode", mode]
     hook = effective.get("hook")
     if hook is not None:
         argv += ["-k", hook]

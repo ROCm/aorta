@@ -50,9 +50,11 @@ _DEFAULT_SESSION = "gelu"
 #: comes from ``--size``.
 _BLOCK_SIZE = 1024
 
-#: Proton's backend set on every released Triton -- 3.6.0, 3.7.0 and 3.7.1 all
-#: offer exactly these. Used to answer the availability question on the Tritons
-#: that cannot be asked, since ``rocprofiler`` is precisely what is missing.
+#: Proton's backend set on the released Tritons that predate the backend
+#: registry -- 3.6.0, 3.7.0 and 3.7.1 all offer exactly these. Used to answer the
+#: availability question on the Tritons that cannot be asked, since
+#: ``rocprofiler`` is precisely what is missing there. Triton 3.8.0 does have the
+#: registry, so it answers for itself and is not covered by this set.
 _PRE_REGISTRY_BACKENDS = frozenset({"cupti", "roctracer", "instrumentation"})
 
 #: Proton's ``--mode`` domain per backend, mirroring aorta's own
@@ -128,9 +130,10 @@ def unavailable_reason(backend: str) -> str | None:
     return (
         f"Triton {triton.__version__} has no libproton.get_available_profilers, "
         f"so its Proton predates the backend registry and cannot offer {backend!r} "
-        f"(it has only {sorted(_PRE_REGISTRY_BACKENDS)}). This example needs "
-        "Triton built from upstream main; no released wheel or container image "
-        "ships the rocprofiler backend."
+        f"(it has only {sorted(_PRE_REGISTRY_BACKENDS)}). Triton 3.8.0 is the "
+        "first release with the rocprofiler backend, so upgrading past 3.7.x "
+        "gets you the backend -- though this example's pcsampling mode needs a "
+        "post-3.8 upstream main build."
     )
 
 
@@ -140,10 +143,11 @@ def proton_kwargs(args: argparse.Namespace) -> dict[str, str | None]:
     A variable aorta did not export falls back to the collector's own default,
     which keeps a standalone run and a trial configured the same way spelled
     identically. ``AORTA_PROTON_MODE`` carries the recipe's ``backend_mode``
-    (``pcsampling`` here), which is the knob that reaches Proton only on this
-    path -- see recipe.yaml. ``AORTA_PROTON_HOOK`` is read for the same reason:
-    a knob the recipe sets and the payload drops would be configured and
-    silently absent from the capture.
+    (``pcsampling`` here); this path reaches Proton on every Triton, whereas the
+    CLI wrap only forwards ``--mode`` from 3.8.0 on -- see recipe.yaml.
+    ``AORTA_PROTON_HOOK`` is read for the same reason: a knob the recipe sets
+    and the payload drops would be configured and silently absent from the
+    capture.
     """
     environ = os.environ
     return {
@@ -234,7 +238,33 @@ def main(argv: list[str] | None = None) -> int:
             f"gelu: proton backend={capture['backend']} "
             f"mode={capture['mode'] or '(unset)'} name={capture['name']}"
         )
-        proton.start(**capture)
+        try:
+            proton.start(**capture)
+        except (ValueError, RuntimeError) as exc:
+            # Backend presence and mode support are separate questions, and the
+            # pre-flight check above can only answer the first. Triton 3.8.0 is
+            # the case that proves it: it registers ``rocprofiler``, so
+            # ``get_available_profilers()`` lists it and the check passes, but
+            # its ``RocprofSDKProfiler::doSetMode`` accepts only
+            # ``periodic_flushing`` and throws on ``pcsampling``. Converted to
+            # the same exit 2 an absent backend gets, because it is the same
+            # answer -- this environment cannot take the measurement -- rather
+            # than a C++ invalid_argument out of Proton's internals. Narrow
+            # exceptions on purpose: pybind maps that throw to ValueError, and
+            # anything else here is a bug worth seeing as a traceback.
+            print(
+                f"gelu: Proton refused backend={capture['backend']!r} with "
+                f"mode={capture['mode']!r}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "gelu: the backend exists on this Triton but does not support "
+                "that mode. AMD pcsampling landed after the 3.8.0 tag, so it "
+                "needs an upstream `main` build; `periodic_flushing` works on "
+                "3.8.0.",
+                file=sys.stderr,
+            )
+            return 2
     try:
         for _ in range(args.iters):
             gelu(x)
