@@ -21,6 +21,7 @@ reproducer that can be made to confirm a defect on demand.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -349,12 +350,55 @@ def test_anchoring_still_matches_genuine_hook_output(
     assert _matches(f"{patterns['HOOK_LINE']} {patterns[key]}", log, tmp_path)
 
 
-def _run_script(object_path: str) -> subprocess.CompletedProcess[str]:
+def _sandbox(tmp_path: Path) -> dict[str, str]:
+    """Environment that lets the script reach its object-path guard without ROCm.
+
+    The guard runs after the ``hipcc`` preflight, so on a machine without ROCm the
+    script dies before it and these tests would assert against the wrong error.
+    Stubbing rather than marking the tests ``rocm`` is deliberate: the guard is
+    pure shell logic with nothing to run on a GPU, so it belongs in the CPU
+    matrix, and stubbing also pins the behaviour on a machine that *does* have a
+    real hipcc -- where these tests otherwise pass for the wrong reason. That is
+    how the gap reached CI in the first place.
+
+    ``ROCM_PATH`` points at nothing so the script's own PATH prepend cannot shadow
+    the stubs, making the run identical on both kinds of host.
+    """
+    bindir = tmp_path / "stubbin"
+    bindir.mkdir(exist_ok=True)
+    # Failing is the fast, deterministic outcome: a hostile path dies at the
+    # guard before this is ever invoked, and an accepted path stops here instead
+    # of running the whole hooked flow.
+    stub = bindir / "hipcc"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    env["ROCM_PATH"] = str(tmp_path / "no-such-rocm")
+    env["ROCM_HOME"] = env["ROCM_PATH"]
+    return env
+
+
+def _run_script(object_path: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(_SCRIPT), "--hook", "/bin/true", "--object", object_path],
         capture_output=True,
         text=True,
         check=False,
+        env=_sandbox(tmp_path),
+    )
+
+
+def test_the_sandbox_reaches_the_guard_at_all() -> None:
+    """Guard against the stubs silently stopping the script too early.
+
+    Without this, every rejection test above could pass because the run died at
+    ``hipcc`` with a message that happens not to contain the guard text.
+    """
+    body = _SCRIPT.read_text()
+    assert body.index('command -v hipcc') < body.index('case "${OBJECT}" in'), (
+        "the hipcc preflight no longer precedes the object guard; the sandbox "
+        "may no longer be needed, or may need to stub something else"
     )
 
 
@@ -377,7 +421,7 @@ def test_hostile_object_path_is_rejected(tmp_path: Path, name: str, why: str) ->
     """
     spoof = tmp_path / name
     spoof.write_bytes(b"")
-    proc = _run_script(str(spoof))
+    proc = _run_script(str(spoof), tmp_path)
     assert proc.returncode == 2, why
     assert "must not contain a newline, backslash or double quote" in proc.stderr
 
@@ -385,17 +429,40 @@ def test_hostile_object_path_is_rejected(tmp_path: Path, name: str, why: str) ->
 def test_ordinary_object_path_is_not_rejected(tmp_path: Path) -> None:
     """The guard must not fire on real paths.
 
-    This run fails later for want of ROCm, so assert only that it cleared
-    validation -- otherwise the test above would pass against a guard that
-    rejects everything.
+    The run stops at the stubbed hipcc just after the guard, which is the proof
+    it got past validation -- otherwise the test above would pass equally well
+    against a guard that rejects everything.
     """
     target = tmp_path / "obj.hsaco"
     target.write_bytes(b"")
-    assert "must not contain a newline" not in _run_script(str(target)).stderr
+    proc = _run_script(str(target), tmp_path)
+    assert "must not contain a newline" not in proc.stderr
+    assert "hipcc failed to build the loader" in proc.stderr
 
 
 def test_object_path_guard_covers_the_workdir_path_too(tmp_path: Path) -> None:
-    """`--workdir` also feeds the path that gets embedded, so it needs the same check."""
+    """`--workdir` feeds the embedded path on the extraction branch, which has no --object.
+
+    That branch is why the guard sits at the point of use rather than at argument
+    parsing: a parse-time check on ``--object`` never sees this path at all.
+    """
+    # Reaching the guard on this branch needs a hipBLASLt bundle to extract from
+    # and a bundler to extract it, neither of which a CPU runner has. Both are
+    # faked so the branch is exercised rather than skipped -- the guard runs
+    # before either is read for content, so nothing here has to be a real object.
+    bundle_name = re.search(r'^BUNDLE_NAME="([^"]+)"$', _SCRIPT.read_text(), re.MULTILINE)
+    assert bundle_name, "BUNDLE_NAME is no longer a plain assignment in the script"
+    rocm = tmp_path / "fake-rocm"
+    library = rocm / "lib" / "hipblaslt" / "library"
+    library.mkdir(parents=True)
+    (library / bundle_name.group(1)).write_bytes(b"")
+
+    env = _sandbox(tmp_path)
+    env["ROCM_PATH"] = env["ROCM_HOME"] = str(rocm)
+    bundler = Path(env["PATH"].split(os.pathsep)[0]) / "clang-offload-bundler"
+    bundler.write_text("#!/bin/sh\nexit 0\n")
+    bundler.chmod(0o755)
+
     workdir = tmp_path / 'w"quote'
     workdir.mkdir()
     proc = subprocess.run(
@@ -403,10 +470,7 @@ def test_object_path_guard_covers_the_workdir_path_too(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
-    # Reaching the guard needs a local hipBLASLt bundle to extract; where that is
-    # absent the run dies earlier, and the guard is unreachable rather than wrong.
-    if "no gfx950 f32 SS Tensile bundle" in proc.stderr:
-        pytest.skip("no local hipBLASLt bundle, so extraction dies before the guard")
-    assert proc.returncode == 2
+    assert proc.returncode == 2, proc.stderr
     assert "must not contain a newline, backslash or double quote" in proc.stderr
