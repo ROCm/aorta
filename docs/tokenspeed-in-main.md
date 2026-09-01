@@ -238,6 +238,15 @@ Everything measured here is gfx950 (MI355X), ROCm 7.0.2.2. Docker is required;
 `tokenspeed_serve` fails in `setup()` if `docker` is not on `PATH` or if
 `/dev/kfd` is not readable and writable.
 
+That ROCm version records what the figures below were taken on; it is not a
+floor. Since [#411](https://github.com/ROCm/aorta/pull/411) AORTA's own CI and
+dev stack is ROCm 10 / Ubuntu 26.04 / py3.14 / torch 2.13, so an environment
+provisioned from the README today will not match it. That does not invalidate
+anything here: every route runs inside the pinned third-party
+`lightseekorg/tokenspeed-amd` image, which carries its own ROCm, and the package
+floor is still Python 3.10. The figures have simply not been re-taken since the
+flip, so treat them as measured on the older base.
+
 **1. Allocate a node. Do not run on the head node.**
 
 ```bash
@@ -460,6 +469,11 @@ Measured on `main` at `7f82258`, Python 3.10.12, pytest 9.1.1:
 | `tests/ci/test_dashboard_and_alert.py` | 112 |
 | `tests/ci/test_eval_lib.py` | 21 |
 | `tests/ci/test_nightly_eval.py` | 24 |
+
+Re-run on `30dcc05`, the ROCm 10 flip, on the same Python 3.10.12: the two
+TokenSpeed suites collect 584 and all 584 pass. The package floor is still
+Python 3.10, so these stay runnable from a 3.10 venv even though the CI and dev
+stack has moved to 3.14.
 
 **What they prove.** The probe suite covers script syntax, the guardrails (NFS
 refusal, missing entry script, missing selector), input validation on the
