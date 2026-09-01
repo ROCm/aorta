@@ -113,6 +113,8 @@ def _read_one(path: str, kind: str, label: str) -> str:
         # Given a run directory, find the artifact in it rather than making the
         # model guess the filename -- env.json and host_env.json are the same
         # shape written under different names depending on how aorta was run.
+        # iter_artifacts walks in sorted order, so a directory holding both
+        # resolves to env.json every time rather than varying per filesystem.
         candidates = [p for p, k in iter_artifacts(target, max_depth=1) if k == kind]
         if not candidates:
             return (
