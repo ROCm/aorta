@@ -8,6 +8,7 @@ rather than a traceback. Nothing here invokes the agent.
 from __future__ import annotations
 
 import importlib.util
+from collections import namedtuple
 
 import pytest
 from click.testing import CliRunner
@@ -65,3 +66,26 @@ def test_missing_extra_shows_an_install_hint() -> None:
     result = CliRunner().invoke(chat, ["ask", "hello"])
     assert result.exit_code != 0
     assert "amd-aorta[chat-cli]" in result.output
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("chainlit") is not None,
+    reason="chainlit installed -- neither error path is active",
+)
+def test_ui_names_the_python_ceiling_rather_than_looping(monkeypatch) -> None:
+    """A py3.14 user must not be told to install an extra that installs nothing.
+
+    Chainlit declares ``Requires-Python < 3.14``, so on 3.14
+    ``pip install amd-aorta[chat-ui]`` succeeds and resolves to nothing. Advising
+    it would send the user round a loop.
+    """
+    from aorta.cli import chat as cli_chat
+
+    # sys.version_info is not constructible, and a bare tuple would not carry
+    # the .major/.minor the message formats.
+    fake = namedtuple("version_info", "major minor micro releaselevel serial")
+    monkeypatch.setattr(cli_chat.sys, "version_info", fake(3, 14, 0, "final", 0))
+    result = CliRunner().invoke(chat, ["ui"])
+    assert result.exit_code != 0
+    assert "Chainlit does not support Python 3.14" in result.output
+    assert "amd-aorta[chat-ui]" not in result.output

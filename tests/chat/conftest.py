@@ -15,7 +15,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # directory skips itself rather than erroring at collection. The import-boundary
 # tests deliberately live in tests/cli/ instead, because those are pure AST and
 # must run here too.
-if importlib.util.find_spec("langchain_core") is None:  # pragma: no cover
+#
+# The guard has to cover this file's own imports, not just the test modules:
+# pytest imports a conftest before it consults collect_ignore_glob, so an
+# unconditional `import httpx` here would fail collection for the whole run
+# rather than skipping one directory. Every name below is used inside a fixture
+# body, so the conditional import is enough.
+CHAT_EXTRA_INSTALLED = importlib.util.find_spec("langchain_core") is not None
+
+if not CHAT_EXTRA_INSTALLED:  # pragma: no cover - exercised on a base install
     collect_ignore_glob = ["test_*.py"]
 
 # Settings that steer control flow are pinned before anything reads them.
@@ -27,10 +35,12 @@ if importlib.util.find_spec("langchain_core") is None:  # pragma: no cover
 # settings object directly.
 os.environ["AORTA_CHAT_LLM_TOOL_MODE"] = "text"
 
-import httpx  # noqa: E402
 import pytest  # noqa: E402
-from langchain_core.documents import Document  # noqa: E402
-from langchain_core.messages import AIMessage  # noqa: E402
+
+if CHAT_EXTRA_INSTALLED:
+    import httpx
+    from langchain_core.documents import Document
+    from langchain_core.messages import AIMessage
 
 
 @pytest.fixture(autouse=True)

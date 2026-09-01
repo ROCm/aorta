@@ -58,7 +58,7 @@ def test_a_profile_copy_nested_in_a_trial_is_skipped(run_dir: Path):
     """
     nested = run_dir / "cell_a" / "trial_0" / CHAT_CONFIG_FILENAME
     nested.write_text('remote_llm_api_key = "sk-must-not-ship"\n', encoding="utf-8")
-    collected = {p for p in _iter_source_files(run_dir)}
+    collected = set(_iter_source_files(run_dir))
     assert nested not in collected
 
 

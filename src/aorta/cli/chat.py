@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 #: installed".
 _MIN_PYTHON = (3, 11)
 
+#: Chainlit's own ceiling, so ``aorta chat ui`` can tell a py3.14 user why the
+#: chat-ui extra installed cleanly and gave them nothing.
+_MAX_PYTHON_UI = (3, 14)
+
 _INSTALL_HINT = (
     "'aorta chat' requires the chat-cli extra.\n"
     "Install it with:  pip install 'amd-aorta[chat-cli]'"
@@ -449,9 +453,10 @@ def chat(
 ) -> None:
     """Ask questions about the AORTA codebase (interactive REPL).
 
-    Bare ``aorta chat`` starts the REPL; ``aorta chat ask "..."`` answers once
-    and exits. Requires the chat-cli extra:
-    ``pip install 'amd-aorta[chat-cli]'``.
+    Bare 'aorta chat' starts the REPL; 'aorta chat ask "..."' answers once and
+    exits. Requires the chat-cli extra:
+
+      pip install 'amd-aorta[chat-cli]'
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -484,6 +489,18 @@ def ui(host: str, port: int) -> None:
     import subprocess
 
     if importlib.util.find_spec("chainlit") is None:
+        if sys.version_info >= _MAX_PYTHON_UI:
+            # Saying "install the chat-ui extra" here would send the user round
+            # a loop: pip installs it successfully and Chainlit's marker
+            # excludes it, so nothing changes. Name the real cause instead.
+            want = ".".join(str(part) for part in _MAX_PYTHON_UI)
+            have = f"{sys.version_info.major}.{sys.version_info.minor}"
+            raise click.ClickException(
+                f"Chainlit does not support Python {have} (it declares "
+                f"< {want}), so the chat-ui extra installs nothing on this "
+                "interpreter. Use a 3.11-3.13 environment for the web UI; "
+                "'aorta chat' and 'aorta chat ask' work here."
+            )
         raise click.ClickException(
             "'aorta chat ui' requires the chat-ui extra.\n"
             "Install it with:  pip install 'amd-aorta[chat-ui]'"
@@ -530,11 +547,11 @@ def config_group() -> None:
     help="Write the profile template without prompting (for scripting).",
 )
 def config_init(profile: str, force: bool, no_input: bool) -> None:
-    """Write a chat profile for PROFILE.
+    """Write a chat profile for the chosen --profile.
 
-    The file is created mode 0600 because it may hold an API key
-    (Decision 9b). ``aorta bundle`` refuses to package it, and
-    ``aorta chat config show`` masks the key unless ``--reveal`` is passed.
+    The file is created mode 0600 because it may hold an API key. 'aorta
+    bundle' refuses to package it, and 'aorta chat config show' masks the key
+    unless --reveal is passed.
     """
     config = _load("config")
     from aorta._user_paths import chat_config_path

@@ -10,9 +10,9 @@ so the masking is tested as a contract, not as formatting.
 from __future__ import annotations
 
 import stat
-import tomllib
 
 import pytest
+import tomllib
 from click.testing import CliRunner
 
 from aorta.chat import config
