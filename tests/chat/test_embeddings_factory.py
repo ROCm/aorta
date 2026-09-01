@@ -2,7 +2,7 @@
 
 Nothing here loads a model. The local BGE provider is only ever asked for its
 name and collection -- never for ``get_embeddings()``, whose first embed would
-download 90 MB of ONNX weights -- and the remote provider is built with a
+download 65 MB of ONNX weights -- and the remote provider is built with a
 placeholder key under the ``no_network`` guard.
 
 Provider-specific behaviour lives in ``test_fastembed_provider.py``; this file

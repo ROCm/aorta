@@ -70,7 +70,7 @@ PRE_SEED_PROCEDURE = (
     "       aorta chat doctor            # downloads nothing\n"
     "       python -c 'from fastembed import TextEmbedding; "
     'TextEmbedding("{model}", cache_dir="/tmp/aorta-model-cache")\'\n'
-    "  2. Copy that directory to this machine (it is ~90 MB):\n"
+    "  2. Copy that directory to this machine (it is ~65 MB):\n"
     "       rsync -a /tmp/aorta-model-cache/ <this-host>:{cache}/\n"
     "  3. On this machine, point at it and forbid network lookups:\n"
     "       export HF_HOME={cache}\n"
@@ -98,7 +98,7 @@ def model_cache_dir() -> Path:
     An explicit directory, not fastembed's default. Verified rather than
     assumed: fastembed ignores ``HF_HOME`` and caches under
     ``/tmp/fastembed_cache``, which is wiped on reboot -- so every reboot would
-    cost a 90 MB re-download -- and is world-writable on a shared node.
+    cost a 65 MB re-download -- and is world-writable on a shared node.
 
     ``HF_HOME`` still wins when set, because a user who set it did so
     deliberately and because pre-seeding through it is the HuggingFace idiom
@@ -121,7 +121,7 @@ def model_is_cached(model: str | None = None) -> bool:
     """Whether the ONNX weights are already on disk.
 
     Deliberately a filesystem check rather than a ``TextEmbedding(...)``
-    construction: ``doctor`` must answer this without a 90 MB download as a side
+    construction: ``doctor`` must answer this without a 65 MB download as a side
     effect. fastembed downloads from a *source* repo rather than from the model
     id, so both names are accepted -- a cache seeded through either counts. The
     ``hub`` subdirectory is checked too, so a cache seeded by plain

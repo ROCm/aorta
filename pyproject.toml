@@ -148,11 +148,12 @@ chat-cli = [
     # fastembed's own default, so the retrieval quality is BGE's rather than
     # MiniLM's with no torch anywhere. This is what deleted the CUDA-on-AMD
     # hazard: sentence-transformers hard-required torch, and pip resolves the
-    # CUDA build by default. Verified against fastembed 0.8.0's metadata -- the
-    # only wheels it adds beyond what langchain already installs are
-    # onnxruntime, pillow, protobuf, flatbuffers, loguru, mmh3 and
-    # py-rust-stemmers, about 40 MB. 0.4.0 is the floor for the cache_dir
-    # argument this code passes.
+    # CUDA build by default. Verified against fastembed 0.8.0's metadata rather
+    # than its README: it does NOT depend on `onnx`, and beyond what langchain
+    # already installs it adds only onnxruntime, pillow, protobuf, flatbuffers,
+    # loguru, mmh3 and py-rust-stemmers -- ~30 MB of wheels, ~86 MB installed,
+    # against the 2.7 GB the torch path could resolve. 0.4.0 is the floor for
+    # the cache_dir argument this code passes.
     "fastembed>=0.4.0; python_version >= '3.11'",
     "rich>=10.0.0; python_version >= '3.11'",
 ]

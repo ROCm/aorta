@@ -691,7 +691,7 @@ def index_build(
     """Build the index from source on this machine.
 
     The air-gapped and developer path. Needs the embedding weights, which are
-    downloaded once (~90 MB) unless the cache is pre-seeded -- run 'aorta chat
+    downloaded once (~65 MB) unless the cache is pre-seeded -- run 'aorta chat
     doctor' first if this node has no egress.
     """
     _index_logging(verbose)

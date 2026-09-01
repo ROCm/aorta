@@ -111,7 +111,7 @@ class TestDocuments:
 
 class TestLazyLoading:
     def test_construction_loads_no_model(self, monkeypatch):
-        """``doctor`` and collection lookups must not cost a 90 MB download."""
+        """``doctor`` and collection lookups must not cost a 65 MB download."""
         called = []
         monkeypatch.setattr(
             fastembed_bge, "_text_embedding", lambda *a, **k: called.append(a) or _FakeModel()
@@ -219,7 +219,7 @@ class TestModelCacheProbe:
         """fastembed's default is /tmp/fastembed_cache: wiped on reboot, shared.
 
         Verified against fastembed 0.8.0 rather than assumed. Leaving it there
-        would cost a 90 MB re-download after every reboot and put the weights in
+        would cost a 65 MB re-download after every reboot and put the weights in
         a directory other users on a shared node can write.
         """
         monkeypatch.delenv("HF_HOME", raising=False)

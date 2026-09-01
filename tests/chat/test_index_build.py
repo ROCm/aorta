@@ -322,7 +322,7 @@ class TestBuildIndex:
 def _install_fake_embedder(monkeypatch) -> None:
     """Replace the provider with a deterministic 8-dimension bag-of-words model.
 
-    Real embeddings would mean a 90 MB download and a minute of CPU per test;
+    Real embeddings would mean a 65 MB download and a minute of CPU per test;
     what these tests are about is the plumbing around the vectors.
     """
     from langchain_core.embeddings import Embeddings

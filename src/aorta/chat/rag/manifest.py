@@ -258,7 +258,7 @@ def validate(
     """Check a manifest against what this install would query with.
 
     ``dimensions`` is optional because the caller may not know it before the
-    model is loaded, and loading it costs a 90 MB download on a cold cache. The
+    model is loaded, and loading it costs a 65 MB download on a cold cache. The
     model and collection checks are the load-bearing ones; the dimension check
     is a second, cheaper net for a model whose dimensions changed under a
     stable name.

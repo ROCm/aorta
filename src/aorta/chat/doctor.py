@@ -201,7 +201,7 @@ def _check_embedding_model(report: Report) -> None:
             WARN,
             f"{state['model']} is not cached, but HuggingFace is reachable",
             hint=(
-                "It will be downloaded (~90 MB) on the first query or index "
+                "It will be downloaded (~65 MB) on the first query or index "
                 "build. Pre-warm it now with: aorta chat index build"
             ),
         )
