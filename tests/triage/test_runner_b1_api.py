@@ -1531,3 +1531,189 @@ def test_resume_hydration_rejects_request_fingerprint_mismatch(tmp_path):
     )
 
     assert hydrated == {}
+
+
+# ---- Layer 2: DT_RPATH vs LD_LIBRARY_PATH (issue #413) --------------------
+#
+# The design property under test is precision, not detection. A warning that
+# fires on every ROCm 10 run -- or on every run that sets LD_LIBRARY_PATH --
+# trains operators to scroll past it, and it would then be scrolled past on
+# the one run where a substitution was silently discarded. So the negative
+# cases below carry as much weight as the positive one.
+
+
+def _substitution_recipe(ld_library_path: str | None):
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    extra_env = {}
+    if ld_library_path is not None:
+        extra_env["LD_LIBRARY_PATH"] = ld_library_path
+    return Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=1,
+        cells=(
+            Cell(
+                name="patched-hipblaslt",
+                mitigations=("none",),
+                environment="local",
+                extra_env=extra_env,
+            ),
+        ),
+        confound=ConfoundCfg(baseline_cell="patched-hipblaslt"),
+    )
+
+
+def _matrix_warnings(tmp_path: Path) -> list[str]:
+    matrix = next(tmp_path.rglob("matrix.json"))
+    return json.loads(matrix.read_text(encoding="utf-8"))["warnings"]
+
+
+@pytest.fixture
+def rpath_stack(monkeypatch):
+    """Pretend the resolved ROCm libraries carry DT_RPATH."""
+    monkeypatch.setattr(runner, "_rocm_rpath_state", True)
+
+
+@pytest.fixture
+def runpath_stack(monkeypatch):
+    """Pretend they carry DT_RUNPATH -- i.e. every ROCm 7.x host."""
+    monkeypatch.setattr(runner, "_rocm_rpath_state", False)
+
+
+def test_warns_when_ld_library_path_meets_an_rpath_stack(
+    tmp_path, patched_env, patched_run_trials, rpath_stack, caplog
+):
+    """Both conditions hold: the substitution may be silently discarded."""
+    with caplog.at_level("WARNING", logger="aorta.triage.runner"):
+        runner.run_recipe(
+            _substitution_recipe("/opt/patched/lib"),
+            output_dir=tmp_path,
+            timestamp="2026-01-01T00-00-00",
+        )
+
+    warnings = _matrix_warnings(tmp_path)
+    hit = next(w for w in warnings if "DT_RPATH" in w)
+    # Actionable: names the cell, the mechanism, and the way out.
+    assert "patched-hipblaslt" in hit
+    assert "LD_LIBRARY_PATH" in hit
+    assert "BEFORE" in hit
+    assert "LD_PRELOAD" in hit
+    assert "recipes/hrx/" in hit
+    # And it reaches a console reader, not only the artifact.
+    assert "DT_RPATH" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_silent_when_ld_library_path_meets_a_runpath_stack(
+    tmp_path, patched_env, patched_run_trials, runpath_stack
+):
+    """Substitution on ROCm 7.x works. Warning here would be crying wolf.
+
+    This is the case that rules out a version- or "is LD_LIBRARY_PATH set"
+    trigger: it describes essentially every substitution run performed to
+    date, all of which behaved exactly as the operator intended.
+    """
+    runner.run_recipe(
+        _substitution_recipe("/opt/patched/lib"),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+    assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+
+
+def test_silent_when_rpath_stack_has_no_substitution(
+    tmp_path, patched_env, patched_run_trials, rpath_stack
+):
+    """A ROCm 10 run that substitutes nothing has nothing to lose.
+
+    Rules out triggering on the ELF fact alone, which would fire on 100%
+    of ROCm 10 runs and say nothing about any of them.
+    """
+    runner.run_recipe(
+        _substitution_recipe(None),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+    assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+
+
+def test_silent_when_the_link_tags_could_not_be_read(
+    tmp_path, patched_env, patched_run_trials, monkeypatch
+):
+    """``rocm_rpath is None`` is "we don't know", which is not grounds to warn.
+
+    Guards the tempting ``if not ...use_rpath()`` spelling, under which
+    ``None`` would read as False (silent, correct here) but the inverse
+    check elsewhere would read as True.
+    """
+    monkeypatch.setattr(runner, "_rocm_rpath_state", None)
+    runner.run_recipe(
+        _substitution_recipe("/opt/patched/lib"),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+    assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+
+
+def test_operator_ld_library_path_reaches_the_child_unmodified(
+    tmp_path, patched_env, patched_run_trials, rpath_stack
+):
+    """Layer 2 warns. It must never edit the environment under test.
+
+    Prepending the stock ROCm directories would outrank nothing (DT_RPATH
+    is consulted first regardless) while hijacking the very substitution
+    the operator asked for -- turning a loud, diagnosable problem into a
+    quiet, wrong one.
+    """
+    runner.run_recipe(
+        _substitution_recipe("/opt/patched/lib"),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+    request = patched_run_trials.call_args_list[0].args[0]
+    assert request.extra_env["LD_LIBRARY_PATH"] == "/opt/patched/lib"
+    # Byte-for-byte: no appended stock dir, no reordering, no separator fixup.
+    assert "/opt/rocm" not in request.extra_env["LD_LIBRARY_PATH"]
+
+    matrix = next(tmp_path.rglob("matrix.json"))
+    cell = json.loads(matrix.read_text(encoding="utf-8"))["cells"][0]
+    assert cell["resolved_env_vars"]["LD_LIBRARY_PATH"] == "/opt/patched/lib"
+
+
+def test_link_tags_are_read_once_not_once_per_cell(monkeypatch):
+    """The ELF read is filesystem I/O; it must not sit in the matrix loop.
+
+    The tags belong to the installed libraries, which cannot change under
+    a running matrix, so one read per process is both sufficient and the
+    only affordable option for a 30-cell recipe.
+    """
+    monkeypatch.setattr(runner, "_rocm_rpath_state", runner._RPATH_UNPROBED)
+    calls: list[int] = []
+
+    def counting_capture():
+        calls.append(1)
+        return {"rocm_rpath": True}
+
+    monkeypatch.setattr(runner, "_capture_library_linkage", counting_capture)
+    for _ in range(5):
+        assert runner._rocm_libraries_use_rpath() is True
+    assert len(calls) == 1
+
+
+def test_warning_predicate_is_pure_and_does_not_touch_the_bundle(rpath_stack):
+    """The detector inspects; the caller decides what to do with the string."""
+    bundle = {"LD_LIBRARY_PATH": "/opt/patched/lib", "HSA_XNACK": "1"}
+    before = dict(bundle)
+    message = runner._rpath_substitution_warning("cell-a", bundle)
+    assert message is not None
+    assert bundle == before
+
+
+def test_silent_when_ld_library_path_is_empty(rpath_stack):
+    """An empty LD_LIBRARY_PATH contributes no directory to search.
+
+    Set-but-empty is not a substitution attempt, so treating it as one
+    would fire the warning on a run with nothing to lose.
+    """
+    assert runner._rpath_substitution_warning("cell-a", {"LD_LIBRARY_PATH": ""}) is None

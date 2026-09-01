@@ -50,7 +50,11 @@ from typing import Any, Literal
 
 import click
 
-from aorta.instrumentation.environment import EnvSnapshot, collect_env
+from aorta.instrumentation.environment import (
+    EnvSnapshot,
+    _capture_library_linkage,
+    collect_env,
+)
 from aorta.registry import get_environment, get_mitigation
 from aorta.registry.errors import RegistryError
 from aorta.run import RunRequest, TrialResult, run_trials
@@ -625,9 +629,14 @@ def _resolve_cell_env_vars(
     inherited by every object below the one carrying it, so a stock sibling
     on ``$ORIGIN/../lib`` wins instead -- with no loader diagnostic and a zero
     exit status, meaning the cell passes while measuring the library the
-    operator meant to replace. ``LD_PRELOAD`` is subject to neither and stays
+    operator meant to replace.     ``LD_PRELOAD`` is subject to neither and stays
     the reliable way to force a specific object; :mod:`aorta.workloads.hrx`
     pairs the two and fails the trial when the loader ignores the preload.
+
+    This function only COMPUTES the bundle -- it never mutates it to work
+    around the above. :func:`_rpath_substitution_warning` inspects the
+    result and warns; see its docstring for why aorta must not "fix" the
+    search order on the operator's behalf.
     """
     extra = list(sidecar_files) if sidecar_files else None
     env: dict[str, str] = {}
@@ -651,6 +660,79 @@ def _resolve_cell_env_vars(
         env.update(get_mitigation(name, extra_files=extra))
     env.update(cell_extra_env)
     return env
+
+
+# Sentinel distinct from ``None``, which is a real answer here ("we could not
+# determine what the libraries carry").
+_RPATH_UNPROBED = object()
+_rocm_rpath_state: Any = _RPATH_UNPROBED
+
+
+def _rocm_libraries_use_rpath() -> bool | None:
+    """``True`` / ``False`` / ``None`` -- do the resolved ROCm libraries use RPATH?
+
+    Reads the schema-1.17 ``library_linkage`` block, which parses the ELF
+    dynamic sections directly. Cached for the life of the process: the fact
+    is a property of the installed libraries, which do not change under a
+    running matrix, and this is consulted once per cell -- re-reading six
+    files per cell would put filesystem I/O in the matrix loop for an
+    answer that cannot have changed.
+
+    ``None`` means the libraries could not be read at all, and callers must
+    treat it as "no warrant to warn" rather than as ``False``.
+    """
+    global _rocm_rpath_state
+    if _rocm_rpath_state is _RPATH_UNPROBED:
+        _rocm_rpath_state = _capture_library_linkage().get("rocm_rpath")
+    return _rocm_rpath_state
+
+
+def _rpath_substitution_warning(
+    cell_name: str, resolved_env_vars: dict[str, str]
+) -> str | None:
+    """Warn iff this cell's bundle may be silently ignored by the loader.
+
+    Fires only when BOTH hold: the cell sets ``LD_LIBRARY_PATH`` (so a
+    library substitution is actually being attempted) and the resolved
+    ROCm libraries carry ``DT_RPATH`` (so the loader will consult their
+    baked-in paths first). Either alone is unremarkable -- ROCm 7.x runs
+    substitute libraries successfully every day, and a ROCm 10 run that
+    is not substituting anything has nothing to lose -- and warning on
+    either alone would train operators to ignore the message, which
+    costs more than it buys the one time it matters.
+
+    Deliberately does NOT repair the situation. Prepending the stock ROCm
+    directories to the child's ``LD_LIBRARY_PATH``, or otherwise editing
+    the bundle, would hijack the very substitution the operator asked
+    for; and short of ``LD_PRELOAD`` there is no way to outrank
+    ``DT_RPATH`` anyway. The goal is to make a silent failure loud, not
+    to restore the old search order. The environment handed to the
+    process under test is exactly what the recipe resolved.
+    """
+    # Truthiness, not membership: an empty LD_LIBRARY_PATH contributes no
+    # search directory, so it is not a substitution attempt and warning on
+    # it would be exactly the crying-wolf this predicate exists to avoid.
+    if not resolved_env_vars.get("LD_LIBRARY_PATH"):
+        return None
+    if _rocm_libraries_use_rpath() is not True:
+        return None
+    return (
+        f"cell {cell_name!r} sets LD_LIBRARY_PATH, but the resolved ROCm "
+        "libraries are linked with DT_RPATH, which the loader searches "
+        "BEFORE LD_LIBRARY_PATH. A library substitution may be silently "
+        "ignored: the trial still exits 0 with no loader diagnostic, and "
+        "the result would describe the stock library rather than the "
+        "substituted one. DT_RPATH is also inherited by every object "
+        "loaded beneath the one carrying it, so a neighbouring ROCm "
+        "library can defeat the override even when the library being "
+        "replaced does not itself carry the tag. LD_PRELOAD is subject "
+        "to neither tag and remains reliable -- the recipes under "
+        "recipes/hrx/ pair the two, and the hrx workload fails the trial "
+        "when the loader rejects the preload. Verify with "
+        "LD_DEBUG=libs. aorta has NOT altered the environment; "
+        "LD_LIBRARY_PATH reaches the workload exactly as the recipe "
+        "resolved it."
+    )
 
 
 def _cells_dir(run_dir: Path) -> Path:
@@ -1780,6 +1862,16 @@ def _run_recipe_locked(
             env_probe=env_probe_arg,
         )
         cell_elapsed = time.perf_counter() - cell_t0
+
+        # Emitted here rather than inside _resolve_cell_env_vars because this
+        # is where a sink exists that an operator actually reads: `warnings`
+        # is rendered into matrix.md and matrix.json. The predicate lives
+        # next to _resolve_cell_env_vars (which owns the hazard docstring);
+        # only the emission is here.
+        rpath_warning = _rpath_substitution_warning(cell.name, resolved_env_vars)
+        if rpath_warning is not None:
+            warnings.append(rpath_warning)
+            log.warning("%s", rpath_warning)
 
         # Promote the wrapper's in-container snapshot if this cell produced
         # one. Retries across cells reusing the env: only cells still in

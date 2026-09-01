@@ -31,6 +31,7 @@ import importlib.util
 import json
 import logging
 import os
+import struct
 import subprocess
 import sys
 import types
@@ -188,6 +189,7 @@ class TestPathConstants:
         [
             "ROCM_ROOT",
             "ROCM_LIB_ROOT",
+            "ROCM_CORE_LIB_DIR",
             "ROCM_INCLUDE_ROOT",
             "ROCM_BIN_DIR",
             "ROCM_VERSION_FILE",
@@ -246,6 +248,10 @@ class TestPathConstants:
             # ROCm path below is derived from one of them.
             "ROCM_ROOT",
             "ROCM_LIB_ROOT",
+            # Schema 1.17: the CORE lib dir, which is a DIFFERENT directory
+            # from ROCM_LIB_ROOT/lib in the wheel layout -- it is where
+            # libamdhip64 lives, and the linkage probe reads its tags there.
+            "ROCM_CORE_LIB_DIR",
             "ROCM_INCLUDE_ROOT",
             "ROCM_BIN_DIR",
             "ROCM_VERSION_FILE",
@@ -340,6 +346,7 @@ REQUIRED_TOP_KEYS = {
     "container_detected",
     "execution_context",
     "probe_namespace",
+    "library_linkage",
 }
 
 
@@ -643,6 +650,33 @@ def _example_snapshot(**overrides) -> object:
             "likely_execution_platform": None,
         },
         "probe_namespace": "mnt:0123456789abcdef",
+        # Schema 1.17. Deliberately a MIXED reading -- ROCm objects on
+        # DT_RPATH while torch's own library is on DT_RUNPATH -- because that
+        # is the real ROCm 10 shape (issue #413) and a single-tag fixture
+        # would let a "collapse to one verdict" regression round-trip clean.
+        "library_linkage": {
+            "status": "ok",
+            "rocm_rpath": True,
+            "tags_observed": ["rpath", "runpath"],
+            "libraries": [
+                {
+                    "name": "libhipblaslt.so",
+                    "scope": "rocm",
+                    "path": "/opt/rocm/lib/libhipblaslt.so.1",
+                    "dt_tags": ["rpath"],
+                    "effective_tag": "rpath",
+                    "reason": None,
+                },
+                {
+                    "name": "libtorch_hip.so",
+                    "scope": "pytorch",
+                    "path": "/site-packages/torch/lib/libtorch_hip.so",
+                    "dt_tags": ["runpath"],
+                    "effective_tag": "runpath",
+                    "reason": None,
+                },
+            ],
+        },
     }
     base.update(overrides)
     return EnvSnapshot(**base)
@@ -12272,3 +12306,360 @@ class TestPythonPackageVersionHelper:
             "fakepkg", reasons, reason_prefix="custom.thing"
         )
         assert any(r.startswith("custom.thing:") for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# library_linkage: DT_RPATH vs DT_RUNPATH (schema 1.17, issue #413)
+# ---------------------------------------------------------------------------
+
+DT_NULL = 0
+DT_SONAME = 14
+DT_RPATH = 15
+DT_RUNPATH = 29
+
+
+def _write_elf(
+    path: Path,
+    tags: tuple[int, ...],
+    *,
+    bits: int = 64,
+    endian: str = "<",
+) -> Path:
+    """Write a minimal but structurally valid ELF carrying *tags* in .dynamic.
+
+    Synthesised rather than compiled: the probe's whole job is to read the
+    dynamic section of libraries built by someone else's toolchain, so the
+    test must be able to produce an RPATH object on a host whose linker
+    defaults to RUNPATH (and vice versa) without needing a compiler at all.
+    Only the fields the parser reads are meaningful; everything else is
+    zero-filled.
+    """
+    is_64 = bits == 64
+    ehdr_size = 64 if is_64 else 52
+    phentsize = 56 if is_64 else 32
+    dyn_entry = 16 if is_64 else 8
+    phoff = ehdr_size
+    dynoff = phoff + phentsize
+
+    ident = b"\x7fELF" + bytes([2 if is_64 else 1, 1 if endian == "<" else 2, 1]) + bytes(9)
+    if is_64:
+        ehdr = ident + struct.pack(
+            f"{endian}HHIQQQIHHHHHH",
+            3, 62, 1, 0, phoff, 0, 0, ehdr_size, phentsize, 1, 0, 0, 0,
+        )
+    else:
+        ehdr = ident + struct.pack(
+            f"{endian}HHIIIIIHHHHHH",
+            3, 3, 1, 0, phoff, 0, 0, ehdr_size, phentsize, 1, 0, 0, 0,
+        )
+
+    dyn_entries = [*tags, DT_NULL]
+    dyn_size = len(dyn_entries) * dyn_entry
+    if is_64:
+        phdr = struct.pack(
+            f"{endian}IIQQQQQQ", 2, 0, dynoff, 0, 0, dyn_size, dyn_size, 8
+        )
+        dynamic = b"".join(
+            struct.pack(f"{endian}qQ", tag, 0) for tag in dyn_entries
+        )
+    else:
+        phdr = struct.pack(
+            f"{endian}IIIIIIII", 2, dynoff, 0, 0, dyn_size, dyn_size, 0, 4
+        )
+        dynamic = b"".join(
+            struct.pack(f"{endian}iI", tag, 0) for tag in dyn_entries
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(ehdr + phdr + dynamic)
+    return path
+
+
+class TestReadElfSearchPathTags:
+    """The ELF parse itself: what the file says, nothing inferred."""
+
+    def test_reads_rpath(self, tmp_path: Path):
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_SONAME, DT_RPATH))
+        assert env_mod._read_elf_search_path_tags(lib) == (["rpath"], None)
+
+    def test_reads_runpath(self, tmp_path: Path):
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_SONAME, DT_RUNPATH))
+        assert env_mod._read_elf_search_path_tags(lib) == (["runpath"], None)
+
+    def test_neither_tag_is_a_clean_read_not_an_error(self, tmp_path: Path):
+        """``([], None)`` -- "carries neither" is an answer, not a failure.
+
+        The distinction from ``([], reason)`` is the whole point: a
+        statically-pathed library and an unreadable one must not collapse
+        into the same reading.
+        """
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_SONAME,))
+        assert env_mod._read_elf_search_path_tags(lib) == ([], None)
+
+    def test_both_tags_are_both_reported(self, tmp_path: Path):
+        """The raw reading stays lossless; the loader's preference is derived."""
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_RPATH, DT_RUNPATH))
+        tags, error = env_mod._read_elf_search_path_tags(lib)
+        assert (tags, error) == (["rpath", "runpath"], None)
+        # glibc ignores DT_RPATH entirely once DT_RUNPATH is present.
+        assert env_mod._effective_link_tag(tags) == "runpath"
+
+    def test_32bit_big_endian_parses(self, tmp_path: Path):
+        """Not an x86-64 parser. DT_RPATH is 15 on every ABI."""
+        lib = _write_elf(
+            tmp_path / "libfoo.so", (DT_RPATH,), bits=32, endian=">"
+        )
+        assert env_mod._read_elf_search_path_tags(lib) == (["rpath"], None)
+
+    def test_non_elf_file_reports_a_reason(self, tmp_path: Path):
+        plain = tmp_path / "libfoo.so"
+        plain.write_text("I am a linker script, not an object\n")
+        tags, error = env_mod._read_elf_search_path_tags(plain)
+        assert tags == []
+        assert error == "not an ELF file"
+
+    def test_truncated_elf_reports_a_reason(self, tmp_path: Path):
+        stub = tmp_path / "libfoo.so"
+        stub.write_bytes(b"\x7fELF\x02\x01\x01" + bytes(9))
+        tags, error = env_mod._read_elf_search_path_tags(stub)
+        assert tags == []
+        assert error is not None
+
+    def test_missing_file_never_raises(self, tmp_path: Path):
+        tags, error = env_mod._read_elf_search_path_tags(tmp_path / "nope.so")
+        assert tags == []
+        assert error is not None
+
+    def test_absurd_program_header_count_is_bounded(self, tmp_path: Path):
+        """A corrupt header must not make the probe allocate gigabytes."""
+        lib = _write_elf(tmp_path / "libfoo.so", (DT_RPATH,))
+        raw = bytearray(lib.read_bytes())
+        struct.pack_into("<H", raw, 0x38, 60000)  # e_phnum
+        lib.write_bytes(bytes(raw))
+        tags, error = env_mod._read_elf_search_path_tags(lib)
+        assert tags == []
+        assert error is not None
+
+
+class TestCaptureLibraryLinkage:
+    """The block: per-library records plus the ANY aggregate Layer 2 uses."""
+
+    @pytest.fixture
+    def rocm_libs(self, tmp_path: Path, monkeypatch):
+        """Point every ROCm lib-dir constant at one empty temp directory."""
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        for name in (
+            "ROCM_CORE_LIB_DIR",
+            "HIPBLASLT_LIB_DIR",
+            "ROCBLAS_LIB_DIR",
+            "MIOPEN_LIB_DIR",
+            "RCCL_LIB_DIR",
+        ):
+            monkeypatch.setattr(env_mod, name, lib_dir)
+        monkeypatch.setattr(env_mod, "_torch_native_lib_dir", lambda _mod: None)
+        monkeypatch.setattr(
+            env_mod, "_safe_import_torch", lambda _reasons, _name: None
+        )
+        return lib_dir
+
+    def test_rpath_stack_sets_the_trigger(self, rocm_libs):
+        _write_elf(rocm_libs / "libhipblaslt.so.1", (DT_RPATH,))
+        block = env_mod._capture_library_linkage()
+        assert block["status"] == "ok"
+        assert block["rocm_rpath"] is True
+        assert block["tags_observed"] == ["rpath"]
+
+    def test_runpath_stack_leaves_the_trigger_off(self, rocm_libs):
+        for soname in ("libhipblaslt.so.1", "librocblas.so.5", "libamdhip64.so.7"):
+            _write_elf(rocm_libs / soname, (DT_RUNPATH,))
+        block = env_mod._capture_library_linkage()
+        assert block["status"] == "ok"
+        assert block["rocm_rpath"] is False
+        assert block["tags_observed"] == ["runpath"]
+
+    def test_a_single_rpath_among_runpaths_sets_the_trigger(self, rocm_libs):
+        """ANY, not all -- and this is the case that made it ANY.
+
+        #413 measured an RPATH on a NEIGHBOURING library defeating a
+        hipBLASLt substitution. One tagged object anywhere in the chain is
+        sufficient, because DT_RPATH is inherited by everything loaded
+        beneath it, so an "all" or "majority" rule would under-report the
+        hazard on exactly the mixed stacks where it bites.
+        """
+        _write_elf(rocm_libs / "libhipblaslt.so.1", (DT_RUNPATH,))
+        _write_elf(rocm_libs / "librocblas.so.5", (DT_RUNPATH,))
+        _write_elf(rocm_libs / "libamdhip64.so.7", (DT_RPATH,))
+        block = env_mod._capture_library_linkage()
+        assert block["rocm_rpath"] is True
+        assert block["tags_observed"] == ["rpath", "runpath"]
+
+    def test_mixed_tags_are_not_collapsed_to_one_verdict(
+        self, rocm_libs, tmp_path, monkeypatch
+    ):
+        """The real ROCm 10 shape: ROCm on RPATH, torch's own lib on RUNPATH.
+
+        Both readings must survive in the record. A reader who saw only a
+        single per-image verdict would conclude torch is on RPATH too, and
+        #413's end-to-end failure is precisely one where torch's DT_RUNPATH
+        did not rescue the substitution.
+        """
+        _write_elf(rocm_libs / "libhipblaslt.so.1", (DT_RPATH,))
+        torch_lib = tmp_path / "torch" / "lib"
+        _write_elf(torch_lib / "libtorch_hip.so", (DT_RUNPATH,))
+        monkeypatch.setattr(
+            env_mod, "_torch_native_lib_dir", lambda _mod: torch_lib
+        )
+
+        block = env_mod._capture_library_linkage()
+        by_name = {e["name"]: e for e in block["libraries"]}
+        assert by_name["libhipblaslt.so"]["effective_tag"] == "rpath"
+        assert by_name["libtorch_hip.so"]["effective_tag"] == "runpath"
+        assert by_name["libtorch_hip.so"]["scope"] == "pytorch"
+        assert sorted(block["tags_observed"]) == ["rpath", "runpath"]
+        # torch's RUNPATH must not dilute the ROCm-scope aggregate.
+        assert block["rocm_rpath"] is True
+
+    def test_absent_install_claims_nothing(self, rocm_libs):
+        """No libraries found is not evidence the stack is substitution-safe."""
+        block = env_mod._capture_library_linkage()
+        assert block["status"] == "absent"
+        assert block["rocm_rpath"] is None
+        assert block["tags_observed"] == []
+        assert all(e["path"] is None for e in block["libraries"])
+        assert all(e["effective_tag"] == "unknown" for e in block["libraries"])
+
+    def test_present_but_unreadable_is_distinct_from_absent(self, rocm_libs):
+        """The rocm_paths ``source="none"`` principle, applied here.
+
+        "There is no hipBLASLt on this host" and "there it is, and we could
+        not read it" are different operator problems and must not render
+        identically.
+        """
+        (rocm_libs / "libhipblaslt.so.1").write_text("not an object file")
+        block = env_mod._capture_library_linkage()
+        assert block["status"] == "unreadable"
+        assert block["rocm_rpath"] is None
+        entry = next(
+            e for e in block["libraries"] if e["name"] == "libhipblaslt.so"
+        )
+        assert entry["path"] is not None
+        assert entry["effective_tag"] == "unknown"
+        assert entry["reason"] == "not an ELF file"
+
+    def test_never_raises_on_a_hostile_tree(self, tmp_path, monkeypatch):
+        """Fail-soft contract: a lib dir that is a FILE must not explode."""
+        broken = tmp_path / "not-a-dir"
+        broken.write_text("x")
+        for name in (
+            "ROCM_CORE_LIB_DIR",
+            "HIPBLASLT_LIB_DIR",
+            "ROCBLAS_LIB_DIR",
+            "MIOPEN_LIB_DIR",
+            "RCCL_LIB_DIR",
+        ):
+            monkeypatch.setattr(env_mod, name, broken)
+        monkeypatch.setattr(env_mod, "_torch_native_lib_dir", lambda _mod: None)
+        monkeypatch.setattr(
+            env_mod, "_safe_import_torch", lambda _reasons, _name: None
+        )
+        block = env_mod._capture_library_linkage()
+        assert block["status"] == "absent"
+        assert block["rocm_rpath"] is None
+
+    def test_reads_the_same_file_the_identity_block_hashes(self, rocm_libs):
+        """Shared candidate ordering, so path and lib_hash cannot disagree.
+
+        Two versioned siblings present: the linkage record must name the
+        same one ``_hash_shared_library`` picks, and that choice is by
+        integer tuple (5.10.0 > 5.9.0), not lexicographic.
+        """
+        _write_elf(rocm_libs / "librocblas.so.5.9.0", (DT_RUNPATH,))
+        _write_elf(rocm_libs / "librocblas.so.5.10.0", (DT_RPATH,))
+        entry = next(
+            e
+            for e in env_mod._capture_library_linkage()["libraries"]
+            if e["name"] == "librocblas.so"
+        )
+        assert entry["path"].endswith("librocblas.so.5.10.0")
+        assert entry["effective_tag"] == "rpath"
+
+    def test_appends_no_partial_reasons(self, rocm_libs):
+        """This block reports its failures in-band, not via partial_reasons.
+
+        Nothing in it is ever None -- an unreadable file is the positive
+        value ``effective_tag="unknown"`` plus a reason -- so it has no
+        "expected to populate, fell back" case for ``partial`` to describe,
+        and a second copy of a broken library would only duplicate what the
+        identity block already recorded.
+        """
+        (rocm_libs / "libhipblaslt.so.1").write_text("junk")
+        reasons: list[str] = []
+        snapshot_reasons_before = list(reasons)
+        env_mod._capture_library_linkage()
+        assert reasons == snapshot_reasons_before
+
+
+class TestLibraryLinkageSchemaSurface:
+    """Schema 1.17 wiring: ordering, back-fill, disaster path, brief."""
+
+    def test_emitted_next_to_the_rocm_block(self):
+        keys = list(_example_snapshot().to_dict())
+        assert keys[keys.index("therock") + 1] == "library_linkage"
+
+    def test_pre_117_snapshot_backfills_as_unknown_not_absent(self):
+        """A 1.16 producer never looked at any dynamic section.
+
+        ``absent`` would assert "this host had no readable ROCm libraries"
+        on behalf of a capture that made no such claim -- the same trap
+        ``therock`` fell into.
+        """
+        d = _example_snapshot().to_dict()
+        del d["library_linkage"]
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert rebuilt.library_linkage == env_mod._null_library_linkage()
+        assert rebuilt.library_linkage["status"] == "unknown"
+        assert rebuilt.library_linkage["rocm_rpath"] is None
+
+    def test_short_block_is_merged_over_the_null_shape(self):
+        """A 1.17 consumer can index the documented keys on any artifact."""
+        d = _example_snapshot().to_dict()
+        d["library_linkage"] = {"status": "ok"}
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert set(rebuilt.library_linkage) == {
+            "status",
+            "rocm_rpath",
+            "tags_observed",
+            "libraries",
+        }
+        assert rebuilt.library_linkage["rocm_rpath"] is None
+
+    def test_disaster_snapshot_carries_the_shape_claiming_nothing(self):
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[], unexpected_reason="boom"
+        )
+        assert snap.library_linkage["status"] == "unknown"
+        assert snap.library_linkage["rocm_rpath"] is None
+
+    def test_summary_renders_the_tristate_not_a_bare_none(self):
+        """``rocm_rpath=None`` must not print as ``None`` in the brief.
+
+        A reader cannot tell "read them, none carried RPATH" from "could
+        not read them" out of a bare ``None``.
+        """
+        snap = _example_snapshot(
+            library_linkage=env_mod._empty_library_linkage()
+        )
+        line = next(
+            ln for ln in snap.summary().splitlines()
+            if ln.lstrip().startswith("linkage:")
+        )
+        assert "rocm_rpath=unknown" in line
+
+    def test_summary_names_the_hazard_when_present(self):
+        line = next(
+            ln for ln in _example_snapshot().summary().splitlines()
+            if ln.lstrip().startswith("linkage:")
+        )
+        assert "rocm_rpath=yes" in line
+        assert "rpath,runpath" in line
