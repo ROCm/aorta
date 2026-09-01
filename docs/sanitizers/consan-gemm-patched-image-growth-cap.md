@@ -258,8 +258,15 @@ admitted MOI site shows it. Using the repo's own LDS fixture:
 ```bash
 export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
 hipcc --genco --offload-arch=gfx950 recipes/sanitizers/fixtures/kernels/lds_reduce.hip -o /tmp/lds.o
-clang-offload-bundler --type=o --unbundle --input=/tmp/lds.o \
-    --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output=/tmp/lds.hsaco
+# --genco emits a raw code object on some ROCm builds and a clang-offload bundle
+# on others, and feeding a raw ELF back through --unbundle fails. Same conditional
+# the nightly's genco_object() uses.
+if head -c 24 /tmp/lds.o | grep -qF __CLANG_OFFLOAD_BUNDLE__; then
+    clang-offload-bundler --type=o --unbundle --input=/tmp/lds.o \
+        --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output=/tmp/lds.hsaco
+else
+    cp /tmp/lds.o /tmp/lds.hsaco
+fi
 hipcc --offload-arch=gfx950 -DLDS_HSACO='"/tmp/lds.hsaco"' \
     recipes/sanitizers/fixtures/kernels/lds_dispatch.hip -o /tmp/lds_dispatch
 
