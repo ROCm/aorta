@@ -10,6 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from aorta.run import _fsafe
 from aorta.run._worker_protocol import (
     PROTOCOL_VERSION,
     read_envelope,
@@ -116,6 +117,26 @@ def _run_request_from_dict(data: dict[str, Any]):
         save_logs=bool(data.get("save_logs", False)),
         env_probe=(dict(data["env_probe"]) if data.get("env_probe") is not None else None),
     )
+
+
+def _anchor_from_envelope(envelope: dict[str, Any]) -> _fsafe.TrustedAnchor | None:
+    """Rebuild the parent's frozen collector anchor from the worker envelope.
+
+    The pinned inode is optional: an older parent, or one whose stat failed,
+    sends the path alone and the descent keeps its no-follow-only behaviour.
+    Refreezing here would defeat the point -- this process starts *after* an
+    earlier trial's payload has run.
+    """
+    raw_path = envelope.get("results_root")
+    if raw_path is None:
+        return None
+    raw_id = envelope.get("results_root_id")
+    identity = (
+        (int(raw_id[0]), int(raw_id[1]))
+        if isinstance(raw_id, (list, tuple)) and len(raw_id) == 2
+        else None
+    )
+    return _fsafe.TrustedAnchor(Path(raw_path), identity)
 
 
 def _synchronize_workload_result(
@@ -365,6 +386,10 @@ def _main(request_path: Path, response_path: Path) -> int:
             env_descriptor=env_descriptor,
             mitigation_env=dict(envelope["mitigation_env"]),
             results_dir=Path(envelope["results_dir"]),
+            # The parent froze this before its trial loop; inheriting it --
+            # pinned inode included -- is what keeps an isolated trial from
+            # resolving a fresh anchor after an earlier trial's payload has run.
+            results_root=_anchor_from_envelope(envelope),
             should_write=bool(envelope["should_write"]),
             persist_result=False,
             result_transform=(

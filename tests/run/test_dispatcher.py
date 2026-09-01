@@ -2,12 +2,15 @@
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from aorta.run import _fsafe
+from aorta.run import dispatcher as dispatcher_module
 from aorta.run.dispatcher import RunRequest, run_trials
 from aorta.workloads import Workload, WorkloadResult
 
@@ -631,13 +634,299 @@ class TestRunTrials:
         collect_dir = captured_config["_aorta_collect_dir"]
         assert Path(collect_dir).is_absolute()
         assert collect_dir.endswith("trial_d0_m0_t0")
+        # The trust anchor for the collector symlink guards travels with it. It
+        # must come from here rather than be derived from ``_aorta_collect_dir``,
+        # because everything at or below that path is payload-writable while the
+        # trial runs -- so if this key ever stops being threaded, the guards fall
+        # back to a boundary the payload controls.
+        results_root = captured_config["_aorta_results_root"]
+        assert Path(results_root).is_absolute()
+        assert Path(collect_dir).parent.name == "collect_dir"
+        assert Path(collect_dir).parent.parent == Path(results_root)
+        assert results_root == str(Path(results_root).resolve())
         # No log prefix, because save_logs was not requested -- proves the two
         # are decoupled.
         assert "_aorta_log_prefix" not in captured_config
 
-    def test_collect_dir_absent_without_collector(self, tmp_path):
-        """No ``_aorta_collect_dir`` for a run with no collector -- back-compat
-        (the key only appears when a collector was requested)."""
+    def test_results_root_is_canonical_when_results_dir_is_a_symlink(self, tmp_path):
+        """The trust anchor is ``--results-dir.resolve()``, stored before launch.
+
+        A live ``.absolute()`` of a symlink is still the symlink. After the
+        payload replaces that directory, resolving the stored path again would
+        follow the new target; pinning the canonical path here is what makes
+        the post-run guard compare against the operator's tree.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        real = tmp_path / "real_results"
+        real.mkdir()
+        link = tmp_path / "results_link"
+        link.symlink_to(real, target_is_directory=True)
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_dir_symlink"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_dir_symlink",
+                trials=1,
+                results_dir=link,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+        workload_dir = real / "collect_dir_symlink"
+        assert captured_config["_aorta_results_root"] == str(real.resolve())
+        assert captured_config["_aorta_results_root"] != str(link.absolute())
+        assert captured_config["_aorta_collect_dir"] == str(
+            workload_dir / "trial_d0_m0_t0"
+        )
+        assert not Path(captured_config["_aorta_results_root"]).is_symlink()
+
+    @pytest.mark.parametrize("collect", [(), ("layer_numerics",)])
+    def test_stale_workload_symlink_is_refused_before_any_write(self, tmp_path, collect):
+        """A link at the workload component aborts the run instead of escaping.
+
+        Keeping ``<results>/<workload>`` lexical stops the collector guards
+        trusting its target, but the dispatcher writes the trial record and the
+        captured logs through that same component, and ``open()`` follows links.
+        A stale link from an earlier run therefore used to put the whole audit
+        trail in the link's target -- ``mkdir(exist_ok=True)`` on a symlink to a
+        directory succeeds silently, so nothing complained.
+
+        Parametrized over ``collect`` because these writes happen on every run,
+        not just a collector run: the anchor that protects them cannot be gated
+        on ``--collect``.
+        """
+        ran = []
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                ran.append(1)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        results = tmp_path / "results"
+        results.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (results / "stale_workload_link").symlink_to(outside, target_is_directory=True)
+
+        mock_ep = MagicMock()
+        mock_ep.name = "stale_workload_link"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        raised: BaseException | None = None
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            try:
+                run_trials(
+                    RunRequest(
+                        workload="stale_workload_link",
+                        trials=1,
+                        results_dir=results,
+                        collect=collect,
+                        save_logs=True,
+                    )
+                )
+            except RuntimeError as exc:
+                raised = exc
+
+        # The escape is asserted FIRST so a regression fails by naming the files
+        # that got out, not merely by "DID NOT RAISE". Without the guard this
+        # reads ['trial_d0_m0_t0.json', '...stderr.log', '...stdout.log'].
+        assert sorted(p.name for p in outside.iterdir()) == []
+        # Refused before the workload was even constructed.
+        assert ran == []
+        assert raised is not None, "expected the run to refuse the planted link"
+        assert "refusing to use" in str(raised)
+
+    def test_results_root_is_frozen_once_for_the_whole_trial_loop(self, tmp_path):
+        """Trial 0's payload must not be able to re-anchor trial 1.
+
+        The anchor is frozen before the loop, so a workload that replaces the
+        workload directory with a symlink to an outside tree cannot hand the next
+        trial a new trusted root. Two properties in one run, because with the
+        record writes anchored they are now inseparable: the swap is *refused*
+        (nothing lands in the link's target), and the anchor trial 0 was handed
+        is the pre-run canonical path rather than one derived after the swap.
+
+        Mutation-verified in both directions: restoring the per-trial
+        ``resolve()`` re-anchors the write to ``outside`` and the emptiness
+        assertion fails; dropping the record-write guard writes
+        ``trial_d0_m0_t0.json`` into ``outside`` and the same assertion fails.
+        """
+        roots: list[str] = []
+        collect_dirs: list[str] = []
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        class ResultsDirSwappingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                roots.append(self.config["_aorta_results_root"])
+                collect_dirs.append(self.config["_aorta_collect_dir"])
+
+            def run(self):
+                # What a hostile (or merely buggy) payload can do to the tree
+                # it was handed: swap the whole results directory for a link.
+                # Only the first trial does it, so a re-anchored second trial
+                # shows up as a differing anchor rather than a second swap.
+                if len(roots) == 1:
+                    workload_dir = Path(collect_dirs[0]).parent
+                    shutil.rmtree(workload_dir)
+                    workload_dir.symlink_to(outside, target_is_directory=True)
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "swap_results_dir"
+        mock_ep.load.return_value = ResultsDirSwappingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        # Pinned BEFORE the run on purpose: after trial 0 plants the symlink,
+        # resolving this same path yields ``outside``, which is precisely the
+        # value a per-trial anchor would have picked up.
+        expected_root = tmp_path.resolve()
+
+        os.environ.pop("AORTA_LEAK_PROBE", None)
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="swap_results_dir",
+                trials=2,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+                save_logs=True,
+                # The record write is the one guard here that raises. This file
+                # warns that raising in the wrong place leaks the overlay into
+                # the caller's process and corrupts later triage cells, so pin
+                # that the refusal happens after the env-restore ``finally``.
+                extra_env={"AORTA_LEAK_PROBE": "leaked"},
+            )
+            # Trial 0's own record write is the first thing to touch the swapped
+            # component, so the run stops there rather than tolerating the swap
+            # for another whole trial.
+            raised: BaseException | None = None
+            try:
+                run_trials(req)
+            except RuntimeError as exc:
+                raised = exc
+
+        # Asserted FIRST so a regression fails by naming what escaped rather
+        # than by "DID NOT RAISE": with either guard removed this reads
+        # ['trial_d0_m0_t0.json', ...].
+        assert sorted(p.name for p in outside.iterdir()) == []
+        # The anchor trial 0 received was pinned before the run, not derived
+        # from the tree the payload had just rewritten.
+        assert Path(roots[0]) == expected_root
+        assert not Path(collect_dirs[0]).is_relative_to(outside.resolve())
+        assert (tmp_path / "swap_results_dir").resolve() == outside.resolve()
+        assert raised is not None, "expected the record write to refuse the swap"
+        assert "refusing to write the trial record" in str(raised)
+        assert (
+            "AORTA_LEAK_PROBE" not in os.environ
+        ), "env overlay leaked when the record write refused"
+
+    def test_results_root_identity_is_pinned_before_the_trial_loop(self, tmp_path):
+        """The anchor carries the results directory's inode, not just its path.
+
+        A pathname is not an immutable anchor: a payload can rename the results
+        directory aside and move a *real* directory into its place, which leaves
+        every later ``O_NOFOLLOW`` check on that pathname satisfied. The pinned
+        ``(st_dev, st_ino)`` is what makes that swap detectable, so it has to be
+        read here -- before any trial launches -- and threaded like the path.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "pinned_root"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="pinned_root",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+
+        info = os.stat(tmp_path.resolve())
+        assert captured_config["_aorta_results_root_id"] == [info.st_dev, info.st_ino]
+        # A plain two-element list of ints, so the trial-JSON dump needs no
+        # sanitizer for it (same contract as ``_aorta_collect``).
+        assert json.loads(json.dumps(captured_config["_aorta_results_root_id"])) == [
+            info.st_dev,
+            info.st_ino,
+        ]
+
+    def test_results_root_identity_reaches_an_isolated_worker(self, tmp_path):
+        """The pin has to survive the JSON envelope, where an fd could not.
+
+        An isolated trial runs in a process that starts *after* an earlier
+        trial's payload, so it must inherit the parent's pin rather than take
+        its own -- which means the envelope carries it explicitly.
+        """
+        from aorta.run._trial_worker import _anchor_from_envelope
+
+        anchor = _fsafe.TrustedAnchor.freeze(tmp_path)
+        assert anchor.identity is not None
+        envelope = {
+            "results_root": str(anchor.path),
+            "results_root_id": list(anchor.identity),
+        }
+        assert _anchor_from_envelope(envelope) == anchor
+        # An envelope from a parent that could not pin degrades to the path.
+        assert _anchor_from_envelope({"results_root": str(tmp_path)}) == (
+            _fsafe.TrustedAnchor(tmp_path, None)
+        )
+        assert _anchor_from_envelope({"results_root": None}) is None
+
+    def test_runtime_anchor_is_not_persisted_without_collector(self, tmp_path):
+        """Probe safety gets the frozen anchor without changing record shape."""
         captured_config: dict = {}
 
         class ConfigCapturingWorkload(Workload):
@@ -663,6 +952,70 @@ class TestRunTrials:
             req = RunRequest(workload="nocollectdir", trials=1, results_dir=tmp_path)
             run_trials(req)
         assert "_aorta_collect_dir" not in captured_config
+        assert captured_config.get("_aorta_results_root") == str(tmp_path.resolve())
+        info = os.stat(tmp_path.resolve())
+        assert captured_config.get("_aorta_results_root_id") == [info.st_dev, info.st_ino]
+
+        written = list(tmp_path.rglob("trial_*.json"))
+        assert len(written) == 1
+        persisted_config = json.loads(written[0].read_text(encoding="utf-8")).get("config")
+        assert isinstance(persisted_config, dict)
+        assert "_aorta_collect_dir" not in persisted_config
+        assert "_aorta_results_root" not in persisted_config
+        assert "_aorta_results_root_id" not in persisted_config
+
+    @pytest.mark.skipif(
+        not _fsafe.HAVE_FD_TRAVERSAL,
+        reason="fd-relative traversal unsupported here",
+    )
+    def test_probe_without_collector_refuses_replaced_results_inode(self, tmp_path):
+        """A normal probe reuses the dispatcher's pre-payload inode pin."""
+        from aorta.workloads._subprocess import SubprocessWorkload
+
+        results = tmp_path / "results"
+        moved = tmp_path / "results.original"
+        replacement = tmp_path / "replacement"
+        replacement_trial = replacement / "trial_0"
+        replacement_trial.mkdir(parents=True)
+        canary = replacement_trial / "canary"
+        canary.write_text("untouched", encoding="utf-8")
+        swap = (
+            "from pathlib import Path; "
+            f"results=Path({str(results)!r}); "
+            f"results.rename(Path({str(moved)!r})); "
+            f"Path({str(replacement)!r}).rename(results)"
+        )
+
+        mock_ep = MagicMock()
+        mock_ep.name = "_subprocess"
+        mock_ep.load.return_value = SubprocessWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with (
+            patch("importlib.metadata.entry_points", return_value=mock_eps),
+            pytest.raises(RuntimeError, match="refusing to write the trial record"),
+        ):
+            run_trials(
+                RunRequest(
+                    workload="_subprocess",
+                    trials=1,
+                    results_dir=results,
+                    save_logs=True,
+                    subprocess_argv=(sys.executable, "-c", swap),
+                    probe_extras={
+                        "cell_name": "none-none",
+                        "env_passthrough_mode": "inherit",
+                        "timeout_per_trial": None,
+                        "cell_env_vars": {},
+                        "disable_detector_tiers": ["tier2", "tier3"],
+                    },
+                )
+            )
+
+        redirected_trial = results / "trial_0"
+        assert (redirected_trial / "canary").read_text(encoding="utf-8") == "untouched"
+        assert not (redirected_trial / "result.json").exists()
 
     def test_collect_survives_trial_json_roundtrip(self, tmp_path):
         """``_aorta_collect`` is a plain list, so the trial JSON dump needs
@@ -2444,15 +2797,22 @@ class TestSaveLogs:
         assert (cell_dir / "trial_d0_m0_t0.stderr.log").read_text().strip() == "BEFORE-CRASH-STDERR"
 
     def test_log_open_failure_degrades_gracefully_and_restores_env(self, tmp_path):
-        """If log-file open() raises, the trial must still run, the env
+        """If the log-file open raises, the trial must still run, the env
         overlay must still be restored (otherwise mitigation vars leak
-        across cells), and the _aorta_* keys must NOT be injected."""
-        real_open = open
+        across cells), and the _aorta_* keys must NOT be injected.
 
-        def raising_open(path, *args, **kwargs):
-            if str(path).endswith((".stdout.log", ".stderr.log")):
+        Injected at ``_open_record_file`` rather than at ``builtins.open``: the
+        record writes go through the frozen anchor with a no-follow leaf now, so
+        patching ``open`` no longer intercepts them and the failure this test
+        exists to simulate would never fire. Same predicate as before -- only
+        the two log names -- so the trial JSON still writes normally.
+        """
+        real_open_record = dispatcher_module._open_record_file
+
+        def raising_open_record(results_dir, anchor, name, **kwargs):
+            if name.endswith((".stdout.log", ".stderr.log")):
                 raise PermissionError("simulated log-open failure")
-            return real_open(path, *args, **kwargs)
+            return real_open_record(results_dir, anchor, name, **kwargs)
 
         os.environ.pop("AORTA_LEAK_PROBE", None)
         NoisyWorkload.seen_config = {}
@@ -2461,8 +2821,8 @@ class TestSaveLogs:
         mock_ep.load.return_value = NoisyWorkload
         mock_eps = MagicMock()
         mock_eps.select.return_value = [mock_ep]
-        with patch("importlib.metadata.entry_points", return_value=mock_eps), patch(
-            "builtins.open", side_effect=raising_open
+        with patch("importlib.metadata.entry_points", return_value=mock_eps), patch.object(
+            dispatcher_module, "_open_record_file", side_effect=raising_open_record
         ):
             results = run_trials(
                 RunRequest(
@@ -2478,6 +2838,64 @@ class TestSaveLogs:
         assert "AORTA_LEAK_PROBE" not in os.environ, "env overlay leaked when log-open failed"
         assert "_aorta_save_logs" not in NoisyWorkload.seen_config
         assert "_aorta_log_prefix" not in NoisyWorkload.seen_config
+
+    @pytest.mark.skipif(
+        not _fsafe.HAVE_FD_TRAVERSAL,
+        reason="fd-relative traversal unsupported here",
+    )
+    def test_partial_open_cleanup_does_not_follow_swapped_workload_dir(self, tmp_path):
+        """Cleaning a log stub must stay anchored after its parent is swapped."""
+        results = tmp_path / "results"
+        workload_dir = results / "noisy"
+        workload_dir.mkdir(parents=True)
+        anchor = _fsafe.TrustedAnchor.freeze(results)
+        names = (
+            "trial_d0_m0_t0.stdout.log",
+            "trial_d0_m0_t0.stderr.log",
+        )
+        with dispatcher_module._open_record_file(
+            workload_dir, anchor, names[0], encoding="utf-8"
+        ):
+            pass
+
+        moved = results / "noisy.original"
+        workload_dir.rename(moved)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        for name in names:
+            (outside / name).write_text("keep me", encoding="utf-8")
+        workload_dir.symlink_to(outside, target_is_directory=True)
+
+        for name in names:
+            with pytest.raises(_fsafe.UnsafePathError):
+                dispatcher_module._unlink_record_file(workload_dir, anchor, name)
+
+        assert all(
+            (outside / name).read_text(encoding="utf-8") == "keep me"
+            for name in names
+        )
+
+    @pytest.mark.skipif(
+        not _fsafe.HAVE_FD_TRAVERSAL,
+        reason="fd-relative traversal unsupported here",
+    )
+    def test_anchored_record_helpers_refuse_a_directory_outside_anchor(self, tmp_path):
+        results = tmp_path / "results"
+        results.mkdir()
+        anchor = _fsafe.TrustedAnchor.freeze(results)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "record.log"
+        victim.write_text("keep me", encoding="utf-8")
+
+        with pytest.raises(_fsafe.UnsafePathError):
+            dispatcher_module._open_record_file(
+                outside, anchor, victim.name, encoding="utf-8"
+            )
+        with pytest.raises(_fsafe.UnsafePathError):
+            dispatcher_module._unlink_record_file(outside, anchor, victim.name)
+
+        assert victim.read_text(encoding="utf-8") == "keep me"
 
 
 class TestAortaTrialEnv:

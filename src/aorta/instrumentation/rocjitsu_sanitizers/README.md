@@ -228,6 +228,17 @@ upstream.
 - Backend timeout, launch failure, unexpected exit, missing verdict, or
   incomplete coverage → `error`.
 - Missing backend or unsupported worklist scoping → `not_checked`.
+
+Coverage evidence is cross-checked two ways: the aggregate `coverage` counts
+must be internally consistent, and the itemized `coverage_site` lines must
+reconcile against them. Malformed or contradictory evidence is a parse error.
+A site kind the hook *counted* but never itemized is not — it is a coverage
+gap, reported as `consan_coverage_incomplete` naming the kind and the count
+(`reader 3 barrier sites not itemized: 0 of 12`). Both fail closed, but the gap
+keeps the rest of the run's evidence — the per-object counts, why sites failed
+to lower, and any race finding — instead of discarding it behind a parse
+complaint. The run that motivated this is written up in
+[`docs/sanitizers/consan-405-unitemized-barrier-sites.md`](../../../../docs/sanitizers/consan-405-unitemized-barrier-sites.md).
 - `pass` only means a requested backend ran healthily and produced no finding;
   Record/Replay's bounded snapshot is not proof that a program is race-free.
 

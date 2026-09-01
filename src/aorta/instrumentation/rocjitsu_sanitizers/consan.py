@@ -42,8 +42,9 @@ class ConSanMode(str, Enum):
 # aggregate ``coverage`` record's ``*_discovered`` counts. The hook only emits
 # those per-site lines at its debug level (kLogDebug=3). A boolean-truthy
 # ``RJ_CONSAN_LOG=1`` maps to kLogInfo, which prints the aggregate line but no
-# per-site records -- so the cross-check would fail closed on an otherwise clean
-# run. Request the debug level explicitly so the evidence is complete.
+# per-site records -- so every kind would report as un-itemized and the
+# cross-check would fail closed on an otherwise clean run. Request the debug
+# level explicitly so the evidence is complete.
 _CONSAN_LOG_DEBUG_LEVEL = "3"
 
 

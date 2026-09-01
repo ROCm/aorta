@@ -168,6 +168,35 @@ def test_record_survives_at_none_level(tmp_path: Path):
     assert not (trial_dir / "stdout.log").exists()  # none drops logs too
 
 
+def test_trial_retention_refuses_a_payload_swapped_trial_dir(tmp_path: Path):
+    """The probe trial tree uses the same fd-relative anchor as collectors."""
+    cell_dir = tmp_path / "cell"
+    workload_subdir = cell_dir / "_subprocess"
+    workload_subdir.mkdir(parents=True)
+    wl = SubprocessWorkload(
+        {
+            CONFIG_KEY_SUBPROCESS_ARGV: ["true"],
+            CONFIG_KEY_LOG_PREFIX: str(workload_subdir / "trial_d0_m0_t0"),
+            CONFIG_KEY_PROBE_EXTRAS: {},
+        }
+    )
+    wl.setup()
+    trial_dir = cell_dir / "trial_0"
+    trial_dir.rename(cell_dir / "trial_0.original")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "trace.bin"
+    victim.write_text("keep me", encoding="utf-8")
+    trial_dir.symlink_to(outside, target_is_directory=True)
+
+    outcome = wl._apply_retention(  # noqa: SLF001 -- pins the wiring seam
+        trial_dir, "pass", {"retain": {"on_pass": "none"}}
+    )
+
+    assert outcome is not None and outcome.no_op
+    assert victim.read_text(encoding="utf-8") == "keep me"
+
+
 def test_non_dict_retain_payload_warns_and_skips(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ):

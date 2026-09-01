@@ -23,6 +23,7 @@ absence of files.
 
 from __future__ import annotations
 
+import io
 import math
 import os
 from pathlib import Path
@@ -37,8 +38,10 @@ from aorta.instrumentation.rocprof import (
     SUMMARY_FILE_STEM,
     SUMMARY_FILENAME,
     RocprofUnavailableError,
+    _parse,
     build_argv_prefix,
     parse_summary,
+    parse_summary_from_streams,
     resolve_binary,
     validate_options,
     wrap_argv,
@@ -658,6 +661,88 @@ def test_parse_summary_survives_unreadable_file(tmp_path):
 
 def test_parse_summary_accepts_str_path():
     assert parse_summary(str(FIXTURES / "flat_with_o"))["rocprof_kernel_count"] == _FLAT_CALLS
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="descriptor accounting needs /proc"
+)
+def test_parse_summary_holds_one_csv_open_at_a_time(tmp_path, monkeypatch):
+    """A per-rank capture must not need a descriptor per rank.
+
+    ``rocprofv3`` writes a stats/trace pair per process, so a large distributed
+    run can hold more CSVs than ``RLIMIT_NOFILE`` allows; opening them all up
+    front hit ``EMFILE`` partway through and reported totals covering only the
+    ranks before the limit. The count is compared across two tree sizes because
+    an absolute bound would pass for the eager version on a small tree.
+    """
+    original = _parse._iter_rows
+
+    def peak_open_fds(root, ranks):
+        root.mkdir()
+        for rank in range(ranks):
+            (root / f"rank{rank:03d}_kernel_stats.csv").write_text(
+                '"Name","Calls","TotalDurationNs"\n"sgemm",1,1000\n', encoding="utf-8"
+            )
+        parse_summary(root)  # warm any lazy imports before the baseline
+        baseline = len(os.listdir("/proc/self/fd"))
+        seen = []
+
+        def counting_iter_rows(stream):
+            seen.append(len(os.listdir("/proc/self/fd")))
+            return original(stream)
+
+        monkeypatch.setattr(_parse, "_iter_rows", counting_iter_rows)
+        try:
+            metrics = parse_summary(root)
+        finally:
+            monkeypatch.setattr(_parse, "_iter_rows", original)
+        assert metrics.get("rocprof_kernel_count") == ranks
+        assert len(seen) == ranks
+        return max(seen) - baseline
+
+    small = peak_open_fds(tmp_path / "small", 8)
+    large = peak_open_fds(tmp_path / "large", 64)
+    assert small == large
+    assert large <= 2
+
+
+def test_parse_summary_from_streams_consumes_lazy_iterators(tmp_path):
+    """The stream entrypoint takes iterators, not just sequences.
+
+    Both callers now pass generators that open one file at a time, so a
+    ``len()`` or a second pass over a group would break them.
+    """
+    (tmp_path / "a_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"sgemm",4,2000\n', encoding="utf-8"
+    )
+    paths = sorted(tmp_path.glob("*_kernel_stats.csv"))
+    metrics = parse_summary_from_streams(
+        str(tmp_path), (path.open(encoding="utf-8") for path in paths), iter(())
+    )
+    assert metrics.get("rocprof_kernel_count") == 4
+
+
+def test_parse_summary_from_streams_falls_back_to_trace_on_empty_stats(tmp_path):
+    """An empty stats iterator must still let the trace group be read.
+
+    The old code branched on the *truthiness* of the stats sequence; a
+    generator is always truthy, so the fallback had to move to "did the stats
+    yield any data".
+    """
+    metrics = parse_summary_from_streams(
+        str(tmp_path),
+        iter(()),
+        iter(
+            [
+                io.StringIO(
+                    '"Kind","Kernel_Name","Start_Timestamp","End_Timestamp"\n'
+                    '"KERNEL_DISPATCH","traced",0,2000000\n'
+                )
+            ]
+        ),
+    )
+    assert metrics.get("rocprof_kernel_count") == 1
+    assert metrics.get("rocprof_top_kernels") == ["traced"]
 
 
 # ---- Docs / schema agreement --------------------------------------------

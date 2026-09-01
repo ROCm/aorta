@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from aorta.run import _fsafe
 from aorta.workloads._subprocess import (
     CONFIG_KEY_LOG_PREFIX,
     CONFIG_KEY_PROBE_EXTRAS,
@@ -101,6 +102,29 @@ def test_env_file_is_0600(tmp_path):
     mode = env_path.stat().st_mode
     perms = stat.S_IMODE(mode)
     assert perms == 0o600, f"expected 0600, got 0o{perms:o}"
+
+
+@pytest.mark.skipif(
+    not _fsafe.HAVE_FD_TRAVERSAL,
+    reason="fd-relative traversal unsupported here",
+)
+def test_env_file_refuses_hard_link_before_truncating_target(tmp_path):
+    """A stale probe.env hard link cannot truncate its outside inode."""
+    wl = _make_workload(
+        tmp_path,
+        argv=["true"],
+        env_mode="file",
+        cell_env_vars={"SECRET_TOKEN": "supersecret"},
+    )
+    wl.setup()
+    victim = tmp_path / "outside.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    (tmp_path / "trial_0" / "probe.env").hardlink_to(victim)
+
+    with pytest.raises(_fsafe.UnsafePathError, match="hard links"):
+        wl.run()
+
+    assert victim.read_text(encoding="utf-8") == "keep me"
 
 
 def test_env_file_validation_failure_does_not_leave_partial_file(tmp_path):

@@ -40,11 +40,15 @@ is not the record or a known log is heavy).
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+from aorta.run import _fsafe
 
 log = logging.getLogger(__name__)
 
@@ -165,17 +169,37 @@ def _load_manifest(trial_dir: Path) -> dict[str, str]:
         return {}
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-        entries = raw["artifacts"]
-        if not isinstance(entries, list):
-            raise TypeError(
-                f"'artifacts' must be a list, got {type(entries).__name__}"
-            )
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError) as exc:
         log.warning(
             "retention: ignoring malformed %s in %s (%s); "
             "falling back to filename convention",
             RETENTION_MANIFEST_NAME,
             trial_dir,
+            exc,
+        )
+        return {}
+    return _manifest_mapping(raw)
+
+
+def _manifest_mapping(raw: object) -> dict[str, str]:
+    """Turn parsed ``artifacts.json`` JSON into a ``{rel_path: class}`` map.
+
+    Shared by :func:`_load_manifest` (pathname) and :func:`_load_manifest_fd`
+    (fd-relative) so both apply identical tolerance: a top-level shape error
+    yields ``{}``; a malformed entry is skipped; an unknown class is pinned to
+    :data:`HEAVY` rather than dropped.
+    """
+    try:
+        entries = raw["artifacts"]  # type: ignore[index]
+        if not isinstance(entries, list):
+            raise TypeError(
+                f"'artifacts' must be a list, got {type(entries).__name__}"
+            )
+    except (ValueError, KeyError, TypeError) as exc:
+        log.warning(
+            "retention: ignoring malformed %s (%s); falling back to filename "
+            "convention",
+            RETENTION_MANIFEST_NAME,
             exc,
         )
         return {}
@@ -200,7 +224,12 @@ def _load_manifest(trial_dir: Path) -> dict[str, str]:
     return mapping
 
 
-def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
+def apply_retention(
+    trial_dir: Path,
+    level: str,
+    *,
+    trusted_root: _fsafe.TrustedAnchor | Path | None = None,
+) -> RetentionOutcome:
     """Prune ``trial_dir`` to the artifacts kept by retention ``level``.
 
     Deletes every file whose class outranks ``level`` -- except the trial
@@ -214,16 +243,37 @@ def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
     Symlinks are never unlinked, and any path that dereferences outside
     ``trial_dir`` is skipped (kept) with a warning -- a buggy or hostile
     collector symlink can never make retention delete files outside the
-    trial output tree. Enumeration uses ``os.walk(..., followlinks=False)``
-    so retention never even *descends* into a symlinked subdirectory (a
-    collector that drops a symlinked dir pointing at, say, ``/`` could
-    otherwise make a naive ``rglob`` walk an arbitrary, huge external tree).
+    trial output tree.
+
+    ``trusted_root`` selects the traversal strategy:
+
+    * **Given** (any artifact tree a same-user payload can swap mid-run): on
+      POSIX the whole prune runs
+      **fd-relative** -- ``trial_dir`` is reached by descending from
+      ``trusted_root`` with ``O_NOFOLLOW`` on every component, and every stat /
+      unlink / rmdir is performed relative to the held directory fds. A payload
+      that replaces an ancestor between the check and a delete cannot redirect
+      it, closing the time-of-check/time-of-use window. ``trusted_root`` is the
+      operator's canonical ``--results-dir`` and ``trial_dir`` must be lexically
+      inside it. Pass a :class:`~aorta.run._fsafe.TrustedAnchor` (rather than a
+      bare path) to also pin the anchor's inode, so a payload that renamed the
+      results directory aside and moved a real directory into its pathname is
+      refused; a bare path keeps the no-follow-only descent.
+    * **Omitted** (a direct caller with no declared trust boundary) or on a
+      platform without the fd primitives: the historical
+      ``os.walk(..., followlinks=False)`` + ``resolve()``-containment body runs,
+      which never descends a symlinked subdirectory and refuses to delete a path
+      that dereferences outside ``trial_dir``.
     """
     if level not in _LEVEL_RANK:
         log.warning("retention: unknown level %r; keeping everything (full)", level)
         return RetentionOutcome(level="full", no_op=True)
     if level == "full":
         return RetentionOutcome(level="full", no_op=True)
+
+    if trusted_root is not None and _fsafe.HAVE_FD_TRAVERSAL:
+        return _apply_retention_fd(trial_dir, level, trusted_root)
+
     if not trial_dir.is_dir():
         return RetentionOutcome(level=level, no_op=True)
 
@@ -277,6 +327,121 @@ def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
         kept=tuple(kept),
         freed_bytes=freed,
     )
+
+
+def _apply_retention_fd(
+    trial_dir: Path, level: str, trusted_root: _fsafe.TrustedAnchor | Path
+) -> RetentionOutcome:
+    """Race-free :func:`apply_retention` for a payload-writable artifact tree.
+
+    Descends from ``trusted_root`` to ``trial_dir`` with ``O_NOFOLLOW`` on every
+    component and holds the resulting directory fd, then classifies and deletes
+    each file relative to the fds returned by :func:`aorta.run._fsafe`. Because
+    no step re-resolves a pathname, a payload that swaps an ancestor after the
+    descent cannot redirect a delete outside the results tree. Symlinked files
+    and subdirectories are yielded as links, recorded as kept with a warning,
+    and never read, followed, or unlinked. Tolerant like the pathname engine: a
+    delete that fails keeps the file and warns.
+    """
+    anchor = _fsafe.as_anchor(trusted_root)
+    components = _fsafe.relative_components(anchor.path, trial_dir)
+    if components is None:
+        log.warning(
+            "retention: %s is not inside the trusted root %s; keeping everything",
+            trial_dir,
+            anchor.path,
+        )
+        return RetentionOutcome(level=level, no_op=True)
+
+    level_rank = _LEVEL_RANK[level]
+    deleted: list[str] = []
+    kept: list[str] = []
+    freed = 0
+    try:
+        with _fsafe.open_dir_nofollow(anchor, components) as base_fd:
+            manifest = _load_manifest_fd(base_fd)
+            for rel, dir_fd, name, info in _fsafe.iter_entries(base_fd):
+                if stat.S_ISLNK(info.st_mode):
+                    log.warning("retention: skipping symlink %s; not pruning it", rel)
+                    kept.append(rel)
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                cls = classify_artifact(rel, manifest)
+                if cls == RECORD or _CLASS_RANK[cls] <= level_rank:
+                    kept.append(rel)
+                    continue
+                try:
+                    os.unlink(name, dir_fd=dir_fd)
+                except OSError as exc:
+                    log.warning(
+                        "retention: could not delete %s (%s); keeping it", rel, exc
+                    )
+                    kept.append(rel)
+                    continue
+                freed += info.st_size
+                deleted.append(rel)
+            _fsafe.prune_empty_dirs(base_fd)
+    except _fsafe.UnsafePathError as exc:
+        if exc.errno == errno.ENOENT:
+            # Nothing was written under this tree (a validated-only collector,
+            # or a command that produced no artifacts). The pathname engine
+            # treats a missing ``trial_dir`` as a no-op too, and an operator
+            # warning would read as a refusal where there is nothing to refuse.
+            log.debug("retention: %s does not exist; nothing to prune", trial_dir)
+            return RetentionOutcome(level=level, no_op=True)
+        # A component of the collector tree was a symlink after the run: refuse
+        # to prune through it, keeping the artifacts. Mirrors the pathname
+        # engine's "skip + warn, never abort" tolerance.
+        log.warning(
+            "retention: refusing to prune %s; a path component is a symlink "
+            "after the run (%s). Collector artifacts kept.",
+            trial_dir,
+            exc,
+        )
+        return RetentionOutcome(level=level, no_op=True)
+    return RetentionOutcome(
+        level=level,
+        deleted=tuple(deleted),
+        kept=tuple(kept),
+        freed_bytes=freed,
+    )
+
+
+def _load_manifest_fd(base_fd: int) -> dict[str, str]:
+    """Read the ``artifacts.json`` manifest ``O_NOFOLLOW`` under ``base_fd``.
+
+    The fd-relative counterpart of :func:`_load_manifest`: a symlinked manifest
+    is refused (``O_NOFOLLOW`` raises), matching the pathname side's symlink
+    check, and the read never leaves the held directory. Same tolerant contract
+    -- any error yields ``{}`` and falls back to filename convention.
+    """
+    info = _fsafe.stat_at(base_fd, RETENTION_MANIFEST_NAME)
+    if info is None:
+        return {}
+    if stat.S_ISLNK(info.st_mode):
+        log.warning(
+            "retention: %s is a symlink; treating as malformed and falling back "
+            "to filename convention",
+            RETENTION_MANIFEST_NAME,
+        )
+        return {}
+    if not stat.S_ISREG(info.st_mode):
+        return {}
+    try:
+        with _fsafe.secure_open_read(
+            base_fd, RETENTION_MANIFEST_NAME, encoding="utf-8"
+        ) as stream:
+            raw = json.loads(stream.read())
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "retention: ignoring malformed %s (%s); falling back to filename "
+            "convention",
+            RETENTION_MANIFEST_NAME,
+            exc,
+        )
+        return {}
+    return _manifest_mapping(raw)
 
 
 def _iter_trial_files(trial_dir: Path, kept: list[str]) -> list[Path]:
