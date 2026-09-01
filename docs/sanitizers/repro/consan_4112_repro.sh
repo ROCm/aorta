@@ -15,11 +15,15 @@
 #   --workdir DIR   keep intermediates here instead of a temp dir
 #   --timeout SEC   wall-clock ceiling for the hooked run, default 6000 (or set
 #                   CONSAN_4112_TIMEOUT). Sized against the slower of the two
-#                   outcomes: a hook that still has the defect rejects the object
-#                   after ~1420 s, but a fixed hook instruments it and runs for
-#                   ~4150 s. A pre-#9964 hook never terminates MOI inventory at
-#                   all, so an unbounded run would hang instead of reporting
-#                   inconclusive
+#                   outcomes *on the 16,265,200-byte ROCm 7.0.2.2 object*: a hook
+#                   that still has the defect rejects it after ~1420 s, but a
+#                   fixed hook instruments it and runs for ~4150 s. Those numbers
+#                   do not transfer to a bigger fixture, and the object a modern
+#                   hipBLASLt ships is one: ~183 MiB with 9.3x the access sites,
+#                   which nobody has timed. Compare the object size this script
+#                   prints and raise the ceiling if it is much larger. A
+#                   pre-#9964 hook never terminates MOI inventory at all, so an
+#                   unbounded run would hang instead of reporting inconclusive
 #   --object PATH   use an already-unbundled gfx950 code object instead of
 #                   extracting one from the local hipBLASLt install
 #   --keep          do not delete the work directory on exit
@@ -173,10 +177,11 @@ hipcc --offload-arch=gfx950 -DOBJECT="\"${OBJECT}\"" "${LOADER_SRC}" -o "${LOADE
     >/dev/null 2>&1 || die "hipcc failed to build the loader"
 
 echo "== running under the ConSan hook (record-replay / strict)"
-echo "   Expect ~24 min against a hook that still has the defect (it is rejected"
-echo "   at the transform), or ~69 min against a fixed one, which instruments the"
-echo "   object and does the work the rejection used to skip. MOI inventory alone"
-echo "   is ~4-11 min either way."
+echo "   On the 16 MB reference object: ~24 min against a hook that still has the"
+echo "   defect (it is rejected at the transform), or ~69 min against a fixed one,"
+echo "   which instruments it and does the work the rejection used to skip. MOI"
+echo "   inventory alone is ~4-11 min either way. A larger object costs more by an"
+echo "   amount nobody has measured -- compare the size printed above."
 echo "   timeout ${TIMEOUT}s"
 start=$(date +%s)
 timeout --kill-after=30s "${TIMEOUT}" \
@@ -277,7 +282,10 @@ if grep -qE "${HOOK_LINE} ${GROWTH_LINE}" "${LOG}"; then
     fi
     echo "        Retry with a ceiling above the required total, e.g."
     echo "          RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_PERCENT=900"
-    echo "        or pass a smaller --object. Expect a much longer run once it proceeds."
+    echo "        or pass a smaller --object. Raise --timeout with it: an object big"
+    echo "        enough to hit this ceiling has far more sites than the ~4150 s the"
+    echo "        default was measured against, so clearing the ceiling is likely to"
+    echo "        trade this verdict for a timeout at the current ${TIMEOUT}s."
     echo "        Full log: ${LOG}"
     trap - EXIT
     exit 3

@@ -70,6 +70,11 @@ work the old path never reached. Any timeout for this case has to be sized again
 the ~69 min figure, not the ~24 min one — see the ceiling discussion in
 `daily-consan-gemm.yaml`.
 
+That remains a lower bound rather than a budget: everything in this section was
+measured on the 15.5 MB object, and the one CI extracts has 9.3x the access
+sites. Nobody has instrumented it end-to-end, because the growth ceiling stops it
+first.
+
 Affects: `daily-consan-gemm.yaml` (dashboard Tab 2, observed-only, non-gating).
 Repro: [`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh).
 
@@ -165,8 +170,13 @@ script makes, and it now reports `fixed` rather than `reproduced`.
 prediction stands: the driver is load-only, so the run ends on strict
 require-records at exit 86. Turning it into a genuine pass/fail additionally needs
 a driver that dispatches a GEMM kernel from the instrumented module (hipBLASLt, or
-a hand-written launcher for one extracted Tensile kernel). That is unbuilt, and it
-is the only remaining blocker now that #9972 is fixed.
+a hand-written launcher for one extracted Tensile kernel). That is unbuilt.
+
+It is **not** the only remaining blocker, and the exit 86 above is what the
+15.5 MB object does, not what CI sees. On the 183 MiB object CI extracts, the
+growth ceiling rejects the transform first, so the run never reaches
+require-records at all — that has to be settled before the dispatching driver
+matters. See the [growth-cap doc](consan-gemm-patched-image-growth-cap.md).
 
 ## Reproducing
 
@@ -213,7 +223,14 @@ still has the defect rejects the object after ~1420 s, but a fixed hook
 instruments it and runs for ~4150 s, so a ceiling sized against the defect would
 kill the very case it is meant to confirm. Hitting the ceiling reports `3`, not a
 hang, which matters because a pre-#9964 hook never terminates MOI inventory for
-this object at all. If the
+this object at all.
+
+Both figures are for the 15.5 MB object, and 6000 s is not a budget for anything
+larger. The object a modern hipBLASLt ships has 9.3x the access sites and has
+never been instrumented end-to-end, because the growth ceiling stops it earlier —
+so raising that ceiling without also raising `--timeout` mostly trades one
+inconclusive result for another. The script says so at the point it suggests the
+retry. If the
 local hipBLASLt does not carry the Tensile bundle — it has shipped both flat
 under `library/` and under `library/gfx950/`, and slim installs may omit it —
 pass `--object` with an already-unbundled gfx950 code object.

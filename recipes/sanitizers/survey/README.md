@@ -38,9 +38,10 @@ observed, including fail-closed behavior on heavy production code objects.
 
 ### Staleness of the recorded ConSan verdicts (2026-08-27)
 
-The three `*_consan` fixtures were recorded on rocjitsu `db0c47df` and no longer
-match what the sanitizers report on current bundles. Regenerating them needs a
-gfx950 host (see "Regenerating" below); until then:
+The three `*_consan` fixtures were recorded on rocjitsu `db0c47df` and have not
+been regenerated since. They have not all drifted the same way, and one has not
+drifted at all — read the fixture you care about rather than the date.
+Regenerating needs a gfx950 host (see "Regenerating" below); until then:
 
 * **`lds_reduce_consan` is wrong in verdict.** Its exit 86 was
   [ROCm/rocm-systems#9972](https://github.com/ROCm/rocm-systems/issues/9972)
