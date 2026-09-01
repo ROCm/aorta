@@ -1,9 +1,12 @@
 """Provider selection and collection naming for the embeddings layer.
 
 Nothing here loads a model. The local BGE provider is only ever asked for its
-name and collection -- never for ``get_embeddings()``, which would pull
-sentence-transformers onto the CPU -- and the remote provider is built with a
+name and collection -- never for ``get_embeddings()``, whose first embed would
+download 90 MB of ONNX weights -- and the remote provider is built with a
 placeholder key under the ``no_network`` guard.
+
+Provider-specific behaviour lives in ``test_fastembed_provider.py``; this file
+covers selection and the collection-naming contract between providers.
 """
 
 from __future__ import annotations
@@ -11,13 +14,13 @@ from __future__ import annotations
 import pytest
 
 from aorta.chat.config import settings
+from aorta.chat.rag.embeddings.base import model_slug
 from aorta.chat.rag.embeddings.factory import collection_name, get_embeddings, get_provider
-from aorta.chat.rag.embeddings.local_bge import LOCAL_COLLECTION_NAME, LocalBgeProvider
-from aorta.chat.rag.embeddings.remote_api import (
-    REMOTE_COLLECTION_PREFIX,
-    RemoteApiProvider,
-    _model_slug,
+from aorta.chat.rag.embeddings.fastembed_bge import (
+    LOCAL_COLLECTION_PREFIX,
+    FastembedBgeProvider,
 )
+from aorta.chat.rag.embeddings.remote_api import REMOTE_COLLECTION_PREFIX, RemoteApiProvider
 
 DEFAULT_REMOTE_MODEL = "text-embedding-3-small"
 
@@ -27,15 +30,13 @@ def remote_embedding_settings(monkeypatch):
     """Select the remote provider with a placeholder key that is never used."""
     monkeypatch.setattr(settings, "embedding_provider", "remote")
     monkeypatch.setattr(settings, "remote_embedding_model", DEFAULT_REMOTE_MODEL)
-    monkeypatch.setattr(
-        settings, "remote_embedding_api_key", "sk-placeholder-not-real"
-    )
+    monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-placeholder-not-real")
     monkeypatch.setattr(settings, "remote_embedding_base_url", "")
 
 
 class TestProviderSelection:
     def test_each_name_resolves_to_its_own_provider(self):
-        assert isinstance(get_provider("local"), LocalBgeProvider)
+        assert isinstance(get_provider("local"), FastembedBgeProvider)
         assert isinstance(get_provider("remote"), RemoteApiProvider)
 
     def test_provider_name_matches_the_setting_string(self):
@@ -44,12 +45,12 @@ class TestProviderSelection:
 
     def test_default_follows_the_embedding_provider_setting(self, monkeypatch):
         monkeypatch.setattr(settings, "embedding_provider", "local")
-        assert isinstance(get_provider(), LocalBgeProvider)
+        assert isinstance(get_provider(), FastembedBgeProvider)
         monkeypatch.setattr(settings, "embedding_provider", "remote")
         assert isinstance(get_provider(), RemoteApiProvider)
 
     def test_provider_string_is_case_and_whitespace_tolerant(self):
-        assert isinstance(get_provider("  LOCAL "), LocalBgeProvider)
+        assert isinstance(get_provider("  LOCAL "), FastembedBgeProvider)
         assert isinstance(get_provider("Remote"), RemoteApiProvider)
 
     def test_unknown_provider_names_the_valid_choices(self):
@@ -64,14 +65,27 @@ class TestProviderSelection:
         with pytest.raises(ValueError, match="unknown embedding provider: 'sbert'"):
             get_provider()
 
+    @pytest.mark.parametrize("alias", ["onnx", "fastembed"])
+    def test_runtime_named_aliases_resolve_to_local(self, alias: str):
+        """Decision 19a left one local flow, but the discussion named the runtime.
+
+        A profile saying ``onnx`` should start rather than fail on a name that
+        was correct while there were two local providers.
+        """
+        assert isinstance(get_provider(alias), FastembedBgeProvider)
+
 
 class TestCollectionNames:
-    def test_local_collection_name_is_still_exactly_aorta(self, monkeypatch):
-        """Existing on-disk indexes must keep loading without a re-index."""
+    def test_local_collection_name_encodes_the_model(self, monkeypatch):
+        """Not the bare ``aorta`` the deleted torch provider used.
+
+        Both emit 384 dimensions from the same model family, so sharing a name
+        would let one's index satisfy the other's only other check.
+        """
         monkeypatch.setattr(settings, "embedding_provider", "local")
-        assert LOCAL_COLLECTION_NAME == "aorta"
-        assert get_provider("local").collection_name() == "aorta"
-        assert collection_name() == "aorta"
+        monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-small-en-v1.5")
+        assert collection_name() == "aorta_fastembed_baai_bge_small_en_v1_5"
+        assert collection_name().startswith(LOCAL_COLLECTION_PREFIX)
 
     def test_remote_collection_name_is_per_model(self, remote_embedding_settings):
         assert collection_name() == "aorta_remote_text_embedding_3_small"
@@ -88,25 +102,21 @@ class TestCollectionNames:
     def test_switching_model_switches_collection(self, monkeypatch):
         monkeypatch.setattr(settings, "remote_embedding_model", DEFAULT_REMOTE_MODEL)
         small = get_provider("remote").collection_name()
-        monkeypatch.setattr(
-            settings, "remote_embedding_model", "text-embedding-3-large"
-        )
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-large")
         assert get_provider("remote").collection_name() != small
 
-    def test_model_slug_keeps_only_what_chroma_accepts(self):
-        assert _model_slug("text-embedding-3-small") == "text_embedding_3_small"
-        assert _model_slug("Voyage/Voyage-3") == "voyage_voyage_3"
-        assert _model_slug("  spaced  model  ") == "spaced_model"
+    def test_model_slug_keeps_only_what_a_table_name_accepts(self):
+        assert model_slug("text-embedding-3-small") == "text_embedding_3_small"
+        assert model_slug("Voyage/Voyage-3") == "voyage_voyage_3"
+        assert model_slug("  spaced  model  ") == "spaced_model"
 
     def test_model_slug_never_returns_an_empty_name(self):
-        """Chroma rejects an empty collection name, so fall back to a literal."""
-        assert _model_slug("") == "model"
-        assert _model_slug("---") == "model"
+        """An empty collection name is not an identifier, so fall back to a literal."""
+        assert model_slug("") == "model"
+        assert model_slug("---") == "model"
 
-    def test_long_model_names_stay_within_the_chroma_limit(self, monkeypatch):
-        monkeypatch.setattr(
-            settings, "remote_embedding_model", "x" * 49 + "-" + "y" * 20
-        )
+    def test_long_model_names_stay_within_the_name_limit(self, monkeypatch):
+        monkeypatch.setattr(settings, "remote_embedding_model", "x" * 49 + "-" + "y" * 20)
         name = get_provider("remote").collection_name()
         assert len(name) <= 63
         assert not name.endswith("_")
@@ -139,12 +149,8 @@ class TestRemoteApiProvider:
     def test_base_url_is_passed_through_when_set(
         self, monkeypatch, remote_embedding_settings, no_network
     ):
-        monkeypatch.setattr(
-            settings, "remote_embedding_base_url", "https://example.invalid/v1"
-        )
-        assert (
-            get_embeddings().openai_api_base == "https://example.invalid/v1"
-        )
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://example.invalid/v1")
+        assert get_embeddings().openai_api_base == "https://example.invalid/v1"
 
     def test_describe_names_the_model_and_endpoint(self, remote_embedding_settings):
         assert DEFAULT_REMOTE_MODEL in RemoteApiProvider().describe()

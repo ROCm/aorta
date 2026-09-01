@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 from langchain_core.embeddings import Embeddings
+
+#: Collection names become part of a sqlite table name, so they have to be bare
+#: identifiers; ``SqliteVecStore`` rejects anything else. 63 was Chroma's limit
+#: and is kept as a sane cap.
+MAX_COLLECTION_NAME = 63
 
 
 class EmbeddingProvider(Protocol):
     """One way of turning text into vectors, plus the collection it owns.
 
-    Providers emit different vector dimensions, so each one owns a distinct
-    Chroma collection name; they can then coexist in the same CHROMA_PATH.
+    Two providers must never share a collection, and dimension equality is not
+    enough to make sharing safe: BGE-small on onnxruntime and BGE-small on torch
+    are both 384-dimension, but the ONNX weights are quantised, so the vectors
+    differ and a cross-read degrades retrieval without raising. Every
+    ``collection_name()`` therefore encodes the model, not just the flow.
     """
 
     name: str
@@ -21,9 +30,20 @@ class EmbeddingProvider(Protocol):
         ...
 
     def collection_name(self) -> str:
-        """Chroma collection this provider indexes into and reads from."""
+        """Collection this provider indexes into and reads from."""
         ...
 
     def describe(self) -> str:
         """One-line human-readable summary for logs and the welcome message."""
         ...
+
+
+def model_slug(model: str) -> str:
+    """Reduce a model id to the alphanumerics and underscores a table name allows."""
+    slug = re.sub(r"[^a-z0-9]+", "_", model.strip().lower()).strip("_")
+    return slug or "model"
+
+
+def build_collection_name(prefix: str, model: str) -> str:
+    """``prefix`` + a slug of ``model``, capped at :data:`MAX_COLLECTION_NAME`."""
+    return (prefix + model_slug(model))[:MAX_COLLECTION_NAME].rstrip("_")

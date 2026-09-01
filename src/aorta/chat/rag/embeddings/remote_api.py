@@ -2,24 +2,14 @@
 
 from __future__ import annotations
 
-import re
-
 from langchain_openai import OpenAIEmbeddings
 
 from aorta.chat.config import settings
+from aorta.chat.rag.embeddings.base import build_collection_name
 from aorta.chat.remote_auth import build_auth, describe_auth
 
-#: Prefix keeping remote collections out of the local provider's "aorta".
+#: Prefix keeping remote collections apart from the local provider's.
 REMOTE_COLLECTION_PREFIX = "aorta_remote_"
-
-#: Chroma rejects collection names longer than this.
-_MAX_COLLECTION_NAME = 63
-
-
-def _model_slug(model: str) -> str:
-    """Reduce a model id to the alphanumerics/underscores Chroma accepts."""
-    slug = re.sub(r"[^a-z0-9]+", "_", model.strip().lower()).strip("_")
-    return slug or "model"
 
 
 class RemoteApiProvider:
@@ -51,8 +41,7 @@ class RemoteApiProvider:
         )
 
     def collection_name(self) -> str:
-        name = REMOTE_COLLECTION_PREFIX + _model_slug(settings.remote_embedding_model)
-        return name[:_MAX_COLLECTION_NAME].rstrip("_")
+        return build_collection_name(REMOTE_COLLECTION_PREFIX, settings.remote_embedding_model)
 
     def describe(self) -> str:
         endpoint = settings.remote_embedding_base_url.strip() or "provider default"
