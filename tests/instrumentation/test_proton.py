@@ -210,18 +210,28 @@ def test_validate_options_rejects_a_backend_mode_the_backend_does_not_have():
         validate_options({"mode": "env", "backend": "roctracer", "backend_mode": "pcsampling"})
 
 
+#: A valid (backend, value) pair for each ``--mode``-bearing option. Keyed by
+#: option so the parametrised gate tests below cover whatever
+#: ``MODE_BEARING_KEYS`` holds; a key added there without an entry here fails
+#: with the KeyError naming it, which is the reminder we want.
+_MODE_BEARING_SAMPLE: dict[str, tuple[str, str]] = {
+    "backend_mode": ("cupti", "pcsampling"),
+    "instrumentation_mode": ("instrumentation", "mma"),
+    "granularity": ("instrumentation", "warp"),
+}
+
+
+def test_mode_bearing_sample_covers_every_declared_key():
+    assert set(_MODE_BEARING_SAMPLE) == set(MODE_BEARING_KEYS)
+
+
 @pytest.mark.parametrize("key", MODE_BEARING_KEYS)
 def test_validate_options_rejects_a_mode_bearing_knob_under_cli(key):
     """Triton 3.7.1's front-end parses ``-m/--mode`` and then calls ``start()``
     without it, so any of these under ``mode: cli`` would be accepted, rendered,
     and dropped -- a capture reporting success while configured as if nothing had
     been asked. Rejecting is the same call the intra-kernel backend gate makes."""
-    values = {
-        "backend_mode": ("cupti", "pcsampling"),
-        "instrumentation_mode": ("instrumentation", "mma"),
-        "granularity": ("instrumentation", "warp"),
-    }
-    backend, value = values[key]
+    backend, value = _MODE_BEARING_SAMPLE[key]
     with pytest.raises(ValueError, match="require mode: env"):
         validate_options({"mode": "cli", "backend": backend, key: value})
 
@@ -229,19 +239,17 @@ def test_validate_options_rejects_a_mode_bearing_knob_under_cli(key):
 @pytest.mark.parametrize("key", MODE_BEARING_KEYS)
 def test_validate_options_takes_the_default_attach_mode_into_account(key):
     """``mode`` defaults to ``cli``, so omitting it must not slip past the gate."""
-    values = {
-        "backend_mode": ("cupti", "pcsampling"),
-        "instrumentation_mode": ("instrumentation", "mma"),
-        "granularity": ("instrumentation", "warp"),
-    }
-    backend, value = values[key]
+    backend, value = _MODE_BEARING_SAMPLE[key]
     with pytest.raises(ValueError, match="require mode: env"):
         validate_options({"backend": backend, key: value})
 
 
 def test_validate_options_rejects_unknown_backend_mode():
-    with pytest.raises(ValueError, match="backend_mode"):
-        validate_options({"backend": "rocprofiler", "backend_mode": "sampling"})
+    """On ``mode: env`` so the domain check is the only thing that can fire; the
+    attach-mode gate would otherwise also reject this and the test could pass
+    without the domain check existing at all."""
+    with pytest.raises(ValueError, match="not one of"):
+        validate_options({"mode": "env", "backend": "rocprofiler", "backend_mode": "sampling"})
 
 
 @pytest.mark.parametrize("backend", ["auto", "instrumentation"])
