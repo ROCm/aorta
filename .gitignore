@@ -46,6 +46,12 @@ experiments/
 artifacts/
 artifacts_*/
 overlap_debug*/
+# Exceptions: `artifacts/` above is meant for run output, but it matches any
+# directory of that name anywhere in the tree -- including the `aorta.artifacts`
+# source package and its tests, which would otherwise be invisible to both git
+# and to tools that honour .gitignore (black, ruff).
+!src/aorta/artifacts/
+!tests/artifacts/
 
 # Experiment outputs and traces
 *.json
