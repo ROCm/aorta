@@ -275,7 +275,8 @@ class TestModuleLevelApi:
             get_retriever()
         message = str(excinfo.value)
         assert str(index_file) in message
-        assert "index_codebase" in message
+        assert "aorta chat index fetch" in message
+        assert "aorta chat index build" in message
 
     def test_a_file_without_this_collection_names_the_provider(self, monkeypatch, index_file: Path):
         """The diagnosable half of switching EMBEDDING_PROVIDER without re-indexing."""

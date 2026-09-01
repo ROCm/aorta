@@ -10,17 +10,21 @@ from langchain_core.embeddings import Embeddings
 
 from aorta.chat.config import settings
 from aorta.chat.rag.embeddings.base import EmbeddingProvider
-from aorta.chat.rag.embeddings.local_bge import LocalBgeProvider
+from aorta.chat.rag.embeddings.fastembed_bge import FastembedBgeProvider
 from aorta.chat.rag.embeddings.remote_api import RemoteApiProvider
 
 _PROVIDERS = {
-    "local": LocalBgeProvider,
+    "local": FastembedBgeProvider,
     "remote": RemoteApiProvider,
-    # Phase 4 (Decision 19a): "onnx" -> FastembedBgeProvider, in a new sibling
-    # module fastembed_bge.py. Same BGE-small model and therefore the same
-    # vectors, on onnxruntime instead of torch, which removes the CUDA-wheels
-    # hazard the "local" provider carries. It becomes the default and the
-    # "local" entry above is deleted with it.
+}
+
+#: Accepted spellings of "local". Decision 19a left one local flow rather than
+#: two, so the name now describes where inference happens, not which runtime
+#: does it -- but the runtime is what the discussion called it, and a profile
+#: saying ``onnx`` should not fail to start.
+_ALIASES = {
+    "onnx": "local",
+    "fastembed": "local",
 }
 
 
@@ -34,6 +38,7 @@ def get_provider(name: str | None = None) -> EmbeddingProvider:
         ValueError: If the provider name is not registered.
     """
     key = (name or settings.embedding_provider).strip().lower()
+    key = _ALIASES.get(key, key)
     provider_cls = _PROVIDERS.get(key)
     if provider_cls is None:
         raise ValueError(
@@ -51,10 +56,7 @@ def get_embeddings() -> Embeddings:
 def collection_name() -> str:
     """Collection for the configured provider.
 
-    Local returns the bare "aorta"; remote returns a per-model name, because
-    the two emit different vector dimensions and cannot share a collection.
-    The names predate the sqlite-vec swap, which invalidated every on-disk
-    index -- they are kept for continuity of the config surface, not because
-    an older index can still be read.
+    Every name encodes both the flow and the model. Dimension equality is not a
+    safe basis for sharing one -- see :class:`~aorta.chat.rag.embeddings.base`.
     """
     return get_provider().collection_name()

@@ -50,14 +50,14 @@ class TestDefaultsAreAnchoredOnTheUser:
     even writable.
     """
 
-    @pytest.mark.parametrize("field", ["index_path", "repo_map_path"])
+    @pytest.mark.parametrize("field", ["index_path", "repo_map_path", "model_cache_path"])
     def test_writable_defaults_avoid_site_packages(self, field):
         value = Path(getattr(Settings(), field)).resolve()
         for key in ("purelib", "platlib"):
             site_packages = Path(sysconfig.get_paths()[key]).resolve()
             assert site_packages not in value.parents, f"{field} resolves into {key}"
 
-    @pytest.mark.parametrize("field", ["index_path", "repo_map_path"])
+    @pytest.mark.parametrize("field", ["index_path", "repo_map_path", "model_cache_path"])
     def test_writable_defaults_follow_xdg_cache_home(self, field, monkeypatch, tmp_path):
         """Resolved per construction, not baked in at module import."""
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))

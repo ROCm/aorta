@@ -233,16 +233,20 @@ _HEAVY_PREFIXES = (
     "langchain_community",
     "langchain_openai",
     "langchain_text_splitters",
-    "langchain_huggingface",
     "langgraph",
     "openai",
     "pydantic",
     "pydantic_settings",
+    # Deleted in Phase 4 (Decision 19a) and listed anyway: they are the CUDA-on
+    # -AMD hazard, so a reappearance in aorta.cli's import graph is worth a
+    # failing test even though nothing imports them today.
     "sentence_transformers",
     "torch",
     "chainlit",
     "chromadb",
     "sqlite_vec",
+    "fastembed",
+    "onnxruntime",
     "rich",
 )
 
