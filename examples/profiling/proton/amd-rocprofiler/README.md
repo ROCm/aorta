@@ -55,12 +55,31 @@ post-3.8 `main` build is what the recipe as written needs.
 `mode='periodic_flushing'` is accepted on 3.8.0, so it is the way to exercise
 the rest of the plumbing on a released Triton.
 
-The payload covers both cases itself — the availability question up front, the
-mode question by catching what `proton.start()` raises — and exits **2** for
-either. That is the "this environment cannot run this" code it also uses for a
-missing GPU, so a failed trial reads as an environment problem rather than a
-bad result. The two exits carry different messages, because they have different
-fixes. On Triton 3.7.1 the backend is missing:
+There is a third question, and on aorta's own CI base it is the one that
+answers first. A ROCm that came from Python wheels ships only versioned
+sonames, so Proton's `dlopen` of the unversioned `librocprofiler-sdk.so` fails
+before any mode is considered. Measured in the ROCm 10 base image that
+[#411](https://github.com/ROCm/aorta/pull/411) moves CI to
+(`rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0`, Triton
+3.8.0, MI350X):
+
+```
+gelu: Proton could not start: [PROTON] Could not load `librocprofiler-sdk.so`
+```
+
+Both `pcsampling` *and* the `periodic_flushing` that 3.8.0 does support fail
+that way there, identically — which is why the payload does not guess. So the
+PC-sampling capture stays unverified on that image too, but for a packaging
+reason rather than a backend or mode one.
+
+The payload covers all three itself — the availability question up front, the
+mode and library questions by classifying what `proton.start()` raises — and
+exits **2** for each. That is the "this environment cannot run this" code it
+also uses for a missing GPU, so a failed trial reads as an environment problem
+rather than a bad result. Anything it does *not* recognise is re-raised as a
+traceback rather than explained away, because a confident wrong diagnosis costs
+more than an unhandled one. The exits carry different messages, because they
+have different fixes. On Triton 3.7.1 the backend is missing:
 
 ```
 gelu: Triton 3.7.1 has no libproton.get_available_profilers, so its Proton

@@ -2,15 +2,20 @@
 
 One deliberately unbalanced Triton kernel with two named intra-kernel scopes —
 `cheap` (a single multiply) and `expensive` (a short `erf` loop) — captured by
-Proton's `instrumentation` backend. Every other Proton backend tells you how
-long a kernel took; this one tells you *where inside the kernel* the cycles
-went.
+Proton's `instrumentation` backend. A queue-tracing backend tells you how long a
+kernel took; this one tells you *where inside the kernel* the cycles went, and
+tells you exactly, against scopes you named.
 
 Two things make it worth a separate example:
 
-- **Intra-kernel attribution**, which no queue-tracing backend can give. A
-  `roctracer` capture of this payload reports a single number for
-  `unbalanced_kernel` (verified); this one reports a number per scope.
+- **Deterministic cycle attribution to named source scopes.** Not intra-kernel
+  visibility as such — the sibling
+  [`../amd-rocprofiler`](../amd-rocprofiler/README.md) reaches inside a kernel
+  too, but statistically, by sampling the program counter, and against whatever
+  instructions the sampler happened to catch. Here you choose the regions and
+  get a cycle count for each. A `roctracer` capture of this payload reports a
+  single number for `unbalanced_kernel` (verified); this one reports a number
+  per scope.
 - **It installs no HSA queue interceptor**, so it is the one Proton backend
   that can share a process with `rocprofv3`. That is exactly why aorta's
   `rocprof` + `proton` conflict guard accepts `backend: instrumentation` and

@@ -4,12 +4,22 @@ The kernel is original to this repository: one elementwise ``erf``-based GELU
 launched in a loop, so PC sampling has a steady stream of instructions to
 sample rather than a handful of launches.
 
-**The ``rocprofiler`` backend exists only on Triton ``main``.** No released
-Triton has it. The payload probes for the capability and returns 2 -- the same
-"this environment cannot run this" code it uses for a missing GPU -- rather
-than letting the request fail as a confusing traceback. It still runs the
-kernel and self-checks when no capture was requested, so the payload itself
-stays verifiable on a Triton that cannot profile it.
+**The backend is released; this example's mode is not.** ``rocprofiler`` ships
+from Triton 3.8.0 (2026-08-28), so a modern image has it -- aorta's own ROCm 10
+CI base carries Triton 3.8.0 and reports it in
+``get_available_profilers()``. What still needs a post-3.8 ``main`` build is
+``pcsampling``: 3.8.0's ``RocprofSDKProfiler`` accepts only
+``periodic_flushing``.
+
+Three things can therefore stop a capture here, and the payload keeps them
+apart rather than blaming whichever is most likely: the backend can be absent
+(a pre-3.8 Triton), the mode can be unsupported (3.8.0), or the backend's
+library can fail to load (a wheel-provided ROCm ships only versioned sonames,
+so ``librocprofiler-sdk.so`` is missing -- verified on the ROCm 10 base). The
+first two return 2, the "this environment cannot run this" code also used for a
+missing GPU; the third reports Proton's own message and its known remedy. The
+payload still runs the kernel and self-checks when no capture was requested, so
+it stays verifiable wherever it cannot profile.
 
 Constexpr kernel parameters are spelled lowercase (``block_size`` rather than
 Triton's conventional ``BLOCK_SIZE``) to satisfy this repository's lint
@@ -137,6 +147,45 @@ def unavailable_reason(backend: str) -> str | None:
     )
 
 
+def start_failure_reason(exc: Exception, capture: dict[str, str | None]) -> str | None:
+    """Explain a ``proton.start()`` failure, or ``None`` if it is not one we know.
+
+    Keyed on what Proton reported rather than on what is most likely, because
+    the likely answer is wrong in the environment that matters most: on a
+    wheel-provided ROCm the ``rocprofiler`` backend is present and every mode
+    fails at ``dlopen``, so a mode diagnosis would misdirect exactly the reader
+    who has the backend available.
+
+    ``None`` means "not recognised" and the caller re-raises. That is deliberate:
+    an unexplained traceback is more useful than a confident wrong explanation.
+    """
+    message = str(exc)
+    if "unsupported mode" in message:
+        return (
+            f"the {capture['backend']!r} backend is present but does not accept "
+            f"mode={capture['mode']!r}. AMD PC sampling landed upstream after the "
+            "3.8.0 tag, so pcsampling needs a post-3.8 `main` build; 3.8.0 itself "
+            "takes only periodic_flushing."
+        )
+    if "Could not load" in message:
+        return (
+            "Proton could not dlopen the backend's library. A ROCm that came "
+            "from Python wheels ships only versioned sonames, while Proton opens "
+            "the unversioned name -- so this says nothing about whether the "
+            "backend or the mode is supported. Add a directory of unversioned "
+            "symlinks to $LD_LIBRARY_PATH, or use an image with a system ROCm "
+            "install."
+        )
+    if "VISIBLE_DEVICES" in message:
+        return (
+            "Proton refuses HIP_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES on AMD. "
+            "Unset it and pin the device with ROCR_VISIBLE_DEVICES instead. "
+            "(Under aorta this translation is automatic; you are seeing it "
+            "because the payload was run directly.)"
+        )
+    return None
+
+
 def proton_kwargs(args: argparse.Namespace) -> dict[str, str | None]:
     """Translate aorta's ``AORTA_PROTON_*`` bundle into ``proton.start()`` keywords.
 
@@ -206,8 +255,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # No capture at all when nothing asked for one: that is how an operator
     # separates "my payload is broken" from "my profiler is broken", and it is
-    # what keeps this file useful on the released Tritons that cannot offer the
-    # backend the recipe asks for.
+    # what keeps this file useful wherever the backend, the mode, or the
+    # backend's library is unavailable.
     profiling = args.backend is not None or f"{_ENV_PREFIX}NAME" in os.environ
     capture = proton_kwargs(args) if profiling else None
     # Checked before anything is measured, so an unobtainable backend reads as
@@ -241,30 +290,23 @@ def main(argv: list[str] | None = None) -> int:
         try:
             proton.start(**capture)
         except (ValueError, RuntimeError) as exc:
-            # Backend presence and mode support are separate questions, and the
-            # pre-flight check above can only answer the first. Triton 3.8.0 is
-            # the case that proves it: it registers ``rocprofiler``, so
-            # ``get_available_profilers()`` lists it and the check passes, but
-            # its ``RocprofSDKProfiler::doSetMode`` accepts only
-            # ``periodic_flushing`` and throws on ``pcsampling``. Converted to
-            # the same exit 2 an absent backend gets, because it is the same
-            # answer -- this environment cannot take the measurement -- rather
-            # than a C++ invalid_argument out of Proton's internals. Narrow
-            # exceptions on purpose: pybind maps that throw to ValueError, and
-            # anything else here is a bug worth seeing as a traceback.
-            print(
-                f"gelu: Proton refused backend={capture['backend']!r} with "
-                f"mode={capture['mode']!r}: {exc}",
-                file=sys.stderr,
-            )
-            print(
-                "gelu: the backend exists on this Triton but does not support "
-                "that mode. AMD pcsampling landed after the 3.8.0 tag, so it "
-                "needs an upstream `main` build; `periodic_flushing` works on "
-                "3.8.0.",
-                file=sys.stderr,
-            )
+            # Three different environment defects reach this handler, and saying
+            # the wrong one is worse than saying nothing: on aorta's ROCm 10 CI
+            # base both `pcsampling` and the `periodic_flushing` that 3.8.0 does
+            # support fail identically with `Could not load
+            # \`librocprofiler-sdk.so\``, so a blanket "unsupported mode"
+            # diagnosis would misdirect the reader in the one image where the
+            # backend is actually available. `start()` also raises ValueError for
+            # a set HIP_VISIBLE_DEVICES. So the message is chosen from what
+            # Proton reported, and anything unrecognised is re-raised rather than
+            # explained away -- a traceback beats a confident wrong answer.
+            reason = start_failure_reason(exc, capture)
+            if reason is None:
+                raise
+            print(f"gelu: Proton could not start: {exc}", file=sys.stderr)
+            print(f"gelu: {reason}", file=sys.stderr)
             return 2
+
     try:
         for _ in range(args.iters):
             gelu(x)

@@ -331,9 +331,17 @@ def test_a_backend_that_refuses_the_mode_exits_two_not_a_traceback(tmp_path):
         "an unsupported mode must exit 2, the same code an unobtainable backend "
         f"gets, not crash or traceback:\n{proc.stdout}\n{proc.stderr}"
     )
-    assert "Proton refused backend=" in proc.stderr, proc.stderr
-    assert "does not support that mode" in proc.stderr, proc.stderr
     assert "Traceback" not in proc.stderr, f"should be handled, not raised:\n{proc.stderr}"
+    # Proton's own words, then the payload's reading of them.
+    assert "unsupported mode" in proc.stderr, proc.stderr
+    assert "does not accept mode=" in proc.stderr, proc.stderr
+    # The classification is the point, not the exit code: the same handler sees
+    # dlopen and device failures, and blaming the mode for those is what this
+    # asserts against. Measured on aorta's ROCm 10 base, where every mode fails
+    # at `Could not load \`librocprofiler-sdk.so\`` -- a mode diagnosis there
+    # would be confidently wrong.
+    assert "could not dlopen" not in proc.stderr, proc.stderr
+    assert "ROCR_VISIBLE_DEVICES instead" not in proc.stderr, proc.stderr
 
 
 @skip_no_proton
