@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1591,7 +1592,20 @@ def _snapshot_with_rocm_rpath(value: bool | None) -> EnvSnapshot:
 
 
 @pytest.fixture
-def rpath_stack(monkeypatch, patched_env):
+def no_inherited_ld_library_path(monkeypatch):
+    """Pin the ambient value these tests assume is absent.
+
+    The predicate reads ``os.environ`` for non-isolated cells, so without
+    this a developer who happens to export ``LD_LIBRARY_PATH`` in the shell
+    they run pytest from would see the "no substitution attempted" cases
+    warn. That would make the silence assertions describe the machine
+    rather than the code.
+    """
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+
+@pytest.fixture
+def rpath_stack(monkeypatch, patched_env, no_inherited_ld_library_path):
     """The local env's own probe reports DT_RPATH on its ROCm libraries."""
     monkeypatch.setattr(
         runner,
@@ -1601,7 +1615,7 @@ def rpath_stack(monkeypatch, patched_env):
 
 
 @pytest.fixture
-def runpath_stack(monkeypatch, patched_env):
+def runpath_stack(monkeypatch, patched_env, no_inherited_ld_library_path):
     """It reports DT_RUNPATH -- i.e. every ROCm 7.x host."""
     monkeypatch.setattr(
         runner,
@@ -1713,25 +1727,95 @@ def test_operator_ld_library_path_reaches_the_child_unmodified(
     assert cell["resolved_env_vars"]["LD_LIBRARY_PATH"] == "/opt/patched/lib"
 
 
-def test_warning_predicate_is_pure_and_does_not_touch_the_bundle():
+def test_warning_predicate_is_pure_and_does_not_touch_the_bundle(monkeypatch):
     """The detector inspects; the caller decides what to do with the string."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/ambient/lib")
     bundle = {"LD_LIBRARY_PATH": "/opt/patched/lib", "HSA_XNACK": "1"}
     before = dict(bundle)
-    message = runner._rpath_substitution_warning("cell-a", bundle, True)
+    ambient_before = dict(os.environ)
+    message = runner._rpath_substitution_warning(
+        "cell-a", bundle, True, boundary="local"
+    )
     assert message is not None
     assert bundle == before
+    # It now reads os.environ too, and must leave that alone as well: the
+    # environment handed to the process under test is the recipe's, not the
+    # detector's.
+    assert dict(os.environ) == ambient_before
 
 
-def test_silent_when_ld_library_path_is_empty():
+def test_silent_when_ld_library_path_is_empty(no_inherited_ld_library_path):
     """An empty LD_LIBRARY_PATH contributes no directory to search.
 
     Set-but-empty is not a substitution attempt, so treating it as one
     would fire the warning on a run with nothing to lose.
     """
     assert (
-        runner._rpath_substitution_warning("cell-a", {"LD_LIBRARY_PATH": ""}, True)
+        runner._rpath_substitution_warning(
+            "cell-a", {"LD_LIBRARY_PATH": ""}, True, boundary="local"
+        )
         is None
     )
+
+
+# ---- Layer 2, the ambient environment (issue #413 follow-up) --------------
+#
+# The cell's resolved bundle is an OVERLAY, not the whole environment. The
+# dispatcher starts from the ambient os.environ and updates it with the
+# bundle (aorta/run/dispatcher.py, "Apply the effective overlay"), then runs
+# the workload in that process; a SubprocessWorkload child gets a snapshot of
+# the same mapping at fork. So `LD_LIBRARY_PATH=/patched aorta triage ...` --
+# the way an engineer actually substitutes a library -- reaches the workload
+# while contributing nothing to the bundle. A predicate that reads only the
+# bundle is blind to the primary case it exists to catch.
+
+
+def test_warns_when_the_substitution_is_inherited_from_the_shell(
+    tmp_path, patched_env, patched_run_trials, rpath_stack, monkeypatch
+):
+    """``LD_LIBRARY_PATH=/patched aorta triage ...`` on a ROCm 10 host.
+
+    The recipe sets nothing, so the bundle is empty -- and the workload
+    still runs with the operator's substitution in place, still silently
+    loses it to DT_RPATH, and still reports a result describing the stock
+    library. This is the false negative the warning was shipped to prevent.
+    """
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/patched/lib")
+
+    runner.run_recipe(
+        _substitution_recipe(None),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+
+    hit = next(w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w)
+    assert "patched-hipblaslt" in hit
+    # Named as inherited, because the fix is in the invoking shell rather
+    # than in the recipe, and an operator told "cell X sets LD_LIBRARY_PATH"
+    # would go looking in a recipe that does not mention it.
+    assert "inherits LD_LIBRARY_PATH" in hit
+
+
+def test_an_explicit_empty_overlay_overrides_an_inherited_substitution(
+    tmp_path, patched_env, patched_run_trials, rpath_stack, monkeypatch
+):
+    """``extra_env`` replaces rather than appends, so ``""`` really clears it.
+
+    A cell that sets ``LD_LIBRARY_PATH: ""`` while the shell exports one is
+    deliberately turning the substitution OFF for that cell. Reading the
+    ambient value anyway would warn about a substitution that the recipe
+    just removed -- the crying-wolf the two-condition trigger exists to
+    prevent, in a new place.
+    """
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/patched/lib")
+
+    runner.run_recipe(
+        _substitution_recipe(""),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+
+    assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
 
 
 # ---- Layer 2, per-environment sourcing (issue #413 follow-up) -------------
@@ -1744,9 +1828,12 @@ def test_silent_when_ld_library_path_is_empty():
 # it is the one the whole feature exists for.
 
 
-def _isolated_substitution_recipe(ld_library_path: str, image: str = "rocm/x:10"):
+def _isolated_substitution_recipe(
+    ld_library_path: str | None, image: str = "rocm/x:10"
+):
     from aorta.triage.recipe import Cell, ConfoundCfg, InlineEnv, Recipe
 
+    extra_env = {} if ld_library_path is None else {"LD_LIBRARY_PATH": ld_library_path}
     env = InlineEnv(name="_inline_rocm10", docker=image)
     return Recipe(
         schema_version=1,
@@ -1758,7 +1845,7 @@ def _isolated_substitution_recipe(ld_library_path: str, image: str = "rocm/x:10"
                 name="patched-in-container",
                 mitigations=("none",),
                 environment=env.name,
-                extra_env={"LD_LIBRARY_PATH": ld_library_path},
+                extra_env=extra_env,
             ),
         ),
         confound=ConfoundCfg(baseline_cell="patched-in-container"),
@@ -1825,6 +1912,162 @@ def test_isolated_env_does_not_inherit_a_host_rpath_reading(
         timestamp="2026-01-01T00-00-00",
     )
     assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+
+
+# ---- Which boundaries pass the ambient value through ----------------------
+#
+# "Isolated" is one word for two different launches, and they answer the
+# inheritance question differently. A container gets only the controlled
+# overlay (docker_env_flags never reads os.environ) and a host path names a
+# directory that is not mounted inside it. A venv wrapper runs a plain
+# subprocess on THIS host: it inherits the ambient environment and the path
+# is real. Collapsing the two would reproduce, for venv cells, the exact
+# false negative this follow-up fixed for local ones -- so the split below
+# IS the assertion, and the two cases must not be merged back.
+
+
+def _venv_substitution_recipe(tmp_path: Path) -> tuple[object, Path]:
+    """A venv-environment cell with no ``LD_LIBRARY_PATH`` of its own.
+
+    Registered through a sidecar because a venv env has no inline shorthand
+    (``InlineEnv`` carries only ``docker``), which is also why this is the
+    one boundary aorta classifies without the cell declaring it.
+    """
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    sidecar = tmp_path / "envs.sidecar.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {"rocm10_venv": {"venv": "/opt/venvs/rocm10"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    recipe = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=1,
+        cells=(
+            Cell(
+                name="patched-in-venv",
+                mitigations=("none",),
+                environment="rocm10_venv",
+                extra_env={},
+            ),
+        ),
+        confound=ConfoundCfg(baseline_cell="patched-in-venv"),
+    )
+    return recipe, sidecar
+
+
+def test_container_env_does_not_read_the_hosts_ld_library_path(
+    tmp_path, monkeypatch, no_inherited_ld_library_path, patched_env
+):
+    """The ambient value does not cross a CONTAINER boundary.
+
+    The container's libraries genuinely carry DT_RPATH, so the second half
+    of the trigger holds -- but the operator's ``LD_LIBRARY_PATH`` is a HOST
+    path, and the only thing aorta guarantees crosses the boundary is the
+    controlled overlay (forwarded by ``docker_env_flags``, which never reads
+    ``os.environ``). Warning here would fire on a cell that is substituting
+    nothing, and it would fire on every containerised cell run from a shell
+    that happens to export the variable.
+    """
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/patched/lib")
+    monkeypatch.setattr(runner, "run_trials", _wrapper_writing(True))
+
+    runner.run_recipe(
+        _isolated_substitution_recipe(None),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+
+    assert not [w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w]
+
+
+def test_venv_env_does_read_the_hosts_ld_library_path(
+    tmp_path, monkeypatch, no_inherited_ld_library_path, patched_env
+):
+    """A venv child inherits this process's environment, so it must warn.
+
+    Same shape as the container case above and the opposite verdict, which
+    is the whole point of the split. The wrapper launches a subprocess on
+    this host, so ``/patched/lib`` is a real directory that the child really
+    searches -- and ROCm 10 really ignores it. Silence here would be the
+    confident wrong answer the feature exists to prevent, just relocated
+    from local cells to venv ones.
+    """
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/patched/lib")
+    monkeypatch.setattr(runner, "run_trials", _wrapper_writing(True))
+    recipe, sidecar = _venv_substitution_recipe(tmp_path)
+
+    runner.run_recipe(
+        recipe,
+        output_dir=tmp_path / "out",
+        timestamp="2026-01-01T00-00-00",
+        extra_sidecar_files=(sidecar,),
+    )
+
+    hit = next(
+        w for w in _matrix_warnings(tmp_path / "out") if "DT_RPATH" in w
+    )
+    assert "patched-in-venv" in hit
+    assert "inherits LD_LIBRARY_PATH" in hit
+    # Hedged, because aorta hands the variable to a wrapper it does not own
+    # and cannot confirm forwards it. The local case says "reaches the
+    # workload" outright and must keep saying so.
+    assert "cannot confirm the variable was forwarded" in hit
+
+
+def test_the_local_case_is_not_hedged(
+    tmp_path, patched_env, patched_run_trials, rpath_stack, monkeypatch
+):
+    """The venv hedge must not leak into the unambiguous majority case.
+
+    For a local cell the dispatcher overlays onto this very process's
+    ``os.environ`` and then runs the workload in it, so the inheritance is
+    an observation, not an expectation. Softening it would teach readers to
+    discount the message everywhere.
+    """
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/patched/lib")
+
+    runner.run_recipe(
+        _substitution_recipe(None),
+        output_dir=tmp_path,
+        timestamp="2026-01-01T00-00-00",
+    )
+
+    hit = next(w for w in _matrix_warnings(tmp_path) if "DT_RPATH" in w)
+    assert "reaches the workload exactly as it was exported to aorta" in hit
+    assert "cannot confirm" not in hit
+
+
+def test_containerized_environments_are_a_subset_of_isolated_ones(tmp_path):
+    """The two questions read one classification, so they cannot disagree.
+
+    Every boundary that suppresses the ambient reading must also route the
+    env to wrapper-driven probing; the reverse does not hold, and venv is
+    the case that makes it not hold. Pinned as an invariant rather than a
+    pair of examples so a future tier (buck, say) has to answer both
+    questions on purpose.
+    """
+    for boundary in ("local", "venv", "container"):
+        suppresses_ambient = (
+            runner._substitution_ld_library_path({}, boundary) == (None, False)
+        )
+        if suppresses_ambient:
+            assert runner._is_isolated_environment(boundary), (
+                f"boundary {boundary!r} drops the ambient environment but is "
+                "not treated as isolated, so its env.json would be a host "
+                "snapshot while its warning assumes a container"
+            )
+    # And the classification itself: docker -> container, venv -> venv.
+    assert runner._is_isolated_environment("container")
+    assert runner._is_isolated_environment("venv")
+    assert not runner._is_isolated_environment("local")
 
 
 def test_isolated_env_with_no_container_snapshot_stays_silent(

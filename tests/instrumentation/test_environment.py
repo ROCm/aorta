@@ -12702,6 +12702,49 @@ class TestCaptureLibraryLinkage:
         assert entry["path"].endswith("librocblas.so.5.10.0")
         assert entry["effective_tag"] == "rpath"
 
+    def test_a_non_elf_candidate_does_not_split_the_tags_from_the_hash(
+        self, rocm_libs
+    ):
+        """A GNU ld script named ``librocblas.so`` beside a versioned ELF.
+
+        The regression: the hash path accepted the first READABLE candidate
+        while the linkage loop accepted the first PARSEABLE one, so the two
+        described different files -- ``lib_hash`` of the ld script paired
+        with the tags of ``librocblas.so.5.10.0``. That breaks the only job
+        the named ``libraries`` list has, which is to line a tag up against
+        a hash already in the snapshot.
+
+        Which file the pair settles on is secondary to their agreeing; the
+        first assertion is therefore the invariant itself, stated over
+        whatever ``path`` the entry reports.
+        """
+        ld_script = rocm_libs / "librocblas.so"
+        ld_script.write_text("/* GNU ld script */\nINPUT(librocblas.so.5.10.0)\n")
+        _write_elf(rocm_libs / "librocblas.so.5.10.0", (DT_RPATH,))
+
+        block = env_mod._capture_library_linkage()
+        entry = next(
+            e for e in block["libraries"] if e["name"] == "librocblas.so"
+        )
+        lib_hash = env_mod._hash_shared_library(rocm_libs, "librocblas.so")
+
+        named = Path(entry["path"])
+        assert lib_hash == (
+            "sha256:" + hashlib.sha256(named.read_bytes()).hexdigest()
+        ), (
+            f"library_linkage names {entry['path']!r} but lib_hash describes "
+            "a different file -- the linkage loop and _hash_shared_library "
+            "have diverged on which candidate IS this library again."
+        )
+        # And the rule they now share is "first readable candidate", so the
+        # ld script is reported honestly rather than skipped past.
+        assert named == ld_script
+        assert entry["effective_tag"] == "unknown"
+        assert entry["reason"] == "not an ELF file"
+        # The verdict is unaffected: the census reads the directory, so the
+        # versioned ELF's DT_RPATH is still counted as evidence.
+        assert block["rocm_rpath"] is True
+
     def test_appends_no_partial_reasons(self, rocm_libs):
         """This block reports its failures in-band, not via partial_reasons.
 

@@ -3961,9 +3961,10 @@ def _shared_library_candidates(lib_dir: Path, soname: str) -> list[Path]:
     Factored out of :func:`_hash_shared_library` so the schema-1.17
     linkage probe reads the DT tags of exactly the file whose hash the
     identity blocks record, rather than re-deriving "which file is this
-    library" under a second, drifting rule. Only the ORDERING is shared;
-    the expensive part (hashing, GBs on a populated install) still
-    happens once, in the one caller that needs it.
+    library" under a second, drifting rule. Ordering alone was not enough
+    to guarantee that -- see :func:`_accepted_shared_library`, which owns
+    the matching ACCEPTANCE rule. The expensive part (hashing, GBs on a
+    populated install) still happens once, in the one caller that needs it.
     """
     candidates: list[Path] = [lib_dir / soname]
     try:
@@ -4001,24 +4002,69 @@ def _shared_library_candidates(lib_dir: Path, soname: str) -> list[Path]:
     return resolved_candidates
 
 
-def _hash_shared_library(lib_dir: Path, soname: str) -> str | None:
-    """SHA-256 a shared library, resolving symlinks first.
+def _accepted_shared_library(lib_dir: Path, soname: str) -> Path | None:
+    """THE file *soname* resolves to under *lib_dir* -- one answer, one rule.
 
-    Hashes the best candidate :func:`_shared_library_candidates` offers,
-    falling through to the next one if that file cannot be opened.
-    Returns ``"sha256:<hex>"`` or ``None``.
+    Walks :func:`_shared_library_candidates` in order and accepts the first
+    one that can actually be opened and read from. Both consumers use this:
+    :func:`_hash_shared_library` for the identity blocks' ``lib_hash`` and
+    :func:`_linkage_entry` for the schema-1.17 DT-tag record. They MUST
+    describe the same file -- the named ``libraries`` list exists so a
+    reader can line a tag up against the hash already in the snapshot, and
+    a pair that can drift makes that alignment a lie.
+
+    Acceptance is deliberately "readable", NOT "parses as an ELF", and the
+    asymmetry is the point. Requiring ELF-ness here would push the skip
+    into the hash path, where it does not belong: hashing a file needs no
+    ELF header, and a real-but-unparseable library (truncated, stripped of
+    its program header table, a stale-mount read error) would stop being
+    recorded at all -- ``lib_hash=None`` for a file that is plainly there.
+    So the ld-script case resolves the other way: a GNU ``ld`` script named
+    ``libfoo.so`` is a normal inhabitant of a lib dir, and the pair reports
+    it honestly as the hashed file with ``effective_tag="unknown"`` rather
+    than quietly reporting one file's hash beside another file's tags.
+
+    Nothing is lost from the ``rocm_rpath`` verdict by that choice: the
+    verdict aggregates over :func:`_census_rocm_link_tags`, which reads
+    every shared object in the directory and therefore still sees the
+    versioned ELF sitting behind the ld script. The named entry going
+    ``unknown`` costs a line of the reading aid, not a detection.
     """
     for resolved in _shared_library_candidates(lib_dir, soname):
         try:
-            digest = hashlib.sha256()
-            with resolved.open("rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    digest.update(chunk)
-            return f"sha256:{digest.hexdigest()}"
+            with resolved.open("rb") as handle:
+                handle.read(1)
         except OSError as exc:
-            log.debug("hash failed for %s: %s", resolved, exc)
+            log.debug("cannot read shared library candidate %s: %s", resolved, exc)
             continue
+        return resolved
     return None
+
+
+def _hash_shared_library(lib_dir: Path, soname: str) -> str | None:
+    """SHA-256 a shared library, resolving symlinks first.
+
+    Hashes whichever candidate :func:`_accepted_shared_library` accepts --
+    the same file the linkage entry reads its DT tags from, so the two
+    cannot describe different files. Returns ``"sha256:<hex>"`` or ``None``.
+
+    A read that fails PART WAY through the accepted file yields ``None``
+    rather than falling through to a versioned sibling: a sibling's digest
+    recorded under this soname would be the very hash/file mismatch the
+    shared acceptance rule exists to prevent.
+    """
+    resolved = _accepted_shared_library(lib_dir, soname)
+    if resolved is None:
+        return None
+    try:
+        digest = hashlib.sha256()
+        with resolved.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+    except OSError as exc:
+        log.debug("hash failed for %s: %s", resolved, exc)
+        return None
 
 
 def _hash_hipblaslt_library() -> str | None:
@@ -4246,44 +4292,40 @@ def _effective_link_tag(tags: list[str]) -> str:
 def _linkage_entry(name: str, scope: str, lib_dir: Path) -> dict[str, Any]:
     """One ``library_linkage.libraries`` record for *name* under *lib_dir*.
 
-    Walks :func:`_shared_library_candidates` -- the same ordering the
-    identity blocks hash through -- and reports the first candidate whose
-    dynamic section parses. If none parses, the best candidate is still
-    named with ``effective_tag="unknown"`` and the reason from the first
-    failure, so "no such library here" and "there it is, unreadable" stay
-    distinguishable.
+    Reads the dynamic section of :func:`_accepted_shared_library`'s pick --
+    the same file, under the same acceptance rule, that the identity blocks
+    hash. It does NOT fall through to a later candidate when that file
+    fails to parse: skipping past it is what let this record name one file
+    while ``lib_hash`` described another. An accepted file we cannot
+    interpret is reported in place, as ``effective_tag="unknown"`` plus the
+    parser's reason, which keeps "no such library here" and "there it is,
+    unreadable" distinguishable without splitting the pair.
     """
-    candidates = _shared_library_candidates(lib_dir, name)
-    if not candidates:
-        return {
-            "name": name,
-            "scope": scope,
-            "path": None,
-            "dt_tags": [],
-            "effective_tag": "unknown",
-            "reason": f"no {name} under {lib_dir}",
-        }
-    first_error: str | None = None
-    for candidate in candidates:
-        tags, error = _read_elf_search_path_tags(candidate)
-        if error is None:
+    accepted = _accepted_shared_library(lib_dir, name)
+    if accepted is None:
+        # Either nothing exists under this name, or everything that does is
+        # unopenable. Name the best-ranked candidate in the latter case so
+        # ``path`` still separates a missing install from a broken one; the
+        # tag read below supplies the reason it could not be opened.
+        candidates = _shared_library_candidates(lib_dir, name)
+        if not candidates:
             return {
                 "name": name,
                 "scope": scope,
-                "path": str(candidate),
-                "dt_tags": tags,
-                "effective_tag": _effective_link_tag(tags),
-                "reason": None,
+                "path": None,
+                "dt_tags": [],
+                "effective_tag": "unknown",
+                "reason": f"no {name} under {lib_dir}",
             }
-        if first_error is None:
-            first_error = error
+        accepted = candidates[0]
+    tags, error = _read_elf_search_path_tags(accepted)
     return {
         "name": name,
         "scope": scope,
-        "path": str(candidates[0]),
-        "dt_tags": [],
-        "effective_tag": "unknown",
-        "reason": first_error,
+        "path": str(accepted),
+        "dt_tags": tags,
+        "effective_tag": "unknown" if error is not None else _effective_link_tag(tags),
+        "reason": error,
     }
 
 
