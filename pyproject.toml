@@ -120,6 +120,14 @@ hw-queue-profiling = [
 ]
 
 # For aorta agent closed-loop (LiteLLM proposer)
+# The Cluster Intelligence Agents. DSPy is what Watch and Autopsy reach a model
+# through today; the shared chat provider layer is where that belongs, so this
+# extra is expected to shrink rather than grow -- see
+# docs/plans/cia-agents-port.md, finding F2.
+cia = [
+    "dspy-ai>=2.5; python_version >= '3.11'",
+]
+
 agent = [
     "litellm>=1.0.0",
 ]
@@ -239,6 +247,7 @@ all = [
     "amd-aorta[hw-queue]",
     "amd-aorta[hw-queue-profiling]",
     "amd-aorta[agent]",
+    "amd-aorta[cia]",
     "amd-aorta[dev]",
 ]
 
