@@ -13,13 +13,21 @@ refresh cadences.
 | Collection | Contents | Rebuilt when | Leaves the machine? |
 | --- | --- | --- | --- |
 | Source | The AORTA tree at `aorta_path`: code, docs, recipes | You upgrade or move the checkout | It is public source, and it is what the published index contains |
-| Run artifacts | *Your* sweep output: `matrix.json`, `env.json` | You run a sweep you want to ask about | **Never.** Built locally, never published |
+| Run artifacts | *Your* sweep output: `matrix.json`, `env.json` | You run a sweep you want to ask about | **Never published.** Built locally, and never shipped as an index asset — but see the note below on remote embeddings |
 
 The split is not tidiness. The run-artifact collection is per-user data that can
 contain customer hostnames, filesystem layouts and environment variables, so it
 must never be built or shipped by CI, and rebuilding the source collection must
 not touch it. Retrieved chunks from it are also the reason
 [redaction](redaction.md) is on by default.
+
+> **"Never published" is not the same as "never sent."** With
+> `embedding_provider = "remote"`, building this collection sends the rendered
+> `matrix.json` and `env.json` text to the embeddings API so it can be turned
+> into vectors, and each later query is sent the same way. That path is not
+> covered by chat-message redaction, which applies to the LLM request rather
+> than the embeddings one. Keep `embedding_provider = "local"` — the default —
+> if this data must not leave the machine.
 
 Alongside the index, chat generates a **repo map** — a function and class index
 over the same tree, at `$XDG_CACHE_HOME/aorta/chat/repo_map.md`. The planner

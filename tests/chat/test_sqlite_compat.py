@@ -43,18 +43,47 @@ def restore_sqlite_modules():
     sqlite_compat._extensions_checked = False
 
 
-def _fake_pysqlite3(version: str = "3.51.1"):
+def _connector(loads_extensions: bool):
+    """A ``connect`` whose connections do or do not offer the extension hook.
+
+    CPython omits ``enable_load_extension`` entirely when the build option is
+    off, so its absence is the shape being modelled rather than a raise.
+    """
+
+    def _connect(_target):
+        if loads_extensions:
+            return SimpleNamespace(
+                enable_load_extension=lambda _flag: None, close=lambda: None
+            )
+        return SimpleNamespace(close=lambda: None)
+
+    return _connect
+
+
+def _fake_pysqlite3(version: str = "3.51.1", loads_extensions: bool = True):
+    """A pysqlite3 stand-in, answering the version *and* extension questions.
+
+    Both now decide whether the swap happens: a current sqlite built without
+    ``--enable-loadable-sqlite-extensions`` is useless to sqlite-vec, and the
+    version check alone used to return before the fallback was considered.
+    """
     return SimpleNamespace(
         sqlite_version=version,
         dbapi2=SimpleNamespace(sqlite_version=version),
+        connect=_connector(loads_extensions),
+        Error=stdlib_sqlite3.Error,
+        NotSupportedError=stdlib_sqlite3.NotSupportedError,
     )
 
 
-def _sqlite_without_extensions():
+def _sqlite_without_extensions(version: str = "3.51.1"):
     """A sqlite3 stand-in whose connections have no enable_load_extension."""
     return SimpleNamespace(
+        sqlite_version=version,
+        dbapi2=SimpleNamespace(sqlite_version=version),
+        Error=stdlib_sqlite3.Error,
         NotSupportedError=stdlib_sqlite3.NotSupportedError,
-        connect=lambda _target: SimpleNamespace(close=lambda: None),
+        connect=_connector(False),
     )
 
 

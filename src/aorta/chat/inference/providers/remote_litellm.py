@@ -22,6 +22,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _require_auth_config() -> tuple[str, str]:
+    """Return the stripped ``(api_key, auth_header)``, or raise if unusable.
+
+    Checked in ``preflight`` as well as at build time: a custom auth header with
+    no key behind it is a configuration error the operator can fix, and this
+    backend's whole job is to reach a gateway.
+    """
+    api_key = settings.remote_llm_api_key.strip()
+    auth_header = settings.remote_llm_auth_header.strip()
+    if auth_header and not api_key:
+        # The placeholder exists to fill the *unused* bearer slot. Sending it as
+        # the gateway's own credential authenticates nothing, and would fail at
+        # the first real query after preflight called the backend healthy.
+        raise ValueError(
+            f"remote_llm_auth_header is set to {auth_header!r}, but "
+            "remote_llm_api_key is empty, so there is no secret to put in that "
+            "header.\n"
+            "Set AORTA_CHAT_REMOTE_LLM_API_KEY, or put remote_llm_api_key in "
+            "the chat profile ('aorta chat config init')."
+        )
+    return api_key, auth_header
+
 LITELLM_IMPORT_MESSAGE = (
     "llm_provider=litellm needs both litellm and langchain-litellm. "
     "Install them with either:\n"
@@ -58,22 +81,30 @@ class RemoteLiteLLMBackend:
 
         # A gateway in front of the provider wants the key in its own header,
         # exactly as on the openai backend. Without an auth header configured,
-        # key handling is left to LiteLLM's own environment variables.
+        # key handling is left to LiteLLM's own environment variables -- unless
+        # a key was configured, which is then what the caller meant by setting
+        # it.
+        api_key, auth_header = _require_auth_config()
         client_key, headers = build_auth(
-            api_key=settings.remote_llm_api_key or PLACEHOLDER_API_KEY,
+            api_key=api_key or PLACEHOLDER_API_KEY,
             auth_header=settings.remote_llm_auth_header,
             extra_headers=settings.remote_llm_extra_headers,
         )
         if headers:
             kwargs["model_kwargs"] = {"extra_headers": headers}
-            if settings.remote_llm_auth_header.strip():
-                kwargs["api_key"] = client_key
+        # Not gated on ``headers``: with extra headers but no auth header, and
+        # with no headers at all, ``build_auth`` hands back the configured key
+        # itself, and dropping it left LiteLLM to find a credential in the
+        # environment that the profile had already been given.
+        if api_key or auth_header:
+            kwargs["api_key"] = client_key
 
         return chat_litellm(**kwargs)
 
     async def preflight(self) -> None:
-        """Surface a missing litellm install now rather than mid-query."""
+        """Surface a missing litellm install, or unusable auth, before a query."""
         _load_chat_litellm()
+        _require_auth_config()
         logger.info("Using %s", self.describe())
 
     def describe(self) -> str:

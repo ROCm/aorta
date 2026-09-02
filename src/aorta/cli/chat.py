@@ -21,12 +21,14 @@ quiet-mode logging setup are that module's.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import importlib
 import json
 import logging
 import os
 import sys
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +163,8 @@ def _quiet_mode() -> None:
 _stderr_suppressed = False
 
 
-def _suppress_stderr_noise() -> None:
+@contextlib.contextmanager
+def _suppress_stderr_noise() -> Iterator[None]:
     """Redirect stderr to /dev/null for the first invocation only.
 
     Catches model-loading banners that go straight to stderr with no logging
@@ -171,19 +174,22 @@ def _suppress_stderr_noise() -> None:
     """
     global _stderr_suppressed
     if _stderr_suppressed:
+        yield
         return
     _stderr_suppressed = True
     real_stderr = sys.stderr
-    sys.stderr = open(os.devnull, "w")  # noqa: SIM115 - lifetime is the process
-
-    def _restore() -> None:
-        try:
-            sys.stderr.close()
-        except Exception:
-            pass
+    devnull = open(os.devnull, "w")  # noqa: SIM115 - closed in the finally below
+    sys.stderr = devnull
+    try:
+        yield
+    finally:
+        # Restored here rather than at process exit. In a REPL the first query
+        # is one of many, and leaving stderr on /dev/null for the rest of the
+        # session discarded every later warning, backend diagnostic and
+        # traceback -- including the INFO loggers `_quiet_mode` deliberately
+        # keeps.
         sys.stderr = real_stderr
-
-    atexit.register(_restore)
+        devnull.close()
 
 
 # ── REPL ──────────────────────────────────────────────────────────────────
@@ -277,12 +283,17 @@ async def _ask_once(
     history: list,
     output_mode: str,
     quiet: bool,
-) -> list:
-    """Invoke the agent for a single query and render the result."""
-    if quiet:
-        _suppress_stderr_noise()
+) -> tuple[list, bool]:
+    """Invoke the agent for one query and render it; also report success.
+
+    The caller needs the second element: a one-shot ``aorta chat ask`` that
+    exits 0 after failing to answer reports success to whatever is consuming
+    the JSON or plain stream.
+    """
+    suppress = _suppress_stderr_noise() if quiet else contextlib.nullcontext()
     try:
-        reply, history, result = await invoke_agent(query, history)
+        with suppress:
+            reply, history, result = await invoke_agent(query, history)
     except Exception:
         logger.exception("Agent graph error")
         msg = "An error occurred while processing your request."
@@ -290,7 +301,7 @@ async def _ask_once(
             _render_json(query, msg, {})
         else:
             _render_plain(msg)
-        return history
+        return history, False
 
     if output_mode == "json":
         _render_json(query, reply, result)
@@ -298,7 +309,7 @@ async def _ask_once(
         _render_plain(reply)
     else:
         _render_rich(reply)
-    return history
+    return history, True
 
 
 async def _interactive_loop(invoke_agent: Any, output_mode: str, quiet: bool) -> None:
@@ -317,15 +328,24 @@ async def _interactive_loop(invoke_agent: Any, output_mode: str, quiet: bool) ->
         sys.stderr.flush()
 
     prompt = _repl_prompt(output_mode, _enable_line_editing(_history_path()))
+    # Where the prompt is written decides whether stdout stays machine-readable.
+    # ``input(prompt)`` puts it on stdout, so a --json REPL interleaved
+    # "aorta> " with the JSON objects and emitted something that is not JSONL --
+    # the very thing the banner above goes to stderr to avoid. On a terminal it
+    # still has to go through input(), which is what lets readline measure the
+    # line start and stop Up from erasing the prompt; piped, there is no redraw
+    # to protect.
+    prompt_via_input = sys.stdout.isatty()
     history: list = []
 
     while True:
         try:
-            # input() takes the prompt so readline can measure it. Printing it
-            # separately, which rich's Console.input() does, leaves readline
-            # believing the line starts at column 0 and erasing the prompt on
-            # the first Up.
-            query = input(prompt)
+            if prompt_via_input:
+                query = input(prompt)
+            else:
+                sys.stderr.write(prompt)
+                sys.stderr.flush()
+                query = input()
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -335,10 +355,10 @@ async def _interactive_loop(invoke_agent: Any, output_mode: str, quiet: bool) ->
         if not stripped:
             continue
 
-        history = await _ask_once(invoke_agent, query, history, output_mode, quiet)
+        history, _ = await _ask_once(invoke_agent, query, history, output_mode, quiet)
 
 
-async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) -> None:
+async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) -> bool:
     """Preflight the backend, then either answer once or start the REPL."""
     factory = _load("inference.providers.factory")
     session = _load("session")
@@ -352,8 +372,11 @@ async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) 
 
     if query is None:
         await _interactive_loop(session.invoke_agent, output_mode, quiet)
-    else:
-        await _ask_once(session.invoke_agent, query, [], output_mode, quiet)
+        # A REPL's exit status describes the session, not any one answer: the
+        # user has already seen each failure and chosen to keep going.
+        return True
+    _, ok = await _ask_once(session.invoke_agent, query, [], output_mode, quiet)
+    return ok
 
 
 def _setup_logging(verbose: bool) -> bool:
@@ -451,7 +474,11 @@ def _dispatch(
         redact=False if no_redact else None,
     )
     quiet = _setup_logging(verbose)
-    asyncio.run(_run(query, _output_mode(as_json, plain), quiet, no_wait))
+    if not asyncio.run(_run(query, _output_mode(as_json, plain), quiet, no_wait)):
+        # The answer was never produced, so the advertised JSON and plain piping
+        # modes must not report success to whatever is reading them. The message
+        # is already rendered on the requested stream; this only sets the status.
+        raise SystemExit(1)
 
 
 # ── Click surface ─────────────────────────────────────────────────────────

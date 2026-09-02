@@ -65,12 +65,25 @@ def index_sources(index: Path) -> set[str]:
             # Table name interpolated because sqlite cannot bind an identifier;
             # the value came from sqlite_master, not from user input.
             for (metadata,) in conn.execute(f'SELECT metadata FROM "{table}"'):  # noqa: S608
+                # Fail closed. This is the last gate before publication, so a
+                # chunk whose provenance cannot be read is the one most worth
+                # stopping for -- skipping it let an index holding unverifiable
+                # source text still print OK.
                 try:
-                    source = json.loads(metadata).get("source", "")
-                except ValueError:
-                    continue
-                if source:
-                    sources.add(source.replace("\\", "/"))
+                    parsed = json.loads(metadata)
+                except ValueError as exc:
+                    raise SystemExit(
+                        f"error: a chunk in {table} has metadata that is not "
+                        f"JSON ({exc}); its provenance cannot be verified."
+                    ) from exc
+                source = parsed.get("source") if isinstance(parsed, dict) else None
+                if not isinstance(source, str) or not source:
+                    raise SystemExit(
+                        f"error: a chunk in {table} has no usable 'source' in "
+                        f"its metadata (got {source!r}); its provenance cannot "
+                        "be verified."
+                    )
+                sources.add(source.replace("\\", "/"))
     return sources
 
 
@@ -91,6 +104,15 @@ def main(argv: list[str] | None = None) -> int:
 
     tracked = tracked_paths(args.repo)
     sources = index_sources(args.index)
+    if not sources:
+        # "All zero paths are tracked" is a pass this guard must not be able to
+        # print: an index with nothing readable in it has not been verified.
+        print(
+            f"::error::{args.index} yielded no indexed source paths, so nothing "
+            "was verified. Refusing to report it as publishable.",
+            file=sys.stderr,
+        )
+        return 1
     untracked = sorted(source for source in sources if source not in tracked)
 
     if untracked:

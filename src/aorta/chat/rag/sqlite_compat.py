@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,29 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split(".") if part.isdigit())
 
 
+def _loads_extensions(module: Any) -> bool:
+    """Whether *module* can load an extension, asked of the module itself.
+
+    Separate from the version: ``--enable-loadable-sqlite-extensions`` is a
+    build option, so a brand-new sqlite can be missing it and an older one have
+    it. CPython omits the method entirely when the option is off; some builds
+    keep it and raise on the call.
+    """
+    try:
+        conn = module.connect(":memory:")
+    except module.Error:  # pragma: no cover - a build that cannot open :memory:
+        return False
+    try:
+        conn.enable_load_extension(True)
+        conn.enable_load_extension(False)
+    except (AttributeError, module.NotSupportedError):
+        return False
+    else:
+        return True
+    finally:
+        conn.close()
+
+
 def ensure_modern_sqlite() -> None:
     """Point ``sqlite3`` at pysqlite3 when the stdlib build is too old.
 
@@ -75,7 +99,14 @@ def ensure_modern_sqlite() -> None:
     """
     global sqlite3, _extensions_checked
 
-    if _version_tuple(sqlite3.sqlite_version) >= MIN_SQLITE_VERSION:
+    # Two independent reasons to swap, and only the first used to be considered:
+    # a *current* sqlite built without loadable-extension support is fine by
+    # version and still unusable, so it returned here and left
+    # ``ensure_loadable_extensions`` to raise the install hint forever -- even
+    # once the user had followed it and installed the very build that fixes it.
+    if _version_tuple(sqlite3.sqlite_version) >= MIN_SQLITE_VERSION and _loads_extensions(
+        sqlite3
+    ):
         return
 
     try:
@@ -87,6 +118,13 @@ def ensure_modern_sqlite() -> None:
                 found=sqlite3.sqlite_version,
             )
         ) from exc
+
+    # Swapping to a build that is no better helps nobody, and would trade a
+    # precise "cannot load extensions" for a confusing version message.
+    if _version_tuple(pysqlite3.sqlite_version) < MIN_SQLITE_VERSION or not _loads_extensions(
+        pysqlite3
+    ):
+        return
 
     sys.modules["sqlite3"] = pysqlite3
     sys.modules["sqlite3.dbapi2"] = pysqlite3.dbapi2

@@ -44,7 +44,12 @@ claim is worse off than one who knows the boundary:
   guarantee about what a prompt contains.
 
 If your threat model needs more than that, use `llm_provider = "vllm"` against a
-model you host, where nothing leaves the machine at all.
+model you host — **and** keep `embedding_provider = "local"`, which is the
+default. A local LLM alone does not mean nothing leaves the machine: with
+`embedding_provider = "remote"`, indexing sends the corpus text (including your
+rendered run artifacts) to the embeddings API, and every retrieval sends the
+query. Neither call goes through the chat-message redactor described here.
+Together, those two settings are what make the claim hold.
 
 ## The notice
 
