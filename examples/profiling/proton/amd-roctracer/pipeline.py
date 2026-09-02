@@ -6,9 +6,12 @@ carries a real launch sequence rather than a single kernel.
 
 Unlike the ``triton-vecadd`` / ``triton-softmax`` payloads this one drives
 Proton itself, because pinning ``roctracer`` only works from inside a live HIP
-runtime -- see the ``import torch`` comment below and ``recipe.yaml``. That is
-specific to this backend: ``rocprofiler`` needs the opposite load order, and
-``instrumentation`` needs no particular one.
+runtime -- see the import comment below and ``recipe.yaml``. That is specific
+to this backend: ``rocprofiler`` is configured when ``libproton.so`` loads and
+so needs the opposite *attach* order, and ``instrumentation`` needs no
+particular one. All three payloads nonetheless share the same *import* order
+(Proton before torch), for a reason unrelated to any of their contracts -- see
+the import comment.
 
 Constexpr kernel parameters are spelled lowercase (``block_size`` rather than
 Triton's conventional ``BLOCK_SIZE``) to satisfy this repository's lint
@@ -163,11 +166,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         default=None,
-        # ``roctracer`` only. This module imports torch before Proton, which is
-        # what roctracer needs and what rocprofiler cannot tolerate -- it is
-        # configured from a ``libproton.so`` constructor and wants to land before
-        # HSA. Use ``../amd-rocprofiler/gelu.py``, whose imports are the other
-        # way round, for that backend.
+        # ``roctracer`` only, and no longer for an import-order reason: this
+        # module now imports Proton before torch exactly as
+        # ``../amd-rocprofiler/gelu.py`` does. What it does not do is *attach*
+        # the way rocprofiler needs -- it starts the session after torch, which
+        # is what roctracer requires and what leaves rocprofiler with an empty
+        # dispatch buffer. Use ``../amd-rocprofiler/gelu.py`` for that backend;
+        # it is also the payload whose availability probe and mode handling are
+        # written for it.
         choices=("roctracer",),
         help="Proton backend for a standalone capture; ignored when $AORTA_PROTON_BACKEND is set",
     )

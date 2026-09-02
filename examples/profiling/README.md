@@ -94,6 +94,17 @@ interceptor, so a CLI pin of it captures correctly and the collector allows it.
 It uses `mode: "env"` only so that `instrumentation_mode` reaches Proton on
 Triton 3.7.1 and earlier, whose CLI parses `--mode` and then drops it.
 
+**If you are writing a new Proton payload, import `triton.profiler` before
+`torch`, whatever backend you target.** The three contracts above are about
+when `proton.start()` runs; the import is a separate rule, and it applies to
+all of them. On Triton 3.8.0 the reverse order hangs the process forever at
+exit — after a complete capture has been written, so it reads as a hang with no
+error. All three payloads mark the import `# isort: skip  # noqa: I001` so the
+linter cannot reorder it, and `test_proton_payloads_import_proton_before_torch`
+fails the CPU suite if one is reversed. See
+[Import order](../../docs/profiling-collectors.md#import-order) and
+[ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
+
 ## Where the collector options live
 
 Each example's `recipe.yaml` carries its collector configuration as a

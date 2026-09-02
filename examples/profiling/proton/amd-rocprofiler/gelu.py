@@ -38,21 +38,28 @@ import argparse
 import os
 import sys
 
-# THE ORDER OF THE NEXT TWO IMPORT BLOCKS IS LOAD-BEARING, and it is the
-# opposite of what the sibling `amd-roctracer` example needs.
+# THE ORDER OF THE NEXT TWO IMPORT BLOCKS IS LOAD-BEARING, for two independent
+# reasons -- and every sibling payload now shares it.
 #
-# `libproton.so` calls `rocprofiler_force_configure` from an
-# `__attribute__((constructor))`, so importing Proton is what configures
-# rocprofiler-sdk -- and Triton 3.8.0's own source warns that letting HSA come
-# up first, naming "a torch import chain", makes the SDK skip dispatch-buffer
-# tracing on already-existing queues and hand back an empty buffer
-# (`RocprofSDKProfiler.cpp`, the comment above its `forceConfigure` call). So
-# Proton must be imported BEFORE torch here.
+# 1. This backend needs it. `libproton.so` calls `rocprofiler_force_configure`
+#    from an `__attribute__((constructor))`, so importing Proton is what
+#    configures rocprofiler-sdk -- and Triton 3.8.0's own source warns that
+#    letting HSA come up first, naming "a torch import chain", makes the SDK
+#    skip dispatch-buffer tracing on already-existing queues and hand back an
+#    empty buffer (`RocprofSDKProfiler.cpp`, the comment above its
+#    `forceConfigure` call).
 #
-# `roctracer` is the reverse -- it installs its interceptor at session start and
-# needs the runtime already up -- which is why `amd-roctracer/pipeline.py`
-# imports torch at module scope and starts Proton after it. Two backends, two
-# contracts; do not "tidy" these into one order.
+# 2. Every backend needs it, on Triton 3.8.0, or the process never exits. That
+#    same registration, landing after HSA is up, makes the atexit
+#    `rocprofiler::registration::finalize()` re-enter its own non-recursive
+#    registration mutex through Proton's `protonToolFini` and deadlock --
+#    after the capture has been written. See ROCm/aorta#434.
+#
+# What still differs between the backends is the ATTACH order, not this one:
+# `roctracer` installs its interceptor at session start and needs the runtime
+# already up, so `amd-roctracer/pipeline.py` calls `proton.start()` after torch
+# while importing Proton before it, exactly as this file does. Do not "tidy"
+# the imports into alphabetical order in either payload.
 import triton.profiler as proton  # isort: skip  # noqa: I001
 from triton._C.libproton import proton as libproton  # isort: skip  # noqa: I001
 

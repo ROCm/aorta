@@ -55,10 +55,16 @@ env_passthrough_mode: inherit
 #
 # Env mode is therefore safe here only because `gelu.py` imports
 # `triton.profiler` and `libproton` *before* `torch`. That import order is
-# load-bearing and is the reverse of `../amd-roctracer/pipeline.py`; see the
-# comment at the top of the payload. This ordering requirement is taken from
-# upstream's source comment, not measured -- no environment on hand can run
-# this backend -- unlike the roctracer measurement in the sibling recipe.
+# load-bearing; see the comment at the top of the payload. This particular
+# ordering requirement is taken from upstream's source comment, not measured --
+# no environment on hand can run this backend -- unlike the roctracer
+# measurement in the sibling recipe.
+#
+# The same import order is now used by every Proton payload here, for a second
+# and measured reason: importing Proton after torch deadlocks the process at
+# exit on Triton 3.8.0 (ROCm/aorta#434). What remains specific to this backend
+# is the attach order -- `gelu.py` starts its session before torch is imported,
+# where `../amd-roctracer/pipeline.py` starts it after.
 #
 # `backend_mode: pcsampling` asks rocprofiler-sdk for statistical
 # instruction-level attribution -- where in the kernel the samples land --

@@ -344,7 +344,8 @@ failure mode of the other. Note the incompatibility is in *initialisation
 order*, not in the attach modes themselves: `roctracer` is the only backend an
 attach mode is forced on, while `rocprofiler` works under either — `mode: cli`
 loads `libproton` before the payload, and `mode: env` is equally safe provided
-the payload imports Proton before torch, as `amd-rocprofiler/gelu.py` does.
+the payload imports Proton before torch, which every shipped payload now does
+for an unrelated reason (see [Import order](#import-order)).
 
 | Backend | Configures itself | Runtime state it needs at that moment | Attach mode |
 |---|---|---|---|

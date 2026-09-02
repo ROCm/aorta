@@ -148,11 +148,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         default=None,
-        # ``rocprofiler`` is deliberately absent, not forgotten. This module
-        # imports torch before Proton, which is right for the two backends left
-        # here and is exactly the ordering that leaves rocprofiler with an empty
-        # dispatch buffer. Offering it would hand out the trap this PR
-        # documents; ``../amd-rocprofiler/gelu.py`` has the import order for it.
+        # ``rocprofiler`` is deliberately absent, not forgotten -- though no
+        # longer for an import-order reason, since this module now imports
+        # Proton before torch just as ``../amd-rocprofiler/gelu.py`` does. What
+        # still rules it out is the *attach* order: this payload starts its
+        # session after torch, which is what roctracer needs and what leaves
+        # rocprofiler with an empty dispatch buffer. Offering it would hand out
+        # that trap; ``../amd-rocprofiler/gelu.py`` attaches the way it needs.
         choices=("instrumentation", "roctracer"),
         help="Proton backend for a standalone capture; ignored when $AORTA_PROTON_BACKEND is set",
     )
