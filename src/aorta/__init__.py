@@ -44,6 +44,10 @@ def __getattr__(name: str) -> Any:
     return resolved
 
 
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
+
+
 def load_training_entrypoint() -> Any:
     """Lazily import and return the default training entry point."""
     module = import_module("aorta.training.fsdp_trainer")
