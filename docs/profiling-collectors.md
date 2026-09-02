@@ -369,6 +369,14 @@ notice in `perf.md`. The collector therefore refuses that pairing at setup:
 `mode: cli` with an explicit `backend: roctracer` raises `ProtonWrapError`
 naming `mode: env` as the route.
 
+**This is a Triton 3.7.x-and-earlier defect, and the guard has an expiry.** The
+byte counts above are from 3.7.1. On 3.8.0 the same pinned `-b roctracer`
+captured 17 kernels on aorta's own MI350 runner, so the bug does not reproduce
+there. The guard stays because 3.7.x is what this repo's containers ship, and
+the GPU test that asserts the bug is still present skips itself from 3.8.0 on —
+so when the floor moves, the test stops claiming something false and the guard
+can be removed deliberately rather than discovered to be dead.
+
 **`rocprofiler` is not covered, and must not be.** The evidence for it is of a
 different kind from everything above — it is read from upstream's source and
 its comments, not measured here — so it is worth being explicit about the

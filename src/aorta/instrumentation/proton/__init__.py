@@ -132,7 +132,13 @@ _AMD_ENV_SIGNALS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICE
 #: * ``roctracer`` installs its interceptor when the session starts, and
 #:   Proton's front-end brings the GPU runtime up only on the ``-b``-absent
 #:   path -- so a CLI pin starts it before the first HSA queue exists and
-#:   records nothing. Measured: a 160-byte profile holding a bare ``ROOT``.
+#:   records nothing. Measured on Triton 3.7.1: a 160-byte profile holding a
+#:   bare ``ROOT``. **This is a 3.7.x-and-earlier defect.** It does not
+#:   reproduce on 3.8.0, where the same pin captured 17 kernels, so the guard
+#:   is a workaround with an expiry rather than a permanent rule. It is kept
+#:   because 3.7.x is what this repo's containers still ship; the inverted GPU
+#:   test asserts the bug is still there and skips itself from 3.8.0 on, so the
+#:   day the floor moves the guard can go with it.
 #: * ``rocprofiler`` is the reverse, and the CLI path is the *safe* one for it.
 #:   Triton 3.8.0 calls ``rocprofiler_force_configure`` from an
 #:   ``__attribute__((constructor))`` in ``libproton.so``, so it is configured

@@ -119,6 +119,61 @@ _SKIP_REASON = _skip_reason()
 skip_no_proton = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 
+def _triton_minor() -> tuple[int, int] | None:
+    """``(major, minor)`` of the installed Triton, or ``None`` if unreadable."""
+    try:
+        import triton
+    except Exception:
+        return None
+    parts = str(getattr(triton, "__version__", "")).split(".")
+    try:
+        return int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+
+
+_TRITON = _triton_minor()
+
+#: ``mode: env`` captures wedge on Triton 3.8.0, and the wedge is why the GPU
+#: job carries ``--timeout``. Two of these tests produced no outcome at all on
+#: run 33527313950 (the job ran to its 60-minute cap and the cancel took the
+#: junit report with it), and the same two hit the child budget on run
+#: 33629989829. Both pass in ~4 s on Triton 3.7.1, here, repeatedly.
+#:
+#: What separates them from the tests that pass on that runner is the attach
+#: mode, not the backend: every ``mode: cli`` capture completed, including a
+#: pinned ``roctracer``. The suspected mechanism is 3.8.0 configuring
+#: rocprofiler-sdk from a ``libproton.so`` constructor at import -- on an image
+#: whose ``librocprofiler-sdk.so`` will not ``dlopen``, the constructor swallows
+#: that, and a later in-process ``proton.start()`` then wedges. Suspected, not
+#: established: it cannot be reproduced on a 3.7.1 host, so this skips rather
+#: than claiming a diagnosis. Tracked in ROCm/aorta#434.
+_ENV_MODE_WEDGE_REASON = (
+    "mode: env captures wedge on Triton 3.8.0 (no outcome on CI run 33527313950, "
+    "child-timeout on 33629989829); they pass in seconds on 3.7.1. Skipped rather "
+    "than left to burn the job's budget -- tracked in ROCm/aorta#434."
+)
+skip_env_mode_wedge = pytest.mark.skipif(
+    _TRITON is not None and _TRITON >= (3, 8),
+    reason=_ENV_MODE_WEDGE_REASON,
+)
+
+#: The empty-capture bug the ``wrap_argv`` guard exists for does not reproduce
+#: on Triton 3.8.0: a pinned ``-b roctracer`` captured 17 kernels there (run
+#: 33629989829), where 3.7.1 gives a bare ``ROOT``. The inverted test below
+#: asserts the bug is still present, so on 3.8.0 it is asserting something
+#: false -- skip it there rather than weaken the assertion, and keep it sharp
+#: where the guard is actually load-bearing.
+skip_bug_fixed_upstream = pytest.mark.skipif(
+    _TRITON is not None and _TRITON >= (3, 8),
+    reason=(
+        "the roctracer CLI-pin empty capture does not reproduce on Triton 3.8.0 "
+        "(captured 17 kernels on CI run 33629989829); the guard is a 3.7.x-and-"
+        "earlier workaround"
+    ),
+)
+
+
 def _raw_proton_env(**extra: str) -> dict[str, str]:
     """Child env for a test that drives Proton directly, bypassing the collector.
 
@@ -254,6 +309,7 @@ def test_python_context_attributes_to_call_paths(tmp_path):
 
 
 @skip_no_proton
+@skip_env_mode_wedge
 def test_env_mode_pins_roctracer_and_gets_a_non_empty_tree(tmp_path):
     """The route the ``mode: cli`` rejection names, end to end.
 
@@ -283,6 +339,7 @@ def test_env_mode_pins_roctracer_and_gets_a_non_empty_tree(tmp_path):
 
 
 @skip_no_proton
+@skip_bug_fixed_upstream
 def test_cli_mode_pin_would_still_capture_nothing(tmp_path):
     """Pins the premise of the ``wrap_argv`` guard against the installed Triton.
 
@@ -447,6 +504,7 @@ def test_pcsampling_captures_once_the_environment_can_do_it(tmp_path):
 
 
 @skip_no_proton
+@skip_env_mode_wedge
 def test_instrumentation_captures_scopes_inside_one_kernel(tmp_path):
     """The intra-kernel backend attributes cycles to regions within a kernel.
 
