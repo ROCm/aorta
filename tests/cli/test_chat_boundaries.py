@@ -195,7 +195,7 @@ def test_cli_chat_module_scope_is_click_and_stdlib():
     assert not offenders, "\n  ".join(["module scope must be click + stdlib:", *offenders])
 
 
-def test_load_turns_a_missing_extra_into_an_install_hint(monkeypatch):
+def test_load_turns_a_missing_extra_into_an_install_hint(monkeypatch, pin_python):
     """An absent external dependency must read as advice, not as a traceback."""
     import click
 
@@ -204,6 +204,10 @@ def test_load_turns_a_missing_extra_into_an_install_hint(monkeypatch):
     def _missing_langchain(name: str):
         raise ModuleNotFoundError("No module named 'langchain'", name="langchain")
 
+    # `_load` checks the interpreter before it imports anything, so on 3.10 the
+    # version refusal -- correct in itself, and asserted in test_chat.py --
+    # would pre-empt the distinction under test here.
+    pin_python()
     monkeypatch.setattr(cli_chat.importlib, "import_module", _missing_langchain)
     with pytest.raises(click.ClickException) as exc:
         cli_chat._load("session")
@@ -211,7 +215,7 @@ def test_load_turns_a_missing_extra_into_an_install_hint(monkeypatch):
     assert "langchain" in str(exc.value)
 
 
-def test_load_lets_a_broken_chat_submodule_surface():
+def test_load_lets_a_broken_chat_submodule_surface(pin_python):
     """The other half of the distinction, and the reason ``_load`` exists.
 
     A ``ModuleNotFoundError`` naming an ``aorta.chat`` module is a real bug -- a
@@ -220,6 +224,7 @@ def test_load_lets_a_broken_chat_submodule_surface():
     """
     from aorta.cli.chat import _load
 
+    pin_python()
     with pytest.raises(ModuleNotFoundError) as exc:
         _load("no_such_submodule")
     assert exc.value.name == "aorta.chat.no_such_submodule"

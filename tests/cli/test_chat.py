@@ -8,7 +8,6 @@ rather than a traceback. Nothing here invokes the agent.
 from __future__ import annotations
 
 import importlib.util
-from collections import namedtuple
 
 import pytest
 from click.testing import CliRunner
@@ -61,30 +60,42 @@ def test_llm_provider_choice_matches_the_provider_factory() -> None:
 
 
 @pytest.mark.skipif(_CHAT_AVAILABLE, reason="chat extra installed -- hint path not active")
-def test_missing_extra_shows_an_install_hint() -> None:
+def test_missing_extra_shows_an_install_hint(pin_python) -> None:
     """Without the extra, ``aorta chat ask`` advises rather than traces back."""
+    pin_python()
     result = CliRunner().invoke(chat, ["ask", "hello"])
     assert result.exit_code != 0
     assert "amd-aorta[chat-cli]" in result.output
+
+
+def test_an_old_interpreter_is_refused_by_version_rather_than_by_extra(pin_python) -> None:
+    """On 3.10 the hint above would send the user round a loop.
+
+    Every chat-cli dependency is marked 3.11+, so ``pip install
+    'amd-aorta[chat-cli]'`` there succeeds and resolves to nothing. Naming the
+    interpreter instead is the whole point of ``_require_python``, and this is
+    the assertion on it -- previously only the 3.10 leg exercised this path,
+    and it did so by failing three tests that expected the other one.
+    """
+    pin_python(10)
+    result = CliRunner().invoke(chat, ["ask", "hello"])
+    assert result.exit_code != 0
+    assert "Python 3.11 or newer" in result.output
+    assert "amd-aorta[chat-cli]" not in result.output
 
 
 @pytest.mark.skipif(
     importlib.util.find_spec("chainlit") is not None,
     reason="chainlit installed -- neither error path is active",
 )
-def test_ui_names_the_python_ceiling_rather_than_looping(monkeypatch) -> None:
+def test_ui_names_the_python_ceiling_rather_than_looping(pin_python) -> None:
     """A py3.14 user must not be told to install an extra that installs nothing.
 
     Chainlit declares ``Requires-Python < 3.14``, so on 3.14
     ``pip install amd-aorta[chat-ui]`` succeeds and resolves to nothing. Advising
     it would send the user round a loop.
     """
-    from aorta.cli import chat as cli_chat
-
-    # sys.version_info is not constructible, and a bare tuple would not carry
-    # the .major/.minor the message formats.
-    fake = namedtuple("version_info", "major minor micro releaselevel serial")
-    monkeypatch.setattr(cli_chat.sys, "version_info", fake(3, 14, 0, "final", 0))
+    pin_python(14)
     result = CliRunner().invoke(chat, ["ui"])
     assert result.exit_code != 0
     assert "Chainlit does not support Python 3.14" in result.output
