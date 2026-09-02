@@ -37,6 +37,17 @@ class EmbeddingProvider(Protocol):
         """Collection this provider indexes into and reads from."""
         ...
 
+    def model_id(self) -> str:
+        """The model whose vectors this provider actually produces.
+
+        Each provider reads a different setting, so a caller that reaches for
+        ``settings.embedding_model`` directly labels remote vectors with the
+        local model's name -- which the corpus digest, the manifest and the
+        load-time compatibility check all did. Ask the selected provider
+        instead, and the three agree by construction.
+        """
+        ...
+
     def describe(self) -> str:
         """One-line human-readable summary for logs and the welcome message."""
         ...

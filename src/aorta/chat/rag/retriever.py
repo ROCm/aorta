@@ -424,7 +424,7 @@ def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
 
     report = manifest_mod.validate(
         found,
-        embedding_model=settings.embedding_model,
+        embedding_model=provider.model_id(),
         collection=provider.collection_name(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,

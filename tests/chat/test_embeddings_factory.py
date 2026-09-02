@@ -159,6 +159,35 @@ class TestRemoteApiProvider:
         assert "provider default" in RemoteApiProvider().describe()
 
 
+class TestEffectiveModelId:
+    """Each provider names the model whose vectors it actually produces.
+
+    Reaching for ``settings.embedding_model`` directly labelled remote vectors
+    with the local model's name, in the corpus digest, the manifest and the
+    load-time compatibility check alike -- so the check compared that wrong
+    label against the same wrong setting and agreed with itself. Asking the
+    selected provider is what makes the three agree by construction.
+    """
+
+    def test_the_local_provider_reports_the_local_setting(self, monkeypatch):
+        from aorta.chat.rag.embeddings.fastembed_bge import FastembedBgeProvider
+
+        monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-small-en-v1.5")
+        assert FastembedBgeProvider().model_id() == "BAAI/bge-small-en-v1.5"
+
+    def test_the_remote_provider_reports_the_remote_setting(self, monkeypatch):
+        monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-small-en-v1.5")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        assert RemoteApiProvider().model_id() == "text-embedding-3-small"
+
+    def test_the_two_providers_disagree_which_is_the_whole_point(self, monkeypatch):
+        from aorta.chat.rag.embeddings.fastembed_bge import FastembedBgeProvider
+
+        monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-small-en-v1.5")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        assert FastembedBgeProvider().model_id() != RemoteApiProvider().model_id()
+
+
 class TestRetrieverCaches:
     def test_reset_caches_clears_both_halves(self, monkeypatch):
         """Vectorstore and retriever are tied to one provider, so both must go."""

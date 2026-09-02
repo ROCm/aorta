@@ -206,10 +206,24 @@ class TestDigest:
         """
         from aorta.chat.rag import index_ops
 
-        def _explode():
-            raise AssertionError("index digest must not build an embedding model")
+        class _NoModelProvider:
+            """Answers its identity, refuses to build weights.
 
-        monkeypatch.setattr(index_ops, "get_provider", _explode)
+            The digest has to name the model whose vectors it describes, or the
+            nightly comparison against a remote-built manifest never matches.
+            Naming one is cheap; loading one is the 65 MB download this command
+            exists to avoid.
+            """
+
+            name = "local"
+
+            def model_id(self):
+                return "bge-small"
+
+            def get_embeddings(self):
+                raise AssertionError("index digest must not build an embedding model")
+
+        monkeypatch.setattr(index_ops, "get_provider", _NoModelProvider)
         tree = tmp_path / "corpus"
         tree.mkdir()
         (tree / "mod.py").write_text("x = 1\n", encoding="utf-8")

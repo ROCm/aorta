@@ -205,8 +205,6 @@ def evaluate(
         k: Retrieval depth.
         search: Injection point for tests; defaults to the real retriever.
     """
-    from aorta.chat.config import settings
-
     questions = questions if questions is not None else load_questions()
     if search is None:
         from aorta.chat.rag.retriever import search_docs
@@ -219,7 +217,11 @@ def evaluate(
         retrieved.append([doc.metadata.get("source", "") for doc in documents])
 
     result = score(questions, retrieved, k)
-    result.embedding_model = settings.embedding_model
+    # The provider that produced the vectors this run retrieved against, so a
+    # before/after comparison is not silently attributed to the local model.
+    from aorta.chat.rag.embeddings.factory import get_provider
+
+    result.embedding_model = get_provider().model_id()
     return result
 
 

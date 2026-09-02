@@ -244,9 +244,14 @@ def build_index(
     finally:
         store.close()
 
+    # The model the *selected* provider embeds with, not the local setting: a
+    # remote build otherwise stamps BGE's name on OpenAI's vectors, and the
+    # load-time check then compares that label against the same wrong setting
+    # and agrees with itself.
+    embedding_model = provider.model_id()
     digest = corpus_mod.corpus_digest(
         documents,
-        embedding_model=settings.embedding_model,
+        embedding_model=embedding_model,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
     )
@@ -255,7 +260,7 @@ def build_index(
         aorta_sha=corpus_mod.head_sha(corpus.base),
         aorta_tag=corpus_mod.head_tag(corpus.base),
         embedding_provider=provider.name,
-        embedding_model=settings.embedding_model,
+        embedding_model=embedding_model,
         dimensions=dimensions,
         collection=collection,
         chunk_size=settings.chunk_size,
@@ -299,7 +304,9 @@ def compute_digest(corpus: corpus_mod.Corpus | None = None) -> tuple[str, int]:
     documents = corpus_mod.load_corpus(corpus)
     digest = corpus_mod.corpus_digest(
         documents,
-        embedding_model=settings.embedding_model,
+        # Must be the same identity ``build_index`` digests with, or the
+        # nightly comparison reports a rebuild is needed on every run.
+        embedding_model=get_provider().model_id(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
     )
@@ -324,7 +331,7 @@ def check_index(
     provider = get_provider()
     report = manifest_mod.validate(
         manifest_mod.read_manifest(target),
-        embedding_model=settings.embedding_model,
+        embedding_model=provider.model_id(),
         collection=provider.collection_name(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
@@ -463,7 +470,7 @@ def fetch_index(
 
         report = manifest_mod.validate(
             manifest,
-            embedding_model=settings.embedding_model,
+            embedding_model=provider.model_id(),
             collection=provider.collection_name(),
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
@@ -529,7 +536,7 @@ def side_load(staged: str | Path, index_path: str | Path | None = None) -> Fetch
     provider = get_provider()
     report = manifest_mod.validate(
         manifest,
-        embedding_model=settings.embedding_model,
+        embedding_model=provider.model_id(),
         collection=provider.collection_name(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,

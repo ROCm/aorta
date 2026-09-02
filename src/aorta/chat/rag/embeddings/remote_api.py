@@ -45,6 +45,9 @@ class RemoteApiProvider:
     def collection_name(self) -> str:
         return build_collection_name(REMOTE_COLLECTION_PREFIX, settings.remote_embedding_model)
 
+    def model_id(self) -> str:
+        return settings.remote_embedding_model
+
     def describe(self) -> str:
         endpoint = settings.remote_embedding_base_url.strip() or "provider default"
         auth = describe_auth(

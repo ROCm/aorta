@@ -263,6 +263,9 @@ class FastembedBgeProvider:
         """
         return build_collection_name(LOCAL_COLLECTION_PREFIX, settings.embedding_model)
 
+    def model_id(self) -> str:
+        return settings.embedding_model
+
     def describe(self) -> str:
         return f"local BGE embeddings ({settings.embedding_model} on onnxruntime)"
 
