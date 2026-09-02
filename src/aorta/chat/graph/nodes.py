@@ -357,6 +357,25 @@ def _looks_like_pasted_source(text: str) -> bool:
     return any(marker in text for marker in _CODE_MARKERS)
 
 
+def _first_json_object(text: str) -> dict | None:
+    """The first JSON object in *text*, ignoring anything around it.
+
+    Models answer the question and then explain themselves, and an explanation
+    containing a brace defeats slicing between the first "{" and the last "}"
+    -- the slice then spans JSON plus prose and fails to parse as either.
+    ``raw_decode`` reads one value and stops, which is what "reply as JSON" was
+    always asking for.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 async def selector_node(state: AgentState) -> dict[str, Any]:
     """Rank the tools by what evidence each returns.
 
@@ -385,10 +404,10 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
                 HumanMessage(content=text),
             ]
         )
-        raw = str(response.content or "").strip()
-        if "{" in raw:
-            payload = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
-            proposed = [t for t in payload.get("tools", []) if t in TOOL_REGISTRY]
+        payload = _first_json_object(str(response.content or ""))
+        if payload:
+            tools = payload.get("tools")
+            proposed = [t for t in tools if t in TOOL_REGISTRY] if isinstance(tools, list) else []
             why = str(payload.get("why", ""))
     except Exception as exc:
         logger.warning("Selector unavailable (%s); the agent will see every tool.", exc)
