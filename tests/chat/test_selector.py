@@ -130,3 +130,25 @@ async def test_dropping_is_explained_rather_than_silent():
     out = await _select(_PROSE, reply)
     assert out["candidate_tools"] == []
     assert "needs source" in out["selection_rationale"]
+
+
+async def test_an_explanation_after_the_json_is_ignored():
+    """The failure this guards, seen against a real model.
+
+    Models answer and then justify themselves, and a justification containing a
+    brace defeats slicing between the first "{" and the last "}" -- the slice
+    spans JSON plus prose and parses as neither, so a perfectly good ranking is
+    thrown away and the agent falls back to every tool.
+    """
+    reply = (
+        '{"tools": ["triage_kernel_source"], "why": "shared memory accesses"}\n\n'
+        "I picked it because reduce_sum() { writes then reads } without a barrier."
+    )
+    out = await _select(_HIP, reply)
+    assert out["candidate_tools"] == ["triage_kernel_source"]
+
+
+async def test_a_json_array_is_not_a_ranking():
+    """Right shape, wrong type: it must widen rather than be coerced."""
+    out = await _select(_HIP, '["triage_kernel_source"]')
+    assert out["candidate_tools"] == []
