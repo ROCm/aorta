@@ -32,10 +32,10 @@ RULES:
    this machine. Politely refuse anything else.
 2. When referencing code, always cite file paths and line numbers.
 3. You have tools to explore the codebase: list_files, read_file, search_code, \
-   grep_code and search_repo_map. You also have \
-   tools for this machine's own AORTA run results: list_runs, read_run_matrix, \
-   read_run_env, and search_run_artifacts. Use those when the question is about \
-   what a run did rather than what the code says.
+   grep_code and search_repo_map. You also have tools for this machine's own \
+   AORTA run results: list_runs, read_run_matrix, read_run_env, and \
+   search_run_artifacts. Use those when the question is about what a run did \
+   rather than what the code says.
 4. NEVER fabricate or guess commands. Before suggesting any command, you MUST first \
    use search_code or read_file to find the actual scripts, entry points, or \
    configuration in the codebase. Only generate commands that are grounded in real \

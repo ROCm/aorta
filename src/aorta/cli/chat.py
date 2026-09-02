@@ -165,7 +165,7 @@ _stderr_suppressed = False
 
 @contextlib.contextmanager
 def _suppress_stderr_noise() -> Iterator[None]:
-    """Redirect stderr to /dev/null for the first invocation only.
+    """Redirect stderr to /dev/null for the duration of the first invocation.
 
     Catches model-loading banners that go straight to stderr with no logging
     hook to silence them -- historically sentence-transformers' LOAD REPORT

@@ -1,9 +1,11 @@
 # Adding an agent tool
 
-`aorta chat` ships ten tools — file listing and reading, semantic and regex
-search, the repo-map lookup, a sandboxed shell, and four readers over your own
-run artifacts. Your package can add more through the `aorta.chat_tools`
-entry-point group, with no edit to AORTA itself.
+`aorta chat` ships nine tools — file listing and reading, semantic and regex
+search, the repo-map lookup, and four readers over your own run artifacts. A
+tenth, the sandboxed shell, is registered only when you set
+[`enable_shell_tool`](configuration.md); until then it is in neither the
+registry nor the prompts. Your package can add more through the
+`aorta.chat_tools` entry-point group, with no edit to AORTA itself.
 
 This is the same mechanism `aorta.workloads`, `aorta.mitigations` and
 `aorta.agents` already use, so if you have registered a workload before, none of

@@ -75,8 +75,10 @@ def _validate_command(command: str) -> str | None:
 def run_terminal_command(command: str) -> str:
     """Execute a terminal command inside the AORTA codebase directory.
 
-    The command must use one of the allowed executables and must not
-    contain destructive or network-access patterns.
+    Every executable used must be on the allowlist, and the command must not
+    contain destructive or network-access patterns. Run ONE command, optionally
+    as a pipeline (``a | b``); chaining with ';' or '&&', command substitution
+    with backticks or $(...), and redirection with '>' or '<' are refused.
 
     Args:
         command: Shell command to run (e.g. 'pytest tests/', 'python -m mymod').

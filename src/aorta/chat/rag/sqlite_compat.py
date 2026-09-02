@@ -104,26 +104,31 @@ def ensure_modern_sqlite() -> None:
     # version and still unusable, so it returned here and left
     # ``ensure_loadable_extensions`` to raise the install hint forever -- even
     # once the user had followed it and installed the very build that fixes it.
-    if _version_tuple(sqlite3.sqlite_version) >= MIN_SQLITE_VERSION and _loads_extensions(
-        sqlite3
-    ):
+    version_ok = _version_tuple(sqlite3.sqlite_version) >= MIN_SQLITE_VERSION
+    if version_ok and (_extensions_checked or _loads_extensions(sqlite3)):
         return
 
+    needed = ".".join(str(part) for part in MIN_SQLITE_VERSION)
     try:
         import pysqlite3
     except ImportError as exc:
         raise RuntimeError(
-            _INSTALL_HINT.format(
-                needed=".".join(str(part) for part in MIN_SQLITE_VERSION),
-                found=sqlite3.sqlite_version,
-            )
+            _INSTALL_HINT.format(needed=needed, found=sqlite3.sqlite_version)
         ) from exc
 
-    # Swapping to a build that is no better helps nobody, and would trade a
-    # precise "cannot load extensions" for a confusing version message.
-    if _version_tuple(pysqlite3.sqlite_version) < MIN_SQLITE_VERSION or not _loads_extensions(
-        pysqlite3
-    ):
+    if _version_tuple(pysqlite3.sqlite_version) < MIN_SQLITE_VERSION:
+        # Installed, but no newer. Naming the fallback's version rather than the
+        # stdlib's is the actionable half: the user has the wheel and still
+        # needs a different one.
+        raise RuntimeError(
+            _INSTALL_HINT.format(needed=needed, found=pysqlite3.sqlite_version)
+        )
+
+    if not _loads_extensions(pysqlite3):
+        # New enough, but no better on the axis that sent us here. Swapping
+        # would change nothing and would trade the precise "cannot load
+        # extensions" message ``ensure_loadable_extensions`` is about to raise
+        # for a version complaint that is not true.
         return
 
     sys.modules["sqlite3"] = pysqlite3

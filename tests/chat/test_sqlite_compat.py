@@ -135,6 +135,48 @@ class TestEnsureModernSqlite:
         assert sys.modules["sqlite3"] is fake
         assert sys.modules["sqlite3.dbapi2"] is fake.dbapi2
 
+    def test_a_fallback_that_is_also_too_old_still_raises(
+        self, monkeypatch, restore_sqlite_modules
+    ):
+        """Having the wheel and still needing a newer one is not a silent pass.
+
+        Making the swap conditional must not turn "too old, and the fallback
+        does not help" into a return with no error at all, which would hand the
+        user sqlite-vec's bare OperationalError instead of the hint.
+        """
+        monkeypatch.setattr(sqlite_compat.sqlite3, "sqlite_version", "3.34.1")
+        monkeypatch.setitem(sys.modules, "pysqlite3", _fake_pysqlite3(version="3.35.0"))
+        with pytest.raises(RuntimeError, match="3.35.0"):
+            ensure_modern_sqlite()
+
+    def test_a_fallback_that_cannot_load_extensions_is_not_swapped_in(
+        self, monkeypatch, restore_sqlite_modules
+    ):
+        """Nothing is gained, and the precise message is about to be raised."""
+        monkeypatch.setattr(sqlite_compat, "sqlite3", _sqlite_without_extensions())
+        before = sys.modules["sqlite3"]
+        monkeypatch.setitem(
+            sys.modules, "pysqlite3", _fake_pysqlite3(loads_extensions=False)
+        )
+        ensure_modern_sqlite()
+        assert sys.modules["sqlite3"] is before
+
+    def test_a_current_stdlib_that_cannot_load_extensions_is_swapped(
+        self, monkeypatch, restore_sqlite_modules
+    ):
+        """The gap Copilot found: version-fine, extension-less, never swapped.
+
+        ``ensure_loadable_extensions`` then raised the install hint forever,
+        including for the user who had already installed the build that fixes
+        it, because the version check returned before the fallback was reached.
+        """
+        monkeypatch.setattr(sqlite_compat, "sqlite3", _sqlite_without_extensions())
+        monkeypatch.setattr(sqlite_compat, "_extensions_checked", False)
+        fake = _fake_pysqlite3()
+        monkeypatch.setitem(sys.modules, "pysqlite3", fake)
+        ensure_modern_sqlite()
+        assert sys.modules["sqlite3"] is fake
+
     def test_the_swap_rebinds_the_module_global_too(self, monkeypatch, restore_sqlite_modules):
         """The extension check must interrogate pysqlite3, not the stdlib build."""
         monkeypatch.setattr(sqlite_compat.sqlite3, "sqlite_version", "3.34.1")
