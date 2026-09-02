@@ -79,9 +79,9 @@ between it and the metrics:**
 > dominates the mean step time and inflates TTFT tenfold (465ms vs 47ms), so a
 > cell looks like a regression purely because it went first.
 
-`warmup_steps: 1` discards that step, which is why the numbers below are stable
-at all. It is worth knowing that a gate on TTFT is one recipe edit away from a
-10× excursion.
+`warmup_steps: 1` is supposed to discard that step. **It does not always**, and
+that is the single most important number in this document — see the next
+section, which measures it on the cell the staged entry actually runs.
 
 **Steady-state serving metrics, by contrast, reproduce well.** The docs do not
 say this in one sentence, but they contain two independent repeats:
@@ -111,6 +111,72 @@ the repo already distinguishes a tight metric from a loose one: the GEMM probe's
 "spread across trials was under 1.5 µs in every cell". Not everything TokenSpeed
 measures is noisy; bring-up is.
 
+### The smoke cell is not unconditionally clean (measured, 13 cell-runs)
+
+Everything above is a claim quoted from another document. This section is a
+measurement of the exact cell the staged nightly entry runs, taken from the
+`step_times_ms` and `metrics_summary` recorded in every `matrix.json` on disk for
+`TOKENSPEED-SERVE-SMOKE`: six sweeps, 13 cell-runs with step times, 39 steps.
+
+**Twelve of the thirteen are very clean.** Tighter than the cross-sweep numbers
+above, because these are the same recipe on the same node:
+
+| Metric | Clean range over 12 cell-runs | Spread |
+|---|---|---|
+| `median_ttft_ms` | 43.65 – 46.87 | 7.37% |
+| `median_tpot_ms` | 1.89 – 1.95 | 3.08% |
+| `output_throughput` | 3502.53 – 3646.20 | 4.10% |
+| `p99_itl_ms` | 34.00 – 35.84 | 5.43% |
+| step time | 1108 – 1178 ms | 6.3% |
+
+**The thirteenth is the compile-cache excursion, and `warmup_steps: 1` did not
+catch it.** `serve-smoke3::no-scratch-reclaim` recorded its three measured steps,
+in order, as:
+
+```
+6193.4 ms,  1140.2 ms,  1142.6 ms
+```
+
+The excursion is the **first measured step** — after the warmup step was already
+discarded. Its cell then reported `median_ttft_ms` 465.30 against a clean 43.65–
+46.87, which is 10.26× the clean mean and the same 465 vs 47 the serving doc
+quotes. So the 10× TTFT excursion is not a hypothetical a recipe edit could
+introduce; it is present, once, in the data we already have, at **1 cell-run in
+13 (7.7%)**.
+
+What it does to the four gates the table below proposes, anchoring each on the
+worst of the twelve clean runs and applying the plan's own margins:
+
+| Gate | Anchor | Threshold | Excursion | Verdict |
+|---|---|---|---|---|
+| `step_time_ms.max` | 1169.50 | 1461.88 | 2825.40 | **fail** |
+| `median_ttft_ms` | 46.87 | 58.59 | 465.30 | **fail** |
+| `output_throughput` | 3502.53 | 2977.15 | 2612.83 | **fail** |
+| `median_tpot_ms` | 1.95 | 2.44 | 1.93 | pass |
+| `p99_itl_ms` | 35.84 | 44.80 | 34.96 | pass |
+
+Three of the four proposed gates fire on a run that is not a regression. Those
+verdicts are `compare_to_baseline`'s, not arithmetic done here —
+`tests/ci/test_eval_lib.py` runs the measured numbers through the real comparator.
+
+**Why the latency-per-token metrics survive it, and why that is the useful
+signal.** The excursion is a fixed ~5 s of compilation added to one step. It
+therefore lands on anything derived from step *duration* — the step-time mean,
+and throughput, which is tokens over that duration — and on TTFT, because the
+first request of that step waits for the compile. It does not touch
+`median_tpot_ms` (1.01× clean) or `p99_itl_ms` (1.00× clean), because those are
+measured *between tokens*, after the compile has happened. A metric whose
+definition excludes the excursion is immune to it by construction, not by luck.
+
+**This is a different failure from the concurrency-64 one, and the difference
+decides the fix.** The matrix work found ~8% of bench steps at concurrency 64
+stalling by a fixed ~0.92 s with no positional pattern — the `serve-load::conc-64`
+cell on disk reads `1621, 2286, 2595` ms, bimodal in a way no warmup setting can
+remove. The smoke cell's excursion is at position 0 every time it appears, which
+makes it **deterministically avoidable**: it is cache warming, and one more
+discarded step removes it. The two look alike in a summary statistic (both make a
+three-step mean untrustworthy) and are opposite in what to do about them.
+
 Finally, the mitigation A/B is consistent with all of the above. On gpt-oss the
 `hsa_no_scratch_reclaim` cell landed at TTFT 66.7 vs 67.1 baseline, TPOT 7.49 vs
 7.61, throughput 1008 vs 994 — the doc calls it "within noise of baseline, as it
@@ -123,26 +189,50 @@ Direction is fixed by `_METRIC_POLICIES` in `scripts/ci/eval_lib.py` (`max` for
 latencies, `min` for throughputs). What this table decides is which of them get a
 *bound* on the first bless.
 
+Only that. The verdicts below are about the nightly's blessed baselines, which
+are derived by applying a margin to an observed value, and they say nothing
+about the workload's own `gates:` block (`_GATE_SPECS` in
+`src/aorta/workloads/tokenspeed_serve.py`), which enforces absolute numbers a
+recipe writes out per trial. The two differ exactly where the margin does the
+damage: `max_p99_itl_ms: 50` is a stated ceiling on tail stalls and is a
+perfectly good gate, whereas a *baseline* ITL ceiling is `observed × 1.25`,
+which for an observation near zero is near zero. So "Never" in this table means
+"never armed automatically from a baseline", not "not gateable" — and a metric
+listed here as record-only can still carry a hand-written per-trial bound today.
+
+> **Revised by measurement.** The four-gate set below was derived before the
+> step-0 excursion was measured on the smoke cell. Three of those four fire on
+> it. The `First bless` column now reflects that; the `Why` column keeps the
+> original reasoning, because it was not wrong about the noise — it was wrong
+> about `warmup_steps: 1` making the excursion unreachable.
+
 | Metric | Policy | First bless | Why |
 |---|---|---|---|
-| `mean_step_time_ms` (`step_time_ms.max`) | max | **Gate** | The bench step `duration`. Under fixed `num_prompts` and `ignore_eos` it is the reciprocal of throughput, so it moves with the thing we care about, and it is the bound `--perf-gate` always writes. |
-| `median_tpot_ms` | max | **Gate** | Reproduced to 1.57% and 0.26% across sweeps, and the docs already name it "the better-behaved per-token metric". It is steady-state decode cost with no queueing term, which is why it is the tightest number we have. |
-| `output_throughput` | min | **Gate** | Reproduced to 2.63% and 0.30%. The headline number, and where a decode regression shows first. |
-| `median_ttft_ms` | max | **Gate** | Reproduced to 0.87% and 0.15%. Gated with the reservation that it is the metric the compile-cache excursion inflates 10× if `warmup_steps` ever stops covering it, and it carries queueing delay that the others do not. If one gate flaps, expect it to be this one. |
+| `median_tpot_ms` | max | **Gate** | Reproduced to 1.57% and 0.26% across sweeps, 3.08% over 12 same-node cell-runs, and the docs already name it "the better-behaved per-token metric". It is steady-state decode cost with no queueing term, which is why it is the tightest number we have — and it is measured between tokens, so the step-0 compile excursion does not enter it (1.01× on the excursion run). The one gate the measurement leaves standing. |
+| `p99_itl_ms` | max | **Gate** | Promoted from record-only for the same reason: 1.00× on the excursion run, 5.43% clean spread. It is the useful half of the ITL pair, it catches tail stalls that a median cannot, and it is the only other metric whose definition excludes the excursion. Gating it and `median_tpot_ms` together covers per-token latency at both the centre and the tail without touching anything duration-derived. |
+| `mean_step_time_ms` (`step_time_ms.max`) | max | **Record-only** (was: gate) | The bench step `duration`, and therefore the metric the excursion hits hardest: 2825 ms against a 1462 ms ceiling, 2.4× over. It is still the bound `--perf-gate` always writes, so arming it is the *default* — which is exactly why the rollout sequence below has to prune it by hand until `warmup_steps` is proven to cover the excursion. |
+| `output_throughput` | min | **Record-only** (was: gate) | Reproduced to 2.63% and 0.30%, and it is the headline number — but it is tokens over the step duration, so the excursion drags it to 0.73× clean and through a 0.85 floor. Nothing is wrong with the metric; it simply cannot be gated while a five-second compile can land inside the window it divides by. |
+| `median_ttft_ms` | max | **Record-only** (was: gate) | The original entry said "if one gate flaps, expect it to be this one", and that was right for the wrong reason — not a flap but a 10.26× excursion, 465.30 against a 58.59 ceiling. It carries queueing delay the others do not, and its first request is the one that waits for the compile. |
 | `p99_ttft_ms` | max | **Record-only** | A p99 over 32 requests is the 32nd of 32 order statistics — effectively the maximum, and we have no repeat measurement of it. The load sweep shows it moving 194 → 2139 ms across shapes and 315 → 426 ms for a 2× concurrency change, so it is responsive to things a gate should not fire on. Promote on evidence from the record-only window. |
-| `p99_tpot_ms`, `p99_itl_ms`, `p99_e2el_ms` | max | **Record-only** | Same order-statistic argument, same absence of repeat data. `p99_itl_ms` is the useful half of the ITL pair and is the best candidate of the three to promote later. |
+| `p99_tpot_ms`, `p99_e2el_ms` | max | **Record-only** | Same order-statistic argument, same absence of repeat data. (`p99_itl_ms` was in this row and has been promoted to the gate set above — it now has 13 same-node cell-runs behind it, not zero repeats, and it is one of the two metrics the step-0 excursion leaves alone.) |
 | `median_e2el_ms` | max | **Record-only** | End-to-end latency is TTFT plus OSL × TPOT, so gating it adds a third alarm for an event two gates already catch, and its reason line is the least specific of the three. |
 | `request_throughput` | min | **Record-only** | Under `ignore_eos` at fixed OSL it is `output_throughput / output_len` — fully determined by a metric already gated. |
 | `total_token_throughput`, `tokens_per_sec` | min | **Record-only** | Restatements of `output_throughput` at fixed ISL/OSL (`tokens_per_sec` is documented as an alias of it). Gating them costs nothing but produces three reason lines for one event, which makes triage slower rather than safer. |
 | `median_itl_ms` | max | **Never** | Measured at ~0, because the gateway delivers several tokens per SSE chunk. A margin is multiplicative, so an observation of 0.0 blesses a ceiling of 0.0 and every later run with any inter-token gap at all fails. `eval_lib` already warned about this in a comment; it is now enforced by `_NO_AUTO_GATE`. |
-| `server_startup_sec` | — | **Never** | 189–379 s on one node with nothing changed, and it does not order by model size. It is not in the allowlist and must stay out: the allowlist is what `--perf-gate` arms from, so adding it *is* gating it. |
+| `server_startup_sec` | — | **Never** | 189–379 s in the docs; **180–415 s measured** over the 13 smoke cell-runs, so the spread is wider than the quoted one, not narrower. It does not order by model size. Not in the allowlist and must stay out: the allowlist is what `--perf-gate` arms from, so adding it *is* gating it. |
 | `container_elapsed_sec` | — | **Never** | Dominated by bring-up; same argument. |
 | `duration`, `total_input_tokens`, `total_output_tokens` | — | **Never** | Work-done counters. The token totals are pinned by the recipe, so a bound on them restates the configuration rather than measuring the stack. |
 | `completed_total`, `failed_total` | — | **Never** | Already enforced, harder, elsewhere: the bench script and the workload independently require `failed == 0` and `completed == num_prompts`, so a shortfall fails the *cell* and reddens the nightly with no baseline involved. A metric bound here would be a third and weaker copy of a check that already fails closed. |
 | `max_output_tokens_per_s`, `max_concurrent_requests` | — | **Never** | Single-sample maxima — the noisiest available summary of a distribution. |
 | `mean_*_ms`, `std_*_ms`, `p50_*`, `p90_*` | — | **Never** | Deliberately absent from the allowlist already ("means are the noisiest summary of a latency distribution and the least useful thing to gate on"). Keep them absent. |
 
-Four gates, then, and everything else charted. The gap between "gated" and
+Two gates, then — `median_tpot_ms` and `p99_itl_ms`, the per-token pair — and
+everything else charted, including three metrics that would have been gated
+before the excursion was measured. That is a deliberately smaller first bless
+than the plan originally proposed: the two that remain are the two whose
+definitions exclude the failure mode we can actually demonstrate, and the three
+that were dropped can be promoted from the record-only window as soon as it shows
+the excursion is gone. The gap between "gated" and
 "invisible" is covered by the dashboard's *What changed* view, which reports any
 metric that moved more than 10% between the two most recent runs without failing
 the job. A 10% throughput drift is real, is not a gate breach under these
@@ -203,6 +293,40 @@ full weeks, long enough to contain a runner reimage, a Docker Hub re-pull, a
 cold HF cache or a Dependabot ROCm bump — the once-a-week-ish events that produce
 excursions in the first place. **Five is the floor; below it the breach rate on
 known-noisy data is 2.9% per run, about nine false alarms a quarter.**
+
+### The extremum anchor has no good answer on a bimodal cell
+
+That whole derivation assumes the window's extremum is a *healthy worst case*.
+The step-0 excursion breaks the assumption, and it is worth being explicit about
+why, because it is the reason the gate set shrank rather than the window growing.
+
+With a bimodal cell the ten-night window either contains an excursion or it does
+not, and both outcomes are bad:
+
+| Window | `median_ttft_ms` anchor | Ceiling | Consequence |
+|---|---|---|---|
+| No excursion (12 of 13 nights) | 46.87 | 58.59 | The excursion, when it lands, reads as a 10× regression. False alarm. |
+| Contains one (1 in 13) | 465.30 | 581.63 | A genuine 2× TTFT regression — 47 → 94 ms — passes comfortably. No detection power at all. |
+
+Enlarging the window does not resolve this; it only makes the second row more
+likely. The extremum is the right statistic for a unimodal metric with occasional
+environmental excursions, which is what the startup series is. It is the wrong
+statistic for a metric with two modes, because "the worst a healthy night has
+been" is not a single number any more.
+
+So the correct response to a bimodal cell is not a cleverer threshold. It is
+either to gate a metric the second mode does not reach — which is what
+`median_tpot_ms` and `p99_itl_ms` are — or to remove the second mode. For the
+step-0 excursion the second option is genuinely available, because the excursion
+is positional: raising `warmup_steps` from 1 to 2 discards it by construction.
+That is the recommended follow-up, and it is what would let the three
+duration-derived metrics be promoted later. It is deliberately *not* bundled into
+this change, because changing `warmup_steps` changes the measurement, and every
+baseline and every number in this document was taken at `warmup_steps: 1`.
+
+For the concurrency-64 stall no such fix exists — it has no position to discard —
+which is why that cell stays out of the nightly entirely rather than being gated
+on a narrower metric.
 
 The margins themselves need no change. `--step-time-margin 0.25` and
 `--throughput-margin 0.15` are already right for these metrics, and the

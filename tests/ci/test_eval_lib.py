@@ -249,6 +249,122 @@ def test_a_near_zero_itl_bound_cannot_be_satisfied():
     assert _gate(0.03, "median_itl_ms", _bound(0.02, "max")) == "fail"
 
 
+# ---------------------------------------------------------------------------
+# The step-0 compile excursion, measured on the cell the staged entry runs.
+#
+# Read from the step_times_ms / metrics_summary of every matrix.json on disk for
+# TOKENSPEED-SERVE-SMOKE: 6 sweeps, 13 cell-runs, 39 steps. Twelve are clean; one
+# recorded its measured steps as 6193.4, 1140.2, 1142.6 ms -- the excursion is
+# the FIRST measured step, after warmup_steps: 1 had already discarded one.
+# docs/tokenspeed-gating-rollout.md derives the revised first-bless set from
+# these; the point of putting them here is that the derivation is checkable.
+# ---------------------------------------------------------------------------
+
+# Full clean envelope (min, max) over the 12 clean cell-runs.
+_SMOKE_CLEAN_RANGE = {
+    "median_ttft_ms": (43.65, 46.87),
+    "median_tpot_ms": (1.89, 1.95),
+    "output_throughput": (3502.53, 3646.20),
+    "p99_itl_ms": (34.00, 35.84),
+}
+# Worst clean observation per metric -- the "ten-night extremum" anchor the plan
+# proposes, so a gate built from it is the most permissive the plan would ever
+# bless. For a `max` metric that is the top of the range, for a `min` metric the
+# bottom.
+_SMOKE_CLEAN_ANCHOR = {
+    name: (hi if eval_lib.metric_policy(name) == "max" else lo)
+    for name, (lo, hi) in _SMOKE_CLEAN_RANGE.items()
+}
+# The one excursion cell-run, same metric names.
+_SMOKE_EXCURSION = {
+    "median_ttft_ms": 465.30,
+    "median_tpot_ms": 1.93,
+    "output_throughput": 2612.83,
+    "p99_itl_ms": 34.96,
+}
+_SMOKE_CLEAN_MEAN_STEP_MS = 1169.5
+_SMOKE_EXCURSION_MEAN_STEP_MS = 2825.4
+
+
+def test_the_step_zero_excursion_breaks_the_duration_derived_gates():
+    """Three of the four proposed gates fire on a run that is not a regression.
+
+    All three are derived from step DURATION -- the step-time mean directly, and
+    throughput as tokens over that duration -- or from TTFT, whose first request
+    waits for the compile. This is why the rollout plan does not bless them from
+    a ten-night extremum while the excursion is still reachable.
+    """
+    for name in ("median_ttft_ms", "output_throughput"):
+        policy = eval_lib.metric_policy(name)
+        threshold = _bound(_SMOKE_CLEAN_ANCHOR[name], policy)
+        assert _gate(_SMOKE_EXCURSION[name], name, threshold) == "fail", name
+
+    # step_time_ms.max is the bound --perf-gate always writes, and it is the
+    # worst of the three: 2.4x the ceiling, not a marginal breach.
+    assert _SMOKE_EXCURSION_MEAN_STEP_MS > _bound(_SMOKE_CLEAN_MEAN_STEP_MS, "max")
+
+
+def test_the_per_token_metrics_are_immune_to_the_excursion_by_construction():
+    """`median_tpot_ms` and `p99_itl_ms` are measured BETWEEN tokens, after the
+    compile has happened, so a fixed ~5 s of compilation added to one step does
+    not enter them. That is a property of their definition, not luck, and it is
+    the reason the revised plan gates the per-token pair first."""
+    for name in ("median_tpot_ms", "p99_itl_ms"):
+        policy = eval_lib.metric_policy(name)
+        threshold = _bound(_SMOKE_CLEAN_ANCHOR[name], policy)
+        assert _gate(_SMOKE_EXCURSION[name], name, threshold) == "pass", name
+        # Stronger than "passes the gate": the excursion run's value lands
+        # *inside* the clean envelope, so on these two metrics the excursion run
+        # is not distinguishable from a healthy one at all.
+        low, high = _SMOKE_CLEAN_RANGE[name]
+        assert low <= _SMOKE_EXCURSION[name] <= high, name
+
+
+# Measured from INSIDE the aorta-ci-gpu container, driving sibling engine
+# containers over the bind-mounted daemon socket, on 2026-09-02. Two sweeps of
+# the two-cell recipe; all four cell-runs passed and all twelve steps were clean
+# (1108-1149 ms, no step-0 excursion). This is the evidence the matrix entry was
+# promoted on.
+_IN_CONTAINER = {
+    "sweep1/baseline": {"median_ttft_ms": 47.1303, "median_tpot_ms": 1.8964,
+                        "output_throughput": 3621.1781, "p99_itl_ms": 34.6303},
+    "sweep1/no-scratch-reclaim": {"median_ttft_ms": 46.6870, "median_tpot_ms": 1.8548,
+                                  "output_throughput": 3593.2672, "p99_itl_ms": 34.6720},
+    "sweep2/baseline": {"median_ttft_ms": 45.1460, "median_tpot_ms": 1.9007,
+                        "output_throughput": 3601.5000, "p99_itl_ms": 34.6700},
+    "sweep2/no-scratch-reclaim": {"median_ttft_ms": 46.7940, "median_tpot_ms": 1.9135,
+                                  "output_throughput": 3577.2000, "p99_itl_ms": 35.0300},
+}
+
+
+def test_running_inside_the_ci_container_does_not_move_the_measurement():
+    """The sibling-container arrangement is a measurement question, not only a
+    plumbing one: if driving the engine from inside aorta-ci-gpu shifted the
+    numbers, a baseline blessed by the nightly could not be compared against the
+    host-side runs this plan's variance analysis is built from, and the ten-night
+    window would have to start over the first time CI changed how it launches.
+
+    It does not shift them. Every one of the sixteen in-container observations
+    lands within 5% of the host-side clean envelope -- and mostly inside it. The
+    boundary therefore contributes less than the run-to-run noise the plan has
+    already accounted for.
+    """
+    for cell, metrics in _IN_CONTAINER.items():
+        for name, observed in metrics.items():
+            low, high = _SMOKE_CLEAN_RANGE[name]
+            assert low * 0.95 <= observed <= high * 1.05, f"{cell}:{name}={observed}"
+
+
+def test_a_gate_blessed_in_the_container_still_passes_host_side_runs():
+    """The other direction, which is the one that would redden a nightly: bless
+    from the in-container run and the host-side clean envelope must still pass."""
+    for metrics in _IN_CONTAINER.values():
+        for name, blessed in metrics.items():
+            policy = eval_lib.metric_policy(name)
+            threshold = _bound(blessed, policy)
+            assert _gate(_SMOKE_CLEAN_ANCHOR[name], name, threshold) == "pass", name
+
+
 def test_compare_record_only_when_no_baseline_and_passed():
     harvested = {"cell": "c", "passed": True, "error": None, "metrics": {}}
     out = eval_lib.compare_to_baseline(harvested, None)
