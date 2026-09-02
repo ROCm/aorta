@@ -212,14 +212,20 @@ buffer that would over-run the segment.
 Two limits are worth stating plainly. One logical Triton kernel usually compiles
 to several objects (shape-selected variants), and ConSan takes exactly one code
 object per run, so harvest one shim and one recipe per object; an ambiguous
-selection fails closed and lists the candidates. And on the currently shipping
-RocJITsu build, record/replay reports itself as `an inventory-only stub`, so a
-dispatch captures no dynamic records and strict policy fails closed with exit 86
-— the same outcome the committed `daily-consan-tiny.yaml` and
-`daily-consan-lds-dispatch.yaml` lanes document
-([ROCm/rocm-systems#9972](https://github.com/ROCm/rocm-systems/issues/9972)).
-The loader removes the aorta-side gap; the dynamic-coverage half stays blocked
-upstream.
+selection fails closed and lists the candidates. And the object has to contain
+sites ConSan can admit: a kernel whose only memory operations are ordinary
+global loads/stores yields `access=0/0` and `applicable=false`, so strict
+`moi_require_records` fails closed at exit 86 no matter what the driver does —
+which is exactly what `daily-consan-tiny.yaml` documents, and dispatching does
+not change it.
+
+The dynamic-coverage half is **no longer blocked upstream**:
+[ROCm/rocm-systems#9972](https://github.com/ROCm/rocm-systems/issues/9972)
+(record/replay reporting itself as `an inventory-only stub`, so a dispatch
+captured no records) is fixed in `15275dad`. On bundle `97c1640b`
+`daily-consan-lds-dispatch.yaml` observes a clean pass with `access=5/5`,
+`barrier=2/2` and `dynamic_complete=true`, so a Triton object with real LDS or
+atomic sites can now reach a genuine verdict.
 
 ## Verdict and health rules
 

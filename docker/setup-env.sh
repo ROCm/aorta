@@ -43,7 +43,7 @@ echo -e "${GREEN}Step 1: Select Dockerfile${NC}"
 # The `rocm70_9-1` / `rocm70_2` filenames encode an amdgpu installer revision, not
 # a ROCm version, so taking them at face value points people at the wrong stack.
 echo "Available Dockerfiles:"
-echo "  1) Dockerfile.rocm-latest             - ROCm 7.2.4 / PyTorch 2.10 (newest CI validates) [default]"
+echo "  1) Dockerfile.rocm-latest             - ROCm 10.0 / PyTorch 2.13 (newest CI validates) [default]"
 echo "  2) Dockerfile.rocm70_9-1              - ROCm 7.2 / PyTorch 2.9.1"
 echo "  3) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0 meta build #19, plus Shampoo optimizer"
 echo "  4) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2.1 build #17 on Ubuntu 22.04"

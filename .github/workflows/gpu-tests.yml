@@ -194,6 +194,26 @@ jobs:
             cd /workspace/aorta
             python -m pip install --upgrade pip
             pip install -e ".[tests,hw-queue]"
+            # The ROCm lib dirs on LD_LIBRARY_PATH, or the payloads these tests
+            # compile with hipcc build and then fail to LAUNCH. Measured on the
+            # ROCm 10 wheel base: hipcc output carries neither DT_RPATH nor
+            # DT_RUNPATH and the image sets no LD_LIBRARY_PATH, so the loader has
+            # nowhere to look and the payload dies before main with
+            #   error while loading shared libraries: libamdhip64.so.7
+            # at exit 127 -- which is what test_payload_runs_and_self_checks
+            # reported. Its sibling test runs the SAME binary under rocprofv3 and
+            # passed, so this is the bare-launch loader path and nothing else.
+            #
+            # Byte-identical to both payloads in sanitizers-nightly.yml and to
+            # _ROCM_LIB_PATH_EXPORT in gen_sanitizer_dashboard.py; the four are
+            # asserted equal by test_rebuild_commands_export_the_rocm_library_path.
+            # See the gate job in that workflow for the full rationale -- both lib
+            # dirs with core first, derived from the resolver rather than a
+            # literal site-packages path (issue #381), appended rather than
+            # prepended so an inherited operator substitution keeps winning, and
+            # written with no apostrophe because this is a single-quoted bash -lc
+            # payload that any apostrophe would close early.
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
             pytest -m "gpu or rocm" -n 4 --junitxml=gpu-results.xml
           '
 

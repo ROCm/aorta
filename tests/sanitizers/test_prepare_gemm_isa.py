@@ -151,7 +151,11 @@ def test_library_for_error_names_both_candidate_paths(monkeypatch, tmp_path):
 # tests below are named after real, measured file sets rather than invented ones.
 # --------------------------------------------------------------------------
 
-# The three variants ROCm 7.14 ships for every one of the four SS layouts.
+# The three variants ROCm 7.14 ships for every one of the four SS layouts. ROCm
+# 10.0 ships the same three, re-measured against that image -- so this set is not
+# 7.14-specific despite the name, and the ROCm 10 flip needed no change here.
+# (ROCm 10 does ship _CU128_ID75a0 and _ID75a8 bundles for gfx950, as 7.14 already
+# did, but for the fp16/bf16/f8 families rather than this f32 SS one.)
 _V_CU256_75A0 = "_CU256_ID75a0"
 _V_75A0 = "_ID75a0"
 _V_75A3_75A2 = "_ID75a3-75a2"
@@ -255,11 +259,15 @@ def test_the_nested_tree_is_used_when_the_flat_one_holds_nothing_for_this_layout
 
 
 def test_classic_single_bundle_is_chosen_for_every_device(monkeypatch, tmp_path):
-    """The 7.2.4 tree must stay byte-identical, and device-independent.
+    """The classic single-bundle tree must stay byte-identical, and device-independent.
 
     Its one bundle per layout carries no predicates, so no device may change the
-    answer -- verified end-to-end against the pinned 7.2.4 CI base, where the
-    extracted objects' digests are unchanged by this selector.
+    answer -- verified end to end against a real classic tree, whose extracted
+    objects' digests are unchanged by this selector. That tree was the CI base
+    while ROCm 7.2.4 was pinned; the current ROCm 10.0 pin is a wheel, per-device
+    tree, and the extraction has been re-run end to end against it as well
+    (three real code objects, correct per-layout digests). Classic installs are
+    what customers run, so this path stays covered here either way.
     """
     monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
     planted = _plant(tmp_path, "Ailk_Bjlk", "")[""]

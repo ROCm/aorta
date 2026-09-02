@@ -1910,6 +1910,30 @@ _ROCM_LLVM_PATH_EXPORT = (
     'resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"'
 )
 
+# And the second half of what a rebuild needs, because building a fixture is not
+# the same as being able to RUN it. hipcc output on the wheel-layout ROCm base
+# carries neither DT_RPATH nor DT_RUNPATH, so a reader who pastes the commands
+# below gets a binary that links cleanly and then dies before main with
+# ``libamdhip64.so.N: cannot open shared object file`` at exit 127. The recorded
+# ``command_sha256`` is a contract about the artifact bytes, so this is published
+# as environment the reader must export rather than as an extra link flag: adding
+# ``-Wl,-rpath`` would change the compile line and stop reproducing that digest.
+#
+# BOTH lib dirs, core first: ``core_lib_dir`` holds the HIP runtime and
+# ``lib_dir`` the math libraries (see the resolver's properties). Appended, never
+# prepended, so an inherited LD_LIBRARY_PATH -- an operator substitution -- keeps
+# winning. Byte-identical to all three workflow copies -- both payloads in
+# sanitizers-nightly.yml and the pytest step in gpu-tests.yml, which needs it for
+# the same reason: the rocprof smoke test launches a hipcc-built binary directly.
+# ``test_rebuild_commands_export_the_rocm_library_path`` cross-checks every one, so
+# the published guidance cannot drift from what actually produced the artifacts.
+_ROCM_LIB_PATH_EXPORT = (
+    'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}'
+    '$(python -c "import os; from aorta.instrumentation.rocm_paths import '
+    "resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys("
+    '[str(x.core_lib_dir), str(x.lib_dir)])))")"'
+)
+
 
 def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
     """How to rebuild each unpublished artifact, as data (pure).
@@ -1926,20 +1950,31 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
     recipe-relative, matching how a recipe names the artifact and how
     ``artifacts_not_published`` records it; ``commands`` are rewritten to run from
     the repo root, which is where REPRODUCE.md leaves the reader, and open with the
-    two prerequisites a fresh shell lacks -- the ROCm LLVM bindir on ``PATH`` and
-    the gitignored output directory. They are the nightly's own invocations
-    (see the tables above): per-artifact and not interchangeable, because a
-    rebuild that differs from them will not reproduce the SHA-256 recorded beside
-    the artifact. An unrecognised reference yields commands ``[]`` rather than a
-    guess.
+    three prerequisites a fresh shell lacks -- the ROCm LLVM bindir on ``PATH``,
+    the ROCm lib dirs on ``LD_LIBRARY_PATH`` so the rebuilt fixture can also be
+    launched, and the gitignored output directory. They are the nightly's own
+    invocations (see the tables above): per-artifact and not interchangeable,
+    because a rebuild that differs from them will not reproduce the SHA-256
+    recorded beside the artifact. An unrecognised reference yields commands ``[]``
+    rather than a guess.
 
     Anything a consumer must branch on is encoded *in* a command rather than left
     to ``caveat`` prose, so the list can be executed as-is.
     """
 
     def prelude(sub: str) -> list[str]:
-        """What every rebuild needs before its first tool call, shell order."""
-        return [_ROCM_LLVM_PATH_EXPORT, f"mkdir -p {_FIXTURES_FROM_ROOT}/{sub}"]
+        """What every rebuild needs before its first tool call, shell order.
+
+        The library path is here rather than only on the binary entries: an
+        ``isa/`` artifact is a code object some fixture then loads, and both
+        exports are one provisioning block in the nightly, so emitting them
+        per-artifact-kind would publish a shell the workflow never had.
+        """
+        return [
+            _ROCM_LLVM_PATH_EXPORT,
+            _ROCM_LIB_PATH_EXPORT,
+            f"mkdir -p {_FIXTURES_FROM_ROOT}/{sub}",
+        ]
 
     plan: list[dict[str, Any]] = []
     for ref in built_refs:

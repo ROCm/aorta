@@ -29,10 +29,13 @@ Two modes, mirroring the two committed HIP loaders:
     the metadata JSON (it is absent in 3.7.1), so pass ``--launch-spec`` when the
     metadata has no ``signature`` -- preferably as an array of ``[name, type]``
     pairs, since argument order is load-bearing and JSON object key order is not
-    (see ``parse_signature``). Note that dispatching a caller-supplied object
-    currently fails closed on the shipping RocJITsu build for the same reason
-    ``daily-consan-lds-dispatch.yaml`` does (zero captured records -> exit 86,
-    ROCm/rocm-systems#9972).
+    (see ``parse_signature``). Dispatching a caller-supplied object used to fail
+    closed for the same reason ``daily-consan-lds-dispatch.yaml`` did (zero
+    captured records -> exit 86, ROCm/rocm-systems#9972); that is fixed in
+    ``15275dad`` and that lane now passes. What still fails closed is an object
+    with no MOI-admissible sites -- ordinary global loads/stores alone give
+    ``access=0/0``, so strict ``moi_require_records`` exits 86 regardless of the
+    driver.
 
 ``run_consan`` executes ``source.consan_command`` as a bare argv with no
 arguments, so a parameterised loader cannot be named directly. ``emit-command``
