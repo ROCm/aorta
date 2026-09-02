@@ -319,3 +319,65 @@ def test_env_mode_payload_reads_every_session_variable(example, tmp_path):
         "set those knobs and the payload would start Proton without them, so the trial "
         "would report a capture that is missing what it asked for"
     )
+
+
+def _first_import_lines(payload: Path) -> tuple[int | None, int | None]:
+    """Line numbers of the payload's first ``triton.profiler`` and ``torch`` imports.
+
+    Module-level statements only. An import inside a function does not run at
+    load time, so it cannot decide which library's constructor lands first --
+    which is the whole property under test.
+    """
+    proton_line = torch_line = None
+    module = ast.parse(payload.read_text(encoding="utf-8"))
+    for node in module.body:
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        for name in names:
+            if proton_line is None and name.startswith("triton.profiler"):
+                proton_line = node.lineno
+            if torch_line is None and (name == "torch" or name.startswith("torch.")):
+                torch_line = node.lineno
+    return proton_line, torch_line
+
+
+_PROTON_PAYLOADS = sorted(
+    path for path in (EXAMPLES / "profiling" / "proton").glob("*/*.py") if path.name != "__init__.py"
+)
+_PROTON_PAYLOAD_IDS = [str(path.relative_to(EXAMPLES)) for path in _PROTON_PAYLOADS]
+
+
+@pytest.mark.skipif(not _PROTON_PAYLOADS, reason="no proton example payloads in the tree")
+@pytest.mark.parametrize("payload", _PROTON_PAYLOADS, ids=_PROTON_PAYLOAD_IDS)
+def test_proton_payloads_import_proton_before_torch(payload):
+    """Importing Proton after torch hangs the process forever at exit.
+
+    ``libproton.so`` calls ``rocprofiler_force_configure`` from an
+    ``__attribute__((constructor))``, so importing ``triton.profiler`` registers
+    Proton as a rocprofiler-sdk client. On Triton 3.8.0, when that registration
+    lands after HSA is already up -- importing torch is enough -- the atexit
+    ``rocprofiler::registration::finalize()`` re-enters its own non-recursive
+    registration mutex through Proton's ``protonToolFini`` and deadlocks. The
+    capture completes and is written; the process then never exits. Two imports
+    in that order are the entire reproducer (ROCm/aorta#434).
+
+    Asserted here rather than left to the GPU smoke tests because this is an
+    import-order convention, and the natural tidy -- letting isort sort the
+    third-party block -- silently reintroduces the hang on a host no CPU test
+    would notice. The ``# isort: skip`` comments in the payloads are what hold
+    the order; this is what says why they must stay.
+    """
+    proton_line, torch_line = _first_import_lines(payload)
+    if proton_line is None or torch_line is None:
+        pytest.skip(f"{_rel(payload)} does not import both triton.profiler and torch")
+    assert proton_line < torch_line, (
+        f"{_rel(payload)} imports torch (line {torch_line}) before triton.profiler "
+        f"(line {proton_line}). That order deadlocks the process at exit on Triton "
+        "3.8.0 -- see ROCm/aorta#434. Import triton.profiler first, keeping the "
+        "'# isort: skip  # noqa: I001' comment so the linter does not undo it. "
+        "Starting the session after torch is still correct and still required by "
+        "roctracer; it is the import that has to come first, not the start() call."
+    )

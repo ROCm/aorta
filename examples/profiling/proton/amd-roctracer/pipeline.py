@@ -28,17 +28,30 @@ import math
 import os
 import sys
 
-# ``torch`` is imported at module scope, not lazily inside main(), and that
-# ordering is load-bearing: roctracer records nothing when it attaches before
-# the HIP runtime it is meant to trace, and importing torch is what brings that
-# runtime up. The same constraint is why this example is driven by ``mode: env``
-# -- Triton's Proton CLI initialises the driver only on the path where ``-b`` is
-# absent, so pinning a backend through ``mode: cli`` produces a hatchet holding
-# nothing but a bare ROOT frame, and still exits 0.
+# THE ORDER OF THE NEXT TWO IMPORT BLOCKS IS LOAD-BEARING, in both directions.
+#
+# Proton first, because importing it after torch hangs the process forever at
+# exit on Triton 3.8.0. `libproton.so` calls `rocprofiler_force_configure` from
+# an `__attribute__((constructor))`, so the import registers Proton as a
+# rocprofiler-sdk client; when HSA is already up (a torch import chain is
+# enough) that registration lands late, and the atexit `registration::finalize`
+# then re-enters its own non-recursive registration mutex through Proton's
+# `protonToolFini` and deadlocks. Two imports in this order are the whole
+# reproducer. See ROCm/aorta#434 for the stack.
+#
+# torch before `proton.start()`, because roctracer installs its interceptor at
+# session start and records nothing if it attaches ahead of the HIP runtime.
+# That constraint is about the START call, not the import -- verified: moving
+# the import above torch leaves the capture byte-identical -- which is what
+# makes satisfying both orderings possible at all. It is also why this example
+# is driven by ``mode: env``: Triton's Proton CLI initialises the driver only on
+# the path where ``-b`` is absent, so pinning a backend through ``mode: cli``
+# produced a hatchet holding nothing but a bare ROOT frame on Triton 3.7.x.
+import triton.profiler as proton  # isort: skip  # noqa: I001
+
 import torch
 import triton
 import triton.language as tl
-import triton.profiler as proton
 
 #: Prefix of the variables aorta's ``proton`` collector exports in ``mode: env``.
 _ENV_PREFIX = "AORTA_PROTON_"

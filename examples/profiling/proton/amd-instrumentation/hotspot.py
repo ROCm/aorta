@@ -23,23 +23,31 @@ import argparse
 import os
 import sys
 
-# ``torch`` is imported at module scope, before ``proton.start()`` runs in
-# main(). For the queue-intercepting backends that ordering is load-bearing --
-# ``roctracer`` records nothing unless the HIP runtime is already up, which is
-# what importing torch does. That is a ``roctracer`` property and not an AMD one:
-# ``rocprofiler`` wants the reverse (it is configured from a ``libproton.so``
-# constructor, so it must land *before* HSA), and this backend has no ordering
-# requirement at all -- it installs no queue interceptor, and a CLI pin of it
-# captures correctly whatever the order. The
-# reason this example chooses ``mode: env`` is narrower and version-independent:
-# Triton 3.7.1's CLI parses ``--mode`` and then calls ``start()`` without it, so
-# ``instrumentation_mode`` would be dropped there. 3.8.0 forwards it, but this
-# route reaches Proton on both -- see recipe.yaml.
+# Proton is imported BEFORE torch, and that ordering is load-bearing even
+# though this backend intercepts no queues. `libproton.so` calls
+# `rocprofiler_force_configure` from an `__attribute__((constructor))`, so the
+# import registers Proton as a rocprofiler-sdk client whatever backend a session
+# later selects; on Triton 3.8.0, registering after HSA is up (a torch import
+# chain is enough) makes the atexit `registration::finalize` re-enter its own
+# non-recursive registration mutex through Proton's `protonToolFini` and
+# deadlock, so the process hangs forever after a perfectly good capture. See
+# ROCm/aorta#434.
+#
+# ``torch`` still lands before ``proton.start()`` runs in main(), which is what
+# the queue-intercepting backends need: ``roctracer`` records nothing unless the
+# HIP runtime is already up. That constraint is about the START call rather than
+# the import, so both orderings hold at once.
+#
+# The reason this example chooses ``mode: env`` is narrower and
+# version-independent: Triton 3.7.1's CLI parses ``--mode`` and then calls
+# ``start()`` without it, so ``instrumentation_mode`` would be dropped there.
+# 3.8.0 forwards it, but this route reaches Proton on both -- see recipe.yaml.
+import triton.profiler as proton  # isort: skip  # noqa: I001
+import triton.profiler.language as pl  # isort: skip  # noqa: I001
+
 import torch
 import triton
 import triton.language as tl
-import triton.profiler as proton
-import triton.profiler.language as pl
 
 # Instrumenting a Triton-DSL kernel is opt-in: ``triton/profiler/language.py``
 # enables only the Gluon semantic by default, because Triton's higher-level IR

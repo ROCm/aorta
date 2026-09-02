@@ -134,44 +134,15 @@ def _triton_minor() -> tuple[int, int] | None:
 
 _TRITON = _triton_minor()
 
-#: ``mode: env`` captures wedge on Triton 3.8.0, and the wedge is why the GPU
-#: job carries ``--timeout``. Two of these tests produced no outcome at all on
-#: run 33527313950 (the job ran to its 60-minute cap and the cancel took the
-#: junit report with it), and the same two hit the child budget on run
-#: 33629989829. Both pass in ~4 s on Triton 3.7.1, here, repeatedly.
-#:
-#: What separates them from the tests that pass on that runner is the attach
-#: mode, not the backend: every ``mode: cli`` capture completed, including a
-#: pinned ``roctracer``. The suspected mechanism is 3.8.0 configuring
-#: rocprofiler-sdk from a ``libproton.so`` constructor at import -- on an image
-#: whose ``librocprofiler-sdk.so`` will not ``dlopen``, the constructor swallows
-#: that, and a later in-process ``proton.start()`` then wedges. Suspected, not
-#: established: it cannot be reproduced on a 3.7.1 host, so this skips rather
-#: than claiming a diagnosis. Tracked in ROCm/aorta#434.
-_ENV_MODE_WEDGE_REASON = (
-    "mode: env captures wedge on Triton 3.8.0 (no outcome on CI run 33527313950, "
-    "child-timeout on 33629989829); they pass in seconds on 3.7.1. Skipped rather "
-    "than left to burn the job's budget -- tracked in ROCm/aorta#434."
-)
-skip_env_mode_wedge = pytest.mark.skipif(
-    _TRITON is not None and _TRITON >= (3, 8),
-    reason=_ENV_MODE_WEDGE_REASON,
-)
-
-#: The empty-capture bug the ``wrap_argv`` guard exists for does not reproduce
-#: on Triton 3.8.0: a pinned ``-b roctracer`` captured 17 kernels there (run
-#: 33629989829), where 3.7.1 gives a bare ``ROOT``. The inverted test below
-#: asserts the bug is still present, so on 3.8.0 it is asserting something
-#: false -- skip it there rather than weaken the assertion, and keep it sharp
-#: where the guard is actually load-bearing.
-skip_bug_fixed_upstream = pytest.mark.skipif(
-    _TRITON is not None and _TRITON >= (3, 8),
-    reason=(
-        "the roctracer CLI-pin empty capture does not reproduce on Triton 3.8.0 "
-        "(captured 17 kernels on CI run 33629989829); the guard is a 3.7.x-and-"
-        "earlier workaround"
-    ),
-)
+#: Whether the installed Triton is one where a ``mode: cli`` pin of
+#: ``roctracer`` actually captures. On 3.7.x it comes back as a 160-byte bare
+#: ``ROOT`` -- the empty capture the ``wrap_argv`` guard exists to refuse -- and
+#: from 3.8.0 on the same pin records normally (measured on gfx950 / ROCm 10:
+#: 3090 bytes, byte-for-byte the size ``backend: auto`` produces). The test
+#: below asserts whichever of the two is true here, rather than skipping on the
+#: newer stack, so the day the version floor moves the guard's premise is still
+#: under test instead of merely unasserted.
+_CLI_PIN_CAPTURES = _TRITON is not None and _TRITON >= (3, 8)
 
 
 def _raw_proton_env(**extra: str) -> dict[str, str]:
@@ -309,7 +280,6 @@ def test_python_context_attributes_to_call_paths(tmp_path):
 
 
 @skip_no_proton
-@skip_env_mode_wedge
 def test_env_mode_pins_roctracer_and_gets_a_non_empty_tree(tmp_path):
     """The route the ``mode: cli`` rejection names, end to end.
 
@@ -339,15 +309,18 @@ def test_env_mode_pins_roctracer_and_gets_a_non_empty_tree(tmp_path):
 
 
 @skip_no_proton
-@skip_bug_fixed_upstream
-def test_cli_mode_pin_would_still_capture_nothing(tmp_path):
+def test_cli_mode_pin_captures_nothing_only_on_the_versions_the_guard_targets(tmp_path):
     """Pins the premise of the ``wrap_argv`` guard against the installed Triton.
 
     Builds the wrap the guard refuses -- ``build_argv_prefix`` renders the flags
-    without the attach-mode check -- and asserts it comes back empty. A failure
-    here is good news, not a bug: it means this Triton initialises the runtime
-    before starting a pinned backend, and the guard can be narrowed to the
-    versions that do not.
+    without the attach-mode check -- and asserts what that Triton actually does
+    with it: an empty tree on 3.7.x, a populated one from 3.8.0.
+
+    Both halves are load-bearing. The 3.7.x half is the regression that would
+    have caught the silent empty capture in the first place. The 3.8.0 half is
+    what says the guard has become a no-op there, so removing it stops being a
+    guess -- and it fails, loudly, if a later Triton reintroduces the ordering
+    bug while the guard is gone.
     """
     out_dir = tmp_path / OUTPUT_SUBDIR
     out_dir.mkdir()
@@ -373,9 +346,19 @@ def test_cli_mode_pin_would_still_capture_nothing(tmp_path):
         pytest.skip(missing)
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert "PASS" in proc.stdout, "the payload itself must still have run"
-    # The silent part of the failure: a clean exit, an artifact directory, and no
-    # measurement anywhere in it.
-    assert parse_summary(out_dir) == {"proton_artifact_dir": str(out_dir)}
+
+    metrics = parse_summary(out_dir)
+    if _CLI_PIN_CAPTURES:
+        # The guard's premise has expired on this Triton. Assert a real capture
+        # rather than merely "not empty": an ordering bug that recorded one
+        # stray kernel would satisfy the weaker check.
+        assert metrics.get("proton_kernel_count", 0) > 0, metrics
+        assert metrics.get("proton_gpu_time_ms", 0.0) > 0.0, metrics
+        assert "add_kernel" in metrics.get("proton_top_kernels", []), metrics
+    else:
+        # The silent part of the failure: a clean exit, an artifact directory,
+        # and no measurement anywhere in it.
+        assert metrics == {"proton_artifact_dir": str(out_dir)}
 
 
 @skip_no_proton
@@ -504,7 +487,6 @@ def test_pcsampling_captures_once_the_environment_can_do_it(tmp_path):
 
 
 @skip_no_proton
-@skip_env_mode_wedge
 def test_instrumentation_captures_scopes_inside_one_kernel(tmp_path):
     """The intra-kernel backend attributes cycles to regions within a kernel.
 

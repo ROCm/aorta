@@ -164,9 +164,25 @@ version of this recipe would not run at all.
 The guard stops at `roctracer`. `rocprofiler` looks like the same case and is
 the opposite one: it is configured by an `__attribute__((constructor))` when
 `libproton.so` loads, so it wants to be set up *before* HSA rather than after,
-and its CLI pin is allowed for that reason. The import order in this example's
-payload — torch first, `proton.start()` after — is therefore the reverse of
-[`../amd-rocprofiler/gelu.py`](../amd-rocprofiler/gelu.py)'s, deliberately.
+and its CLI pin is allowed for that reason.
+
+**What the two backends disagree about is the `start()` call, not the import.**
+This payload imports `triton.profiler` before `torch`, exactly as
+[`../amd-rocprofiler/gelu.py`](../amd-rocprofiler/gelu.py) does, and then calls
+`proton.start()` after torch — which is what `roctracer` needs, since it
+installs its interceptor at session start rather than at load. Both orderings
+hold at once, and the capture is unchanged either way: measured on gfx950, the
+hatchet is byte-identical (1648 bytes, 15 launches across the three kernels) on
+Triton 3.7.1 and 3.8.0 with the import moved.
+
+Importing Proton *after* torch is not merely suboptimal on 3.8.0 — it hangs the
+process forever at exit, after the capture has already been written. The
+constructor registers Proton as a rocprofiler-sdk client; when that lands after
+HSA is up, the atexit `rocprofiler::registration::finalize()` re-enters its own
+non-recursive registration mutex through Proton's `protonToolFini` and
+deadlocks. `import torch` followed by `import triton.profiler` is the whole
+reproducer. See [ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
+
 See [Pinning an explicit AMD
 backend](../../../../docs/profiling-collectors.md#pinning-an-explicit-amd-backend)
 for both contracts side by side, including which one is measured and which is

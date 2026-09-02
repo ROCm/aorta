@@ -457,9 +457,11 @@ would imply more than it knows. The Triton version in the run's env snapshot is
 what disambiguates which backend produced a given set of numbers — read it
 before comparing `proton_gpu_time_ms` across runs from different environments.
 
-To pin `roctracer`, use `mode: env` and a payload that imports torch and then
-calls `proton.start()` itself (`rocprofiler` needs the reverse import order, and
-also accepts `mode: cli`):
+To pin `roctracer`, use `mode: env` and a payload that calls `proton.start()`
+after torch is imported (`rocprofiler` also accepts `mode: cli`). Note this is a
+constraint on the `start()` call, not on the import: every Proton payload should
+import `triton.profiler` **before** torch, because the reverse order deadlocks
+the process at exit on Triton 3.8.0 — see [Import order](#import-order) below:
 
 ```yaml
 collect:
@@ -475,6 +477,44 @@ is that recipe with a working payload;
 [`amd-instrumentation/`](../examples/profiling/proton/amd-instrumentation/)
 and [`amd-rocprofiler/`](../examples/profiling/proton/amd-rocprofiler/) are
 the same shape for the other two backends.
+
+#### Import order
+
+**Import `triton.profiler` before `torch`, in every payload, whatever backend
+it uses.** On Triton 3.8.0 the reverse order hangs the process forever at
+`exit()` — after a perfectly good capture has already been flushed to disk.
+These two lines are the entire reproducer:
+
+```python
+import torch
+import triton.profiler  # process now never exits
+```
+
+`libproton.so` calls `rocprofiler_force_configure` from an
+`__attribute__((constructor))`, so importing Proton registers it as a
+rocprofiler-sdk client. When that registration lands *after* HSA is already up
+— importing torch is enough, no GPU work required — the atexit
+`rocprofiler::registration::finalize()` takes its registration mutex, invokes
+Proton's `protonToolFini`, and that re-enters the same non-recursive mutex on
+the same thread. The main thread then sits in `futex_wait` forever.
+
+The failure is unusually easy to misread, because everything the payload was
+asked to do succeeded: the kernels ran, the tree is complete, the `.hatchet`
+is on disk, and stdout says `PASS`. Only the exit never happens. Under a test
+runner or a sweep it reads as a hang with no failing assertion.
+
+This is not a Proton-collector defect, and it is not specific to aorta: any
+process on this stack that imports torch before `triton.profiler` is affected.
+Reported upstream; tracked here as
+[ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
+
+The ordering is free. Measured on gfx950, moving the import above torch leaves
+the capture byte-identical on both Triton 3.7.1 and 3.8.0, because what the
+queue-intercepting backends actually constrain is when `proton.start()` runs,
+not when the module is imported. All three shipped examples now import Proton
+first, marked `# isort: skip  # noqa: I001` so the linter does not undo it, and
+`test_proton_payloads_import_proton_before_torch` fails the CPU suite if a
+future edit reverses one.
 
 ### Device selection on AMD
 
@@ -665,6 +705,17 @@ of Triton, and a host shim bound to a Triton-less interpreter will fail the
 same way the `proton` console script does.
 
 ## Troubleshooting
+
+**The payload printed `PASS`, the `.hatchet` is on disk, and the process never
+exits.** An exit-time deadlock between Proton and rocprofiler-sdk on Triton
+3.8.0, triggered by importing `torch` before `triton.profiler`. Nothing is
+wrong with the capture — it is complete — so there is no failing assertion and
+no error output; the process simply sits in `futex_wait` until something kills
+it. Confirm with `gdb -p <pid> -batch -ex 'thread 1' -ex bt`: the main thread
+will be in `rocprofiler::registration::finalize()` under `__run_exit_handlers`,
+blocked on `get_registration_mutex()`. Fix by importing `triton.profiler`
+before torch — see [Import order](#import-order). Tracked in
+[ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
 
 **`rocprofv3 not found`.** Put `rocprofv3` on `$PATH` (it ships with ROCm)
 or set `$ROCPROF_BIN` to the binary. `$ROCPROF_BIN` accepts either a bare
