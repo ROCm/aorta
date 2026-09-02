@@ -19,10 +19,12 @@ def __getattr__(name: str) -> Any:
     a hard-coded literal that silently drifts from the released version.
 
     Reading that metadata pulls in ``importlib.metadata`` and walks ``sys.path``
-    for dist-info, which cost about 100 ms of the ~180 ms a bare ``aorta``
-    invocation spent on imports (issue #417) -- for an attribute almost no
-    caller reads. Resolving on demand and caching the result in the module
-    globals keeps the guarantee without charging every import for it.
+    for dist-info, which dominated the cost of ``import aorta`` -- roughly
+    three quarters of it, for an attribute almost no caller reads (issue #417).
+    Stated as a share rather than a duration because the absolute number moves
+    with the interpreter and how many distributions are installed. Resolving on
+    demand and caching the result in the module globals keeps the guarantee
+    without charging every import for it.
 
     The fallback is best-effort and defensive: besides the expected
     missing-metadata case (uninstalled source tree), any unexpected metadata

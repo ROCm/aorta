@@ -53,8 +53,10 @@ def test_bench_help_lists_hw_queue_eval() -> None:
     assert result.exit_code == 0, result.output
     assert "hw_queue_eval" in result.output
     row = next(
-        line for line in result.output.splitlines() if line.strip().startswith("hw_queue_eval")
+        (line for line in result.output.splitlines() if line.strip().startswith("hw_queue_eval")),
+        None,
     )
+    assert row is not None, result.output
     rendered = row.split("hw_queue_eval", 1)[1].strip()
     assert rendered, f"help row is blank: {row!r}"
     # Tolerate Click's width-dependent "..." truncation instead of pinning a width.

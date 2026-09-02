@@ -100,6 +100,29 @@ def test_help_lists_exactly_the_registered_commands() -> None:
     assert listed == sorted(_COMMANDS)
 
 
+def _commands_section(help_output: str) -> str:
+    return help_output.partition("Commands:\n")[2]
+
+
+def test_commands_section_matches_an_eagerly_built_group() -> None:
+    """The registry must render the Commands block an eager group would.
+
+    ``LazyGroup.format_commands`` says it mirrors ``click.Group``'s while
+    sourcing rows from the registry rather than imported commands. Checking
+    that against a real eager group is what turns the claim from a comment
+    into a test, and it pins the property this whole change rests on: that
+    ``aorta --help`` stays byte-for-byte what it was, Click's column width and
+    ``...`` truncation included.
+    """
+    eager = click.Group(
+        main.name,
+        commands={name: entry.load() for name, entry in _COMMANDS.items()},
+    )
+    lazy = _commands_section(main.get_help(click.Context(main, terminal_width=80)))
+    assert lazy, "no Commands section rendered"
+    assert lazy == _commands_section(eager.get_help(click.Context(eager, terminal_width=80)))
+
+
 @pytest.mark.parametrize("name", sorted(_COMMANDS))
 def test_every_command_resolves_through_the_group(name: str) -> None:
     """Covers the deprecated probe/run/triage aliases (issue #248) along with the rest."""
@@ -121,8 +144,8 @@ def test_shell_completion_carries_help_from_the_registry() -> None:
     """
     completions = {item.value: item.help for item in main.shell_complete(click.Context(main), "")}
     for name, entry in _COMMANDS.items():
-        rendered = completions[name]
-        assert rendered, f"{name} completes with no help text"
+        rendered = completions.get(name)
+        assert rendered, f"{name} completes with no help text: {rendered!r}"
         # Tolerate Click's short-help truncation instead of pinning a width.
         assert entry.help.startswith(rendered.removesuffix("...").rstrip()), (name, rendered)
 
