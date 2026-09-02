@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -322,6 +323,83 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     route = "question" if "question" in route_text else "action"
     logger.info("Router classified as: %s (raw: %r)", route, route_text)
     return {"route": route}
+
+
+# ──────────────────── Select ─────────────────────
+
+_SELECTOR_PROMPT = """\
+You help engineers debug GPU workloads. Below is every tool available, with
+what it does and what evidence it returns.
+
+{catalogue}
+
+Given the user's problem, choose the {limit} tools most likely to identify the
+cause, best first.
+
+Judge only on this: would the evidence that tool returns actually answer this
+problem?
+
+If nothing fits, return fewer tools, or none. A wrong tool costs a cluster job
+and sends the engineer down the wrong path.
+
+Reply as JSON and nothing else:
+{{"tools": ["first", "second"], "why": "one sentence naming the evidence that decided it"}}
+"""
+
+#: Anything below is prose. Fences and these markers are what tell source from
+#: a description of source, which decides whether a pasted-source tool is even
+#: possible -- see enforce_requirements.
+_CODE_MARKERS = ("```", "__global__", "__shared__", "def ", "class ", "s_load", "v_mov", "import ")
+
+
+def _looks_like_pasted_source(text: str) -> bool:
+    """Whether the message carries code, as opposed to describing some."""
+    return any(marker in text for marker in _CODE_MARKERS)
+
+
+async def selector_node(state: AgentState) -> dict[str, Any]:
+    """Rank the tools by what evidence each returns.
+
+    Not a routing table. The model is shown what each tool produces and asked
+    whether that would answer this question, so a problem described in words
+    nobody anticipated still reaches the right instrument.
+
+    Advisory: on any failure the act node still sees every tool. The only thing
+    enforced is structural -- a tool that reads pasted source cannot run when
+    nothing was pasted.
+    """
+    from aorta.chat.tools.capabilities import MAX_CANDIDATES, catalogue, enforce_requirements
+
+    text = str(state["messages"][-1].content)
+    proposed: list[str] = []
+    why = ""
+    try:
+        llm = _get_llm(temperature=0.0, streaming=False)
+        response = await llm.ainvoke(
+            [
+                SystemMessage(
+                    content=_SELECTOR_PROMPT.format(
+                        catalogue=catalogue(), limit=MAX_CANDIDATES
+                    )
+                ),
+                HumanMessage(content=text),
+            ]
+        )
+        raw = str(response.content or "").strip()
+        if "{" in raw:
+            payload = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
+            proposed = [t for t in payload.get("tools", []) if t in TOOL_REGISTRY]
+            why = str(payload.get("why", ""))
+    except Exception as exc:
+        logger.warning("Selector unavailable (%s); the agent will see every tool.", exc)
+
+    candidates, dropped = enforce_requirements(
+        proposed[:MAX_CANDIDATES], has_pasted_source=_looks_like_pasted_source(text)
+    )
+    if dropped:
+        why = f"{why} Dropped {', '.join(dropped)}: needs source in the message.".strip()
+    logger.info("Selector: %s", candidates or "no candidate")
+    return {"candidate_tools": candidates, "selection_rationale": why}
 
 
 # ──────────────────── Plan ───────────────────────

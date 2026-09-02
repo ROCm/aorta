@@ -39,6 +39,13 @@ from aorta.chat.tools.artifacts import (
     read_run_matrix,
     search_run_artifacts,
 )
+from aorta.chat.tools.cluster import (
+    list_cluster_jobs,
+    read_autopsy_report,
+    triage_assembly_source,
+    triage_kernel_source,
+    triage_workload,
+)
 from aorta.chat.tools.files import list_files, read_file
 from aorta.chat.tools.run import run_terminal_command
 from aorta.chat.tools.search import grep_code, search_code, search_repo_map
@@ -52,6 +59,13 @@ _GROUP = "aorta.chat_tools"
 #: :func:`load_chat_tools` raises if they drift, since that is an aorta bug.
 BUILTIN_CHAT_TOOLS: dict[str, BaseTool] = {
     "list_files": list_files,
+    # Diagnostics: each runs what the user supplied on a GPU node and
+    # classifies what came back.
+    "triage_kernel_source": triage_kernel_source,
+    "triage_assembly_source": triage_assembly_source,
+    "triage_workload": triage_workload,
+    "list_cluster_jobs": list_cluster_jobs,
+    "read_autopsy_report": read_autopsy_report,
     "read_file": read_file,
     "search_code": search_code,
     "grep_code": grep_code,

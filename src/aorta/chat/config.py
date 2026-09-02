@@ -139,6 +139,30 @@ class Settings(BaseSettings):
     remote_llm_auth_header: str = ""
     remote_llm_extra_headers: Annotated[dict[str, str], NoDecode] = {}
 
+    # --- Cluster Intelligence Agents ---
+    # Every one of these is empty or a duration by default. A guessed path or a
+    # guessed node is worse than an unset one: it does not fail, it runs
+    # somewhere nobody meant and reports nothing useful.
+    #: Where job records and bundles are written. Empty means the agents'
+    #: own default. Must be readable from every node that runs work.
+    jobs_path: str = ""
+    #: Pin work to one node. Empty lets the scheduler choose, which is correct
+    #: everywhere except a demo.
+    cia_demo_node: str = ""
+    #: The sanitizer backend. Unset means the sweep will report that it could
+    #: not run, which is the honest outcome -- not that it found nothing.
+    rocjitsu_build: str = ""
+    #: Preloaded into the sanitized process. ConSan's hook is dlopened into one
+    #: that has already loaded the host libstdc++, so without the newer one the
+    #: tool library fails to load and the run reports a guardrail it never
+    #: exercised.
+    rocjitsu_preload: str = ""
+    #: Ceiling on one triage. The agents have their own internal timeouts; this
+    #: is the backstop that keeps a wedged cluster job from hanging a chat turn.
+    triage_timeout: int = 1800
+    #: Ceiling on a single static analysis, which needs no GPU and no queue.
+    waitcheck_timeout: int = 300
+
     # --- Tool-calling protocol ---
     # "text"   act_node asks for `ACTION: tool(arg="v")` lines and parses them.
     #          Works with any chat model, including a vLLM server started
@@ -331,6 +355,19 @@ class Settings(BaseSettings):
     @property
     def aorta_root(self) -> Path:
         return Path(self.aorta_path).resolve()
+
+    @property
+    def jobs_root(self) -> Path:
+        """Rendezvous root for job records and bundles.
+
+        Defers to the agents' own default when unset, rather than repeating it
+        here -- two spellings of the same default is how they drift apart.
+        """
+        if self.jobs_path.strip():
+            return Path(self.jobs_path).expanduser().resolve()
+        from aorta.cia.launch.cluster import default_jobs_root
+
+        return Path(default_jobs_root()).expanduser().resolve()
 
     @property
     def index_file(self) -> Path:

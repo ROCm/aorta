@@ -53,8 +53,17 @@ def _highest(pattern: re.Pattern[str], text: str) -> int:
 
 
 def _looks_like_instructions(text: str) -> bool:
+    """Whether any line is a mnemonic rather than a label, comment or fence.
+
+    A fence marker counted as an instruction here, so an empty code block
+    assembled into a valid kernel with nothing in it -- which then reports no
+    hazards, and reads exactly like a clean result.
+    """
     return any(
-        line.strip() and not _NOT_AN_INSTRUCTION.match(line) for line in text.splitlines()
+        line.strip()
+        and not line.lstrip().startswith("```")
+        and not _NOT_AN_INSTRUCTION.match(line)
+        for line in text.splitlines()
     )
 
 
