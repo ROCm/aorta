@@ -6,12 +6,12 @@ carries a real launch sequence rather than a single kernel.
 
 Unlike the ``triton-vecadd`` / ``triton-softmax`` payloads this one drives
 Proton itself, because pinning ``roctracer`` only works from inside a live HIP
-runtime -- see the import comment below and ``recipe.yaml``. That is specific
-to this backend: ``rocprofiler`` is configured when ``libproton.so`` loads and
-so needs the opposite *attach* order, and ``instrumentation`` needs no
-particular one. All three payloads nonetheless share the same *import* order
-(Proton before torch), for a reason unrelated to any of their contracts -- see
-the import comment.
+runtime -- see the import comment below and ``recipe.yaml``. That requirement
+is specific to this backend: ``rocprofiler`` is configured when
+``libproton.so`` loads rather than when a session starts, and
+``instrumentation`` needs no particular ordering at all. The three requirements
+do not conflict, so all three ``amd-*`` payloads use one ordering: Proton
+imported before torch, ``proton.start()`` called after it.
 
 Constexpr kernel parameters are spelled lowercase (``block_size`` rather than
 Triton's conventional ``BLOCK_SIZE``) to satisfy this repository's lint
@@ -166,14 +166,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         default=None,
-        # ``roctracer`` only, and no longer for an import-order reason: this
-        # module now imports Proton before torch exactly as
-        # ``../amd-rocprofiler/gelu.py`` does. What it does not do is *attach*
-        # the way rocprofiler needs -- it starts the session after torch, which
-        # is what roctracer requires and what leaves rocprofiler with an empty
-        # dispatch buffer. Use ``../amd-rocprofiler/gelu.py`` for that backend;
-        # it is also the payload whose availability probe and mode handling are
-        # written for it.
+        # ``roctracer`` only, and no longer for an ordering reason: this module
+        # now imports Proton before torch and starts the session after it,
+        # which is exactly what ``../amd-rocprofiler/gelu.py`` does. The
+        # omission stands on what this payload does *not* carry -- gelu.py has
+        # the rocprofiler availability probe and the classifier that turns an
+        # unsupported mode or an unloadable rocprofiler-sdk into a clean exit 2
+        # rather than a traceback. Offering the backend here would hand out a
+        # capture path with none of that handling. Use gelu.py for it.
         choices=("roctracer",),
         help="Proton backend for a standalone capture; ignored when $AORTA_PROTON_BACKEND is set",
     )

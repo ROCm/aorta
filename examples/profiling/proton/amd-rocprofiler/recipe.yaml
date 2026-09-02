@@ -62,9 +62,15 @@ env_passthrough_mode: inherit
 #
 # The same import order is now used by every Proton payload here, for a second
 # and measured reason: importing Proton after torch deadlocks the process at
-# exit on Triton 3.8.0 (ROCm/aorta#434). What remains specific to this backend
-# is the attach order -- `gelu.py` starts its session before torch is imported,
-# where `../amd-roctracer/pipeline.py` starts it after.
+# exit on Triton 3.8.0 (ROCm/aorta#434).
+#
+# So the payloads no longer differ in ordering at all -- all of them import
+# Proton first and call `proton.start()` from main(), after torch. That is not
+# a compromise: the two backends constrain *different events*. rocprofiler
+# constrains when it is CONFIGURED, which the constructor does at import;
+# roctracer constrains when the SESSION STARTS. One ordering satisfies both,
+# which is why the earlier "two backends, two import orders" framing here was
+# wrong rather than merely stale.
 #
 # `backend_mode: pcsampling` asks rocprofiler-sdk for statistical
 # instruction-level attribution -- where in the kernel the samples land --

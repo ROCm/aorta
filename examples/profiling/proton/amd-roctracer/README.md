@@ -166,14 +166,17 @@ the opposite one: it is configured by an `__attribute__((constructor))` when
 `libproton.so` loads, so it wants to be set up *before* HSA rather than after,
 and its CLI pin is allowed for that reason.
 
-**What the two backends disagree about is the `start()` call, not the import.**
-This payload imports `triton.profiler` before `torch`, exactly as
-[`../amd-rocprofiler/gelu.py`](../amd-rocprofiler/gelu.py) does, and then calls
-`proton.start()` after torch — which is what `roctracer` needs, since it
-installs its interceptor at session start rather than at load. Both orderings
-hold at once, and the capture is unchanged either way: measured on gfx950, the
-hatchet is byte-identical (1648 bytes, 15 launches across the three kernels) on
-Triton 3.7.1 and 3.8.0 with the import moved.
+**The two backends constrain different events, so one ordering serves both.**
+`roctracer` constrains when the *session starts* — it installs its interceptor
+then, and needs the runtime already up. `rocprofiler` constrains when it is
+*configured*, which the `libproton.so` constructor does at import. Those are
+not the same moment, so there is nothing to trade off: this payload imports
+`triton.profiler` before `torch`, exactly as
+[`../amd-rocprofiler/gelu.py`](../amd-rocprofiler/gelu.py) does, and calls
+`proton.start()` from `main()` after torch, also as gelu.py does. The capture
+is unaffected by the import move: measured on gfx950, the hatchet is
+byte-identical (1648 bytes, 15 launches across the three kernels) on Triton
+3.7.1 and 3.8.0.
 
 Importing Proton *after* torch is not merely suboptimal on 3.8.0 — it hangs the
 process forever at exit, after the capture has already been written. The

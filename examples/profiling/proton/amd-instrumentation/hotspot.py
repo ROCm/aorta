@@ -149,12 +149,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--backend",
         default=None,
         # ``rocprofiler`` is deliberately absent, not forgotten -- though no
-        # longer for an import-order reason, since this module now imports
-        # Proton before torch just as ``../amd-rocprofiler/gelu.py`` does. What
-        # still rules it out is the *attach* order: this payload starts its
-        # session after torch, which is what roctracer needs and what leaves
-        # rocprofiler with an empty dispatch buffer. Offering it would hand out
-        # that trap; ``../amd-rocprofiler/gelu.py`` attaches the way it needs.
+        # longer for an ordering reason, since this module now imports Proton
+        # before torch and starts the session after it, exactly as
+        # ``../amd-rocprofiler/gelu.py`` does. What rules it out is that this
+        # payload carries none of gelu.py's rocprofiler handling: no
+        # availability probe, and no classifier to turn an unsupported mode or
+        # an unloadable rocprofiler-sdk into a clean exit 2. Use gelu.py.
         choices=("instrumentation", "roctracer"),
         help="Proton backend for a standalone capture; ignored when $AORTA_PROTON_BACKEND is set",
     )

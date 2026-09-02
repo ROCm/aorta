@@ -285,13 +285,16 @@ payload does publish all three.
   the atexit `rocprofiler::registration::finalize()` re-enter its own
   non-recursive registration mutex through Proton's `protonToolFini` and
   deadlock, so the process hangs forever after writing a complete capture
-  ([ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434)). What still
-  differs between the backends is the **attach** order — when `proton.start()`
-  is called — not the import: `../amd-roctracer/pipeline.py` starts its session
-  after torch because roctracer needs the runtime already up, while importing
-  Proton before torch exactly as this payload does. Two backends, two attach
-  contracts, one import order; do not normalise the `start()` calls, and do not
-  let a linter sort the imports.
+  ([ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434)).
+
+  With that, the payloads no longer differ in ordering at all: each imports
+  Proton first and calls `proton.start()` from `main()`, after torch. That is
+  not a compromise between the two contracts — the contracts constrain
+  *different events*. `rocprofiler` constrains when it is **configured**, and
+  the `libproton.so` constructor does that at import; `roctracer` constrains
+  when the **session starts**. One ordering satisfies both, which is why the
+  "two backends, two import orders" framing this bullet used to carry was
+  wrong rather than merely out of date. Do not let a linter sort these imports.
 - **Device selection.** Proton on AMD reads `ROCR_VISIBLE_DEVICES` and rejects
   `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` for the queue-intercepting
   backends. aorta's collector translates the rejected spellings automatically

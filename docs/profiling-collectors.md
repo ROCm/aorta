@@ -509,11 +509,15 @@ process on this stack that imports torch before `triton.profiler` is affected.
 Reported upstream; tracked here as
 [ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
 
-The ordering is free. Measured on gfx950, moving the import above torch leaves
-the capture byte-identical on both Triton 3.7.1 and 3.8.0, because what the
-queue-intercepting backends actually constrain is when `proton.start()` runs,
-not when the module is imported. All three shipped examples now import Proton
-first, marked `# isort: skip  # noqa: I001` so the linter does not undo it, and
+The ordering is free, and it does not fight either backend's contract. What
+`roctracer` constrains is when `proton.start()` runs — its interceptor goes in
+at session start, so the runtime has to be up by then — not when the module is
+imported; measured on gfx950, moving the import above torch leaves the capture
+byte-identical on both Triton 3.7.1 and 3.8.0. What `rocprofiler` constrains is
+the import itself, and in the same direction. So every payload can import
+Proton first and still call `proton.start()` after torch, which is what all
+three shipped examples do. The imports are marked
+`# isort: skip  # noqa: I001` so the linter does not undo it, and
 `test_proton_payloads_import_proton_before_torch` fails the CPU suite if a
 future edit reverses one.
 

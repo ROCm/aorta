@@ -55,11 +55,12 @@ import sys
 #    registration mutex through Proton's `protonToolFini` and deadlock --
 #    after the capture has been written. See ROCm/aorta#434.
 #
-# What still differs between the backends is the ATTACH order, not this one:
-# `roctracer` installs its interceptor at session start and needs the runtime
-# already up, so `amd-roctracer/pipeline.py` calls `proton.start()` after torch
-# while importing Proton before it, exactly as this file does. Do not "tidy"
-# the imports into alphabetical order in either payload.
+# Note this does NOT conflict with `roctracer`, which needs the runtime already
+# up when its session starts: the two backends constrain different events --
+# rocprofiler when it is CONFIGURED (at import, by the constructor), roctracer
+# when the SESSION STARTS. Every payload here satisfies both the same way,
+# importing Proton first and calling `proton.start()` from main() after torch.
+# Do not "tidy" the imports into alphabetical order in any of them.
 import triton.profiler as proton  # isort: skip  # noqa: I001
 from triton._C.libproton import proton as libproton  # isort: skip  # noqa: I001
 
