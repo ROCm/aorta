@@ -75,6 +75,21 @@ It appears once per session, and only when a redaction actually happened — a
 session whose prompts contained no paths is not told about a rewrite that never
 occurred.
 
+### In the web UI
+
+stderr is the *server's* console under `aorta chat ui`, which is not a place the
+person typing can see, so the notice is also delivered into the browser session
+that caused it — once, after the answer it applies to.
+
+"Once per session" is therefore per **browser** session, not per server process.
+The state lives on a `NoticeState` the Chainlit handler owns and binds around
+each turn (`redaction.use_notice_state`), so one user's redaction cannot consume
+another user's disclosure. The CLI front doors are one session per process and
+use the process-wide state without binding anything.
+
+The welcome message states the scope before you type, since the per-request
+notice necessarily arrives after you have already sent something.
+
 ## Turning it off
 
 ```bash

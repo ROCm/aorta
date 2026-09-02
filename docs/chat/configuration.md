@@ -97,10 +97,10 @@ environment.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `remote_llm_model` | `gpt-4o-mini` | The model id as the provider names it. For `litellm`, LiteLLM's own id format. |
-| `remote_llm_api_key` | *(empty)* | Required for `openai`; a missing value fails preflight rather than mid-query. **Ignored for `litellm`**, which reads its own standard variables. |
+| `remote_llm_api_key` | *(empty)* | Required for `openai`; a missing value fails preflight rather than mid-query. Used by `litellm` too **when set** — only when it is empty does LiteLLM fall back to its own standard variables (`ANTHROPIC_API_KEY`, ...). |
 | `remote_llm_base_url` | *(empty)* | Empty means the provider default. Set it for anything else. |
-| `remote_llm_auth_header` | *(empty)* | Header name for a gateway that does not take a bearer token. `openai` only. |
-| `remote_llm_extra_headers` | *(empty)* | Non-secret headers a gateway wants, as `user=alice,x-tenant=acme` or a JSON object. `openai` only. |
+| `remote_llm_auth_header` | *(empty)* | Header name for a gateway that does not take a bearer token. Honoured by both `openai` and `litellm`. |
+| `remote_llm_extra_headers` | *(empty)* | Extra headers a gateway wants, as `user=alice,x-tenant=acme` or a JSON object. Honoured by both `openai` and `litellm`. Values are masked by `config show` and count as a credential for the 0600 check, because a gateway key put here is as sensitive as `remote_llm_api_key`. |
 
 ### Call limits
 
@@ -145,7 +145,7 @@ directory cannot be pip-upgraded cleanly.
 | `max_act_rounds` / `max_act_rounds_search` | `5` / `8` | Tool-loop budget for ordinary and search-shaped questions. The single biggest lever on cost. |
 | `max_retry_iterations` | `3` | Critic retry budget. `0` disables the retry loop. |
 
-### Sandbox and egress
+### Command execution and egress
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

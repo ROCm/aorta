@@ -2,6 +2,7 @@
 
 Question path:  Router → Retrieve → Answer → End
 Action path:    Router → Plan → Retrieve → Act ⇄ Critic → End
+                                              └ Finalize → End (retries spent)
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from aorta.chat.graph.nodes import (
     act_node,
     answer_node,
     critic_node,
+    finalize_node,
     plan_node,
     retrieve_node,
     router_node,
@@ -31,10 +33,19 @@ def route_after_retrieve(state: AgentState) -> str:
 
 
 def route_after_critic(state: AgentState) -> str:
-    max_retries = settings.max_retry_iterations
-    if state.get("critic_feedback") and state.get("iteration", 0) < max_retries:
+    """Accept, retry, or report an answer the critic would not accept.
+
+    The third case is the point of the ``finalize`` branch. Sending exhaustion
+    to ``END`` left the rejected ``AIMessage`` last in state, which is what
+    ``invoke_agent`` reads its reply from -- so a budget spent entirely on
+    rejections returned the last rejected answer as though the critic had
+    passed it, and the verdict reached nobody.
+    """
+    if not state.get("critic_feedback"):
+        return END
+    if state.get("iteration", 0) < settings.max_retry_iterations:
         return "act"
-    return END
+    return "finalize"
 
 
 def build_graph() -> StateGraph:
@@ -43,6 +54,7 @@ def build_graph() -> StateGraph:
     Flow:
         Router ──► question ──► Retrieve ──► Answer ──► End
         Router ──► action   ──► Plan ──► Retrieve ──► Act ⇄ Critic ──► End
+                                                            └──► Finalize ──► End
     """
     graph = StateGraph(AgentState)
 
@@ -51,6 +63,7 @@ def build_graph() -> StateGraph:
     graph.add_node("retrieve", retrieve_node)
     graph.add_node("act", act_node)
     graph.add_node("critic", critic_node)
+    graph.add_node("finalize", finalize_node)
     graph.add_node("answer", answer_node)
 
     graph.set_entry_point("router")
@@ -75,8 +88,9 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "critic",
         route_after_critic,
-        {"act": "act", END: END},
+        {"act": "act", "finalize": "finalize", END: END},
     )
+    graph.add_edge("finalize", END)
 
     return graph.compile()
 

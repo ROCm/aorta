@@ -6,14 +6,19 @@ import logging
 
 import chainlit as cl
 
+from aorta.chat import redaction
 from aorta.chat.inference.providers.factory import get_backend
 from aorta.chat.session import invoke_agent
+from aorta.chat.ui.welcome import welcome_message
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+#: Key under which each browser session keeps its :class:`redaction.NoticeState`.
+_NOTICE_STATE_KEY = "redaction_notice_state"
 
 
 def _unavailable_message(reason: str) -> str:
@@ -25,6 +30,9 @@ async def on_start():
     """Initialise per-session state and check the LLM backend is usable."""
     cl.user_session.set("history", [])
     cl.user_session.set("backend_error", None)
+    # One state per browser session, not one per process: the notice is a
+    # per-session disclosure and this server serves many at once.
+    cl.user_session.set(_NOTICE_STATE_KEY, redaction.NoticeState())
 
     try:
         backend = get_backend()
@@ -35,16 +43,7 @@ async def on_start():
         await cl.Message(content=_unavailable_message(str(exc))).send()
         return
 
-    await cl.Message(
-        content=(
-            "Welcome to the **AORTA Codebase Assistant**.\n\n"
-            "I can help you understand, navigate, and work with the AORTA "
-            "codebase. Ask me anything about it -- I can read files, search "
-            "code, and even run commands in a sandbox.\n\n"
-            f"_LLM backend: {backend.describe()}_\n\n"
-            "_Type your question below to get started._"
-        )
-    ).send()
+    await cl.Message(content=welcome_message(backend.describe())).send()
 
 
 @cl.on_message
@@ -59,12 +58,20 @@ async def on_message(message: cl.Message):
         return
 
     history: list = cl.user_session.get("history", [])
+    # A session that predates this key (or a reconnect) still gets its own
+    # state rather than falling back to the process-wide one, which would let
+    # one browser session consume another's disclosure.
+    notice_state = cl.user_session.get(_NOTICE_STATE_KEY)
+    if notice_state is None:
+        notice_state = redaction.NoticeState()
+        cl.user_session.set(_NOTICE_STATE_KEY, notice_state)
 
     thinking_msg = cl.Message(content="Thinking...")
     await thinking_msg.send()
 
     try:
-        reply, history, _result = await invoke_agent(message.content, history)
+        with redaction.use_notice_state(notice_state):
+            reply, history, _result = await invoke_agent(message.content, history)
     except Exception:
         logger.exception("Agent graph error")
         await thinking_msg.remove()
@@ -76,3 +83,10 @@ async def on_message(message: cl.Message):
     await thinking_msg.remove()
     cl.user_session.set("history", history)
     await cl.Message(content=reply).send()
+
+    # After the answer, not before: the notice reports what this request had
+    # removed, and it is drained so the session sees it once. Without this the
+    # disclosure Decision 16 requires only ever reached the server's stderr.
+    notice = redaction.take_pending_notice(notice_state)
+    if notice:
+        await cl.Message(content=f"_{notice}_").send()

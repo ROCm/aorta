@@ -107,6 +107,105 @@ class TestMessageRewriting:
         assert out is messages
 
 
+class TestNoticeIsSessionLocal:
+    """The notice state must not be shared by every session in the process.
+
+    Under ``aorta chat ui`` one process serves many browser sessions. With a
+    module-level flag, the first session to trigger a redaction consumed the
+    disclosure for everybody, and every later user was silently redacted -- the
+    one thing Decision 16 says must not happen. The CLI is one session per
+    process, so it keeps using the process-wide state and binds nothing.
+    """
+
+    def test_two_bound_sessions_are_each_told(self):
+        _, summary = redaction.redact_text(CUSTOMER_TEXT)
+        first, second = redaction.NoticeState(), redaction.NoticeState()
+        one, two = io.StringIO(), io.StringIO()
+        with redaction.use_notice_state(first):
+            assert redaction.emit_notice_once(summary, stream=one) is True
+        with redaction.use_notice_state(second):
+            assert redaction.emit_notice_once(summary, stream=two) is True
+        assert one.getvalue().count("aorta chat: redacted") == 1
+        assert two.getvalue().count("aorta chat: redacted") == 1
+
+    def test_one_session_is_still_told_only_once(self):
+        _, summary = redaction.redact_text(CUSTOMER_TEXT)
+        state = redaction.NoticeState()
+        stream = io.StringIO()
+        for _ in range(3):
+            with redaction.use_notice_state(state):
+                redaction.emit_notice_once(summary, stream=stream)
+        assert stream.getvalue().count("aorta chat: redacted") == 1
+
+    def test_a_bound_session_does_not_consume_the_process_notice(self):
+        """A UI session must leave the CLI fallback state untouched."""
+        _, summary = redaction.redact_text(CUSTOMER_TEXT)
+        with redaction.use_notice_state(redaction.NoticeState()):
+            redaction.emit_notice_once(summary, stream=io.StringIO())
+        assert redaction.current_notice_state().emitted is False
+
+    def test_the_binding_is_undone_on_the_way_out(self):
+        state = redaction.NoticeState()
+        with redaction.use_notice_state(state):
+            assert redaction.current_notice_state() is state
+        assert redaction.current_notice_state() is not state
+
+    def test_state_survives_the_tasks_one_turn_spans(self):
+        """The reason this is a mutable object and not a ``ContextVar[bool]``.
+
+        A task copies the context at creation and its writes do not propagate
+        back, so a bare flag flipped inside a graph node would be forgotten by
+        the next turn and the notice would fire every time. Shared state does
+        not have that problem.
+        """
+        import asyncio
+
+        _, summary = redaction.redact_text(CUSTOMER_TEXT)
+        state = redaction.NoticeState()
+        stream = io.StringIO()
+
+        async def turn() -> None:
+            # A nested task is what LangGraph runs nodes in.
+            await asyncio.create_task(
+                asyncio.to_thread(redaction.emit_notice_once, summary, stream)
+            )
+
+        async def session() -> None:
+            with redaction.use_notice_state(state):
+                await turn()
+                await turn()
+
+        asyncio.run(session())
+        assert stream.getvalue().count("aorta chat: redacted") == 1
+
+
+class TestNoticeDelivery:
+    """A front door that is not a terminal has to be able to render it itself."""
+
+    def test_the_line_is_parked_for_the_caller_to_show(self):
+        _, summary = redaction.redact_text(CUSTOMER_TEXT)
+        state = redaction.NoticeState()
+        with redaction.use_notice_state(state):
+            redaction.emit_notice_once(summary, stream=io.StringIO())
+        assert state.pending is not None
+        assert "aorta chat: redacted" in state.pending
+
+    def test_draining_it_yields_it_exactly_once(self):
+        _, summary = redaction.redact_text(CUSTOMER_TEXT)
+        state = redaction.NoticeState()
+        with redaction.use_notice_state(state):
+            redaction.emit_notice_once(summary, stream=io.StringIO())
+        assert redaction.take_pending_notice(state) is not None
+        assert redaction.take_pending_notice(state) is None
+
+    def test_nothing_is_parked_when_nothing_was_redacted(self):
+        state = redaction.NoticeState()
+        _, summary = redaction.redact_text("what does the router node do?")
+        with redaction.use_notice_state(state):
+            redaction.emit_notice_once(summary, stream=io.StringIO())
+        assert redaction.take_pending_notice(state) is None
+
+
 class TestNotice:
     def test_notice_names_what_went_and_how_to_disable_it(self):
         _, summary = redaction.redact_text(CUSTOMER_TEXT)

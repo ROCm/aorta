@@ -217,8 +217,15 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
     save us here -- its env-key removal is driven by the recipe's
     ``redaction:`` globs, which say nothing about a TOML file -- so a
     copy of the profile inside a run dir is refused outright and the
-    skip is logged rather than silent. (A *symlink* to the real profile
-    is already refused by the escape check above.)
+    skip is logged rather than silent.
+
+    Both the walked name and the *resolved* name are tested, because the
+    escape check above only rejects a link leaving the tree. An in-tree
+    alias -- ``run/profile-copy -> run/chat.toml`` -- resolves inside
+    ``root``, so it passes that check, and its own basename is not
+    ``chat.toml``; matching the walked name alone would follow it and
+    bundle the key. ``resolve()`` collapses a chain of links, so the
+    target's name is the one that decides.
     """
     skipped_rel_paths = frozenset({".aorta-probe.lock", MANIFEST_FILENAME})
     root = run_dir.resolve()
@@ -236,12 +243,16 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
         rel = path.relative_to(run_dir).as_posix()
         if rel in skipped_rel_paths:
             continue
-        if path.name == CHAT_CONFIG_FILENAME:
+        if CHAT_CONFIG_FILENAME in (path.name, resolved.name):
+            # Name the target when the entry is an alias, so the operator can
+            # tell why a file not called chat.toml was refused.
+            via = "" if path.name == resolved.name else f" (resolves to {resolved.name})"
             log.warning(
-                "aorta bundle: refusing to package %s -- '%s' is the "
+                "aorta bundle: refusing to package %s%s -- '%s' is the "
                 "'aorta chat' profile filename and may hold an API key. "
                 "Move it out of the run dir if it is something else.",
                 rel,
+                via,
                 CHAT_CONFIG_FILENAME,
             )
             continue

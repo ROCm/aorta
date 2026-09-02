@@ -88,6 +88,96 @@ def test_the_key_is_absent_from_the_written_tarball(run_dir: Path, tmp_path: Pat
     assert b"sk-must-not-ship" not in blob
 
 
+class TestInTreeSymlinkAlias:
+    """An alias inside the tree must not smuggle the profile past the skip.
+
+    The escape check in ``_iter_source_files`` only rejects a link whose target
+    leaves ``run_dir``; an in-tree link resolves inside it and is deliberately
+    followed, so it passed that check. Matching the *walked* basename alone then
+    missed it, because the alias is not called ``chat.toml`` -- and following it
+    put the key in a bundle bound for a support ticket.
+    """
+
+    def test_an_alias_is_skipped(self, run_dir: Path):
+        (run_dir / CHAT_CONFIG_FILENAME).write_text(
+            'remote_llm_api_key = "sk-must-not-ship"\n', encoding="utf-8"
+        )
+        alias = run_dir / "profile-copy"
+        alias.symlink_to(run_dir / CHAT_CONFIG_FILENAME)
+        assert alias not in set(_iter_source_files(run_dir))
+
+    def test_an_alias_nested_in_a_trial_is_skipped(self, run_dir: Path):
+        """Depth is no more of an excuse for the alias than for the file."""
+        (run_dir / CHAT_CONFIG_FILENAME).write_text(
+            'remote_llm_api_key = "sk-must-not-ship"\n', encoding="utf-8"
+        )
+        alias = run_dir / "cell_a" / "trial_0" / "saved-settings.toml"
+        alias.symlink_to(run_dir / CHAT_CONFIG_FILENAME)
+        assert alias not in set(_iter_source_files(run_dir))
+
+    def test_a_chain_of_aliases_is_skipped(self, run_dir: Path):
+        """``resolve()`` collapses the chain, so the final target decides."""
+        (run_dir / CHAT_CONFIG_FILENAME).write_text(
+            'remote_llm_api_key = "sk-must-not-ship"\n', encoding="utf-8"
+        )
+        (run_dir / "link-b").symlink_to(run_dir / CHAT_CONFIG_FILENAME)
+        alias = run_dir / "link-a"
+        alias.symlink_to(run_dir / "link-b")
+        collected = set(_iter_source_files(run_dir))
+        assert alias not in collected
+        assert (run_dir / "link-b") not in collected
+
+    def test_a_directory_alias_does_not_help_either(self, run_dir: Path):
+        """The profile reached through an aliased parent is still the profile."""
+        real = run_dir / "cell_a" / "trial_0"
+        (real / CHAT_CONFIG_FILENAME).write_text(
+            'remote_llm_api_key = "sk-must-not-ship"\n', encoding="utf-8"
+        )
+        (run_dir / "trial-alias").symlink_to(real, target_is_directory=True)
+        collected = {p.resolve().name for p in _iter_source_files(run_dir)}
+        assert CHAT_CONFIG_FILENAME not in collected
+
+    def test_the_alias_key_is_absent_from_the_written_tarball(
+        self, run_dir: Path, tmp_path: Path
+    ):
+        """End to end: the bytes are what actually reach the support ticket."""
+        (run_dir / CHAT_CONFIG_FILENAME).write_text(
+            'remote_llm_api_key = "sk-must-not-ship"\n', encoding="utf-8"
+        )
+        (run_dir / "profile-copy").symlink_to(run_dir / CHAT_CONFIG_FILENAME)
+        output = tmp_path / "bundle.tar.gz"
+        bundle_run_dir(run_dir, output=output)
+        with tarfile.open(output, "r:gz") as tar:
+            names = tar.getnames()
+            blob = b"".join(
+                tar.extractfile(name).read()
+                for name in names
+                if not name.endswith("/") and tar.extractfile(name) is not None
+            )
+        assert not any(name.endswith("profile-copy") for name in names), names
+        assert b"sk-must-not-ship" not in blob
+
+    def test_the_alias_skip_names_the_target(self, run_dir: Path, caplog):
+        """``profile-copy`` refused with no reason given is a puzzle, not a log."""
+        (run_dir / CHAT_CONFIG_FILENAME).write_text("chunk_size = 1\n", encoding="utf-8")
+        (run_dir / "profile-copy").symlink_to(run_dir / CHAT_CONFIG_FILENAME)
+        with caplog.at_level("WARNING", logger="aorta.bundle.writer"):
+            _iter_source_files(run_dir)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("profile-copy" in m and CHAT_CONFIG_FILENAME in m for m in messages), messages
+
+    def test_an_unrelated_in_tree_symlink_is_still_followed(self, run_dir: Path):
+        """The fix must not turn into a blanket refusal of in-tree links.
+
+        Following them is documented behaviour -- only the credential filename
+        is special.
+        """
+        target = run_dir / "cell_a" / "trial_0" / "result.json"
+        alias = run_dir / "latest-result.json"
+        alias.symlink_to(target)
+        assert alias in set(_iter_source_files(run_dir))
+
+
 def test_the_manifest_does_not_list_it_either(run_dir: Path, tmp_path: Path):
     """A manifest entry would name the file even with its bytes withheld."""
     (run_dir / CHAT_CONFIG_FILENAME).write_text("chunk_size = 1\n", encoding="utf-8")

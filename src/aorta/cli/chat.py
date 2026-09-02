@@ -659,7 +659,7 @@ def config_init(profile: str, force: bool, no_input: bool) -> None:
 @click.option(
     "--reveal",
     is_flag=True,
-    help="Print API keys in full instead of masking them.",
+    help="Print API keys and extra-header values in full instead of masking them.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the settings as JSON.")
 def config_show(reveal: bool, as_json: bool) -> None:
@@ -678,7 +678,10 @@ def config_show(reveal: bool, as_json: bool) -> None:
         click.echo(f"  {key} = {values[key]!r}")
     if not reveal:
         click.echo("")
-        click.echo("API keys are masked. Pass --reveal to print them.")
+        click.echo(
+            "API keys and extra-header values are masked. "
+            "Pass --reveal to print them."
+        )
 
 
 @config_group.command(name="validate")

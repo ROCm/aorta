@@ -929,6 +929,66 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
     return {"iteration": iteration, "critic_feedback": None}
 
 
+# ──────────────────── Exhausted retries ─────────
+
+
+#: Prefix on the answer the critic rejected for the last time. The rejected text
+#: is kept rather than dropped -- it is usually partly right, and the user waited
+#: for it -- but it must not be the only thing they see, which is what happened
+#: when this edge went straight to END.
+_UNRESOLVED_HEADER = (
+    "I could not verify this answer against the tool output, and I have run out "
+    "of retries ({used} of {allowed}). Treat it as unconfirmed:"
+)
+
+_UNRESOLVED_FOOTER = (
+    "The check that failed: {feedback}\n\n"
+    "Asking something narrower, or naming the file you care about, usually "
+    "gets a grounded answer."
+)
+
+
+def _last_ai_text(messages: list[Any]) -> str:
+    """The most recent assistant text in *messages*, or empty."""
+    for message in reversed(messages):
+        if isinstance(message, AIMessage) and message.content:
+            return str(message.content)
+    return ""
+
+
+async def finalize_node(state: AgentState) -> dict[str, Any]:
+    """Report an unresolved criticism instead of passing the answer off as good.
+
+    Reached only when the critic rejected the answer on the final permitted
+    attempt. Before this node existed the edge went to ``END`` with the rejected
+    ``AIMessage`` still last in state, so :func:`aorta.chat.session.extract_reply`
+    returned it as an ordinary reply and the validator's verdict reached nobody:
+    the one case the critic exists to catch was the one case it could not report.
+
+    No LLM call. The wording is fixed so that exhausting the budget cannot
+    itself fail, and so this node adds no spend to a query that has already
+    paid for ``max_retry_iterations`` rounds.
+    """
+    feedback = (state.get("critic_feedback") or "").strip()
+    # `command_output` is the text the critic judged, so it is the rejected
+    # answer by definition. The message scan is only a fallback: the critic
+    # cannot produce feedback without it, so this path is not reachable today.
+    rejected = state.get("command_output") or _last_ai_text(state["messages"])
+    header = _UNRESOLVED_HEADER.format(
+        used=state.get("iteration", 0),
+        allowed=settings.max_retry_iterations,
+    )
+    parts = [header, rejected.strip() or "(no answer was produced)"]
+    if feedback:
+        parts.append(_UNRESOLVED_FOOTER.format(feedback=feedback))
+    logger.info(
+        "Retry budget exhausted with the critic still rejecting; reporting "
+        "the unresolved criticism (iteration %s)",
+        state.get("iteration", 0),
+    )
+    return {"messages": [AIMessage(content="\n\n".join(parts))]}
+
+
 # ──────────────────── End (Q&A shortcut) ─────────
 
 

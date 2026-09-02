@@ -134,8 +134,10 @@ class Settings(BaseSettings):
     # Gateways that want the key in a custom header rather than as a bearer
     # token: set the header name here (Ocp-Apim-Subscription-Key for Azure API
     # Management, api-key for Azure OpenAI, x-api-key for Anthropic's own API).
-    # remote_llm_extra_headers carries non-secret extras a gateway needs for
-    # attribution or quota, e.g. {"user": "alice"}.
+    # remote_llm_extra_headers carries whatever else a gateway wants, typically
+    # attribution or quota, e.g. {"user": "alice"} -- but nothing stops a key
+    # going in here, so its values are masked and mode-checked as credentials
+    # (SECRET_MAPPING_FIELDS).
     remote_llm_auth_header: str = ""
     remote_llm_extra_headers: Annotated[dict[str, str], NoDecode] = {}
 
@@ -212,7 +214,7 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 50
 
-    # --- Sandbox ---
+    # --- Command execution (not a sandbox; see tools/run.py and #440) ---
     # Off by default: the shell tool hands an LLM-authored string to a shell, so
     # it is the one tool whose worst case is not "a wrong answer". Enabling it
     # is a deliberate act by the operator, not a default anyone inherits by
@@ -361,6 +363,23 @@ SECRET_FIELDS = frozenset(
         "remote_llm_api_key",
         "remote_embedding_api_key",
         "vllm_api_key",
+    }
+)
+
+#: Mapping fields whose *values* are masked with the same rules, keys left
+#: visible. These are passed straight through as HTTP request headers, so
+#: whether one holds a credential is decided by the gateway, not by us: an
+#: ``Ocp-Apim-Subscription-Key``, ``api-key``, ``x-api-key`` or plain
+#: ``Authorization`` put here is as much a key as ``remote_llm_api_key``. A
+#: name-based test for "is this header secret" would have to enumerate every
+#: gateway convention and would fail open on the one nobody listed, so the
+#: values are treated as secret unconditionally. Header *names* stay in the
+#: clear because they are what makes the output useful for diagnosis --
+#: :func:`aorta.chat.remote_auth.describe_auth` already reports names only.
+SECRET_MAPPING_FIELDS = frozenset(
+    {
+        "remote_llm_extra_headers",
+        "remote_embedding_extra_headers",
     }
 )
 
@@ -599,12 +618,23 @@ def effective_settings(reveal: bool = False) -> dict[str, Any]:
     Credentials are masked unless *reveal*, which is the first of the two
     guards Decision 9b obliges: the likeliest leak is a customer pasting their
     own config into a support ticket.
+
+    "Credential" covers :data:`SECRET_FIELDS` and the values of
+    :data:`SECRET_MAPPING_FIELDS`. The latter is what a gateway user's key
+    actually travels in, so masking the named key fields alone would honour
+    this docstring on the field a public-provider user sets and break it on the
+    field an enterprise user sets.
     """
     values = get_settings().model_dump()
-    if not reveal:
-        for name in SECRET_FIELDS:
-            if name in values:
-                values[name] = mask(str(values[name]))
+    if reveal:
+        return values
+    for name in SECRET_FIELDS:
+        if name in values:
+            values[name] = mask(str(values[name]))
+    for name in SECRET_MAPPING_FIELDS:
+        headers = values.get(name)
+        if isinstance(headers, dict):
+            values[name] = {key: mask(str(val)) for key, val in headers.items()}
     return values
 
 
@@ -634,7 +664,11 @@ def validate_profile(path: Path | None = None) -> list[str]:
     except Exception as exc:  # pydantic ValidationError, or a field validator
         problems.append(f"{path}: {exc}")
 
-    if any(raw.get(name) for name in SECRET_FIELDS):
+    # SECRET_MAPPING_FIELDS counts too: a profile whose only credential sits in
+    # an extra header is exactly as sensitive as one with remote_llm_api_key
+    # set, and reporting it healthy at 0644 was the mode check honouring the
+    # field name rather than the secret.
+    if any(raw.get(name) for name in (*SECRET_FIELDS, *SECRET_MAPPING_FIELDS)):
         mode = path.stat().st_mode & 0o777
         if mode != PROFILE_FILE_MODE:
             problems.append(
@@ -650,6 +684,7 @@ __all__ = [
     "PROFILE_PROMPTS",
     "PROFILE_TEMPLATES",
     "SECRET_FIELDS",
+    "SECRET_MAPPING_FIELDS",
     "ConfigFileError",
     "Settings",
     "apply_cli_overrides",

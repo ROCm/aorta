@@ -76,8 +76,10 @@ llm_provider = "litellm"
 remote_llm_model = "claude-sonnet-4-5"
 ```
 
-LiteLLM reads `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and friends itself; AORTA
-never touches them, so `remote_llm_api_key` is ignored for this backend.
+With `remote_llm_api_key` empty, LiteLLM reads `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY` and friends itself and AORTA does not touch them. Set
+`remote_llm_api_key` and it is passed to LiteLLM explicitly instead — which is
+what makes the gateway flow below work on this backend.
 
 Current Claude Opus builds accept only `temperature=1` and LiteLLM raises rather
 than negotiating. The graph asks for 0.0 and 0.1, so this backend enables

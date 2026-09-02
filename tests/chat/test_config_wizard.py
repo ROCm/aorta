@@ -185,6 +185,76 @@ class TestConfigShow:
         assert config.mask("") == ""
 
 
+class TestExtraHeaderValuesAreMasked:
+    """``config show`` printed both ``*_extra_headers`` maps verbatim.
+
+    Those values are handed straight to the HTTP client as request headers, so
+    a gateway credential lives there as readily as in ``remote_llm_api_key``:
+    Azure API Management reads ``Ocp-Apim-Subscription-Key``, Azure OpenAI reads
+    ``api-key``, Anthropic reads ``x-api-key``. ``effective_settings`` documents
+    that credentials are masked without ``--reveal``, so printing them was a
+    promise the code did not keep -- on exactly the profile shape an enterprise
+    user has.
+    """
+
+    @pytest.mark.parametrize("field", sorted(config.SECRET_MAPPING_FIELDS))
+    @pytest.mark.parametrize(
+        "header",
+        ["Ocp-Apim-Subscription-Key", "api-key", "x-api-key", "Authorization"],
+    )
+    def test_the_value_is_masked(self, field, header, chat_profile, monkeypatch):
+        secret = "gw-abcdefgh12345678"
+        monkeypatch.setenv(f"AORTA_CHAT_{field.upper()}", f"{header}={secret}")
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "show"])
+        assert result.exit_code == 0, result.output
+        assert secret not in result.output
+        # The header name stays legible -- it is what makes the output useful,
+        # and describe_auth() already reports names in the clear.
+        assert header in result.output
+
+    def test_json_output_is_masked_too(self, chat_profile, monkeypatch):
+        """--json is the form most likely to be pasted into a ticket."""
+        secret = "gw-abcdefgh12345678"
+        monkeypatch.setenv(
+            "AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", f"x-api-key={secret}"
+        )
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "show", "--json"])
+        assert result.exit_code == 0, result.output
+        assert secret not in result.output
+
+    def test_reveal_still_prints_it(self, chat_profile, monkeypatch):
+        secret = "gw-abcdefgh12345678"
+        monkeypatch.setenv(
+            "AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", f"x-api-key={secret}"
+        )
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "show", "--reveal"])
+        assert result.exit_code == 0, result.output
+        assert secret in result.output
+
+    def test_a_non_secret_extra_is_masked_as_well(self, chat_profile, monkeypatch):
+        """No name-based guessing: we cannot know which header a gateway reads.
+
+        Masking an attribution value such as ``user=alice`` costs nothing --
+        ``config show`` is a diagnostic and ``--reveal`` exists -- while a
+        denylist of "credential-looking" header names fails open on the one
+        convention nobody enumerated.
+        """
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", "user=alice-in-eng")
+        config.reset_settings()
+        values = config.effective_settings()
+        assert values["remote_llm_extra_headers"] == {"user": config.mask("alice-in-eng")}
+
+    def test_the_masking_notice_mentions_headers(self, chat_profile, monkeypatch):
+        """The footer said "API keys are masked", which undersold what it does."""
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "show"])
+        assert result.exit_code == 0, result.output
+        assert "extra-header" in result.output
+
+
 class TestConfigValidate:
     def test_a_healthy_profile_exits_zero(self, chat_profile):
         config.write_profile({"chunk_size": 128}, chat_profile)
@@ -215,5 +285,27 @@ class TestConfigValidate:
     def test_a_permissive_profile_with_no_credential_is_fine(self, chat_profile):
         """Only the presence of a key makes the mode a problem."""
         chat_profile.write_text("chunk_size = 64\n", encoding="utf-8")
+        chat_profile.chmod(0o644)
+        assert config.validate_profile(chat_profile) == []
+
+    @pytest.mark.parametrize("field", sorted(config.SECRET_MAPPING_FIELDS))
+    def test_a_credential_in_an_extra_header_needs_0600_too(self, field, chat_profile):
+        """A profile whose only secret is a gateway header is just as sensitive.
+
+        The mode check keyed on SECRET_FIELDS alone, so this profile was
+        reported healthy at 0644 -- the check honouring the field name rather
+        than the secret.
+        """
+        chat_profile.write_text(
+            f'{field} = {{ "x-api-key" = "gw-live" }}\n', encoding="utf-8"
+        )
+        chat_profile.chmod(0o644)
+        problems = config.validate_profile(chat_profile)
+        assert any("0644" in p and "chmod 600" in p for p in problems), problems
+
+    @pytest.mark.parametrize("field", sorted(config.SECRET_MAPPING_FIELDS))
+    def test_an_empty_extra_header_map_does_not_demand_0600(self, field, chat_profile):
+        """Presence of the key, not the field being declared, is the trigger."""
+        chat_profile.write_text(f"{field} = {{}}\n", encoding="utf-8")
         chat_profile.chmod(0o644)
         assert config.validate_profile(chat_profile) == []

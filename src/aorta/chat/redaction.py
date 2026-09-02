@@ -22,7 +22,10 @@ key in a message body -- keys travel as request headers, which this never sees
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import IO, Any
 
 from aorta.chat.config import settings
@@ -138,13 +141,72 @@ def redact_messages(messages: list[Any]) -> tuple[list[Any], RedactionSummary]:
 
 # ── first-send notice ─────────────────────────────────────────────────────
 
-_notice_emitted = False
+
+@dataclass
+class NoticeState:
+    """One session's record of the first-redaction disclosure.
+
+    A mutable object rather than a bare flag in a :class:`ContextVar`, because
+    the flag has to survive across the several asyncio tasks one session spans.
+    A task copies the context at creation and its own writes do not propagate
+    back, so a ``ContextVar[bool]`` flipped inside a graph node would be
+    forgotten by the next message and the "once per session" notice would fire
+    on every turn. The var carries a handle to shared state; the state is what
+    changes.
+    """
+
+    emitted: bool = False
+    #: The notice text, held for a front door that shows it itself rather than
+    #: reading the process's stderr. ``None`` once drained (or never set).
+    pending: str | None = field(default=None)
 
 
-def reset_session_notice() -> None:
+#: Fallback for the single-session front doors. ``aorta chat`` and
+#: ``aorta chat ask`` are one session per process, so process-wide state is
+#: session state there and no caller has to bind anything.
+_process_notice = NoticeState()
+
+_notice_state: ContextVar[NoticeState] = ContextVar(
+    "aorta_chat_notice_state", default=_process_notice
+)
+
+
+def current_notice_state() -> NoticeState:
+    """The :class:`NoticeState` in force for this call."""
+    return _notice_state.get()
+
+
+@contextmanager
+def use_notice_state(state: NoticeState) -> Iterator[NoticeState]:
+    """Bind *state* for the duration of the block.
+
+    For a front door that multiplexes sessions over one process: the Chainlit
+    server holds a state per browser session and binds it around each turn, so
+    one user's redaction cannot consume another user's disclosure.
+    """
+    token = _notice_state.set(state)
+    try:
+        yield state
+    finally:
+        _notice_state.reset(token)
+
+
+def take_pending_notice(state: NoticeState | None = None) -> str | None:
+    """Remove and return the notice *state* has not displayed yet.
+
+    Draining is what makes it show once: the caller renders whatever it gets
+    back, and a second call in the same session gets ``None``.
+    """
+    state = state if state is not None else current_notice_state()
+    pending, state.pending = state.pending, None
+    return pending
+
+
+def reset_session_notice(state: NoticeState | None = None) -> None:
     """Forget that the notice was shown. For tests, and for a new session."""
-    global _notice_emitted
-    _notice_emitted = False
+    state = state if state is not None else current_notice_state()
+    state.emitted = False
+    state.pending = None
 
 
 def notice_line(summary: RedactionSummary) -> str:
@@ -162,18 +224,24 @@ def notice_line(summary: RedactionSummary) -> str:
 
 
 def emit_notice_once(summary: RedactionSummary, stream: IO[str] | None = None) -> bool:
-    """Print the notice on the first send that redacted anything.
+    """Print the notice on the first send of this session that redacted anything.
 
     Returns whether it printed. Keyed on a non-empty summary rather than on the
     first send outright: a session whose prompts held no paths would otherwise
     be told about a redaction that never happened.
+
+    The line always goes to the stream, which is the server's log under
+    Chainlit, and is also parked on the session's :class:`NoticeState` for a
+    front door that renders it to the user itself.
     """
-    global _notice_emitted
-    if _notice_emitted or not summary:
+    state = current_notice_state()
+    if state.emitted or not summary:
         return False
-    _notice_emitted = True
+    state.emitted = True
+    line = notice_line(summary)
+    state.pending = line
     target = stream if stream is not None else _notice_stream()
-    print(notice_line(summary), file=target, flush=True)
+    print(line, file=target, flush=True)
     return True
 
 
@@ -188,11 +256,15 @@ def redact_for_send(messages: list[Any]) -> list[Any]:
 
 
 __all__ = [
+    "NoticeState",
     "RedactionSummary",
+    "current_notice_state",
     "emit_notice_once",
     "notice_line",
     "redact_for_send",
     "redact_messages",
     "redact_text",
     "reset_session_notice",
+    "take_pending_notice",
+    "use_notice_state",
 ]

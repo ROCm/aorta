@@ -1,4 +1,11 @@
-"""Sandboxed terminal command execution tool."""
+"""Allowlisted terminal command execution tool.
+
+Not a sandbox, deliberately named as such: containment here is an *executable*
+allowlist plus a refusal of shell control syntax, and the working directory is
+not a boundary. See :func:`run_terminal_command` for what that does and does
+not buy, and #440 for the OS-level isolation this would need to earn the other
+word. Registered only when ``enable_shell_tool`` is set (Decision 17a).
+"""
 
 from __future__ import annotations
 
