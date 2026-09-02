@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import functools
 import json
 import shutil
 import subprocess
@@ -59,6 +60,36 @@ def gpu_count() -> int:
     except ImportError:
         return 0
     return torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+
+@functools.lru_cache(maxsize=1)
+def docker_daemon() -> tuple[bool, str]:
+    """Can this runner reach a Docker daemon? Probed once, reported either way.
+
+    Same contract as `gpu_count`: this answers "is the capability present on
+    this runner", not "did the workload work". A workload that runs its engine
+    in a sibling container needs a client in the CI image AND a daemon socket
+    mounted into it, and the socket is a per-lane opt-in that grants effective
+    root on the runner -- so "absent" is the normal, deliberate state, not a
+    fault, and an entry that needs it must skip rather than fail.
+
+    Deliberately narrow: only entries that set `needs_docker_daemon` consult
+    this, so a broken daemon cannot turn the rest of the nightly into skips.
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        return False, "no docker client on PATH"
+    try:
+        proc = subprocess.run(
+            [docker, "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"docker info did not complete ({type(exc).__name__})"
+    if proc.returncode != 0:
+        last = [ln for ln in (proc.stderr or "").splitlines() if ln.strip()]
+        return False, f"docker info failed: {last[-1].strip()[:160] if last else 'no stderr'}"
+    return True, f"daemon {proc.stdout.strip() or 'present'}"
 
 
 def build_metadata() -> dict[str, Any]:
@@ -198,6 +229,16 @@ def evaluate(matrix_doc: dict[str, Any], baselines: dict[str, Any], out_dir: Pat
                  "metrics": {}, "deltas": {}, "duration_sec": 0.0, "error": None}
             )
             continue
+
+        if entry.get("needs_docker_daemon"):
+            reachable, detail = docker_daemon()
+            if not reachable:
+                results.append(
+                    {"entry": name, "recipe": entry["recipe"], "cell": None,
+                     "verdict": "skip", "reasons": [f"needs a docker daemon: {detail}"],
+                     "metrics": {}, "deltas": {}, "duration_sec": 0.0, "error": None}
+                )
+                continue
 
         start = _dt.datetime.now()
         rc, matrix_path, timed_out = run_entry(entry, out_dir)
