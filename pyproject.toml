@@ -302,17 +302,11 @@ aorta = [
     "workloads/tokenspeed/README.md",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short"
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "gpu: marks tests that require GPU",
-    "rocm: marks tests that require ROCm specifically",
-    "hw_queue: marks hw_queue_eval tests",
-]
+# Pytest configuration deliberately does NOT live here -- see `pytest.ini` at
+# the repo root. A root `pytest.ini` outranks `[tool.pytest.ini_options]`
+# unconditionally, so a block added here would be dead config that pytest
+# ignores. Edit `pytest.ini` instead.
+# `tests/test_pytest_config_single_source.py` enforces this.
 
 [tool.black]
 line-length = 100
