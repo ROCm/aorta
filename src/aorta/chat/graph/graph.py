@@ -16,6 +16,7 @@ from aorta.chat.graph.nodes import (
     critic_node,
     finalize_node,
     plan_node,
+    selector_node,
     retrieve_node,
     router_node,
 )
@@ -59,6 +60,7 @@ def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     graph.add_node("router", router_node)
+    graph.add_node("select", selector_node)
     graph.add_node("plan", plan_node)
     graph.add_node("retrieve", retrieve_node)
     graph.add_node("act", act_node)
@@ -71,9 +73,10 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "router",
         route_after_router,
-        {"plan": "plan", "retrieve": "retrieve"},
+        {"plan": "select", "retrieve": "retrieve"},
     )
 
+    graph.add_edge("select", "plan")
     graph.add_edge("plan", "retrieve")
 
     graph.add_conditional_edges(
