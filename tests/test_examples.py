@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from aorta.instrumentation.proton import ENV_PREFIX, build_env
 from aorta.triage.recipe import load_recipe
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -235,3 +236,86 @@ def test_payload_failure_path_still_exits_nonzero(payload, code):
     assert (
         _exit_code_of_main_guard(payload, code) == code
     ), f"{_rel(payload)} does not propagate main() == {code} as an exit status"
+
+
+# ---- The mode: env contract has two halves ------------------------------
+#
+# Under ``mode: env`` the collector only exports variables; the payload is what
+# calls ``proton.start()``. So a knob the recipe sets and the payload never
+# reads is accepted at recipe load, exported, and then silently missing from
+# the capture -- no validation error anywhere. Holding the payloads to the
+# bundle ``build_env`` actually produces, rather than to a list written out
+# here, is what makes a future option fail this test instead of shipping as a
+# no-op.
+
+#: Exported for a payload that wants to write artifacts alongside the profile.
+#: It configures nothing about the session -- and ``NAME`` already carries the
+#: directory -- so a payload that ignores it loses no measurement.
+_OPTIONAL_ENV_SUFFIXES = frozenset({"DIR"})
+
+
+def _interpolated_env_suffixes(payload: Path) -> set[str]:
+    """Names the payload interpolates after ``_ENV_PREFIX`` in executable code.
+
+    Read out of the f-string nodes rather than searched for in the text. Every
+    one of these names also appears in prose -- the docstrings that explain
+    which variable carries which knob name them -- so a substring check over the
+    file would be satisfied by the explanation alone, and a payload that stopped
+    reading a variable would still pass. An f-string cannot appear in a
+    docstring, so what this collects is what the code actually looks up.
+    """
+    suffixes: set[str] = set()
+    for node in ast.walk(ast.parse(payload.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        suffixes.update(
+            part.value
+            for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return suffixes
+
+
+def _env_mode_proton_examples() -> list[Path]:
+    proton = [example for example in _EXAMPLE_DIRS if example.parent.name == "proton"]
+    return [
+        example
+        for example in proton
+        if (load_recipe(example / "recipe.yaml").collect_options.get("proton") or {}).get("mode")
+        == "env"
+    ]
+
+
+_ENV_MODE_EXAMPLES = _env_mode_proton_examples()
+_ENV_MODE_IDS = [str(path.relative_to(EXAMPLES)) for path in _ENV_MODE_EXAMPLES]
+
+
+@pytest.mark.skipif(not _ENV_MODE_EXAMPLES, reason="no mode: env proton example in the tree")
+@pytest.mark.parametrize("example", _ENV_MODE_EXAMPLES, ids=_ENV_MODE_IDS)
+def test_env_mode_payload_reads_every_session_variable(example, tmp_path):
+    """Options chosen to make ``build_env`` emit every key it can: the optional
+    ones are omitted unless asked for, so a narrower call would assert less."""
+    exported = build_env(
+        tmp_path,
+        {
+            "mode": "env",
+            "backend": "rocprofiler",
+            "backend_mode": "pcsampling",
+            "hook": "triton",
+        },
+    )
+    required = sorted(
+        suffix
+        for suffix in (name[len(ENV_PREFIX) :] for name in exported)
+        if suffix not in _OPTIONAL_ENV_SUFFIXES
+    )
+    assert required, "build_env exported nothing to check; the bundle or the prefix moved"
+    looked_up: set[str] = set()
+    for payload in sorted(example.glob("*.py")):
+        looked_up |= _interpolated_env_suffixes(payload)
+    missing = [suffix for suffix in required if suffix not in looked_up]
+    assert not missing, (
+        f"{_rel(example)} never reads {[ENV_PREFIX + s for s in missing]}; a recipe can "
+        "set those knobs and the payload would start Proton without them, so the trial "
+        "would report a capture that is missing what it asked for"
+    )

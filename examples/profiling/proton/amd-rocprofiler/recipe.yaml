@@ -1,0 +1,74 @@
+# Proton capture on the `rocprofiler` backend, with PC sampling.
+#
+# SHIPPED UNVERIFIED -- for the mode, not the backend. `rocprofiler` is
+# released as of Triton 3.8.0 (2026-08-28), whose CLI advertises
+# `-b {cupti,rocprofiler,roctracer,instrumentation}`. Its `pcsampling` mode is
+# not: on 3.8.0, `proton.start(backend="rocprofiler", mode="pcsampling")` raises
+#   ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling
+# because AMD PC sampling landed upstream after the 3.8.0 tag. So this recipe as
+# written needs a post-3.8 `main` build and was never run end-to-end; everything
+# else in this tree was. Check the backend with
+#
+#   python -c "from triton._C.libproton import proton as p; print(p.get_available_profilers())"
+#
+# -- an AttributeError means the installed Triton predates the backend registry
+# entirely (3.7.1 and earlier). That list does not answer the mode question;
+# `backend_mode: periodic_flushing` is what runs on a plain 3.8.0. See README.md.
+#
+#   aorta sweep run \
+#       --recipe examples/profiling/proton/amd-rocprofiler/recipe.yaml \
+#       --output ./profiling_results \
+#       -- python examples/profiling/proton/amd-rocprofiler/gelu.py \
+#            --size 4194304 --iters 50
+schema_version: 1
+mode: probe
+
+ticket: PROFILING-PROTON-AMD-ROCPROFILER
+
+trials: 1
+timeout_per_trial: 1800
+
+mitigation_axis: [none]
+diagnostic_axis: [none]
+
+env_passthrough_mode: inherit
+
+# `mode: env`, not `mode: cli`, for one reason -- and it is *not* the reason
+# the sibling `amd-roctracer` recipe has: this backend is not refused under
+# `mode: cli`.
+#
+# Whether the CLI forwards `-m/--mode` to `start()` depends on the version:
+# Triton 3.8.0 passes `mode=args.mode` through, while 3.7.1 and earlier parse
+# the flag and then call `start()` without it, dropping `backend_mode` below.
+# In `mode: env` it is exported as `AORTA_PROTON_MODE` and the payload passes
+# it to `proton.start(mode=...)` itself, which works on every version.
+#
+# `mode: cli` would also be correct for `rocprofiler`, and on initialisation
+# ordering alone it is what upstream prefers. `libproton.so` calls
+# `rocprofiler_force_configure` from an `__attribute__((constructor))`, so the
+# backend is configured at library load, and Triton v3.8.0's
+# `RocprofSDKProfiler.cpp` warns that letting HSA come up first -- it names "a
+# torch import chain" -- makes rocprofiler-sdk skip dispatch-buffer tracing on
+# already-existing queues and return an empty buffer. That is the opposite of
+# `roctracer`, which installs its interceptor at session start and needs the
+# runtime already up.
+#
+# Env mode is therefore safe here only because `gelu.py` imports
+# `triton.profiler` and `libproton` *before* `torch`. That import order is
+# load-bearing and is the reverse of `../amd-roctracer/pipeline.py`; see the
+# comment at the top of the payload. This ordering requirement is taken from
+# upstream's source comment, not measured -- no environment on hand can run
+# this backend -- unlike the roctracer measurement in the sibling recipe.
+#
+# `backend_mode: pcsampling` asks rocprofiler-sdk for statistical
+# instruction-level attribution -- where in the kernel the samples land --
+# rather than the whole-kernel spans `roctracer` reports. This is the line that
+# needs a post-3.8 `main` build; the backend's other valid `backend_mode`,
+# `periodic_flushing`, is accepted on 3.8.0.
+collect:
+  proton:
+    mode: "env"
+    backend: "rocprofiler"
+    backend_mode: "pcsampling"
+    context: "shadow"
+    data: "tree"

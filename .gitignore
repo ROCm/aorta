@@ -113,3 +113,14 @@ buck-out/
 # Untracked by design -- a lingering bundle here is a stale-hook trap, see
 # docs/sanitizers/rocjitsu-bundle-provenance.md.
 .sanitizer-nightly/
+
+# Proton profiles from a standalone example run. Proton resolves its `-n`
+# session name relative to the CWD, and the profiling examples are documented as
+# being run from the repo root, so `python examples/.../pipeline.py` under a
+# profiler drops `pipeline.hatchet` here. A capture is run output, never source.
+#
+# Anchored to the root on purpose rather than a bare `*.hatchet`: the parser's
+# fixtures are checked-in `.hatchet` files
+# (`tests/instrumentation/fixtures/proton/`), and an unanchored pattern would
+# silently ignore the next one somebody adds.
+/*.hatchet

@@ -31,9 +31,26 @@ so a device-pinned cell still profiles the device it asked for.
 The default backend is :data:`AUTO_BACKEND`, which omits Proton's ``-b``
 entirely. Proton then picks the backend matching the active runtime --
 ``rocprofiler`` where rocprofiler-sdk is available, ``roctracer`` otherwise.
-Naming a backend explicitly is a version commitment: ``rocprofiler`` is the
-preferred AMD backend upstream but was added after Triton 3.7, whose CLI
-rejects the name at argparse before the payload ever runs.
+Which one that is depends on the version: ``select_profiler_from_triton_backend``
+maps the ``hip`` target to ``rocprofiler`` on Triton 3.8.0 and to ``roctracer``
+on 3.7.1, and nothing in the capture records which ran.
+
+Naming a backend explicitly costs more than a version commitment (though it is
+also that: ``rocprofiler`` arrived in Triton 3.8.0, so 3.7.x and earlier reject
+the name at argparse before the payload ever runs). Proton's front-end calls
+``_select_backend()`` only on the path
+where ``-b`` is absent, and that call is what brings the GPU runtime up, so
+``roctracer`` pinned through ``mode: cli`` starts before the first HSA queue
+exists and records nothing -- a 160-byte profile holding an empty ``ROOT``
+frame, from a run that exits 0. :func:`wrap_argv` refuses that combination and
+names ``mode: env`` instead, where the payload starts Proton after the runtime
+is up.
+
+That is a ``roctracer`` property, not an AMD one. ``rocprofiler`` has the
+opposite contract -- it is configured from a ``libproton.so`` constructor at
+load time, and upstream warns that letting HSA come up first yields an empty
+dispatch buffer -- so its CLI pin is allowed and is the better ordering. See
+:data:`_CLI_UNPINNABLE_BACKENDS`.
 """
 
 from __future__ import annotations
@@ -48,11 +65,14 @@ from pathlib import Path
 
 from ._options import (
     AUTO_BACKEND,
+    BACKEND_MODES,
     BACKENDS,
     CONTEXTS,
     DATA_FORMATS,
     GRANULARITIES,
+    HOOKS,
     INSTRUMENTATION_MODES,
+    MODE_BEARING_KEYS,
     MODES,
     OPTION_KEYS,
     QUEUE_INTERCEPTING_BACKENDS,
@@ -104,6 +124,33 @@ _AMD_BACKENDS: frozenset[str] = frozenset({"rocprofiler", "roctracer"})
 #: ``backend: auto`` too. ``ROCR_VISIBLE_DEVICES`` is the variable Proton reads
 #: on AMD; ``HIP_VISIBLE_DEVICES`` is the one it refuses.
 _AMD_ENV_SIGNALS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+
+#: Backends ``mode: cli`` cannot pin. Spelled out rather than derived from
+#: :data:`QUEUE_INTERCEPTING_BACKENDS`, because the two AMD backends turn out to
+#: have *opposite* initialisation contracts and deriving it treated them alike:
+#:
+#: * ``roctracer`` installs its interceptor when the session starts, and
+#:   Proton's front-end brings the GPU runtime up only on the ``-b``-absent
+#:   path -- so a CLI pin starts it before the first HSA queue exists and
+#:   records nothing. Measured on Triton 3.7.1: a 160-byte profile holding a
+#:   bare ``ROOT``. **This is a 3.7.x-and-earlier defect.** It does not
+#:   reproduce on 3.8.0, where the same pin captured 17 kernels, so the guard
+#:   is a workaround with an expiry rather than a permanent rule. It is kept
+#:   because 3.7.x is what this repo's containers still ship; the inverted GPU
+#:   test asserts the bug is still there and skips itself from 3.8.0 on, so the
+#:   day the floor moves the guard can go with it.
+#: * ``rocprofiler`` is the reverse, and the CLI path is the *safe* one for it.
+#:   Triton 3.8.0 calls ``rocprofiler_force_configure`` from an
+#:   ``__attribute__((constructor))`` in ``libproton.so``, so it is configured
+#:   at library load, before any user code. Its own source warns that letting
+#:   HSA come up first -- naming "a torch import chain" -- makes rocprofiler-sdk
+#:   skip dispatch-buffer tracing on already-existing queues and yield an empty
+#:   buffer. Refusing the CLI pin would push operators toward exactly that.
+#:
+#: ``auto`` is absent for the reason it always was: omitting ``-b`` is the
+#: working path. A future intercepting backend has to be classified by its own
+#: contract, which is why this is no longer a set operation.
+_CLI_UNPINNABLE_BACKENDS: frozenset[str] = frozenset({"roctracer"})
 
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
 # Interpreter flags that take no argument and can safely stay in front of
@@ -209,6 +256,15 @@ def build_argv_prefix(
     front-end collects them with ``argparse.REMAINDER``, so there is no ``--``
     separator (unlike rocprofv3).
 
+    This renders whatever the validated options ask for, including a ``-b`` for
+    a backend :func:`wrap_argv` would refuse to pin (see
+    :data:`_CLI_UNPINNABLE_BACKENDS`). The split is deliberate -- this function
+    is the renderer and :func:`wrap_argv` is where the attach decision is made,
+    so a caller that only wants to display or log the flags still can -- but it
+    means a consumer building its own CLI attach out of this prefix has to
+    apply that policy itself. Everything inside aorta reaches Proton through
+    :func:`wrap_argv`.
+
     Args:
         out_dir: Directory the profile is written into.
         options: Recipe-supplied options; see :func:`validate_options`.
@@ -240,9 +296,17 @@ def build_argv_prefix(
         "--data",
         effective["data"],
     ]
+    # ``--mode`` is rendered, but reaches Proton only on Triton 3.8.0 and newer:
+    # 3.7.1's front-end parses the flag and then calls ``start()`` without it.
+    # Rendered anyway rather than refused, because 3.8.0 is the current release
+    # and aorta cannot tell from here which Triton will run the wrap -- see
+    # :data:`MODE_BEARING_KEYS`. ``mode: env`` is the version-independent route.
     mode = mode_argument(effective)
     if mode is not None:
         argv += ["--mode", mode]
+    hook = effective.get("hook")
+    if hook is not None:
+        argv += ["-k", hook]
     return argv
 
 
@@ -282,6 +346,9 @@ def build_env(
     mode = mode_argument(effective)
     if mode is not None:
         env[f"{ENV_PREFIX}MODE"] = mode
+    hook = effective.get("hook")
+    if hook is not None:
+        env[f"{ENV_PREFIX}HOOK"] = hook
     return env
 
 
@@ -471,8 +538,9 @@ def wrap_argv(
     Raises:
         ValueError: an option key or value is invalid.
         ProtonWrapError: ``mode: cli`` was requested for a command Proton's
-            front-end cannot execute, or the wrap needs ``env(1)`` to carry
-            variables into the command and it is not on ``$PATH``.
+            front-end cannot execute or with a backend it cannot pin, or the
+            wrap needs ``env(1)`` to carry variables into the command and it is
+            not on ``$PATH``.
     """
     effective = validate_options(options)
     inner = list(argv)
@@ -480,6 +548,27 @@ def wrap_argv(
     if effective["mode"] == "env":
         prefix = _device_env_prefix(effective["backend"], environ, build_env(out_dir, options))
         return [*prefix, *inner]
+
+    # Checked before the argv shape, because ``mode: env`` is the fix for both
+    # and this is the one an operator cannot see failing: an unwrappable argv
+    # at least stops the trial, while this produces a clean exit 0 carrying an
+    # empty profile.
+    if effective["backend"] in _CLI_UNPINNABLE_BACKENDS:
+        raise ProtonWrapError(
+            f"proton mode 'cli' cannot pin backend {effective['backend']!r}. "
+            "Proton's command front-end calls _select_backend() only when '-b' "
+            "is absent, and that call is what initialises the GPU runtime, so "
+            "roctracer's interceptor is installed before the first HSA queue "
+            "exists and records nothing: the profile comes back as an empty "
+            "ROOT frame and the trial reports no proton metrics while exiting "
+            "0. Use 'proton: {mode: env}' with a payload that calls "
+            "proton.start() after the runtime is up (see "
+            "examples/profiling/proton/amd-roctracer), or leave "
+            f"'backend: {AUTO_BACKEND}', which omits '-b' and is unaffected. "
+            "Note this applies to roctracer only -- rocprofiler configures "
+            "itself when libproton loads, so its CLI pin is allowed and is the "
+            "ordering upstream prefers."
+        )
 
     flags, target = _split_python_launch(inner)
     python = resolve_python(inner)
@@ -493,13 +582,16 @@ def wrap_argv(
 
 __all__ = [
     "AUTO_BACKEND",
+    "BACKEND_MODES",
     "BACKENDS",
     "CONTEXTS",
     "DATA_FORMATS",
     "ENV_PREFIX",
     "ENV_PROTON_PYTHON",
     "GRANULARITIES",
+    "HOOKS",
     "INSTRUMENTATION_MODES",
+    "MODE_BEARING_KEYS",
     "MODES",
     "OPTION_KEYS",
     "OUTPUT_SUBDIR",

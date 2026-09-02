@@ -17,6 +17,9 @@ at.
 | [`rocprof/torch-matmul`](rocprof/torch-matmul/) | hipBLASLt / rocBLAS GEMM kernels PyTorch picks for `a @ b` | `torch` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/rocprof/torch-matmul/recipe.yaml --output ./profiling_results -- python examples/profiling/rocprof/torch-matmul/matmul.py` |
 | [`proton/triton-vecadd`](proton/triton-vecadd/) | One Triton elementwise kernel, launch-site attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-vecadd/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-vecadd/vecadd.py` |
 | [`proton/triton-softmax`](proton/triton-softmax/) | A Triton fused reduction, Python-frame attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-softmax/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-softmax/softmax.py` |
+| [`proton/amd-roctracer`](proton/amd-roctracer/) | Three Triton kernels in sequence, whole-kernel attribution on a pinned `roctracer` backend | `torch` + `triton` for ROCm. Container. `roctracer` is the *whole-kernel* AMD backend present in every released Triton, including the ones predating `rocprofiler` (added in 3.8.0). `instrumentation` is in every release too, but measures inside a kernel. | `aorta sweep run --recipe examples/profiling/proton/amd-roctracer/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-roctracer/pipeline.py` |
+| [`proton/amd-instrumentation`](proton/amd-instrumentation/) | Two named scopes *inside* one unbalanced Triton kernel — intra-kernel attribution | `torch` + `triton` for ROCm. Container. The only Proton backend that coexists with `rocprofv3`; publishes no numeric metrics, only `proton_artifact_dir`. | `aorta sweep run --recipe examples/profiling/proton/amd-instrumentation/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-instrumentation/hotspot.py` |
+| [`proton/amd-rocprofiler`](proton/amd-rocprofiler/) | Statistical instruction-level attribution (`backend_mode: pcsampling`) instead of whole-kernel spans | `torch` + `triton` for ROCm. Container. **A post-3.8 Triton `main` build**: the `rocprofiler` backend is released as of 3.8.0, but AMD `pcsampling` landed after that tag, so this example's capture ships documented but unverified. | `aorta sweep run --recipe examples/profiling/proton/amd-rocprofiler/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/amd-rocprofiler/gelu.py` |
 
 ## Start here
 
@@ -33,8 +36,8 @@ aorta sweep run \
   -- /tmp/hip_gemm 512 20
 ```
 
-The other three need a PyTorch-for-ROCm interpreter (and Triton, for the
-Proton pair). The reference way to get one is a ROCm PyTorch container with
+The other six need a PyTorch-for-ROCm interpreter (and Triton, for the five
+Proton ones). The reference way to get one is a ROCm PyTorch container with
 aorta installed **inside** it — see each example's README. Running
 `aorta sweep run -- docker run ...` from the host instead would attach the
 profiler to the docker client, which dispatches no kernels and produces an
@@ -51,12 +54,41 @@ empty capture.
 together, so the pairing is rejected at recipe load. Only Proton's
 `instrumentation` backend coexists with `rocprof`.
 
-The Proton examples leave `backend: "auto"`, which omits Proton's `-b` and
-lets Proton pick the backend matching the active runtime. That is what makes
-them run out of the box across Triton versions: `rocprofiler` is the
-preferred AMD backend upstream, but Triton 3.7.x and earlier accept only
-`cupti`/`roctracer`/`instrumentation` and exit with an argparse
-`invalid choice: 'rocprofiler'` before the payload runs.
+The two Triton examples leave `backend: "auto"`, which omits Proton's `-b`
+and lets Proton pick the backend matching the active runtime. That is what
+makes them run out of the box across Triton versions: `rocprofiler` is the
+preferred AMD backend upstream and released as of Triton 3.8.0, but 3.7.x and
+earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an
+argparse `invalid choice: 'rocprofiler'` before the payload runs. The
+convenience has a cost worth knowing: what `auto` resolves to on AMD is
+`rocprofiler` from 3.8.0 onward and `roctracer` below it, and nothing in the
+`.hatchet` records which one ran — the run's env snapshot is where you read the
+Triton version that settles it.
+
+The three `amd-*` examples pin a backend instead, and all use `mode: "env"`
+with a payload that calls `proton.start()` itself — but for three different
+reasons, which are worth keeping apart. Only one of the three is forced.
+
+For `amd-roctracer` it is forced. Proton's CLI front-end initialises the HIP
+runtime only on the path where `-b` is absent, and `roctracer` records nothing
+unless it starts after that runtime is up, so a `roctracer` pin under the
+default `mode: "cli"` captures an empty tree; the collector refuses that one
+combination rather than letting a trial pass with nothing in it.
+
+For `amd-rocprofiler` it is a choice, and the backend's contract is the
+*opposite* of its sibling's rather than the same. `libproton.so` configures
+rocprofiler-sdk from an `__attribute__((constructor))` at load time, so it
+needs to be set up *before* HSA comes up — which makes `mode: "cli"` legal for
+it, and on ordering grounds the shape upstream prefers. That example uses
+`mode: "env"` so `backend_mode` reaches Proton on every Triton version, and it
+is safe there only because the payload imports Proton before `torch`. This
+ordering is taken from upstream's source comments, not measured here, unlike
+the `roctracer` behaviour above.
+
+For `amd-instrumentation` it is a choice too. That backend installs no queue
+interceptor, so a CLI pin of it captures correctly and the collector allows it.
+It uses `mode: "env"` only so that `instrumentation_mode` reaches Proton on
+Triton 3.7.1 and earlier, whose CLI parses `--mode` and then drops it.
 
 ## Where the collector options live
 
@@ -106,7 +138,7 @@ examples/profiling/<collector>/<example-name>/
   README.md               requirements, standalone run, aorta run, artifacts
 ```
 
-The conventions the existing four follow, and that a new one should too:
+The conventions the existing seven follow, and that a new one should too:
 
 1. **Standalone-runnable.** A user must be able to reproduce the payload
    without aorta. Every README shows the bare command first.
