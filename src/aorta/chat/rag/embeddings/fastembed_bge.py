@@ -143,18 +143,32 @@ def _source_repo(model: str) -> str:
 
     fastembed re-hosts ONNX conversions under its own org, so
     ``BAAI/bge-small-en-v1.5`` is fetched from ``qdrant/bge-small-en-v1.5-onnx-q``
-    and that is the name the cache directory carries. Falls back to the model id
-    when fastembed is absent or does not know the model, which only makes the
-    cache probe conservative.
+    and that is the name the cache directory carries.
+
+    Falls back to the model id whenever the registry cannot be read at all --
+    fastembed absent, a partial install, or the *private*
+    ``_list_supported_models`` / ``description.sources`` shape changing under
+    us -- which only makes the cache probe conservative. Broad on purpose:
+    :func:`_text_embedding` calls :func:`model_is_cached` from inside its own
+    ``except`` handler, so an exception raised here would replace the download
+    failure being explained with an unrelated one and the operator would lose
+    :data:`PRE_SEED_PROCEDURE` entirely.
     """
     try:
         from fastembed import TextEmbedding
-    except ImportError:
+    except Exception:  # absent, or an install too broken to import
         return model
-    for description in TextEmbedding._list_supported_models():
-        if description.model == model:
-            source = getattr(description.sources, "hf", None)
-            return source or model
+    try:
+        for description in TextEmbedding._list_supported_models():
+            if description.model == model:
+                return getattr(description.sources, "hf", None) or model
+    except Exception:
+        logger.debug(
+            "could not read fastembed's model registry; treating %s as its own "
+            "source repo, which only makes the cache probe conservative",
+            model,
+            exc_info=True,
+        )
     return model
 
 

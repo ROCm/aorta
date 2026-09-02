@@ -20,6 +20,8 @@ is constructed lazily and every test either stubs it or asks only for names.
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -169,6 +171,63 @@ class TestCollectionName:
         monkeypatch.setattr(settings, "embedding_model", DEFAULT_MODEL)
         monkeypatch.setattr(settings, "remote_embedding_model", DEFAULT_MODEL)
         assert FastembedBgeProvider().collection_name() != RemoteApiProvider().collection_name()
+
+
+class TestSourceRepoLookupIsFailSoft:
+    """``_source_repo`` reads a *private* fastembed API, so it must not raise.
+
+    ``_text_embedding`` calls ``model_is_cached`` -- and so ``_source_repo`` --
+    from inside its own ``except`` handler. An exception from the registry walk
+    would replace the download failure being explained with an unrelated one,
+    and the operator would never see ``PRE_SEED_PROCEDURE``.
+
+    A fake ``fastembed`` module is installed rather than the real one, so this
+    runs identically with and without the chat extra present.
+    """
+
+    @staticmethod
+    def _install_fake(monkeypatch, text_embedding) -> None:
+        module = types.ModuleType("fastembed")
+        module.TextEmbedding = text_embedding
+        monkeypatch.setitem(sys.modules, "fastembed", module)
+
+    def test_a_registry_that_cannot_be_read_falls_back_to_the_model_id(self, monkeypatch):
+        class Renamed:
+            """``_list_supported_models`` gone, as a private API may do."""
+
+            @staticmethod
+            def _list_supported_models():
+                raise AttributeError("_list_supported_models")
+
+        self._install_fake(monkeypatch, Renamed)
+        assert fastembed_bge._source_repo(DEFAULT_MODEL) == DEFAULT_MODEL
+
+    def test_a_description_without_sources_falls_back_too(self, monkeypatch):
+        """Only ``.hf`` was guarded before; ``.sources`` itself can go as well."""
+
+        class NoSources:
+            @staticmethod
+            def _list_supported_models():
+                return [types.SimpleNamespace(model=DEFAULT_MODEL)]
+
+        self._install_fake(monkeypatch, NoSources)
+        assert fastembed_bge._source_repo(DEFAULT_MODEL) == DEFAULT_MODEL
+
+    def test_a_readable_registry_is_still_honoured(self, monkeypatch):
+        """The fallback must not swallow the answer it exists to protect."""
+
+        class Healthy:
+            @staticmethod
+            def _list_supported_models():
+                return [
+                    types.SimpleNamespace(
+                        model=DEFAULT_MODEL,
+                        sources=types.SimpleNamespace(hf="qdrant/bge-small-en-v1.5-onnx-q"),
+                    )
+                ]
+
+        self._install_fake(monkeypatch, Healthy)
+        assert fastembed_bge._source_repo(DEFAULT_MODEL) == "qdrant/bge-small-en-v1.5-onnx-q"
 
 
 class TestModelCacheProbe:
