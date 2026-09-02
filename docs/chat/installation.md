@@ -14,8 +14,9 @@ Sizes are measured `site-packages` on Python 3.12, base install included.
 | `chat-ui` | `chat-cli` plus Chainlit, for `aorta chat ui` | 3.11–3.13 | ~305 MB |
 | `chat-all` | `chat-ui` plus LiteLLM, for native Anthropic / Gemini / Bedrock | 3.11–3.13 | ~420 MB |
 
-The embedding model's weights (~130 MB) are fetched on first use and cached
-outside the environment, so they are not in those numbers.
+The embedding model's weights (~65 MB — `fastembed` serves this model from a
+quantised ONNX re-host, not the 130 MB fp32 build) are fetched on first use and
+cached outside the environment, so they are not in those numbers.
 
 > **There is deliberately no torch tier, not even an opt-in one.** Embeddings
 > run `BAAI/bge-small-en-v1.5` on `onnxruntime` via `fastembed`, so no extra can

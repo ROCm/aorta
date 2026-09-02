@@ -115,6 +115,7 @@ environment.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `embedding_model` | `BAAI/bge-small-en-v1.5` | Local model. |
+| `model_cache_path` | `$XDG_CACHE_HOME/aorta/chat/models` | Where the local model's ONNX weights are cached. `HF_HOME` overrides it, which is what [air-gapped pre-seeding](rag-index.md#air-gapped-nodes) uses. Explicit rather than `fastembed`'s own `/tmp/fastembed_cache`, which a reboot wipes and other users on a shared node can write. |
 | `remote_embedding_model` | `text-embedding-3-small` | Also decides the collection name, since dimensions differ per model. |
 | `remote_embedding_api_key` | *(empty)* | Separate from the chat key, so the two can use different providers. |
 | `remote_embedding_base_url` | *(empty)* | Empty means the provider default. |

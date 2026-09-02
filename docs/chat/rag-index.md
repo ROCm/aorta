@@ -81,8 +81,15 @@ means `aorta_path` is pointing at a tree that includes build output.
 
 `index fetch --from <path>` side-loads an index someone copied in, which solves
 half the problem. The other half is the embedding model: the local provider
-downloads its weights (~130 MB) from Hugging Face on first use, so a node with
-no egress can neither fetch an index nor build one.
+downloads its weights from Hugging Face on first use, so with no egress
+`index fetch` (which resolves a release asset over the network) and `index
+build` both fail — the first for want of the asset, the second for want of the
+model.
+
+The download is ~65 MB, not the 130 MB of the fp32 weights: `fastembed` serves
+this model from a quantised ONNX re-host (`qdrant/bge-small-en-v1.5-onnx-q`),
+which is also why its vectors are not interchangeable with a torch-built
+index's.
 
 Pre-seed the model cache on a connected machine, copy it across, and point at it:
 
@@ -90,6 +97,10 @@ Pre-seed the model cache on a connected machine, copy it across, and point at it
 export HF_HOME=/shared/hf-cache
 export HF_HUB_OFFLINE=1
 ```
+
+`HF_HOME` is checked first and wins when set. Without it the cache is
+`model_cache_path`, which defaults under `$XDG_CACHE_HOME` — set that instead
+if you would rather keep the weights out of a shared Hugging Face cache.
 
 The failure without this arrives as a Hugging Face connection error from inside
 the embedding library, which reads as a bug rather than as "you need to pre-seed
