@@ -362,10 +362,10 @@ def test_perf_gate_entry_without_perf_gate_is_rejected():
     assert "no effect without --perf-gate" in out.stderr
 
 
-def test_a_staged_entry_is_not_a_valid_perf_gate_scope():
-    """`pending_entries` are not in `entries`, so scoping to one must fail rather
-    than quietly refresh everything correctness-only."""
-    out = _refresh_cli("--perf-gate", "--perf-gate-entry", "tokenspeed_serve_smoke")
+def test_an_unknown_entry_is_not_a_valid_perf_gate_scope():
+    """Scoping to a name that is not in `entries` -- a staged entry, or a typo --
+    must fail rather than quietly refresh everything correctness-only."""
+    out = _refresh_cli("--perf-gate", "--perf-gate-entry", "not_a_real_entry")
     assert out.returncode != 0
     assert "no such matrix entry" in out.stderr
 
@@ -395,8 +395,15 @@ def test_pending_entries_are_inert(tmp_path, monkeypatch):
     who wires the key up would otherwise start a blocked entry by accident.
     """
     doc = _real_matrix()
-    pending = {e["name"] for e in doc.get("pending_entries") or []}
-    assert pending, "expected at least one staged entry"
+    # Synthesised rather than read from the file: the key is legitimately empty
+    # between staged entries, and the property being pinned -- that a future
+    # reader who wires the key up starts a blocked entry -- must hold then too.
+    doc = dict(doc)
+    doc["pending_entries"] = [
+        {"name": "staged_thing", "recipe": "recipes/ci/gpu-smoke.yaml", "blocked_on": "x"},
+        *(doc.get("pending_entries") or []),
+    ]
+    pending = {e["name"] for e in doc["pending_entries"]}
 
     monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 8)
     monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
@@ -416,6 +423,92 @@ def test_pending_entries_are_inert(tmp_path, monkeypatch):
     assert not (pending & {e["entry"] for e in result["entries"]})
 
 
+def _docker_matrix():
+    return {"entries": [
+        {"name": "needs_daemon", "recipe": "r.yaml", "needs_docker_daemon": True},
+        {"name": "plain", "recipe": "r2.yaml"},
+    ]}
+
+
+def _fake_run(ran):
+    def run(entry, out_dir):
+        ran.append(entry["name"])
+        return 0, _write_matrix(out_dir / entry["name"] / "matrix.json",
+                                [{"name": "c", "error": None, "passed_count": 1,
+                                  "failed_count": 0, "error_count": 0,
+                                  "metrics_summary": {}}]), False
+    return run
+
+
+def test_an_entry_needing_a_daemon_skips_rather_than_fails_when_there_is_none(
+        tmp_path, monkeypatch):
+    """The socket is a per-lane opt-in that grants effective root, so no lane
+    sets it and "no daemon" is the normal state. An entry that needs one must
+    therefore skip -- a fail would redden every nightly until a security
+    decision that is not the pipeline's to make."""
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 8)
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+    monkeypatch.setattr(nightly_eval, "docker_daemon",
+                        lambda: (False, "no docker client on PATH"))
+    ran: list[str] = []
+    monkeypatch.setattr(nightly_eval, "run_entry", _fake_run(ran))
+
+    result = nightly_eval.evaluate(_docker_matrix(), {"baselines": {}}, tmp_path)
+    by_name = {e["entry"]: e for e in result["entries"]}
+
+    assert by_name["needs_daemon"]["verdict"] == "skip"
+    assert "no docker client on PATH" in by_name["needs_daemon"]["reasons"][0]
+    assert "needs_daemon" not in ran
+    # And the probe must not quarantine anything that did not ask for it.
+    assert by_name["plain"]["verdict"] != "skip"
+    assert ran == ["plain"]
+
+
+def test_an_entry_needing_a_daemon_runs_when_one_is_reachable(tmp_path, monkeypatch):
+    """The other half: the skip must disappear the moment a lane mounts the
+    socket, with no further edit to the matrix."""
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 8)
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+    monkeypatch.setattr(nightly_eval, "docker_daemon", lambda: (True, "daemon 29.4.2"))
+    ran: list[str] = []
+    monkeypatch.setattr(nightly_eval, "run_entry", _fake_run(ran))
+
+    nightly_eval.evaluate(_docker_matrix(), {"baselines": {}}, tmp_path)
+    assert ran == ["needs_daemon", "plain"]
+
+
+def test_the_daemon_probe_reports_a_client_that_cannot_reach_a_daemon(monkeypatch):
+    """A mounted-but-dead socket is the interesting case: the client is on PATH,
+    so a `which docker` check would call the capability present and the entry
+    would fail on connect. The probe must actually talk to the daemon."""
+    import subprocess as sp
+
+    nightly_eval.docker_daemon.cache_clear()
+    monkeypatch.setattr(nightly_eval.shutil, "which", lambda _: "/usr/local/bin/docker")
+    monkeypatch.setattr(
+        nightly_eval.subprocess, "run",
+        lambda *a, **k: sp.CompletedProcess(
+            a[0], 1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock."),
+    )
+    try:
+        reachable, detail = nightly_eval.docker_daemon()
+        assert reachable is False
+        assert "Cannot connect to the Docker daemon" in detail
+    finally:
+        nightly_eval.docker_daemon.cache_clear()
+
+
+def test_the_live_serving_entry_declares_the_capability_it_needs():
+    """Promoted on a demonstrated launch, but only safe in `entries` because it
+    declares the capability. Without the flag it is a guaranteed nightly failure
+    on every runner that has not opted into the socket."""
+    live = {e["name"]: e for e in _real_matrix()["entries"]}
+    entry = live["tokenspeed_serve_smoke"]
+    assert entry["needs_docker_daemon"] is True
+    assert "blocked_on" not in entry
+    assert int(entry["timeout_sec"]) >= 3600
+
+
 def test_pending_entries_are_valid_and_loadable():
     """Validated exactly like a live entry, so promoting one is a move, not a bet.
 
@@ -424,7 +517,8 @@ def test_pending_entries_are_valid_and_loadable():
     """
     from aorta.triage.recipe import load_recipe
 
-    known_fields = {"name", "recipe", "nproc", "min_gpus", "timeout_sec", "blocked_on"}
+    known_fields = {"name", "recipe", "nproc", "min_gpus", "timeout_sec",
+                    "needs_docker_daemon", "blocked_on"}
     pending = _real_matrix().get("pending_entries") or []
     live = {e["name"] for e in _real_matrix()["entries"]}
 
@@ -442,7 +536,7 @@ def test_pending_entries_are_valid_and_loadable():
         assert int(entry.get("timeout_sec", 1800)) >= 1800
 
 
-def test_staged_serving_entry_metric_names_resolve_against_the_policy_table():
+def test_serving_entry_metric_names_resolve_against_the_policy_table():
     """The names `tokenspeed bench serve` exports, checked against the allowlist.
 
     The workload passes its export through verbatim, so a metric the plan intends
@@ -451,14 +545,22 @@ def test_staged_serving_entry_metric_names_resolve_against_the_policy_table():
     arms from.
     """
     eval_lib = _load("eval_lib")
-    pending = {e["name"]: e for e in _real_matrix().get("pending_entries") or []}
-    assert "tokenspeed_serve_smoke" in pending
+    live = {e["name"]: e for e in _real_matrix()["entries"]}
+    assert "tokenspeed_serve_smoke" in live
 
-    # Gated from the first bless (docs/tokenspeed-gating-rollout.md).
+    # Gated from the first bless (docs/tokenspeed-gating-rollout.md). Both are
+    # per-token metrics: they are measured between tokens, so the step-0 compile
+    # excursion measured on this cell does not enter them.
+    for name in ("median_tpot_ms", "p99_itl_ms"):
+        assert eval_lib.metric_policy(name) == "max", name
+        assert eval_lib.is_auto_gateable(name) is True, name
+
+    # Gateable and correctly directed, but held record-only for the first bless
+    # because all three are duration-derived or wait on the compile, and the
+    # excursion carries each of them through its threshold.
     assert eval_lib.metric_policy("median_ttft_ms") == "max"
-    assert eval_lib.metric_policy("median_tpot_ms") == "max"
     assert eval_lib.metric_policy("output_throughput") == "min"
-    for name in ("median_ttft_ms", "median_tpot_ms", "output_throughput"):
+    for name in ("median_ttft_ms", "output_throughput"):
         assert eval_lib.is_auto_gateable(name) is True, name
 
     # Recorded but never gated: bring-up time is the noisiest thing the workload

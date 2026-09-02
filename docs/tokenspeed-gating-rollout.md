@@ -2,16 +2,22 @@
 
 [`tokenspeed_serve`](tokenspeed-serving.md) reports TTFT, TPOT, ITL and
 throughput, and the serving metric names are already in the nightly's gating
-allowlist. Nothing is gated, because no serving recipe is in
-`config/ci/nightly_eval_matrix.yaml` and no serving baseline has been blessed.
-This document is the sequence for changing that, and the reasoning behind the
-numbers it picks.
+allowlist. A serving recipe is now in `config/ci/nightly_eval_matrix.yaml`, but
+nothing is gated, because no serving baseline has been blessed. This document is
+the sequence for changing that, and the reasoning behind the numbers it picks.
 
-The reason it is a document rather than a commit is that we have **one run per
-cell**. A threshold derived from a single observation encodes whichever night it
-was taken on, and the nightly then fails on the difference between two healthy
-runs. That failure is worse than no gate: it trains everyone to ignore the
-alert, and the first real regression arrives into a channel nobody reads.
+The reason it is a document rather than a commit is that we do not yet have a
+window to derive thresholds from. A threshold derived from a single observation
+encodes whichever night it was taken on, and the nightly then fails on the
+difference between two healthy runs. That failure is worse than no gate: it
+trains everyone to ignore the alert, and the first real regression arrives into a
+channel nobody reads.
+
+Measuring the cell rather than reasoning about it has since made that case
+stronger and the first bless smaller. One cell-run in thirteen carries a
+five-second compile excursion in its first measured step, which three of the four
+originally-proposed gates cannot survive — see [the smoke cell
+section](#the-smoke-cell-is-not-unconditionally-clean-measured-13-cell-runs).
 
 See [ci-nightly-eval.md](ci-nightly-eval.md) for how the nightly works in
 general; this only covers what is specific to serving.
@@ -31,8 +37,10 @@ Two consequences that decide the shape of this rollout:
   a `fail` with or without a baseline — the harness is fail-closed by design, and
   `docs/ci-nightly-eval.md` says so. An entry may therefore only be added to the
   matrix once it can actually *pass* on the runner. Adding one that cannot is not
-  a soft landing; it is a nightly that is red every night. This is what currently
-  blocks us — see [What blocks this today](#what-blocks-this-today).
+  a soft landing; it is a nightly that is red every night. That constraint is
+  what shaped this entry: it declares `needs_docker_daemon: true` so that a
+  runner without the socket **skips** it rather than failing — see [What blocks
+  this today](#what-blocks-this-today).
 - **Blessing is all-or-nothing per refresh, unless it is scoped.**
   `refresh_baselines.py` rebuilds the whole baseline file and `--perf-gate` armed
   every entry in it. Running it to bless serving would, in the same PR, derive
@@ -348,8 +356,8 @@ so the claim is checked rather than asserted.
 
 ## What blocks this today
 
-The matrix entry is written and validated but is **not live**, and the reason is
-not gating policy.
+The matrix entry is live, and what remains is a decision rather than an
+engineering task.
 
 `nightly_eval.py` runs *inside* the `aorta-ci-gpu` container
 (`eval-reusable.yml` → `docker_cmd.sh exec`), and `tokenspeed_serve` runs the
@@ -358,18 +366,17 @@ and a route to a daemon in there. It had neither, and the workload's `setup()`
 raised `'docker' not on PATH` before anything else happened. Record-only does not
 help — it defers perf bounds, not failures.
 
-Both pieces now exist. Neither is switched on, and nothing has been observed
-working, so the entry stays staged; see [What is still
-missing](#what-is-still-missing) below for exactly what is left.
+Both pieces now exist, the image has been built, and a cell has been run to
+completion from inside the container (see
+[Verification](#verification-status)). The client half is therefore done and
+proven. The daemon half is a per-lane opt-in that no lane sets, because it grants
+effective root on the runner and that is the CI owner's call.
 
-The entry therefore lives under `pending_entries` in
-`config/ci/nightly_eval_matrix.yaml`. Nothing reads that key: both consumers
-iterate `entries` only, so it cannot run by accident. It is real YAML rather than
-a commented-out block (the convention the file's other two deferred entries use)
-so that `tests/ci/test_nightly_eval.py` can validate it exactly like a live
-entry — recipe path, loadability through the real parser, field names, metric
-names against the policy table. Promoting it is then a move of five lines, not a
-bet on whether it still parses.
+The entry lives in `entries` with `needs_docker_daemon: true`, which is what makes
+that safe: on a runner without a socket it skips with the reason recorded, rather
+than failing. `tests/ci/test_nightly_eval.py` covers both halves of that — the
+skip when no daemon is reachable, and the run when one is — so the day a lane
+flips the flag is a configuration change, not a discovery.
 
 ### The enabling change
 
@@ -420,6 +427,42 @@ What the nightly needs, concretely:
   [tokenspeed-serving.md](tokenspeed-serving.md), and that reason is stronger
   here, not weaker.
 
+**Measured, and more specific than the above was.** Demonstrating this on a
+gfx950 node produced two failures worth writing down, because neither is what the
+guidance as written would have led you to expect.
+
+*Every* bind source must be resolvable by the daemon, not only `work_dir`. The
+first attempt put `AORTA_WORKSPACE` on an autofs-mounted NFS home and the
+container never started:
+
+```
+Error response from daemon: error while creating mount source path
+'/home/.../wt-gating': mkdir /home/...: permission denied
+```
+
+The daemon resolves *all* `-v` sources in the host namespace, so a checkout on an
+automounted or root-squashed filesystem fails the same way a `work_dir` there
+would — and it fails at container create, before any of the workload's own
+checks can produce a better message. On a GitHub runner the workspace is local
+disk and this does not arise; on any node where `/home` is networked, the repo
+has to be staged locally first. Worth knowing before debugging it as a socket
+problem, which is what it looks like.
+
+**The work root must be owned by the uid the container runs as, and the obvious
+way to create it gets that wrong.** `aorta-ci-gpu` runs as root, so the workload
+checks `u0` and requires the root itself to be root-owned. A `work_dir` created
+by an ordinary host-side run is owned by *that* user, and the containerised run
+then refuses it — the node used here already had a `/tmp/ts-work-serve` at
+`uid=100550 mode=1777` left by earlier host-side sweeps, which uid 0 must reject.
+The demonstration used a fresh path created *through the daemon* so it landed
+root-owned, which is exactly what the workload's own error message advises an
+administrator to do.
+
+The operational trap in that is worth stating on its own: **the ten record-only
+runs cannot share a `work_dir` with the containerised nightly** if they are taken
+by hand as an ordinary user. Either take them as root, or give the two a separate
+`work_dir` and accept the cold HF cache on the first nightly.
+
 **The uid has to agree too**, and this is a second way the same boundary bites.
 The workload uses a per-uid scratch root and then *verifies* it: `<work_dir>/u<uid>`
 must be a real directory (not a symlink), owned by the running uid, and not group-
@@ -468,72 +511,96 @@ switched off, and turning it on is one flag plus a named sign-off.
 
 ### What is still missing
 
-1. **The CI image has never been built.** The installer has been run for real and
-   the client it produces drives a live daemon, but no machine available to this
-   work had the disk for the ~52 GB ROCm 10 base. See
-   [Verification](#verification-status) for what a human must run.
-2. **No lane enables the socket**, pending the decision above.
-3. **No container launch from inside `aorta-ci-gpu` has been observed.** Until one
-   has, the failure mode has merely moved from `'docker' not on PATH` to
-   `Cannot connect to the Docker daemon`, which reddens the nightly just as hard.
+**One thing, and it is a decision rather than a piece of work: no lane enables
+the socket.** That is the sign-off described above, and it is deliberately not
+this branch's to give.
+
+Everything else on this list has been done. The entry is therefore in `entries`
+rather than `pending_entries`, carrying `needs_docker_daemon: true` — so on a
+runner without the socket it **skips**, with the reason in the results, instead
+of failing on `Cannot connect to the Docker daemon`. When a lane sets
+`docker-socket: true` the entry starts running with no further edit. Promoting it
+without that flag would have been the mistake the matrix file's own header warns
+about: an entry may only be added once it can actually pass on the runner.
 
 ### Verification status
 
-Verified here, against the real artifact rather than by inspection:
+Built and run on a gfx950 (MI355X) node on 2026-09-02.
 
-- the installer downloads, rejects a wrong sha256 without leaving a binary
-  behind, and extracts only the client;
-- the extracted client reports `29.7.2` and negotiates against a `29.1.3` daemon,
-  which is the claim that it need not match the runner's version;
-- `docker compose config` over the base plus the override resolves all three
-  mounts, with the scratch mount identical on both sides;
-- the file-shape invariants above, as tests in `tests/ci/test_dashboard_and_alert.py`.
+**The image builds and is client-only.** `docker compose --env-file .env.ci -f
+docker-compose.build.yaml build` succeeds, producing a 51.9 GB `aorta:ci-gpu`.
+The build's own `RUN` checks pass — `docker client check: OK --
+/usr/local/bin/docker, no daemon on PATH` — and the assertion holds when
+re-checked against the built image rather than during it: `dockerd`,
+`containerd`, `runc`, `containerd-shim-runc-v2`, `docker-proxy` and
+`docker-init` are all absent from `PATH`, and `docker --version` reports
+**29.7.2**. That is what makes "client only" a property of the artifact and not
+of the Dockerfile's intent.
 
-Not verified, and requiring a machine with ~60 GB free and access to the base
-image:
+**The client reaches the host daemon from inside the container.** With the
+override mounted, `docker exec aorta-ci-gpu docker ps` returns the running
+container list, exit 0.
+
+**A cell completes.** Two sweeps of `tokenspeed-serve-bench-smoke.yaml` were
+driven from inside `aorta-ci-gpu`, each starting the TokenSpeed engine as a
+sibling container: four cell-runs, all passed, `failed_total` 0 and
+`completed_total` 96 throughout, engine containers cleaned up afterwards. The
+twelve measured steps were 1108–1149 ms with no step-0 excursion, and every
+metric landed within 5% of the host-side clean envelope — so the container
+boundary does not move the measurement, which is what lets a nightly baseline be
+compared against the host-side runs the variance analysis is built from.
+
+Two configuration requirements were discovered by doing this rather than by
+reading, and are written up under [work_dir](#the-enabling-change) above: all
+bind sources must be resolvable by the daemon (an autofs NFS checkout is not),
+and the work root must be root-owned because the container runs as uid 0.
+
+Also verified earlier, and still true: the installer rejects a wrong sha256
+without leaving a binary behind; the client negotiates against an older (29.1.3)
+daemon; `docker compose config` resolves all three mounts with the scratch mount
+identical on both sides.
+
+Not verified, because it is the thing awaiting sign-off: the entry has never run
+under `nightly_eval.py` on a CI runner, only under `aorta sweep run` in the
+container by hand. The skip path is covered by tests rather than by a runner.
+
+To reproduce:
 
 ```bash
 cd docker
 bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
-# the build's own checks assert the client is present and no daemon came with it
 docker run --rm aorta:ci-gpu docker --version
 
-# then, on a gfx950 node, the launch this promotion actually waits on:
+# work root must be root-owned; creating it through the daemon is the easy way
+docker run --rm -v /tmp:/mnt busybox:1.37 mkdir -p /mnt/ts-work-serve
+
+export TS_SERVE_WORK_DIR=/tmp/ts-work-serve
 bash ../scripts/ci/docker_compose.sh --env-file .env.ci \
   -f docker-compose.build.yaml -f docker-compose.docker-socket.yaml up -d
-docker exec aorta-ci-gpu docker ps            # client reaches the host daemon
-docker exec aorta-ci-gpu python -m aorta.cli run \
-  recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml   # with work_dir set as above
+docker exec aorta-ci-gpu docker ps
+docker exec aorta-ci-gpu aorta sweep run \
+  --recipe recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml \
+  --output-dir "$TS_SERVE_WORK_DIR/out" --strict
 ```
-
-Until that last command produces a bench export, the entry stays in
-`pending_entries`. The cheapest way to get the ten record-only runs meanwhile is
-to run the recipe by hand on a gfx950 node and record `matrix.json`, which needs
-none of this.
 
 ## The rollout sequence
 
-Steps 1–2 are blocked on the section above. Everything from step 3 is the part
-this document is really specifying.
+Steps 1–2 are **done**. Step 3 cannot start until a lane enables the socket,
+because until then the entry skips rather than records. Everything from step 3 is
+the part this document is really specifying.
 
-**1. Promote the entry.** Move it from `pending_entries` into `entries`, dropping
-`blocked_on`:
-
-```yaml
-  - name: tokenspeed_serve_smoke
-    recipe: recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml
-    min_gpus: 1
-    timeout_sec: 3600
-```
+**1. ~~Promote the entry.~~ Done.** It is in `entries` with `min_gpus: 1`,
+`timeout_sec: 3600` and `needs_docker_daemon: true`.
 
 `timeout_sec: 3600` rather than the 1800 default: two bring-ups at the observed
 spread plus the teardown VRAM drain is around 15 minutes before the image pull
 and any cold-cache weight download, and a timeout is an unconditional entry
 failure rather than a slow record. Check the job's own `timeout-minutes: 150` in
-`eval-reusable.yml` still has room.
+`eval-reusable.yml` still has room. Measured end to end from inside the
+container, a full two-cell sweep took **12 minutes** on a warm cache, so the
+budget is right but most of it is bring-up.
 
-**2. Verify it before merging.** The matrix parses through the loader the nightly
-uses, and the recipe through the real recipe parser:
+**2. ~~Verify it before merging.~~ Done**, and rerun these after any change:
 
 ```bash
 python -m pytest tests/ci -q --timeout=180
@@ -541,19 +608,48 @@ python -m pytest tests/workloads/test_tokenspeed_serve.py -q
 aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml --dry-run
 ```
 
+**2a. Enable the socket on the nightly lane.** Not done, and not this branch's
+call — see [Security](#security-this-grants-effective-root-on-the-runner). One
+flag on the `rocm-ci-setup` step, plus a named sign-off:
+
+```yaml
+      - uses: ./.github/actions/rocm-ci-setup
+        with:
+          docker-socket: true
+```
+
+Until that lands the entry reports `skip` with `needs a docker daemon: ...` in
+its reasons, which is visible on the dashboard and costs the nightly nothing.
+
 **3. Let it record for ten nightlies.** It will report `recording` on the
 dashboard. Watch the *Workloads* view and write the numbers down; the ten values
-of `median_ttft_ms`, `median_tpot_ms`, `output_throughput` and
-`mean_step_time_ms` per cell are the input to step 4. Two cells, so twenty
-observations of each. A `fail` during this window is a real failure — the entry
-is unbaselined but the harness is fail-closed — and must be fixed rather than
-waited out.
+of `median_tpot_ms` and `p99_itl_ms` per cell are the input to step 4, and the
+ten of `median_ttft_ms`, `output_throughput` and `mean_step_time_ms` are what
+decides whether the three record-only metrics can be promoted later. Two cells,
+so twenty observations of each. A `fail` during this window is a real failure —
+the entry is unbaselined but the harness is fail-closed — and must be fixed
+rather than waited out.
 
-**4. Check the window before blessing.** Compute, per cell and per metric, the
-extremum and the ratio of extremum to median. If any of the four gated metrics
-shows a window spread above about 10%, do not bless that metric — the margin was
-sized for a 3% spread and a 10% one means something is varying that we have not
-identified. Demote it to record-only in step 5 and investigate.
+**4. Check the window before blessing, and check it for bimodality first.**
+Compute, per cell and per metric, the extremum and the ratio of extremum to
+median. Two separate checks:
+
+- *Spread.* If either gated metric shows a window spread above about 10%, do not
+  bless it — the margin was sized for a 3% spread and a 10% one means something
+  is varying that we have not identified. Demote it in step 5 and investigate.
+- *Bimodality.* Look at the per-step times, not only the per-cell summary. If any
+  night's first measured step stands well clear of its other two, the compile
+  excursion is still reachable and the three record-only metrics stay
+  record-only regardless of how good their spread looks — a clean ten-night
+  window over a bimodal cell is the exact situation where the extremum anchor
+  gives a threshold with no detection power. See
+  [the bimodal-cell section](#the-extremum-anchor-has-no-good-answer-on-a-bimodal-cell).
+
+If the window shows no excursion in twenty cell-runs, that is reasonable evidence
+it has stopped happening, and the three can be promoted with the same margins.
+The more reliable route is to raise `warmup_steps` to 2, which removes it by
+construction — at the cost of re-taking the window, since it changes the
+measurement.
 
 **5. Bless, scoped to this entry only.**
 
@@ -579,25 +675,40 @@ Two edits are needed, both mechanical:
 - Replace each bound with one derived from the ten-run window: `max × 1.25` for a
   `max` metric, `min × 0.85` for a `min` metric.
 - Delete the keys this document lists as record-only — `p99_ttft_ms`,
-  `p99_tpot_ms`, `p99_itl_ms`, `median_e2el_ms`, `p99_e2el_ms`,
-  `request_throughput`, `total_token_throughput`, `tokens_per_sec` — leaving
-  `median_ttft_ms`, `median_tpot_ms`, `output_throughput` and the
-  `step_time_ms.max` entry. `median_itl_ms` will not be there; `_NO_AUTO_GATE`
-  keeps the refresher from writing it.
+  `p99_tpot_ms`, `median_e2el_ms`, `p99_e2el_ms`, `request_throughput`,
+  `total_token_throughput`, `tokens_per_sec`, and now also `median_ttft_ms`,
+  `output_throughput` **and the `step_time_ms.max` entry** — leaving
+  `median_tpot_ms` and `p99_itl_ms`. `median_itl_ms` will not be there;
+  `_NO_AUTO_GATE` keeps the refresher from writing it.
+
+Deleting `step_time_ms.max` is the one that needs attention, because it is the
+bound `--perf-gate` always writes and the only one on this list that is not a
+metric key. Leaving it in by inattention arms the gate the measured excursion
+breaches hardest — 2825 ms against a 1462 ms ceiling. It is the most likely
+mistake in this whole sequence.
 
 This hand-editing is the honest cost of the current tooling, and it is bounded:
-eight keys across two cells, on a PR a human reviews anyway, and it is meant to
-shrink as the record-only metrics are promoted on evidence. If it turns out to
-recur every refresh rather than converge, the fix is a per-metric scope alongside
-`--perf-gate-entry`, and that is the point to build it — not before, when the
-right metric set is still a guess.
+ten keys across two cells, on a PR a human reviews anyway, and it is meant to
+shrink as the record-only metrics are promoted on evidence. It got larger rather
+than smaller when the excursion was measured, which strengthens the case below
+for a per-metric scope.
 
 **7. Promote the record-only metrics on evidence, not on schedule.** After
-another ten nightlies under the live gate, the `p99_*` metrics have twenty
-observations. Promote any whose window spread is comparable to its median's. That
-is the intended end state: `p99_ttft_ms` gated is worth more than
-`median_ttft_ms` gated, because tail latency is what a serving regression damages
-first — we just have no basis for a bound on it yet.
+another ten nightlies under the live gate there are twenty more observations.
+Take them in two groups, because they are blocked on different things:
+
+- `median_ttft_ms`, `output_throughput` and `step_time_ms.max` are blocked on the
+  step-0 excursion, not on their spread — which is already good enough. Promote
+  them when twenty cell-runs show no excursion, or immediately after raising
+  `warmup_steps` to 2 and re-taking the window.
+- The remaining `p99_*` metrics are blocked on having no repeat data. Promote any
+  whose window spread is comparable to its median's. `p99_ttft_ms` gated is worth
+  more than `median_ttft_ms` gated, because tail latency is what a serving
+  regression damages first — we just have no basis for a bound on it yet.
+
+If the hand-editing recurs every refresh rather than converging, the fix is a
+per-metric scope alongside `--perf-gate-entry`. That is the point to build it —
+not before, when the right metric set is still a guess.
 
 ## When a gate fires
 
@@ -673,14 +784,27 @@ was not enough a decision was made and is recorded here.
   same-night control. `tokenspeed-serve-gptoss.yaml` is the recipe whose numbers
   matter most (it is TokenSpeed's canonical AMD benchmark) and is the right
   second entry once this one has been gated for a month.
-- **Cost.** Roughly 15 minutes of runner time per nightly for the two cells, on a
-  warm HF cache. Not separately budgeted with anyone.
+- **Cost.** Measured at **12 minutes** of runner time per nightly for the two
+  cells on a warm HF cache, driven from inside the CI container — close to the 15
+  minutes originally estimated. Not separately budgeted with anyone.
 - **`--perf-gate-entry` over hand-pruning.** Scoping was added as code because
   the alternative recurs on every refresh, for sixteen cells belonging to other
   people's workloads, in a diff where the omission looks identical to the
   inclusion. The per-metric pruning in step 6 was left manual for the mirror-image
-  reason: it is eight keys in one entry, it converges, and building a flag for it
-  now would fix a metric set we are explicitly planning to change.
+  reason: it is ten keys in one entry, on a PR a human reviews anyway, and
+  building a flag for it now would fix a metric set we are explicitly planning to
+  change.
+- **`needs_docker_daemon` over leaving the entry staged.** A launch was
+  demonstrated, so the entry has earned promotion; but the socket is still off by
+  design, and an entry in `entries` that cannot reach a daemon fails every night.
+  Rather than choose between a stale `pending_entries` row and a red nightly, the
+  capability was made declarable, exactly as `min_gpus` already is for GPU count.
+  The cost is one field and one probe; the alternative was for the promotion to
+  wait on a security decision it does not actually depend on.
+- **`warmup_steps` left at 1.** Raising it to 2 would remove the step-0 excursion
+  by construction and is the recommended follow-up, but it changes the
+  measurement, and every number in this document was taken at 1. Doing both in
+  one change would leave neither verifiable.
 - **`median_itl_ms`.** Kept in the allowlist and excluded from auto-blessing,
   rather than removed. Removing it would make a legitimate hand-written bound
   impossible; the problem is only ever with a bound derived from a margin.
