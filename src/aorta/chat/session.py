@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 import logging
 
 from langchain_core.messages import AIMessage, BaseMessage
@@ -35,8 +37,17 @@ def extract_reply(messages: list[BaseMessage]) -> str:
 async def invoke_agent(
     query: str,
     history: list[BaseMessage],
+    on_step: Callable[[str, dict], Awaitable[None]] | None = None,
 ) -> tuple[str, list[BaseMessage], dict]:
     """Run a single query through the agent graph.
+
+    *on_step* is awaited as the run proceeds: once per node with the state it
+    produced, and once per tool with its name before that tool blocks. It is
+    how a caller shows what the agents are doing rather than only what they
+    concluded -- a diagnostic tool holds one node for minutes, and a node that
+    reports only on completion says nothing for all of it.
+
+    Omitting it awaits the graph exactly as before.
 
     Returns:
         (reply_text, updated_history, raw_result_dict)
@@ -44,18 +55,33 @@ async def invoke_agent(
     from langchain_core.messages import HumanMessage
 
     history.append(HumanMessage(content=query))
+    initial = {
+        "messages": history,
+        "route": None,
+        "plan": None,
+        "retrieved_context": None,
+        "command_output": None,
+        "critic_feedback": None,
+        "iteration": 0,
+    }
     with count_llm_calls("query"):
-        result = await agent_graph.ainvoke(
-            {
-                "messages": history,
-                "route": None,
-                "plan": None,
-                "retrieved_context": None,
-                "command_output": None,
-                "critic_feedback": None,
-                "iteration": 0,
-            }
-        )
+        if on_step is None:
+            result = await agent_graph.ainvoke(initial)
+        else:
+            # "updates" names the node that just ran and "custom" carries a
+            # tool announcing itself; "values" is the accumulated state, so the
+            # last one matches what ainvoke would have returned.
+            result = {}
+            async for mode, chunk in agent_graph.astream(
+                initial, stream_mode=["updates", "values", "custom"]
+            ):
+                if mode == "updates":
+                    for node, delta in chunk.items():
+                        await on_step(node, delta or {})
+                elif mode == "custom":
+                    await on_step("tool", chunk)
+                else:
+                    result = chunk
     reply = extract_reply(result.get("messages", []))
     history.append(AIMessage(content=reply))
     return reply, history, result

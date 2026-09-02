@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -21,6 +22,8 @@ from aorta.chat.plugins import BUILTIN_CHAT_TOOLS, ChatTool, load_chat_tools
 from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
 from aorta.chat.redaction import redact_for_send
+
+from langgraph.config import get_stream_writer
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,7 @@ RULES:
 
 RETRIEVED CONTEXT:
 {context}
+12. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
 """
 
 #: answer_node has no tool-execution loop, so its prompt must not offer tools.
@@ -323,6 +327,26 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     route = "question" if "question" in route_text else "action"
     logger.info("Router classified as: %s (raw: %r)", route, route_text)
     return {"route": route}
+
+
+async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
+    """Run a tool off the event loop, announcing it before it blocks.
+
+    Every tool here is synchronous and the diagnostic ones block for minutes
+    while a cluster job runs. Calling one inline stalls the loop, which under
+    the web UI means the server stops answering and the browser reports the
+    backend as unreachable rather than busy.
+
+    The announcement is what makes a five-minute tool visible: steps otherwise
+    appear only when a node finishes, so the one node that takes real time is
+    the one that says nothing.
+    """
+    try:
+        get_stream_writer()({"tool": _normalise_tool_name(tool_name), "args": kwargs})
+    except RuntimeError:
+        pass  # not being streamed; nothing to announce to
+    return await asyncio.to_thread(_execute_tool, tool_name, kwargs)
+
 
 
 # ──────────────────── Select ─────────────────────
@@ -672,7 +696,7 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
                 )
                 continue
             seen.add(signature)
-            result = _execute_tool(call["name"], call["args"])
+            result = await _execute_tool_async(call["name"], call["args"])
             trace.append(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}")
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
 
@@ -809,7 +833,7 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
         unproductive = 0
         tool_name, kwargs = action
         logger.info("Act round %d: %s(%s)", round_num + 1, tool_name, kwargs)
-        result = _execute_tool(tool_name, kwargs)
+        result = await _execute_tool_async(tool_name, kwargs)
         tool_trace.append(f"[{tool_name}({kwargs})] → {result}")
 
         messages.append(AIMessage(content=text))

@@ -20,6 +20,38 @@ def _unavailable_message(reason: str) -> str:
     return f"**LLM backend unavailable**\n\n```\n{reason}\n```"
 
 
+#: What each node contributes that is worth showing. A node absent from this
+#: map renders nothing, which keeps plumbing like retrieve out of the way.
+_NODE_TITLES = {
+    "router": "Deciding whether this needs a job",
+    "select": "Choosing a diagnostic tool",
+    "plan": "Planning the steps",
+    "act": "Running tools",
+    "critic": "Checking the answer",
+}
+
+
+def _node_reasoning(node: str, delta: dict) -> str:
+    """What a node recorded, in the words it recorded it."""
+    if node == "router":
+        return f"Route: **{delta.get('route') or 'unknown'}**"
+    if node == "select":
+        tools = delta.get("candidate_tools") or []
+        why = delta.get("selection_rationale") or ""
+        if not tools:
+            return why or "No tool matched; the agent will see the full list."
+        ranked = "\n".join(f"{i}. `{t}`" for i, t in enumerate(tools, 1))
+        return f"{why}\n\n{ranked}" if why else ranked
+    if node == "plan":
+        return str(delta.get("plan") or "")
+    if node == "act":
+        trace = delta.get("tool_trace") or []
+        return "\n\n".join(f"```\n{entry[:1500]}\n```" for entry in trace)
+    if node == "critic":
+        return str(delta.get("critic_feedback") or "Accepted.")
+    return ""
+
+
 @cl.on_chat_start
 async def on_start():
     """Initialise per-session state and check the LLM backend is usable."""
@@ -63,8 +95,28 @@ async def on_message(message: cl.Message):
     thinking_msg = cl.Message(content="Thinking...")
     await thinking_msg.send()
 
+    async def show_step(node: str, delta: dict) -> None:
+        # A tool announces itself before it runs. Showing that immediately is
+        # the difference between a visible five-minute cluster job and a chat
+        # that looks frozen.
+        if node == "tool":
+            async with cl.Step(name=f"Running {delta.get('tool')}") as step:
+                step.output = (
+                    f"`{delta.get('tool')}`\n\nWork on the cluster can take "
+                    "several minutes."
+                )
+            return
+        title = _NODE_TITLES.get(node)
+        body = _node_reasoning(node, delta) if title else ""
+        if not title or not body:
+            return
+        async with cl.Step(name=title) as step:
+            step.output = body
+
     try:
-        reply, history, _result = await invoke_agent(message.content, history)
+        reply, history, _result = await invoke_agent(
+            message.content, history, on_step=show_step
+        )
     except Exception:
         logger.exception("Agent graph error")
         await thinking_msg.remove()
