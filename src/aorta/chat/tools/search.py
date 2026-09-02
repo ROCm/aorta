@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 
 from aorta.chat.config import settings
 from aorta.chat.rag.walk import prune_dirnames
+from aorta.chat.tools._sandbox import AORTA_ROOT_LABEL, resolve_within
 
 
 def _search_docs(query: str, k: int) -> list:
@@ -75,11 +76,10 @@ def grep_code(pattern: str, path: str = ".", max_results: int = 20) -> str:
         Matching lines with file paths and line numbers.
     """
     root = settings.aorta_root
-    target = (root / path).resolve()
     try:
-        target.relative_to(root)
-    except ValueError:
-        return f"Error: path escapes AORTA root: {path}"
+        target = resolve_within(root, path, AORTA_ROOT_LABEL)
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not target.exists():
         return f"Error: path '{path}' does not exist."
 

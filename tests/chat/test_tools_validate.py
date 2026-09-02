@@ -118,7 +118,7 @@ class TestResolveSafe:
     @patch("aorta.chat.tools.files.settings")
     def test_traversal_raises(self, mock_settings, tmp_path):
         mock_settings.aorta_root = tmp_path
-        with pytest.raises(ValueError, match="escapes AORTA root"):
+        with pytest.raises(ValueError, match="escapes the AORTA root"):
             _resolve_safe("../../etc/passwd")
 
     @patch("aorta.chat.tools.files.settings")
@@ -135,14 +135,14 @@ class TestResolveSafe:
         (tmp_path / "aorta-old").mkdir()
         (tmp_path / "aorta-old" / "secrets.txt").write_text("token\n", encoding="utf-8")
         mock_settings.aorta_root = root
-        with pytest.raises(ValueError, match="escapes AORTA root"):
+        with pytest.raises(ValueError, match="escapes the AORTA root"):
             _resolve_safe("../aorta-old/secrets.txt")
 
     @patch("aorta.chat.tools.files.settings")
     def test_absolute_path_outside_the_root_raises(self, mock_settings, tmp_path):
         """An absolute argument discards the root entirely in ``root / path``."""
         mock_settings.aorta_root = tmp_path
-        with pytest.raises(ValueError, match="escapes AORTA root"):
+        with pytest.raises(ValueError, match="escapes the AORTA root"):
             _resolve_safe("/etc/passwd")
 
     @patch("aorta.chat.tools.files.settings")
@@ -154,7 +154,7 @@ class TestResolveSafe:
         (outside / "secrets.txt").write_text("token\n", encoding="utf-8")
         (root / "link.txt").symlink_to(outside / "secrets.txt")
         mock_settings.aorta_root = root
-        with pytest.raises(ValueError, match="escapes AORTA root"):
+        with pytest.raises(ValueError, match="escapes the AORTA root"):
             _resolve_safe("link.txt")
 
     @patch("aorta.chat.tools.files.settings")
@@ -173,7 +173,12 @@ class TestResolveSafe:
 
 
 class TestGrepCodeSandbox:
-    """``grep_code`` guards its own ``path`` argument rather than calling _resolve_safe."""
+    """``grep_code`` returns the refusal as a string instead of raising it.
+
+    It shares the containment rule with the other tools (``_sandbox``), but a
+    tool that already reports every other failure as ``Error: ...`` must report
+    this one the same way rather than aborting the graph run.
+    """
 
     @patch("aorta.chat.tools.search.settings")
     def test_sibling_sharing_a_prefix_is_refused(self, mock_settings, tmp_path):
@@ -185,7 +190,7 @@ class TestGrepCodeSandbox:
         (tmp_path / "aorta-old" / "secrets.py").write_text("TOKEN = 'x'\n", encoding="utf-8")
         mock_settings.aorta_root = root
         out = grep_code.invoke({"pattern": "TOKEN", "path": "../aorta-old"})
-        assert "escapes AORTA root" in out
+        assert "escapes the AORTA root" in out
         assert "secrets.py" not in out
 
     @patch("aorta.chat.tools.search.settings")
@@ -193,7 +198,7 @@ class TestGrepCodeSandbox:
         from aorta.chat.tools.search import grep_code
 
         mock_settings.aorta_root = tmp_path
-        assert "escapes AORTA root" in grep_code.invoke({"pattern": "x", "path": "../.."})
+        assert "escapes the AORTA root" in grep_code.invoke({"pattern": "x", "path": "../.."})
 
     @patch("aorta.chat.tools.search.settings")
     def test_in_root_search_still_works(self, mock_settings, tmp_path):

@@ -8,6 +8,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from aorta.chat.config import settings
+from aorta.chat.tools._sandbox import AORTA_ROOT_LABEL, resolve_within
 
 _GITIGNORE_PATTERNS: list[str] = [
     "__pycache__",
@@ -25,18 +26,8 @@ _GITIGNORE_PATTERNS: list[str] = [
 
 
 def _resolve_safe(path: str) -> Path:
-    """Resolve *path* relative to AORTA_PATH and prevent directory traversal.
-
-    ``relative_to`` rather than a string prefix test: ``/aorta-old`` starts with
-    the characters of ``/aorta`` without being inside it.
-    """
-    root = settings.aorta_root
-    resolved = (root / path).resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError:
-        raise ValueError(f"Path escapes AORTA root: {path}") from None
-    return resolved
+    """Resolve *path* under ``aorta_path``, refusing anything that escapes it."""
+    return resolve_within(settings.aorta_root, path, AORTA_ROOT_LABEL)
 
 
 def _is_ignored(rel_path: str) -> bool:

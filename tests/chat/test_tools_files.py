@@ -109,7 +109,7 @@ class TestSandboxEscapes:
         (tmp_path / "aorta-old" / "secrets.txt").write_text("api_key=hunter2\n", encoding="utf-8")
         mock_settings.aorta_root = root
         result = read_file.invoke({"file_path": "../aorta-old/secrets.txt"})
-        assert "escapes AORTA root" in result
+        assert "escapes the AORTA root" in result
         assert "hunter2" not in result
 
     @patch("aorta.chat.tools.files.settings")
@@ -120,13 +120,13 @@ class TestSandboxEscapes:
         (tmp_path / "aorta-old" / "secrets.txt").write_text("api_key=hunter2\n", encoding="utf-8")
         mock_settings.aorta_root = root
         result = list_files.invoke({"path": "../aorta-old"})
-        assert "escapes AORTA root" in result
+        assert "escapes the AORTA root" in result
         assert "secrets.txt" not in result
 
     @patch("aorta.chat.tools.files.settings")
     def test_read_file_refuses_an_absolute_path(self, mock_settings, fake_aorta_dir):
         mock_settings.aorta_root = fake_aorta_dir
-        assert "escapes AORTA root" in read_file.invoke({"file_path": "/etc/passwd"})
+        assert "escapes the AORTA root" in read_file.invoke({"file_path": "/etc/passwd"})
 
     @patch("aorta.chat.tools.files.settings")
     def test_read_file_refuses_a_symlink_out_of_the_root(self, mock_settings, tmp_path):
@@ -138,7 +138,7 @@ class TestSandboxEscapes:
         (root / "link.txt").symlink_to(outside / "secrets.txt")
         mock_settings.aorta_root = root
         result = read_file.invoke({"file_path": "link.txt"})
-        assert "escapes AORTA root" in result
+        assert "escapes the AORTA root" in result
         assert "hunter2" not in result
 
     @patch("aorta.chat.tools.files.settings")
@@ -152,7 +152,7 @@ class TestSandboxEscapes:
         (outside / "secrets.txt").write_text("api_key=hunter2\n", encoding="utf-8")
         (root / "link").symlink_to(outside, target_is_directory=True)
         mock_settings.aorta_root = root
-        assert "escapes AORTA root" in list_files.invoke({"path": "link"})
+        assert "escapes the AORTA root" in list_files.invoke({"path": "link"})
 
     @patch("aorta.chat.tools.files.settings")
     def test_a_child_sharing_the_root_prefix_is_still_readable(self, mock_settings, tmp_path):

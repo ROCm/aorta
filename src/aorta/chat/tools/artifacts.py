@@ -31,6 +31,7 @@ from aorta.chat.runs import (
     iter_artifacts,
     render_artifact,
 )
+from aorta.chat.tools._sandbox import RUNS_ROOT_LABEL, resolve_within
 
 #: Cap on one tool's return, mirroring ``read_file``'s 8000. A full matrix for a
 #: wide sweep renders longer than any answer needs, and the untruncated text is
@@ -42,18 +43,8 @@ _MAX_RUNS_LISTED = 40
 
 
 def _resolve_safe(path: str) -> Path:
-    """Resolve *path* under the runs root, refusing anything that escapes it.
-
-    ``relative_to`` rather than a string prefix test: ``/runs-old`` starts with
-    the characters of ``/runs`` without being inside it.
-    """
-    root = settings.runs_root
-    resolved = (root / path).resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError:
-        raise ValueError(f"path escapes the run root: {path}") from None
-    return resolved
+    """Resolve *path* under ``runs_path``, refusing anything that escapes it."""
+    return resolve_within(settings.runs_root, path, RUNS_ROOT_LABEL)
 
 
 def _truncate(text: str) -> str:
