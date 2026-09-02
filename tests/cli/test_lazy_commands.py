@@ -112,6 +112,21 @@ def test_shell_completion_offers_every_command() -> None:
     assert sorted(item.value for item in completions) == sorted(_COMMANDS)
 
 
+def test_shell_completion_carries_help_from_the_registry() -> None:
+    """Every completion item ships the help column, sourced from the registry.
+
+    ``zsh_complete`` renders this column, and the registry is the only place it
+    can come from without importing the command -- so an empty help here means
+    either the laziness or the description in the shell menu has been lost.
+    """
+    completions = {item.value: item.help for item in main.shell_complete(click.Context(main), "")}
+    for name, entry in _COMMANDS.items():
+        rendered = completions[name]
+        assert rendered, f"{name} completes with no help text"
+        # Tolerate Click's short-help truncation instead of pinning a width.
+        assert entry.help.startswith(rendered.removesuffix("...").rstrip()), (name, rendered)
+
+
 def test_shell_completion_filters_on_the_incomplete_prefix() -> None:
     completions = main.shell_complete(click.Context(main), "en")
     assert [item.value for item in completions] == ["env", "environments"]

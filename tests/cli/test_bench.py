@@ -43,10 +43,24 @@ _HW_QUEUE_AVAILABLE = _hw_queue_available()
 
 
 def test_bench_help_lists_hw_queue_eval() -> None:
-    """``aorta bench --help`` exits 0 and lists hw_queue_eval."""
+    """``aorta bench --help`` exits 0 and lists hw_queue_eval with its short help.
+
+    The row's help text is the behaviour change the registry bought: the
+    deleted proxy carried no help, so the row rendered blank. Sourced from the
+    registry rather than hardcoded so the two cannot drift apart.
+    """
     result = CliRunner().invoke(bench, ["--help"])
     assert result.exit_code == 0, result.output
     assert "hw_queue_eval" in result.output
+    row = next(
+        line for line in result.output.splitlines() if line.strip().startswith("hw_queue_eval")
+    )
+    rendered = row.split("hw_queue_eval", 1)[1].strip()
+    assert rendered, f"help row is blank: {row!r}"
+    # Tolerate Click's width-dependent "..." truncation instead of pinning a width.
+    assert bench.lazy_commands["hw_queue_eval"].help.startswith(
+        rendered.removesuffix("...").rstrip()
+    ), rendered
 
 
 def test_bench_wired_under_main() -> None:
@@ -97,14 +111,52 @@ def _fail_import(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
     monkeypatch.setattr("aorta.cli._lazy_group.import_module", raise_it)
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["hw_queue_eval"], id="bare"),
+        pytest.param(["hw_queue_eval", "sweep"], id="trailing-subcommand"),
+        pytest.param(["hw_queue_eval", "sweep", "--iters", "3"], id="trailing-subcommand-options"),
+        pytest.param(["hw_queue_eval", "--bogus-flag"], id="trailing-unknown-option"),
+    ],
+)
 def test_missing_external_dependency_becomes_an_install_hint(
     monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
 ) -> None:
-    """An absent third-party dep means the extra is not installed: show the hint."""
+    """An absent third-party dep means the extra is not installed: show the hint.
+
+    The trailing-argument cases pin the stand-in's ``ignore_unknown_options``
+    plus variadic ``UNPROCESSED`` argument: without them Click rejects the
+    extra tokens with its own usage error and the user never sees the hint.
+    """
     _fail_import(monkeypatch, ModuleNotFoundError("No module named 'torch'", name="torch"))
-    result = CliRunner().invoke(bench, ["hw_queue_eval"])
+    result = CliRunner().invoke(bench, argv)
     assert result.exit_code != 0
     assert "amd-aorta[hw-queue]" in result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["hw_queue_eval", "--help"], id="bare"),
+        pytest.param(["hw_queue_eval", "sweep", "--help"], id="trailing-subcommand"),
+    ],
+)
+def test_missing_external_dependency_help_shows_the_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    """``--help`` on the stand-in exits 0 and renders the hint as the help body.
+
+    The environment-gated test above only covers this on a base install; this
+    one stubs the import so the path stays covered wherever the suite runs.
+    """
+    _fail_import(monkeypatch, ModuleNotFoundError("No module named 'torch'", name="torch"))
+    result = CliRunner().invoke(bench, argv)
+    assert result.exit_code == 0, result.output
+    assert "amd-aorta[hw-queue]" in result.output
+    assert "Error" not in result.output
 
 
 def test_missing_internal_module_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
