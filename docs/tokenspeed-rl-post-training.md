@@ -29,9 +29,10 @@ The short version:
   against a 322 s cold start), `ipc` raises `NotImplementedError`, and `nccl`
   **returns success while transferring nothing**, loading uninitialised device
   memory into the model
-  ([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer)). The engine
-  choice is still defensible on the shape of the API; the loop is blocked on an
-  upstream fix.
+  ([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer), filed upstream
+  as [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373)).
+  The engine choice is still defensible on the shape of the API; the loop is
+  blocked on an upstream fix.
 - **The strongest training signal in this repo is recipe synthesis**, because a
   generated recipe either loads, validates and dry-runs or it does not. That is a
   graded machine-checkable reward requiring no human labelling. The second
@@ -162,9 +163,10 @@ the original weights back and watching them *not* come back reveals it.
 So the honest position is that the API exists, its shape is right, its control
 plane is fast, and **neither of its two transports works on this build**. The
 27.8-hour argument above still holds — it is why this matters — but the fix it
-depends on is upstream and unbuilt. TP > 1 is blocked behind the same defect;
-`docs/tokenspeed-serving.md` separately records that TP=4 does not come up at
-all on this image.
+depends on is upstream and unbuilt, tracked as
+[tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373).
+TP > 1 is blocked behind the same defect; `docs/tokenspeed-serving.md`
+separately records that TP=4 does not come up at all on this image.
 
 ### The EOS trap, which cost the most to find
 
@@ -688,6 +690,9 @@ SGLang rollout should drive this unchanged, which widens the trainer choice.
 
 ### Phase 2b — the NCCL data plane does not transfer
 
+Filed upstream as
+[tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373).
+
 The control plane above is real. **The transport is not.** A trainer peer was
 stood up on an 8-GPU gfx950 node (engine on GPU 0, peer on GPU 7, disjoint
 `HIP_VISIBLE_DEVICES`, TP=1, Qwen3-0.6B) and driven through the full
@@ -851,7 +856,8 @@ One item that is **not** blocked on Manoj and should be raised anyway: the
 `nccl` weight transport does not work on this image
 ([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer)). That is an
 upstream TokenSpeed defect, it blocks the loop at every topology and model size,
-and it is ours to file rather than his to decide.
+and it is ours to file rather than his to decide. Filed as
+[tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373).
 
 <a id="a1"></a>
 **A1 — "CIA" and "Sleuth".** Neither appears in this repository. This plan
@@ -927,7 +933,9 @@ path stops at Phase 3 no matter what the engine does.
   [Phase 2](#phase-2-validate-the-weight-sync-path). The transport is measured
   in [Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer) and it is
   broken: `/update_weights` returns 200 having moved nothing and loads
-  uninitialised device memory into the model. `ipc` is settled and negative.
+  uninitialised device memory into the model, filed upstream as
+  [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373).
+  `ipc` is settled and negative.
   So "weights can be updated in place" is **established for the control plane
   and refuted for the transport** — the opposite of the previous position,
   which assumed the transport worked because the metadata contract did.
