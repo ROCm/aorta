@@ -23,13 +23,14 @@ from aorta.chat.graph.nodes import (
 )
 from tests.chat.conftest import make_fake_llm
 
+#: ``run_terminal_command`` is absent on purpose: it is opt-in, so the prompts
+#: describe it only when ``enable_shell_tool`` registered it.
 TOOL_NAMES = [
     "list_files",
     "read_file",
     "search_code",
     "grep_code",
     "search_repo_map",
-    "run_terminal_command",
 ]
 
 

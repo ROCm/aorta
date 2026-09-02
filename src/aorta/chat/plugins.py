@@ -48,20 +48,39 @@ logger = logging.getLogger(__name__)
 
 _GROUP = "aorta.chat_tools"
 
-#: The tools `aorta chat` ships. Keys must match each tool's own ``name``;
-#: :func:`load_chat_tools` raises if they drift, since that is an aorta bug.
+#: The tools `aorta chat` ships unconditionally. Keys must match each tool's own
+#: ``name``; :func:`load_chat_tools` raises if they drift, since that is an
+#: aorta bug.
 BUILTIN_CHAT_TOOLS: dict[str, BaseTool] = {
     "list_files": list_files,
     "read_file": read_file,
     "search_code": search_code,
     "grep_code": grep_code,
     "search_repo_map": search_repo_map,
-    "run_terminal_command": run_terminal_command,
     "list_runs": list_runs,
     "read_run_matrix": read_run_matrix,
     "read_run_env": read_run_env,
     "search_run_artifacts": search_run_artifacts,
 }
+
+#: Shipped, but only registered when ``enable_shell_tool`` is set. Kept out of
+#: :data:`BUILTIN_CHAT_TOOLS` rather than filtered later so that a disabled
+#: shell is absent from the registry the prompts are built from, not merely
+#: refused at call time -- a tool the model is never told about is one no
+#: prompt-injected text can talk it into reaching for.
+OPTIONAL_CHAT_TOOLS: dict[str, BaseTool] = {
+    "run_terminal_command": run_terminal_command,
+}
+
+
+def enabled_builtins() -> dict[str, BaseTool]:
+    """Built-ins plus whichever optional tools the profile switched on."""
+    from aorta.chat.config import settings
+
+    tools = dict(BUILTIN_CHAT_TOOLS)
+    if settings.enable_shell_tool:
+        tools.update(OPTIONAL_CHAT_TOOLS)
+    return tools
 
 
 @dataclass(frozen=True)
@@ -94,7 +113,7 @@ def load_chat_tools() -> dict[str, ChatTool]:
             name disagree.
     """
     registry: dict[str, ChatTool] = {}
-    for name, tool in BUILTIN_CHAT_TOOLS.items():
+    for name, tool in enabled_builtins().items():
         if not isinstance(tool, BaseTool):
             raise RegistryError(
                 f"built-in chat tool '{name}' must be a langchain BaseTool; "
@@ -153,4 +172,10 @@ def load_chat_tools() -> dict[str, ChatTool]:
     return registry
 
 
-__all__ = ["BUILTIN_CHAT_TOOLS", "ChatTool", "load_chat_tools"]
+__all__ = [
+    "BUILTIN_CHAT_TOOLS",
+    "OPTIONAL_CHAT_TOOLS",
+    "ChatTool",
+    "enabled_builtins",
+    "load_chat_tools",
+]

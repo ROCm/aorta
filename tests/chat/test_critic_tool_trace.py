@@ -26,6 +26,7 @@ from aorta.chat.graph.nodes import (
     act_node,
     critic_node,
 )
+from aorta.chat.tools.run import _format_output
 
 
 class TestEndsWithUser:
@@ -247,6 +248,70 @@ class TestCriticSeesTheTrace:
         with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
             result = await critic_node(state)
         assert result["critic_feedback"] == "the command failed"
+
+    @pytest.mark.asyncio
+    async def test_the_text_mode_trace_puts_the_exit_code_at_a_line_start(
+        self, monkeypatch
+    ):
+        """The shape act_node writes in text tool mode, not a hand-made one.
+
+        ``critic_node`` matches with ``line.startswith("Exit code: ")``, so the
+        trace putting the result after the arrow on the same line hid every
+        failed command in this mode and let the critic approve an answer built
+        on one.
+        """
+        from aorta.chat.graph import nodes
+
+        monkeypatch.setattr(nodes.settings, "max_retry_iterations", 3)
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(return_value=AIMessage(content="the command failed"))
+        # What run.py's _format_output returns: the exit code, then the output.
+        formatted = _format_output("boom", 1)
+        state = {
+            "messages": [HumanMessage(content="run the tests")],
+            "command_output": "I ran pytest",
+            # Exactly the shape act_node appends for a text-protocol tool call.
+            "tool_trace": [
+                f"[run_terminal_command({{'command': 'pytest'}})] →\n{formatted}"
+            ],
+            "iteration": 0,
+            "critic_feedback": None,
+            "route": "action",
+            "plan": None,
+            "retrieved_context": "",
+        }
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            result = await critic_node(state)
+        assert result["critic_feedback"] == "the command failed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", ["INVALID", "not valid", "INVALID: no citation"])
+    async def test_a_rejection_containing_the_word_valid_is_a_rejection(
+        self, monkeypatch, verdict
+    ):
+        """``"VALID" in "INVALID"`` is True, so the substring test passed them.
+
+        The prompt asks for exactly ``VALID`` on success, which made every
+        rejection the critic exists to produce read as an approval.
+        """
+        from aorta.chat.graph import nodes
+
+        monkeypatch.setattr(nodes.settings, "max_retry_iterations", 3)
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(return_value=AIMessage(content=verdict))
+        state = {
+            "messages": [HumanMessage(content="q")],
+            "command_output": "an answer",
+            "tool_trace": ["TOOL RESULT from grep_code:\nsomething"],
+            "iteration": 0,
+            "critic_feedback": None,
+            "route": "action",
+            "plan": None,
+            "retrieved_context": "",
+        }
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            result = await critic_node(state)
+        assert result["critic_feedback"] == verdict
 
     @pytest.mark.asyncio
     async def test_an_absent_trace_does_not_crash(self, monkeypatch):

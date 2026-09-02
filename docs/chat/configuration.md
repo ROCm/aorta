@@ -149,7 +149,8 @@ directory cannot be pip-upgraded cleanly.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `allowed_commands` | `python,pytest,make,pip,grep,wc,head,tail,cat,ls,find` | Allowlist for `run_terminal_command`. Accepts `a,b,c` or a JSON list. |
+| `enable_shell_tool` | `false` | Register `run_terminal_command`. Off by default: it hands a model-authored string to a shell, so the agent is not given one unless you say so. While off, the tool is absent from the registry and from the prompts, not merely refused at call time. |
+| `allowed_commands` | `python,pytest,make,pip,grep,wc,head,tail,cat,ls,find` | Allowlist for `run_terminal_command`, applied per pipeline stage. Command chaining and redirection (`;`, `&`, backticks, `$(...)`, `>`, `<`) are refused, since the allowlist checks executables. Accepts `a,b,c` or a JSON list. |
 | `command_timeout` | `60` | Seconds before a sandboxed command is killed. |
 | `redact` | `true` | Rewrite filesystem paths and IP addresses out of outbound requests. Read [redaction](redaction.md) before turning this off — and read it anyway for what it does **not** cover. |
 

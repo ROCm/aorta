@@ -213,6 +213,11 @@ class Settings(BaseSettings):
     chunk_overlap: int = 50
 
     # --- Sandbox ---
+    # Off by default: the shell tool hands an LLM-authored string to a shell, so
+    # it is the one tool whose worst case is not "a wrong answer". Enabling it
+    # is a deliberate act by the operator, not a default anyone inherits by
+    # installing the extra.
+    enable_shell_tool: bool = False
     # NoDecode turns off pydantic-settings' JSON decoding for this field so the
     # comma-separated form loads; the validator below accepts both that and a
     # JSON list.

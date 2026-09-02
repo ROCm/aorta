@@ -2,7 +2,28 @@
 
 from __future__ import annotations
 
+import pytest
+
 from aorta.chat.graph.nodes import _parse_action
+from aorta.chat.plugins import OPTIONAL_CHAT_TOOLS
+
+
+@pytest.fixture()
+def shell_tool_registered(monkeypatch):
+    """Put ``run_terminal_command`` in the registry ``_parse_action`` consults.
+
+    The shell tool is opt-in, and the registry is resolved once at import, so a
+    setting flipped now would not reach it. These cases are about parsing a
+    command string -- the argument values that made the old ``[^)]*`` capture
+    stop early -- not about whether the tool is enabled.
+    """
+    from aorta.chat.graph import nodes
+
+    monkeypatch.setitem(
+        nodes.TOOL_REGISTRY,
+        "run_terminal_command",
+        OPTIONAL_CHAT_TOOLS["run_terminal_command"],
+    )
 
 
 class TestParseActionValid:
@@ -41,7 +62,7 @@ class TestParseActionValid:
         assert name == "search_code"
         assert kwargs == {"query": "hello world"}
 
-    def test_command_arg(self):
+    def test_command_arg(self, shell_tool_registered):
         result = _parse_action('ACTION: run_terminal_command(command="ls -la")')
         assert result is not None
         name, kwargs = result
@@ -91,7 +112,7 @@ class TestParseActionInvalid:
 
 
 class TestParseActionEdgeCases:
-    def test_command_with_parentheses_in_value(self):
+    def test_command_with_parentheses_in_value(self, shell_tool_registered):
         text = 'ACTION: run_terminal_command(command="ls -td experiments/multinode_* 2>/dev/null | head -1")'
         result = _parse_action(text)
         assert result is not None
@@ -99,7 +120,7 @@ class TestParseActionEdgeCases:
         assert name == "run_terminal_command"
         assert "ls -td" in kwargs["command"]
 
-    def test_command_with_subshell(self):
+    def test_command_with_subshell(self, shell_tool_registered):
         text = 'ACTION: run_terminal_command(command="find . -name \'*.py\' -exec grep -l main {} +")'
         result = _parse_action(text)
         assert result is not None

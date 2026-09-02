@@ -16,7 +16,7 @@ from langchain_core.tools import BaseTool
 from aorta.chat.config import settings
 from aorta.chat.graph.state import AgentState
 from aorta.chat.inference.vllm_client import get_chat_llm
-from aorta.chat.plugins import BUILTIN_CHAT_TOOLS, ChatTool, load_chat_tools
+from aorta.chat.plugins import ChatTool, enabled_builtins, load_chat_tools
 from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
 from aorta.chat.redaction import redact_for_send
@@ -28,10 +28,11 @@ You are the AORTA Codebase Assistant, an AI agent that helps \
 developers understand, navigate, and work with the AORTA codebase.
 
 RULES:
-1. Only answer questions about the AORTA codebase. Politely refuse anything else.
+1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
+   this machine. Politely refuse anything else.
 2. When referencing code, always cite file paths and line numbers.
 3. You have tools to explore the codebase: list_files, read_file, search_code, \
-   grep_code, search_repo_map, and run_terminal_command (sandboxed). You also have \
+   grep_code and search_repo_map. You also have \
    tools for this machine's own AORTA run results: list_runs, read_run_matrix, \
    read_run_env, and search_run_artifacts. Use those when the question is about \
    what a run did rather than what the code says.
@@ -71,7 +72,8 @@ You have NO tools available. Answer using only the RETRIEVED CONTEXT below \
 and the conversation so far.
 
 RULES:
-1. Only answer questions about the AORTA codebase. Politely refuse anything else.
+1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
+   this machine. Politely refuse anything else.
 2. When referencing code, always cite file paths and line numbers.
 3. NEVER fabricate file paths, commands, flags, or behaviour. Everything you \
    state must be visible in the RETRIEVED CONTEXT.
@@ -109,11 +111,10 @@ Available tools:
 3. search_code(query) - Semantic search for code related to the query.
 4. grep_code(pattern, path) - Regex search across files (e.g. "def.*config").
 5. search_repo_map(query) - Search the function/class index for matching entries.
-6. run_terminal_command(command) - Run a sandboxed terminal command.
-7. list_runs(path) - List this machine's AORTA run directories.
-8. read_run_matrix(path) - Read a run's per-cell pass/fail matrix.
-9. read_run_env(path) - Read a run's environment snapshot.
-10. search_run_artifacts(query) - Semantic search over indexed run artifacts.
+6. list_runs(path) - List this machine's AORTA run directories.
+7. read_run_matrix(path) - Read a run's per-cell pass/fail matrix.
+8. read_run_env(path) - Read a run's environment snapshot.
+9. search_run_artifacts(query) - Semantic search over indexed run artifacts.
 
 For each step, specify which tool to use and what arguments. For "find all" or \
 "search for" queries, plan MULTIPLE searches with different phrasings and tools \
@@ -141,11 +142,10 @@ Available tools:
 3. search_code(query="search terms", k=10) - Semantic search for code related to the query (k = max results).
 4. grep_code(pattern="regex", path=".") - Regex search across files (e.g. "def.*config", "class.*Config").
 5. search_repo_map(query="keyword") - Search the function/class index for matching entries.
-6. run_terminal_command(command="cmd") - Run a sandboxed terminal command in the AORTA directory.
-7. list_runs(path=".") - List this machine's AORTA run directories and their artifacts.
-8. read_run_matrix(path="run_dir") - Read a run's matrix.json: per-cell pass/fail and failure hints.
-9. read_run_env(path="run_dir") - Read a run's environment snapshot (ROCm version, probe completeness).
-10. search_run_artifacts(query="terms") - Semantic search over this machine's indexed run artifacts.
+6. list_runs(path=".") - List this machine's AORTA run directories and their artifacts.
+7. read_run_matrix(path="run_dir") - Read a run's matrix.json: per-cell pass/fail and failure hints.
+8. read_run_env(path="run_dir") - Read a run's environment snapshot (ROCm version, probe completeness).
+9. search_run_artifacts(query="terms") - Semantic search over this machine's indexed run artifacts.
 
 After receiving tool results, you may call another tool or provide your final answer.
 When you are done gathering information and ready to answer, output your final response \
@@ -162,7 +162,7 @@ IMPORTANT:
 - NEVER fabricate file paths, commands, or flags -- only use what the tools return or \
   what is in the RETRIEVED CONTEXT.
 - For questions about file counts, directory contents, or running experiments, ALWAYS \
-  use list_files or run_terminal_command to get real data.
+  use the listing and search tools to get real data.
 - Run artifacts report fields they did not record as "unknown", listed under \
   "NOT RECORDED". Never read one as zero or as a pass. If the field that decides \
   the question is unknown, say the run did not record it.
@@ -196,13 +196,46 @@ def _plugin_tool_help(tools: dict[str, ChatTool]) -> str:
     lines = [
         f"{index}. {entry.name}(...) - {_summary_line(entry.tool)} "
         f"[from {entry.source_package}]"
-        for index, entry in enumerate(extra, start=len(BUILTIN_CHAT_TOOLS) + 1)
+        # Counted from the built-ins actually registered, not from
+        # BUILTIN_CHAT_TOOLS, whose length stopped saying how many the prompt
+        # listed once the shell tool became conditional.
+        for index, entry in enumerate(extra, start=len(enabled_builtins()) + 1)
     ]
     return "\nAdditional tools contributed by installed plugins:\n\n" + "\n".join(lines) + "\n"
 
 
-TOOL_DESCRIPTIONS = _BUILTIN_TOOL_DESCRIPTIONS + _plugin_tool_help(CHAT_TOOLS)
-PLAN_PROMPT = _BUILTIN_PLAN_PROMPT + _plugin_tool_help(CHAT_TOOLS)
+#: Appended to the prompts only when the shell tool is registered. Keeping it
+#: out of the numbered lists is the point: a prompt that advertises a tool the
+#: registry does not hold teaches the model to emit a call that can only ever be
+#: refused, and tells prompt-injected text that a shell is worth asking for.
+_SHELL_TOOL_ACT_HELP = (
+    "\nAlso available:\n\n"
+    '- run_terminal_command(command="cmd") - Run a sandboxed terminal command '
+    "in the AORTA directory.\n"
+)
+_SHELL_TOOL_PLAN_HELP = (
+    "\nAlso available:\n\n"
+    "- run_terminal_command(command) - Run a sandboxed terminal command.\n"
+)
+
+
+def _shell_tool_help(fragment: str) -> str:
+    """*fragment* when the shell tool is switched on, otherwise nothing."""
+    from aorta.chat.config import settings
+
+    return fragment if settings.enable_shell_tool else ""
+
+
+TOOL_DESCRIPTIONS = (
+    _BUILTIN_TOOL_DESCRIPTIONS
+    + _shell_tool_help(_SHELL_TOOL_ACT_HELP)
+    + _plugin_tool_help(CHAT_TOOLS)
+)
+PLAN_PROMPT = (
+    _BUILTIN_PLAN_PROMPT
+    + _shell_tool_help(_SHELL_TOOL_PLAN_HELP)
+    + _plugin_tool_help(CHAT_TOOLS)
+)
 
 
 def _get_llm(**kwargs):
@@ -250,14 +283,44 @@ def _log_empty_content(response: Any, node: str) -> None:
         logger.debug("%s reasoning channel: %s", node, reasoning)
 
 
+def _close_paren(text: str, start: int) -> int | None:
+    """Index of the ``)`` closing the ``(`` at *start*, or None if unbalanced.
+
+    Quote-aware, because the argument values are shell and Python fragments:
+    stopping at the first ``)`` truncated every call whose value contained one,
+    of which ``run_terminal_command(command="python -c 'print(1)'")`` is the
+    ordinary case rather than a corner one. A truncated call still parsed, so
+    the tool ran with a silently different argument.
+    """
+    quote: str | None = None
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
 def _parse_action(text: str) -> tuple[str, dict] | None:
     """Extract a tool call from ACTION: tool_name(k="v", ...) format."""
     import re
-    match = re.search(r'ACTION:\s*(\w+)\(([^)]*)\)', text)
+    match = re.search(r'ACTION:\s*(\w+)\(', text)
     if not match:
         return None
+    end = _close_paren(text, match.end() - 1)
+    if end is None:
+        return None
     tool_name = match.group(1)
-    args_str = match.group(2).strip()
+    args_str = text[match.end():end].strip()
     if tool_name not in TOOL_REGISTRY:
         return None
     kwargs: dict = {}
@@ -713,7 +776,12 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
         tool_name, kwargs = action
         logger.info("Act round %d: %s(%s)", round_num + 1, tool_name, kwargs)
         result = _execute_tool(tool_name, kwargs)
-        tool_trace.append(f"[{tool_name}({kwargs})] → {result}")
+        # The result starts on its own line so that ``Exit code: N`` stays at
+        # the start of one: ``critic_node`` scans this trace with
+        # ``line.startswith(_EXIT_CODE_PREFIX)``, so putting the result after
+        # the arrow hid every failed command in text tool mode and let the
+        # critic approve an answer built on one.
+        tool_trace.append(f"[{tool_name}({kwargs})] →\n{result}")
 
         messages.append(AIMessage(content=text))
         messages.append(HumanMessage(
@@ -848,7 +916,11 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
             ]
         )
         verdict = validation.content.strip()
-        if "VALID" not in verdict.upper():
+        # Exact match, not a substring test: "INVALID" contains "VALID", and so
+        # does "not valid", so the substring form passed every rejection the
+        # critic exists to catch. The prompt asks for exactly "VALID", which
+        # makes anything else -- including an explanation -- a retry.
+        if verdict.upper() != "VALID":
             logger.info("Critic rejected response, iteration %d: %s", iteration, verdict[:200])
             return {"iteration": iteration, "critic_feedback": verdict}
 

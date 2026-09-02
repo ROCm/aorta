@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from langchain_core.tools import tool
 
-from aorta.chat.plugins import BUILTIN_CHAT_TOOLS, load_chat_tools
+from aorta.chat.plugins import BUILTIN_CHAT_TOOLS, enabled_builtins, load_chat_tools
 from aorta.registry.errors import RegistryCollisionError, RegistryError
 
 
@@ -79,6 +79,41 @@ def test_builtins_load_with_no_plugins_installed(fake_chat_tool_eps):
     registry = load_chat_tools()
     assert set(registry) == set(BUILTIN_CHAT_TOOLS)
     assert all(entry.source_package == "aorta" for entry in registry.values())
+
+
+class TestShellToolIsOptIn:
+    """#421: "a shell exec tool that is off unless explicitly enabled".
+
+    It is left out of the registry rather than refused at call time, so a
+    disabled shell is also absent from the prompts built from that registry --
+    a tool the model is never told about is one no prompt-injected text can
+    talk it into reaching for.
+    """
+
+    def test_it_is_absent_by_default(self, fake_chat_tool_eps, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "enable_shell_tool", False)
+        fake_chat_tool_eps([])
+        assert "run_terminal_command" not in load_chat_tools()
+
+    def test_enabling_it_registers_it(self, fake_chat_tool_eps, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "enable_shell_tool", True)
+        fake_chat_tool_eps([])
+        registry = load_chat_tools()
+        assert "run_terminal_command" in registry
+        assert registry["run_terminal_command"].source_package == "aorta"
+
+    def test_the_default_registry_is_the_builtins_exactly(
+        self, fake_chat_tool_eps, monkeypatch
+    ):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "enable_shell_tool", False)
+        fake_chat_tool_eps([])
+        assert set(load_chat_tools()) == set(BUILTIN_CHAT_TOOLS)
 
 
 def test_every_builtin_key_matches_the_tools_own_name():
@@ -202,8 +237,9 @@ def test_plugin_tools_are_advertised_to_the_text_protocol():
     assert "read_fabric_counters" in text
     assert "Read the fabric performance counters" in text
     assert "amd-fabric-tools" in text
-    # Numbering continues from the hand-written built-in list above it.
-    assert f"{len(BUILTIN_CHAT_TOOLS) + 1}. read_fabric_counters" in text
+    # Numbering continues from the hand-written built-in list above it, whose
+    # length depends on whether the opt-in shell tool is registered.
+    assert f"{len(enabled_builtins()) + 1}. read_fabric_counters" in text
 
 
 def test_a_tool_with_no_description_still_renders():
