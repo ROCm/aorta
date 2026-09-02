@@ -17,6 +17,10 @@ StopReason = Literal[
     "agent_requested",
 ]
 
+#: Every category either front door may return. The probe agent reaches a
+#: category by trying mitigations; :mod:`aorta.cia` reaches one by reading
+#: instrument evidence. They answer different questions and share this
+#: vocabulary, so a verdict means the same thing whichever produced it.
 AUTOPSY_CATEGORIES: frozenset[str] = frozenset(
     {
         "rccl_hang",
@@ -27,6 +31,12 @@ AUTOPSY_CATEGORIES: frozenset[str] = frozenset(
         "launch_error",
         "perf_regression",
         "unknown",
+        # Reachable only from instrument evidence: a sanitizer that watched two
+        # waves collide, a debugger that read a stopped wave, or a tool that
+        # could not run at all. The probe agent never proposes these.
+        "gpu_race",
+        "numeric_silent",
+        "tooling_gap",
     }
 )
 
