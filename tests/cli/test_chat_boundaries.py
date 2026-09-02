@@ -46,6 +46,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src"
 _CHAT_PKG = _SRC / "aorta" / "chat"
+_CIA_PKG = _SRC / "aorta" / "cia"
 _CLI_CHAT = _SRC / "aorta" / "cli" / "chat.py"
 _AGENT_LLM = _SRC / "aorta" / "agent" / "llm.py"
 
@@ -327,4 +328,69 @@ def test_importing_aorta_cli_does_not_pull_in_asyncio():
     assert out.stdout.strip() == "False", (
         "import aorta.cli now pulls in asyncio; move the import into the "
         "command callback that awaits the agent."
+    )
+
+
+# ── The same two rules, for aorta.cia ─────────────────────────────────────
+
+#: What only the chat extras provide. ``aorta.cia`` may pull its own extra --
+#: dspy and what dspy pulls -- but reaching any of these would mean the agents
+#: cannot be used without installing a chatbot, which is the property the
+#: package was placed outside ``aorta.chat`` to keep.
+_CHAT_ONLY_PREFIXES = (
+    "langchain",
+    "langchain_core",
+    "langchain_community",
+    "langchain_openai",
+    "langchain_text_splitters",
+    "langgraph",
+    "chainlit",
+    "chromadb",
+    "sentence_transformers",
+    "fastembed",
+    "torch",
+)
+
+
+def test_aorta_cia_contains_no_click():
+    """Same rule as ``aorta.chat``, same reason: Click lives in ``aorta.cli``.
+
+    The agents arrived from a repository where each was its own console script,
+    so the argparse entry points were dropped on the way in. This is what keeps
+    them from growing back.
+    """
+    offenders: list[str] = []
+    for path in _python_files(_CIA_PKG):
+        rel = path.relative_to(_REPO_ROOT)
+        for node in ast.walk(_parse(path)):
+            for name in _imported_names(node):
+                if name == "click" or name.startswith("click."):
+                    offenders.append(f"{rel}:{node.lineno}: imports {name!r}")
+    assert not offenders, "Click found under src/aorta/cia/:\n  " + "\n  ".join(offenders)
+
+
+def test_importing_the_agents_does_not_require_the_chat_extras():
+    """Launch, Watch and Autopsy are useful with no chatbot present.
+
+    From a script, from CI, from ``aorta`` itself. Core has two dependencies;
+    the chat extras add eleven plus Chainlit, and a cluster job submitter has no
+    business requiring them. Measured in a fresh interpreter, because
+    ``sys.modules`` is already dirty by the time pytest runs this.
+    """
+    import subprocess
+
+    probe = (
+        "import sys, json, aorta.cia, aorta.cia.launch, aorta.cia.autopsy.orchestrator;"
+        f"chat_only={_CHAT_ONLY_PREFIXES!r};"
+        "print(json.dumps(sorted(m for m in sys.modules "
+        "if m.split('.')[0] in chat_only)))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    leaked = __import__("json").loads(out.stdout)
+    assert leaked == [], (
+        f"importing the agents pulled in {leaked}, which only the chat extras "
+        "provide. The agents must stay usable on a base install plus their own "
+        "extra."
     )

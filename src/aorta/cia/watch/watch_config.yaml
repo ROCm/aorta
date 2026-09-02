@@ -1,0 +1,42 @@
+# Watch agent configuration — all fields have sensible defaults.
+# Override per-job by passing --config <path> to `watchdog poll`.
+
+watch:
+  model: claude-haiku-4-5        # fast + cheap for frequent polling
+  confidence_threshold: 0.70
+
+  # Adaptive poll interval — Watch self-tunes based on observed log activity.
+  # First poll: Haiku estimates step cadence, sets interval to ~2x step time.
+  # Backs off when log is quiet; re-arms when activity spikes.
+  poll_interval_sec: 60          # starting interval; updated dynamically
+  poll_interval_min_sec: 15      # never poll more often than this
+  poll_interval_max_sec: 600     # never wait longer than 10 minutes
+
+  # Semantic expectations — plain English; LLM maps these to whatever
+  # the workload calls throughput/loss/step in its own log format.
+  expectations:
+    - "Training loss should be decreasing or stable — not NaN, inf, or sharply diverging"
+    - "Training steps should be advancing — not stuck printing the same step repeatedly"
+    - "No out-of-memory errors, GPU faults, or process crashes"
+    - "Throughput should not drop more than 50% from the peak seen so far"
+    - "No NCCL/RCCL collective timeouts or rank stalls"
+    # Sanitizer sweeps (`mode: sanitizer`) are short and fail by verdict rather than
+    # by crashing, so the interesting event is the guardrail refusing the run.
+    - "A sanitizer sweep must not report 'sanitizer guardrail not clean' — that means a sanitizer verdict was fail or error"
+    - "No ConSan race findings such as 'auto replay diagnostic conflict=true'"
+    - "No waitcheck hazards such as 'missing s_waitcnt'"
+    - "A sanitizer run must actually execute — 'not_checked' with a reason like rj_waitcheck_not_found means the RocJITsu backend is missing, which is a tooling gap and not a pass"
+
+log_finder:
+  # Optional explicit paths (globs, {job_id} substituted at runtime).
+  # Leave empty for auto-discovery.
+  paths: []
+
+  # File extensions to include in extension-based scan.
+  extensions: [".log", ".txt", ".out", ".err"]
+
+  # Never watch these.
+  exclude: [".ckpt", ".bin", ".pt", ".safetensors", ".pkl", ".npz", ".npy"]
+
+  # Cap on number of files to monitor simultaneously.
+  max_files: 8
