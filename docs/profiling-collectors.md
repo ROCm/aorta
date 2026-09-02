@@ -5,6 +5,11 @@ Both collectors work by rewriting the launch argv — the same seam the mirage
 emulator uses — so an opaque `aorta sweep run ... -- <command>` gets profiled
 and the payload never learns it is being measured.
 
+This page is the reference: every option, the artifact layout, and the
+troubleshooting table. It does not tell you *which* Proton backend to pick —
+for that, and for what each one costs you, see
+[Choosing a Proton backend](proton-backends.md).
+
 How wide "a command" is differs by collector, and it is the first thing to
 check: `rocprof` wraps **anything**, while Proton's default `mode: cli` takes
 over a Python *script*, so it attaches only to `python ... <script>.py`, a
@@ -207,6 +212,10 @@ Precedence and scope:
 | `summary_units` | `sec`, `msec`, `usec`, `nsec` | (unset → rocprofv3's own default) | Unit for the human-readable summary file only. Does not change the parsed metrics, which are always ms. |
 
 ### `proton` options
+
+The `backend` row below is the schema. For which backend answers which question
+— and for the version matrix, the two opposite initialisation contracts, and the
+measured sharp edges — see [Choosing a Proton backend](proton-backends.md).
 
 | Option | Values | Default | Notes |
 |---|---|---|---|

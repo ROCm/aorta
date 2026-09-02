@@ -54,6 +54,10 @@ empty capture.
 together, so the pairing is rejected at recipe load. Only Proton's
 `instrumentation` backend coexists with `rocprof`.
 
+The three `amd-*` examples exist because Proton's backends measure different
+things; [Choosing a Proton backend](../../docs/proton-backends.md) is the guide
+to which one answers which question, if you are here to pick rather than to run.
+
 The two Triton examples leave `backend: "auto"`, which omits Proton's `-b`
 and lets Proton pick the backend matching the active runtime. That is what
 makes them run out of the box across Triton versions: `rocprofiler` is the
