@@ -201,3 +201,22 @@ def test_read_env_raises_on_invalid_json(tmp_path: Path):
 
     with pytest.raises(ArtifactReadError):
         read_env(path)
+
+
+def test_read_env_raises_on_invalid_utf8(tmp_path: Path):
+    """A snapshot cut mid-character is unreadable, not a different exception.
+
+    ``UnicodeDecodeError`` is a ``ValueError`` rather than an ``OSError``, so a
+    reader that converts only the latter lets it past ``ArtifactError``
+    altogether and the tolerant callers in :mod:`aorta.chat` -- which catch
+    ``ArtifactReadError`` precisely to survive a run killed mid-write -- abort
+    on the case they were written for.
+    """
+    path = tmp_path / "env.json"
+    # Cut inside the three bytes of an em dash: valid UTF-8 up to the cut, then
+    # a truncated sequence, which is what a killed write actually leaves.
+    encoded = json.dumps(_env(captured_at="2026\u201401"), ensure_ascii=False).encode("utf-8")
+    path.write_bytes(encoded[: encoded.index(b"\xe2\x80\x94") + 2])
+
+    with pytest.raises(ArtifactReadError):
+        read_env(path)

@@ -169,6 +169,24 @@ class TestIndexing:
         assert docs
         assert any("run_nan/matrix.json" == d.metadata["source"] for d in docs)
 
+    def test_an_artifact_cut_mid_character_is_skipped_too(self, wired):
+        """The same killed job, one byte earlier in the multi-byte sequence.
+
+        A truncated UTF-8 sequence surfaces as ``UnicodeDecodeError``, which is
+        a ``ValueError``: unless the reader converts it to ``ArtifactReadError``
+        it escapes the ``except`` here and the one bad file costs the user every
+        other run's index -- the outcome this walk exists to prevent.
+        """
+        (wired.root / "broken").mkdir()
+        doc = json.dumps({"cells": [{"name": "fp32\u2014off"}]}, ensure_ascii=False)
+        encoded = doc.encode("utf-8")
+        (wired.root / "broken" / "matrix.json").write_bytes(
+            encoded[: encoded.index(b"\xe2\x80\x94") + 2]
+        )
+        docs = runs_rag.collect_run_documents(wired.root)
+        assert docs
+        assert any("run_nan/matrix.json" == d.metadata["source"] for d in docs)
+
     def test_indexing_then_searching_finds_the_right_run(self, wired):
         runs_rag.index_run_artifacts(wired.root)
         hits = runs_rag.search_run_docs("nan in the loss", k=3)

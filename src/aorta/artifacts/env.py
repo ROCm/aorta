@@ -69,11 +69,16 @@ class EnvArtifact(HasMissingFields):
     source_path: Path | None = None
 
     def block(self, name: str) -> Mapping[str, Any] | None:
-        """Return an unmodelled top-level block, or ``None`` if absent.
+        """Return an unmodelled top-level block, or ``None``.
 
         The escape hatch for the blocks this reader does not type -- the GEMM
         library identities, the driver block, the catalogs. Returns the raw
         mapping as the probe wrote it.
+
+        ``None`` covers both an absent block and one the probe wrote as
+        something other than an object, and -- unlike the typed accessors --
+        neither case is recorded in :attr:`missing_fields`. A caller that has
+        to tell the two apart reads :attr:`raw` directly.
         """
         value = self.raw.get(name)
         return value if isinstance(value, Mapping) else None

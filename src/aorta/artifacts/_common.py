@@ -86,6 +86,12 @@ def load_json_object(path: Path | str) -> dict[str, Any]:
         raw = resolved.read_text(encoding="utf-8")
     except OSError as exc:
         raise ArtifactReadError(f"{resolved}: cannot read artifact ({exc})") from exc
+    except UnicodeDecodeError as exc:
+        # A ``ValueError`` subclass, so it is not covered by the ``OSError``
+        # above nor by ``ArtifactError``, and a run killed mid-write is exactly
+        # how a truncated multi-byte sequence gets here -- the case the
+        # tolerant callers in ``aorta.chat`` are written for.
+        raise ArtifactReadError(f"{resolved}: not valid UTF-8 ({exc})") from exc
     try:
         doc = json.loads(raw)
     except ValueError as exc:
