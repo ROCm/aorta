@@ -14,6 +14,7 @@ working, ``fake`` must stay the default, and ``fake`` must stay *fully offline*
 from __future__ import annotations
 
 import builtins
+import importlib.util
 import json
 from types import SimpleNamespace
 
@@ -29,6 +30,18 @@ from aorta.agent.llm import (
 
 CANDIDATES = ["none", "tf32_off", "hsa_xnack"]
 TRIED: list[str] = []
+
+#: Most of this file stubs the chat model out and so runs anywhere. Two groups
+#: cannot: they assert what happens *because* the chat extra is present, and
+#: reaching them without it raises out of ``aorta.chat.config`` (pydantic on
+#: 3.11+, stdlib ``tomllib`` on 3.10) rather than testing anything.
+#:
+#: The predicate is the one production uses -- ``llm._chat_layer_available``
+#: asks exactly this of exactly this package -- so the tests are gated on the
+#: condition they describe rather than on a proxy for it. chat-tests.yml runs
+#: this file on the legs that do install the extra, so the gated cases are
+#: covered in CI rather than skipped everywhere.
+_CHAT_AVAILABLE = importlib.util.find_spec("langchain_core") is not None
 
 
 def _propose(proposer, candidates=None, tried=None):
@@ -77,6 +90,10 @@ class TestMakeProposer:
         assert isinstance(proposer, ChatProviderProposer)
         assert proposer._provider == backend
 
+    @pytest.mark.skipif(
+        not _CHAT_AVAILABLE,
+        reason="chat extra absent, so the fallback below is the correct path here",
+    )
     def test_litellm_prefers_the_shared_layer_when_chat_is_installed(self):
         """Decision 7a: configured once, not twice."""
         assert isinstance(make_proposer("litellm"), ChatProviderProposer)
@@ -246,12 +263,16 @@ class TestMissingExtra:
         assert exc.value.name == "aorta.chat.inference"
 
 
+@pytest.mark.skipif(not _CHAT_AVAILABLE, reason="amd-aorta[chat-cli] not installed")
 class TestRealProviderResolution:
     """No mock of ``_chat_model`` here -- this is the wiring itself.
 
     Every other test in this file stubs the chat model out, which would let a
     broken seam pass: the point of Decision 7a is that the agent reads the
     *chat* configuration, and only an unmocked resolution proves it does.
+
+    Because nothing is mocked, this is the one group that needs the extra for
+    real. chat-tests.yml runs this file so that it does.
     """
 
     @pytest.fixture(autouse=True)

@@ -109,6 +109,9 @@ jobs:
             'tests/chat/*'
             'tests/cli/test_chat.py'
             'tests/cli/test_chat_boundaries.py'
+            # TestRealProviderResolution resolves the provider layer for real,
+            # so it needs the extra and only runs here.
+            'tests/agent/test_llm_providers.py'
             # The chat-* extras, their environment markers, and the entry-point
             # groups all live here.
             'pyproject.toml'
@@ -255,9 +258,17 @@ jobs:
       # tests/cli/ because they are pure AST and must also run on a base
       # install. They are cheap and this is the job that can also prove the
       # no-langchain property against an interpreter that really has langchain.
+      #
+      # tests/agent/test_llm_providers.py joins them for the same reason in the
+      # other direction: its TestRealProviderResolution group deliberately does
+      # not mock the chat model, because Decision 7a is only proven by an
+      # unmocked resolution. That group skips itself on the required CPU gate,
+      # which installs no chat extra, so without this line it would be gated
+      # everywhere and run nowhere.
       - name: Run the chat test suite
         run: |
           pytest tests/chat tests/cli/test_chat.py tests/cli/test_chat_boundaries.py \
+            tests/agent/test_llm_providers.py \
             -m "not gpu and not rocm" -n auto
 
   # Stable aggregator, in the shape cpu-tests.yml uses. Branch protection (if
