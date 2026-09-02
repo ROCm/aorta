@@ -422,9 +422,9 @@ _MAX_UNPRODUCTIVE_ROUNDS = 2
 
 _NO_ANSWER_MSG = (
     "I could not complete that request. The model did not produce an answer or "
-    "call any tools. If you are using a reasoning model, set LLM_TOOL_MODE=native "
-    "so it can call tools through the OpenAI function-calling API instead of the "
-    "ACTION: text protocol."
+    "call any tools. If you are using a reasoning model, set "
+    "AORTA_CHAT_LLM_TOOL_MODE=native so it can call tools through the OpenAI "
+    "function-calling API instead of the ACTION: text protocol."
 )
 
 #: Sent with the final synthesis call, which runs without tools bound. Offered
@@ -452,14 +452,14 @@ _FINAL_ANSWER_MSG = (
 
 
 async def act_node(state: AgentState) -> dict[str, Any]:
-    """Tool-using loop, in whichever protocol LLM_TOOL_MODE selects."""
+    """Tool-using loop, in whichever protocol ``llm_tool_mode`` selects."""
     mode = settings.llm_tool_mode.strip().lower()
     if mode == "native":
         return await _act_native(state)
     if mode == "text":
         return await _act_text(state)
     raise ValueError(
-        f"unknown LLM_TOOL_MODE: {settings.llm_tool_mode!r} "
+        f"unknown llm_tool_mode: {settings.llm_tool_mode!r} "
         "(expected one of native, text)"
     )
 
@@ -669,7 +669,7 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
                     logger.warning(
                         "Act loop abandoned after %d rounds with no tool call and "
                         "no text. If this is a reasoning model, set "
-                        "LLM_TOOL_MODE=native.",
+                        "AORTA_CHAT_LLM_TOOL_MODE=native.",
                         unproductive,
                     )
                     return {

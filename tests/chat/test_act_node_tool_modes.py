@@ -4,7 +4,7 @@ Findings from running gpt-oss-20b against a real gateway, each of which cost a
 query and some tokens to discover:
 
 * It never emits a parseable ``ACTION:`` line -- 0 of 8 rounds -- so the text
-  protocol burned 11 billed calls and answered nothing. Hence LLM_TOOL_MODE.
+  protocol burned 11 billed calls and answered nothing. Hence ``llm_tool_mode``.
 * Offered tools on the final synthesis call, it keeps calling them and returns
   no prose, so a loop that gathered plenty still answered nothing.
 * It repeats an identical tool call when a result disappoints, spending rounds
@@ -84,10 +84,11 @@ class TestSuiteIsIndependentOfLocalConfig:
     def test_the_default_mode_under_test_is_text(self):
         """Pins the conftest guard.
 
-        Without it, a developer `.env` containing LLM_TOOL_MODE=native -- the
-        value a reasoning model requires -- silently sent four TestActNode
-        tests down the native path and broke them. Deleting the guard should
-        fail here rather than somewhere unrelated.
+        Without it, a developer profile or exported
+        ``AORTA_CHAT_LLM_TOOL_MODE=native`` -- the value a reasoning model
+        requires -- silently sent four TestActNode tests down the native path
+        and broke them. Deleting the guard should fail here rather than
+        somewhere unrelated.
         """
         from aorta.chat.graph import nodes
 
@@ -115,7 +116,7 @@ class TestModeDispatch:
         from aorta.chat.graph import nodes
 
         monkeypatch.setattr(nodes.settings, "llm_tool_mode", "function_calling")
-        with pytest.raises(ValueError, match="unknown LLM_TOOL_MODE"):
+        with pytest.raises(ValueError, match="unknown llm_tool_mode"):
             await act_node(_state())
 
     @pytest.mark.asyncio

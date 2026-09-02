@@ -178,7 +178,7 @@ class TestDimensionMismatch:
         message = str(excinfo.value)
         assert "2-dimension" in message
         assert "6 dimensions" in message
-        assert "EMBEDDING_PROVIDER" in message
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER" in message
 
     def test_a_collection_that_was_never_written_says_so(self, index_file: Path):
         _build(index_file, collection="aorta").close()

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 async def wait_for_vllm(timeout: int = 300, interval: int = 5) -> None:
     """Deprecated alias for the local backend's preflight.
 
-    Prefer ``get_backend().preflight()``, which honours ``LLM_PROVIDER``.
+    Prefer ``get_backend().preflight()``, which honours ``llm_provider``.
     Imported inside the function so this module, which both entry points
     load, stays free of any single provider at import time.
     """

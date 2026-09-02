@@ -53,8 +53,8 @@ _MISSING_INDEX = (
 _MISSING_COLLECTION = (
     "The chat index at {path} holds no collection named {collection!r}, which is "
     "what the configured embedding provider reads ({provider}). Either re-index "
-    "with this provider, or set EMBEDDING_PROVIDER back to the one that built "
-    "the index. Collections present: {present}."
+    "with this provider, or set AORTA_CHAT_EMBEDDING_PROVIDER back to the one "
+    "that built the index. Collections present: {present}."
 )
 
 
@@ -336,8 +336,8 @@ class SqliteVecStore(VectorStore):
                 f"the configured embedding provider produced a {len(vector)}-"
                 f"dimension query vector, but collection {self._collection!r} in "
                 f"{self._path} was built at {expected} dimensions. Re-index with "
-                "this provider, or switch EMBEDDING_PROVIDER back to the one "
-                "that built it."
+                "this provider, or switch AORTA_CHAT_EMBEDDING_PROVIDER back to "
+                "the one that built it."
             )
 
         conn = self._connection()

@@ -222,7 +222,7 @@ class FastembedBgeEmbeddings(Embeddings):
 
 
 class FastembedBgeProvider:
-    """``EMBEDDING_PROVIDER=local`` -- BGE-small on onnxruntime, no torch."""
+    """``embedding_provider=local`` -- BGE-small on onnxruntime, no torch."""
 
     name = "local"
 
@@ -231,7 +231,7 @@ class FastembedBgeProvider:
             import fastembed  # noqa: F401
         except ImportError as exc:
             raise ValueError(
-                "EMBEDDING_PROVIDER=local needs fastembed, which is part of the "
+                "embedding_provider=local needs fastembed, which is part of the "
                 "chat-cli extra.\n"
                 "  pip install 'amd-aorta[chat-cli]'\n"
                 "Or set AORTA_CHAT_EMBEDDING_PROVIDER=remote to use an "

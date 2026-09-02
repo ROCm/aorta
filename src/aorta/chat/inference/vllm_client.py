@@ -1,8 +1,8 @@
 """Compatibility shim for the pre-provider LLM entry points.
 
-``get_chat_llm`` now lives in :mod:`src.inference.chat` and dispatches on
-``LLM_PROVIDER``; the raw vLLM helpers moved to
-:mod:`src.inference.providers.local_vllm`. Both are re-exported here so
+``get_chat_llm`` now lives in :mod:`aorta.chat.inference.chat` and dispatches on
+``llm_provider``; the raw vLLM helpers moved to
+:mod:`aorta.chat.inference.providers.local_vllm`. Both are re-exported here so
 existing imports keep working unchanged.
 """
 

@@ -13,7 +13,7 @@ REMOTE_COLLECTION_PREFIX = "aorta_remote_"
 
 
 class RemoteApiProvider:
-    """EMBEDDING_PROVIDER=remote -- OpenAI, or any OpenAI-compatible endpoint."""
+    """``embedding_provider=remote`` -- OpenAI, or any OpenAI-compatible endpoint."""
 
     name = "remote"
 
@@ -21,9 +21,11 @@ class RemoteApiProvider:
         api_key = settings.remote_embedding_api_key.strip()
         if not api_key:
             raise ValueError(
-                "REMOTE_EMBEDDING_API_KEY is not set, but EMBEDDING_PROVIDER="
-                "'remote'. Set REMOTE_EMBEDDING_API_KEY in your .env, or set "
-                "EMBEDDING_PROVIDER=local to use the on-disk BGE model."
+                "remote_embedding_api_key is not set, but embedding_provider is "
+                "'remote'. Set AORTA_CHAT_REMOTE_EMBEDDING_API_KEY, or put "
+                "remote_embedding_api_key in the chat profile "
+                "('aorta chat config init'), or set "
+                "AORTA_CHAT_EMBEDDING_PROVIDER=local to use the on-disk BGE model."
             )
         client_key, headers = build_auth(
             api_key=api_key,

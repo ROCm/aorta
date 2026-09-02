@@ -131,12 +131,14 @@ class TestRemoteApiProvider:
         assert isinstance(provider, RemoteApiProvider)
         with pytest.raises(ValueError) as exc:
             provider.get_embeddings()
-        assert "REMOTE_EMBEDDING_API_KEY" in str(exc.value)
-        assert "EMBEDDING_PROVIDER=local" in str(exc.value)
+        # The namespaced spellings, not the bare ones: pydantic-settings reads
+        # only AORTA_CHAT_*, so advice naming a bare name does nothing.
+        assert "AORTA_CHAT_REMOTE_EMBEDDING_API_KEY" in str(exc.value)
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in str(exc.value)
 
     def test_whitespace_only_key_counts_as_missing(self, monkeypatch):
         monkeypatch.setattr(settings, "remote_embedding_api_key", "   ")
-        with pytest.raises(ValueError, match="REMOTE_EMBEDDING_API_KEY"):
+        with pytest.raises(ValueError, match="AORTA_CHAT_REMOTE_EMBEDDING_API_KEY"):
             RemoteApiProvider().get_embeddings()
 
     def test_factory_builds_the_remote_model_without_a_network_call(

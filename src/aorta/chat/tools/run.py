@@ -71,7 +71,7 @@ def run_terminal_command(command: str) -> str:
 
     cwd = settings.aorta_root
     if not cwd.exists():
-        return f"Error: AORTA_PATH '{cwd}' does not exist."
+        return f"Error: aorta_path '{cwd}' does not exist."
 
     try:
         result = asyncio.get_event_loop().run_until_complete(

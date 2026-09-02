@@ -14,5 +14,5 @@ def get_chat_llm(
     temperature: float = 0.1,
     streaming: bool = True,
 ) -> BaseChatModel:
-    """Return a chat model from the backend selected by ``LLM_PROVIDER``."""
+    """Return a chat model from the backend selected by ``llm_provider``."""
     return get_backend().get_chat_model(temperature=temperature, streaming=streaming)
