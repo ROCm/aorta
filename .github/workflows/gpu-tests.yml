@@ -187,6 +187,23 @@ jobs:
       # per CPU core would spin up dozens of HIP contexts contending for a
       # single device (OOM / flakiness). A small bounded pool keeps parallelism
       # without oversubscribing the GPU.
+      #
+      # --timeout=300 (pytest-timeout, already in the `tests` extra) bounds a
+      # wedged test rather than the job. A GPU test that hangs instead of
+      # failing costs far more than one red test: the job runs to its
+      # 60-minute cap, and because a GitHub-side cancel skips the junit upload,
+      # the gate reports NO test results at all -- so any real failure in the
+      # same run is destroyed along with it. Observed on run 33527313950, where
+      # 105 of 108 tests reported in 54 s, a profiler payload then wedged for
+      # 59 minutes, and the one genuine failure went out with the cancel.
+      #
+      # Sized from measurement: on run 33606698270 the whole suite was 104
+      # tests in 51.6 s wall, and its slowest single test -- the rocprofv3
+      # sweep -- took 20.2 s. 300 s is ~15x that, and more than the entire
+      # suite has ever needed. Set here rather than in
+      # pytest.ini because the opt-in operator payloads (AORTA_LN_GPU_SMOKE)
+      # legitimately run for tens of minutes and must keep their own budgets;
+      # only this job is being bounded.
       - name: Install package and run GPU test suite
         run: |
           bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
@@ -214,7 +231,7 @@ jobs:
             # written with no apostrophe because this is a single-quoted bash -lc
             # payload that any apostrophe would close early.
             export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
-            pytest -m "gpu or rocm" -n 4 --junitxml=gpu-results.xml
+            pytest -m "gpu or rocm" -n 4 --timeout=300 --junitxml=gpu-results.xml
           '
 
       # Separate step, after pytest: under `set -euo pipefail` a knob the

@@ -213,7 +213,7 @@ gaps). New GPU tests must carry `@pytest.mark.gpu` or `@pytest.mark.rocm`.
 
 | Job | Triggers | What it runs |
 | --- | --- | --- |
-| `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n 4` inside a digest-pinned ROCm container (bounded workers so xdist doesn't oversubscribe the single GPU) |
+| `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n 4 --timeout=300` inside a digest-pinned ROCm container (bounded workers so xdist doesn't oversubscribe the single GPU; the per-test cap keeps a wedged test from running out the job's 60-minute limit, which would cancel the run and take the junit report with it) |
 | `workload regression (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | Real-hardware workload smokes from [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml) via [`scripts/ci/run_gpu_regression_smokes.sh`](../scripts/ci/run_gpu_regression_smokes.sh). PRs run the fast single-GPU `pr` tier; nightly / dispatch run the full manifest |
 
 ### Execution environment (docker)
@@ -549,6 +549,11 @@ docker exec aorta-ci-gpu bash -lc '
 '
 docker compose --env-file .env.ci -f docker-compose.build.yaml down -v
 ```
+
+The gate's `--timeout=300` is omitted here on purpose: it exists to stop a
+wedged test from consuming the CI job's 60-minute budget, and locally you
+usually want a hang to sit still so it can be attached to and inspected. Add it
+if what you are reproducing *is* the timeout.
 
 Workload regression smokes (inside the same container):
 

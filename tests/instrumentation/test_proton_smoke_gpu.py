@@ -51,6 +51,19 @@ _EXAMPLES = [
     ),
 ]
 
+#: Wall-clock budget for one payload subprocess, sized from measurement rather
+#: than guessed: the captures timed on MI350 land at ~2.5 s each with a cold
+#: Triton cache, so this is ~50x headroom. These are ten iterations of one
+#: small Triton kernel; nothing here has a legitimate reason to take minutes.
+#:
+#: It sits deliberately below the GPU workflow's ``--timeout``, so a wedged
+#: payload surfaces as ``TimeoutExpired`` from here -- naming the payload and
+#: carrying its partial output -- rather than as pytest-timeout killing the
+#: test from outside with no such detail. The former 3600 s could do neither:
+#: it matched the CI job's own 60-minute cap exactly, so the job always died
+#: first and the budget could never actually fire.
+_CHILD_TIMEOUT_S = 120
+
 #: Proton's dlopen failure on an image whose ROCm comes from Python wheels:
 #: those ship only ``libroctracer64.so.4`` while Proton dlopens the unversioned
 #: name. An environment defect with a known fix, not a collector bug, so it
@@ -100,7 +113,7 @@ def _capture(example: str, payload: str, args: list[str], out_root: Path, option
         cwd=out_root,
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=_CHILD_TIMEOUT_S,
         env={**os.environ, "TRITON_CACHE_DIR": str(out_root / "triton-cache")},
     )
     if _DLOPEN_MARKER in proc.stderr:
