@@ -193,6 +193,11 @@ a CLI pin is the ordering it wants.)
 
 ## Notes
 
+- **Is this the backend you want?** It gives deterministic cycles against
+  scopes you name, and publishes no numeric metrics. If you want per-kernel
+  timings that reach `perf.md` instead, see
+  [Choosing a Proton backend](../../../../docs/proton-backends.md).
+
 - **`granularity` is deliberately not set in the recipe.** The option pair
   `instrumentation_mode: default` + `granularity: warp` renders Proton's single
   `--mode` as the string `default:granularity=warp`, and Triton 3.7.1 rejects

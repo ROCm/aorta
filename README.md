@@ -305,6 +305,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [LLM Determinism](docs/llm-determinism.md) | Bit-exact double-run nondeterminism probe |
 | [Layer Numerics](docs/layer-numerics.md) | Per-layer / per-stage NaN, magnitude, and out-of-range logger |
 | [Profiling Collectors](docs/profiling-collectors.md) | `--collect rocprof` (wraps any subprocess command) / `--collect proton` (Python launches, or `mode: env`) — attach a GPU profiler without editing the payload |
+| [Choosing a Proton backend](docs/proton-backends.md) | Which of Proton's five backends answers which question — whole-kernel timing vs intra-kernel cycles vs PC sampling, what each costs you, and what is available on which Triton |
 | [TokenSpeed](docs/tokenspeed.md) | Third-party inference engine under `mode: probe` — kernel, operator-suite and serving triage, plus Waitcheck and ConSan over its JIT attention/gemm kernels (gfx950) |
 | [TokenSpeed serving](docs/tokenspeed-serving.md) | `tokenspeed_serve` workload — TTFT / TPOT / ITL / throughput per cell, over model, concurrency and ISL/OSL sweeps (gfx950) |
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |

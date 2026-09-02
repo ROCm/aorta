@@ -239,6 +239,11 @@ payload does publish all three.
 
 ## Notes
 
+- **Is this the backend you want?** It gives statistical instruction-level
+  attribution and needs a post-3.8 build. For the alternatives that run on a
+  released Triton, see
+  [Choosing a Proton backend](../../../../docs/proton-backends.md).
+
 - **`backend_mode`, not `instrumentation_mode`.** Both render Proton's single
   `--mode`, so the schema makes them mutually exclusive, and `backend_mode`
   requires an explicit (non-`auto`) backend. The backend's documented domain is

@@ -174,6 +174,11 @@ taken from upstream's source.
 
 ## Notes
 
+- **Is this the backend you want?** It gives whole-kernel spans. If you need
+  attribution *inside* a kernel, or you are weighing the three AMD backends
+  against each other, see
+  [Choosing a Proton backend](../../../../docs/proton-backends.md).
+
 - **Why `roctracer` and not `rocprofiler`.** `roctracer` is deprecated
   upstream in favour of the rocprofiler-sdk backend, and as of Triton 3.8.0 it
   is no longer the only whole-kernel AMD backend you can name on a release. It
