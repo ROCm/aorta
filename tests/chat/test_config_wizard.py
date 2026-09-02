@@ -9,7 +9,9 @@ so the masking is tested as a contract, not as formatting.
 
 from __future__ import annotations
 
+import os
 import stat
+from unittest.mock import patch
 
 import pytest
 import tomllib
@@ -65,6 +67,37 @@ class TestConfigInit:
         CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
         mode = stat.S_IMODE(chat_profile.stat().st_mode)
         assert mode == 0o600, oct(mode)
+
+    def test_a_permissive_existing_profile_is_tightened_before_the_key_lands(
+        self, chat_profile
+    ):
+        """``O_CREAT``'s mode applies only on create, so an existing file kept its.
+
+        A key written into a 0644 profile and chmodded afterwards is readable by
+        every other user on the box for the length of the write. The mode has to
+        be set on the descriptor first, which is what makes the guarantee in
+        ``write_profile``'s docstring true rather than aspirational.
+        """
+        from aorta.chat.config import write_profile
+
+        chat_profile.parent.mkdir(parents=True, exist_ok=True)
+        chat_profile.write_text("chunk_size = 1\n", encoding="utf-8")
+        chat_profile.chmod(0o644)
+
+        observed: list[int] = []
+        real_open = open
+
+        def _watching_open(fd, *args, **kwargs):
+            # The mode as it stands at the moment the writable handle is made,
+            # which is the instant before any byte of the key is written.
+            observed.append(stat.S_IMODE(os.fstat(fd).st_mode))
+            return real_open(fd, *args, **kwargs)
+
+        with patch("aorta.chat.config.open", _watching_open):
+            write_profile({"remote_llm_api_key": "sk-secret"}, path=chat_profile)
+
+        assert observed == [0o600], [oct(m) for m in observed]
+        assert stat.S_IMODE(chat_profile.stat().st_mode) == 0o600
 
     def test_an_existing_profile_is_not_clobbered(self, chat_profile):
         chat_profile.write_text("chunk_size = 1\n", encoding="utf-8")

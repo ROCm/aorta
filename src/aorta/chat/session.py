@@ -43,11 +43,15 @@ async def invoke_agent(
     """
     from langchain_core.messages import HumanMessage
 
-    history.append(HumanMessage(content=query))
+    # A copy, not the caller's list: both front doors catch a graph failure and
+    # carry on with the history they passed in, so appending before the await
+    # left the failed question in it as an unanswered user turn that every
+    # later request then replayed.
+    pending = [*history, HumanMessage(content=query)]
     with count_llm_calls("query"):
         result = await agent_graph.ainvoke(
             {
-                "messages": history,
+                "messages": pending,
                 "route": None,
                 "plan": None,
                 "retrieved_context": None,
@@ -57,5 +61,4 @@ async def invoke_agent(
             }
         )
     reply = extract_reply(result.get("messages", []))
-    history.append(AIMessage(content=reply))
-    return reply, history, result
+    return reply, [*pending, AIMessage(content=reply)], result

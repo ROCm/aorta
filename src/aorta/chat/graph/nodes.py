@@ -210,12 +210,14 @@ def _plugin_tool_help(tools: dict[str, ChatTool]) -> str:
 #: refused, and tells prompt-injected text that a shell is worth asking for.
 _SHELL_TOOL_ACT_HELP = (
     "\nAlso available:\n\n"
-    '- run_terminal_command(command="cmd") - Run a sandboxed terminal command '
-    "in the AORTA directory.\n"
+    '- run_terminal_command(command="cmd") - Run one allowlisted command, '
+    "starting in the AORTA directory. Not a filesystem sandbox; prefer "
+    "read_file, list_files and grep_code where they will do.\n"
 )
 _SHELL_TOOL_PLAN_HELP = (
     "\nAlso available:\n\n"
-    "- run_terminal_command(command) - Run a sandboxed terminal command.\n"
+    "- run_terminal_command(command) - Run one allowlisted command. Not a "
+    "filesystem sandbox; prefer the file and search tools where they will do.\n"
 )
 
 

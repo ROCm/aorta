@@ -563,17 +563,20 @@ def write_profile(values: dict[str, Any], path: Path | None = None) -> Path:
     body = render_profile(values)
     # os.open carrying the mode, rather than write_text followed by chmod: the
     # latter leaves a window in which the key is on disk under the process
-    # umask. The explicit chmod after covers the pre-existing-file case, where
-    # O_CREAT's mode argument is ignored.
+    # umask.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PROFILE_FILE_MODE)
     try:
+        # O_CREAT's mode applies only when the file is created, so an existing
+        # profile keeps whatever mode it had -- 0644 from a careless editor,
+        # say. fchmod on the descriptor closes that: a chmod after the write
+        # would be a chmod after the key was already on disk world-readable.
+        os.fchmod(fd, PROFILE_FILE_MODE)
         handle = open(fd, "w", encoding="utf-8")
     except BaseException:
         os.close(fd)
         raise
     with handle:  # takes ownership of fd
         handle.write(body)
-    os.chmod(path, PROFILE_FILE_MODE)
     reset_settings()
     return path
 

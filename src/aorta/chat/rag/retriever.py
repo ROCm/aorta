@@ -409,18 +409,22 @@ def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
     the numbers differ, and two BGE-small variants at 384 dimensions would sail
     straight past it and answer from vectors that were never comparable.
 
-    An index with no manifest beside it -- one built before manifests existed,
-    or copied without its sidecar -- is reported as a warning rather than a
-    refusal, because it is more likely to be a correct index missing a file than
-    a wrong one. ``aorta chat doctor`` names it either way.
+    An index whose manifest is absent, unreadable or from a schema this install
+    does not know is refused rather than warned about. The warning it used to
+    get was the same hole by another name: without a usable manifest there is
+    nothing to compare the model against, so two same-dimension indexes from
+    different models are exactly the case that sails through -- the one this
+    function exists to stop. Every path that builds or fetches an index writes
+    the sidecar, so a missing one is a copied or hand-moved index rather than a
+    normal state, and rebuilding or re-fetching is the fix. ``aorta chat
+    doctor`` reports it without raising.
     """
     from aorta.chat.rag import manifest as manifest_mod
 
     try:
         found = manifest_mod.read_manifest(index_file)
     except manifest_mod.ManifestError as exc:
-        logger.warning("Cannot verify the chat index: %s", exc)
-        return
+        raise manifest_mod.IndexMismatchError(str(exc)) from exc
 
     report = manifest_mod.validate(
         found,

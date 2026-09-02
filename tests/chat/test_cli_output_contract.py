@@ -114,3 +114,47 @@ def _inputs(answers: list[str]):
         return remaining.pop(0)
 
     return _input
+
+
+class TestSessionHistoryOnFailure:
+    """A failed turn must not leave an unanswered question in the history.
+
+    Both front doors catch a graph failure and carry on with the list they
+    passed in, so appending the user message before the await left the failed
+    question in it -- and every later request replayed it as a user turn that
+    was never answered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_failed_turn_leaves_the_history_untouched(self, monkeypatch):
+        from aorta.chat import session
+
+        monkeypatch.setattr(
+            session, "agent_graph", _Graph(RuntimeError("provider exploded"))
+        )
+        history: list = []
+        with pytest.raises(RuntimeError):
+            await session.invoke_agent("why did fp32 fail?", history)
+        assert history == []
+
+    @pytest.mark.asyncio
+    async def test_a_successful_turn_returns_both_messages(self, monkeypatch):
+        from aorta.chat import session
+
+        monkeypatch.setattr(session, "agent_graph", _Graph(None))
+        _, returned, _ = await session.invoke_agent("q", [])
+        assert [type(m).__name__ for m in returned] == ["HumanMessage", "AIMessage"]
+
+
+class _Graph:
+    """An ``agent_graph`` stand-in that answers, or raises what it was given."""
+
+    def __init__(self, error: Exception | None) -> None:
+        self._error = error
+
+    async def ainvoke(self, state):
+        if self._error is not None:
+            raise self._error
+        from langchain_core.messages import AIMessage
+
+        return {"messages": [*state["messages"], AIMessage(content="an answer")]}

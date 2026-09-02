@@ -34,7 +34,7 @@ claim is worse off than one who knows the boundary:
 - **Credentials are not scrubbed from message text.** Chat never *puts* a key in
   a message body — keys travel as request headers, which this never sees — but
   if a key reaches a prompt some other way (it is in a file the model read, or
-  in the output of a sandboxed command, or you typed it), it is sent verbatim.
+  in the output of `run_terminal_command`, or you typed it), it is sent verbatim.
 - **Customer and project identifiers are not scrubbed.** A customer name
   survives redaction only *incidentally*, when it happens to sit inside a path
   that gets rewritten. A ticket ID in `matrix.json`, a cluster name in a

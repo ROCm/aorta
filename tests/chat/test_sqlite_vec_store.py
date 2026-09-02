@@ -18,6 +18,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from aorta.chat.rag import indexer as indexer_module
+from aorta.chat.rag import manifest as manifest_module
 from aorta.chat.rag import retriever as retriever_module
 from aorta.chat.rag.indexer import index_codebase
 from aorta.chat.rag.retriever import SqliteVecStore, get_retriever, reset_caches, search_docs
@@ -236,7 +237,38 @@ def _fake_provider() -> SimpleNamespace:
     return SimpleNamespace(
         get_embeddings=BagOfWordsEmbeddings,
         collection_name=lambda: "aorta",
+        model_id=lambda: "bag-of-words",
         describe=lambda: "bag-of-words test embeddings",
+    )
+
+
+def _write_matching_manifest(index_file: Path) -> None:
+    """Put a sidecar beside the index, as every build and fetch path does.
+
+    These tests reach the store through ``index_codebase``, which writes no
+    manifest, so they used to query a sidecar-less index. That is now refused:
+    without a manifest nothing can say which model produced the vectors, which
+    is exactly the mismatch the check exists to catch.
+    """
+    from aorta.chat.rag import manifest as manifest_mod
+
+    if not index_file.is_file():
+        # Nothing to describe. The missing-index path has its own message and
+        # must keep reaching it.
+        return
+    manifest_mod.write_manifest(
+        index_file,
+        manifest_mod.Manifest(
+            aorta_version="0.0.0-test",
+            aorta_sha="",
+            embedding_provider="local",
+            embedding_model="bag-of-words",
+            dimensions=len(VOCABULARY),
+            collection="aorta",
+            chunk_size=512,
+            chunk_overlap=50,
+            index_sha256=manifest_mod.sha256_file(index_file),
+        ),
     )
 
 
@@ -244,9 +276,16 @@ def _patch_settings(monkeypatch, index_file: Path) -> None:
     monkeypatch.setattr(
         retriever_module,
         "settings",
-        SimpleNamespace(index_file=index_file, retriever_k=3, retriever_fetch_k=4),
+        SimpleNamespace(
+            index_file=index_file,
+            retriever_k=3,
+            retriever_fetch_k=4,
+            chunk_size=512,
+            chunk_overlap=50,
+        ),
     )
     monkeypatch.setattr(retriever_module, "get_provider", _fake_provider)
+    _write_matching_manifest(index_file)
 
 
 class TestModuleLevelApi:
@@ -320,3 +359,32 @@ class TestIndexCodebase:
         _patch_settings(monkeypatch, index_file)
         documents = get_retriever().invoke("config timeout")
         assert documents[0].metadata["source"] == "src/config.py"
+
+
+class TestManifestIsRequired:
+    """Decision 20a, tightened: an unverifiable index is refused, not warned about.
+
+    Warning and querying anyway was the same hole the model check exists to
+    close, by another name -- with no usable manifest there is nothing to
+    compare the model against, so two same-dimension indexes built by different
+    models are precisely the case that sails through. Every build and fetch path
+    writes the sidecar, so its absence is a copied or hand-moved index rather
+    than a normal state.
+    """
+
+    def test_an_index_with_no_manifest_is_refused(self, monkeypatch, index_file: Path):
+        _build(index_file).close()
+        _patch_settings(monkeypatch, index_file)
+        manifest_module.manifest_path(index_file).unlink()
+
+        with pytest.raises(manifest_module.IndexMismatchError, match="manifest"):
+            get_retriever()
+
+    def test_a_corrupt_manifest_is_refused(self, monkeypatch, index_file: Path):
+        """Positive evidence something is wrong, not merely absence of evidence."""
+        _build(index_file).close()
+        _patch_settings(monkeypatch, index_file)
+        manifest_module.manifest_path(index_file).write_text("{not json", encoding="utf-8")
+
+        with pytest.raises(manifest_module.IndexMismatchError):
+            get_retriever()
