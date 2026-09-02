@@ -125,4 +125,8 @@ seams are often the better fit:
   [agent](../agent/agentic-testing-guide.md) under `aorta.agents` instead.
 - To *consume* AORTA's results from your own program, you do not need a plugin
   at all — run the CLI and read `matrix.json` and `env.json` through
-  `aorta.artifacts`, which needs no chat extra.
+  `aorta.artifacts`, which needs no chat extra. Note that it is **internal for
+  now**: it is importable from a base `pip install amd-aorta` and deliberately
+  depends only on the standard library, but it is scoped to what AORTA's own
+  tooling needs today and its names may change without a deprecation cycle.
+  Pin your AORTA version if you build on it.
