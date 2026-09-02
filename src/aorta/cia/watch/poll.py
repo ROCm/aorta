@@ -83,18 +83,31 @@ def poll_jobs(
 
             # Discover or refresh watch files
             if not job.watch_files:
-                found = finder.find(
-                    job_dir,
-                    job_context=job_context,
-                    scheduler=job.scheduler,
-                    scheduler_job_id=job.scheduler_job_id,
-                    head_node=getattr(job, "head_node", ""),
-                )
-                # Also include explicit log_path from job record
-                explicit = Path(job.log_path) if job.log_path else None
-                if explicit and explicit.exists() and explicit not in found:
-                    found.insert(0, explicit)
-                job.watch_files = [str(p) for p in found]
+                declared = Path(job.log_path) if job.log_path else None
+                if declared is not None and not declared.is_file():
+                    # Declared but not written yet: the job is still starting.
+                    # Resolving now would cache a guess for the life of the run,
+                    # and discovery has nowhere good to look this early -- it
+                    # falls back to trawling the working directory, which for a
+                    # sanitizer sweep is a source checkout whose test fixtures
+                    # are *designed* to read like failing logs. Watch then
+                    # faithfully diagnoses somebody's test data.
+                    continue
+                if declared is not None:
+                    # The job told us where it writes. Nothing discovery finds
+                    # can be more authoritative than that.
+                    job.watch_files = [str(declared)]
+                else:
+                    job.watch_files = [
+                        str(p)
+                        for p in finder.find(
+                            job_dir,
+                            job_context=job_context,
+                            scheduler=job.scheduler,
+                            scheduler_job_id=job.scheduler_job_id,
+                            head_node=getattr(job, "head_node", ""),
+                        )
+                    ]
                 if job.watch_files:
                     print(f"[watch] {job.job_id}: watching {[Path(p).name for p in job.watch_files]}")
 
