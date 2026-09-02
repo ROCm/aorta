@@ -13,6 +13,7 @@ expects a good one.
 
 from __future__ import annotations
 
+import http.client
 import io
 import urllib.error
 from pathlib import Path
@@ -88,6 +89,22 @@ class _FakeResponse(io.BytesIO):
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+class _FailingResponse(_FakeResponse):
+    """Opens cleanly, then fails partway through its body.
+
+    The interesting half of the failure surface: the request has already
+    succeeded, so nothing here arrives as the ``URLError`` that ``urlopen``
+    wraps a connection failure in.
+    """
+
+    def __init__(self, payload: bytes, error: BaseException) -> None:
+        super().__init__(payload)
+        self._error = error
+
+    def read(self, *args):  # noqa: ARG002 - signature match
+        raise self._error
 
 
 @pytest.fixture()
@@ -259,6 +276,73 @@ class TestFetchFailures:
     def test_a_garbled_manifest_is_reported_as_such(self, server, tmp_path: Path):
         server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = b"{not json"
         with pytest.raises(IndexFetchError, match="not usable"):
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+
+class TestTransferFailures:
+    """Failures after the request succeeded, which is where the gaps were.
+
+    ``urlopen`` wraps a *connection* failure in ``URLError``; a body that stops
+    short or a socket that resets mid-stream does not go through that path, so
+    each one needs a handler of its own or it leaves ``index_ops`` unconverted
+    and the CLI, which only knows :class:`IndexFetchError`, prints a traceback.
+    """
+
+    @staticmethod
+    def _failing_asset(monkeypatch, server, error: BaseException) -> None:
+        """Serve the index body from a response that raises ``error`` mid-read."""
+        real = server.urlopen
+
+        def _urlopen(url, timeout=None):
+            if url.endswith(ASSET_NAME):
+                return _FailingResponse(BODY, error)
+            return real(url, timeout=timeout)
+
+        monkeypatch.setattr(index_ops.urllib.request, "urlopen", _urlopen)
+
+    def test_a_body_that_stops_short_is_reported_and_installs_nothing(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """``IncompleteRead`` is an ``HTTPException``, not an ``OSError``."""
+        self._failing_asset(
+            monkeypatch, server, http.client.IncompleteRead(BODY[:16], len(BODY) - 16)
+        )
+        dest = tmp_path / "i.sqlite"
+        with pytest.raises(IndexFetchError, match="ended early"):
+            fetch_index(version="0.2.1", index_path=dest)
+        assert not dest.exists()
+
+    def test_a_reset_mid_stream_does_not_blame_the_destination(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """Calling a stalled transfer a write failure sends the operator to the disk.
+
+        The node with no egress is the expected case here, so the one message
+        that must not appear is the one naming the destination as the cause.
+        """
+        self._failing_asset(
+            monkeypatch, server, ConnectionResetError(104, "Connection reset by peer")
+        )
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+        assert "could not write" not in str(exc.value)
+        assert "Connection reset by peer" in str(exc.value)
+
+    def test_a_sidecar_reset_is_reported_as_a_fetch_error(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """The sidecar is fetched first, so it fails first."""
+
+        def _urlopen(url, timeout=None):  # noqa: ARG001 - signature match
+            return _FailingResponse(b"", ConnectionResetError(104, "Connection reset by peer"))
+
+        monkeypatch.setattr(index_ops.urllib.request, "urlopen", _urlopen)
+        with pytest.raises(IndexFetchError, match="Connection reset by peer"):
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+    def test_a_sidecar_that_is_not_utf8_is_reported_as_a_fetch_error(self, server, tmp_path: Path):
+        server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = b"\xff\xfe{}"
+        with pytest.raises(IndexFetchError, match="not valid UTF-8"):
             fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
 
 

@@ -23,6 +23,7 @@ a ``.devN+g<sha>`` version takes the rolling one and says how far off it is.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -358,12 +359,33 @@ def _download(url: str, target: Path) -> None:
         raise IndexFetchError(f"could not download {url}: HTTP {exc.code} {exc.reason}") from exc
     except urllib.error.URLError as exc:
         raise IndexFetchError(f"could not reach {url}: {exc.reason}." + _NO_EGRESS_HINT) from exc
+    except http.client.HTTPException as exc:
+        # A response body that stops short of its Content-Length raises
+        # IncompleteRead, which is not an OSError, so it would leave this
+        # function as a traceback past the CLI's IndexFetchError guard -- and a
+        # truncated transfer is the expected failure for tens of megabytes over
+        # a flaky link, not an anomaly.
+        raise IndexFetchError(
+            f"the download of {url} ended early ({type(exc).__name__}: {exc}); "
+            "nothing was installed"
+        ) from exc
     except OSError as exc:
-        raise IndexFetchError(f"could not write {target}: {exc}") from exc
+        # Names both sides rather than asserting a cause it cannot know: this
+        # single handler covers a socket error mid-stream (never wrapped as a
+        # URLError, because the request itself succeeded) as well as a full or
+        # unwritable destination.
+        raise IndexFetchError(f"could not transfer {url} to {target}: {exc}") from exc
 
 
 def _download_text(url: str) -> str:
-    """Fetch a small sidecar (manifest or checksum) as text."""
+    """Fetch a small sidecar (manifest or checksum) as text, or raise
+    :class:`IndexFetchError`.
+
+    Fetched before the index itself, so every failure here has to arrive as
+    ``IndexFetchError`` for the CLI to render it: this is the first thing
+    ``aorta chat index fetch`` does on a node whose egress it knows nothing
+    about.
+    """
     try:
         with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT) as response:  # noqa: S310
             return response.read().decode("utf-8")
@@ -377,6 +399,10 @@ def _download_text(url: str) -> str:
         ) from exc
     except urllib.error.URLError as exc:
         raise IndexFetchError(f"could not reach {url}: {exc.reason}" + _NO_EGRESS_HINT) from exc
+    except (http.client.HTTPException, OSError) as exc:
+        raise IndexFetchError(f"could not fetch {url}: {type(exc).__name__}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise IndexFetchError(f"the sidecar at {url} is not valid UTF-8 ({exc})") from exc
 
 
 def _verify_checksum(path: Path, expected_line: str, url: str) -> str:
