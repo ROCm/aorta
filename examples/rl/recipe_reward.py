@@ -38,29 +38,42 @@ Tier 6 in the plan -- "does the recipe express the *asked-for* shape" -- is
 deliberately not implemented. It needs a rubric or a judge model, and inventing
 an automatic proxy for it is how reward hacking starts.
 
-THE MEMORISATION CAVEAT
------------------------
+The novelty gate
+----------------
 
-**Verbatim reproduction of a committed recipe scores tier 5.** Every check here
-is a property of the artifact, not of the model's work: a policy that learns to
-emit `recipes/tokenspeed/tokenspeed-serve-load.yaml` character-for-character
-gets full automatic marks for retrieval. This reward is therefore a floor on
-syntactic and semantic well-formedness, not evidence of synthesis, and it cannot
-be the only term in a training objective.
+Every tier above is a property of the artifact, not of the model's work, so a
+policy that emits `recipes/tokenspeed/tokenspeed-serve-load.yaml`
+character-for-character earns tier 5 for retrieval. That is not a caveat to
+document, it is a reward the policy will find, so it is scored:
 
-`--check-memorisation` reports the nearest committed recipe by similarity, which
-is the cheap version of the mitigation. A real run needs at least: held-out
-prompts whose target recipes are not in the training corpus, a novelty term or
-penalty against the corpus, and tier-6 grading by something that can tell
-"answers the question" from "is a valid recipe". Treat a rising tier-5 rate on
-its own as a memorisation alarm, not as progress.
+    reward = (tier / MAX_TIER) * novelty_multiplier
+
+The multiplier is 1.0 below `MEMORISATION_SOFT` similarity to the nearest
+committed recipe, tapers linearly to 0.0 at `MEMORISATION_HARD`, and is 0.0 at
+or above it. Two thresholds rather than one because each alone is gameable: a
+pure cliff lets a policy park just underneath it, and a pure taper never
+actually refuses to pay for a verbatim copy.
+
+Similarity is measured on a *canonical* form -- YAML re-parsed and re-emitted
+with sorted keys, comments gone, and the arbitrary `ticket` label dropped -- so
+the obvious evasions do not work. Renaming the ticket, reordering keys,
+reindenting, or stripping comments leaves a copied recipe at ~1.0 similarity and
+a reward of zero. Only changing what the recipe *does* moves it.
+
+What the gate still cannot do: it measures distance from the committed corpus,
+which is a proxy for the training corpus and not the same set. It also cannot
+tell a novel recipe from a novel *useless* one -- tier 6, "does this express the
+asked-for shape", needs a rubric or a judge model and is deliberately still
+unimplemented, because inventing an automatic proxy for it is how reward hacking
+starts. A real run still needs held-out prompts and tier-6 grading; the gate
+removes the single largest way to score well without working, not all of them.
 
 Usage
 -----
 
     python examples/rl/recipe_reward.py                     # built-in demo
     python examples/rl/recipe_reward.py path/to/recipe.yaml  # grade files
-    python examples/rl/recipe_reward.py --check-memorisation path/to/recipe.yaml
+    python examples/rl/recipe_reward.py --no-novelty-gate path/to/recipe.yaml
     python examples/rl/recipe_reward.py --json recipes/tokenspeed/*.yaml
 """
 
@@ -89,6 +102,17 @@ from aorta.triage.recipe import load_recipe
 
 MAX_TIER = 5
 
+# Below SOFT a candidate is treated as its own work; at or above HARD it is
+# treated as retrieval and paid nothing. See "The novelty gate" above for why
+# there are two thresholds instead of one.
+MEMORISATION_SOFT = 0.80
+MEMORISATION_HARD = 0.95
+
+# Fields that identify a recipe without changing what it measures. Two
+# candidates differing only here are the same recipe for novelty purposes, so
+# renaming the ticket cannot buy a policy out of the gate.
+_IDENTITY_KEYS = ("ticket",)
+
 TIER_NAMES = {
     0: "does not parse",
     1: "parses as YAML",
@@ -105,19 +129,25 @@ class Grade:
 
     tier: int = 0
     reward: float = 0.0
+    tier_reward: float = 0.0
     failed_at: str | None = None
     reason: str | None = None
     warnings: list[str] = field(default_factory=list)
     nearest_committed: tuple[str, float] | None = None
+    novelty_multiplier: float = 1.0
+    memorised: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "tier": self.tier,
             "reward": self.reward,
+            "tier_reward": self.tier_reward,
             "tier_name": TIER_NAMES[self.tier],
             "failed_at": self.failed_at,
             "reason": self.reason,
             "warnings": self.warnings,
+            "novelty_multiplier": self.novelty_multiplier,
+            "memorised": self.memorised,
         }
         if self.nearest_committed is not None:
             out["nearest_committed_recipe"] = self.nearest_committed[0]
@@ -280,16 +310,55 @@ def grade_recipe_text(
     return _finish(grade, text, corpus)
 
 
+def canonicalise(text: str) -> str:
+    """Reduce a recipe to what it *does*, for similarity comparison.
+
+    Re-emitting the parsed YAML with sorted keys collapses the whole class of
+    cosmetic edits -- comments, indentation, key order, quoting style -- and
+    dropping the identity fields collapses renaming. What survives is the
+    recipe's actual content, so similarity measures copying rather than
+    formatting. Unparseable text is compared raw; it cannot score above tier 0
+    anyway, so its novelty is moot.
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return text
+    if isinstance(data, dict):
+        data = {k: v for k, v in data.items() if k not in _IDENTITY_KEYS}
+    return yaml.safe_dump(data, sort_keys=True, default_flow_style=False)
+
+
+def novelty_multiplier(similarity: float) -> float:
+    """Reward scale for a candidate this close to the nearest committed recipe."""
+    if similarity < MEMORISATION_SOFT:
+        return 1.0
+    if similarity >= MEMORISATION_HARD:
+        return 0.0
+    span = MEMORISATION_HARD - MEMORISATION_SOFT
+    return round((MEMORISATION_HARD - similarity) / span, 4)
+
+
 def _finish(grade: Grade, text: str, corpus: dict[str, str] | None) -> Grade:
-    grade.reward = grade.tier / MAX_TIER
-    if corpus:
-        best_name, best_ratio = None, 0.0
-        for name, committed in corpus.items():
-            ratio = difflib.SequenceMatcher(None, text, committed).ratio()
-            if ratio > best_ratio:
-                best_name, best_ratio = name, ratio
-        if best_name is not None:
-            grade.nearest_committed = (best_name, best_ratio)
+    grade.tier_reward = grade.tier / MAX_TIER
+    grade.reward = grade.tier_reward
+
+    if not corpus:
+        return grade
+
+    candidate = canonicalise(text)
+    best_name, best_ratio = None, 0.0
+    for name, committed in corpus.items():
+        ratio = difflib.SequenceMatcher(None, candidate, canonicalise(committed)).ratio()
+        if ratio > best_ratio:
+            best_name, best_ratio = name, ratio
+    if best_name is None:
+        return grade
+
+    grade.nearest_committed = (best_name, best_ratio)
+    grade.novelty_multiplier = novelty_multiplier(best_ratio)
+    grade.memorised = best_ratio >= MEMORISATION_HARD
+    grade.reward = round(grade.tier_reward * grade.novelty_multiplier, 4)
     return grade
 
 
@@ -373,12 +442,85 @@ DEMO_CASES = (
 )
 
 
+def _cosmetic_mutation(text: str) -> str:
+    """A copy edited only in ways that do not change what the recipe measures.
+
+    This is the evasion the gate has to survive: reword the ticket, drop the
+    comments, reflow the indentation. The canonical form is identical, so the
+    similarity is unchanged and the reward stays zero.
+    """
+    lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    body = "\n".join(lines)
+    data = yaml.safe_load(body)
+    if isinstance(data, dict):
+        data["ticket"] = "DEMO-RENAMED-TO-EVADE"
+        data = dict(reversed(list(data.items())))
+    return yaml.safe_dump(data, sort_keys=False, default_flow_style=False, indent=4)
+
+
+def _novelty_demo(corpus: dict[str, str]) -> int:
+    """Score a verbatim copy, a cosmetic copy, and a genuinely novel recipe."""
+    print("=" * 72)
+    print("The novelty gate: does copying still pay?")
+    print("=" * 72)
+    print(
+        f"reward = (tier/{MAX_TIER}) * novelty, novelty tapering 1.0 -> 0.0 between "
+        f"{MEMORISATION_SOFT:.2f} and {MEMORISATION_HARD:.2f} similarity\n"
+    )
+
+    if not corpus:
+        print("!! no committed recipes found; cannot demonstrate the gate")
+        return 1
+
+    # Copy a committed tokenspeed_serve recipe: same workload as the novel
+    # candidate below, so the two differ in novelty and nothing else. Grading
+    # the corpus to hunt for a target would cost one full validation per recipe.
+    target_name, target_text = None, None
+    for name, text in sorted(corpus.items()):
+        if "tokenspeed-serve" in name and "rollout" not in name:
+            target_name, target_text = name, text
+            break
+    if target_text is None:
+        target_name, target_text = sorted(corpus.items())[0]
+    print(f"copy target: {target_name}\n")
+
+    cases = (
+        ("verbatim copy of a committed recipe", target_text, True),
+        ("same recipe, ticket renamed and keys reordered", _cosmetic_mutation(target_text), True),
+        ("a genuinely novel valid recipe", _GOOD, False),
+    )
+
+    failures = 0
+    for label, text, expect_memorised in cases:
+        grade = grade_recipe_text(text, corpus=corpus)
+        ok = grade.memorised == expect_memorised and grade.tier == MAX_TIER
+        if not ok:
+            failures += 1
+        nearest, ratio = grade.nearest_committed or ("(none)", 0.0)
+        print(f"{'ok ' if ok else '!! '}{label}")
+        print(
+            f"       tier {grade.tier}/{MAX_TIER} (would pay {grade.tier_reward:.2f}) "
+            f"* novelty {grade.novelty_multiplier:.2f} = reward {grade.reward:.2f}"
+        )
+        print(f"       nearest: {nearest} at {ratio:.3f} canonical similarity")
+        print(f"       memorised: {grade.memorised} (expected {expect_memorised})")
+        print()
+
+    print("The first two cases are the point: both are tier 5, both would have")
+    print("earned full marks from the tiers alone, and both now pay nothing. The")
+    print("third is equally well-formed and keeps its full reward, which is what")
+    print("makes the gate a novelty term and not just a difficulty penalty.\n")
+    return failures
+
+
 def run_demo(corpus: dict[str, str] | None) -> int:
     print("Seam demonstration: recipe-synthesis reward, graded by aorta itself.")
-    print(f"Tiers are cumulative; reward = tier / {MAX_TIER}.\n")
+    print(f"Tiers are cumulative; tier reward = tier / {MAX_TIER}.\n")
     failures = 0
     for label, text, expected in DEMO_CASES:
-        grade = grade_recipe_text(text, corpus=corpus)
+        # Graded without the corpus so the tier ladder reads as a tier ladder;
+        # the gate gets its own section below.
+        grade = grade_recipe_text(text, corpus=None)
         ok = "ok " if grade.tier == expected else "!! "
         if grade.tier != expected:
             failures += 1
@@ -386,17 +528,12 @@ def run_demo(corpus: dict[str, str] | None) -> int:
         print(f"       {TIER_NAMES[grade.tier]}")
         if grade.reason:
             print(f"       stopped at {grade.failed_at}: {grade.reason[:160]}")
-        if grade.nearest_committed:
-            name, ratio = grade.nearest_committed
-            print(f"       nearest committed recipe: {name} ({ratio:.3f} similarity)")
         print()
     print("The tier-4 case is the point of tier 5: it is a valid recipe whose")
     print("concurrency axis does not vary, because the key naming that axis was")
     print("dropped with a warning. Tiers 1-4 cannot see it.\n")
-    print("MEMORISATION CAVEAT: every tier above is a property of the artifact.")
-    print("A policy that reproduces a committed recipe verbatim scores 5/5 for")
-    print("retrieval. This reward is a floor on well-formedness, not evidence of")
-    print("synthesis -- see the module docstring.")
+
+    failures += _novelty_demo(corpus or {})
     return 1 if failures else 0
 
 
@@ -407,15 +544,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("recipes", nargs="*", type=Path,
                         help="recipe files to grade; omit for the built-in demo")
     parser.add_argument("--json", action="store_true", help="emit JSON")
-    parser.add_argument("--check-memorisation", action="store_true",
-                        help="report the nearest committed recipe by similarity")
+    parser.add_argument("--no-novelty-gate", action="store_true",
+                        help="score tiers only, without penalising corpus copies")
     parser.add_argument("--recipes-root", type=Path, default=None,
-                        help="corpus root for --check-memorisation "
+                        help="corpus root for the novelty gate "
                              "(default: <repo>/recipes)")
     args = parser.parse_args(argv)
 
+    # The gate is on by default: it is part of the reward, not a diagnostic, and
+    # a scorer that silently omits it pays full marks for retrieval.
     corpus = None
-    if args.check_memorisation:
+    if not args.no_novelty_gate:
         root = args.recipes_root or (Path(__file__).resolve().parents[2] / "recipes")
         corpus = load_corpus(root) if root.is_dir() else {}
 
@@ -441,6 +580,9 @@ def main(argv: list[str] | None = None) -> int:
             if grade.nearest_committed:
                 name, ratio = grade.nearest_committed
                 print(f"     nearest committed recipe: {name} ({ratio:.3f} similarity)")
+                if grade.memorised:
+                    print(f"     MEMORISED: novelty gate zeroed a tier-{grade.tier} "
+                          f"reward of {grade.tier_reward:.2f}")
     if args.json:
         print(json.dumps(results, indent=2))
     return 0
