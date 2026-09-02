@@ -16,7 +16,7 @@ from langchain_text_splitters import (
 from aorta.chat.config import settings
 from aorta.chat.rag.embeddings.factory import get_provider
 from aorta.chat.rag.retriever import SqliteVecStore
-from aorta.chat.rag.walk import prune_dirnames
+from aorta.chat.rag.walk import is_symlink, prune_dirnames
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,11 @@ def _load_documents(
         for filename in sorted(filenames):
             fpath = root / filename
             if fpath.suffix not in CODE_EXTENSIONS:
+                continue
+            if is_symlink(fpath):
+                # ``include`` tests the link's own path, which is the tracked
+                # one, while the read below would take the target's bytes.
+                logger.debug("Skipping symlink: %s", fpath)
                 continue
 
             rel = str(fpath.relative_to(base))

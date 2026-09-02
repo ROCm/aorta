@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 from aorta.chat.config import settings
-from aorta.chat.rag.walk import should_skip_dir
+from aorta.chat.rag.walk import is_symlink, should_skip_dir
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,12 @@ def _build_tree(root: Path, prefix: str = "") -> list[str]:
     """Recursively build a tree listing with Python signatures."""
     entries = sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name))
     lines: list[str] = []
+
+    # Unlike the ``os.walk`` consumers, this descent is hand-rolled, so nothing
+    # declines to follow a link for it: a symlinked directory would be recursed
+    # into outside the configured root, and a cycle would recurse until the
+    # interpreter's own limit stopped it.
+    entries = [entry for entry in entries if not is_symlink(entry)]
 
     for i, entry in enumerate(entries):
         is_last = i == len(entries) - 1

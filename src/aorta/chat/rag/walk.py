@@ -59,6 +59,27 @@ def should_skip_dir(path: Path) -> bool:
     return False
 
 
+def is_symlink(path: Path) -> bool:
+    """True for a walked entry that must not be followed.
+
+    The containment guards in this package vet the *entry point* of a traversal
+    -- ``resolve_within`` resolves the path a caller asked for, so a link whose
+    target sits outside the root is refused there. Neither that check nor
+    :func:`prune_dirnames` re-resolves the individual files a walk then reaches,
+    so a link found underneath an allowed root is read at wherever its target
+    lives. With ``embedding_provider = "remote"`` that content is uploaded, and
+    for a published index it is embedded verbatim despite the tracked-path
+    allowlist passing on the link's own path.
+
+    An unreadable entry counts as one to skip: the walk has nothing to gain from
+    a path it cannot stat.
+    """
+    try:
+        return path.is_symlink()
+    except OSError:
+        return True
+
+
 def prune_dirnames(root: Path, dirnames: list[str]) -> None:
     """Drop unwanted directories from *dirnames*, editing it in place.
 

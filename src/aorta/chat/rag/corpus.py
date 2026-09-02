@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import subprocess
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,18 +74,38 @@ class Corpus:
         return f"{self.base} [{', '.join(self.subpaths)}] ({scope})"
 
 
+#: Hosts whose ``owner/name`` path this guard is willing to read.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+
+#: ``user@host:owner/name`` -- git's SCP-like syntax, which is not a URL and so
+#: is invisible to ``urlsplit``. The negative lookahead keeps ``host:/path``
+#: (a genuine URL missing its scheme) out.
+_SCP_REMOTE = re.compile(r"^(?:[^@/]+@)?(?P<host>[^:/]+):(?!/)(?P<path>.+)$")
+
+
 def _normalise_remote(url: str) -> str:
     """Reduce a git remote URL to ``owner/name``.
 
     Handles ``git@github.com:owner/name.git``, ``https://github.com/owner/name``
     and the ``ssh://`` form, because the guard has to hold whichever spelling
     the runner's checkout happens to use.
+
+    The host is matched as a host rather than found anywhere in the string. A
+    substring test reduced ``https://evil.example/github.com/ROCm/aorta`` to
+    ``ROCm/aorta``, so any remote at all could satisfy the publishable-index
+    guard by carrying the right text in its path.
     """
     text = url.strip().removesuffix(".git")
-    for separator in ("github.com:", "github.com/"):
-        _, found, tail = text.partition(separator)
-        if found:
-            return tail.strip("/")
+    scp = _SCP_REMOTE.match(text)
+    if scp:
+        host, path = scp.group("host"), scp.group("path")
+    else:
+        split = urllib.parse.urlsplit(text)
+        host, path = split.hostname or "", split.path
+    if host.lower() in _GITHUB_HOSTS:
+        return path.strip("/")
+    # Not a GitHub remote: return it whole, so the caller reports what it really
+    # found rather than a fragment that could coincide with the expected slug.
     return text.strip("/")
 
 

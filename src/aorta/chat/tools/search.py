@@ -9,7 +9,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from aorta.chat.config import settings
-from aorta.chat.rag.walk import prune_dirnames
+from aorta.chat.rag.walk import is_symlink, prune_dirnames
 from aorta.chat.tools._sandbox import AORTA_ROOT_LABEL, resolve_within
 
 
@@ -96,6 +96,10 @@ def grep_code(pattern: str, path: str = ".", max_results: int = 20) -> str:
         for filename in sorted(filenames):
             fpath = current / filename
             if fpath.suffix not in _SEARCH_EXTENSIONS:
+                continue
+            if is_symlink(fpath):
+                # ``resolve_within`` above vetted the search root, not each file
+                # underneath it, so a link here would be opened at its target.
                 continue
 
             rel = str(fpath.relative_to(root))

@@ -95,6 +95,25 @@ class TestPublicTreeGuard:
         with pytest.raises(PublicTreeError):
             corpus_mod.assert_public_tree(repo)
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://evil.example/github.com/ROCm/aorta.git",
+            "https://github.com.evil.example/ROCm/aorta.git",
+            "git@evil.example:github.com/ROCm/aorta.git",
+        ],
+    )
+    def test_a_remote_that_only_contains_the_host_refuses(self, repo: Path, url: str):
+        """The host has to be the host, not a substring anywhere in the URL.
+
+        Searching for ``github.com/`` reduced every one of these to
+        ``ROCm/aorta``, so any remote at all could satisfy the guard by
+        carrying the right text somewhere in its path.
+        """
+        _git(repo, "remote", "set-url", "origin", url)
+        with pytest.raises(PublicTreeError):
+            corpus_mod.assert_public_tree(repo)
+
     def test_a_tree_that_is_not_a_git_checkout_refuses(self, tmp_path: Path):
         """Absence of evidence is not a pass. The guard fails closed."""
         (tmp_path / "loose").mkdir()
@@ -348,6 +367,13 @@ def _install_fake_embedder(monkeypatch) -> None:
 
         def collection_name(self):
             return "aorta_fake"
+
+        def model_id(self):
+            # Read from settings, as the real local provider does, so the
+            # manifest assertions still see the model the test configured.
+            from aorta.chat.config import settings
+
+            return settings.embedding_model
 
         def describe(self):
             return "fake 8d embeddings"

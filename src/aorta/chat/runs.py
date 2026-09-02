@@ -77,8 +77,12 @@ def _sorted_children(directory: Path) -> tuple[list[Path], list[Path]]:
         entries = sorted(directory.iterdir())
     except OSError:
         return [], []
+    # Both halves refuse links for the same reason: ``iter_artifacts`` is a
+    # discovery walk, so nothing re-resolves what it finds against ``root`` the
+    # way the direct readers resolve a path the caller named. A ``matrix.json``
+    # symlink would otherwise be read, and indexed, from outside the sandbox.
     dirs = [e for e in entries if e.is_dir() and not e.is_symlink()]
-    files = [e for e in entries if e.is_file()]
+    files = [e for e in entries if e.is_file() and not e.is_symlink()]
     return dirs, files
 
 
