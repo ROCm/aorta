@@ -6,23 +6,42 @@ This package provides:
 """
 
 from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
-# Single source of truth for the version is the distribution metadata, which is
-# generated from ``pyproject.toml`` at build/install time. This keeps
-# ``aorta.__version__`` in lockstep with whatever was actually installed (wheel,
-# ``pip install .``, editable, or ``pip install git+...``) instead of a hard-coded
-# literal that silently drifts from the released version. This runs at import
-# time, so the fallback is best-effort and defensive: besides the expected
-# missing-metadata case (uninstalled source tree), any unexpected metadata error
-# (e.g. unreadable/corrupted dist-info) must not break ``import aorta``.
-try:
-    __version__ = version("amd-aorta")
-except PackageNotFoundError:  # source tree without dist-info
-    __version__ = "0.0.0+unknown"
-except Exception:  # pragma: no cover - defensive: never break import on metadata errors
-    __version__ = "0.0.0+unknown"
+
+def __getattr__(name: str) -> Any:
+    """Resolve ``aorta.__version__`` on first access (PEP 562).
+
+    Single source of truth for the version is the distribution metadata, which
+    is generated from ``pyproject.toml`` at build/install time. This keeps
+    ``aorta.__version__`` in lockstep with whatever was actually installed
+    (wheel, ``pip install .``, editable, or ``pip install git+...``) instead of
+    a hard-coded literal that silently drifts from the released version.
+
+    Reading that metadata pulls in ``importlib.metadata`` and walks ``sys.path``
+    for dist-info, which cost about 100 ms of the ~180 ms a bare ``aorta``
+    invocation spent on imports (issue #417) -- for an attribute almost no
+    caller reads. Resolving on demand and caching the result in the module
+    globals keeps the guarantee without charging every import for it.
+
+    The fallback is best-effort and defensive: besides the expected
+    missing-metadata case (uninstalled source tree), any unexpected metadata
+    error (e.g. unreadable/corrupted dist-info) must not break ``import aorta``.
+    """
+    if name != "__version__":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    try:
+        resolved = version("amd-aorta")
+    except PackageNotFoundError:  # source tree without dist-info
+        resolved = "0.0.0+unknown"
+    except Exception:  # pragma: no cover - defensive: never break on metadata errors
+        resolved = "0.0.0+unknown"
+
+    globals()["__version__"] = resolved
+    return resolved
 
 
 def load_training_entrypoint() -> Any:
