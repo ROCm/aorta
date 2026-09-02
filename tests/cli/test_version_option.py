@@ -8,18 +8,23 @@ onto the distribution providing it. This project's distribution is
 name always took that fallback -- and the fallback raises ``RuntimeError`` when
 the mapping is ambiguous.
 
-Two ordinary conditions make it ambiguous, neither needing a stale artefact:
+Two ordinary layouts make it ambiguous, neither needing a stale artefact:
 
-* Any editable install of this src layout. The ``.pth`` puts ``src/`` on the
-  path and the editable build itself leaves ``src/amd_aorta.egg-info`` there,
-  so it is discovered as a *second* distribution also named ``amd-aorta``. A
-  fresh ``pip install -e .`` in a clean checkout is enough.
-* Any install, wheel included, on a distro where ``sys.platlibdir`` is
-  ``lib64`` (the RHEL and Fedora family). ``python -m venv`` makes ``lib64`` a
-  symlink to ``lib`` and ``site`` puts both on ``sys.path``, so *every*
-  ``.dist-info`` is enumerated twice.
+* An editable install whose build left ``src/amd_aorta.egg-info`` in the tree.
+  The ``.pth`` puts ``src/`` on the path, so that directory is discovered as a
+  *second* distribution also named ``amd-aorta``. Whether the build leaves it
+  depends on the install path -- an isolated build (the default for both ``pip``
+  and ``uv``) does, ``--no-build-isolation`` may not -- so a fresh
+  ``pip install -e .`` in a clean checkout is typically enough.
+* A virtual environment that exposes its site-packages through both ``lib`` and
+  ``lib64``, which is what ``python -m venv`` produces where
+  ``sys.platlibdir`` is ``lib64`` (the RHEL and Fedora family): ``lib64``
+  becomes a symlink to ``lib`` and ``site`` puts both on ``sys.path``, so
+  *every* ``.dist-info`` under them is enumerated twice -- no editable install
+  required.
 
-Naming the distribution skips the fallback.
+Naming the distribution skips the fallback on every layout, which is why the
+test below injects the ambiguous mapping instead of relying on either one.
 
 These run in a subprocess because ``version_option`` caches the resolved
 version in its closure: once anything in the process has asked for

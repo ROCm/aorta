@@ -7,13 +7,14 @@ from aorta.cli import agent, bench, bundle, env, environments, mitigations, prob
 
 @click.group()
 # The distribution is ``amd-aorta``; only the import package is ``aorta``. Passing
-# the import name makes Click fall back to ``packages_distributions()``, which
-# reports ``amd-aorta`` twice under any editable install of this src layout -- the
-# editable build leaves ``src/amd_aorta.egg-info`` on the path beside the
-# site-packages ``.dist-info`` -- and twice again under a plain wheel install on a
-# ``lib64`` distro, where ``lib64`` symlinks to ``lib`` and both land on
-# ``sys.path``. ``--version`` then raises instead of printing (issue #429). Naming
-# the distribution skips that fallback entirely.
+# the import name makes Click fall back to ``packages_distributions()``, which can
+# report ``amd-aorta`` twice -- and then ``--version`` raises instead of printing
+# (issue #429). Two layouts do it: an editable install whose build left
+# ``src/amd_aorta.egg-info`` beside the site-packages ``.dist-info`` (build
+# isolation, the default for pip and uv, does; ``--no-build-isolation`` may not),
+# and a venv that exposes site-packages through both ``lib`` and ``lib64``, as
+# ``python -m venv`` does where ``sys.platlibdir`` is ``lib64``. Naming the
+# distribution skips that fallback entirely, on every layout.
 @click.version_option(package_name="amd-aorta")
 def main() -> None:
     """AORTA - GPU debugging platform for ROCm."""
