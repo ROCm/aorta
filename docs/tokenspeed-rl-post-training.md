@@ -20,12 +20,18 @@ The short version:
 - **The RL loop does not belong in aorta.** AORTA is a benchmarking and triage
   harness. Its job here is to stand up, validate and measure the rollout engine.
   The trainer belongs in a separate effort built on verl or slime.
-- **TokenSpeed already has the hard part.** It ships an RL online weight-sync
-  control plane — `/init_weight_transfer_engine`, `/start_weight_update`,
-  `/update_weights`, `/finish_weight_update`, `/pause`, `/resume` — with NCCL and
-  CUDA-IPC transports, and names verl / slime / AReaL / miles as the trainers it
-  is for. This is not a gap to work around; it is the reason the engine choice is
-  defensible.
+- **TokenSpeed has the hard part designed, and neither transport works.** It
+  ships an RL online weight-sync control plane —
+  `/init_weight_transfer_engine`, `/start_weight_update`, `/update_weights`,
+  `/finish_weight_update`, `/pause`, `/resume` — with NCCL and CUDA-IPC
+  transports, and names verl / slime / AReaL / miles as the trainers it is for.
+  Measured on gfx950: the control plane works and is effectively free (1–5 ms
+  against a 322 s cold start), `ipc` raises `NotImplementedError`, and `nccl`
+  **returns success while transferring nothing**, loading uninitialised device
+  memory into the model
+  ([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer)). The engine
+  choice is still defensible on the shape of the API; the loop is blocked on an
+  upstream fix.
 - **The strongest training signal in this repo is recipe synthesis**, because a
   generated recipe either loads, validates and dry-runs or it does not. That is a
   graded machine-checkable reward requiring no human labelling. The second
@@ -33,10 +39,14 @@ The short version:
   deterministic labeller that turns every archived probe run into a free example.
 - **The cost claim is half right.** "No cluster needed" holds with room to spare:
   a plausible 400-iteration run generates ~419M tokens, which is ~2.5 hours of
-  generation across one 8-GPU MI355X node. "Light on compute" does not hold on a
-  FLOPs basis — the update is roughly 5x the generation's FLOPs — it holds only
-  because decode utilises the hardware so much worse. The wall-clock split is
-  more like 70/30 than 95/5, which caps what optimising the rollout half can buy.
+  generation across one 8-GPU MI355X node — or ~3.3 hours once `ipc`'s absence
+  forces the trainer onto 2 of those 8 GPUs, which costs a third of the
+  generation throughput and **no second node**
+  ([5b](#5b-what-disaggregation-actually-costs)). "Light on compute" does not
+  hold on a FLOPs basis — the update is roughly 5x the generation's FLOPs — it
+  holds only because decode utilises the hardware so much worse. The wall-clock
+  split is more like 70/30 than 95/5, which caps what optimising the rollout
+  half can buy.
 - **"CIA" and "Sleuth" do not appear anywhere in this repository.** The internal
   consumer that does exist is `aorta agent`'s `LiteLLMProposer`, and it is a good
   enough seam to design against. Whether that is what was meant is the first
@@ -131,15 +141,30 @@ weights**, against roughly 2.5 hours of actual generation for the same run (see
 [cost](#5-cost-does-the-claim-hold)). Cold-starting per iteration would make
 bring-up eleven times the cost of the work.
 
-What [Phase 2](#phase-2-validate-the-weight-sync-path) since established, by
-running it: the control plane works on this image on gfx950, and costs 1-5 ms
-against a 322 s cold start. But **`ipc` is not implemented** — its receive path
-raises — so of the two backends named above only `nccl` is real, and the
-colocated deployment this section implies is not available. What is still not
-established is the NCCL transport itself under a real trainer peer, and any of
-this at the tensor-parallel widths a real run would use;
-`docs/tokenspeed-serving.md` records that TP=4 does not come up at all on this
-image.
+**The heading above is wrong, and running it is what established that.** Two
+phases of measurement have inverted this section's conclusion, and it is left
+standing because the reasoning that produced it — an engine with this API is the
+right engine — is still correct, while the assumption underneath it was not.
+
+[Phase 2](#phase-2-validate-the-weight-sync-path) found the control plane works
+on this image on gfx950 and costs 1–5 ms against a 322 s cold start, but that
+**`ipc` is not implemented** — its receive path raises — so of the two backends
+named above only `nccl` is wired, and the colocated deployment this section
+implies is unavailable.
+
+[Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer) then found that
+`nccl` **does not transfer either.** With a real trainer peer joined to the
+group, `/update_weights` returns `200 {"message": "Weights updated"}` having
+moved no tensor at all, and loads uninitialised device memory into the model.
+The served completion changes, so the failure impersonates success; only pushing
+the original weights back and watching them *not* come back reveals it.
+
+So the honest position is that the API exists, its shape is right, its control
+plane is fast, and **neither of its two transports works on this build**. The
+27.8-hour argument above still holds — it is why this matters — but the fix it
+depends on is upstream and unbuilt. TP > 1 is blocked behind the same defect;
+`docs/tokenspeed-serving.md` separately records that TP=4 does not come up at
+all on this image.
 
 ### The EOS trap, which cost the most to find
 
@@ -412,6 +437,68 @@ parallel across data-parallel workers, so one 8-GPU node divides it.
 generation on a single node for the whole run. Even the conservative 8B figure
 fits inside a working day. The claim is not marginal.
 
+### 5b. What disaggregation actually costs
+
+`backend: ipc` is unimplemented (Phase 2), so trainer and engine cannot share
+GPUs and the figures above — which assumed all 8 GPUs generating — need
+revising. An earlier draft of this document said that "doubles the nodes". **That
+was wrong, and the correction is in our favour.**
+
+`nccl` requires separate *GPUs*, not separate *nodes*. The Phase 2b peer ran on
+GPU 7 of the same node as the engine on GPU 0, over intra-node RCCL. So the cost
+of losing `ipc` is paid in devices out of the node's eight, not in a second
+node.
+
+**What each side wants for a Qwen3-8B-class model.** MI355X carries 288 GB
+HBM3e per GPU, 8 per node, which is what makes this comfortable:
+
+| Side | Component | Memory |
+|---|---|---|
+| Trainer | policy weights (bf16) | 16 GB |
+| | gradients (bf16) | 16 GB |
+| | Adam moments (fp32 m + v) | 64 GB |
+| | fp32 master weights | 32 GB |
+| | frozen reference policy (bf16) | 16 GB |
+| | activations, 512-token sequences | ~20–40 GB |
+| | **trainer total** | **~165–185 GB** |
+| Engine | weights per data-parallel replica (bf16) | 16 GB |
+| | KV cache + workspace per replica | ~30–60 GB |
+
+The trainer fits on a single 288 GB GPU on paper. Giving it **two** is the
+recommendation — headroom for activations at longer sequences, and FSDP across a
+pair rather than betting the run on a single-device fit. GRPO needs no value
+network, which is what keeps this off four or more.
+
+That leaves **6 GPUs generating instead of 8**, and generation is
+embarrassingly parallel across data-parallel replicas, so the cost is linear:
+
+| Layout | Generating GPUs | Generation (8B scaled) | Generation (8B conservative) | Iteration wall clock | Node-hours |
+|---|---|---|---|---|---|
+| colocated `ipc` (unavailable) | 8 | 2.5 h | 9.0 h | 3.6 h | **3.6** |
+| **disaggregated, one node (6 + 2)** | 6 | 3.3 h | 12.0 h | 4.8 h | **4.8** |
+| disaggregated, two nodes (8 + 2) | 8 | 2.5 h | 9.0 h | 3.6 h | **7.1** |
+
+Iteration wall clock divides generation by the ~70% share section 5 derives, so
+it covers the training step too; node-hours multiply that by the nodes held.
+
+**The recommendation is the middle row: keep it on one node.** Losing a quarter
+of the generating GPUs costs ~33% more wall clock; buying that back with a
+second node costs ~48% more node-hours and leaves 6 GPUs idle on the second
+node. The one-node layout is the cheaper trade on both counts, and it is also
+the simpler thing to schedule on a preemptible partition.
+
+**So "no large cluster" survives, and it was never close.** The honest revision
+is 3.6 → 4.8 node-hours for the scaled 8B estimate, and 12.9 → 17.1 for the
+conservative one. A 400-iteration run still fits on **one 8-GPU node** inside a
+day, which is what the claim actually asserted. What disaggregation costs is a
+quarter of the node's generation capacity, not a second machine.
+
+Two caveats on those numbers. The 8B throughput is extrapolated from a
+concurrency-8 measurement by a factor measured on Qwen3-0.6B (section 5), so the
+conservative column is the one to plan against. And all of this is contingent on
+the weight transport working at all — Phase 2b found it does not, and no
+topology fixes that.
+
 **Verdict on "light on compute": not as stated.** On a FLOPs basis the update is
 *larger* than the generation. With `N` parameters and `T` generated tokens,
 generation costs about `2NT` (one forward per token), while a GRPO iteration
@@ -576,8 +663,10 @@ and never restarted, so **pause/resume against a running server is settled**.
 **The colocated path is not available.** `backend: ipc` accepts `init` and
 `start`, parses `update_info` in full, and then raises `NotImplementedError` —
 see [A6](#assumptions-to-confirm-with-manoj). Phase 4's "colocated (`ipc`) on
-one 8-GPU node" has to become disaggregated `nccl`, which doubles the nodes.
-This is exactly the assumption that was worth breaking early, and it broke.
+one 8-GPU node" has to become disaggregated `nccl` — which costs GPUs inside the
+node, not a second node, since `nccl` runs intra-node quite happily
+(see [5b](#5b-what-disaggregation-actually-costs)). This is exactly the
+assumption that was worth breaking early, and it broke.
 
 **Two contract details a trainer will hit.** The lifecycle guards are real —
 start-before-init, update-with-no-active-update, finish-with-none-active and
@@ -597,13 +686,117 @@ conflicts from bugs by status code will misclassify both. Malformed requests the
 `/release_memory_occupation`, `/resume_memory_occupation`. slime and verl's
 SGLang rollout should drive this unchanged, which widens the trainer choice.
 
-**What is still open**, and needs a second process rather than more reading: an
-actual NCCL broadcast from a trainer peer, asserting the served outputs change,
-and the same at TP > 1. The `nccl` metadata contract is known —
+### Phase 2b — the NCCL data plane does not transfer
+
+The control plane above is real. **The transport is not.** A trainer peer was
+stood up on an 8-GPU gfx950 node (engine on GPU 0, peer on GPU 7, disjoint
+`HIP_VISIBLE_DEVICES`, TP=1, Qwen3-0.6B) and driven through the full
+`init → start → update → finish`. Every call returns 200. Nothing moves.
+
+**The finding.** `/update_weights` answers
+`200 {"message": "Weights updated"}` while transferring nothing, and **loads
+uninitialised device memory into the model**. The served completion changes,
+which is why this is dangerous: it looks like a working weight update.
+
+```
+prompt "The capital of France is", temperature 0, TP=1 (identical at TP=2)
+  baseline          " Paris. The capital of France is also the capital of ..."
+  after "perturb"   "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  after "restore"   "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"   <- should equal baseline
+```
+
+**Why the restore half is what caught it.** A perturbation-only test passes
+here. The completion changes, `/update_weights` returns 200, and the obvious
+conclusion — "the broadcast landed" — is wrong. Pushing the *original* weights
+back is what breaks the tie: a faithful transport returns the baseline
+completion exactly, and this one does not move at all. Any future check of this
+path should be a round trip for that reason.
+
+**The evidence that nothing was received**, in the order it narrowed:
+
+1. **The peer's broadcast never drains.** It logs per tensor and never completes
+   its first `dist.broadcast`. Whatever the engine did, it did not match the
+   sender.
+2. **The peer's helper is correct.** Two ranks using the same group construction
+   broadcast to each other correctly over RCCL 2.27.7 on the same node and image
+   — a poisoned receive buffer is replaced by the sender's pattern. So the
+   protocol reimplementation is not the fault.
+3. **No RCCL communicator is ever created by the engine.** It logs
+   `weight-update group joined: rank=1 world_size=2` and later
+   `weight-update group destroyed`, with no communicator init between them.
+4. **`/update_weights` is precisely the call that corrupts the model.** Walking
+   the lifecycle one step at a time, generating after each: `init` leaves the
+   completion identical, a `start`/`finish` bracket with no update leaves it
+   identical, and the *first* `/update_weights` degrades it — with
+   `flush_cache: false`, so the cache flush is not the cause.
+5. **Reversing the roles fails the same way.** Initialising with
+   `rank_offset: 0` makes the engine rank 0 and therefore the broadcast root,
+   with the peer receiving into a poisoned buffer. The engine's update returns
+   200 in 0.350 s; the peer's receive never drains and the poison is never
+   replaced. So this is not a disagreement about which end is the root — the
+   engine posts no collective in either direction.
+
+Together: `init_weights_update_group` genuinely forms the torch process group
+(the peer's rendezvous completes and the engine reports the right rank), and
+`update_weights_from_distributed` genuinely reaches the model and calls
+`load_weights` — but the `dist.broadcast` that should fill the receive buffer
+never executes, so `torch.empty`'s contents are what gets loaded. On the second
+update the allocator hands back the same block, which is why "restore" produces
+a byte-identical degenerate completion rather than a different one.
+
+This is worse than `ipc`. `ipc` refuses honestly with `NotImplementedError`;
+`nccl` reports success and silently destroys the policy. A trainer would see
+rewards collapse after the first weight sync and have no reason to suspect the
+transport.
+
+**Timing, for what it is worth.** The control-plane cost is not the obstacle:
+`init` 6–8 ms, `start` and `finish` ~1 ms each, `/update_weights` 0.25–0.85 s
+for a 311 MB tensor on the first call and ~2 ms after — against the **322 s**
+cold start it would replace. If the transport worked at these latencies, the
+27.8-hour restart bill in section 5 would collapse to minutes and 400 iterations
+would be comfortable. The ratio is not what blocks this; correctness is.
+
+**TP = 2 fails identically**, which is worth knowing: the defect is not a
+function of tensor-parallel width. Engine on GPUs 0–1, peer on GPU 7,
+`world_size: 3`, `rank_offset: 1`:
+
+| | TP=1 | TP=2 |
+|---|---|---|
+| `/get_world_size` | 1 | 2 |
+| workers joined | rank 1 | ranks 1 **and** 2 |
+| `init` | 6 ms | 357 ms |
+| `/update_weights` (first) | 246 ms | 518 ms |
+| `/update_weights` (second) | 2 ms | 7 ms |
+| completion changed by "perturb" | yes | yes |
+| completion restored by "restore" | **no** | **no** |
+| peer's broadcast drained | **no** | **no** |
+| RCCL communicators created | **0** | **0** |
+
+The rank layout is exactly as documented — both engine workers join at
+`rank_offset + i`, taking ranks 1 and 2 of a world of 3 — so the *addressing*
+scales correctly and only the transfer is missing. Sharded receive proper
+(whether `load_weights` slices a full unsharded tensor correctly per rank)
+remains genuinely unevaluated, because it cannot be reached until a tensor
+arrives.
+
+**What would be needed.** This is an upstream fix, not a configuration change —
+the metadata contract is right, the group forms, the call reaches the model, and
+the collective does not happen. Reproducing it takes
+[`examples/rl/nccl_weight_peer.py`](../examples/rl/nccl_weight_peer.py) and
+[`examples/rl/nccl_roundtrip_check.py`](../examples/rl/nccl_roundtrip_check.py)
+against the pinned image; the round-trip check reports
+`HTTP_OK_BUT_WEIGHTS_UNCHANGED` or `CHANGED_BUT_NOT_FAITHFUL` rather than
+`PROVEN`, and is the regression test for the fix. Until then **no online RL loop
+can run on this build at any topology**, and Phase 4 needs either an upstream
+weight-transfer fix or a fallback that pays the cold start.
+
+The metadata contract, confirmed against the image's own source:
 `init_info: {master_address, master_port, rank_offset, world_size, group_name?}`
-and `update_info: {names, dtype_names, shapes, packed?, group_name?,
-flush_cache?}` — so the remaining work is a peer that joins the group and
-broadcasts, not discovery.
+and `update_info: {names, dtype_names, shapes, packed?, packed_buffer_size_bytes?,
+packed_num_buffers?, group_name?, flush_cache?}`. Engine worker `i` takes rank
+`rank_offset + i`; shapes are the **unsharded** checkpoint shapes at every TP
+degree, because the receive side hands the tensors to the model's own
+`load_weights`, which applies the sharding.
 
 ### Phase 3 — reward functions and a supervised baseline
 
@@ -619,7 +812,9 @@ that number rather than against zero.
 verl or slime, with TokenSpeed as the rollout engine over the weight-transfer
 path. **Disaggregated (`nccl`), not colocated:** Phase 2 established that the
 `ipc` receive path is not implemented, so trainer and engine need separate GPUs
-and the node budget is two 8-GPU nodes rather than one. GRPO rather than PPO: no value network
+— 6 generating plus 2 training on one 8-GPU node, which costs ~33% of the
+generation throughput and no extra machine
+([5b](#5b-what-disaggregation-actually-costs)). GRPO rather than PPO: no value network
 to fit, which matters when the reward is a graded checker rather than a learned
 model. Success is tier-1-5 pass rate and classifier agreement on held-out
 prompts, against the Phase 3 baseline.
@@ -635,6 +830,30 @@ evaluation harness is needed.
 
 ## Assumptions to confirm with Manoj
 
+Everything that could be settled by reading the repository or running hardware
+has been. What is left needs a decision or an artifact that is not ours, and
+these four block Phase 4 rather than merely refining it:
+
+| # | Blocked on | Why it blocks | Costs if wrong |
+|---|---|---|---|
+| [A1](#a1) | The CIA / Sleuth output contract | The reward checks output *format* first; neither system appears in this repository, so there is nothing to check against | Rewrite of the reward's outer layer; the tier ladder survives |
+| [A2](#a2) | What "AORTA-like actions" means | Producing artifacts is automatically scorable; conversational expertise is not | If it means conversation, this is a RAG problem and the RL case largely dissolves |
+| [A3](#a3) | Model choice | Sets the memory and throughput arithmetic in [5](#5-cost-does-the-claim-hold) and [5b](#5b-what-disaggregation-actually-costs) | The cost table, not the design |
+| [A7](#a7) | Who stands up the trainer | No trainer exists here; verl/slime integration, the GRPO loop and its checkpointing are outside this repository | Phase 4 cannot start |
+
+Two further items are blocked but softer: [A4](#a4) (does a probe archive exist)
+decides whether triage classification is a main signal or a footnote — the code
+path for it is built and tested against synthetic fixtures, so only the corpus
+is missing — and [A5](#a5) (whether Toyota is a separate demo) affects scope
+rather than feasibility.
+
+One item that is **not** blocked on Manoj and should be raised anyway: the
+`nccl` weight transport does not work on this image
+([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer)). That is an
+upstream TokenSpeed defect, it blocks the loop at every topology and model size,
+and it is ours to file rather than his to decide.
+
+<a id="a1"></a>
 **A1 — "CIA" and "Sleuth".** Neither appears in this repository. This plan
 assumes the intended first consumer is something shaped like `aorta agent`'s
 `LiteLLMProposer`: an OpenAI-compatible endpoint returning strict JSON with a
@@ -642,6 +861,7 @@ constrained `category` and registered mitigation names. If CIA and Sleuth are
 different systems, their output contract is needed before training, because the
 output format is most of what the reward checks.
 
+<a id="a2"></a>
 **A2 — "AORTA-like actions" means producing AORTA artifacts.** This plan reads
 the niche as recipe synthesis, triage classification and mitigation proposal,
 because those are what the repository can score automatically. If what was meant
@@ -649,22 +869,26 @@ is conversational expertise about AORTA — answering questions from the docs �
 machine-checkable reward largely disappears and the effort is a
 retrieval-augmented-generation problem rather than an RL one.
 
+<a id="a3"></a>
 **A3 — Model size.** Qwen3-8B is assumed: the largest Qwen3 in the measured set,
 and comfortably able to emit parseable YAML, which the reward design requires.
 Qwen3-0.6B is used in the committed recipes because they measure the engine, not
 the model. If the demo needs a specific size, the cost table changes.
 
+<a id="a4"></a>
 **A4 — A probe archive exists.** The classifier-agreement signal needs a body of
 archived probe runs with logs and reports. This repository has the classifier but
 no corpus. How many real runs are retained, and where, decides whether 4.2 is a
 main signal or a footnote.
 
+<a id="a5"></a>
 **A5 — "Self-serving to Toyota" is a separate demo.** The transcript mentions
 Toyota alongside AORTA as candidate domains. This plan addresses only the AORTA
 domain, on the grounds that it is the one with an automatic reward. A
 customer-facing vertical would need its own reward design and probably human
 labelling.
 
+<a id="a6"></a>
 **A6 — The rollout engine may take the whole node. RESOLVED, against us.** The
 colocated (`ipc`) configuration assumed trainer and engine could share GPUs on
 one node. They cannot, on this image: the IPC receive path is not implemented.
@@ -677,20 +901,39 @@ side; use backend='nccl' for now.
 ```
 
 which matches the source (`weight_transfer/manager.py`, the `else` branch of
-`update()`). `nccl` is therefore the only wired backend, the engine must be
-disaggregated onto separate GPUs, the node count doubles and the "no cluster"
-claim gets tighter — exactly the branch this assumption was written to catch.
-Measured in [Phase 2](#phase-2-validate-the-weight-sync-path).
+`update()`). `nccl` is therefore the only wired backend and the engine must be
+disaggregated onto separate GPUs — but intra-node, so the "no cluster" claim
+survives at a cost of ~33% of generation throughput rather than a second
+machine ([5b](#5b-what-disaggregation-actually-costs)). Measured in
+[Phase 2](#phase-2-validate-the-weight-sync-path). The `nccl` transport then
+turned out not to transfer at all
+([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer)), which blocks the
+loop regardless of topology.
+
+<a id="a7"></a>
+**A7 — Someone has to stand up a trainer.** Nothing in this repository trains
+anything, and nothing here proposes to: the reward functions
+([`examples/rl/`](../examples/rl/)) are deliberately scorers that a trainer
+calls, not a training loop. Phase 4 needs a verl or slime deployment, a GRPO
+configuration, checkpointing, and an owner for the run itself. That is a
+separate piece of work with a separate owner, and until it has one the phased
+path stops at Phase 3 no matter what the engine does.
 
 ## Known gaps
 
-- **The weight-transfer path is exercised, but not end to end.** The control
-  plane, its lifecycle guards, its validation and pause/resume are measured
-  against a live server in [Phase 2](#phase-2-validate-the-weight-sync-path);
-  `ipc` is settled and negative. What remains unrun is the one thing needing a
-  second process: an actual NCCL tensor broadcast from a trainer peer, and the
-  same at TP > 1. Until that runs, "weights can be updated in place" is
-  established for the control plane and assumed for the transport.
+- **The weight transport does not work, and that is now measured rather than
+  assumed.** The control plane, its lifecycle guards, its validation and
+  pause/resume are measured against a live server in
+  [Phase 2](#phase-2-validate-the-weight-sync-path). The transport is measured
+  in [Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer) and it is
+  broken: `/update_weights` returns 200 having moved nothing and loads
+  uninitialised device memory into the model. `ipc` is settled and negative.
+  So "weights can be updated in place" is **established for the control plane
+  and refuted for the transport** — the opposite of the previous position,
+  which assumed the transport worked because the metadata contract did.
+- **TP > 1 weight receive is unrun**, because it is blocked rather than
+  deferred: sharded receive cannot be evaluated while single-rank receive
+  transfers nothing. It is the first thing to run after an upstream fix.
 - **The committed recipes cannot show a real length distribution**, because
   `dataset: random` prompts do not induce EOS. Their throughput and sample-count
   numbers are valid; `generated_tokens_*` will read as a constant at the cap.
