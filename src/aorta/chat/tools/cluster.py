@@ -22,7 +22,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from aorta.chat.config import settings
-from aorta.cia.triage import _default_aorta_root, run_triage
+from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
 
@@ -357,94 +357,11 @@ _NAN_WAVE_RE = re.compile(r"AMDGPU Wave\s+[\d:]+\s+\((\d+),(\d+),(\d+)\)")
 _NAN_KERNEL_RE = re.compile(r"#1\s+.*?\bin\s+([A-Za-z_]\w*)\s*\(")
 
 
-_WAITCHECK_CACHE: dict[bool, str] = {}
-
-# tile_reverse_bug.hsaco:gfx950[0]:.text+0x8: missing s_waitcnt lgkmcnt(0) before def of s4
-_WC_DIAG_RE = re.compile(
-    r"^\S+:(?P<target>\w+)\[\d+\]:(?P<offset>\.text\+0x[0-9a-fA-F]+):\s*(?P<what>.+)$",
-    re.M,
-)
-# The offset is absent when there is nothing to wait for: "producer <no modeled
-# dependency>", which is the whole point of an excessive-wait finding.
-_WC_ROLE_RE = re.compile(
-    r"^\s+(?P<role>producer|consumer)\s+(?:(?P<at>\.text\+\S+):\s*)?(?P<insn>.+)$", re.M
-)
-_WC_SUMMARY_RE = re.compile(r"instructions=(?P<insns>\S+).*?diagnostics=(?P<diags>\S+)")
-# ...:.text+0x44: counter under-accounting: emitted s_waitcnt vmcnt(0) is stronger
-# than waitcheck requirement s_waitcnt vmcnt(63) before v_add_f32_e32 v1, v1, v1
-_WC_PARITY_RE = re.compile(
-    r"(?P<offset>\.text\+0x[0-9a-fA-F]+):\s*counter under-accounting:\s*(?P<what>.+)$", re.M
-)
 
 
-def _run_waitcheck(code_object: Path, extra: list[str] | None = None) -> tuple[str, int]:
-    binary = Path(settings.rocjitsu_build) / "tools" / "rj_waitcheck"
-    proc = subprocess.run(
-        [str(binary), str(code_object), *(extra or [])],
-        capture_output=True, text=True, timeout=settings.waitcheck_timeout,
-        stdin=subprocess.DEVNULL,
-    )
-    return ((proc.stdout or "") + (proc.stderr or "")).strip(), proc.returncode
 
 
-def _format_waitcheck(
-    bug_out: str, bug_rc: int, fixed_out: str, fixed_rc: int, diff: str,
-    over_out: str = "", over_rc: int = 0,
-) -> str:
-    lines = ["WaitCheck on a hand-tuned gfx950 assembly kernel", ""]
 
-    lines.append("Correctness — before the fix:")
-    diag = _WC_DIAG_RE.search(bug_out)
-    if diag:
-        lines.append(f"  {diag.group('what')}  at {diag.group('offset')}")
-        for role in _WC_ROLE_RE.finditer(bug_out):
-            lines.append(f"    {role.group('role'):8s} {role.group('at')}: {role.group('insn')}")
-    summary = _WC_SUMMARY_RE.search(bug_out)
-    if summary:
-        lines.append(f"  instructions={summary.group('insns')} diagnostics={summary.group('diags')}")
-    lines.append(f"  exit={bug_rc} (4 is WAITCHECK_HAZARD_EXIT)")
-    lines.append("")
-
-    if diff:
-        lines.append("The fix, as applied to the assembly — quote this verbatim:")
-        lines += [f"  {ln}" for ln in diff.splitlines()]
-        lines.append("")
-
-    lines.append("Correctness — after the fix:")
-    fixed_summary = _WC_SUMMARY_RE.search(fixed_out)
-    if fixed_summary:
-        lines.append(
-            f"  instructions={fixed_summary.group('insns')} "
-            f"diagnostics={fixed_summary.group('diags')}"
-        )
-    if "parity-exact" in fixed_out:
-        parity = re.search(r"(parity-fields=\S+ parity-exact=\S+)", fixed_out)
-        if parity:
-            lines.append(f"  {parity.group(1)}")
-    lines.append(f"  exit={fixed_rc} (0 is clean)")
-    lines.append("")
-
-    over_parity = _WC_PARITY_RE.search(over_out) if over_out else None
-    if over_parity:
-        lines.append("Performance — a third build with one redundant wait added:")
-        lines.append(f"  {over_parity.group('what')}  at {over_parity.group('offset')}")
-        for role in _WC_ROLE_RE.finditer(over_out):
-            lines.append(f"    {role.group('role'):8s} {role.group('at')}: {role.group('insn')}")
-        counters = re.search(r"(counter-underaccounting=\S+ unmodeled-waits=\S+)", over_out)
-        if counters:
-            lines.append(f"  {counters.group(1)}")
-        lines.append(
-            f"  exit={over_rc} -- a warning, not a failure. The kernel is still correct; "
-            f"it is waiting on something with no modeled dependency and losing cycles."
-        )
-        lines.append("")
-
-    lines.append(
-        "Note: this is static analysis of the code object. No GPU ran and nothing was "
-        "reproduced -- both the hazard and the redundant wait are proved from the "
-        "instruction stream. Excessive waits only surface with --check-counter-parity."
-    )
-    return "\n".join(lines)
 
 
 WAITCHECK_RECIPE = "recipes/sanitizers/demo-waitcheck-asm.yaml"
@@ -512,49 +429,29 @@ def triage_assembly_source(source: str, label: str = "") -> str:
             f"Wrapped source kept at: {asm_path}"
         )
 
-    try:
-        out, rc = _run_waitcheck(obj_path, ["--check-counter-parity"])
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return f"Error: could not run the wait checker: {exc}"
+    recipe = write_asm_recipe(
+        recipe_path=staging / f"{stem}.yaml",
+        kernel_name=prepared.kernel,
+        code_object=obj_path,
+        target=_ARCH,
+        ticket=f"CHAT-{prepared.kernel}",
+    )
+    body = _run_triage(["--recipe", str(recipe)], label or f"{prepared.kernel} asm")
 
-    lines = [f"Wait-hazard analysis of the assembly you supplied — {label or prepared.kernel}"]
+    note = []
     if prepared.wrapped:
-        lines.append(
+        note.append(
             f"  (wrapped as a kernel for assembly: {prepared.sgpr_count} SGPRs, "
             f"{prepared.vgpr_count} VGPRs, sized from the registers your code names)"
         )
-    lines.append(f"  code object: {obj_path}")
-    lines.append("")
-
-    diag = _WC_DIAG_RE.search(out)
-    if diag:
-        lines.append(f"Hazard: {diag.group('what')}  at {diag.group('offset')}")
-        for role in _WC_ROLE_RE.finditer(out):
-            at = f"{role.group('at')}: " if role.group("at") else ""
-            lines.append(f"  {role.group('role'):8s} {at}{role.group('insn')}")
-    parity = _WC_PARITY_RE.search(out)
-    if parity:
-        lines.append("")
-        lines.append(f"Excessive wait: {parity.group('what')}  at {parity.group('offset')}")
-    summary = _WC_SUMMARY_RE.search(out)
-    if summary:
-        lines.append("")
-        lines.append(
-            f"instructions={summary.group('insns')} diagnostics={summary.group('diags')} exit={rc}"
-        )
-    if not diag and not parity:
-        lines.append("No wait hazard and no excessive wait found in this sequence.")
-    lines.append("")
-    lines.append(
-        "This is static analysis of your assembly: nothing executed, so a clean "
-        "result means the instruction stream is well-ordered, not that the kernel "
-        "was tested."
+    note.append(
+        "  This is static analysis of the code object: nothing executed, so a "
+        "clean result means the instruction stream is well-ordered, not that "
+        "the kernel was tested."
     )
-
-    result = "\n".join(lines)
+    result = "\n".join([body, "", *note])
     _ASM_CACHE[cache_key] = result
     return result
-
 
 @tool
 def triage_workload(source: str = "", command: str = "", label: str = "") -> str:

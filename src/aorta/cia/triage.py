@@ -156,6 +156,38 @@ def write_kernel_recipe(
     return recipe_path
 
 
+def write_asm_recipe(
+    *, recipe_path: Path, kernel_name: str, code_object: Path, target: str, ticket: str
+) -> Path:
+    """Emit a waitcheck recipe for an already-assembled code object.
+
+    ``kernel_list`` rather than ``kernel``: waitcheck reads a code object and
+    never runs it, so there is no command to provision. The loader hashes the
+    object itself, which is what pins the identity a finding is reported
+    against.
+    """
+    recipe = {
+        "schema_version": 1,
+        "mode": "sanitizer",
+        "ticket": ticket,
+        "description": f"Chat-submitted assembly {kernel_name} checked on {target}.",
+        "sanitizer_plan": {
+            "target": target,
+            "source": {
+                "kind": "kernel_list",
+                "kernels": [{"name": kernel_name, "code_object": str(code_object)}],
+            },
+            "scope": {"kind": "kernel"},
+            "selection": {"requirement": "top_dispatch_count", "top_n": 1},
+            "sanitizers": ["waitcheck"],
+            "policy": {"consan_policy": "strict", "on_missing_backend": "fail"},
+            "output": {"report": "sanitizer_report.json"},
+        },
+    }
+    recipe_path.write_text(yaml.safe_dump(recipe, sort_keys=False), encoding="utf-8")
+    return recipe_path
+
+
 def reconcile_stale_jobs(jobs_root: Path) -> int:
     """Mark finished jobs whose record still claims 'running' as terminal.
 
@@ -234,6 +266,12 @@ def summarize_sanitizer(report: dict) -> dict:
         # needs; the other 63 are the same race seen from other lanes.
         if findings:
             meta = findings[0].get("metadata") or {}
+            first = findings[0]
+            if first.get("message"):
+                entry["message"] = str(first["message"])
+            entry["context"] = [
+                str(meta[k]) for k in ("context_1", "context_2") if meta.get(k)
+            ]
             entry["example"] = {
                 k: meta[k]
                 for k in ("first_owner", "second_owner", "first_lds", "second_lds",
