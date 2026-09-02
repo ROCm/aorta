@@ -20,9 +20,16 @@ _CIA = "src/aorta/cia"
 
 #: Shapes that mean "somebody's machine", not "anybody's machine".
 _SITE_SHAPED = (
-    (re.compile(r"/apps/[a-z]"), "an absolute path under /apps"),
-    (re.compile(r"/home/[a-z]"), "an absolute path under /home"),
+    # No trailing character class: the value that prompted this test was
+    # ``f"/apps/{os.environ.get('USER')}"``, where the next character is a
+    # brace. Requiring a letter there would have missed it.
+    (re.compile(r"/apps/"), "an absolute path under /apps"),
+    (re.compile(r"/home/"), "an absolute path under /home"),
+    # cv350-rck-g03 and the like.
     (re.compile(r"\b[a-z]{2,}\d{2,}-[a-z]{2,}\d?-[a-z]\d{2}"), "a cluster hostname"),
+    # Which partition is hardcoded matters less than that one is: an installed
+    # default no account can submit to fails the same way whatever it is named.
+    (re.compile(r"--partition=[A-Za-z]"), "a hardcoded Slurm partition"),
     (re.compile(r'"(interactive|meta\d+)"'), "a Slurm partition name"),
 )
 
