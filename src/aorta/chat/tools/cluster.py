@@ -22,7 +22,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from aorta.chat.config import settings
-from aorta.cia.triage import run_triage
+from aorta.cia.triage import _default_aorta_root, run_triage
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
 
@@ -204,7 +204,10 @@ def _run_triage(extra_args: list[str], label: str) -> str:
     for key, value in (
         ("ROCJITSU_BUILD", settings.rocjitsu_build),
         ("LD_PRELOAD", settings.rocjitsu_preload),
-        ("AORTA_PATH", str(settings.aorta_root)),
+        # The root the AORTA CLI resolves recipes against, which is not
+        # settings.aorta_root -- that is the codebase the chat tools may read,
+        # and it points at the package while recipes sit beside src/.
+        ("AORTA_PATH", _default_aorta_root()),
         ("CIA_JOBS_ROOT", str(settings.jobs_root)),
     ):
         if value:
