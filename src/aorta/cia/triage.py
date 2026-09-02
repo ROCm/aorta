@@ -39,10 +39,21 @@ TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "
 
 
 def _default_aorta_root() -> str:
-    """Where the AORTA CLI's recipes live: the installed package, not a site."""
+    """The directory the AORTA CLI resolves recipes against.
+
+    Not the package directory: in a source checkout ``recipes/`` sits beside
+    ``src/``, so the package's own parent is one level too deep and the sweep
+    finds no recipes. Walk up until the directory holding them appears, and
+    fall back to the package when it does not -- an installed wheel carries
+    its recipes inside the distribution.
+    """
     import aorta
 
-    return str(Path(aorta.__file__).resolve().parent)
+    package = Path(aorta.__file__).resolve().parent
+    for candidate in (package, *package.parents):
+        if (candidate / "recipes").is_dir():
+            return str(candidate)
+    return str(package)
 
 
 def venv_bin(name: str) -> str:
@@ -126,7 +137,12 @@ def write_kernel_recipe(
             "source": {
                 "kind": "kernel",
                 "kernel": {"name": kernel_name},
-                "command": str(command),
+                # `consan_command`, not `command`: for every source kind except
+                # consan_repro the recipe loader reads the former and ignores
+                # the latter, so naming it `command` leaves ConSan unprovisioned
+                # and it fails closed as not_checked -- a run that proves
+                # nothing, reported without an error.
+                "consan_command": str(command),
                 "consan_log": True,
             },
             "scope": {"kind": "kernel"},
@@ -283,7 +299,7 @@ def run_triage(argv: list[str] | None = None) -> dict:
     # summary can never fail the run.
     echo_findings = (
         f"; {shlex.quote(venv_bin('python'))} "
-        f"{shlex.quote(str(Path(__file__).resolve().parents[1] / 'scripts' / 'echo_sanitizer_findings.py'))} "
+        f"{shlex.quote(str(Path(__file__).resolve().parent / 'echo_findings.py'))} "
         f"{shlex.quote(str(Path(aorta_output) / 'sanitizer_report.json'))} || true"
     )
 
