@@ -132,14 +132,19 @@ class TestChainlitLandingPage:
         how one wrong sentence becomes two.
         """
         body = CHAINLIT_MD.read_text(encoding="utf-8")
-        row = next(line for line in body.splitlines() if "Run pytest" in line)
-        assert "sandbox" not in row.lower()
-        assert "only if the operator enabled" in row
+        rows = [line for line in body.splitlines() if "Run pytest" in line]
+        assert rows, "the example table no longer has a command-execution row"
+        for row in rows:
+            assert "sandbox" not in row.lower()
+            assert "only if the operator enabled" in row
 
     def test_it_is_shipped_in_the_wheel(self):
         """It is package data; a test that reads it must not be the only reader."""
         import tomllib
 
         pyproject = Path(welcome.__file__).parents[4] / "pyproject.toml"
+        if not pyproject.is_file():  # installed wheel, not a source checkout
+            pytest.skip("pyproject.toml is not present in an installed layout")
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        assert "chat/ui/chainlit.md" in data["tool"]["setuptools"]["package-data"]["aorta"]
+        package_data = data["tool"]["setuptools"]["package-data"]
+        assert "chat/ui/chainlit.md" in package_data.get("aorta", [])

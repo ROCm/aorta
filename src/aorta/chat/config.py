@@ -644,6 +644,10 @@ def validate_profile(path: Path | None = None) -> list[str]:
     Reports unreadable/malformed files, keys that no longer exist, values that
     fail validation, and a profile holding a credential at a permissive mode --
     the last being a real finding on a shared node, not a style note.
+
+    "Credential" is :data:`SECRET_FIELDS` plus a non-empty
+    :data:`SECRET_MAPPING_FIELDS` map, so a profile whose only secret is a
+    gateway header is held to the same mode as one with an API key.
     """
     path = path or chat_config_path()
     problems: list[str] = []

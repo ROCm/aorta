@@ -226,6 +226,16 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
     ``chat.toml``; matching the walked name alone would follow it and
     bundle the key. ``resolve()`` collapses a chain of links, so the
     target's name is the one that decides.
+
+    The guard is a **filename** rule, and that is its limit: a renamed
+    copy (``cp chat.toml notes.toml``) or a hardlink carries no name and
+    no target to test, so neither is caught here, and no writer-side
+    check can distinguish an arbitrary TOML holding a key from one that
+    does not. Symlinks are singled out because *this* function chooses
+    to follow them, so the aliasing is the writer's own doing rather
+    than the operator's. The backstops for the rest are the recipe's
+    ``redaction:`` globs and ``aorta bundle --review``, which lists
+    every file before the tarball is sent.
     """
     skipped_rel_paths = frozenset({".aorta-probe.lock", MANIFEST_FILENAME})
     root = run_dir.resolve()

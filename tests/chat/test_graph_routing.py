@@ -112,6 +112,11 @@ class TestFinalizeNode:
         assert reply.index("could not verify") < reply.index("The router node")
 
     async def test_it_reports_the_budget_it_spent(self):
+        """Named as attempts, which is what ``iteration`` counts.
+
+        The first critic pass is the initial validation, not a retry, so
+        calling the count "retries" would overstate the budget by one.
+        """
         state = {
             "messages": [],
             "command_output": "an answer",
@@ -119,7 +124,8 @@ class TestFinalizeNode:
             "iteration": 3,
         }
         reply = (await finalize_node(state))["messages"][0].content
-        assert "3 of 3" in reply
+        assert "all 3 attempts" in reply
+        assert "retries" not in reply
 
     async def test_it_costs_no_llm_call(self):
         """Exhausting the budget must not itself be able to fail or bill."""

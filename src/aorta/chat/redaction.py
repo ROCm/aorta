@@ -39,10 +39,14 @@ def _notice_stream() -> IO[str]:
 
     ``sys.__stderr__`` in preference to ``sys.stderr``: quiet mode -- which is
     the default, not a flag -- points ``sys.stderr`` at ``os.devnull`` to
-    swallow the embedding model's LOAD REPORT table, and this notice is the one
-    thing Decision 16 requires the user actually sees. Falls back when the
-    interpreter was started without a real stderr (``pythonw``, some embedded
-    hosts), where ``sys.__stderr__`` is ``None``.
+    swallow the embedding model's LOAD REPORT table, and on the CLI front doors
+    this notice is the one thing Decision 16 requires the user actually sees.
+    Falls back when the interpreter was started without a real stderr
+    (``pythonw``, some embedded hosts), where ``sys.__stderr__`` is ``None``.
+
+    Under ``aorta chat ui`` this stream is the *server's* console, which the
+    person typing cannot see, so it is the log copy rather than the disclosure.
+    :class:`NoticeState.pending` is what that front door renders.
     """
     return sys.__stderr__ if sys.__stderr__ is not None else sys.stderr
 

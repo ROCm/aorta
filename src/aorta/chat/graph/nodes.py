@@ -936,9 +936,12 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 #: is kept rather than dropped -- it is usually partly right, and the user waited
 #: for it -- but it must not be the only thing they see, which is what happened
 #: when this edge went straight to END.
+#: ``iteration`` counts critic passes, so it is *attempts*, not retries -- the
+#: first pass is the initial validation. Naming it "retries" would overstate the
+#: budget by one every time.
 _UNRESOLVED_HEADER = (
-    "I could not verify this answer against the tool output, and I have run out "
-    "of retries ({used} of {allowed}). Treat it as unconfirmed:"
+    "I could not verify this answer against the tool output, and I have used all "
+    "{allowed} attempts. Treat it as unconfirmed:"
 )
 
 _UNRESOLVED_FOOTER = (
@@ -974,10 +977,7 @@ async def finalize_node(state: AgentState) -> dict[str, Any]:
     # answer by definition. The message scan is only a fallback: the critic
     # cannot produce feedback without it, so this path is not reachable today.
     rejected = state.get("command_output") or _last_ai_text(state["messages"])
-    header = _UNRESOLVED_HEADER.format(
-        used=state.get("iteration", 0),
-        allowed=settings.max_retry_iterations,
-    )
+    header = _UNRESOLVED_HEADER.format(allowed=settings.max_retry_iterations)
     parts = [header, rejected.strip() or "(no answer was produced)"]
     if feedback:
         parts.append(_UNRESOLVED_FOOTER.format(feedback=feedback))

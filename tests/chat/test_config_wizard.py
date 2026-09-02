@@ -245,7 +245,7 @@ class TestExtraHeaderValuesAreMasked:
         monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", "user=alice-in-eng")
         config.reset_settings()
         values = config.effective_settings()
-        assert values["remote_llm_extra_headers"] == {"user": config.mask("alice-in-eng")}
+        assert values.get("remote_llm_extra_headers") == {"user": config.mask("alice-in-eng")}
 
     def test_the_masking_notice_mentions_headers(self, chat_profile, monkeypatch):
         """The footer said "API keys are masked", which undersold what it does."""
@@ -253,6 +253,23 @@ class TestExtraHeaderValuesAreMasked:
         result = CliRunner().invoke(chat, ["config", "show"])
         assert result.exit_code == 0, result.output
         assert "extra-header" in result.output
+
+    def test_every_header_map_on_settings_is_registered(self):
+        """A third header field must not be able to arrive unmasked.
+
+        The membership list and the fields it is supposed to cover are two
+        spellings of one rule, so the agreement is pinned rather than assumed:
+        adding ``remote_rerank_extra_headers`` and forgetting
+        SECRET_MAPPING_FIELDS fails here instead of in a support ticket.
+        """
+        header_fields = {
+            name for name in config.Settings.model_fields if name.endswith("_extra_headers")
+        }
+        assert header_fields == set(config.SECRET_MAPPING_FIELDS)
+
+    def test_the_two_credential_lists_do_not_overlap(self):
+        """Scalars are masked whole, maps per value; a field is one or the other."""
+        assert not (config.SECRET_FIELDS & config.SECRET_MAPPING_FIELDS)
 
 
 class TestConfigValidate:
