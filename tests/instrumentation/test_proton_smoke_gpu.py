@@ -74,10 +74,15 @@ _EXAMPLES = [
 #: It governs **every** subprocess this module launches, including the ones
 #: that build their own argv instead of going through :func:`_capture` -- the
 #: payloads a wedge is most likely to hit are exactly the ones that bypass the
-#: helper. Two things are a hole in the budget, and
+#: helper. Three call shapes are a hole in the budget, and
 #: ``tests/instrumentation/test_proton.py`` asserts on this module's AST that
-#: neither is present: a raw ``timeout=`` literal, which narrows the budget,
-#: and a blocking child call carrying no ``timeout=`` at all, which removes it.
+#: none is present: a raw ``timeout=`` literal, which narrows the budget; a
+#: blocking child call carrying no ``timeout=`` at all, which removes it; and
+#: ``os.system`` / ``os.popen``, which cannot be bounded at all.
+#:
+#: Raising the number below is the fourth hole, and the only one that leaves
+#: every call site still spelling ``_CHILD_TIMEOUT_S``. The same module asserts
+#: this value stays under the workflow's ``--timeout``, so the two cannot drift.
 _CHILD_TIMEOUT_S = 120
 
 #: Proton's dlopen failure on an image whose ROCm comes from Python wheels:

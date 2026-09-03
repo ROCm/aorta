@@ -4,12 +4,16 @@ Covers the option schema, both attach modes (``cli`` argv rewrite and ``env``
 variable bundle), the ``HIP_VISIBLE_DEVICES`` -> ``ROCR_VISIBLE_DEVICES``
 translation Proton needs on AMD, and fail-soft ``.hatchet`` parsing.
 
-It also carries one guard over the *sibling* GPU module's source
-(``test_gpu_smoke_subprocesses_all_use_the_shared_child_budget``): the GPU legs
+It also carries two guards over the *sibling* GPU module's source: the GPU legs
 are path-skipped on most PRs, so a convention that only they exercise needs a
-CPU test to hold it. Because that guard reads one fixed file, its own detection
-is exercised separately against snippets -- a guard checked only against source
-that already complies cannot say what it would reject.
+CPU test to hold it. One checks that every child launch there carries the shared
+budget (``test_gpu_smoke_subprocesses_all_use_the_shared_child_budget``); the
+other checks the budget's own *value*
+(``test_the_shared_child_budget_value_stays_under_the_gpu_job_timeout``), since
+pinning the constant's name everywhere still permits raising the constant.
+Because the first reads one fixed file, its detection is exercised separately
+against snippets -- a guard checked only against source that already complies
+cannot say what it would reject.
 """
 
 from __future__ import annotations
@@ -1431,13 +1435,21 @@ def _child_budget_violations(source: str, filename: str = "<snippet>") -> dict[s
 
 
 def _assigned_int(source: str, name: str) -> int | None:
-    """Value of a module-level ``name = <int literal>`` assignment."""
+    """Value of a module-level ``name = <int literal>`` assignment.
+
+    ``None`` for anything else -- an annotated assignment, an expression, a
+    negation -- so the caller fails closed and says what it could not read
+    rather than silently checking nothing. ``bool`` is rejected despite being
+    an ``int`` subclass: ``True`` would otherwise read as a one-second budget
+    and pass every bound.
+    """
     for node in ast.parse(source).body:
         targets = node.targets if isinstance(node, ast.Assign) else []
         if any(isinstance(t, ast.Name) and t.id == name for t in targets) and isinstance(
             node.value, ast.Constant
         ):
-            return node.value.value if isinstance(node.value.value, int) else None
+            value = node.value.value
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
     return None
 
 
@@ -1555,7 +1567,7 @@ def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
     )
 
 
-def test_the_shared_child_budget_stays_below_the_pytest_timeout_it_hides_behind():
+def test_the_shared_child_budget_value_stays_under_the_gpu_job_timeout():
     """The budget's *value* has to be bounded, not just its name.
 
     The guard above pins every call to ``_CHILD_TIMEOUT_S`` and says nothing
@@ -1569,7 +1581,10 @@ def test_the_shared_child_budget_stays_below_the_pytest_timeout_it_hides_behind(
     because "below the thing that would otherwise kill us" is the actual
     property: a budget above it never fires, and pytest-timeout kills the test
     from outside with no payload name and no partial output. Either side
-    changing is caught.
+    changing is caught. Comment lines are skipped when reading the workflow --
+    ``gpu-tests.yml`` explains the flag a few lines above passing it, and a
+    guard that reads the prose instead of the flag would keep passing after the
+    two drifted apart.
     """
     module = Path(__file__).with_name("test_proton_smoke_gpu.py")
     budget = _assigned_int(module.read_text(encoding="utf-8"), "_CHILD_TIMEOUT_S")
@@ -1582,7 +1597,9 @@ def test_the_shared_child_budget_stays_below_the_pytest_timeout_it_hides_behind(
     workflow = Path(__file__).parents[2] / ".github" / "workflows" / "gpu-tests.yml"
     pytest_timeouts = [
         int(match)
-        for match in re.findall(r"--timeout=(\d+)", workflow.read_text(encoding="utf-8"))
+        for line in workflow.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+        for match in re.findall(r"--timeout=(\d+)", line)
     ]
     assert pytest_timeouts, (
         f"{workflow.name} no longer passes --timeout= to pytest. The child budget is "
