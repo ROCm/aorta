@@ -196,6 +196,36 @@ def resolve_source(version: str | None = None, installed: str | None = None) -> 
     )
 
 
+#: Prefix of the staging directory every install path writes through. Created
+#: beside the destination so the final move is a rename on one filesystem.
+_STAGING_PREFIX = ".aorta-index-"
+
+
+# ── installing ────────────────────────────────────────────────────────────
+
+
+def _install_staged(staged: Path, dest: Path) -> list[str]:
+    """Move a finished index into place, keeping this machine's own collections.
+
+    Every path here -- build, fetch, side-load -- produces the whole index
+    somewhere else and then makes it live in one rename. That ordering is the
+    crash safety: an interruption before the rename leaves the previous index
+    and its sidecars exactly as they were, and one after it leaves an index
+    whose sidecars have not caught up yet, which the load-time contents check
+    refuses rather than answers from. What must never exist is a destination
+    that is wrong but self-consistent, because nothing downstream can detect it.
+
+    Sidecars are therefore the caller's *last* step, after this returns.
+    """
+    # Imported here, not at module scope: ``retriever`` pulls in langchain, and
+    # this module is reachable from ``aorta --help``.
+    from aorta.chat.rag.retriever import carry_over_collections
+
+    carried = carry_over_collections(dest, staged)
+    staged.replace(dest)
+    return carried
+
+
 # ── building ──────────────────────────────────────────────────────────────
 
 
@@ -235,14 +265,30 @@ def build_index(
     embeddings = provider.get_embeddings()
     collection = provider.collection_name()
 
-    store = SqliteVecStore(path=target, embedding=embeddings, collection=collection)
-    try:
-        store.reset()
-        for start in range(0, len(chunks), _WRITE_BATCH):
-            store.add_documents(chunks[start : start + _WRITE_BATCH], provider=provider.describe())
-        dimensions = store.dimension()
-    finally:
-        store.close()
+    # Built beside the destination and moved in at the end. A build takes tens
+    # of minutes and embeds into the store as it goes, so writing straight to
+    # the configured path meant a Ctrl-C left a partly-populated index under
+    # sidecars that still described the previous one -- an index that answers,
+    # from a fraction of the corpus, with nothing on screen to say so.
+    with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=target.parent) as staging_dir:
+        staged = Path(staging_dir) / target.name
+        store = SqliteVecStore(path=staged, embedding=embeddings, collection=collection)
+        try:
+            store.reset()
+            for start in range(0, len(chunks), _WRITE_BATCH):
+                store.add_documents(
+                    chunks[start : start + _WRITE_BATCH], provider=provider.describe()
+                )
+            dimensions = store.dimension()
+        finally:
+            store.close()
+
+        # Hashed before the move, because this records the index *as built* --
+        # the bytes a publish would upload and ``sha256sum -c`` would check.
+        # Anything this machine carries over afterwards is its own, and is why
+        # the load-time check counts chunks instead of hashing the file.
+        index_sha256 = manifest_mod.sha256_file(staged)
+        _install_staged(staged, target)
 
     # The model the *selected* provider embeds with, not the local setting: a
     # remote build otherwise stamps BGE's name on OpenAI's vectors, and the
@@ -265,7 +311,7 @@ def build_index(
         collection=collection,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
-        index_sha256=manifest_mod.sha256_file(target),
+        index_sha256=index_sha256,
         store_version=_store_version(),
         built_at=manifest_mod.now_stamp(),
         corpus_digest=digest,
@@ -326,6 +372,12 @@ def check_index(
     ``strict`` raises on a refusal, which is what every load path wants. It is
     only ``False`` for ``doctor``, whose job is to report every problem at once
     rather than stop at the first.
+
+    The index is opened, not merely stat-ed, so the manifest is checked against
+    the contents rather than only against itself. That is what stops ``doctor``
+    reporting a healthy index over one whose build was interrupted, where every
+    field it could read came from the sidecar the interrupted build never got
+    round to replacing.
     """
     target = Path(index_path) if index_path else settings.index_file
     provider = get_provider()
@@ -336,10 +388,23 @@ def check_index(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         installed_version=installed_version(),
+        chunk_count=_installed_chunk_count(target, provider.collection_name()),
     )
     if strict:
         report.raise_if_refused(target)
     return report
+
+
+def _installed_chunk_count(target: Path, collection: str) -> int | None:
+    """Live chunk count of ``collection`` in ``target``, or ``None``.
+
+    ``None`` when it cannot be read, so the field checks still get to report
+    what they can -- a caller asking what is wrong with an index must not be
+    answered with a traceback.
+    """
+    from aorta.chat.rag.retriever import collection_chunk_count
+
+    return collection_chunk_count(target, collection)
 
 
 # ── fetching ──────────────────────────────────────────────────────────────
@@ -447,7 +512,7 @@ def fetch_index(
     # Staged inside the destination directory so the final move is a rename on
     # one filesystem, and therefore atomic: a concurrent reader sees the old
     # index or the new one, never a half-written file.
-    with tempfile.TemporaryDirectory(prefix=".aorta-index-", dir=dest.parent) as staging_dir:
+    with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=dest.parent) as staging_dir:
         staged = Path(staging_dir) / ASSET_NAME
         manifest_text = _download_text(source.manifest_url)
         checksum_line = _download_text(source.checksum_url)
@@ -478,18 +543,23 @@ def fetch_index(
         )
         report.raise_if_refused(source.index_url)
 
-        # Sidecars first: a reader that finds an index without a manifest
-        # refuses, so an install interrupted here fails safe rather than leaving
-        # an unverifiable index in the configured path.
-        manifest_mod.manifest_path(dest).write_text(manifest_text, encoding="utf-8")
+        # Index first, sidecars after. Writing the sidecars first looked like
+        # the fail-safe order -- and is, on a first install, where there is no
+        # index for them to describe. On a re-fetch it is the dangerous one: an
+        # interruption between the two leaves the *previous* index paired with
+        # the incoming manifest, which is wrong and self-consistent, and no
+        # field check can see it because every field it reads is the sidecar's.
+        carried = _install_staged(staged, dest)
+        # Checksum then manifest, matching ``write_manifest``: the manifest is
+        # the file the load path gates on, so it is the last to appear.
         manifest_mod.checksum_path(dest).write_text(f"{checksum}  {dest.name}\n", encoding="utf-8")
-        staged.replace(dest)
+        manifest_mod.manifest_path(dest).write_text(manifest_text, encoding="utf-8")
 
     return FetchResult(
         index_path=dest,
         manifest=manifest,
         source=source.describe(),
-        warnings=[*source.notes, *report.warnings],
+        warnings=[*source.notes, *report.warnings, *_carried_note(carried)],
     )
 
 
@@ -545,14 +615,27 @@ def side_load(staged: str | Path, index_path: str | Path | None = None) -> Fetch
     report.raise_if_refused(origin)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(origin, dest)
+    # Copied through staging for the same reason the download is: ``copy2``
+    # straight onto ``dest`` is not atomic, and an interrupted one leaves a
+    # truncated index under the sidecars of the index it was replacing.
+    with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=dest.parent) as staging_dir:
+        staged = Path(staging_dir) / dest.name
+        shutil.copy2(origin, staged)
+        carried = _install_staged(staged, dest)
     manifest_mod.write_manifest(dest, manifest)
     return FetchResult(
         index_path=dest,
         manifest=manifest,
         source=f"side-loaded from {origin}",
-        warnings=list(report.warnings),
+        warnings=[*report.warnings, *_carried_note(carried)],
     )
+
+
+def _carried_note(carried: list[str]) -> list[str]:
+    """Say so when local collections were preserved, rather than only logging it."""
+    if not carried:
+        return []
+    return [f"kept this machine's own collection(s) across the install: {', '.join(carried)}"]
 
 
 __all__ = [

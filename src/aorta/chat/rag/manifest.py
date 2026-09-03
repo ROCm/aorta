@@ -90,6 +90,15 @@ class Manifest:
     ``index_sha256`` covers the ``.sqlite`` only. The manifest cannot hash
     itself, which is why the published set also carries a ``.sha256`` file: the
     checksum is verified against the download before the manifest is trusted.
+
+    It describes the index *as built or published*, and is a transport check:
+    it is what proves a download or a hand-carried copy arrived intact. It is
+    deliberately not what the load path verifies, because the file legitimately
+    stops matching it -- the per-user run collection lives in the same
+    ``.sqlite`` (``rag/runs.py``) and rewrites it on its own cadence. The
+    load-time equivalent is ``chunk_count`` checked against the source
+    collection's live row count, which is scoped to the half this manifest
+    actually describes.
     """
 
     aorta_version: str
@@ -149,15 +158,21 @@ def now_stamp() -> str:
 
 
 def write_manifest(index_path: str | Path, manifest: Manifest) -> Path:
-    """Write the sidecar manifest and the sidecar checksum, returning the former."""
+    """Write the sidecar checksum and the sidecar manifest, returning the latter.
+
+    The manifest goes last because it is the file every load path gates on. An
+    interruption between the two therefore leaves the previous manifest over
+    the new index, which the contents check refuses -- rather than a current
+    manifest beside a checksum describing something else.
+    """
     target = manifest_path(index_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(manifest.to_json(), encoding="utf-8")
     # Two spaces is sha256sum's own format, so `sha256sum -c` works on the
     # published file without reformatting.
     checksum_path(index_path).write_text(
         f"{manifest.index_sha256}  {Path(index_path).name}\n", encoding="utf-8"
     )
+    target.write_text(manifest.to_json(), encoding="utf-8")
     return target
 
 
@@ -254,6 +269,7 @@ def validate(
     chunk_overlap: int | None = None,
     installed_version: str = "",
     installed_sha: str = "",
+    chunk_count: int | None = None,
 ) -> ValidationReport:
     """Check a manifest against what this install would query with.
 
@@ -262,6 +278,12 @@ def validate(
     model and collection checks are the load-bearing ones; the dimension check
     is a second, cheaper net for a model whose dimensions changed under a
     stable name.
+
+    ``chunk_count`` is the collection's live row count, when the caller has
+    opened the store far enough to know it. It is what catches a manifest that
+    survived while the index under it did not -- an interrupted build, a
+    truncated copy -- which the field checks above cannot see, because they
+    only ever read the sidecar.
     """
     report = ValidationReport(manifest=manifest)
 
@@ -284,6 +306,18 @@ def validate(
     if manifest.store != STORE_NAME:
         report.refusals.append(
             f"store format: index is {manifest.store!r}, this aorta reads {STORE_NAME!r}"
+        )
+
+    # A refusal, not a warning, and for the same reason as the model check: an
+    # index holding a third of its chunks does not fail, it answers from the
+    # third that survived. ``chunk_count`` of 0 in the manifest means a builder
+    # that predates the field rather than an empty index, so it is not checked.
+    if chunk_count is not None and manifest.chunk_count and manifest.chunk_count != chunk_count:
+        report.refusals.append(
+            f"contents: the manifest describes {manifest.chunk_count} chunks, but "
+            f"the index holds {chunk_count}. The manifest and the index it "
+            "describes are from different builds -- most likely a build or "
+            "install that was interrupted part way"
         )
 
     # Chunk params do not invalidate an index -- the vectors are still the same

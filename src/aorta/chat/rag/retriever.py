@@ -384,6 +384,118 @@ class SqliteVecStore(VectorStore):
         return [candidates[index][0] for index in picked]
 
 
+def carry_over_collections(source: Path, dest: Path) -> list[str]:
+    """Copy collections present in ``source`` but absent from ``dest``.
+
+    Installing a published index replaces the whole ``.sqlite``, and the
+    per-user run collection lives in that same file (``rag/runs.py``) with its
+    own refresh cadence. Without this, every fetch silently deleted run
+    retrieval until the user rebuilt it -- and nothing said so.
+
+    Only collections ``dest`` lacks are copied, so the incoming source
+    collection always wins: the point is to preserve private data, not to
+    resurrect the index being replaced. Returns the names copied.
+    """
+    if not source.exists() or not dest.exists():
+        return []
+
+    ensure_modern_sqlite()
+    ensure_loadable_extensions()
+
+    import sqlite3
+
+    import sqlite_vec
+
+    conn = sqlite3.connect(dest)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("ATTACH DATABASE ? AS incoming", (str(source),))
+        try:
+            copied = _copy_missing_collections(conn)
+        finally:
+            conn.execute("DETACH DATABASE incoming")
+    except sqlite3.DatabaseError:
+        # A source file that is not a usable store has nothing to preserve, and
+        # failing the install over it would be worse than the data loss this
+        # function exists to prevent: the new index is already verified.
+        logger.warning("Could not read %s to preserve its private collections", source)
+        return []
+    finally:
+        conn.close()
+    if copied:
+        logger.info("Preserved local collection(s) across the install: %s", ", ".join(copied))
+    return copied
+
+
+def _copy_missing_collections(conn: sqlite3.Connection) -> list[str]:
+    """Copy every ``incoming`` collection the main database does not have."""
+    if not _has_registry(conn, "incoming"):
+        return []
+    theirs = {
+        name: (int(dimension), provider)
+        for name, dimension, provider in conn.execute(
+            f'SELECT collection, dimension, provider FROM incoming."{_REGISTRY_TABLE}"'
+        )
+    }
+    if not theirs:
+        return []
+    mine = (
+        {name for (name,) in conn.execute(f'SELECT collection FROM main."{_REGISTRY_TABLE}"')}
+        if _has_registry(conn, "main")
+        else set()
+    )
+
+    copied = []
+    for name in sorted(set(theirs) - mine):
+        # Names come from the registry of a file this install wrote, but they
+        # are interpolated into table names, so they get the same check a
+        # constructed store gets rather than being trusted for their origin.
+        if not _SAFE_COLLECTION.match(name):
+            logger.warning("Skipping collection %r: not a bare identifier", name)
+            continue
+        dimension, provider = theirs[name]
+        chunks, vectors = f"chunks_{name}", f"vec_{name}"
+        conn.execute(
+            f'CREATE TABLE main."{chunks}" '
+            "(id INTEGER PRIMARY KEY, content TEXT NOT NULL, metadata TEXT NOT NULL)"
+        )
+        conn.execute(
+            f'CREATE VIRTUAL TABLE main."{vectors}" USING vec0(embedding float[{dimension}])'
+        )
+        conn.execute(
+            f'INSERT INTO main."{chunks}" (id, content, metadata) '
+            f'SELECT id, content, metadata FROM incoming."{chunks}"'
+        )
+        # Row by row rather than INSERT..SELECT: vec0 is a virtual table, and
+        # the rowid has to be carried across explicitly because it is the join
+        # key back to the chunk text.
+        for rowid, embedding in conn.execute(
+            f'SELECT rowid, embedding FROM incoming."{vectors}"'
+        ).fetchall():
+            conn.execute(
+                f'INSERT INTO main."{vectors}" (rowid, embedding) VALUES (?, ?)',
+                (rowid, embedding),
+            )
+        conn.execute(
+            f'INSERT INTO main."{_REGISTRY_TABLE}" (collection, dimension, provider) '
+            "VALUES (?, ?, ?)",
+            (name, dimension, provider),
+        )
+        copied.append(name)
+    conn.commit()
+    return copied
+
+
+def _has_registry(conn: sqlite3.Connection, schema: str) -> bool:
+    row = conn.execute(
+        f"SELECT name FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (_REGISTRY_TABLE,),
+    ).fetchone()
+    return row is not None
+
+
 _retriever_cache: VectorStoreRetriever | None = None
 _vectorstore_cache: SqliteVecStore | None = None
 
@@ -401,7 +513,11 @@ def reset_caches() -> None:
     _vectorstore_cache = None
 
 
-def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
+def _check_manifest(
+    index_file: Path,
+    provider: EmbeddingProvider,
+    chunk_count: int | None = None,
+) -> None:
     """Enforce Decision 20a before the first query, not after it.
 
     Warn on source drift, refuse on an embedding-model or dimension mismatch.
@@ -418,6 +534,12 @@ def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
     the sidecar, so a missing one is a copied or hand-moved index rather than a
     normal state, and rebuilding or re-fetching is the fix. ``aorta chat
     doctor`` reports it without raising.
+
+    ``chunk_count`` is the collection's live row count, which is how a manifest
+    that describes different contents than the file holds gets caught. It is
+    deliberately not a hash of the ``.sqlite``: the private run collection
+    shares that file and rewrites it on its own cadence, so a whole-file digest
+    stops matching the moment the user builds run retrieval.
     """
     from aorta.chat.rag import manifest as manifest_mod
 
@@ -433,6 +555,7 @@ def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         installed_version=_installed_version(),
+        chunk_count=chunk_count,
     )
     for warning in report.warnings:
         logger.warning("chat index: %s", warning)
@@ -448,6 +571,35 @@ def _installed_version() -> str:
         return ""
 
 
+def collection_chunk_count(path: Path, collection: str) -> int | None:
+    """Rows in ``collection``'s chunk table, or ``None`` when unreadable.
+
+    ``None`` means "no evidence" rather than "empty", so a caller skips the
+    contents check instead of refusing: a file that is not a store, or holds no
+    such collection, has a better error waiting for it further down.
+
+    Deliberately raw sqlite rather than a :class:`SqliteVecStore`. The chunk
+    table is an ordinary table, so counting it needs neither the sqlite-vec
+    extension nor an embedding provider -- and requiring a provider would mean
+    ``aorta chat doctor`` downloaded a 65 MB model to count rows.
+    """
+    import sqlite3
+
+    if not path.exists() or not _SAFE_COLLECTION.match(collection):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()
+        return int(row[0])
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 def _get_vectorstore() -> SqliteVecStore:
     """Return the cached sqlite-vec store, opening it on first call."""
     global _vectorstore_cache
@@ -461,11 +613,17 @@ def _get_vectorstore() -> SqliteVecStore:
     # One provider decides both halves: embeddings and the collection they were
     # written to. Mixing them would query the wrong vector dimension.
     provider = get_provider()
-    _check_manifest(index_file, provider)
     store = SqliteVecStore(
         path=index_file,
         embedding=provider.get_embeddings(),
         collection=provider.collection_name(),
+    )
+    # The manifest check still runs first, and on an absent collection it runs
+    # exactly as it did before the count existed: a model mismatch renames the
+    # collection, and its refusal names the cause far better than "no such
+    # collection" would.
+    _check_manifest(
+        index_file, provider, collection_chunk_count(index_file, provider.collection_name())
     )
     if not store.collection_exists():
         present = ", ".join(store.collection_names()) or "none"
