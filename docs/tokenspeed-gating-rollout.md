@@ -89,7 +89,8 @@ between it and the metrics:**
 
 `warmup_steps: 1` is supposed to discard that step. **It does not always**, and
 that is the single most important number in this document — see the next
-section, which measures it on the cell the staged entry actually runs.
+section, which measures it on the cell the staged entry actually runs. That
+measurement is why the recipe now sets `warmup_steps: 2`.
 
 **Steady-state serving metrics, by contrast, reproduce well.** The docs do not
 say this in one sentence, but they contain two independent repeats:
@@ -125,6 +126,19 @@ Everything above is a claim quoted from another document. This section is a
 measurement of the exact cell the staged nightly entry runs, taken from the
 `step_times_ms` and `metrics_summary` recorded in every `matrix.json` on disk for
 `TOKENSPEED-SERVE-SMOKE`: six sweeps, 13 cell-runs with step times, 39 steps.
+
+> **These numbers were all taken at `warmup_steps: 1`, which the recipe no
+> longer uses.** The recipe now sets `warmup_steps: 2`, precisely because of what
+> this section measures. So read everything below as **the rationale for that
+> change, not as the baseline to bless against**: the table is the evidence that
+> a step-0 excursion reaches the metrics at `warmup_steps: 1`, and it is retained
+> for that purpose. It is *not* a prediction of what the record-only window will
+> show, because the window is taken at a different setting — one whose whole
+> purpose is to remove the excursion these thirteen cell-runs contain. Nothing
+> here is deleted or restated at the new setting; there is no measurement at
+> `warmup_steps: 2` yet, and inventing one would be worse than having none. The
+> ten-night window is what produces it. See step 3 of
+> [the rollout sequence](#the-rollout-sequence).
 
 **Twelve of the thirteen are very clean.** Tighter than the cross-sweep numbers
 above, because these are the same recipe on the same node:
@@ -327,10 +341,15 @@ either to gate a metric the second mode does not reach — which is what
 `median_tpot_ms` and `p99_itl_ms` are — or to remove the second mode. For the
 step-0 excursion the second option is genuinely available, because the excursion
 is positional: raising `warmup_steps` from 1 to 2 discards it by construction.
-That is the recommended follow-up, and it is what would let the three
-duration-derived metrics be promoted later. It is deliberately *not* bundled into
-this change, because changing `warmup_steps` changes the measurement, and every
-baseline and every number in this document was taken at `warmup_steps: 1`.
+
+**That has now been done** — the recipe sets `warmup_steps: 2` — which is what
+should let the three duration-derived metrics be promoted later. The cost is that
+it changes the measurement: every number in this document was taken at
+`warmup_steps: 1`, so none of them is a baseline any more, and the ten-night
+record-only window has to be taken afresh at the new setting before anything is
+blessed. That is a deliberate trade. Carrying the excursion into the window
+instead would have meant either blessing a bimodal cell or spending ten nights
+establishing a distribution we already intended to change.
 
 For the concurrency-64 stall no such fix exists — it has no position to discard —
 which is why that cell stays out of the nightly entirely rather than being gated
@@ -392,8 +411,18 @@ next to `aorta-ci-gpu`, not nested inside it.
 is an override, which is the mechanism the base compose already documents for
 optional mounts ("Do not add a volume here"), so the default container still has
 no route to the daemon. `rocm-ci-setup` takes a `docker-socket` input, default
-`false`, and adds the override's `-f` only when it is `true`. **No lane sets it**,
-which is deliberate — see the security note below.
+`false`, and adds the override's `-f` only when it is `true`.
+
+That input is reachable from a caller workflow through a matching `docker_socket`
+`workflow_call` input on `eval-reusable.yml`, also defaulting to `false` and
+forwarded to the setup step. The default is what matters here: `eval-reusable.yml`
+is shared by the nightly and by `bump-validate.yml`, so the choice has to be the
+caller's rather than the reusable workflow's — setting it centrally would grant
+the socket to a PR-triggered lane as a side effect of enabling the nightly.
+`bump-validate.yml` therefore pins it `false` explicitly, and
+`sanitizers-nightly.yml` never sees it, using `rocm-ci-setup` directly with no
+`docker-socket` argument. **No lane currently sets it `true`** — see the security
+note below.
 
 **3. `work_dir` must be an explicitly configured shared path.** This is the detail
 most likely to be missed, because nothing reports it as a path problem.
@@ -518,8 +547,8 @@ this branch's to give.
 Everything else on this list has been done. The entry is therefore in `entries`
 rather than `pending_entries`, carrying `needs_docker_daemon: true` — so on a
 runner without the socket it **skips**, with the reason in the results, instead
-of failing on `Cannot connect to the Docker daemon`. When a lane sets
-`docker-socket: true` the entry starts running with no further edit. Promoting it
+of failing on `Cannot connect to the Docker daemon`. When the nightly lane sets
+`docker_socket: true` the entry starts running with no further edit. Promoting it
 without that flag would have been the mistake the matrix file's own header warns
 about: an entry may only be added once it can actually pass on the runner.
 
@@ -608,21 +637,45 @@ python -m pytest tests/workloads/test_tokenspeed_serve.py -q
 aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml --dry-run
 ```
 
-**2a. Enable the socket on the nightly lane.** Not done, and not this branch's
-call — see [Security](#security-this-grants-effective-root-on-the-runner). One
-flag on the `rocm-ci-setup` step, plus a named sign-off:
+**2a. Enable the socket on the nightly lane.** The plumbing is in place; the
+decision is not this branch's to make — see
+[Security](#security-this-grants-effective-root-on-the-runner). It is one line in
+`.github/workflows/nightly-eval.yml`, plus a named sign-off:
 
 ```yaml
-      - uses: ./.github/actions/rocm-ci-setup
-        with:
-          docker-socket: true
+    uses: ./.github/workflows/eval-reusable.yml
+    with:
+      docker_socket: true
 ```
 
-Until that lands the entry reports `skip` with `needs a docker daemon: ...` in
-its reasons, which is visible on the dashboard and costs the nightly nothing.
+The `docker_socket` input on `eval-reusable.yml` defaults to `false` and is set
+per caller, so this arms the nightly lane and nothing else. `bump-validate.yml`
+sets it `false` explicitly: that lane runs PR head code on the same self-hosted
+runner and must keep no route to the host daemon. `sanitizers-nightly.yml` does
+not go through `eval-reusable.yml` at all — it uses the `rocm-ci-setup` action
+directly and passes no `docker-socket`, so it inherits the action default of
+`false`. Setting the input inside `eval-reusable.yml` instead of per caller would
+hand the socket to every lane at once and is the mistake this shape exists to
+prevent.
 
-**3. Let it record for ten nightlies.** It will report `recording` on the
-dashboard. Watch the *Workloads* view and write the numbers down; the ten values
+Until the sign-off lands, leave it `false`: the entry reports `skip` with
+`needs a docker daemon: ...` in its reasons, which is visible on the dashboard
+and costs the nightly nothing.
+
+**3. Let it record for ten nightlies, at `warmup_steps: 2`.** It will report
+`recording` on the dashboard.
+
+> The window is only valid at the setting the gate will run at, and that setting
+> is now `warmup_steps: 2` in
+> `recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml`. Confirm that before
+> counting nights, and restart the count if it changes underneath the window.
+> None of the numbers earlier in this document can substitute for any of these
+> ten: they were measured at `warmup_steps: 1`, and the change was made
+> specifically to alter the behaviour they describe. Expect the window to be
+> *cleaner* than the 13-cell-run table — that is the change working — but do not
+> assume it; the point of the window is to measure it rather than predict it.
+
+Watch the *Workloads* view and write the numbers down; the ten values
 of `median_tpot_ms` and `p99_itl_ms` per cell are the input to step 4, and the
 ten of `median_ttft_ms`, `output_throughput` and `mean_step_time_ms` are what
 decides whether the three record-only metrics can be promoted later. Two cells,
@@ -647,9 +700,14 @@ median. Two separate checks:
 
 If the window shows no excursion in twenty cell-runs, that is reasonable evidence
 it has stopped happening, and the three can be promoted with the same margins.
-The more reliable route is to raise `warmup_steps` to 2, which removes it by
-construction — at the cost of re-taking the window, since it changes the
-measurement.
+
+This window is the first measurement at `warmup_steps: 2`, so it is also the
+test of whether that change did what it was supposed to. Two outcomes worth
+telling apart: no excursion in twenty cell-runs is the expected result and clears
+the three duration-derived metrics for promotion in step 7; an excursion that
+still appears at position 0 means two discarded steps are not enough to cover
+the compile, which is new information and should be investigated rather than
+absorbed by raising `warmup_steps` again.
 
 **5. Bless, scoped to this entry only.**
 
@@ -657,7 +715,16 @@ measurement.
 Actions -> Refresh baselines -> Run workflow
 ```
 
-with the workflow's arguments set to
+with the dispatch form filled in as
+
+| Input | Value |
+|---|---|
+| `perf_gate` | `true` |
+| `perf_gate_entry` | `tokenspeed_serve_smoke` |
+| `step_time_margin` | `0.25` (default) |
+| `throughput_margin` | `0.15` (default) |
+
+which the workflow turns into
 
 ```bash
 python scripts/ci/refresh_baselines.py --perf-gate \
@@ -665,8 +732,16 @@ python scripts/ci/refresh_baselines.py --perf-gate \
 ```
 
 The scope is not optional. Without it the same PR arms step-time ceilings for
-every other entry in the matrix from that one run. A misspelled entry name is
-rejected rather than silently scoping to nothing.
+every other entry in the matrix from that one run, so leaving `perf_gate_entry`
+empty with `perf_gate: true` logs a warning on the job. It is a warning rather
+than a hard failure because an unscoped refresh is the legitimate end state once
+every workload has variance data behind it — but during rollout it is not what
+you want. A misspelled entry name is rejected rather than silently scoping to
+nothing, and setting `perf_gate_entry` without `perf_gate` fails immediately
+instead of after the wheel install.
+
+`perf_gate_entry` accepts several names, comma- or space-separated, mapping to
+one `--perf-gate-entry` each. For this rollout it should be exactly one.
 
 **6. Correct the PR diff by hand, then merge.** The refresher derives bounds from
 the *single* run it just did, and from every auto-gateable metric it observed.
@@ -698,9 +773,10 @@ another ten nightlies under the live gate there are twenty more observations.
 Take them in two groups, because they are blocked on different things:
 
 - `median_ttft_ms`, `output_throughput` and `step_time_ms.max` are blocked on the
-  step-0 excursion, not on their spread — which is already good enough. Promote
-  them when twenty cell-runs show no excursion, or immediately after raising
-  `warmup_steps` to 2 and re-taking the window.
+  step-0 excursion, not on their spread — which is already good enough. The
+  `warmup_steps: 2` change is intended to remove the blocker, so promote them
+  once the step-3 window shows twenty cell-runs with no excursion. That window
+  *is* the re-taken one; there is no separate re-take to schedule.
 - The remaining `p99_*` metrics are blocked on having no repeat data. Promote any
   whose window spread is comparable to its median's. `p99_ttft_ms` gated is worth
   more than `median_ttft_ms` gated, because tail latency is what a serving
@@ -801,10 +877,17 @@ was not enough a decision was made and is recorded here.
   capability was made declarable, exactly as `min_gpus` already is for GPU count.
   The cost is one field and one probe; the alternative was for the promotion to
   wait on a security decision it does not actually depend on.
-- **`warmup_steps` left at 1.** Raising it to 2 would remove the step-0 excursion
-  by construction and is the recommended follow-up, but it changes the
-  measurement, and every number in this document was taken at 1. Doing both in
-  one change would leave neither verifiable.
+- **`warmup_steps` raised to 2.** Reversed from "left at 1" earlier in this
+  branch. The step-0 excursion is positional, so one more discarded step removes
+  it by construction, and it is measured at 1 cell-run in 13 — frequent enough
+  that a ten-night window taken at 1 would probably contain one and produce
+  either a false alarm or a threshold with no detection power. The objection to
+  bundling it was that it changes the measurement and invalidates every number
+  here; that is true and is now the accepted cost, because those numbers were
+  never going to be the bless baseline — the window is, and the window has not
+  been taken yet. Changing the setting *before* the window costs nothing;
+  changing it after would have cost ten nights. The variance table is kept as
+  the rationale.
 - **`median_itl_ms`.** Kept in the allowlist and excluded from auto-blessing,
   rather than removed. Removing it would make a legitimate hand-written bound
   impossible; the problem is only ever with a bound derived from a margin.
