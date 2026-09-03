@@ -125,7 +125,7 @@ def test_commands_section_matches_an_eagerly_built_group() -> None:
 
 @pytest.mark.parametrize("name", sorted(_COMMANDS))
 def test_every_command_resolves_through_the_group(name: str) -> None:
-    """Covers the deprecated probe/run/triage aliases (issue #248) along with the rest."""
+    """Covers the deprecated probe/triage aliases (issue #248) along with the rest."""
     result = CliRunner().invoke(main, [name, "--help"])
     assert result.exit_code == 0, result.output
 
