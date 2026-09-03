@@ -139,7 +139,7 @@ Each PR body references issue #188 and the prior phase PR (so the dependency cha
 | 1.17 | Probe-mode entries in `aorta.workloads` entry-point group: `_subprocess = "aorta.workloads._subprocess:SubprocessWorkload"` is registered in `pyproject.toml` and resolves via `get_workload_class("_subprocess")`. | 3 | Unit test `tests/probe/test_subprocess_workload.py::test_resolved_via_entry_point`. |
 | 1.18 | `aorta probe` exits non-zero (Click `ClickException`) when the recipe is invalid, when no axis items resolve, when `--env-passthrough-mode` is invalid, or when the trailing argv is empty (`--` followed by nothing). | 3 | Unit tests `tests/probe/test_cli_parsing.py::test_invalid_recipe_nonzero_exit`, `::test_empty_argv_nonzero_exit`. |
 | 1.19 | Probe-mode rejects `condition`, `custom_patterns`, `redaction` keys at load time with a "deferred to Phase 2/3" error message that points to the phase. (Prevents users writing recipes that will silently no-op until later phases.) | 2 | Unit test `tests/probe/test_recipe.py::test_phase_2_3_keys_rejected_with_pointer`. |
-| 1.20 | `tests/probe/` contains an `__init__.py` and is collected by `pytest` per the existing `[tool.pytest.ini_options]` (`testpaths = ["tests"]`). | 1 | `pytest tests/probe` discovers ≥ 1 test. |
+| 1.20 | `tests/probe/` contains an `__init__.py` and is collected by `pytest` per the existing `pytest.ini` (`testpaths = tests`). | 1 | `pytest tests/probe` discovers ≥ 1 test. |
 |   | **Total weight** | **77** |  |
 
 ## 1.C File-by-File Deliverables
