@@ -354,20 +354,34 @@ def _imported_module_paths(node: ast.stmt) -> list[str]:
     return []
 
 
-def _load_time_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
-    """Statements that run when the module is imported.
+#: ``try:``/``except*`` in whichever spellings this Python provides.
+_TRY_NODES = (ast.Try, *((ast.TryStar,) if hasattr(ast, "TryStar") else ()))
+
+
+def _load_time_statements(
+    body: list[ast.stmt], *, certain: bool = True
+) -> Iterator[tuple[ast.stmt, bool]]:
+    """Statements that can run at import, each tagged as certain to or not.
 
     Not the same set as ``module.body``. A ``try:``/``except ImportError:`` or
     an ``if`` around an optional import -- the ordinary shape for a dependency
     that may be absent -- runs at load time just as a bare import does, so the
     nested blocks have to be descended into. Reading only the top level made
-    those imports invisible, and an invisible proton import makes
+    those imports invisible, and invisible makes
     :func:`test_proton_payloads_import_proton_before_torch` *skip* rather than
     fail: the payload would deadlock and the suite would report green.
 
-    Function and class bodies are excluded, because those really do not run at
-    import time, so an import there cannot decide which library's constructor
-    lands first -- which is the whole property under test.
+    **Class bodies are descended into.** A module-level ``class`` statement
+    executes its body while the module loads, so an import there really does
+    run the extension's constructor -- verified, not assumed. Only *function*
+    bodies are excluded, and only because they genuinely do not run at import,
+    so an import there cannot decide which library lands first.
+
+    The flag distinguishes blocks that are **entered unconditionally** (a
+    ``try:`` or ``with:`` body, a ``finally:``, a class body) from those that
+    may be skipped whole (``if``/``else``, an ``except`` handler, a loop body,
+    a ``match`` case). Only the first kind can be *relied on* as evidence that
+    Proton was imported early; see :func:`_first_import_lines`.
 
     Still invisible, and deliberately so: an import performed by a *call* such
     as ``importlib.import_module("triton.profiler")`` is not an import
@@ -375,34 +389,60 @@ def _load_time_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
     tracking string arguments rather than reading the AST's import nodes.
     """
     for node in body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        yield node
-        for block in ("body", "orelse", "finalbody"):
-            yield from _load_time_statements(getattr(node, block, None) or [])
-        for handler in getattr(node, "handlers", []):
-            yield from _load_time_statements(handler.body)
-        for case in getattr(node, "cases", []):
-            yield from _load_time_statements(case.body)
+        yield node, certain
+        if isinstance(node, (ast.ClassDef, ast.With, ast.AsyncWith)):
+            yield from _load_time_statements(node.body, certain=certain)
+        elif isinstance(node, _TRY_NODES):
+            yield from _load_time_statements(node.body, certain=certain)
+            yield from _load_time_statements(node.finalbody, certain=certain)
+            yield from _load_time_statements(node.orelse, certain=False)
+            for handler in node.handlers:
+                yield from _load_time_statements(handler.body, certain=False)
+        elif isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            yield from _load_time_statements(node.body, certain=False)
+            yield from _load_time_statements(node.orelse, certain=False)
+        elif isinstance(node, ast.Match):
+            for case in node.cases:
+                yield from _load_time_statements(case.body, certain=False)
 
 
 def _first_import_lines(payload: Path) -> tuple[int | None, int | None]:
-    """Line numbers of the payload's first Proton and ``torch`` imports.
+    """Lines to compare for the import-order rule: Proton's, then ``torch``'s.
 
-    Lowest line number rather than first-encountered, because
-    :func:`_load_time_statements` yields an enclosing ``try:`` before the
-    imports inside it and so is not in source order.
+    Not simply the lowest line of each. Once conditional blocks are in scope,
+    the two libraries need opposite treatment, because the question is whether
+    *any* feasible load path imports torch first:
+
+    * **Proton** -- the line reported is the earliest import certain to be
+      attempted, because a conditional one is no evidence the constructor ran
+      early: on the path where the branch is skipped it did not run at all.
+      With no certain import, the *latest* conditional one is used, that being
+      the worst path on which Proton loads at all.
+    * **torch** -- the earliest import that *might* run, conditional or not,
+      since any of them is enough to bring HSA up.
+
+    Flattening both to ``min()`` passed a genuinely deadlocking payload: a
+    Proton import under ``if TYPE_CHECKING:`` (never executed) followed by
+    top-level ``import torch`` and then a real Proton import reported
+    ``proton_line < torch_line`` off the unexecuted line, while the runtime
+    order was torch first.
     """
-    proton_lines: list[int] = []
-    torch_lines: list[int] = []
+    certain_proton: list[int] = []
+    any_proton: list[int] = []
+    any_torch: list[int] = []
     module = ast.parse(payload.read_text(encoding="utf-8"))
-    for node in _load_time_statements(module.body):
+    for node, certain in _load_time_statements(module.body):
         for name in _imported_module_paths(node):
             if name.startswith(_PROTON_IMPORT_PREFIXES):
-                proton_lines.append(node.lineno)
+                any_proton.append(node.lineno)
+                if certain:
+                    certain_proton.append(node.lineno)
             if name == "torch" or name.startswith("torch."):
-                torch_lines.append(node.lineno)
-    return (min(proton_lines, default=None), min(torch_lines, default=None))
+                any_torch.append(node.lineno)
+    proton_line = min(certain_proton) if certain_proton else max(any_proton, default=None)
+    return proton_line, min(any_torch, default=None)
 
 
 _PROTON_PAYLOADS = sorted(
@@ -532,21 +572,21 @@ def test_the_order_guard_ignores_imports_it_cannot_attribute(tmp_path):
             id="with-block",
         ),
         pytest.param(
+            "class Holder:\n    import torch\n    import triton.profiler as proton\n",
+            (3, 2),
+            id="class-body-runs-at-import",
+        ),
+        pytest.param(
             "def main():\n    import torch\n    import triton.profiler as proton\n",
             (None, None),
             id="inside-a-function-does-not-run-at-import",
-        ),
-        pytest.param(
-            "class Holder:\n    import torch\n    import triton.profiler as proton\n",
-            (None, None),
-            id="inside-a-class-body",
         ),
     ],
 )
 def test_the_order_guard_sees_imports_nested_in_load_time_blocks(
     tmp_path, payload_source, expected
 ):
-    """A module-level ``try:`` or ``if:`` runs at import, so it must be descended into.
+    """A module-level ``try:``, ``if:`` or ``class:`` runs at import.
 
     Reading only ``module.body`` made these invisible, and invisible is the
     dangerous direction: ``_first_import_lines`` returned ``(None, None)`` and
@@ -555,10 +595,72 @@ def test_the_order_guard_sees_imports_nested_in_load_time_blocks(
     -- the ordinary shape for an optional dependency -- would deadlock at exit
     and still report green.
 
-    The last two cases are the boundary in the other direction: a function or
-    class body genuinely does not run at import, so an import there decides
-    nothing about which constructor lands first and must stay invisible.
+    A class body is the case most easily got wrong, because it looks like a
+    function body and behaves like module scope: the ``class`` statement
+    executes its body as the module loads, so the extension's constructor
+    really does run. Only the function case stays invisible, and that one is
+    the boundary in the other direction -- it genuinely does not run at import,
+    so it decides nothing about which library lands first.
     """
     payload = tmp_path / "payload.py"
     payload.write_text(payload_source, encoding="utf-8")
     assert _first_import_lines(payload) == expected
+
+
+@pytest.mark.parametrize(
+    ("payload_source", "expected"),
+    [
+        pytest.param(
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n"
+            "    import triton.profiler as proton\nimport torch\n"
+            "import triton.profiler as proton\n",
+            (5, 4),
+            id="unexecuted-proton-must-not-vouch-for-a-later-real-one",
+        ),
+        pytest.param(
+            "if sys.version_info >= (3, 9):\n    import triton.profiler as proton\n"
+            "import torch\nimport triton.profiler as proton\n",
+            (4, 3),
+            id="conditional-proton-then-torch-then-certain-proton",
+        ),
+        pytest.param(
+            "import torch\nif FLAG:\n    import triton.profiler as proton\n",
+            (3, 1),
+            id="only-conditional-proton-uses-its-own-line",
+        ),
+        pytest.param(
+            "import torch\nif FLAG:\n    import triton.profiler as proton\nelse:\n"
+            "    import triton.profiler.language as pl\n",
+            (5, 1),
+            id="only-conditional-proton-uses-the-worst-branch",
+        ),
+        pytest.param(
+            "try:\n    import triton.profiler as proton\nexcept ImportError:\n"
+            "    proton = None\nimport torch\n",
+            (2, 5),
+            id="try-body-is-entered-so-it-does-vouch",
+        ),
+    ],
+)
+def test_a_conditional_proton_import_is_no_evidence_of_a_safe_order(
+    tmp_path, payload_source, expected
+):
+    """A branch that may not execute cannot vouch for the import order.
+
+    Taking ``min()`` of every Proton line let an unexecuted import stand in for
+    a real one. Under ``if TYPE_CHECKING:`` the import never runs, so a payload
+    that then did ``import torch`` before its actual Proton import reported
+    ``proton_line < torch_line`` and passed -- while deadlocking at runtime,
+    which is precisely what this guard exists to prevent.
+
+    So Proton reports the earliest *certain* import and falls back to the latest
+    conditional one (the worst path on which it loads at all), while torch
+    reports the earliest that *might* run. The last case is the boundary: a
+    ``try:`` body is entered unconditionally, so unlike an ``if`` it is real
+    evidence, and the ordinary optional-dependency shape keeps passing.
+    """
+    payload = tmp_path / "payload.py"
+    payload.write_text(payload_source, encoding="utf-8")
+    proton_line, torch_line = _first_import_lines(payload)
+    assert (proton_line, torch_line) == expected
+    assert proton_line is not None and torch_line is not None, "must not go invisible"
