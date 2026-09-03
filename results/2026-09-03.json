@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-03T11:18:15.851674+00:00",
+  "generated_at": "2026-09-03T15:58:15.804087+00:00",
   "build": {
     "amd_aorta_version": "0.3.1rc20260903",
     "torch": "2.13.0+rocm10.0.0",
     "hip": "7.15.26333",
     "rocm": "10.0.0",
-    "upstream_run_id": "33748209376",
-    "head_sha": "90dae9376bd3a09531478a72752ccb204e36fc5c",
+    "upstream_run_id": "33770514024",
+    "head_sha": "00c4a4609a45ea90503a4329c882ea1c416871c3",
     "wheel_file": "amd_aorta-0.3.1rc20260903-py3-none-any.whl",
     "lane": "gate",
     "base_image": null
@@ -27,8 +27,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 194.3752048537135,
-        "mean_wall_clock_sec": 3.4960266798734665,
+        "mean_step_time_ms": 194.91543993353844,
+        "mean_wall_clock_sec": 3.4853040548041463,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "sum": 8.0,
@@ -41,8 +41,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/gpu_smoke/CI-GPU-SMOKE/gpu_smoke/2026-09-03T11-12-14/matrix.json",
-      "duration_sec": 11.378823,
+      "matrix_path": ".nightly-eval/gpu_smoke/CI-GPU-SMOKE/gpu_smoke/2026-09-03T15-52-15/matrix.json",
+      "duration_sec": 11.427726,
       "error": null
     },
     {
@@ -52,20 +52,20 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 46.18170531466603,
-        "mean_wall_clock_sec": 10.442066799849272,
+        "mean_step_time_ms": 43.08691783808172,
+        "mean_wall_clock_sec": 10.258311201818287,
         "step_time_source": "per_step",
         "summary": {
           "parameter_count": 33170432.0,
           "batch_size": 4.0,
           "prompt_len": 128.0,
           "generate_tokens": 32.0,
-          "prefill_latency_ms": 1.2321872636675835,
-          "decode_latency_ms": 1.2482087157907025,
-          "tokens_per_sec": 3204.592268422129,
+          "prefill_latency_ms": 1.125152688473463,
+          "decode_latency_ms": 1.154745643537852,
+          "tokens_per_sec": 3463.9663049474684,
           "decoded_tokens": 496.0,
-          "step_time_p50": 44.24540279433131,
-          "step_time_p99": 52.02959761954844,
+          "step_time_p50": 41.243262123316526,
+          "step_time_p99": 48.741095708683126,
           "logits_checksum": 33904201.0
         }
       },
@@ -82,8 +82,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/inference_offline/EXAMPLE-INFERENCE-SMOKE/inference/2026-09-03T11-12-26/matrix.json",
-      "duration_sec": 19.041695,
+      "matrix_path": ".nightly-eval/inference_offline/EXAMPLE-INFERENCE-SMOKE/inference/2026-09-03T15-52-27/matrix.json",
+      "duration_sec": 18.590283,
       "error": null
     },
     {
@@ -93,16 +93,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1404.7212533187121,
-        "mean_wall_clock_sec": 11.933767915703356,
+        "mean_step_time_ms": 1385.4475219268352,
+        "mean_wall_clock_sec": 11.890781846828759,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 2.0,
           "parameter_count": 656896.0,
           "final_loss": 6.936877250671387,
-          "step_time_p50": 1.0243691504001617,
-          "step_time_p99": 36.50880426168442
+          "step_time_p50": 0.8973916992545128,
+          "step_time_p99": 2.5848207995295525
         }
       },
       "deltas": {},
@@ -110,8 +110,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_ddp/EXAMPLE-TRAINING-DDP/training/2026-09-03T11-12-46/matrix.json",
-      "duration_sec": 23.046638,
+      "matrix_path": ".nightly-eval/training_ddp/EXAMPLE-TRAINING-DDP/training/2026-09-03T15-52-47/matrix.json",
+      "duration_sec": 23.044073,
       "error": null
     },
     {
@@ -121,16 +121,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1322.480850853026,
-        "mean_wall_clock_sec": 11.620002845302224,
+        "mean_step_time_ms": 1334.754404379055,
+        "mean_wall_clock_sec": 11.82110760267824,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 2.0,
           "parameter_count": 2361856.0,
           "final_loss": 254.41094970703125,
-          "step_time_p50": 5.532856099307537,
-          "step_time_p99": 7.583915200084448
+          "step_time_p50": 6.0476278886199,
+          "step_time_p99": 35.13858010992408
         }
       },
       "deltas": {},
@@ -138,8 +138,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_fsdp/EXAMPLE-TRAINING-FSDP/training/2026-09-03T11-13-09/matrix.json",
-      "duration_sec": 22.794356,
+      "matrix_path": ".nightly-eval/training_fsdp/EXAMPLE-TRAINING-FSDP/training/2026-09-03T15-53-10/matrix.json",
+      "duration_sec": 22.993773,
       "error": null
     },
     {
@@ -149,11 +149,11 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1509.4292163848877,
-        "mean_wall_clock_sec": 13.053532380610704,
+        "mean_step_time_ms": 1595.0532913208008,
+        "mean_wall_clock_sec": 13.324308324605227,
         "step_time_source": "elapsed_per_iter",
         "summary": {
-          "avg_step_time_ms": 1509.4292163848877,
+          "avg_step_time_ms": 1595.0532913208008,
           "layers_verified": 15.0,
           "layer_checksum_mismatches": 0.0,
           "eff_num_heads": 4.0,
@@ -174,8 +174,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/race/RACE-SMOKE/race/2026-09-03T11-13-32/matrix.json",
-      "duration_sec": 22.643531,
+      "matrix_path": ".nightly-eval/race/RACE-SMOKE/race/2026-09-03T15-53-32/matrix.json",
+      "duration_sec": 22.696308,
       "error": null
     },
     {
@@ -185,8 +185,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8229.382457211614,
-        "mean_wall_clock_sec": 17.73274625558406,
+        "mean_step_time_ms": 7749.101537279785,
+        "mean_wall_clock_sec": 17.32785391435027,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -202,8 +202,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T11-13-54/matrix.json",
-      "duration_sec": 80.164689,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T15-53-55/matrix.json",
+      "duration_sec": 79.765642,
       "error": null
     },
     {
@@ -213,8 +213,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8095.7563649863005,
-        "mean_wall_clock_sec": 15.692082003690302,
+        "mean_step_time_ms": 7514.7407706826925,
+        "mean_wall_clock_sec": 15.42016976326704,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -230,8 +230,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T11-13-54/matrix.json",
-      "duration_sec": 80.164689,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T15-53-55/matrix.json",
+      "duration_sec": 79.765642,
       "error": null
     },
     {
@@ -241,8 +241,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8006.363953463733,
-        "mean_wall_clock_sec": 17.815670092590153,
+        "mean_step_time_ms": 7810.342678800225,
+        "mean_wall_clock_sec": 17.68350158073008,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -258,8 +258,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T11-13-54/matrix.json",
-      "duration_sec": 80.164689,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T15-53-55/matrix.json",
+      "duration_sec": 79.765642,
       "error": null
     },
     {
@@ -269,8 +269,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8332.510622218251,
-        "mean_wall_clock_sec": 19.181620591320097,
+        "mean_step_time_ms": 8183.645701035857,
+        "mean_wall_clock_sec": 19.42276345938444,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -286,8 +286,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T11-13-54/matrix.json",
-      "duration_sec": 80.164689,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-03T15-53-55/matrix.json",
+      "duration_sec": 79.765642,
       "error": null
     },
     {
@@ -297,16 +297,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1351.4200674835593,
-        "mean_wall_clock_sec": 12.947749637067318,
+        "mean_step_time_ms": 1344.8200300335884,
+        "mean_wall_clock_sec": 12.96160705666989,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 8.0,
           "parameter_count": 656896.0,
           "final_loss": 6.936975479125977,
-          "step_time_p50": 1.3822028413414955,
-          "step_time_p99": 53.24511865153909
+          "step_time_p50": 1.3252338394522667,
+          "step_time_p99": 61.52577659115195
         }
       },
       "deltas": {},
@@ -314,8 +314,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_ddp_8gpu/EXAMPLE-TRAINING-DDP/training/2026-09-03T11-15-14/matrix.json",
-      "duration_sec": 27.803362,
+      "matrix_path": ".nightly-eval/training_ddp_8gpu/EXAMPLE-TRAINING-DDP/training/2026-09-03T15-55-15/matrix.json",
+      "duration_sec": 27.402301,
       "error": null
     },
     {
@@ -325,16 +325,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1373.0819765478373,
-        "mean_wall_clock_sec": 13.102936285547912,
+        "mean_step_time_ms": 1376.2192348949611,
+        "mean_wall_clock_sec": 12.85022970661521,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 8.0,
           "parameter_count": 2361856.0,
           "final_loss": 254.3743896484375,
-          "step_time_p50": 6.0075270012021065,
-          "step_time_p99": 32.456380017101765
+          "step_time_p50": 5.701015703380108,
+          "step_time_p99": 59.7945361956954
         }
       },
       "deltas": {},
@@ -342,8 +342,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_fsdp_8gpu/EXAMPLE-TRAINING-FSDP/training/2026-09-03T11-15-42/matrix.json",
-      "duration_sec": 27.656177,
+      "matrix_path": ".nightly-eval/training_fsdp_8gpu/EXAMPLE-TRAINING-FSDP/training/2026-09-03T15-55-42/matrix.json",
+      "duration_sec": 28.053027,
       "error": null
     },
     {
@@ -353,11 +353,11 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1748.9449501037598,
-        "mean_wall_clock_sec": 17.86782648321241,
+        "mean_step_time_ms": 1828.354024887085,
+        "mean_wall_clock_sec": 17.983784468844533,
         "step_time_source": "elapsed_per_iter",
         "summary": {
-          "avg_step_time_ms": 1748.9449501037598,
+          "avg_step_time_ms": 1828.354024887085,
           "layers_verified": 15.0,
           "layer_checksum_mismatches": 0.0,
           "eff_num_heads": 4.0,
@@ -378,8 +378,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/race_8gpu/RACE-SMOKE/race/2026-09-03T11-16-10/matrix.json",
-      "duration_sec": 28.15182,
+      "matrix_path": ".nightly-eval/race_8gpu/RACE-SMOKE/race/2026-09-03T15-56-10/matrix.json",
+      "duration_sec": 27.951704,
       "error": null
     },
     {
@@ -389,8 +389,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 9441.216076724231,
-        "mean_wall_clock_sec": 22.30147627275437,
+        "mean_step_time_ms": 8764.764130115509,
+        "mean_wall_clock_sec": 21.842568710446358,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -406,8 +406,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T11-16-38/matrix.json",
-      "duration_sec": 98.495237,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T15-56-38/matrix.json",
+      "duration_sec": 98.050438,
       "error": null
     },
     {
@@ -417,8 +417,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8699.66480601579,
-        "mean_wall_clock_sec": 20.31098576914519,
+        "mean_step_time_ms": 8600.711174309254,
+        "mean_wall_clock_sec": 19.941322376951575,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -434,8 +434,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T11-16-38/matrix.json",
-      "duration_sec": 98.495237,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T15-56-38/matrix.json",
+      "duration_sec": 98.050438,
       "error": null
     },
     {
@@ -445,8 +445,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8793.460085056722,
-        "mean_wall_clock_sec": 21.89120737835765,
+        "mean_step_time_ms": 8716.886210255325,
+        "mean_wall_clock_sec": 21.891309496946633,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -462,8 +462,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T11-16-38/matrix.json",
-      "duration_sec": 98.495237,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T15-56-38/matrix.json",
+      "duration_sec": 98.050438,
       "error": null
     },
     {
@@ -473,8 +473,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 9265.460412018001,
-        "mean_wall_clock_sec": 24.045114137232304,
+        "mean_step_time_ms": 9102.779981680214,
+        "mean_wall_clock_sec": 24.03590943850577,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -490,8 +490,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T11-16-38/matrix.json",
-      "duration_sec": 98.495237,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-03T15-56-38/matrix.json",
+      "duration_sec": 98.050438,
       "error": null
     }
   ]
