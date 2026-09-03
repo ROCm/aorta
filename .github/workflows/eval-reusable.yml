@@ -24,6 +24,21 @@ on:
         type: boolean
         required: false
         default: false
+      # MUST stay false for every PR-triggered lane (bump-validate.yml), and for
+      # any lane that does not run a workload needing its own container.
+      # Mounting the host daemon socket into the CI container is effectively root
+      # on the runner: a container that can reach the daemon can start a
+      # privileged one bind-mounting /. On a PR-triggered lane that is reachable
+      # by anyone who can open a PR that touches the trigger paths, so the socket
+      # is opt-in per caller and off by default -- deliberately NOT set here in
+      # the shared reusable workflow, where it would apply to every caller at
+      # once. Only nightly-eval.yml sets it true. See the security note in
+      # docker/docker-compose.docker-socket.yaml.
+      docker_socket:
+        description: "mount the host docker socket (nightly eval lane only)"
+        type: boolean
+        required: false
+        default: false
 
 env:
   CONTAINER_NAME: aorta-ci-gpu
@@ -72,6 +87,7 @@ jobs:
         uses: ./.github/actions/rocm-ci-setup
         with:
           rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+          docker-socket: ${{ inputs.docker_socket }}
 
       - name: Install wheel and run evaluation
         env:
