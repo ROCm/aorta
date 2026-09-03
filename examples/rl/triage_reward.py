@@ -79,7 +79,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport
+from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport, Verdict
 from aorta.probe.classifier.verdict import (
     VALID_VERDICTS,
     partition_detectors,
@@ -88,6 +88,13 @@ from aorta.probe.classifier.verdict import (
 
 VERDICT_WEIGHT = 0.6
 ATTRIBUTION_WEIGHT = 0.4
+
+# Every verdict a corpus example may carry: the probe's three-way split plus the
+# sanitizers' wider vocabulary. Taken from both enums rather than written out,
+# so a new verdict upstream widens this automatically instead of making valid
+# corpus rows look like corruption. The two spaces stay unmapped -- `warn` has
+# no probe equivalent -- so this is a union, not a translation.
+SANITIZER_VERDICTS = frozenset(v.value for v in Verdict) | frozenset(VALID_VERDICTS)
 
 
 @dataclass
@@ -283,6 +290,49 @@ def load_sanitizer_reports(root: Path) -> list[tuple[str, Label]]:
     return out
 
 
+def load_corpus(path: Path) -> list[tuple[str, Label, str]]:
+    """Load a `build_corpus.py` triage JSONL as labels, with their families.
+
+    The corpus stores the label rather than recomputing it from the report,
+    because the report may not travel with it. The seam is not lost: the label
+    was produced by ``label_sanitizer_report`` at build time, so it passed
+    ``SanitizerReport.from_dict`` then. What is checked here instead is that the
+    verdict is one this scorer knows, so a corpus written by a newer builder
+    with a wider vocabulary fails loudly rather than scoring as a mismatch
+    against every answer.
+    """
+    out: list[tuple[str, Label, str]] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if row.get("kind") != "triage":
+            continue
+        stored = row["label"]
+        verdict = stored["verdict"]
+        if verdict not in SANITIZER_VERDICTS:
+            raise ValueError(
+                f"{path}:{line_number}: verdict {verdict!r} is outside this "
+                f"scorer's vocabulary {sorted(SANITIZER_VERDICTS)}"
+            )
+        out.append((
+            row["example_id"],
+            Label(
+                verdict=verdict,
+                failure_detectors=list(stored.get("failure_detectors") or []),
+                error_detectors=list(stored.get("error_detectors") or []),
+                stored_verdict=stored.get("stored_verdict"),
+                stale=bool(stored.get("stale")),
+                source=row["example_id"],
+            ),
+            row.get("workload_family", "unknown"),
+        ))
+    return out
+
+
 def score_policy(
     name: str,
     answer_for: Any,
@@ -401,8 +451,19 @@ FIXTURES: tuple[dict[str, Any], ...] = (
 )
 
 
-def run_demo(as_json: bool, runs_root: Path | None) -> int:
-    if runs_root is not None:
+def run_demo(
+    as_json: bool, runs_root: Path | None, corpus: Path | None = None
+) -> int:
+    families: dict[str, int] = {}
+    if corpus is not None:
+        rows = load_corpus(corpus)
+        if not rows:
+            print(f"no triage examples in {corpus}", file=sys.stderr)
+            return 2
+        labelled = [(src, label) for src, label, _ in rows]
+        for _, _, family in rows:
+            families[family] = families.get(family, 0) + 1
+    elif runs_root is not None:
         loaded = load_runs(runs_root)
         labelled = [(src, label_run(doc, src)) for src, doc in loaded]
         # Sanitizer reports live alongside probe results in a real run tree, and
@@ -451,6 +512,7 @@ def run_demo(as_json: bool, runs_root: Path | None) -> int:
         print(json.dumps({
             "runs": [{"source": s, "label": lb.as_dict()} for s, lb in labelled],
             "verdict_distribution": distribution,
+            "workload_families": families,
             "policies": policies,
             "stale": [s for s, _ in stale],
         }, indent=2))
@@ -458,7 +520,10 @@ def run_demo(as_json: bool, runs_root: Path | None) -> int:
 
     print("Seam demonstration: triage-classification reward, labelled by aorta.")
     print(f"reward = {VERDICT_WEIGHT} * verdict-correct + {ATTRIBUTION_WEIGHT} * attribution-F1\n")
-    print(f"{len(labelled)} run(s); verdict distribution: {distribution}\n")
+    print(f"{len(labelled)} run(s); verdict distribution: {distribution}")
+    if families:
+        print(f"workload families: {families}")
+    print()
 
     for source, label in labelled:
         cited = ", ".join(sorted(label.cited_detectors)) or "(none)"
@@ -496,9 +561,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--runs", type=Path, default=None,
                     help="directory of archived probe runs (result.json files); "
                          "omit to use the synthetic fixtures")
+    ap.add_argument("--corpus", type=Path, default=None,
+                    help="triage.jsonl written by build_corpus.py; scores the "
+                         "labelled corpus directly, with no conversion pass")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     args = ap.parse_args(argv)
-    return run_demo(args.json, args.runs)
+    return run_demo(args.json, args.runs, args.corpus)
 
 
 if __name__ == "__main__":

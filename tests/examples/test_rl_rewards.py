@@ -685,3 +685,129 @@ def test_scoring_works_unchanged_across_both_label_sources(triage_reward):
 
         wrong = triage_reward.Answer("pass" if label.verdict != "pass" else "fail", [])
         assert triage_reward.score_answer(wrong, label).reward < 1.0
+
+
+# --------------------------------------------------------------------------- #
+# build_corpus.py -- turning real sanitizer runs into scorable examples.
+#
+# The two properties worth pinning are the ones that would quietly ruin a
+# corpus: counting lanes of one race as many examples, and losing the workload
+# family that makes the corpus splittable.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def build_corpus():
+    return _load("build_corpus")
+
+
+def _build(build_corpus, tmp_path, results):
+    out = tmp_path / "corpus"
+    build_corpus.main([
+        "--results", str(results),
+        "--baselines", str(
+            Path(__file__).resolve().parents[2]
+            / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+        ),
+        "--out", str(out),
+    ])
+    return out, json.loads((out / "manifest.json").read_text())
+
+
+def test_the_committed_reports_build_into_a_corpus(build_corpus, tmp_path):
+    _, manifest = _build(build_corpus, tmp_path, _SURVEY)
+    assert manifest["scenarios"] == 6
+    assert manifest["examples"]["triage"] == 6
+    assert manifest["rejected_reports"] == 0
+
+
+def test_every_example_carries_a_workload_family(build_corpus, tmp_path):
+    """Stratification is free now and expensive to retrofit, so it is enforced."""
+    out, manifest = _build(build_corpus, tmp_path, _SURVEY)
+    assert "unknown" not in manifest["workload_families"]
+    for name in ("triage.jsonl", "proposal.jsonl"):
+        rows = [json.loads(x) for x in (out / name).read_text().splitlines() if x]
+        assert rows
+        for row in rows:
+            assert row["workload_family"] != "unknown"
+
+
+def test_lanes_of_one_race_collapse_to_one_site(build_corpus, tmp_path):
+    """64 findings from one race are one piece of evidence, not 64.
+
+    Built by replaying a real finding across lane masks, which is exactly the
+    shape ConSan emits for a two-wave LDS race: same instruction pair, one
+    record per lane.
+    """
+    source = json.loads(
+        (_SURVEY / "reports" / "gemm_f32_waitcheck" / "sanitizer_report.json")
+        .read_text()
+    )
+    # Reduced to the one check carrying the lanes, so the counts below are the
+    # dedup rule and nothing else.
+    check = source["checks"][0]
+    source["checks"] = [check]
+    template = (check.get("findings") or [])[0]
+    check["kernel_results"] = []
+    lanes = []
+    for index in range(64):
+        lane = json.loads(json.dumps(template))
+        lane["metadata"] = dict(lane.get("metadata") or {})
+        lane["metadata"].update({
+            "first_inst": "0x8", "second_inst": "0x28", "kind": "1",
+            "first_lane_mask": hex(1 << (index % 32)),
+            "first_lds": f"[{index * 4},{index * 4 + 4})",
+        })
+        lanes.append(lane)
+    check["findings"] = lanes
+
+    results = tmp_path / "results" / "lds_reduce_consan"
+    results.mkdir(parents=True)
+    (results / "sanitizer_report.json").write_text(json.dumps(source))
+
+    _, manifest = _build(build_corpus, tmp_path, tmp_path / "results")
+    assert manifest["findings"]["raw"] == 64
+    assert manifest["findings"]["distinct_sites"] == 1
+
+
+def test_the_corpus_scores_through_the_triage_scorer(
+    build_corpus, triage_reward, tmp_path
+):
+    """The corpus is consumable with no conversion pass, and the oracle is perfect."""
+    out, _ = _build(build_corpus, tmp_path, _SURVEY)
+    rows = triage_reward.load_corpus(out / "triage.jsonl")
+    assert len(rows) == 6
+    for _, label, family in rows:
+        assert family != "unknown"
+        oracle = triage_reward.Answer(label.verdict, sorted(label.cited_detectors))
+        assert triage_reward.score_answer(oracle, label).reward == pytest.approx(1.0)
+
+
+def test_the_corpus_scores_through_the_proposal_scorer(
+    build_corpus, proposal_reward, tmp_path
+):
+    """Every proposal variant lands on the tier it was synthesised to land on."""
+    out, _ = _build(build_corpus, tmp_path, _SURVEY)
+    rows = proposal_reward.load_corpus(out / "proposal.jsonl")
+    assert rows
+    by_variant = {}
+    for proposal, _ in rows:
+        by_variant.setdefault(proposal.name.rsplit(":", 1)[1], set()).add(
+            proposal_reward.score_proposal(proposal).tier
+        )
+    assert by_variant["valid"] == {5}
+    assert by_variant["hallucinated_name"] == {3}
+    assert by_variant["invalid_category"] == {2}
+    assert by_variant["already_tried"] == {4}
+
+
+def test_a_verdict_outside_the_vocabulary_is_rejected(triage_reward, tmp_path):
+    """A corpus written by a newer builder fails loudly, not as a silent mismatch."""
+    corpus = tmp_path / "triage.jsonl"
+    corpus.write_text(json.dumps({
+        "kind": "triage", "example_id": "triage:x", "workload_family": "f",
+        "label": {"verdict": "catastrophe", "failure_detectors": [],
+                  "error_detectors": []},
+    }) + "\n")
+    with pytest.raises(ValueError, match="outside this scorer's vocabulary"):
+        triage_reward.load_corpus(corpus)

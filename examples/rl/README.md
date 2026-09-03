@@ -316,6 +316,55 @@ Row two is the term that earns its place: a policy with the verdict right and
 the citation invented keeps 0.689, and the 0.311 it loses is entirely
 attribution. Without that term it would be indistinguishable from the oracle.
 
+## `build_corpus.py`
+
+Turns a tree of real `sanitizer_report.json` artifacts into JSONL that both
+scorers read directly:
+
+```bash
+python examples/rl/build_corpus.py \
+  --results <tree of sanitizer runs> \
+  --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
+  --out examples/rl/corpus --run-meta run_meta.json
+
+python examples/rl/triage_reward.py   --corpus examples/rl/corpus/triage.jsonl
+python examples/rl/proposal_reward.py --corpus examples/rl/corpus/proposal.jsonl
+```
+
+The committed corpus under `corpus/` is the first one generated from real runs;
+`corpus/README.md` records what is in it, its provenance, and the tool defects
+the runs surfaced.
+
+### One example is one scenario, not one finding
+
+The two-wave LDS race reproducer emits 64 findings that are 64 lanes of a
+single race: identical instruction pair, differing only in lane mask and LDS
+byte range. `distinct_evidence` dedupes on the tuple that identifies a race
+*site*, and `finding_counts` reports `raw` next to `distinct_sites` so the
+difference stays visible rather than being absorbed into a corpus size.
+
+ConSan also writes the same finding objects into both `check.findings` and
+`kernel_results[].findings`, which doubles a naive count — 64 findings read as
+128. Identical records are collapsed before the site dedup, so `raw` means what
+the tool emitted.
+
+### Ground truth is the committed baseline, not the run
+
+A scenario named in `verdict_baselines.json` carries its expected verdict next
+to the observed one and an explicit `agrees` flag. A disagreement is emitted,
+not dropped: it is evidence of a tool defect, and dropping it would hide the
+one thing worth reporting. `manifest.json` lists any disagreements by name.
+
+### `workload_family` on every example
+
+There are three families today (`synthetic_hip_lds`, `synthetic_hip_vecadd`,
+`tensile_gemm_object`) and the field looks redundant at that size. It is not:
+the detector and finding vocabulary is workload-independent, but which failures
+co-occur is not, so a corpus that cannot be split by family cannot be checked
+for balance. Recording it during generation is free; backfilling it onto
+artifacts that no longer say which workload produced them is not. A test
+asserts no example carries `unknown`.
+
 ## The NCCL weight-transfer harness
 
 `probe_weight_transfer.py` exercises the control plane; these two exercise the

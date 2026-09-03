@@ -84,6 +84,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from aorta.agent.llm import AUTOPSY_CATEGORIES, AgentStep
@@ -434,8 +435,48 @@ def baselines() -> list[dict[str, Any]]:
     return rows
 
 
-def run_demo(as_json: bool) -> int:
-    scored = [(f, score_proposal(f)) for f in FIXTURES]
+def load_corpus(path: Path) -> list[tuple[Proposal, str]]:
+    """Load a `build_corpus.py` proposal JSONL, with each row's workload family.
+
+    The corpus stores the raw model output verbatim, so scoring a corpus row is
+    the same code path as scoring a fixture: nothing about the ladder is
+    corpus-specific, which is what makes the two comparable.
+    """
+    out: list[tuple[Proposal, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if row.get("kind") != "proposal":
+            continue
+        spec = row["proposal"]
+        out.append((
+            Proposal(
+                name=spec["name"],
+                raw=spec["raw"],
+                candidates=list(spec.get("candidates") or []),
+                tried=list(spec.get("tried") or []),
+            ),
+            row.get("workload_family", "unknown"),
+        ))
+    return out
+
+
+def run_demo(as_json: bool, corpus: Path | None = None) -> int:
+    families: dict[str, int] = {}
+    if corpus is not None:
+        rows = load_corpus(corpus)
+        if not rows:
+            print(f"no proposal examples in {corpus}", file=sys.stderr)
+            return 2
+        proposals = [p for p, _ in rows]
+        for _, family in rows:
+            families[family] = families.get(family, 0) + 1
+    else:
+        proposals = list(FIXTURES)
+
+    scored = [(f, score_proposal(f)) for f in proposals]
     if as_json:
         print(
             json.dumps(
@@ -443,6 +484,7 @@ def run_demo(as_json: bool) -> int:
                     "proposals": [
                         {"name": f.name, **s.as_dict()} for f, s in scored
                     ],
+                    "workload_families": families,
                     "baselines": baselines(),
                 },
                 indent=2,
@@ -457,6 +499,8 @@ def run_demo(as_json: bool) -> int:
         "reward = tier/5. Tiers 1-2 are form, 3 is the closed category set,\n"
         "4-5 are registry membership and availability.\n"
     )
+    if families:
+        print(f"corpus workload families: {families}\n")
     for f, s in scored:
         print(f"tier {s.tier}/{MAX_TIER}  reward {s.reward:.2f}  {f.name}")
         print(f"       consumer would: {s.consumer_outcome}")
@@ -484,9 +528,11 @@ def run_demo(as_json: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--corpus", type=Path, default=None,
+                        help="proposal.jsonl written by build_corpus.py")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
-    return run_demo(args.json)
+    return run_demo(args.json, args.corpus)
 
 
 if __name__ == "__main__":
