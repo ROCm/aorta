@@ -56,6 +56,14 @@ Every number below is measured, on one gfx950 (MI355X) node against the image
 digest the recipes pin. There is no synthetic data here, and no more of it than
 this — that is the whole problem.
 
+Two caveats that apply to every number in this section, both established later
+in the document rather than assumed here. They were taken at `warmup_steps: 1`
+and the recipe now sets `2`, so they are rationale and not a baseline; and they
+were taken on an **MI355X**, whereas the CI runner `smci350-rck-g03-f16-12` is an
+**MI350X**, so their absolute *level* does not transfer to the runner even though
+their *spread* is the thing being argued about. See
+[Verification status](#verification-status).
+
 **Bring-up is the noisy one, and it is very noisy.** From
 [tokenspeed.md](tokenspeed.md):
 
@@ -311,10 +319,71 @@ noisiest metric the workload produces. The metrics we are actually gating are
 10–16× tighter than that one. Zero at n=5 is an artefact of a seven-point sample
 rather than a real floor, so the honest reading is that the risk is small by 5
 and the remaining reason to go further is calendar coverage: ten nightlies is two
-full weeks, long enough to contain a runner reimage, a Docker Hub re-pull, a
-cold HF cache or a Dependabot ROCm bump — the once-a-week-ish events that produce
-excursions in the first place. **Five is the floor; below it the breach rate on
-known-noisy data is 2.9% per run, about nine false alarms a quarter.**
+full weeks, long enough to contain a runner reimage, a Docker Hub re-pull or a
+cold HF cache — the once-a-week-ish events that produce excursions in the first
+place. **Five is the floor; below it the breach rate on known-noisy data is 2.9%
+per run, about nine false alarms a quarter.**
+
+### A stack bump does not get absorbed by the window — it invalidates it
+
+An earlier version of the paragraph above listed "a Dependabot ROCm bump" beside
+the runner reimage and the cold cache, as one more thing ten nights is long
+enough to contain. That was wrong, and it is worth correcting rather than
+quietly dropping, because the two categories look alike and are opposites.
+
+A reimage, a re-pull and a cold cache are *environmental* events: they perturb a
+run and the stack underneath is the same before and after, so a window that
+contains one has measured a genuine bad night and the extremum is doing exactly
+its job. A digest bump is not that. It replaces the thing being measured
+half-way through measuring it, so the window no longer describes one population.
+You can **sample a stack bump or derive a stable ceiling across the window, but
+not both** — the extremum then answers "how bad has a healthy night been on
+either of two stacks", which is a number about neither.
+
+The counter-example is not hypothetical, and it happened while this branch was
+open. `sanitizers-nightly.yml` went red on 2026-09-02 and stayed red, because
+[#411](https://github.com/ROCm/aorta/pull/411) moved `Dockerfile.ci-gpu` from
+ROCm 7.2.4 to ROCm 10 and the f32 GEMM code objects the gate scans are extracted
+from the image's own Tensile bundle — so the committed expectation was describing
+objects the image no longer ships
+([#453](https://github.com/ROCm/aorta/issues/453)). That is a *correctness*
+baseline invalidated by a mid-flight digest change. A perf baseline is not
+better protected; it is worse, because a shifted number still looks like a
+number and nothing about it announces that the stack moved. A mid-window bump
+would do to the perf baseline precisely what that one did to the sanitizer
+baseline.
+
+**Operational condition, for the duration of the window: hold any PR that
+changes either pinned digest.** Concretely, the `FROM … @sha256` in
+`docker/Dockerfile.ci-gpu` (currently
+`rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb70…`)
+and the engine digest in
+`recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml`
+(`lightseekorg/tokenspeed-amd@sha256:60c12e37…`). If one has to land, restart
+the count; do not average across it.
+
+This is preventable by policy rather than by luck, which is the useful part.
+`.github/dependabot.yml` runs the `docker` ecosystem against `/docker` on a
+**weekly** schedule and its own comment says the job "bumps the `FROM ... @sha256`
+digests", so an in-window bump is not merely possible but scheduled. There is
+**no auto-merge** — the same file says so explicitly, and a human therefore has
+to approve and merge one for it to reach the window. Ten nights is long enough
+for roughly two of these to be opened, so the hold is a real decision someone
+will be asked to make twice, not a theoretical one.
+
+Checked at the time of writing: the only open PR in the `docker` ecosystem is
+[#309](https://github.com/ROCm/aorta/pull/309) (`bump ubuntu from 22.04 to
+26.04 in /docker`), and it is **clear** — it touches
+`Dockerfile.rocm-ubuntu-ebpf`, `Dockerfile.rocm70_2-ubuntu-nan` and
+`Dockerfile.rocm70_2-ubuntu-pytorch`, none of which is `Dockerfile.ci-gpu`, and
+it does not move the engine digest. The other open `dependabot/*` PRs (#310–#314)
+are `github-actions` bumps. So nothing currently open needs holding; re-check
+before the window starts, since the ecosystem is on a weekly timer.
+
+Everything else in the ten-night justification stands. The residual-breach-rate
+analysis is unaffected — it is a statement about sampling a single population,
+which is what this condition exists to preserve — and so is the calendar-coverage
+argument for the three environmental events it still lists.
 
 ### The extremum anchor has no good answer on a bimodal cell
 
@@ -554,7 +623,10 @@ about: an entry may only be added once it can actually pass on the runner.
 
 ### Verification status
 
-Built and run on a gfx950 (MI355X) node on 2026-09-02.
+Built and run on a gfx950 (MI355X) dev node on 2026-09-02 — **not** on the CI
+runner, which is an MI350X. Read the hardware note further down this section
+before treating any absolute number here as something the nightly should
+reproduce.
 
 **The image builds and is client-only.** `docker compose --env-file .env.ci -f
 docker-compose.build.yaml build` succeeds, producing a 51.9 GB `aorta:ci-gpu`.
@@ -578,6 +650,92 @@ twelve measured steps were 1108–1149 ms with no step-0 excursion, and every
 metric landed within 5% of the host-side clean envelope — so the container
 boundary does not move the measurement, which is what lets a nightly baseline be
 compared against the host-side runs the variance analysis is built from.
+
+> [!IMPORTANT]
+> **The 1108–1149 ms envelope is not a night-one acceptance check.** It was
+> measured on an **MI355X** dev node. The CI runner
+> `smci350-rck-g03-f16-12` is an **MI350X** — same gfx950/CDNA4 ISA, but a lower
+> power budget and air rather than liquid cooling. Correctness is unaffected by
+> that difference: the ISA is identical, so the kernels, the compiler output and
+> every verdict the harness produces are the same. Absolute step times are a
+> different matter and will plausibly differ — a priori, at least; one MI350X
+> cell has since been measured and did not show an offset, which narrows the
+> expectation without licensing the envelope as a check. See the subsection
+> below.
+>
+> So do **not** use this envelope to accept or reject night one, in either
+> direction. A first nightly landing outside 1108–1149 ms is not evidence of a
+> problem, and one landing inside it is not evidence that the lane is healthy.
+>
+> **What has to reproduce across the window is the spread, not the level.** The
+> ceilings are derived from the ten CI nights themselves — `max × 1.25` and
+> `min × 0.85` over that window, on that runner — so a systematic offset between
+> the dev node and the runner is absorbed by construction and is expected,
+> harmless and not worth investigating. What would matter is the *shape*: a
+> window spread materially wider than the measured few percent, or a step-0
+> excursion, and step 4 already checks both. Judge night one against the two
+> checks in step 4 and against the previous nights on the same runner, never
+> against a number taken on other hardware.
+
+#### One MI350X cell at `warmup_steps: 2` (2026-09-03) — a data point, not a spread
+
+Both caveats above — MI355X hardware, and `warmup_steps: 1` — are now partly
+addressed by one measurement, and it is recorded here with its limits stated
+first because it is easy to over-read.
+
+**This is a single cell-run. It is not a variance estimate and must not be used
+as one, and it does not replace anything above.** The
+[13-cell-run table](#the-smoke-cell-is-not-unconditionally-clean-measured-13-cell-runs)
+stays exactly as it is — it remains the rationale for `warmup_steps: 2`, and one
+cell cannot restate it. The ten-night window is still the only thing that
+produces a spread at the new setting.
+
+Run on **`cv350-rck-g03-c16-18`** (Slurm partition `meta64`), which is an
+**MI350X**: 1000 W package power cap, VBIOS `113-M350-01-1K5-000C`, gfx950,
+288 GiB HBM. The 1000 W cap and the air-cooled VBIOS are what identify it as an
+MI350X rather than an MI355X, and it is the *same hardware class as the CI
+runner* — which is the point. Deliberately **not** on
+`smci350-rck-g03-f16-12`, which is reserved for the baseline window. One
+`baseline` cell of `tokenspeed-serve-bench-smoke.yaml` with every
+measurement-relevant setting as committed (image digest, Qwen3-0.6B, ISL 512 /
+OSL 128, concurrency 8, 32 prompts, 3 measured steps, `num_warmups: 1`,
+`warmup_steps: 2`, `ignore_eos`, seed 0), on a private `work_dir` so it cannot
+touch the CI lane's. Passed, `failed_total` 0, `completed_total` 96.
+
+| Metric | MI350X, 1 cell, `warmup_steps: 2` | MI355X clean range, `warmup_steps: 1` |
+|---|---|---|
+| step times, in order | 1135.03 / 1136.39 / 1136.51 ms | 1108 – 1178 ms |
+| `median_ttft_ms` | 45.00 | 43.65 – 46.87 |
+| `median_tpot_ms` | 1.910 | 1.89 – 1.95 |
+| `p99_itl_ms` | 34.64 | 34.00 – 35.84 |
+| `output_throughput` | 3605.7 | 3502.53 – 3646.20 |
+| `server_startup_sec` | 282 | 180 – 415 |
+
+Two things worth taking from it, and one worth not taking.
+
+**The MI350X level is not detectably different at this workload size.** Every
+metric lands inside the MI355X clean range, step time included. That is a
+plausible result rather than a surprising one: Qwen3-0.6B at concurrency 8 is a
+small, latency-bound load that does not approach either card's power ceiling, so
+the MI355X's higher budget and liquid cooling have nothing to bite on. It does
+**not** license using the MI355X envelope as an acceptance check — one cell
+cannot establish agreement, and the rule above stands unchanged — but it does
+mean a large night-one offset would itself be worth a look, rather than being
+shrugged off as expected hardware difference.
+
+**No step-0 excursion, with the excursion's own signature absent.** The first
+measured step is the *fastest* of the three, so there is no positional outlier at
+all. This is the first observation at `warmup_steps: 2` and n=1, so it is
+consistent with the change working and nowhere near sufficient to conclude it;
+step 4's bimodality check over twenty cell-runs is what settles that.
+
+**What not to take from it:** the three step times span 0.13%, and that number is
+**not** comparable to the 6.3% step-time or 3.08%/5.43% metric spreads in the
+table above. Those are across *twelve cell-runs* — separate server bring-ups on
+separate invocations, which is where the variance lives. 0.13% is three
+consecutive steps against one already-warm server, and it is the *within*-cell
+figure that the earlier table never reported. Reading it as a 48× variance
+improvement would be a category error. Re-taking the spread needs the window.
 
 Two configuration requirements were discovered by doing this rather than by
 reading, and are written up under [work_dir](#the-enabling-change) above: all
@@ -674,6 +832,19 @@ and costs the nightly nothing.
 > specifically to alter the behaviour they describe. Expect the window to be
 > *cleaner* than the 13-cell-run table — that is the change working — but do not
 > assume it; the point of the window is to measure it rather than predict it.
+
+> **And do not accept or reject night one against any number in this document.**
+> All of them were taken on an MI355X dev node; the runner is an MI350X. A
+> systematic offset in the absolute level is expected and harmless, because the
+> ceilings come from these ten nights on this runner. It is the spread that has
+> to reproduce — see the hardware note under
+> [Verification status](#verification-status), and the single MI350X data point
+> recorded there.
+
+Also confirm before counting that neither pinned digest is about to move: an
+in-window bump invalidates the window rather than being absorbed by it, which is
+[its own section](#a-stack-bump-does-not-get-absorbed-by-the-window--it-invalidates-it)
+and the reason for the digest hold.
 
 Watch the *Workloads* view and write the numbers down; the ten values
 of `median_tpot_ms` and `p99_itl_ms` per cell are the input to step 4, and the
