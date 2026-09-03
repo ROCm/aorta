@@ -121,3 +121,121 @@ def test_comparator_rejects_missing_report(tmp_path, monkeypatch) -> None:
     _write_case(tmp_path, "consan-clean", _check("consan", Verdict.PASS))
     # consan-racy intentionally absent
     assert comparator.main(["prog", str(tmp_path)]) == 1
+
+
+# --------------------------------------------------------------- vacuity sweep
+# ROCm/aorta#450: two informational recipes paired a load-only driver with
+# consan_policy: strict and so ended `error` with zero findings on every run.
+# Nothing caught it, because the comparison above only covers the gated cases.
+
+
+def _errored(sanitizer: str, reason: str) -> CheckResult:
+    return CheckResult(
+        sanitizer=sanitizer,
+        state=ExecutionState.ERROR,
+        verdict=Verdict.ERROR,
+        reason=reason,
+        returncode=86,
+    )
+
+
+def test_sweep_rejects_undeclared_vacuous_error(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # consan_gemm has no expected_error entry, so exit 86 with no findings is a
+    # broken run rather than a result.
+    _write_case(tmp_path, "informational/consan-gemm", _errored("consan", "combined_hook_exit_86"))
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert "consan_gemm" in out
+    assert "combined_hook_exit_86" in out
+
+
+def test_sweep_rejects_vacuous_error_in_full_mode(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # Every gated case matches its baseline, so only the sweep can fail this.
+    _write_all_matching(tmp_path)
+    _write_case(tmp_path, "informational/consan-gemm", _errored("consan", "combined_hook_exit_86"))
+    assert comparator.main(["prog", str(tmp_path)]) == 1
+
+
+def test_sweep_accepts_declared_expected_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # consan_tiny declares expected_error reason combined_hook_exit_86 in the
+    # committed baselines: an intended negative control, so it must not fire.
+    _write_case(tmp_path, "informational/consan-tiny", _errored("consan", "combined_hook_exit_86"))
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 0
+
+
+def test_sweep_rejects_declared_case_erroring_for_another_reason(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # The declaration names a reason, so consan_tiny is allowed to fail closed for
+    # exit 86 and nothing else. A timeout there is a new failure.
+    _write_case(tmp_path, "informational/consan-tiny", _errored("consan", "combined_hook_timeout"))
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 1
+    assert "combined_hook_exit_86" in capsys.readouterr().out
+
+
+def test_sweep_rejects_vacuous_not_checked(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    not_checked = CheckResult(
+        sanitizer="consan",
+        state=ExecutionState.NOT_CHECKED,
+        verdict=Verdict.NOT_CHECKED,
+        reason="no backend",
+    )
+    _write_case(tmp_path, "informational/consan-gemm", not_checked)
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 1
+
+
+def test_sweep_accepts_clean_pass_with_zero_findings(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # daily-consan-lds-dispatch's real shape: a completed run that found nothing.
+    # Zero findings alone must never be the trigger.
+    _write_case(tmp_path, "informational/consan-lds-dispatch", _check("consan", Verdict.PASS))
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 0
+
+
+def test_sweep_accepts_error_that_still_produced_findings(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # An errored run that still reported something is not vacuous; the gated
+    # baseline comparison is what judges whether the verdict is right.
+    errored_with_finding = CheckResult(
+        sanitizer="consan",
+        state=ExecutionState.ERROR,
+        verdict=Verdict.ERROR,
+        reason="consan_coverage_incomplete: barrier patched/supported mismatch: 1/2",
+        returncode=0,
+        findings=(
+            Finding(
+                sanitizer="consan",
+                severity=FindingSeverity.ERROR,
+                code="c",
+                message="partial coverage",
+            ),
+        ),
+    )
+    _write_case(tmp_path, "informational/consan-gemm", errored_with_finding)
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 0
+
+
+def test_vacuous_only_ignores_absent_gated_cases(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # The survey job's result tree contains none of the gated cases, and the job
+    # may legitimately be killed early by the runner cap in #370. Absence is not
+    # this check's business.
+    _write_case(tmp_path, "informational/consan-lds-dispatch", _check("consan", Verdict.PASS))
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 0
+
+
+def test_vacuous_only_tolerates_empty_tree(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 0
+
+
+def test_comparator_rejects_bad_usage(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    assert comparator.main(["prog"]) == 2
+    assert comparator.main(["prog", "--vacuous-only"]) == 2
+    assert comparator.main(["prog", str(tmp_path), "extra"]) == 2

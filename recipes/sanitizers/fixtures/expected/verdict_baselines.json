@@ -25,5 +25,11 @@
     "finding_shape": {
       "consan": "auto replay diagnostic"
     }
+  },
+  "consan_tiny": {
+    "expected_error": {
+      "reason": "combined_hook_exit_86",
+      "why": "Intended negative control, not a misconfiguration. tiny_vecadd's only memory operations are ordinary global loads/stores, which ConSan reports as supported-synchronization-only and does not admit as MOI sites, so it has no instrumentable sites at all (access=0/0, applicable=false). Giving it a dispatching driver was measured in #409 and does not change the verdict, only the record-buffer count in the message. Under consan_policy: strict the run therefore fails closed at exit 86 rather than emitting a false pass, and that fail-closed behaviour is what this case asserts. Declared here so the vacuity sweep added for #450 does not flag it, while still failing if this case ever errors for any OTHER reason."
+    }
   }
 }

@@ -580,6 +580,23 @@ jobs:
               --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch" || true
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml \
               --output-dir "${SANITIZER_OUT}/informational/waitcheck-tiny" || true
+
+            # Every survey recipe above runs under `|| true`, because a non-gating
+            # row must not fail the job merely for reporting something. That is
+            # what let ROCm/aorta#450 sit for weeks: two of these ended `error`
+            # with zero findings on every run, and since the baseline comparison in
+            # the gate job only covers the three GATED cases, nothing ever looked
+            # at these reports at all.
+            #
+            # So look at them. --vacuous-only asserts the one thing that is always
+            # wrong regardless of what a row is expected to observe: a run that
+            # terminated without producing any signal. Cases where that is the
+            # intended outcome declare it in verdict_baselines.json (consan_tiny
+            # does). This CAN turn the survey job red, which is the point -- the
+            # artifact upload below is `if: always()`, so Tab 2 still publishes.
+            echo "[$(date +%T)] survey: rejecting vacuous outcomes …"
+            python scripts/sanitizers/compare_verdict_baselines.py \
+              --vacuous-only "${SANITIZER_OUT}"
           '
 
       - name: Reclaim results ownership
