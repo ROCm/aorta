@@ -1373,37 +1373,34 @@ def test_parse_summary_from_streams_consumes_a_lazy_iterator(tmp_path):
 
 
 def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
-    """No subprocess in the GPU smoke module may set its own ``timeout=``.
+    """No call in the GPU smoke module may set its own ``timeout=``.
 
     ``test_proton_smoke_gpu.py`` sizes ``_CHILD_TIMEOUT_S`` so a wedged payload
     surfaces as ``TimeoutExpired`` naming that payload, rather than as the CI
     job hitting its own 60-minute cap -- which cancels the run and takes the
-    junit report with it (ROCm/aorta#434). A literal ``timeout=`` on any
-    ``subprocess.run`` there is a hole in that budget, and the calls most
-    likely to wedge are the ones that build their own argv instead of going
-    through ``_capture``.
+    junit report with it (ROCm/aorta#434). A literal ``timeout=`` anywhere
+    there is a hole in that budget, and the calls most likely to wedge are the
+    ones that build their own argv instead of going through ``_capture``.
 
     Checked from the CPU suite because the GPU legs are path-skipped on most
     PRs, so a regression here would otherwise reach `main` unobserved. Read
-    from the AST rather than grepped so a reflowed call still matches.
+    from the AST rather than grepped so a reflowed call still matches, and
+    keyed on the ``timeout`` keyword rather than on the callee being
+    ``subprocess.run``: ``from subprocess import run``, a ``Popen.communicate``
+    or an ``asyncio`` wait would each escape a callee-shaped check while
+    leaving exactly the same hole.
     """
     source = Path(__file__).with_name("test_proton_smoke_gpu.py")
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
 
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        target = node.func
-        if not (isinstance(target, ast.Attribute) and target.attr == "run"):
-            continue
-        if not (isinstance(target.value, ast.Name) and target.value.id == "subprocess"):
-            continue
-        for keyword in node.keywords:
-            if keyword.arg != "timeout":
-                continue
-            if not (isinstance(keyword.value, ast.Name) and keyword.value.id == "_CHILD_TIMEOUT_S"):
-                offenders.append((keyword.lineno, ast.unparse(keyword.value)))
+    offenders = [
+        (keyword.lineno, ast.unparse(keyword.value))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "timeout"
+        and not (isinstance(keyword.value, ast.Name) and keyword.value.id == "_CHILD_TIMEOUT_S")
+    ]
 
     assert not offenders, (
         f"{source.name} sets a per-call timeout instead of _CHILD_TIMEOUT_S at "
