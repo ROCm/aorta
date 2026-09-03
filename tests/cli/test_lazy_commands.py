@@ -22,6 +22,7 @@ import pytest
 from click.testing import CliRunner
 
 from aorta.cli import _COMMANDS, main
+from aorta.cli._lazy_group import LazyGroup
 
 _COMMAND_MODULES = {entry.import_path.partition(":")[0] for entry in _COMMANDS.values()}
 
@@ -169,6 +170,33 @@ def test_unknown_command_still_suggests_a_registered_one() -> None:
         pytest.skip("this Click does not offer unknown-command suggestions")
     result = CliRunner().invoke(main, ["enviroments"])
     assert "environments" in result.output, result.output
+
+
+def test_eagerly_added_commands_keep_working_alongside_lazy_ones() -> None:
+    """``add_command`` must survive the swap ``resolve_command`` does.
+
+    ``LazyGroup``'s docstring promises eagerly added commands keep working
+    alongside lazy ones, and the unknown-command path now temporarily replaces
+    ``self.commands`` to recover Click's suggestions. Nothing else covers the
+    two together.
+    """
+    group = LazyGroup(
+        "eager-and-lazy",
+        lazy_commands={"agent": _COMMANDS["agent"]},
+    )
+
+    @click.command("added")
+    def added() -> None:
+        """Added the usual way."""
+
+    group.add_command(added)
+    assert group.list_commands(click.Context(group)) == ["added", "agent"]
+    result = CliRunner().invoke(group, ["added", "--help"])
+    assert result.exit_code == 0, result.output
+    assert group.get_command(click.Context(group), "added") is added
+    # The stand-ins must not outlive the lookup: a group whose ``commands``
+    # advertises `agent` would hand a caller an empty command with no callback.
+    assert set(group.commands) == {"added"}
 
 
 def test_resolved_commands_carry_their_registry_name() -> None:

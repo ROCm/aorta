@@ -14,7 +14,9 @@ without a registry copy the help and completion paths would import exactly the
 modules this group exists to avoid.
 
 ``tests/cli/test_lazy_commands.py`` fails if a registry help string drifts from
-the command's own, and if any command module is imported eagerly.
+the command's own, if a resolved command does not carry the key it was reached
+by, if an unknown command stops suggesting a registered one, and if any command
+module is imported eagerly.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ class LazyCommand:
     """Registry entry: where a command lives, and what ``--help`` says about it.
 
     Attributes:
-        import_path: ``"module:attribute"`` locating the ``click.Command``.
+        import_path: ``"module:attribute"`` locating the ``click.Command``. The
+            attribute need not be named after the registry key; :func:`_named`
+            reconciles the two.
         help: The command's help text. Only the first paragraph is ever
             rendered, so registering just that paragraph is enough; see the
             module docstring for why it is duplicated here at all.
@@ -105,9 +109,9 @@ class LazyGroup(click.Group):
         # Click draws its "Did you mean ...?" candidates from ``self.commands``,
         # which lazy names never enter -- so an eager group answers
         # ``aorta enviroments`` with ``Did you mean 'environments'?`` and this
-        # one would not. Only the keys are read, and only on this
-        # unknown-command path, so bare stand-ins are enough and nothing is
-        # imported. Registered commands keep precedence over the registry.
+        # one would not. Click reads only the keys of that mapping, and only on
+        # this unknown-command path, so bare stand-ins are enough and nothing
+        # is imported to build them.
         registered = self.commands
         self.commands = {**{name: click.Command(name) for name in self.lazy_commands}, **registered}
         try:

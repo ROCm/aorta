@@ -7,7 +7,10 @@ Tests the shim contract only — not hw_queue_eval internals:
 - When hw_queue_eval is unavailable, bare invoke exits non-zero with a clear
   install hint; ``--help`` exits 0 but shows the hint instead of empty help.
 - Only a missing *external* dependency is read as "extra not installed": a
-  missing aorta.hw_queue_eval sub-module, or any other ImportError, propagates.
+  missing aorta.hw_queue_eval sub-module, or any other ImportError, propagates
+  — from the group and from this module's own availability probe alike.
+- The resolved group is named ``hw_queue_eval``, the key it is registered
+  under, not ``cli``, the name it is defined as.
 - ``bench`` is correctly wired under the top-level ``aorta`` CLI.
 """
 
