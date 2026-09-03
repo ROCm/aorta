@@ -3,10 +3,16 @@
 Covers the option schema, both attach modes (``cli`` argv rewrite and ``env``
 variable bundle), the ``HIP_VISIBLE_DEVICES`` -> ``ROCR_VISIBLE_DEVICES``
 translation Proton needs on AMD, and fail-soft ``.hatchet`` parsing.
+
+It also carries one guard over the *sibling* GPU module's source
+(``test_gpu_smoke_subprocesses_all_use_the_shared_child_budget``): the GPU legs
+are path-skipped on most PRs, so a convention that only they exercise needs a
+CPU test to hold it.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -1364,3 +1370,43 @@ def test_parse_summary_from_streams_consumes_a_lazy_iterator(tmp_path):
     )
     assert metrics.get("proton_kernel_count") == 3
     assert metrics.get("proton_gpu_time_ms") == pytest.approx(2.0)
+
+
+def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
+    """No subprocess in the GPU smoke module may set its own ``timeout=``.
+
+    ``test_proton_smoke_gpu.py`` sizes ``_CHILD_TIMEOUT_S`` so a wedged payload
+    surfaces as ``TimeoutExpired`` naming that payload, rather than as the CI
+    job hitting its own 60-minute cap -- which cancels the run and takes the
+    junit report with it (ROCm/aorta#434). A literal ``timeout=`` on any
+    ``subprocess.run`` there is a hole in that budget, and the calls most
+    likely to wedge are the ones that build their own argv instead of going
+    through ``_capture``.
+
+    Checked from the CPU suite because the GPU legs are path-skipped on most
+    PRs, so a regression here would otherwise reach `main` unobserved. Read
+    from the AST rather than grepped so a reflowed call still matches.
+    """
+    source = Path(__file__).with_name("test_proton_smoke_gpu.py")
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not (isinstance(target, ast.Attribute) and target.attr == "run"):
+            continue
+        if not (isinstance(target.value, ast.Name) and target.value.id == "subprocess"):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "timeout":
+                continue
+            if not (isinstance(keyword.value, ast.Name) and keyword.value.id == "_CHILD_TIMEOUT_S"):
+                offenders.append((keyword.lineno, ast.unparse(keyword.value)))
+
+    assert not offenders, (
+        f"{source.name} sets a per-call timeout instead of _CHILD_TIMEOUT_S at "
+        f"{offenders}. A wedged Proton payload would then run past the GPU job's "
+        "own cap, which cancels the job and loses its report -- see ROCm/aorta#434."
+    )

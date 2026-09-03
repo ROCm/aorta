@@ -133,9 +133,10 @@ instead of a full matrix. Read the raw tree with `proton-viewer -m time/s
 
 ## Why `mode: env`
 
-Pinning `roctracer` through `mode: cli` **silently captures nothing**, and the
-mechanism is worth knowing because it is not a bug you would guess from the
-output. Triton's Proton CLI front-end resolves the backend like this:
+On Triton 3.7.x and earlier, pinning `roctracer` through `mode: cli`
+**silently captures nothing**, and the mechanism is worth knowing because it is
+not a bug you would guess from the output. Triton's Proton CLI front-end
+resolves the backend like this:
 
 ```python
 backend = args.backend if args.backend else _select_backend()
@@ -150,9 +151,22 @@ metrics. aorta's parser finds no `time (<unit>)` leaves, degrades to
 `proton_artifact_dir`, and the trial carries no Proton metrics while looking
 like a success.
 
-Upgrading Triton does not help. That line is line 73 of
-`third_party/proton/proton/proton.py` at the `v3.8.0` tag, unchanged, so 3.8.0
-skips the driver-initialising call on the `-b` path exactly as 3.7.1 does.
+Upgrading Triton *does* help, and not for the reason the line above would
+suggest. That line is line 73 of `third_party/proton/proton/proton.py` at the
+`v3.8.0` tag, unchanged, so 3.8.0 still skips the driver-initialising call on
+the `-b` path exactly as 3.7.1 does — yet the same pin captures normally there:
+measured on gfx950 / ROCm 10 at 3090 bytes, byte-for-byte what `backend: auto`
+produces. Something else on that stack brings the runtime up before the session
+starts. So the empty capture is a 3.7.x-and-earlier defect, not a permanent
+property of pinning.
+
+The collector nonetheless refuses the pairing on *every* version, because
+3.7.x is still what several images in use ship (3.7.1 in
+`rocm/pytorch:rocm7.14_ubuntu26.04_py3.14_pytorch_release_2.12.0`, 3.6.0 in
+`rocm/pytorch:latest`) and the failure it prevents is silent. Dropping the
+refusal once the supported floor reaches 3.8 is tracked in
+[ROCm/aorta#439](https://github.com/ROCm/aorta/issues/439). `mode: env`, which
+this example uses, is correct on every version either way.
 
 `mode: env` avoids this entirely. aorta exports `AORTA_PROTON_*` and leaves
 argv alone; the payload imports `torch` at module scope — which brings the HIP

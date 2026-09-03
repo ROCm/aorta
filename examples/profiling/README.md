@@ -75,9 +75,13 @@ reasons, which are worth keeping apart. Only one of the three is forced.
 
 For `amd-roctracer` it is forced. Proton's CLI front-end initialises the HIP
 runtime only on the path where `-b` is absent, and `roctracer` records nothing
-unless it starts after that runtime is up, so a `roctracer` pin under the
-default `mode: "cli"` captures an empty tree; the collector refuses that one
-combination rather than letting a trial pass with nothing in it.
+unless it starts after that runtime is up, so on Triton 3.7.x and earlier a
+`roctracer` pin under the default `mode: "cli"` captures an empty tree.
+Measured on 3.8.0 the same pin captures normally, but the collector refuses
+that one combination on every version rather than letting a trial pass with
+nothing in it on the older images still in use — see
+[ROCm/aorta#439](https://github.com/ROCm/aorta/issues/439). `mode: "env"` is
+correct on every version.
 
 For `amd-rocprofiler` it is a choice, and the backend's contract is the
 *opposite* of its sibling's rather than the same. `libproton.so` configures

@@ -35,13 +35,15 @@ env_passthrough_mode: inherit
 # decide, because it cannot know from its own interpreter which one that is.
 #
 # Note this is a *different* reason from the one that forces `mode: env` on the
-# sibling `amd-roctracer` recipe. That backend records nothing when Proton's
-# CLI pins it, because the CLI initialises the HIP runtime only on the path
-# where `-b` is absent and a queue interceptor must be installed first -- a line
-# that is unchanged in 3.8.0, so no release fixes it, and the collector does
-# refuse that combination. The instrumentation backend installs no interceptor
-# and captures fine under a `-b instrumentation` CLI wrap (verified on 3.7.1);
-# what `mode: cli` costs here is the version guarantee on the mode knob.
+# sibling `amd-roctracer` recipe. On Triton 3.7.x and earlier that backend
+# records nothing when Proton's CLI pins it, because the CLI initialises the
+# HIP runtime only on the path where `-b` is absent and a queue interceptor
+# must be installed first; measured on 3.8.0 the same pin captures normally, so
+# a release does fix it, but the collector still refuses that combination on
+# every version while 3.7.x images remain in use (ROCm/aorta#439). The
+# instrumentation backend installs no interceptor and captures fine under a
+# `-b instrumentation` CLI wrap (verified on 3.7.1); what `mode: cli` costs
+# here is the version guarantee on the mode knob.
 #
 # `granularity` is deliberately ABSENT. The option pair
 # `instrumentation_mode: default` + `granularity: warp` renders Proton's single

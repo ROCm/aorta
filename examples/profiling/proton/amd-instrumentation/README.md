@@ -181,8 +181,11 @@ That is the *only* reason this example uses `mode: env`, and it is worth being
 precise about, because the sibling [`../amd-roctracer`](../amd-roctracer/README.md)
 needs it for a different and much harder one. There, the same snippet's
 `_select_backend()` — called only when `-b` is absent — is what initialises the
-Triton HIP driver, and `roctracer` records nothing unless it starts after that;
-that line is unchanged in 3.8.0, so no version fixes it. This backend installs
+Triton HIP driver, and `roctracer` records nothing unless it starts after that,
+so a CLI pin captures an empty tree on Triton 3.7.x and earlier. That line is
+unchanged in 3.8.0, yet the pin captures normally there, so a release does fix
+it; the collector keeps refusing the pairing while 3.7.x images are in use
+([ROCm/aorta#439](https://github.com/ROCm/aorta/issues/439)). This backend installs
 no queue interceptor: a `-b instrumentation` CLI wrap of this payload captures
 both scopes correctly (verified on 3.7.1: 1738 bytes, cycle counts intact). So
 the collector's refusal to pin a backend under `mode: cli` covers `roctracer`

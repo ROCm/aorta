@@ -70,6 +70,13 @@ _EXAMPLES = [
 #: test from outside with no such detail. The former 3600 s could do neither:
 #: it matched the CI job's own 60-minute cap exactly, so the job always died
 #: first and the budget could never actually fire.
+#:
+#: It governs **every** subprocess this module launches, including the ones
+#: that build their own argv instead of going through :func:`_capture`. A raw
+#: ``timeout=`` literal in any of them is a hole in the budget, so
+#: ``tests/instrumentation/test_proton.py`` asserts on the AST that there are
+#: none -- the payloads a wedge is most likely to hit are exactly the ones that
+#: bypass the helper.
 _CHILD_TIMEOUT_S = 120
 
 #: Proton's dlopen failure on an image whose ROCm comes from Python wheels:
@@ -338,7 +345,7 @@ def test_cli_mode_pin_captures_nothing_only_on_the_versions_the_guard_targets(tm
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=_CHILD_TIMEOUT_S,
         env=_raw_proton_env(TRITON_CACHE_DIR=str(tmp_path / "triton-cache")),
     )
     missing = _dlopen_failure(proc.stderr)
@@ -369,10 +376,11 @@ def test_a_backend_that_refuses_the_mode_exits_two_not_a_traceback(tmp_path):
     Triton 3.8.0 is the case that motivates it: it registers ``rocprofiler``, so
     the payload's availability probe passes, but its ``RocprofSDKProfiler``
     accepts only ``periodic_flushing`` and raises ``ValueError: [PROTON]
-    RocprofSDKProfiler: unsupported mode: pcsampling``. That version is not
-    installable here, so the same path is driven through a mode no backend
-    accepts -- what is under test is the payload's handling, not Proton's
-    taxonomy of modes.
+    RocprofSDKProfiler: unsupported mode: pcsampling``. Reproducing *that*
+    rejection needs 3.8.0, and 3.7.1 does not register the backend at all, so
+    the path is driven instead through a mode no backend on any version accepts
+    -- what is under test is the payload's handling, not Proton's taxonomy of
+    modes, and this way both CI legs exercise it.
     """
     out_dir = tmp_path / "proton"
     out_dir.mkdir()
@@ -382,7 +390,7 @@ def test_a_backend_that_refuses_the_mode_exits_two_not_a_traceback(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=_CHILD_TIMEOUT_S,
         env=_raw_proton_env(
             **{
                 "TRITON_CACHE_DIR": str(tmp_path / "triton-cache"),
@@ -433,7 +441,7 @@ def _pcsampling_skip_reason(tmp_path) -> str | None:
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=_CHILD_TIMEOUT_S,
         env=_raw_proton_env(TRITON_CACHE_DIR=str(tmp_path / "triton-cache")),
     )
     if probe.returncode == 0:

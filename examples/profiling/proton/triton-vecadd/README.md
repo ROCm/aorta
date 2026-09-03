@@ -99,12 +99,16 @@ Read the raw tree yourself with `proton-viewer -m time/s <file>.hatchet`
   earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an
   argparse `invalid choice: 'rocprofiler'` before the payload runs. For
   `roctracer` it is an attach-mode commitment too: Proton's CLI front-end
-  initialises the HIP runtime only on the path where `-b` is absent — still
-  true in 3.8.0 — and `roctracer` records nothing unless it starts after that,
-  so pinning it under this recipe's `mode: "cli"` captures an empty
-  `ROOT`-only tree and still exits 0. The collector refuses that pairing and
-  names `mode: "env"`, where the payload drives Proton itself;
-  [`../amd-roctracer/`](../amd-roctracer/README.md) is the worked case.
+  initialises the HIP runtime only on the path where `-b` is absent, and
+  `roctracer` records nothing unless it starts after that, so on Triton 3.7.x
+  and earlier pinning it under this recipe's `mode: "cli"` captures an empty
+  `ROOT`-only tree and still exits 0. Measured on 3.8.0 the same pin captures
+  normally, but the collector refuses that pairing on every version — 3.7.x is
+  still shipped by images in use and the failure is silent — and names
+  `mode: "env"`, where the payload drives Proton itself;
+  [`../amd-roctracer/`](../amd-roctracer/README.md) is the worked case and
+  [ROCm/aorta#439](https://github.com/ROCm/aorta/issues/439) tracks the
+  refusal's removal.
   `rocprofiler` carries no such commitment — it is configured when
   `libproton.so` loads, so `mode: "cli"` suits it and is allowed.
 - **What `auto` resolved to is not in the artifact.** The `.hatchet`

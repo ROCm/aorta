@@ -220,7 +220,7 @@ measured sharp edges — see [Choosing a Proton backend](proton-backends.md).
 | Option | Values | Default | Notes |
 |---|---|---|---|
 | `mode` | `cli`, `env` | `cli` | See [Attach modes](#proton-attach-modes). |
-| `backend` | `auto`, `rocprofiler`, `roctracer`, `instrumentation`, `cupti` | `auto` | `auto` omits Proton's `-b` and lets Proton pick the backend matching the active runtime. On AMD that resolution is version-dependent — `select_profiler_from_triton_backend('hip')` returns `rocprofiler` on Triton 3.8.0 and newer and `roctracer` on 3.7.1 and earlier; on NVIDIA it is `cupti` either way. It is the only spelling correct on every version and is why it is the default: **naming a backend is a version commitment, and naming `roctracer` is an attach-mode commitment too.** `rocprofiler` is the preferred AMD backend upstream and has been a released backend since Triton 3.8.0 (2026-08-28), whose CLI advertises `-b {cupti,rocprofiler,roctracer,instrumentation}`; 3.7.x and earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an argparse `invalid choice: 'rocprofiler'` before the payload runs. `roctracer` is the deprecated AMD predecessor, and the one *whole-kernel* AMD backend present in *every* release including the oldest; `instrumentation` the intra-kernel path, also present in every release; `cupti` the NVIDIA one, accepted so a recipe stays portable even though aorta's examples are AMD. Pinning `roctracer` means `mode: env` and a payload that drives Proton itself: under the default `mode: cli` such a pin captures an empty tree, and the collector refuses that one pairing. The two AMD tracing backends have *opposite* initialisation contracts, so `rocprofiler` is not covered — it configures itself when `libproton` loads, which makes `mode: cli` the ordering upstream prefers for it — see [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend). `instrumentation` measures *inside* a kernel and publishes **no numeric metrics** — its leaves carry `cycles` / `normalized_cycles`, never `time (<unit>)`, so such a trial reports `proton_artifact_dir` and nothing else. |
+| `backend` | `auto`, `rocprofiler`, `roctracer`, `instrumentation`, `cupti` | `auto` | `auto` omits Proton's `-b` and lets Proton pick the backend matching the active runtime. On AMD that resolution is version-dependent — `select_profiler_from_triton_backend('hip')` returns `rocprofiler` on Triton 3.8.0 and newer and `roctracer` on 3.7.1 and earlier; on NVIDIA it is `cupti` either way. It is the only spelling correct on every version and is why it is the default: **naming a backend is a version commitment, and naming `roctracer` is an attach-mode commitment too.** `rocprofiler` is the preferred AMD backend upstream and has been a released backend since Triton 3.8.0 (2026-08-28), whose CLI advertises `-b {cupti,rocprofiler,roctracer,instrumentation}`; 3.7.x and earlier accept only `cupti`/`roctracer`/`instrumentation` and exit with an argparse `invalid choice: 'rocprofiler'` before the payload runs. `roctracer` is the deprecated AMD predecessor, and the one *whole-kernel* AMD backend present in *every* release including the oldest; `instrumentation` the intra-kernel path, also present in every release; `cupti` the NVIDIA one, accepted so a recipe stays portable even though aorta's examples are AMD. Pinning `roctracer` means `mode: env` and a payload that drives Proton itself: on Triton 3.7.x and earlier such a pin captures an empty tree under the default `mode: cli`. Measured on 3.8.0 the same pin captures normally, but the collector still refuses that one pairing on every version, because 3.7.x is what several images in use ship — see [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend) and [#439](https://github.com/ROCm/aorta/issues/439) for when the refusal goes. The two AMD tracing backends have *opposite* initialisation contracts, so `rocprofiler` is not covered — it configures itself when `libproton` loads, which makes `mode: cli` the ordering upstream prefers for it — see [Pinning an explicit AMD backend](#pinning-an-explicit-amd-backend). `instrumentation` measures *inside* a kernel and publishes **no numeric metrics** — its leaves carry `cycles` / `normalized_cycles`, never `time (<unit>)`, so such a trial reports `proton_artifact_dir` and nothing else. |
 | `backend_mode` | `pcsampling`, `periodic_flushing` | (unset) | Proton's per-backend `--mode`. **Requires an explicit (non-`auto`) backend**, because which values are valid depends on which backend runs: `rocprofiler` takes both, `roctracer` only `periodic_flushing`, `cupti` both. Not valid on `backend: instrumentation`, whose modes are the `instrumentation_mode` key, and rejected together with `instrumentation_mode` *or* `granularity` — all three render into Proton's single `--mode` argument, so only one may be set. What the schema accepts is the backend's documented domain, not what a given build implements: `rocprofiler` + `pcsampling` is rejected by Triton 3.8.0 itself with `ValueError: [PROTON] RocprofSDKProfiler: unsupported mode: pcsampling`, because AMD PC sampling landed upstream after the 3.8.0 tag. `roctracer` + `periodic_flushing` is accepted by `start()` on 3.8.0, but **accepted is not the same as working**: on Triton 3.7.1 / ROCm 7.0.2 that pair kills the workload with SIGSEGV (exit 139) once kernels dispatch — verified on two payloads — so leave it unset there. Reaching Proton through `mode: cli` is version-dependent — see the paragraph below the table. |
 | `context` | `shadow`, `python` | `shadow` | How a kernel's time is attributed to a calling frame. |
 | `data` | `tree`, `trace` | `tree` | `tree` writes the `.hatchet` file the parser reads; `trace` writes a chrome trace instead, so it produces no numeric metrics. |
@@ -381,11 +381,20 @@ naming `mode: env` as the route.
 
 **This is a Triton 3.7.x-and-earlier defect, and the guard has an expiry.** The
 byte counts above are from 3.7.1. On 3.8.0 the same pinned `-b roctracer`
-captured 17 kernels on aorta's own MI350 runner, so the bug does not reproduce
-there. The guard stays because 3.7.x is what this repo's containers ship, and
-the GPU test that asserts the bug is still present skips itself from 3.8.0 on —
-so when the floor moves, the test stops claiming something false and the guard
-can be removed deliberately rather than discovered to be dead.
+captures normally — measured on gfx950 / ROCm 10 at 3090 bytes, byte-for-byte
+what `backend: auto` produces there — so the bug does not reproduce on the newer
+stack. The guard stays because 3.7.x is still what several images in use ship
+(3.7.1 in `rocm/pytorch:rocm7.14_ubuntu26.04_py3.14_pytorch_release_2.12.0`,
+3.6.0 in `rocm/pytorch:latest`), and removing it today would regress those users
+into the silent unprofiled trial it exists to prevent.
+
+`test_cli_mode_pin_captures_nothing_only_on_the_versions_the_guard_targets`
+asserts *whichever* of the two behaviours the installed Triton has, rather than
+skipping on the newer stack, so both halves stay under test: the 3.7.x half is
+the original regression, and the 3.8.0 half is what will say the guard has
+become a no-op — and what fails loudly if a later Triton reintroduces the
+ordering bug after the guard is gone. Removal is tracked in
+[#439](https://github.com/ROCm/aorta/issues/439).
 
 **`rocprofiler` is not covered, and must not be.** The evidence for it is of a
 different kind from everything above — it is read from upstream's source and
@@ -506,8 +515,14 @@ runner or a sweep it reads as a hang with no failing assertion.
 
 This is not a Proton-collector defect, and it is not specific to aorta: any
 process on this stack that imports torch before `triton.profiler` is affected.
-Reported upstream; tracked here as
-[ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
+Filed against both repositories that can fix it, each carrying the two-line
+reproducer, the gdb stack and the 3.7.1-clean / 3.8.0-affected boundary:
+[triton-lang/triton#11549](https://github.com/triton-lang/triton/issues/11549)
+(`protonToolFini` re-enters rocprofiler-sdk from inside a client finalizer) and
+[ROCm/rocm-systems#11123](https://github.com/ROCm/rocm-systems/issues/11123)
+(`invoke_client_finalizer` holds a non-recursive mutex across that callback).
+Neither is fixed yet, so the import order below is a workaround, not a cure.
+Tracked here as [ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
 
 The ordering is free, and it does not fight either backend's contract. What
 `roctracer` constrains is when `proton.start()` runs — its interceptor goes in
@@ -721,6 +736,23 @@ will be in `rocprofiler::registration::finalize()` under `__run_exit_handlers`,
 blocked on `get_registration_mutex()`. Fix by importing `triton.profiler`
 before torch — see [Import order](#import-order). Tracked in
 [ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
+
+Two things decide whether an environment is exposed, and both surprise people
+trying to confirm it:
+
+- **The unversioned `librocprofiler-sdk.so` must resolve.** A stock
+  `rocm/pytorch` wheel image ships only `librocprofiler-sdk.so.1`, so Proton's
+  constructor `dlopen` fails, no rocprofiler-sdk client registers, and nothing
+  deadlocks — the image is *accidentally* immune. `Dockerfile.ci-gpu`'s
+  devel-symlink fixup creates that soname, which is why CI is exposed and a
+  bare `docker run` of the same base is not. A classic `/opt/rocm` install
+  ships both spellings. **No GPU is needed** to reproduce it.
+- **Triton must be 3.8.0 exactly.** 3.7.x predates the constructor;
+  `triton-lang/triton#11009` removed the re-entrant call on `main` but landed
+  after the `v3.8.0` tag was cut, so 3.8.0 is the affected window. Once the
+  installed Triton carries that fix the import order stops being load-bearing
+  for this reason (it still is for `rocprofiler`, which needs configuring
+  before HSA).
 
 **`rocprofv3 not found`.** Put `rocprofv3` on `$PATH` (it ships with ROCm)
 or set `$ROCPROF_BIN` to the binary. `$ROCPROF_BIN` accepts either a bare
