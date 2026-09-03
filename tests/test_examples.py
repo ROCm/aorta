@@ -321,8 +321,40 @@ def test_env_mode_payload_reads_every_session_variable(example, tmp_path):
     )
 
 
+#: Module paths whose import loads ``libproton.so`` and so runs the
+#: ``rocprofiler_force_configure`` constructor. ``triton.profiler`` is the
+#: documented entry point and pulls the extension in transitively;
+#: ``triton._C.libproton`` *is* the extension, imported directly by
+#: ``amd-rocprofiler/gelu.py``. Either one landing after torch is the hang, so
+#: the guard has to recognise both -- matching only the first would pass a
+#: payload that led with the second.
+_PROTON_IMPORT_PREFIXES = ("triton.profiler", "triton._C.libproton")
+
+
+def _imported_module_paths(node: ast.stmt) -> list[str]:
+    """Fully qualified module paths an import statement loads.
+
+    ``from triton import profiler`` loads ``triton.profiler`` but puts only
+    ``triton`` in ``ImportFrom.module``, so the bound names have to be joined
+    back on: reading ``module`` alone made that spelling invisible, and an
+    invisible proton import makes :func:`test_proton_payloads_import_proton_before_torch`
+    *skip* rather than fail. ``module`` is kept as well for
+    ``from triton.profiler import scope``, where the package is the whole path.
+
+    Relative imports are ignored -- neither ``triton`` nor ``torch`` can be
+    reached that way from an example payload, and ``module`` is not a usable
+    prefix when ``level`` is set.
+    """
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom) and not node.level:
+        module = node.module or ""
+        return [module, *(f"{module}.{alias.name}" for alias in node.names)]
+    return []
+
+
 def _first_import_lines(payload: Path) -> tuple[int | None, int | None]:
-    """Line numbers of the payload's first ``triton.profiler`` and ``torch`` imports.
+    """Line numbers of the payload's first Proton and ``torch`` imports.
 
     Module-level statements only. An import inside a function does not run at
     load time, so it cannot decide which library's constructor lands first --
@@ -331,13 +363,8 @@ def _first_import_lines(payload: Path) -> tuple[int | None, int | None]:
     proton_line = torch_line = None
     module = ast.parse(payload.read_text(encoding="utf-8"))
     for node in module.body:
-        names: list[str] = []
-        if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            names = [node.module or ""]
-        for name in names:
-            if proton_line is None and name.startswith("triton.profiler"):
+        for name in _imported_module_paths(node):
+            if proton_line is None and name.startswith(_PROTON_IMPORT_PREFIXES):
                 proton_line = node.lineno
             if torch_line is None and (name == "torch" or name.startswith("torch.")):
                 torch_line = node.lineno
@@ -381,3 +408,58 @@ def test_proton_payloads_import_proton_before_torch(payload):
         "Starting the session after torch is still correct and still required by "
         "roctracer; it is the import that has to come first, not the start() call."
     )
+
+
+@pytest.mark.parametrize(
+    "proton_import",
+    [
+        pytest.param("import triton.profiler as proton", id="import-dotted"),
+        pytest.param("import triton.profiler.language as pl", id="import-submodule"),
+        pytest.param("from triton import profiler", id="from-package"),
+        pytest.param("from triton import profiler as proton", id="from-package-aliased"),
+        pytest.param("from triton.profiler import scope", id="from-module"),
+        pytest.param("from triton._C.libproton import proton", id="from-extension"),
+    ],
+)
+def test_every_proton_import_spelling_is_visible_to_the_order_guard(tmp_path, proton_import):
+    """A spelling the guard cannot see makes the order test *skip*, not fail.
+
+    That is the dangerous direction: a payload rewritten to any of these forms
+    with torch first would deadlock at exit and still report green, because
+    ``_first_import_lines`` returns ``None`` and
+    :func:`test_proton_payloads_import_proton_before_torch` skips on ``None``.
+    """
+    payload = tmp_path / "payload.py"
+    payload.write_text(f"import torch\n{proton_import}\n", encoding="utf-8")
+    proton_line, torch_line = _first_import_lines(payload)
+    assert (proton_line, torch_line) == (2, 1), proton_import
+
+
+@pytest.mark.parametrize(
+    "torch_import",
+    [
+        pytest.param("import torch", id="import"),
+        pytest.param("import torch.nn.functional as F", id="import-submodule"),
+        pytest.param("from torch import nn", id="from-package"),
+    ],
+)
+def test_every_torch_import_spelling_is_visible_to_the_order_guard(tmp_path, torch_import):
+    """Same in the other direction: an invisible torch import also skips."""
+    payload = tmp_path / "payload.py"
+    payload.write_text(f"import triton.profiler as proton\n{torch_import}\n", encoding="utf-8")
+    proton_line, torch_line = _first_import_lines(payload)
+    assert (proton_line, torch_line) == (1, 2), torch_import
+
+
+def test_the_order_guard_ignores_imports_it_cannot_attribute(tmp_path):
+    """Relative and unrelated imports must not be read as either library.
+
+    ``ImportFrom.module`` is not a usable prefix when ``level`` is set, so
+    ``from . import torch_helpers`` would otherwise join into a bogus path.
+    """
+    payload = tmp_path / "payload.py"
+    payload.write_text(
+        "from . import torch_helpers\nfrom .torch import profiler\nimport argparse\n",
+        encoding="utf-8",
+    )
+    assert _first_import_lines(payload) == (None, None)

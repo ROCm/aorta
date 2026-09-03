@@ -1372,38 +1372,148 @@ def test_parse_summary_from_streams_consumes_a_lazy_iterator(tmp_path):
     assert metrics.get("proton_gpu_time_ms") == pytest.approx(2.0)
 
 
+#: Callables that block on a child process and take a ``timeout`` keyword.
+#: Matched on the trailing name only, so ``subprocess.run(...)``,
+#: ``run(...)`` after ``from subprocess import run`` and
+#: ``proc.communicate(...)`` all resolve the same way.
+_BLOCKS_ON_A_CHILD = frozenset(
+    {"run", "call", "check_call", "check_output", "communicate", "wait", "wait_for"}
+)
+
+#: Child launches that cannot be given a timeout at all, so there is no
+#: bounded spelling of them to accept.
+_UNBOUNDABLE_CHILD_LAUNCH = frozenset({"system", "popen"})
+
+
+def _called_name(node: ast.Call) -> str | None:
+    """Trailing identifier of a call's callee, ignoring how it was reached."""
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _child_budget_violations(source: str, filename: str = "<snippet>") -> dict[str, list]:
+    """Ways ``source`` escapes the shared child budget, keyed by how.
+
+    ``narrowed``: a ``timeout=`` that is not ``_CHILD_TIMEOUT_S``, on any call
+    shape. ``unbounded``: a blocking child call with no ``timeout=`` keyword.
+    ``unboundable``: a launch that takes no timeout at all.
+    """
+    tree = ast.parse(source, filename=filename)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    return {
+        "narrowed": [
+            (keyword.lineno, ast.unparse(keyword.value))
+            for node in calls
+            for keyword in node.keywords
+            if keyword.arg == "timeout"
+            and not (
+                isinstance(keyword.value, ast.Name) and keyword.value.id == "_CHILD_TIMEOUT_S"
+            )
+        ],
+        "unbounded": [
+            (node.lineno, ast.unparse(node.func))
+            for node in calls
+            if (_called_name(node) or "") in _BLOCKS_ON_A_CHILD
+            and not any(keyword.arg == "timeout" for keyword in node.keywords)
+        ],
+        "unboundable": [
+            (node.lineno, ast.unparse(node.func))
+            for node in calls
+            if (_called_name(node) or "") in _UNBOUNDABLE_CHILD_LAUNCH
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "snippet"),
+    [
+        pytest.param("narrowed", "subprocess.run(argv, timeout=3600)", id="literal-timeout"),
+        pytest.param("narrowed", "proc.communicate(timeout=600)", id="literal-on-communicate"),
+        pytest.param("unbounded", "subprocess.run(argv)", id="no-timeout-at-all"),
+        pytest.param("unbounded", "run(argv, check=True)", id="no-timeout-bare-import"),
+        pytest.param("unbounded", "subprocess.check_output(argv)", id="no-timeout-check-output"),
+        pytest.param("unbounded", "proc.communicate()", id="no-timeout-communicate"),
+        pytest.param("unbounded", "proc.wait()", id="no-timeout-wait"),
+        pytest.param("unboundable", "os.system(cmd)", id="os-system"),
+    ],
+)
+def test_the_child_budget_guard_sees_every_way_out(kind, snippet):
+    """Each escape from ``_CHILD_TIMEOUT_S`` must be reported, and as its own kind.
+
+    The guard below reads one fixed file, so on its own it can only say that
+    *today's* calls are bounded. These snippets are what say it would notice a
+    new one -- the first version keyed on ``timeout=`` being present, so
+    ``subprocess.run(argv)``, the most likely regression of all, sailed past it.
+    """
+    found = _child_budget_violations(snippet)
+    assert found[kind], f"{snippet!r} not reported as {kind}: {found}"
+    assert not [k for k in found if k != kind and found[k]], f"{snippet!r} misfiled: {found}"
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param("subprocess.run(argv, timeout=_CHILD_TIMEOUT_S)", id="run"),
+        pytest.param("proc.communicate(timeout=_CHILD_TIMEOUT_S)", id="communicate"),
+        pytest.param("json.load(handle)", id="unrelated-call"),
+        pytest.param("shutil.which('proton')", id="no-child"),
+    ],
+)
+def test_the_child_budget_guard_accepts_what_it_should(snippet):
+    """A guard that flags correct code gets disabled, so pin the negatives too."""
+    assert not any(_child_budget_violations(snippet).values()), snippet
+
+
 def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
-    """No call in the GPU smoke module may set its own ``timeout=``.
+    """Every child in the GPU smoke module must be bounded by ``_CHILD_TIMEOUT_S``.
 
     ``test_proton_smoke_gpu.py`` sizes ``_CHILD_TIMEOUT_S`` so a wedged payload
     surfaces as ``TimeoutExpired`` naming that payload, rather than as the CI
     job hitting its own 60-minute cap -- which cancels the run and takes the
-    junit report with it (ROCm/aorta#434). A literal ``timeout=`` anywhere
-    there is a hole in that budget, and the calls most likely to wedge are the
-    ones that build their own argv instead of going through ``_capture``.
+    junit report with it (ROCm/aorta#434). The calls most likely to wedge are
+    the ones that build their own argv instead of going through ``_capture``.
+
+    Two ways to leave that budget, and the guard has to reject both. A
+    ``timeout=`` literal is a *narrowed* budget, and it can appear on any call
+    shape, so that half stays keyed on the keyword rather than the callee:
+    ``from subprocess import run``, a ``Popen.communicate`` or an ``asyncio``
+    wait would each escape a callee-shaped check while leaving the same hole.
+    An omitted ``timeout=`` is an *absent* budget -- ``subprocess.run(argv)``
+    is completely unbounded -- and nothing about the keyword can catch that,
+    so the second half does look at the callee, matching its trailing name so
+    the import spelling still does not matter. The keyword spelling is what it
+    requires: ``communicate`` and ``wait`` would also take the budget
+    positionally, and asking for the keyword is what lets the guard see it.
 
     Checked from the CPU suite because the GPU legs are path-skipped on most
     PRs, so a regression here would otherwise reach `main` unobserved. Read
-    from the AST rather than grepped so a reflowed call still matches, and
-    keyed on the ``timeout`` keyword rather than on the callee being
-    ``subprocess.run``: ``from subprocess import run``, a ``Popen.communicate``
-    or an ``asyncio`` wait would each escape a callee-shaped check while
-    leaving exactly the same hole.
+    from the AST rather than grepped so a reflowed call still matches.
     """
     source = Path(__file__).with_name("test_proton_smoke_gpu.py")
-    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    found = _child_budget_violations(source.read_text(encoding="utf-8"), filename=str(source))
+    narrowed, unbounded, unboundable = (
+        found["narrowed"],
+        found["unbounded"],
+        found["unboundable"],
+    )
 
-    offenders = [
-        (keyword.lineno, ast.unparse(keyword.value))
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        for keyword in node.keywords
-        if keyword.arg == "timeout"
-        and not (isinstance(keyword.value, ast.Name) and keyword.value.id == "_CHILD_TIMEOUT_S")
-    ]
-
-    assert not offenders, (
+    assert not narrowed, (
         f"{source.name} sets a per-call timeout instead of _CHILD_TIMEOUT_S at "
-        f"{offenders}. A wedged Proton payload would then run past the GPU job's "
+        f"{narrowed}. A wedged Proton payload would then run past the GPU job's "
         "own cap, which cancels the job and loses its report -- see ROCm/aorta#434."
+    )
+    assert not unbounded, (
+        f"{source.name} waits on a child without a timeout= keyword at {unbounded}. "
+        "Pass timeout=_CHILD_TIMEOUT_S, or launch through _capture, so a wedge "
+        "fails this test's payload rather than the whole GPU job -- see "
+        "ROCm/aorta#434."
+    )
+    assert not unboundable, (
+        f"{source.name} launches a child that cannot be bounded at {unboundable}. "
+        "os.system and os.popen take no timeout, so a wedge there runs until the "
+        "GPU job's own cap. Use subprocess with timeout=_CHILD_TIMEOUT_S -- see "
+        "ROCm/aorta#434."
     )
