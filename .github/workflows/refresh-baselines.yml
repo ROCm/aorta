@@ -21,6 +21,20 @@ on:
         type: boolean
         required: false
         default: false
+      # The scoping guard for a perf refresh. An unscoped `--perf-gate` rewrites
+      # the whole baseline file and arms step-time ceilings on every matrix
+      # entry -- gpu_smoke, inference_offline, training_ddp, training_fsdp, race
+      # and llm_determinism included -- each from a single observation with no
+      # variance data behind it. Naming the entry under test keeps the refresh
+      # correctness-only everywhere else, so perf gating can be rolled out one
+      # workload at a time. Unknown names are rejected by refresh_baselines.py
+      # rather than silently scoping the gate to nothing.
+      perf_gate_entry:
+        description: >-
+          Restrict perf_gate to these matrix entries (comma- or space-separated,
+          e.g. "tokenspeed_serve_smoke"). Empty gates EVERY entry.
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -58,14 +72,51 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v5
 
+      # refresh_baselines.py rejects both of these too, but only after pip has
+      # installed the wheel inside the container -- minutes of GPU runner time to
+      # learn about a typo in a dispatch form. Same rules, checked in seconds.
+      - name: Validate perf-gate inputs
+        env:
+          PERF_GATE: ${{ inputs.perf_gate }}
+          PERF_GATE_ENTRY: ${{ inputs.perf_gate_entry }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PERF_GATE_ENTRY}" ] && [ "${PERF_GATE}" != "true" ]; then
+            echo "::error::perf_gate_entry has no effect without perf_gate: true"
+            exit 1
+          fi
+          # Deliberately a warning, not an error: an unscoped perf refresh is a
+          # legitimate end-state operation (bless everything once every workload
+          # has variance data), and it is the behaviour every existing dispatch
+          # of this workflow has had. Loud, not blocked.
+          if [ "${PERF_GATE}" = "true" ] && [ -z "${PERF_GATE_ENTRY}" ]; then
+            echo "::warning::Unscoped perf refresh: this arms step-time ceilings on EVERY matrix entry from a single observation each. Set perf_gate_entry to scope it to the workload under test."
+          fi
+
       - name: Set up ROCm CI container
         uses: ./.github/actions/rocm-ci-setup
         with:
           rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
 
+      # Dispatch inputs reach the container as environment variables rather than
+      # being interpolated into this shell string. `perf_gate_entry` is free
+      # text, and `${{ }}` substitution happens before bash sees the script, so
+      # interpolating it would let a dispatch value close the quote and run
+      # arbitrary commands on the runner.
       - name: Install nightly wheel and regenerate baselines
+        env:
+          STEP_TIME_MARGIN: ${{ inputs.step_time_margin }}
+          THROUGHPUT_MARGIN: ${{ inputs.throughput_margin }}
+          PERF_GATE: ${{ inputs.perf_gate }}
+          PERF_GATE_ENTRY: ${{ inputs.perf_gate_entry }}
         run: |
-          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
+          bash scripts/ci/docker_cmd.sh exec \
+            -e STEP_TIME_MARGIN="${STEP_TIME_MARGIN}" \
+            -e THROUGHPUT_MARGIN="${THROUGHPUT_MARGIN}" \
+            -e PERF_GATE="${PERF_GATE}" \
+            -e PERF_GATE_ENTRY="${PERF_GATE_ENTRY}" \
+            -e DEV_WHEELS_INDEX="${{ env.DEV_WHEELS_INDEX }}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip
@@ -73,11 +124,29 @@ jobs:
             # so baselines are generated on the exact dependency set they gate.
             constraint=""
             [ -f config/ci/ci-constraints.txt ] && constraint="-c config/ci/ci-constraints.txt"
-            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}" $constraint
+            pip install --pre "amd-aorta[hw-queue]" -f "$DEV_WHEELS_INDEX" $constraint
+            # NOTE: this whole script is inside a single-quoted bash -lc, so it
+            # must contain no apostrophes.
+            args=()
+            if [ "${PERF_GATE}" = "true" ]; then
+              args+=(--perf-gate)
+            fi
+            # Comma- or space-separated list -> one --perf-gate-entry per name,
+            # which is what the repeatable flag expects. Empty fields (from a
+            # trailing comma) are dropped rather than passed as an empty string,
+            # which the known-entry check in refresh_baselines.py would reject.
+            if [ -n "${PERF_GATE_ENTRY}" ]; then
+              IFS=", " read -r -a _entries <<< "${PERF_GATE_ENTRY}"
+              for _e in "${_entries[@]}"; do
+                if [ -n "${_e}" ]; then
+                  args+=(--perf-gate-entry "${_e}")
+                fi
+              done
+            fi
             python scripts/ci/refresh_baselines.py \
-              --step-time-margin "${{ github.event.inputs.step_time_margin || 0.25 }}" \
-              --throughput-margin "${{ github.event.inputs.throughput_margin || 0.15 }}" \
-              ${{ github.event.inputs.perf_gate == 'true' && '--perf-gate' || '' }}
+              --step-time-margin "${STEP_TIME_MARGIN:-0.25}" \
+              --throughput-margin "${THROUGHPUT_MARGIN:-0.15}" \
+              ${args[@]+"${args[@]}"}
           '
 
       # The container wrote regression_baselines.yaml into the mounted workspace;
