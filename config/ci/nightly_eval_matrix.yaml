@@ -10,6 +10,21 @@
 #   nproc     - optional; launch under `torchrun --standalone --nproc_per_node=<n>`
 #   min_gpus  - optional; skip when torch.cuda.device_count() is lower (default 1;
 #               defaults to nproc when nproc is set)
+#   timeout_sec - optional; per-entry wall-clock budget (default 1800). Exceeding
+#               it kills the whole process group and FAILS the entry.
+#   needs_docker_daemon - optional; skip when no Docker daemon is reachable from
+#               wherever nightly_eval.py is running. For workloads that start
+#               their engine in a sibling container. Like min_gpus this states a
+#               runner CAPABILITY, so its absence is a skip, not a failure --
+#               and only entries that set it consult the probe, so a broken
+#               daemon cannot turn the rest of the nightly into skips.
+#
+# Record-only is NOT a field here: a cell is record-only exactly while
+# config/ci/regression_baselines.yaml has no key for it. Adding an entry to
+# `entries` therefore starts it record-only by construction. Note the limit of
+# that -- record-only defers PERFORMANCE gating only. A cell that errors or
+# fails is a `fail` with or without a baseline (nightly_eval.py is fail-closed),
+# so an entry may only be added here once it can actually pass on the runner.
 #
 # Phase 1 wires one config per registered workload (the smoke recipes). Per-workload
 # matrices (dtypes, larger GPU counts) are Phase 3 -- add rows here, no code change.
@@ -78,6 +93,61 @@ entries:
     recipe: recipes/llm-determinism/example-llm-determinism.yaml
     nproc: 8
     min_gpus: 8
+
+  # TokenSpeed online serving. Chosen over the other four serving recipes as the
+  # cheapest cell that still answers something: Qwen3-0.6B is ~1.2 GB of weights
+  # against ~40 GB for the gpt-oss recipes, and two cells against four (models)
+  # or six (load). It is also the only serving recipe whose cells differ ONLY by
+  # mitigation, so the pair is a same-night control: a move in both cells is the
+  # stack, a move in one is the mitigation or noise. That is the triage lever the
+  # multi-model and load recipes cannot give, since their cells legitimately
+  # differ in speed.
+  #
+  # 3600s, not the 1800s default: two bring-ups at the observed startup spread
+  # (180-415 s measured over 13 cell-runs) plus the teardown VRAM drain is ~15
+  # min before the image pull and any cold-cache weight download, and a timeout
+  # is an unconditional entry FAILURE rather than a slow record.
+  #
+  # `needs_docker_daemon` is what makes this row safe to have here today. The
+  # nightly runs nightly_eval.py INSIDE aorta-ci-gpu, and `tokenspeed_serve`
+  # starts the TokenSpeed engine in its own container, so it needs a docker
+  # client in the image (present, and proven: the built image carries 29.7.2 and
+  # no daemon) plus a route to a daemon (a per-lane opt-in that no lane sets,
+  # because it grants effective root on the runner and that is the CI owner's
+  # call). Until a lane sets `docker-socket: true` this entry SKIPS, with the
+  # reason in the results, rather than failing on "cannot connect to the Docker
+  # daemon" -- the same contract min_gpus gives the 8-GPU rows.
+  #
+  # Proven on gfx950 on 2026-09-02: two sweeps driven from inside the CI
+  # container over a mounted socket, four cell-runs, all passed, twelve clean
+  # steps (1108-1149 ms), metrics within 5% of the host-side envelope.
+  #
+  # The recipe's `work_dir: /tmp/ts-work-serve` must be mounted at the SAME
+  # string on both sides and be root-owned -- see the work_dir section of
+  # docs/tokenspeed-gating-rollout.md, which the demonstration made a good deal
+  # more specific.
+  - name: tokenspeed_serve_smoke
+    recipe: recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml
+    min_gpus: 1
+    timeout_sec: 3600
+    needs_docker_daemon: true
+
+# Entries that are ready to run but blocked on a runner prerequisite. This key
+# is not read by anything: nightly_eval.py and refresh_baselines.py both iterate
+# `entries` only, so nothing below executes. It exists because the alternative
+# for a staged-but-blocked entry is a commented-out block (the convention the
+# two NOTEs above use), and a comment cannot be checked -- tests/ci/
+# test_nightly_eval.py validates these the same way it validates `entries`, so
+# the recipe path, the GPU requirement and the metric names are known-good on
+# the day the prerequisite lands rather than discovered by a red nightly.
+#
+# Promote by moving the entry (minus `blocked_on`) into `entries` above.
+# Empty as of 2026-09-02: tokenspeed_serve_smoke, the only entry that was ever
+# staged here, was promoted into `entries` once a cell was demonstrated running
+# from inside the CI container. Keep the key and this comment -- the convention
+# is worth more than the one row was, and the next blocked entry should land
+# here rather than in a comment block.
+pending_entries: []
 
 # dtype axis (fp32/fp16/bf16) is a follow-up: the smoke recipes pin one dtype
 # each, so per-dtype coverage needs dtype recipe variants (or workload_config

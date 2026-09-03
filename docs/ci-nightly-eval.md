@@ -188,7 +188,16 @@ controls stay hidden unless it runs.
   `refresh_baselines.py --perf-gate` (adds `step_time_ms.max` plus per-metric
   `policy`/`value` bounds -- min for throughput, max for latency/step-time, equal
   for checksums -- that the comparator then enforces; a required metric that is
-  absent is a failure).
+  absent is a failure).   `--perf-gate-entry <name>` (repeatable) restricts that to
+  named entries: the baseline file is rewritten whole, so an unscoped refresh
+  arms *every* entry's perf gates from whichever single run it just did.
+  Both are dispatch inputs on `refresh-baselines.yml` (`perf_gate` and
+  `perf_gate_entry`, the latter taking a comma- or space-separated list), so a
+  scoped refresh is runnable from the Actions UI without editing the workflow.
+  A worked example of rolling gating out for one workload -- which metrics to
+  bound, how many record-only runs to take first, and what to derive the
+  threshold from -- is in
+  [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md).
 
 ## Baselines
 
