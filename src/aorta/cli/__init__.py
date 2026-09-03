@@ -10,7 +10,7 @@ from aorta.cli._lazy_group import LazyCommand, LazyGroup
 _COMMANDS: dict[str, LazyCommand] = {
     "agent": LazyCommand(
         "aorta.cli.agent:agent",
-        "Closed-loop mitigation search via the probe engine.",
+        "Autonomous agents: run unattended to a verdict and write artifacts.",
     ),
     "bench": LazyCommand(
         "aorta.cli.bench:bench",
