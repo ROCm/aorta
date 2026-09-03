@@ -139,8 +139,10 @@ class TestCollectionName:
     def test_the_name_encodes_the_model(self, monkeypatch):
         monkeypatch.setattr(settings, "embedding_model", DEFAULT_MODEL)
         name = FastembedBgeProvider().collection_name()
-        assert name == "aorta_fastembed_baai_bge_small_en_v1_5"
         assert name.startswith(LOCAL_COLLECTION_PREFIX)
+        # The slug stays readable; the trailing digest is what makes the name
+        # unique, so the model is asserted as a substring rather than the whole.
+        assert "baai_bge_small_en_v1_5" in name
 
     def test_it_is_not_the_pre_swap_name(self, monkeypatch):
         """The old provider owned the bare name ``aorta`` at the same 384 dims.

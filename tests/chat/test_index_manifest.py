@@ -124,6 +124,21 @@ class TestReadFailures:
             read_manifest(index_file)
         assert "Upgrade aorta" in str(exc.value)
 
+    @pytest.mark.parametrize("value", ["1", None, 1.5, [1], True])
+    def test_a_non_integer_schema_is_refused_rather_than_compared(self, index_file, value):
+        """``schema_version > SCHEMA_VERSION`` against a string raises TypeError.
+
+        That escaped every caller, all of which handle only ``ManifestError``,
+        so a malformed sidecar surfaced as an unhandled crash instead of the
+        refusal the reader is supposed to produce.
+        """
+        raw = json.loads(_manifest().to_json())
+        raw["schema_version"] = value
+        manifest_path(index_file).write_text(json.dumps(raw))
+
+        with pytest.raises(ManifestError, match="non-integer schema version"):
+            read_manifest(index_file)
+
     def test_an_unknown_extra_key_is_tolerated(self, index_file: Path):
         """A newer builder adding a field must not strand an older client.
 
@@ -186,6 +201,53 @@ class TestRefusals:
             dimensions=384,
         )
         assert report.refusals
+
+
+class TestTheEmbeddingIdentityRefusal:
+    """Same model name, different endpoint, is a different vector space.
+
+    ``text-embedding-3-small`` means whatever the configured OpenAI-compatible
+    API says it means. Keying only on the model let a gateway switch keep the
+    old vectors and query them with the new endpoint's -- every field check
+    passed and retrieval returned plausible nonsense.
+    """
+
+    def _validate(self, manifest_identity: str, install_identity: str):
+        return validate(
+            _manifest(embedding_identity=manifest_identity),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            embedding_identity=install_identity,
+        )
+
+    def test_a_different_endpoint_refuses(self):
+        report = self._validate(f"https://a.example/v1\n{MODEL}", f"https://b.example/v1\n{MODEL}")
+
+        assert any("embedding identity" in line for line in report.refusals)
+
+    def test_the_refusal_names_both_endpoints(self):
+        """Two opaque collection digests are not something an operator can act on."""
+        report = self._validate(f"https://a.example/v1\n{MODEL}", f"https://b.example/v1\n{MODEL}")
+        line = next(line for line in report.refusals if "embedding identity" in line)
+
+        assert "https://a.example/v1" in line
+        assert "https://b.example/v1" in line
+        assert "\n" not in line
+
+    def test_the_same_identity_is_clean(self):
+        report = self._validate(f"https://a.example/v1\n{MODEL}", f"https://a.example/v1\n{MODEL}")
+
+        assert report.refusals == []
+
+    def test_a_manifest_predating_the_field_is_not_refused_on_it(self):
+        """It has no identity to disagree with, and the collection check covers it.
+
+        Refusing on an empty value would reject every manifest written before
+        the field existed for a reason that is not true of them.
+        """
+        report = self._validate("", f"https://a.example/v1\n{MODEL}")
+
+        assert not any("embedding identity" in line for line in report.refusals)
 
 
 class TestRefusalText:

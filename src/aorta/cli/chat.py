@@ -541,9 +541,20 @@ class _GroupOptions:
 
 
 def _group_options(ctx: click.Context) -> _GroupOptions:
-    """Group-level options, or defaults when the subcommand was reached directly."""
-    parent = ctx.find_root().obj
-    return parent if isinstance(parent, _GroupOptions) else _GroupOptions()
+    """Group-level options, or defaults when the subcommand was reached directly.
+
+    Walks the ancestry rather than jumping to ``find_root``. Under the real
+    ``aorta`` entry point the root is the *top-level* group, whose ``obj`` is
+    not ours, so ``aorta chat --llm-provider openai ask q`` silently fell back
+    to defaults. It only looked correct in tests, which invoke ``chat``
+    directly and therefore make ``chat`` the root.
+    """
+    node: click.Context | None = ctx
+    while node is not None:
+        if isinstance(node.obj, _GroupOptions):
+            return node.obj
+        node = node.parent
+    return _GroupOptions()
 
 
 @click.group(name="chat", invoke_without_command=True)

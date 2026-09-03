@@ -231,8 +231,14 @@ class TestEmbeddingProviderWiring:
         assert APIM_HEADER in described
         assert "sk-super-secret" not in described
 
-    def test_the_collection_name_ignores_the_auth_style(self, amd_gateway):
-        """Auth is transport; it must not move where vectors are stored."""
-        assert RemoteApiProvider().collection_name() == (
-            "aorta_remote_text_embedding_3_small"
-        )
+    def test_the_collection_name_ignores_the_auth_style(self, amd_gateway, monkeypatch):
+        """Auth is transport; it must not move where vectors are stored.
+
+        The *endpoint* does move it -- that is what the identity digest is for
+        -- so this holds the endpoint fixed and varies only the auth style,
+        rather than comparing against a literal name.
+        """
+        with_gateway_auth = RemoteApiProvider().collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_auth_header", "")
+        monkeypatch.setattr(settings, "remote_embedding_extra_headers", {})
+        assert RemoteApiProvider().collection_name() == with_gateway_auth

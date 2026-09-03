@@ -456,7 +456,11 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
 
 
 async def retrieve_node(state: AgentState) -> dict[str, Any]:
-    """Run RAG retrieval to gather context for the user's query."""
+    """Gather context for the user's query: source chunks, plus run artifacts.
+
+    Both, because this feeds the branch that has no tools. Retrieving only
+    source left a run question answerable only from code.
+    """
     last_human = None
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
@@ -474,14 +478,45 @@ async def retrieve_node(state: AgentState) -> dict[str, Any]:
             "retrieved_context": "(Index not built yet -- run indexing first.)"
         }
 
-    if not docs:
-        return {"retrieved_context": "(No relevant code found.)"}
-
     chunks = []
     for doc in docs:
         src = doc.metadata.get("source", "?")
         chunks.append(f"### {src}\n```\n{doc.page_content}\n```")
+    chunks.extend(_run_artifact_chunks(last_human))
+
+    if not chunks:
+        return {"retrieved_context": "(No relevant code found.)"}
     return {"retrieved_context": "\n\n".join(chunks)}
+
+
+def _run_artifact_chunks(query: str) -> list[str]:
+    """Run-artifact context for the branch that has no tools.
+
+    The router sends a specific question -- "why did this sweep fail?" -- down
+    the ``question`` path by design, because it is specific. That branch never
+    calls a tool, so without this it could only answer from source code, and
+    the run artifacts the command exists to explain were unreachable by the
+    route most likely to ask about them.
+
+    A missing collection is the common case, not an error: most installs have
+    never run ``aorta chat index runs``. This is supplementary context, so
+    *nothing* it can raise -- an absent collection, an unreadable index, a
+    remote embedding provider that is down -- may take the answer with it; the
+    query is still answerable from source, which is what it did before this
+    existed. Hence the broad catch, at debug level so it is still diagnosable.
+    """
+    from aorta.chat.rag.runs import search_run_docs
+
+    try:
+        docs = search_run_docs(query, settings.search_tool_k)
+    except Exception as exc:  # supplementary context; see the docstring
+        logger.debug("No run-artifact context for this query: %s", exc)
+        return []
+    return [
+        f"### run artifact: {doc.metadata.get('source', '?')} "
+        f"({doc.metadata.get('artifact_kind', '?')})\n```\n{doc.page_content}\n```"
+        for doc in docs
+    ]
 
 
 # ──────────────────── Search-query detection ─────

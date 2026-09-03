@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import http.client
 import io
+import json
 import urllib.error
 from pathlib import Path
 
@@ -23,6 +24,8 @@ import pytest
 from aorta.chat.config import settings
 from aorta.chat.rag import index_ops
 from aorta.chat.rag import manifest as manifest_mod
+from aorta.chat.rag.embeddings.base import build_collection_name
+from aorta.chat.rag.embeddings.fastembed_bge import LOCAL_COLLECTION_PREFIX
 from aorta.chat.rag.index_ops import (
     ASSET_NAME,
     ROLLING_TAG,
@@ -33,7 +36,10 @@ from aorta.chat.rag.index_ops import (
 )
 
 MODEL = "BAAI/bge-small-en-v1.5"
-COLLECTION = "aorta_fastembed_baai_bge_small_en_v1_5"
+# Derived, not spelled out: the name carries a digest of the embedding
+# identity, and a fixture that hardcoded it would make every manifest here
+# refuse for the wrong reason the next time the identity gains a component.
+COLLECTION = build_collection_name(LOCAL_COLLECTION_PREFIX, MODEL)
 BODY = b"pretend this is a 48 MB sqlite-vec index" * 16
 
 
@@ -277,6 +283,51 @@ class TestFetchFailures:
         server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = b"{not json"
         with pytest.raises(IndexFetchError, match="not usable"):
             fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+
+class TestTheFetchedSchemaIsChecked:
+    """``read_manifest`` refused a future schema; the download path did not.
+
+    So an older client reported a successful fetch, installed the files, and
+    then had every load refuse the manifest it had just written -- a fetch that
+    "worked" followed by a chat that no longer starts.
+    """
+
+    def _serve_schema(self, server, value) -> None:
+        raw = json.loads(_manifest().to_json())
+        raw["schema_version"] = value
+        server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = json.dumps(raw).encode()
+
+    def test_a_newer_schema_refuses_and_installs_nothing(self, server, tmp_path: Path):
+        self._serve_schema(server, manifest_mod.SCHEMA_VERSION + 1)
+        dest = tmp_path / "i.sqlite"
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert "Upgrade aorta" in str(exc.value)
+        assert not dest.exists()
+        assert not manifest_mod.manifest_path(dest).exists()
+        assert not manifest_mod.checksum_path(dest).exists()
+
+    @pytest.mark.parametrize("value", ["1", None, 1.5, [1]])
+    def test_a_non_integer_schema_is_an_index_fetch_error(self, server, tmp_path, value):
+        """Not a ``TypeError`` out of a comparison the caller never guarded."""
+        self._serve_schema(server, value)
+        dest = tmp_path / "i.sqlite"
+
+        with pytest.raises(IndexFetchError, match="non-integer schema version"):
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert not dest.exists()
+
+    def test_an_older_schema_is_still_accepted(self, server, tmp_path: Path):
+        """Forward tolerance runs one way only; an older sidecar still parses."""
+        self._serve_schema(server, manifest_mod.SCHEMA_VERSION)
+        dest = tmp_path / "i.sqlite"
+
+        assert fetch_index(version="0.2.1", index_path=dest).index_path == dest
+        assert dest.exists()
 
 
 class TestTransferFailures:

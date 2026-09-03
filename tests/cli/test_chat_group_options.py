@@ -101,6 +101,60 @@ class TestAskInheritsGroupOptions:
         }
 
 
+class TestTheRealEntryPointGetsThemToo:
+    """Every test above invokes ``chat`` directly, which hides the bug.
+
+    Invoked that way, ``chat`` *is* the root context, so ``find_root().obj``
+    happened to be the ``_GroupOptions`` this module is about. Under the real
+    ``aorta`` entry point the root is the top-level group, whose ``obj`` is
+    something else entirely -- so the lookup missed and every group option was
+    silently dropped for the invocation form users actually type.
+    """
+
+    def test_a_provider_survives_the_top_level_group(self, dispatched):
+        from aorta.cli import main
+
+        result = CliRunner().invoke(main, ["chat", "--llm-provider", "openai", "ask", "q"])
+
+        assert result.exit_code == 0, result.output
+        assert dispatched.only()["llm_provider"] == "openai"
+
+    @pytest.mark.parametrize(
+        ("flag", "field"),
+        [
+            ("--no-redact", "no_redact"),
+            ("--no-wait", "no_wait"),
+            ("--json", "as_json"),
+            ("--plain", "plain"),
+            ("-v", "verbose"),
+        ],
+    )
+    def test_every_group_flag_survives_the_top_level_group(self, dispatched, flag, field):
+        from aorta.cli import main
+
+        CliRunner().invoke(main, ["chat", flag, "ask", "q"])
+
+        assert dispatched.only()[field] is True
+
+    def test_the_option_after_the_subcommand_still_wins(self, dispatched):
+        from aorta.cli import main
+
+        CliRunner().invoke(
+            main, ["chat", "--llm-provider", "openai", "ask", "--llm-provider", "vllm", "q"]
+        )
+
+        assert dispatched.only()["llm_provider"] == "vllm"
+
+    def test_no_options_anywhere_stays_at_the_defaults(self, dispatched):
+        """The walk must not pick up an unrelated ``obj`` from an outer context."""
+        from aorta.cli import main
+
+        CliRunner().invoke(main, ["chat", "ask", "q"])
+
+        assert dispatched.only()["llm_provider"] is None
+        assert dispatched.only()["no_redact"] is False
+
+
 class TestUiReceivesThemThroughTheEnvironment:
     """The Chainlit child is a fresh interpreter, so overrides travel as env."""
 

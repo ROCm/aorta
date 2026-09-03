@@ -307,6 +307,7 @@ def build_index(
         aorta_tag=corpus_mod.head_tag(corpus.base),
         embedding_provider=provider.name,
         embedding_model=embedding_model,
+        embedding_identity=provider.vector_identity(),
         dimensions=dimensions,
         collection=collection,
         chunk_size=settings.chunk_size,
@@ -399,6 +400,7 @@ def check_index(
         manifest,
         embedding_model=provider.model_id(),
         collection=provider.collection_name(),
+        embedding_identity=provider.vector_identity(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         installed_version=installed_version(),
@@ -531,6 +533,11 @@ def fetch_index(
 
         try:
             manifest = manifest_mod.Manifest.from_dict(json.loads(manifest_text))
+            # Before ``_install_staged``, not after: a schema this build cannot
+            # read must fail the fetch rather than be written to disk and then
+            # rejected by the first load, which reports success and leaves a
+            # chat that no longer starts.
+            manifest_mod.ensure_supported_schema(manifest, f"the index at {source.index_url}")
         except (ValueError, manifest_mod.ManifestError) as exc:
             raise IndexFetchError(
                 f"the manifest at {source.manifest_url} is not usable: {exc}"
@@ -547,6 +554,7 @@ def fetch_index(
             manifest,
             embedding_model=provider.model_id(),
             collection=provider.collection_name(),
+            embedding_identity=provider.vector_identity(),
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
             installed_version=installed_version(),
@@ -618,6 +626,7 @@ def side_load(staged: str | Path, index_path: str | Path | None = None) -> Fetch
         manifest,
         embedding_model=provider.model_id(),
         collection=provider.collection_name(),
+        embedding_identity=provider.vector_identity(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         installed_version=installed_version(),

@@ -170,6 +170,30 @@ def test_unparseable_schema_version_is_unknown(value):
     assert env.schema_status == "unknown"
 
 
+@pytest.mark.parametrize("value", ["1", "1.", "1.bad", "1.2.3", "1.16.0", " 1.16"])
+def test_a_value_that_is_not_major_dot_minor_is_unknown(value):
+    """The whole value has to parse, not just the part before the first dot.
+
+    Splitting once read the major and ignored whatever followed, so "1",
+    "1.bad" and "1.2.3" were all reported as a supported major 1 -- a corrupt
+    schema presented as compatible, which is the one answer this must not give.
+    """
+    env = parse_env(_env(schema_version=value))
+
+    assert env.schema_status == "unknown"
+    assert "MAJOR.MINOR" in env.schema_note
+
+
+@pytest.mark.parametrize("value", ["1", "1.bad", "1.2.3"])
+def test_a_malformed_schema_version_is_also_a_missing_field(value):
+    """Unknown has to reach ``require()``, or strict callers still see a pass."""
+    env = parse_env(_env(schema_version=value))
+
+    assert "schema_version" in env.missing_fields
+    with pytest.raises(MissingFieldError, match="schema_version"):
+        env.require()
+
+
 def test_absent_schema_version_is_unknown():
     env = parse_env(_env_without("schema_version"))
 

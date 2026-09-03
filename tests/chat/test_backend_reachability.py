@@ -131,6 +131,33 @@ class TestDoctorReportsAnUnreachableBackend:
         assert _backend_check(report).status == doctor.FAIL
 
 
+class TestTheHealthUrlDropsOnlyTheApiSuffix:
+    """``replace("/v1", "")`` removed every occurrence, not the suffix.
+
+    A base URL carrying ``/v1`` in the authority or an earlier path segment was
+    rewritten into a malformed address, so preflight and probe polled somewhere
+    that could not answer and reported a healthy server unreachable.
+    """
+
+    @pytest.mark.parametrize(
+        ("base_url", "expected"),
+        [
+            ("http://localhost:8000/v1", "http://localhost:8000/health"),
+            ("http://localhost:8000/v1/", "http://localhost:8000/health"),
+            # The authority contains "/v1" as part of "//v1.example".
+            ("http://v1.example/v1", "http://v1.example/health"),
+            ("https://host/v1-gateway/v1", "https://host/v1-gateway/health"),
+            ("https://host/api/v1/v1", "https://host/api/v1/health"),
+            # No suffix to drop: the whole base is a prefix of the health path.
+            ("http://localhost:8000", "http://localhost:8000/health"),
+        ],
+    )
+    def test_it_strips_a_trailing_v1_and_nothing_else(self, monkeypatch, base_url, expected):
+        monkeypatch.setattr(settings, "vllm_base_url", base_url)
+
+        assert LocalVLLMBackend().health_url() == expected
+
+
 class TestPreflightStaysPermissive:
     """What the doctor fix must NOT change.
 

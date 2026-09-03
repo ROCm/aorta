@@ -375,6 +375,11 @@ def _install_fake_embedder(monkeypatch) -> None:
 
             return settings.embedding_model
 
+        def vector_identity(self):
+            from aorta.chat.config import settings
+
+            return settings.embedding_model
+
         def describe(self):
             return "fake 8d embeddings"
 

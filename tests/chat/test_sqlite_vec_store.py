@@ -238,6 +238,7 @@ def _fake_provider() -> SimpleNamespace:
         get_embeddings=BagOfWordsEmbeddings,
         collection_name=lambda: "aorta",
         model_id=lambda: "bag-of-words",
+        vector_identity=lambda: "bag-of-words",
         describe=lambda: "bag-of-words test embeddings",
     )
 

@@ -58,8 +58,15 @@ class LocalVLLMBackend:
         )
 
     def health_url(self) -> str:
-        """The endpoint ``preflight`` and ``probe`` poll."""
-        return settings.vllm_base_url.rstrip("/").replace("/v1", "") + "/health"
+        """The endpoint ``preflight`` and ``probe`` poll.
+
+        Only a *trailing* ``/v1`` is dropped. ``replace`` removed every
+        occurrence, so a base URL carrying it in the authority or an earlier
+        path segment -- ``http://v1.example/v1`` -- was probed at the malformed
+        ``http:/.example/health`` and reported unreachable while serving fine.
+        """
+        base = settings.vllm_base_url.rstrip("/").removesuffix("/v1")
+        return base + "/health"
 
     async def _await_health(self, timeout: float, interval: float) -> bool:
         """Poll ``/health`` until it answers 200. Returns whether it ever did.

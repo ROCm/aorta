@@ -1,7 +1,9 @@
 """The manifest that travels with a chat index, and the checks it makes possible.
 
-Decision 20a. An index is valid for exactly one tuple of (embedding model,
-dimensions, chunk params, store version, source commit), and the failure mode
+Decision 20a. An index is valid for exactly one tuple of (embedding identity,
+dimensions, chunk params, store version, source commit) -- identity rather than
+model name, because a remote model name means only what its endpoint says it
+means, so the endpoint is part of it. The failure mode
 when that tuple is wrong is the reason this module exists: a mismatched index
 does not raise. It answers, fluently, from vectors that were never comparable
 to the query's. For a debugging assistant that is worse than an outage, because
@@ -115,6 +117,13 @@ class Manifest:
     store: str = STORE_NAME
     store_version: str = ""
     built_at: str = ""
+    #: The provider's full vector identity -- for a remote provider, endpoint
+    #: and model rather than model alone. Defaulted rather than required so a
+    #: manifest written before the field existed still parses; ``validate``
+    #: therefore only compares it when it is present, and the collection check
+    #: is what fails such a manifest closed, since the collection name carries
+    #: a digest of this same identity.
+    embedding_identity: str = ""
     corpus_digest: str = ""
     corpus_roots: list[str] = field(default_factory=list)
     file_count: int = 0
@@ -198,14 +207,36 @@ def read_manifest(index_path: str | Path) -> Manifest:
         raise ManifestError(f"could not read the manifest at {path}: {exc}") from exc
 
     manifest = Manifest.from_dict(raw)
-    if manifest.schema_version > SCHEMA_VERSION:
-        raise ManifestError(
-            f"the index at {index_path} carries manifest schema version "
-            f"{manifest.schema_version}, but this aorta understands "
-            f"{SCHEMA_VERSION}. Upgrade aorta, or rebuild the index locally "
-            "with 'aorta chat index build'."
-        )
+    ensure_supported_schema(manifest, f"the index at {index_path}")
     return manifest
+
+
+def ensure_supported_schema(manifest: Manifest, subject: str) -> None:
+    """Raise unless this build can interpret ``manifest``'s schema version.
+
+    Separate from :meth:`Manifest.from_dict` so parsing stays independent of
+    policy, and shared so that every path which *adopts* a manifest applies it.
+    The download path did not, so an older client installed an index it would
+    then refuse on first load -- a successful fetch followed by a broken chat.
+
+    A non-integer version is rejected explicitly rather than compared: ``>``
+    against a string raises ``TypeError``, which escapes callers that handle
+    only :class:`ManifestError`.
+    """
+    version = manifest.schema_version
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ManifestError(
+            f"the manifest for {subject} carries a non-integer schema version "
+            f"({version!r}), so it is malformed and cannot be interpreted. "
+            "Re-fetch with 'aorta chat index fetch', or rebuild with "
+            "'aorta chat index build'."
+        )
+    if version > SCHEMA_VERSION:
+        raise ManifestError(
+            f"{subject} carries manifest schema version {version}, but this "
+            f"aorta understands {SCHEMA_VERSION}. Upgrade aorta, or rebuild the "
+            "index locally with 'aorta chat index build'."
+        )
 
 
 @dataclass
@@ -259,11 +290,17 @@ def _refusal_text(index_path: str | Path, refusals: list[str], manifest: Manifes
     return "\n".join(lines)
 
 
+def _readable_identity(identity: str) -> str:
+    """Render a newline-joined vector identity on one line."""
+    return " / ".join(part for part in identity.split("\n") if part)
+
+
 def validate(
     manifest: Manifest,
     *,
     embedding_model: str,
     collection: str,
+    embedding_identity: str = "",
     dimensions: int | None = None,
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
@@ -295,7 +332,23 @@ def validate(
     if manifest.collection != collection:
         report.refusals.append(
             f"collection: index holds {manifest.collection!r}, this install reads "
-            f"{collection!r}"
+            f"{collection!r}. The trailing digest covers the whole embedding "
+            "identity, so the endpoint may have changed even where the model "
+            "name did not"
+        )
+    # Only when the manifest carries one: an older manifest has no identity to
+    # compare, and is already refused above on the collection name. Checking
+    # this too is what turns that refusal from two opaque digests into a line
+    # naming the endpoint that changed.
+    if (
+        manifest.embedding_identity
+        and embedding_identity
+        and manifest.embedding_identity != embedding_identity
+    ):
+        report.refusals.append(
+            f"embedding identity: index was built against "
+            f"{_readable_identity(manifest.embedding_identity)}, this install "
+            f"embeds with {_readable_identity(embedding_identity)}"
         )
     if dimensions is not None and manifest.dimensions != dimensions:
         report.refusals.append(
@@ -361,6 +414,7 @@ __all__ = [
     "ManifestError",
     "ValidationReport",
     "checksum_path",
+    "ensure_supported_schema",
     "manifest_path",
     "now_stamp",
     "read_manifest",

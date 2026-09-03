@@ -10,6 +10,7 @@ between.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -229,11 +230,14 @@ def classify_dotted_schema(value: Any, known_major: int) -> tuple[SchemaStatus, 
     """
     if not isinstance(value, str):
         return "unknown", f"schema_version {value!r} is not a string; expected 'MAJOR.MINOR'"
-    head = value.split(".", 1)[0]
-    try:
-        major = int(head)
-    except ValueError:
-        return "unknown", f"schema_version {value!r} has no numeric major component"
+    # The whole value has to match, not just its head. Reading only the prefix
+    # classified "1", "1.bad" and "1.2.3" as a supported major 1, so a corrupt
+    # or unexpected schema was reported as compatible -- the one answer this
+    # function exists to avoid giving. ``\d`` is exactly the digit set ``int``
+    # accepts, so the conversion below cannot raise.
+    if not re.fullmatch(r"\d+\.\d+", value):
+        return "unknown", f"schema_version {value!r} is not of the form 'MAJOR.MINOR'"
+    major = int(value.split(".", 1)[0])
     if major == known_major:
         return "supported", None
     if major > known_major:

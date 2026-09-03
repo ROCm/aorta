@@ -43,10 +43,27 @@ class RemoteApiProvider:
         )
 
     def collection_name(self) -> str:
-        return build_collection_name(REMOTE_COLLECTION_PREFIX, settings.remote_embedding_model)
+        return build_collection_name(
+            REMOTE_COLLECTION_PREFIX,
+            settings.remote_embedding_model,
+            identity=self.vector_identity(),
+        )
 
     def model_id(self) -> str:
         return settings.remote_embedding_model
+
+    def vector_identity(self) -> str:
+        """Endpoint and model together, because the model name alone is ambiguous.
+
+        ``text-embedding-3-small`` is whatever the configured OpenAI-compatible
+        API decides it is. Keying only on the name let a switch from endpoint A
+        to endpoint B keep A's stored vectors and query them with B's, which
+        passes every dimension and model check and returns plausible nonsense.
+        The empty base URL is the provider's own default, and is a distinct
+        endpoint from any explicit one.
+        """
+        endpoint = settings.remote_embedding_base_url.strip().rstrip("/") or "<provider-default>"
+        return f"{endpoint}\n{settings.remote_embedding_model}"
 
     def describe(self) -> str:
         endpoint = settings.remote_embedding_base_url.strip() or "provider default"

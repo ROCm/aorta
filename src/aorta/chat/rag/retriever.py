@@ -478,35 +478,124 @@ def _copy_missing_collections(conn: sqlite3.Connection) -> list[str]:
             logger.warning("Skipping collection %r: not a bare identifier", name)
             continue
         dimension, provider = theirs[name]
-        chunks, vectors = f"chunks_{name}", f"vec_{name}"
-        conn.execute(
-            f'CREATE TABLE main."{chunks}" '
-            "(id INTEGER PRIMARY KEY, content TEXT NOT NULL, metadata TEXT NOT NULL)"
-        )
-        conn.execute(
-            f'CREATE VIRTUAL TABLE main."{vectors}" USING vec0(embedding float[{dimension}])'
-        )
-        conn.execute(
-            f'INSERT INTO main."{chunks}" (id, content, metadata) '
-            f'SELECT id, content, metadata FROM incoming."{chunks}"'
-        )
-        # Row by row rather than INSERT..SELECT: vec0 is a virtual table, and
-        # the rowid has to be carried across explicitly because it is the join
-        # key back to the chunk text.
-        for rowid, embedding in conn.execute(
-            f'SELECT rowid, embedding FROM incoming."{vectors}"'
-        ).fetchall():
-            conn.execute(
-                f'INSERT INTO main."{vectors}" (rowid, embedding) VALUES (?, ?)',
-                (rowid, embedding),
-            )
-        conn.execute(
-            f'INSERT INTO main."{_REGISTRY_TABLE}" (collection, dimension, provider) '
-            "VALUES (?, ?, ?)",
-            (name, dimension, provider),
-        )
+        _clone_collection(conn, name, dimension, provider)
         copied.append(name)
     return copied
+
+
+def _clone_collection(conn: sqlite3.Connection, name: str, dimension: int, provider: str) -> None:
+    """Recreate ``incoming``'s ``name`` in ``main`` and copy every row across.
+
+    Assumes the caller has already checked that ``name`` is a bare identifier
+    and that ``main`` has no table of that name left.
+    """
+    chunks, vectors = f"chunks_{name}", f"vec_{name}"
+    conn.execute(
+        f'CREATE TABLE main."{chunks}" '
+        "(id INTEGER PRIMARY KEY, content TEXT NOT NULL, metadata TEXT NOT NULL)"
+    )
+    conn.execute(f'CREATE VIRTUAL TABLE main."{vectors}" USING vec0(embedding float[{dimension}])')
+    conn.execute(
+        f'INSERT INTO main."{chunks}" (id, content, metadata) '
+        f'SELECT id, content, metadata FROM incoming."{chunks}"'
+    )
+    # Row by row rather than INSERT..SELECT: vec0 is a virtual table, and
+    # the rowid has to be carried across explicitly because it is the join
+    # key back to the chunk text.
+    for rowid, embedding in conn.execute(
+        f'SELECT rowid, embedding FROM incoming."{vectors}"'
+    ).fetchall():
+        conn.execute(
+            f'INSERT INTO main."{vectors}" (rowid, embedding) VALUES (?, ?)',
+            (rowid, embedding),
+        )
+    conn.execute(
+        f'INSERT INTO main."{_REGISTRY_TABLE}" (collection, dimension, provider) VALUES (?, ?, ?)',
+        (name, dimension, provider),
+    )
+
+
+def replace_collection_from(dest: str | Path, source: str | Path, collection: str) -> None:
+    """Install ``collection`` from ``source`` into ``dest``, replacing any there.
+
+    One transaction, so ``dest`` ends up holding either the collection it
+    already had or the incoming one, never a half-written rebuild. That is what
+    lets a caller embed into a scratch database first: dropping the live
+    collection before the first vector existed meant a provider failure or a
+    Ctrl-C part way through left the user with an empty collection and nothing
+    to fall back to.
+
+    Raises rather than warning, unlike the carry-over in ``_install_staged``:
+    there the incoming index is already verified and preserving old collections
+    is best-effort, whereas a swap that fails here would otherwise be reported
+    as a completed rebuild.
+
+    Raises:
+        ValueError: If ``collection`` is not a bare identifier.
+        RuntimeError: If ``source`` holds no such collection.
+        sqlite3.DatabaseError: If either database is unusable.
+    """
+    if not _SAFE_COLLECTION.match(collection):
+        raise ValueError(
+            f"collection name {collection!r} is not a bare identifier; it "
+            "becomes part of a table name and cannot be bound as a parameter"
+        )
+
+    ensure_modern_sqlite()
+    ensure_loadable_extensions()
+
+    import sqlite3
+
+    import sqlite_vec
+
+    conn = sqlite3.connect(Path(dest), isolation_level=None)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("ATTACH DATABASE ? AS incoming", (str(Path(source)),))
+        try:
+            conn.execute("BEGIN")
+            try:
+                _swap_collection(conn, collection)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.execute("DETACH DATABASE incoming")
+    finally:
+        conn.close()
+
+
+def _swap_collection(conn: sqlite3.Connection, name: str) -> None:
+    """Replace ``main``'s copy of ``name`` with ``incoming``'s, inside a transaction.
+
+    Both absence checks run before anything is dropped, so a caller that staged
+    nothing loses nothing. ``RuntimeError`` rather than ``sqlite3.DatabaseError``
+    because neither case is sqlite reporting a problem -- they are this module
+    being asked to install a collection that was never built.
+    """
+    if not _has_registry(conn, "incoming"):
+        raise RuntimeError("the staged database has no collection registry")
+    row = conn.execute(
+        f'SELECT dimension, provider FROM incoming."{_REGISTRY_TABLE}" WHERE collection = ?',
+        (name,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"the staged database has no collection {name!r}")
+
+    if not _has_registry(conn, "main"):
+        conn.execute(
+            f'CREATE TABLE main."{_REGISTRY_TABLE}" ('
+            "collection TEXT PRIMARY KEY, "
+            "dimension INTEGER NOT NULL, "
+            "provider TEXT NOT NULL DEFAULT '')"
+        )
+    conn.execute(f'DROP TABLE IF EXISTS main."chunks_{name}"')
+    conn.execute(f'DROP TABLE IF EXISTS main."vec_{name}"')
+    conn.execute(f'DELETE FROM main."{_REGISTRY_TABLE}" WHERE collection = ?', (name,))
+    _clone_collection(conn, name, int(row[0]), row[1])
 
 
 def _has_registry(conn: sqlite3.Connection, schema: str) -> bool:
@@ -579,6 +668,7 @@ def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
         found,
         embedding_model=provider.model_id(),
         collection=provider.collection_name(),
+        embedding_identity=provider.vector_identity(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         installed_version=_installed_version(),

@@ -261,9 +261,17 @@ class FastembedBgeProvider:
         index it built would pass ``SqliteVecStore``'s dimension check and then
         answer from vectors that were never comparable.
         """
-        return build_collection_name(LOCAL_COLLECTION_PREFIX, settings.embedding_model)
+        return build_collection_name(
+            LOCAL_COLLECTION_PREFIX,
+            settings.embedding_model,
+            identity=self.vector_identity(),
+        )
 
     def model_id(self) -> str:
+        return settings.embedding_model
+
+    def vector_identity(self) -> str:
+        """The model alone: weights are fetched from a fixed repo, not an endpoint."""
         return settings.embedding_model
 
     def describe(self) -> str:

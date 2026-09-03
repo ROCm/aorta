@@ -186,7 +186,7 @@ jobs:
       - name: Decide whether the corpus changed
         id: digest
         env:
-          MANIFEST_URL: https://github.com/${{ github.repository }}/releases/download/dev-wheels/aorta-chat-index.sqlite.manifest.json
+          ASSET_BASE: https://github.com/${{ github.repository }}/releases/download/dev-wheels
         run: |
           set -uo pipefail
           current="$(aorta chat index digest --public-only --path . | python -c 'import json,sys; print(json.load(sys.stdin)["corpus_digest"])')"
@@ -199,11 +199,29 @@ jobs:
           # A missing or unreadable published manifest means "no baseline", which
           # must rebuild rather than skip. Only an explicit digest match skips.
           published=""
-          if curl -fsSL --retry 3 "${MANIFEST_URL}" -o published.json; then
+          if curl -fsSL --retry 3 "${ASSET_BASE}/aorta-chat-index.sqlite.manifest.json" -o published.json; then
             published="$(python -c 'import json; print(json.load(open("published.json")).get("corpus_digest",""))' || true)"
           else
             echo "No published manifest yet; building."
           fi
+
+          # The manifest is the smallest of the three assets and the one most
+          # likely to survive a partial upload or a manual asset deletion. On
+          # its own it proves nothing about what `index fetch` will find, so a
+          # digest match that skips the rebuild would leave fetch broken every
+          # night until unrelated corpus content happened to change. Require
+          # the whole published set before trusting the match.
+          complete=true
+          for asset in aorta-chat-index.sqlite aorta-chat-index.sqlite.sha256; do
+            if ! curl -fsSL --retry 3 -I "${ASSET_BASE}/${asset}" >/dev/null; then
+              echo "Published asset ${asset} is missing; rebuilding the whole set."
+              complete=false
+            fi
+          done
+          if [ "${complete}" != "true" ]; then
+            published=""
+          fi
+
           if [ -n "${published}" ] && [ "${published}" = "${current}" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Corpus digest unchanged (${current}); skipping the rebuild."

@@ -30,6 +30,7 @@ to.
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -37,7 +38,7 @@ from langchain_core.documents import Document
 from aorta.artifacts import read_env, read_matrix
 from aorta.chat.config import settings
 from aorta.chat.rag.embeddings.factory import get_provider
-from aorta.chat.rag.retriever import SqliteVecStore
+from aorta.chat.rag.retriever import SqliteVecStore, replace_collection_from
 from aorta.chat.runs import (
     ArtifactReadError,
     iter_artifacts,
@@ -58,6 +59,10 @@ RUN_COLLECTION_SUFFIX = "_runs"
 #: fewer chunks than the codebase, but the remote embedding provider still sends
 #: one request per batch.
 _WRITE_BATCH = 200
+
+#: Names the scratch directory the rebuild stages into, so an interrupted run
+#: leaves something recognisable next to the index rather than an opaque tmpdir.
+_STAGING_PREFIX = ".aorta-runs-staging-"
 
 #: Covers both ways this state is reached, because they are indistinguishable
 #: once ``reset()`` has dropped the collection: never indexed, or indexed from a
@@ -140,6 +145,11 @@ def index_run_artifacts(runs_path: str | Path | None = None) -> SqliteVecStore:
     Returns the populated store. Refreshing is a full rebuild of this
     collection only -- the source collection in the same file is untouched,
     which is the whole reason the two are separate.
+
+    All or nothing: everything is embedded into a scratch database and swapped
+    in one transaction, so a failure leaves the collection that was already
+    there. The exception propagates -- a rebuild that did not happen must not
+    return a store as though it had.
     """
     root = Path(runs_path).resolve() if runs_path else settings.runs_root
     if not root.is_dir():
@@ -151,20 +161,50 @@ def index_run_artifacts(runs_path: str | Path | None = None) -> SqliteVecStore:
 
     index_file = settings.index_file
     index_file.parent.mkdir(parents=True, exist_ok=True)
+    # The cached store holds an open connection to the file about to be swapped
+    # under it, and would keep serving the collection this call replaces.
+    reset_caches()
+
+    if not docs:
+        # Reset in place: a run root that was emptied should leave no stale
+        # cells behind to be retrieved as current, and there is nothing to
+        # stage that could fail part way.
+        store = SqliteVecStore(
+            path=index_file,
+            embedding=provider.get_embeddings(),
+            collection=collection,
+        )
+        store.reset()
+        logger.warning("No run artifacts found under %s; collection is now empty.", root)
+        return store
+
+    # Embedded into a scratch database first, then swapped in one transaction.
+    # Resetting the live collection before the first vector existed meant a
+    # remote-provider failure or a Ctrl-C during the walk destroyed a working
+    # collection and left an empty one -- the opposite of the interruption
+    # safety docs/chat/rag-index.md promises. Staged beside the index so the
+    # two files share a filesystem and the scratch copy is cleaned up with it.
+    with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=index_file.parent) as staging:
+        staged_path = Path(staging) / "runs-staging.sqlite"
+        staged = SqliteVecStore(
+            path=staged_path,
+            embedding=provider.get_embeddings(),
+            collection=collection,
+        )
+        try:
+            for start in range(0, len(docs), _WRITE_BATCH):
+                staged.add_documents(
+                    docs[start : start + _WRITE_BATCH], provider=provider.describe()
+                )
+        finally:
+            staged.close()
+        replace_collection_from(index_file, staged_path, collection)
+
     store = SqliteVecStore(
         path=index_file,
         embedding=provider.get_embeddings(),
         collection=collection,
     )
-    # Reset even with nothing to write: a run root that was emptied should
-    # leave no stale cells behind to be retrieved as current.
-    store.reset()
-    if not docs:
-        logger.warning("No run artifacts found under %s; collection is now empty.", root)
-        return store
-
-    for start in range(0, len(docs), _WRITE_BATCH):
-        store.add_documents(docs[start : start + _WRITE_BATCH], provider=provider.describe())
     logger.info(
         "Indexed %d run-artifact chunks from %s into %s (collection %s)",
         len(docs),

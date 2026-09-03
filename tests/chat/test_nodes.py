@@ -54,6 +54,97 @@ class TestRetrieveNode:
             assert "No relevant code" in result["retrieved_context"]
 
 
+class TestRunArtifactsReachTheToolFreeBranch:
+    """"Why did this sweep fail?" is specific, so the router calls it a question.
+
+    That branch has no tools, and retrieval only ever queried the source
+    collection -- so the PR's headline use case was answerable only from source
+    code, by the route most likely to ask it.
+    """
+
+    @staticmethod
+    def _run_docs(*contents):
+        from langchain_core.documents import Document
+
+        return [
+            Document(page_content=text, metadata={"source": "run_nan/matrix.json",
+                                                  "artifact_kind": "matrix"})
+            for text in contents
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_documents_are_added_to_the_context(self, fake_retriever):
+        from aorta.chat.graph import nodes
+
+        with (
+            patch.object(nodes, "get_retriever", return_value=fake_retriever),
+            patch(
+                "aorta.chat.rag.runs.search_run_docs",
+                return_value=self._run_docs("failure_rate: 0.750 nan detected in loss"),
+            ),
+        ):
+            state = {"messages": [HumanMessage(content="why did this sweep fail?")]}
+            result = await nodes.retrieve_node(state)
+
+        assert "nan detected in loss" in result["retrieved_context"]
+        assert "run_nan/matrix.json" in result["retrieved_context"]
+
+    @pytest.mark.asyncio
+    async def test_run_context_answers_even_when_no_source_matched(self):
+        """Otherwise a run-only question still reports "no relevant code"."""
+        from aorta.chat.graph import nodes
+
+        empty = MagicMock()
+        empty.invoke.return_value = []
+        with (
+            patch.object(nodes, "get_retriever", return_value=empty),
+            patch(
+                "aorta.chat.rag.runs.search_run_docs",
+                return_value=self._run_docs("failure_rate: 0.750"),
+            ),
+        ):
+            state = {"messages": [HumanMessage(content="why did this sweep fail?")]}
+            result = await nodes.retrieve_node(state)
+
+        assert "failure_rate: 0.750" in result["retrieved_context"]
+        assert "No relevant code" not in result["retrieved_context"]
+
+    @pytest.mark.asyncio
+    async def test_a_missing_run_collection_is_not_an_error(self, fake_retriever):
+        """Most installs have never run ``aorta chat index runs``."""
+        from aorta.chat.graph import nodes
+        from aorta.chat.rag.runs import RunCollectionMissingError
+
+        with (
+            patch.object(nodes, "get_retriever", return_value=fake_retriever),
+            patch(
+                "aorta.chat.rag.runs.search_run_docs",
+                side_effect=RunCollectionMissingError("no collection"),
+            ),
+        ):
+            state = {"messages": [HumanMessage(content="how do I run scenarios?")]}
+            result = await nodes.retrieve_node(state)
+
+        assert "run_scenario" in result["retrieved_context"]
+
+    @pytest.mark.asyncio
+    async def test_a_broken_run_store_never_takes_the_answer_with_it(self, fake_retriever):
+        """Supplementary context. The query is still answerable from source."""
+        from aorta.chat.graph import nodes
+
+        with (
+            patch.object(nodes, "get_retriever", return_value=fake_retriever),
+            patch(
+                "aorta.chat.rag.runs.search_run_docs",
+                side_effect=RuntimeError("remote embedding endpoint went away"),
+            ),
+        ):
+            state = {"messages": [HumanMessage(content="how do I run scenarios?")]}
+            result = await nodes.retrieve_node(state)
+
+        assert "run_scenario" in result["retrieved_context"]
+
+
 class TestActNode:
     @pytest.mark.asyncio
     async def test_direct_answer_no_action(self):

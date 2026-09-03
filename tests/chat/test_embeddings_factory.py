@@ -84,11 +84,12 @@ class TestCollectionNames:
         """
         monkeypatch.setattr(settings, "embedding_provider", "local")
         monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-small-en-v1.5")
-        assert collection_name() == "aorta_fastembed_baai_bge_small_en_v1_5"
         assert collection_name().startswith(LOCAL_COLLECTION_PREFIX)
+        assert "baai_bge_small_en_v1_5" in collection_name()
 
     def test_remote_collection_name_is_per_model(self, remote_embedding_settings):
-        assert collection_name() == "aorta_remote_text_embedding_3_small"
+        assert collection_name().startswith(REMOTE_COLLECTION_PREFIX)
+        assert "text_embedding_3_small" in collection_name()
 
     def test_the_two_providers_never_share_a_collection(self, monkeypatch):
         """The vector dimensions differ, so the collections must too."""
@@ -120,6 +121,103 @@ class TestCollectionNames:
         name = get_provider("remote").collection_name()
         assert len(name) <= 63
         assert not name.endswith("_")
+
+
+class TestCollectionNamesAreUnique:
+    """The slug alone is not injective, and the run collection has no manifest.
+
+    Source retrieval refuses a mismatch via its sidecar, but the run-artifact
+    collection is keyed by name and carries no model record, so two models that
+    collide on a name and share a dimension silently query each other's
+    vectors. The digest in the name is what stops that.
+    """
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            # Punctuation is discarded, so these slug identically.
+            ("foo/bar", "foo-bar"),
+            ("foo.bar", "foo_bar"),
+            ("Voyage/Voyage-3", "voyage-voyage-3"),
+            # Differ only after the 63-character cap.
+            ("m" * 70 + "-alpha", "m" * 70 + "-beta"),
+        ],
+    )
+    def test_models_that_slug_alike_do_not_share_a_collection(self, monkeypatch, left, right):
+        monkeypatch.setattr(settings, "remote_embedding_model", left)
+        left_name = get_provider("remote").collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_model", right)
+
+        assert get_provider("remote").collection_name() != left_name
+
+    def test_a_colliding_name_still_fits_and_is_an_identifier(self, monkeypatch):
+        from aorta.chat.rag.retriever import _SAFE_COLLECTION
+
+        monkeypatch.setattr(settings, "remote_embedding_model", "z" * 200)
+        name = get_provider("remote").collection_name()
+
+        assert len(name) <= 63
+        assert _SAFE_COLLECTION.match(name)
+
+    def test_the_name_is_stable_across_calls(self, monkeypatch):
+        """A digest that moved would orphan the collection it named yesterday."""
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+
+        assert get_provider("remote").collection_name() == (
+            get_provider("remote").collection_name()
+        )
+
+
+class TestTheRemoteEndpointIsPartOfTheIdentity:
+    """A model name is endpoint-local for an arbitrary OpenAI-compatible API.
+
+    Keeping ``text-embedding-3-small`` while moving from gateway A to gateway B
+    kept A's stored vectors and queried them with B's. Same name, same
+    dimensions, so the model check and the dimension check both passed and
+    retrieval returned plausible nonsense.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _remote(self, monkeypatch):
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
+
+    def test_switching_endpoint_switches_collection(self, monkeypatch):
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://a.example/v1")
+        at_a = get_provider("remote").collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://b.example/v1")
+
+        assert get_provider("remote").collection_name() != at_a
+
+    def test_the_provider_default_is_its_own_endpoint(self, monkeypatch):
+        """An empty base URL is a real endpoint, not "any endpoint"."""
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "")
+        default = get_provider("remote").collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://a.example/v1")
+
+        assert get_provider("remote").collection_name() != default
+
+    def test_a_trailing_slash_is_the_same_endpoint(self, monkeypatch):
+        """Otherwise a cosmetic profile edit orphans the whole index."""
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://a.example/v1")
+        plain = get_provider("remote").collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://a.example/v1/")
+
+        assert get_provider("remote").collection_name() == plain
+
+    def test_the_identity_names_both_halves(self, monkeypatch):
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://a.example/v1")
+        identity = get_provider("remote").vector_identity()
+
+        assert "https://a.example/v1" in identity
+        assert "text-embedding-3-small" in identity
+
+    def test_the_local_identity_is_just_the_model(self, monkeypatch):
+        """Weights come from a fixed repo, so there is no endpoint to record."""
+        monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-small-en-v1.5")
+
+        assert get_provider("local").vector_identity() == "BAAI/bge-small-en-v1.5"
 
 
 class TestRemoteApiProvider:

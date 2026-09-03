@@ -58,6 +58,9 @@ class _Provider:
     def model_id(self):
         return settings.embedding_model
 
+    def vector_identity(self):
+        return settings.embedding_model
+
     def describe(self):
         return "fake 8d embeddings"
 

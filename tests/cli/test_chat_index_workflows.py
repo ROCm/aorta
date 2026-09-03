@@ -160,6 +160,37 @@ class TestDigestSkip:
         assert "changed=true" in digest["run"]
         assert "No published manifest yet" in digest["run"]
 
+    def test_the_skip_requires_the_whole_published_set(self):
+        """The manifest alone proves nothing about what ``index fetch`` will find.
+
+        It is the smallest of the three assets and the likeliest to survive a
+        partial upload or a manual deletion. Keying the skip on it alone meant
+        that if the sqlite or the checksum went missing, every nightly went on
+        emitting ``changed=false`` and fetch stayed broken indefinitely -- until
+        unrelated corpus content happened to change.
+        """
+        job = _load("nightly.yml")["jobs"]["chat-index"]
+        digest = next(s for s in job["steps"] if s.get("id") == "digest")
+        run = digest["run"]
+
+        for asset in ("aorta-chat-index.sqlite", "aorta-chat-index.sqlite.sha256"):
+            assert asset in run, f"the skip decision never looks for {asset}"
+        # An incomplete set has to clear the baseline, or the digest still matches.
+        assert 'published=""' in run
+
+    @_needs_chat
+    def test_the_assets_it_checks_are_the_ones_that_are_published(self):
+        """A renamed asset must not leave the check silently passing on nothing."""
+        from aorta.chat.rag import manifest as manifest_mod
+        from aorta.chat.rag.index_ops import ASSET_NAME
+
+        job = _load("nightly.yml")["jobs"]["chat-index"]
+        run = next(s for s in job["steps"] if s.get("id") == "digest")["run"]
+
+        assert ASSET_NAME in run
+        assert ASSET_NAME + manifest_mod.CHECKSUM_SUFFIX in run
+        assert ASSET_NAME + manifest_mod.MANIFEST_SUFFIX in run
+
     def test_the_release_does_not_skip(self):
         """`index fetch` resolves by tag, so a release must carry its own asset.
 

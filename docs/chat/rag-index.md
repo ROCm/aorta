@@ -79,14 +79,21 @@ aorta chat doctor                # extras, backend reachability, index freshness
 one you need after a sweep. `build`, `fetch` and `--from` all replace the source
 collection and leave it alone.
 
-**Interrupting any of them is safe.** Each writes the new index beside the old
-one and moves it into place in a single step, then writes the manifest, so a
-`Ctrl-C` leaves the previous index and its manifest exactly as they were rather
-than a half-populated file under a manifest describing the complete one. If a
-run is interrupted in the window after the move, the manifest no longer matches
-the chunk count in the index and every query is refused until you rebuild or
-re-fetch — which is the point, because that state cannot produce a correct
-answer and would not otherwise announce itself.
+**Interrupting any of them is safe.** `build`, `fetch` and `--from` write the
+new index beside the old one and move it into place in a single step, then write
+the manifest, so a `Ctrl-C` leaves the previous index and its manifest exactly as
+they were rather than a half-populated file under a manifest describing the
+complete one. If a run is interrupted in the window after the move, the manifest
+no longer matches the chunk count in the index and every query is refused until
+you rebuild or re-fetch — which is the point, because that state cannot produce a
+correct answer and would not otherwise announce itself.
+
+`index runs` cannot move a file, because its collection shares the `.sqlite`
+with the source one. It gets the same guarantee a different way: it embeds into
+a scratch database and swaps the finished collection in one transaction, so an
+interruption — or a remote embedding endpoint that stops answering part way
+through — leaves the collection you already had, rather than an empty or
+half-rebuilt one.
 
 `fetch` is the normal path: the source collection is identical for every user of
 a given AORTA revision, so building it locally is work someone already did. It

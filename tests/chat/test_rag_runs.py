@@ -57,6 +57,12 @@ class FakeProvider:
     def collection_name(self) -> str:
         return self._collection
 
+    def model_id(self) -> str:
+        return "fake/model"
+
+    def vector_identity(self) -> str:
+        return "fake/model"
+
     def describe(self) -> str:
         return f"fake provider ({self._collection})"
 
@@ -352,6 +358,123 @@ class TestSeparationFromTheSourceCollection:
         source.add_documents([Document(page_content="rocm", metadata={})])
         runs_rag.index_run_artifacts(wired.root)
         assert set(source.collection_names()) >= {"aorta", "aorta_runs"}
+
+
+class TestARebuildThatFailsLeavesTheOldCollectionUsable:
+    """The collection was dropped before the first vector existed.
+
+    So a remote embedding provider that went down part way through -- or a
+    Ctrl-C -- destroyed a working collection and left an empty one, which is
+    the opposite of the interruption safety docs/chat/rag-index.md promises.
+    Embedding now happens in a scratch database that is swapped in one
+    transaction, so a failure costs the rebuild and nothing else.
+    """
+
+    @staticmethod
+    def _fail_after(provider, n_batches: int):
+        """An embedder that dies once it has embedded ``n_batches`` batches."""
+        embeddings = BagOfWordsEmbeddings()
+        calls = {"n": 0}
+
+        class _Flaky(Embeddings):
+            def embed_documents(self, texts):
+                calls["n"] += 1
+                if calls["n"] > n_batches:
+                    raise RuntimeError("remote embedding endpoint went away")
+                return embeddings.embed_documents(texts)
+
+            def embed_query(self, text):
+                return embeddings.embed_query(text)
+
+        provider.get_embeddings = _Flaky
+        return calls
+
+    def test_the_previous_collection_still_answers(self, wired, monkeypatch):
+        runs_rag.index_run_artifacts(wired.root)
+        before = runs_rag.search_run_docs("nan", k=1)
+        assert before
+
+        self._fail_after(wired.provider, 0)
+        with pytest.raises(RuntimeError, match="went away"):
+            runs_rag.index_run_artifacts(wired.root)
+
+        runs_rag.reset_caches()
+        wired.provider.get_embeddings = BagOfWordsEmbeddings
+        after = runs_rag.search_run_docs("nan", k=1)
+
+        assert after[0].page_content == before[0].page_content
+
+    def test_a_failure_part_way_through_does_not_half_write_it(self, wired, monkeypatch):
+        """A partial rebuild is the worse outcome: it answers, from a subset."""
+        monkeypatch.setattr(runs_rag, "_WRITE_BATCH", 1)
+        runs_rag.index_run_artifacts(wired.root)
+        store = SqliteVecStore(
+            path=wired.index,
+            embedding=BagOfWordsEmbeddings(),
+            collection=runs_rag.run_collection_name(),
+        )
+        full = store.similarity_search("nan loss rocm hang", k=50)
+
+        self._fail_after(wired.provider, 1)
+        with pytest.raises(RuntimeError, match="went away"):
+            runs_rag.index_run_artifacts(wired.root)
+
+        runs_rag.reset_caches()
+        store = SqliteVecStore(
+            path=wired.index,
+            embedding=BagOfWordsEmbeddings(),
+            collection=runs_rag.run_collection_name(),
+        )
+        assert len(store.similarity_search("nan loss rocm hang", k=50)) == len(full)
+
+    def test_it_leaves_no_staging_directory_behind(self, wired):
+        self._fail_after(wired.provider, 0)
+        with pytest.raises(RuntimeError, match="went away"):
+            runs_rag.index_run_artifacts(wired.root)
+
+        leftovers = list(wired.index.parent.glob(runs_rag._STAGING_PREFIX + "*"))
+        assert leftovers == []
+
+    def test_a_successful_rebuild_still_replaces_the_contents(self, wired):
+        """Swapping must not turn the rebuild into an append."""
+        runs_rag.index_run_artifacts(wired.root)
+        runs_rag.reset_caches()
+        first = len(
+            SqliteVecStore(
+                path=wired.index,
+                embedding=BagOfWordsEmbeddings(),
+                collection=runs_rag.run_collection_name(),
+            ).similarity_search("nan loss rocm hang", k=100)
+        )
+
+        runs_rag.index_run_artifacts(wired.root)
+        runs_rag.reset_caches()
+        second = len(
+            SqliteVecStore(
+                path=wired.index,
+                embedding=BagOfWordsEmbeddings(),
+                collection=runs_rag.run_collection_name(),
+            ).similarity_search("nan loss rocm hang", k=100)
+        )
+
+        assert second == first
+
+    def test_the_source_collection_survives_a_failed_run_rebuild(self, wired):
+        from langchain_core.documents import Document
+
+        source = SqliteVecStore(
+            path=wired.index, embedding=BagOfWordsEmbeddings(), collection="aorta"
+        )
+        source.reset()
+        source.add_documents(
+            [Document(page_content="rocm kernel launch path", metadata={"source": "src/a.py"})]
+        )
+
+        self._fail_after(wired.provider, 0)
+        with pytest.raises(RuntimeError, match="went away"):
+            runs_rag.index_run_artifacts(wired.root)
+
+        assert source.similarity_search("rocm", k=1)[0].metadata["source"] == "src/a.py"
 
 
 class TestMissingCollection:
