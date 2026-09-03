@@ -1,0 +1,41 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-CONSAN-TINY
+description: >
+  Informational (non-gating) gfx950 ConSan run over a trivial single-kernel object
+  (tiny_vecadd) with no LDS/atomic/barrier sites, driven via the source.consan_command
+  path added in #347. Demonstrates the guardrail's fail-closed behavior when there is
+  nothing analyzable: static analysis is complete but strict require-records fails
+  closed (exit 86) rather than emitting a false pass. Rendered on the dashboard's
+  Workload survey tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
+  DELIBERATE NEGATIVE CONTROL -- the exit 86 is the assertion, not a bug to fix.
+  tiny_vecadd's only memory operations are ordinary global loads/stores, which ConSan
+  reports as ordinary_memory_support=supported-synchronization-only and does not admit
+  as MOI sites, so it observes access=0/0 and applicable=false. Measured 2026-08-27:
+  swapping the load-only consan_tiny_load for a driver that actually dispatches
+  tiny_vecadd does NOT change the verdict -- the only difference is "1 auto MOI report
+  buffer(s)" instead of "0" in the require-records message. Making this row pass would
+  require a kernel with admissible sites, which is what daily-consan-lds-dispatch.yaml
+  already covers.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: tiny_vecadd
+      code_object: fixtures/isa/tiny.hsaco
+      code_object_index: 0
+    consan_command: fixtures/bin/consan_tiny_load
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json
