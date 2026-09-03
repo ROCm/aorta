@@ -35,6 +35,15 @@ jobs:
       ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       wheel_run_id: ${{ github.event.workflow_run.id || '' }}
       do_alert: true
+      # The nightly is the ONLY lane that gets the host docker socket: the
+      # tokenspeed_serve_smoke entry launches the TokenSpeed container itself, so
+      # it needs a route to the daemon. This lane is not PR-triggered -- it runs
+      # on a published nightly wheel or an explicit dispatch -- which is what
+      # makes the grant acceptable. Do not copy this line into bump-validate.yml.
+      # Until the socket is signed off, leaving this false is also safe: the
+      # entry declares `needs_docker_daemon: true` and reports `skip` with the
+      # reason recorded rather than failing the nightly.
+      docker_socket: true
     secrets: inherit
 
   # Append today's results to the ci-results data branch. The dashboard itself is
