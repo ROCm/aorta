@@ -1,8 +1,8 @@
 """A ``click.Group`` that imports a subcommand's module only when it is used.
 
-Every ``aorta`` invocation used to import all ten command modules, and with
+Every ``aorta`` invocation used to import every command module, and with
 them most of the package -- roughly 190 ms of the 255 ms that ``aorta --help``
-took (issue #417). The cost is breadth rather than weight: no single module is
+took (issue #417, measured when there were ten of them). The cost is breadth rather than weight: no single module is
 expensive, but ``aorta --help`` and shell completion paid for all of them.
 
 :class:`LazyGroup` keeps a registry mapping a command name to the import path

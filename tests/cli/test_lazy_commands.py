@@ -1,7 +1,7 @@
 """Regression tests for the lazy top-level command group (issue #417).
 
-``aorta`` used to import all ten command modules on every invocation, which
-was roughly 190 ms of a 255 ms ``aorta --help``. The laziness is only worth
+``aorta`` used to import every command module on every invocation, which was
+roughly 190 ms of a 255 ms ``aorta --help`` (measured when there were ten). The laziness is only worth
 anything if it holds, and it is easy to lose by accident: a convenience import
 at the top of ``aorta/cli/__init__.py``, or a help/completion path that reads
 ``short_help`` off a real command, quietly drags the whole graph back in.
