@@ -11,13 +11,19 @@ Same seam as ``recipe_reward.py``, same reason: a reward that reimplements the
 precedence rules drifts from them, and a drifted label is worse than no label
 because it still trains.
 
-There is no corpus yet
-----------------------
-The archived probe runs this wants do not exist in the repo. What is missing is
-*only* the corpus: the labelling, the scoring, and the degenerate-policy check
-are all here and tested against synthetic ``result.json`` fixtures whose shape
-matches what ``SubprocessWorkload`` writes. Pointing ``--runs`` at a directory of
-real ``result.json`` files is the entire remaining step.
+Two label sources
+-----------------
+``result.json`` from probe cells, and ``sanitizer_report.json`` from Waitcheck /
+ConSan runs. Both answer the same question -- what happened, and what evidence
+says so -- and ``--runs`` collects both from one tree.
+
+The sanitizer source is the one that works on real data today: the six reports
+under ``recipes/sanitizers/survey/reports/`` are the only archived labelled
+failure evidence in the repository, and ``--runs recipes/sanitizers/survey``
+scores them. The probe source has no corpus yet; what is missing there is *only*
+the corpus, since the labelling, scoring and degenerate-policy check are tested
+against synthetic ``result.json`` fixtures shaped like what
+``SubprocessWorkload`` writes.
 
 Labels are recomputed, not read
 -------------------------------
@@ -61,6 +67,7 @@ Usage
     python examples/rl/triage_reward.py               # fixtures + baselines
     python examples/rl/triage_reward.py --json
     python examples/rl/triage_reward.py --runs path/to/archived/runs
+    python examples/rl/triage_reward.py --runs recipes/sanitizers/survey
 """
 
 from __future__ import annotations
@@ -72,6 +79,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport
 from aorta.probe.classifier.verdict import (
     VALID_VERDICTS,
     partition_detectors,
@@ -202,6 +210,79 @@ def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+def label_sanitizer_report(doc: dict[str, Any], source: str | None = None) -> Label:
+    """Label one ``sanitizer_report.json`` through aorta's own report model.
+
+    The second label source for the root-cause half, and the one the CIA tool
+    fleet makes on-domain: Waitcheck and ConSan output is richer evidence than a
+    detector ID, because a ``Finding`` names a code, a severity and often a
+    kernel and code-object offset.
+
+    The seam is stronger here than for ``result.json``. ``SanitizerReport``
+    recomputes ``overall_verdict`` as the max-ranked check verdict in
+    ``__post_init__``, and ``from_dict`` *raises* when the stored value
+    contradicts that recomputation. So a rotted report cannot be silently
+    trained on -- it fails to load, and the caller records why. The verdict
+    vocabulary is the sanitizer's own (``pass``/``warn``/``fail``/
+    ``not_checked``/``error``), which is wider than the probe's three-way split;
+    the two label spaces are kept separate rather than mapped onto each other,
+    because ``warn`` has no probe equivalent and inventing one would be a
+    judgement the tools did not make.
+
+    Cited evidence is the set of finding codes, namespaced by the sanitizer that
+    produced them -- ``waitcheck:wait_hazard`` rather than ``wait_hazard`` -- so
+    attribution reads the same way as a ``tier4:`` detector ID and cannot be
+    confused with one.
+    """
+    report = SanitizerReport.from_dict(doc)
+    codes: list[str] = []
+    for check in report.checks:
+        findings = list(check.findings)
+        for kernel_result in check.kernel_results:
+            findings.extend(kernel_result.findings)
+        for finding in findings:
+            code = f"{finding.sanitizer or check.sanitizer}:{finding.code}"
+            if code not in codes:
+                codes.append(code)
+
+    verdict = report.overall_verdict.value
+    # A sanitizer that did not run is an infra error, exactly as a probe trial
+    # that never validly ran is: no observation was made, so there is nothing to
+    # attribute. Keeping it in `error_detectors` mirrors the probe side, where
+    # `cited_detectors` is the union of both lists.
+    failures = codes if verdict in {"fail", "warn"} else []
+    errors = codes if verdict in {"error", "not_checked"} else []
+    return Label(
+        verdict=verdict,
+        failure_detectors=failures,
+        error_detectors=errors,
+        stored_verdict=verdict,
+        stale=False,
+        source=source,
+    )
+
+
+def load_sanitizer_reports(root: Path) -> list[tuple[str, Label]]:
+    """Every loadable ``sanitizer_report.json`` under a directory.
+
+    A report that fails aorta's own consistency check is skipped and named,
+    never silently coerced: that is the corpus-rot signal for this label source.
+    """
+    out: list[tuple[str, Label]] = []
+    for path in sorted(root.rglob("sanitizer_report.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"  skipped {path}: unreadable ({exc})", file=sys.stderr)
+            continue
+        try:
+            out.append((str(path), label_sanitizer_report(doc, source=str(path))))
+        except (ValueError, KeyError, TypeError) as exc:
+            print(f"  skipped {path}: rejected by aorta's report model ({exc})",
+                  file=sys.stderr)
+    return out
+
+
 def score_policy(
     name: str,
     answer_for: Any,
@@ -224,8 +305,15 @@ def score_policy(
 #
 # Shaped like what SubprocessWorkload writes (aorta/workloads/_subprocess.py):
 # a `verdict`, the three partitioned detector lists, and the run's exit/timing
-# fields. Deliberately skewed towards `pass`, because real corpora are, and the
-# skew is the whole point of the baseline check.
+# fields.
+#
+# These are failure-heavy, which a real probe archive is not. That is
+# deliberate -- the failure shapes are what the reward has to discriminate, and
+# there is no point spending fixtures on the class a real corpus supplies in
+# bulk. It does mean the printed baselines are read off *this* mix and not off a
+# forecast of a real one: on these fixtures the always-`pass` floor is low and
+# the always-`fail` floor is high, and both flip once the archive arrives. The
+# baseline check is the invariant, not the numbers it currently prints.
 # --------------------------------------------------------------------------- #
 
 def _run(
@@ -272,16 +360,61 @@ FIXTURES: tuple[dict[str, Any], ...] = (
     # A required custom pattern that never fired -- a synthesised failure with
     # no underlying crash, which surface heuristics tend to read as a pass.
     _run("missing-pass-signal", "fail", ["meta:missing_pass_signal"], []),
+    # --- The debugging vertical proper ------------------------------------- #
+    # The cases above exercise the verdict precedence rules; these are the
+    # failure shapes `aorta agent` is actually pointed at, one per autopsy
+    # category the proposal contract enumerates. Detector IDs are the real
+    # ones -- tier2_hang, tier3_kernel and tier4_patterns own them -- because a
+    # fixture citing an ID that no tier can emit trains attribution against a
+    # vocabulary that does not exist.
+    #
+    # rccl_hang: the collective times out and the monitor also sees no
+    # progress, so two detectors justify one verdict and a correct answer must
+    # cite both. This is the case attribution F1 exists for.
+    _run("collective-timeout", "fail",
+         ["tier2:hang", "tier4:collective_timeout", "tier4:nccl_rccl_error"],
+         [], exit_code=-9),
+    # illegal_mem: the page fault is the cause and the HIP error is the report
+    # of it. Citing only the tier4 line is the plausible half-answer.
+    _run("illegal-access", "fail",
+         ["tier3:vm_l2_fault", "tier4:hip_error", "tier4:python_traceback"],
+         [], exit_code=1),
+    # thermal_throttle is a *failure* detector, not advisory -- only
+    # tier3:vram_growth is a warn. A policy that reads "throttle" as a
+    # performance note and answers pass is wrong here.
+    _run("thermal-throttle", "fail", ["tier3:thermal_throttle"], []),
+    # A fabric fault with a downstream collective error: the interconnect is
+    # the story and the collective is the symptom.
+    _run("xgmi-fault", "fail",
+         ["tier3:xgmi_link_error", "tier4:collective_timeout"], [], exit_code=-9),
+    # checkpoint_race: no crash, no signal, just wrong numbers.
+    _run("nan-signature", "fail", ["tier4:nan_signature"], [], exit_code=0),
+    # A reset after a segfault, with vram growth as a red herring: the warn
+    # detector must not be cited as justification for the verdict.
+    _run("reset-with-warn", "fail",
+         ["tier1:sigsegv", "tier3:amdgpu_reset"], [],
+         warns=["tier3:vram_growth"], exit_code=-11),
+    # An SDMA timeout that the harness also recorded as an infra timeout:
+    # fail > error again, but with a kernel-tier cause rather than a signal.
+    _run("sdma-timeout", "fail",
+         ["tier3:sdma_timeout"], ["tier1:timeout"], exit_code=-9),
 )
 
 
 def run_demo(as_json: bool, runs_root: Path | None) -> int:
     if runs_root is not None:
         loaded = load_runs(runs_root)
-        if not loaded:
-            print(f"no result.json found under {runs_root}", file=sys.stderr)
-            return 2
         labelled = [(src, label_run(doc, src)) for src, doc in loaded]
+        # Sanitizer reports live alongside probe results in a real run tree, and
+        # both are evidence for the same question, so one --runs sweep collects
+        # both rather than making the caller know which kind they have.
+        labelled += load_sanitizer_reports(runs_root)
+        if not labelled:
+            print(
+                f"no result.json or sanitizer_report.json found under {runs_root}",
+                file=sys.stderr,
+            )
+            return 2
     else:
         labelled = [
             (f"synthetic:{d['cell_name']}", label_run(d, f"synthetic:{d['cell_name']}"))

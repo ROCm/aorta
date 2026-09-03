@@ -9,8 +9,9 @@ Background and the plan these support: [`docs/tokenspeed-rl-post-training.md`](.
 
 | | What it demonstrates | Needs |
 |---|---|---|
-| [`recipe_reward.py`](recipe_reward.py) | A graded reward for recipe synthesis, computed by calling aorta's own validators, with a novelty gate that refuses to pay for corpus copies | nothing — no GPU, no container |
+| [`proposal_reward.py`](proposal_reward.py) | A reward for the shape of an `aorta agent` proposal, scored through the agent's own contract code | nothing — no GPU, no container |
 | [`triage_reward.py`](triage_reward.py) | A reward for triage classification, labelled by aorta's own verdict resolver | nothing — no GPU, no container |
+| [`recipe_reward.py`](recipe_reward.py) | A graded reward for recipe synthesis, computed by calling aorta's own validators, with a novelty gate that refuses to pay for corpus copies | nothing — no GPU, no container |
 | [`probe_weight_transfer.py`](probe_weight_transfer.py) | Whether an RL iteration costs a weight update or a cold restart: drives TokenSpeed's weight-sync control plane and times it | a running `tokenspeed serve` |
 | [`nccl_weight_peer.py`](nccl_weight_peer.py) | The trainer half of the `nccl` weight-transfer protocol: joins the engine's group and broadcasts tensors | two GPUs, the TokenSpeed image |
 | [`nccl_roundtrip_check.py`](nccl_roundtrip_check.py) | Whether a weight update *actually changes the weights*: perturb, then restore, comparing greedy completions | the above plus a running engine |
@@ -154,13 +155,34 @@ was it clean (`pass`) — and which detectors justify that. The label comes from
 
 ```bash
 python examples/rl/triage_reward.py                    # synthetic fixtures
-python examples/rl/triage_reward.py --runs path/to/runs  # real result.json files
+python examples/rl/triage_reward.py --runs path/to/runs  # real archived runs
+python examples/rl/triage_reward.py --runs recipes/sanitizers/survey
 ```
 
-**The corpus does not exist yet.** That is the *only* thing missing: labelling,
-scoring and the degenerate-policy check are implemented and tested against
-synthetic `result.json` fixtures shaped like what `SubprocessWorkload` writes.
-Pointing `--runs` at a directory of archived runs is the remaining step.
+### Two label sources
+
+`result.json` from probe cells, and `sanitizer_report.json` from Waitcheck and
+ConSan runs. Both answer the same question, so `--runs` collects both from one
+tree.
+
+The sanitizer source works on real data today — the six committed reports under
+`recipes/sanitizers/survey/reports/` are the only archived labelled failure
+evidence in the repository, and the last command above scores them. The probe
+source has no corpus yet; labelling, scoring and the degenerate-policy check are
+implemented and tested against synthetic fixtures, and pointing `--runs` at
+archived probe runs is the remaining step.
+
+The seam is stronger on the sanitizer side. `SanitizerReport.from_dict`
+recomputes `overall_verdict` from the check results and **raises** if the stored
+value contradicts it, so a rotted report cannot be trained on — it fails to load
+and is named on stderr. On the probe side the same disagreement is only flagged
+`stale`.
+
+Two deliberate choices there: the verdict vocabulary stays the sanitizer's own
+(`pass`/`warn`/`fail`/`not_checked`/`error`) rather than being mapped onto the
+probe's three-way split, because `warn` has no probe equivalent; and cited
+evidence is namespaced as `waitcheck:wait_hazard` rather than `wait_hazard`, so
+attribution reads like a detector ID and cannot be mistaken for one.
 
 Two scoring terms, because either alone is trivially hackable:
 
@@ -178,20 +200,121 @@ rules is reported as `stale` rather than silently trained on.
 
 ### The degenerate baseline
 
-Probe corpora are skewed towards `pass`, so a policy that always answers `pass`
-scores well on accuracy alone — the classifier analogue of the memorisation
-problem. The demo therefore scores that policy alongside the real ones:
+A real probe corpus is skewed towards `pass`, so a policy that always answers
+`pass` scores well on accuracy alone — the classifier analogue of the
+memorisation problem. The demo therefore scores the degenerate policies
+alongside the real ones, over 18 fixtures:
 
 | Policy | Verdict accuracy | Attribution F1 | Reward |
 |---|---|---|---|
 | oracle | 1.000 | 1.000 | 1.000 |
-| right verdict, invented detectors | 1.000 | 0.364 | 0.746 |
-| degenerate: always `pass`, no detectors | 0.364 | 0.364 | **0.364** |
-| degenerate: always `fail`, correct detectors | 0.455 | 1.000 | **0.673** |
+| right verdict, invented detectors | 1.000 | 0.222 | 0.689 |
+| degenerate: always `pass`, no detectors | 0.222 | 0.222 | **0.222** |
+| degenerate: always `fail`, correct detectors | 0.667 | 1.000 | **0.800** |
 
-Reading nothing is worth 0.364 on these fixtures. A policy's reward is only
-meaningful stated next to that floor, which is why the demo prints them
-together.
+These fixtures are deliberately failure-heavy — the failure shapes are what the
+reward has to discriminate — so the floors here are the inverse of a real
+corpus's: always-`pass` is cheap and always-`fail` is expensive, and both flip
+once an archive arrives. The invariant is that a floor is printed at all. A
+policy's reward is only meaningful stated next to it.
+
+Row two is the term earning its place: verdict right, citation invented, and the
+0.311 it loses is entirely attribution. Without that term it would be
+indistinguishable from the oracle.
+
+### Debugging-shaped fixtures
+
+The fixtures cover two things. The first eleven exercise the verdict precedence
+rules — `fail` over `error` over `pass`, the infra-only case, the synthesised
+`meta:missing_pass_signal`. The rest are the failure shapes `aorta agent` is
+actually pointed at, one per autopsy category the proposal contract enumerates:
+a collective timeout with a hang, a page fault reported as a HIP error, a
+thermal throttle, an XGMI link fault, a NaN signature with a zero exit code, and
+an SDMA timeout alongside an infra timeout.
+
+Every cited detector ID is one a classifier tier can really emit, which a test
+pins by collecting the vocabulary from the tier modules' own constants rather
+than hard-coding it. A fixture citing an invented ID would train attribution
+against a vocabulary that does not exist.
+
+One fixture carries `tier3:vram_growth` as a **warn** alongside a genuine
+segfault. It is a red herring on purpose: advisory detectors are evidence about
+a run, never justification for its verdict, so a policy that cites every
+detector it can see scores lower than one that cites only the failure signals.
+`tier3:vram_growth` is the only advisory detector — `tier3:thermal_throttle`
+reads like a performance note but is a genuine failure signal.
+
+## `proposal_reward.py`
+
+The outer layer, and the cheapest reward in the plan: does a proposal satisfy
+the contract `aorta agent` actually demands? Strict JSON, a `category` from the
+closed autopsy set, and mitigation names that resolve in the registry *and* are
+still available. Zero GPU, microseconds per sample, no labelling — the contract
+is code.
+
+```bash
+python examples/rl/proposal_reward.py
+python examples/rl/proposal_reward.py --json
+```
+
+### Why score it, when the consumer already validates
+
+Because the consumer validates *quietly*, and a reward that delegated to it
+would score silent failure as success.
+
+`LiteLLMProposer.propose` drops unrecognised mitigation names before the policy
+ever sees them:
+
+```python
+filtered = [m for m in step.next_mitigations if m in remaining]
+```
+
+So a proposal naming only invented mitigations — `rccl_p2p_disable`, which
+sounds exactly like the 22 registered names and is not one of them — arrives at
+the loop as a well-formed step with nothing to try, and `run_agent_loop` reads
+an empty list as a decision to stop. The outcome is `agent_stop`, carrying the
+model's own hypothesis as the operator's recommended action. Nothing raises.
+
+`AgentStep.from_dict` repairs on the same principle: a non-bool `stop` becomes
+`False`, a non-list `next_mitigations` becomes `[]`, an unparseable
+`confidence` becomes `0.0`, a null `category` becomes `"unknown"`. Correct for a
+serving path, useless as a training oracle.
+
+| Tier | Check | Reward |
+|---|---|---|
+| 1 | Parses as a JSON object | 0.2 |
+| 2 | The five demanded keys, with the demanded types | 0.4 |
+| 3 | `category` is in the closed set | 0.6 |
+| 4 | A non-empty mitigation list, every name in the registry | 0.8 |
+| 5 | Every name still available, `confidence` in [0, 1] | 1.0 |
+
+Each tier calls `AgentStep.from_dict`, `AgentPolicy.validate_step`,
+`AUTOPSY_CATEGORIES` and `get_mitigation` rather than restating them — the same
+seam the other two scorers use, so a new category or mitigation changes the
+reward in the same commit.
+
+Every scored proposal also records `consumer_outcome`: what `run_agent_loop`
+would actually do with it, one of `accepted`, `silent_stop` or `policy_stop`.
+That is what makes the reward readable against its real consequence. Note that
+`accepted` and a low reward co-occur often — a mistyped `confidence` is
+accepted after being silently zeroed — and that is the whole point.
+
+### The ceiling, which is the reason this is a gate and not the reward
+
+| Policy | Mean reward | Accepted by the loop |
+|---|---|---|
+| always the same valid proposal | **1.00** | 1.00 |
+| always an empty object | 0.20 | 0.00 |
+| always prose | 0.00 | 0.00 |
+
+A fixed valid proposal scores full marks while diagnosing nothing, and the loop
+accepts it every time. This is asserted as a test, so if it ever changes the
+docstring's claim that this measures form only has become false. Pair it with
+`triage_reward.py`, which scores whether the read is right.
+
+Row two is the term that earns its place: a policy with the verdict right and
+the citation invented keeps 0.689, and the 0.311 it loses is entirely
+attribution. Without that term it would be indistinguishable from the oracle.
 
 ## The NCCL weight-transfer harness
 

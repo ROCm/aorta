@@ -13,7 +13,7 @@ This document works out what of that belongs in this repository, what TokenSpeed
 can already do, what the training signal would be, and whether the cost claim
 survives contact with the measured numbers. It is a plan, not a report of work
 done: the only part built so far is the rollout-shaped serving support described
-under [What was built](#what-was-built).
+under [What was built](#6-what-was-built).
 
 The short version:
 
@@ -29,15 +29,32 @@ The short version:
   against a 322 s cold start), `ipc` raises `NotImplementedError`, and `nccl`
   **returns success while transferring nothing**, loading uninitialised device
   memory into the model
-  ([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer), filed upstream
+  ([Phase 2b](#phase-2b--the-nccl-data-plane-does-not-transfer), filed upstream
   as [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373)).
   The engine choice is still defensible on the shape of the API; the loop is
   blocked on an upstream fix.
-- **The strongest training signal in this repo is recipe synthesis**, because a
-  generated recipe either loads, validates and dry-runs or it does not. That is a
-  graded machine-checkable reward requiring no human labelling. The second
-  strongest is triage classification, where `aorta.probe.classifier` is a
-  deterministic labeller that turns every archived probe run into a free example.
+- **The domain is debugging, and the consumer is CIA with aorta inside it.**
+  Both were open when this was first written; [A2](#a2) settled the domain and a
+  CIA architecture diagram settled the consumer
+  ([3.0](#30-what-cia-is-and-where-a-post-trained-model-sits-in-it)). CIA is the
+  Cluster Intelligence Agent, exposing aorta over MCP, API and CLI, driving
+  Waitcheck / ConSan / ASAN / UBSan / ROCgdb / RocJITsu against MI355, with an
+  AORTA chatbot front end that shows **output logs, root cause and the fix**.
+- **The output contract is a pair, and the two free rewards map onto it.** Root
+  cause is triage classification, labelled deterministically by
+  `aorta.probe.classifier`; fix is mitigation correctness. That pair is now the
+  spine of [4](#4-the-domain-and-the-training-signal), with proposal validity as
+  a free gate over both, and recipe synthesis demoted from headline to
+  capability check. The demotion costs the best reward this repository can
+  offer, which is worth stating plainly rather than absorbing quietly.
+- **The corpus is now the critical path, and it is nearly empty.** Counting
+  probe *and* sanitizer artifacts: 18 archived labelled runs, of which exactly
+  **one** evidences a real defect. But the repository already ships deliberate
+  race reproducers with committed expected verdicts, so the corpus is *generable*
+  cheaply even though it does not exist
+  ([4.6](#46-what-the-corpus-actually-contains)). Not one archived artifact
+  comes from a workload the diagram names, so stratifying by workload family
+  matters as much as covering failure categories.
 - **The cost claim is half right.** "No cluster needed" holds with room to spare:
   a plausible 400-iteration run generates ~419M tokens, which is ~2.5 hours of
   generation across one 8-GPU MI355X node — or ~3.3 hours once `ipc`'s absence
@@ -48,16 +65,22 @@ The short version:
   holds only because decode utilises the hardware so much worse. The wall-clock
   split is more like 70/30 than 95/5, which caps what optimising the rollout
   half can buy.
-- **"CIA" and "Sleuth" do not appear anywhere in this repository.** The internal
-  consumer that does exist is `aorta agent`'s `LiteLLMProposer`, and it is a good
-  enough seam to design against. Whether that is what was meant is the first
-  assumption to confirm.
+- **The consumer contract is pinned from source, and the integration seam is
+  measured.** `aorta agent`'s `LiteLLMProposer` is the contract that exists
+  today; its prompt, schema and validation are transcribed in
+  [3.1](#31-what-the-current-consumer-sends), and
+  [3.4](#34-the-current-contract-versus-the-target-one) reconciles it with the
+  chatbot's root-cause-and-fix target — they are the same pair, compressed.
+  Pointing the agent at a self-hosted model needs **no code change** — two
+  environment variables — verified against a mock OpenAI endpoint rather than
+  assumed.
 
 Related: [TokenSpeed under AORTA](tokenspeed.md) for the probe routes and the
 container's operational hazards, [TokenSpeed serving benchmarks](tokenspeed-serving.md)
 for the workload this extends and every measured number quoted below,
 [Aorta Probe Agent](agent/aorta-probe-agent.md) for the agent loop that is the
-candidate consumer.
+first consumer, and whose "Relationship to Cluster-Scale Agent Systems" section
+already anticipates being invoked by a cluster agent — which is what CIA is.
 
 ## 1. Scope: what belongs where
 
@@ -72,10 +95,10 @@ So the split, and the seam:
 | Concern | Where | Why |
 |---|---|---|
 | The RL algorithm (GRPO/PPO, advantages, optimiser, checkpoints) | Separate repo, built on **verl** or **slime** | TokenSpeed names both as supported trainers; reimplementing either is months of work to arrive behind where they are |
-| The reward functions | Separate repo, but **importing aorta as a library** | The rewards are "does this recipe load", "does this triage read match the classifier" — they are calls into `aorta.triage.recipe` and `aorta.probe.classifier`, which is what makes them cheap |
+| The reward functions | Separate repo, but **importing aorta as a library** | The rewards are "is this proposal on contract", "does this triage read match the classifier", "did this mitigation fix it" — calls into `aorta.agent`, `aorta.probe.classifier` and `aorta.registry`, which is what makes them cheap |
 | Standing the rollout engine up, and proving it serves | **aorta** (`tokenspeed_serve`) | Already does exactly this for fixed-length serving; rollout is a load shape it did not express |
 | Measuring rollout throughput, length distribution, bring-up | **aorta** | This is the measurement the cost model above depends on, and nothing else in the stack reports it |
-| Weight-transfer correctness and cost | **aorta**, later | A probe route, not a workload — see [Phase 2](#phase-2-validate-the-weight-sync-path) |
+| Weight-transfer correctness and cost | **aorta**, later | A probe route, not a workload — see [Phase 2](#phase-2--validate-the-weight-sync-path) |
 | Serving the finished model for agents to call | Neither; **ops** | An inference deployment, not a benchmark |
 
 The load-bearing consequence is that the reward functions import aorta rather
@@ -118,7 +141,7 @@ image (`lightseekorg/tokenspeed-amd@sha256:60c12e37…`), on a gfx950 node.
 | EOS-respecting generation | **Yes, but not through the flag** — see below | `bench.py:1911-1912` |
 | Generated-token counts | **Yes**, from the response's `usage.completion_tokens` | `bench.py:1258-1270` |
 | Per-request lengths | **Yes**, `output_lens`, but only with `--save-detailed` | `bench.py:1639,1972` |
-| Weight reload without cold start | **Yes, purpose-built — but `nccl` only**, `ipc` raises `NotImplementedError` ([Phase 2](#phase-2-validate-the-weight-sync-path)) | `runtime/engine/weight_transfer/`, `runtime/entrypoints/control_server.py:399+` |
+| Weight reload without cold start | **Yes, purpose-built — but `nccl` only**, `ipc` raises `NotImplementedError` ([Phase 2](#phase-2--validate-the-weight-sync-path)) | `runtime/engine/weight_transfer/`, `runtime/entrypoints/control_server.py:399+` |
 | Logprobs for the trainer's importance ratios | **Yes**, `/generate` with `return_logprob` | `control_server.py:262-290` |
 | OpenAI *and* SGLang dialects | **Yes**, both, deliberately | `control_server.py:209` names "sglang-native /generate clients (e.g. slime, verl)" |
 
@@ -147,13 +170,13 @@ phases of measurement have inverted this section's conclusion, and it is left
 standing because the reasoning that produced it — an engine with this API is the
 right engine — is still correct, while the assumption underneath it was not.
 
-[Phase 2](#phase-2-validate-the-weight-sync-path) found the control plane works
+[Phase 2](#phase-2--validate-the-weight-sync-path) found the control plane works
 on this image on gfx950 and costs 1–5 ms against a 322 s cold start, but that
 **`ipc` is not implemented** — its receive path raises — so of the two backends
 named above only `nccl` is wired, and the colocated deployment this section
 implies is unavailable.
 
-[Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer) then found that
+[Phase 2b](#phase-2b--the-nccl-data-plane-does-not-transfer) then found that
 `nccl` **does not transfer either.** With a real trainer peer joined to the
 group, `/update_weights` returns `200 {"message": "Weights updated"}` having
 moved no tensor at all, and loads uninitialised device memory into the model.
@@ -272,110 +295,502 @@ meaningful; TPOT and ITL do not.** They are still reported, because suppressing
 them per-mode would make the metric set depend on the configuration, but a
 rollout cell's TPOT is not a per-token latency.
 
-## 3. What "CIA" and "Sleuth" are
+## 3. The consumer: CIA, with aorta inside it
 
-They are not in this repository. `rg -i` across all of `docs/`, `src/`, `config/`,
-`recipes/` and `tests/` finds no `CIA` and no `sleuth` — not as identifiers, not
-in prose, not in configuration.
+Two answers settled this section. Asked what the model is for
+([A2](#a2)), the answer was:
 
-What does exist, and is a plausible referent, is **`aorta agent`** — a
-closed-loop mitigation-search agent documented in
-[agent/aorta-probe-agent.md](agent/aorta-probe-agent.md). Its shape matters,
-because it is the shape a post-trained model would have to fit:
+> "debugging vertical, can we post train to become a good model for use with
+> aorta llm agent?"
 
-- It calls an LLM through `LiteLLMProposer`, which is `litellm.completion(model=…,
-  messages=…, response_format={"type": "json_object"})`.
-- It asks for strict JSON: `category` (one of eight autopsy labels), `hypothesis`,
-  `next_mitigations` (registered names only), `confidence`, `stop`.
-- Every proposal is re-validated: names must resolve through
-  `aorta.registry.get_mitigation`, and the pass/fail verdict comes from the
-  deterministic classifier, never from the model.
+And an architecture diagram supplied for **CIA — the Cluster Intelligence
+Agent** — settled what CIA is ([A1](#a1)). It is not a separate system
+consuming aorta from outside. **AORTA is the box inside CIA**, and Sleuth is
+described as something similar.
 
-That last property is what makes this a good first consumer rather than a risky
-one: the model is advisory. A bad proposal costs a wasted probe cell, not a wrong
-verdict. Pointing it at a self-hosted model is a small change — LiteLLM routes
-`openai/<name>` to any OpenAI-compatible base URL, which is exactly what
-TokenSpeed's gateway serves — with one gap: `LiteLLMProposer` passes no
-`api_base`, so today it depends on `OPENAI_API_BASE` being set in the
-environment. Threading an explicit `--llm-api-base` through is a few lines and
-belongs with this work rather than in it.
+### 3.0 What CIA is, and where a post-trained model sits in it
 
-If "CIA" and "Sleuth" are different systems, their interfaces need to be
-established before anything is trained, because the output format is not a detail
-— it is most of what the reward function checks. Recorded as
-[assumption A1](#assumptions-to-confirm-with-manoj).
+```
+   CIA: Cluster Intelligence Agent
+   ┌─────────────────────────────────┐        Waitcheck  ◄── highlighted
+   │  M   A   C  │                  │        ConSan     ◄── highlighted
+   │  C   P   L  │      AORTA       │───────  ASAN                        MI355
+   │  P   I   I  │                  │        UBSan          ────────────►
+   └─────────────────────────────────┘        ROCgdb
+            │  workloads  │                   RocJITsu                    Log
+            └─────────────┘                   ...                      (3rd phase)
+
+   Front end is an AORTA chatbot for input, and shows
+   output logs, root cause and the fix.
+
+   workloads: Fremont (Gsplat, MIOpen conv2D, ...), Ads, TBD
+```
+
+Four things in that picture change this plan.
+
+**CIA exposes aorta over MCP, API and CLI.** Three interfaces down its left
+edge. The CLI is what `aorta agent` already is. MCP is the interesting one for
+serving: if CIA reaches aorta over MCP, a post-trained model could be reached
+through that path rather than only through the proposer's LiteLLM call. Noted as
+an integration option and **not designed for** — there is nothing in this tree
+that serves aorta over MCP today, and speculating about a schema that does not
+exist is how the previous version of this document went wrong about CIA.
+
+This is also not a new idea in the repository. `docs/agent/aorta-probe-agent.md`
+already anticipates it, distinguishing fleet-wide cluster intelligence from the
+probe agent's single-repro search and recording "cluster agent could invoke
+`aorta agent` with a frozen argv" as the future interop path. The diagram
+confirms that shape.
+
+**The output contract is a pair: root cause *and* fix.** That is the annotation
+verbatim — the chatbot "will show output logs, root cause and the fix". It is
+more than the mitigation-name proposal the current proposer asks for, and the
+relationship between the two is worked out in
+[3.4](#34-the-current-contract-versus-the-target-one).
+
+**The evidence is sanitizer and debugger output, not just probe verdicts.**
+Waitcheck and ConSan are highlighted in the diagram, with ASAN, UBSan, ROCgdb
+and RocJITsu behind them, all pointed at MI355 hardware. That makes this
+project's sanitizer work on-domain rather than adjacent, and it changes the
+corpus inventory materially — see
+[4.6](#46-what-the-corpus-actually-contains).
+
+**The workloads are not TokenSpeed.** Fremont (with Gsplat and MIOpen conv2D
+beneath it), Ads, and TBD. TokenSpeed is the workload this document was written
+around and it does not appear in the diagram at all. The generalisation
+consequences are in [4.6](#46-what-the-corpus-actually-contains); the short
+version is that a model trained only on TokenSpeed triage is being trained on
+the wrong distribution.
+
+`Log` is marked as a **3rd phase** on the right of the diagram. Taken only as a
+sequencing hint: log analysis is planned later, so a reward built on structured
+detector and sanitizer output rather than raw log text is aligned with the
+current phase. Not read as more than that.
+
+### 3.1 What the current consumer sends
+
+What follows is the contract `aorta agent` enforces **today**, read from
+`src/aorta/agent/llm.py`, `policy.py` and `loop.py` rather than summarised. It
+is the machine-checkable contract, and it is a subset of the chatbot's target
+contract rather than the same thing —
+[3.4](#34-the-current-contract-versus-the-target-one) reconciles them.
+
+One `litellm.completion` call per iteration, with
+`response_format={"type": "json_object"}` and two messages. The system message
+is a fixed string:
+
+```
+You are an AORTA probe agent. Propose ONLY registered mitigation names from the
+candidate list. Never propose shell commands or argv. Return strict JSON with
+keys: category, hypothesis, next_mitigations (list of strings), confidence
+(0-1), stop (bool). category must be one of: ['checkpoint_race',
+'illegal_mem', 'launch_error', 'oom_fragment', 'perf_regression', 'rccl_hang',
+'thermal_throttle', 'unknown'].
+```
+
+The user message is `json.dumps(..., indent=2)` of exactly four keys —
+`symptom`, `cell_summaries`, `candidates`, `already_tried`. `candidates` is
+already narrowed to what is still available (allowlist minus tried minus the
+`none` baseline), so the model is never offered a mitigation it cannot use.
+
+`cell_summaries` is the entire evidence the model gets, and it is narrow.
+`_read_cell_summaries` builds one dict per probe cell with six keys and nothing
+else:
+
+```json
+{
+  "cell_name": "none-none",
+  "verdict": "fail",
+  "failure_detectors_fired": ["tier2:hang", "tier4:collective_timeout"],
+  "warn_detectors_fired": [],
+  "capture": {"stderr_tail": "..."},
+  "exit_code": null
+}
+```
+
+That matters for the reward design more than anything else in this section: the
+model is not given raw logs, it is given the classifier's own detector IDs plus
+a capture excerpt. Detectors are unioned across trials, and the `capture` shown
+is from the first *failing* trial rather than `trial_0`, so a single bad trial
+in an otherwise passing cell is not hidden. The task is therefore "read the
+classifier's evidence and act on it", not "read a log".
+
+### 3.2 What it demands back, and what it does with a bad answer
+
+Five keys: `category`, `hypothesis`, `next_mitigations`, `confidence`, `stop`
+(plus an optional `stop_reason`). But the *stated* contract and the *enforced*
+contract differ, and the gap is where a reward has to live.
+
+`AgentStep.from_dict` repairs rather than rejects. A `stop` that is not a real
+JSON boolean becomes `False` (so `"stop": "false"` cannot prematurely end the
+search — `bool("false")` is `True`, which the code comments call out). A
+`next_mitigations` that is not a list becomes `[]` rather than being exploded
+into characters by `list("tf32_off")`. A non-numeric `confidence` becomes `0.0`.
+A null or blank `category` becomes `"unknown"`. Those defences are correct for a
+serving path — the audit trail has to survive a bad provider — but they mean the
+consumer reports success on input it silently repaired.
+
+Then there are three ways a proposal can end the run:
+
+| What the model sends | What happens | How loud |
+|---|---|---|
+| Unparseable, or a non-object | Caught, becomes a safe stop with `stop_reason: agent_requested`; the parse error is recorded in `hypothesis` | Silent to the operator |
+| A mitigation name that is not in the offered candidates | Dropped by `filtered = [m for m in step.next_mitigations if m in remaining]` before validation. If that empties the list, `run_agent_loop` reads it as a decision to stop and reports `agent_stop` with the model's own hypothesis as the recommended action | **Entirely silent** |
+| A `category` outside the closed set | `AgentPolicy.validate_step` raises `PolicyViolation`; the loop catches it and reports `policy_stop` | Loud |
+
+The middle row is the important one. A hallucinated-but-plausible mitigation
+name — `rccl_p2p_disable`, say, which sounds exactly like the 22 registered
+names but is not one of them — does not error. It ends the search early, and
+the report blames the model's own hypothesis. This is the same shape of trap as
+the `nccl` transport defect in [Phase 2b](#phase-2b--the-nccl-data-plane-does-not-transfer):
+a failure that returns success. It is the reason the format reward in
+[4.1](#41-the-gate-on-both-halves--proposal-validity) is scored
+explicitly rather than delegated to the consumer.
+
+What the model never does is decide pass/fail. `aggregate_cell_verdict` sets the
+verdict, `winning_mitigation` detects the fix, and a passing `none-none`
+baseline short-circuits the loop *before* the proposer is consulted at all. The
+model is advisory: a bad proposal costs a wasted probe cell, never a wrong
+verdict. That is what makes this a safe first consumer.
+
+### 3.3 Pointing it at a self-hosted model: no code change
+
+This was recorded as an open integration gap. It is now measured, and the answer
+is better than expected.
+
+`LiteLLMProposer` passes neither `api_base` nor `api_key`, so it inherits
+LiteLLM's environment resolution. Setting two variables is sufficient:
+
+```bash
+export OPENAI_API_BASE=http://<engine-host>:<port>/v1
+export OPENAI_API_KEY=unused-but-must-be-set
+aorta agent --llm-backend litellm --llm-model openai/<served-model-name> ...
+```
+
+Verified against a mock OpenAI-compatible endpoint: the request arrives at
+`POST /v1/chat/completions` on the self-hosted address, with
+`response_format: {"type": "json_object"}` intact, and the reply parses back
+into an `AgentStep` unchanged. Both `openai/<name>` and a bare model name route
+there. The `openai/` prefix is stripped on the wire, so **the name after the
+slash must match what the engine advertises**, not what the CLI default says.
+
+Three caveats, none blocking:
+
+- `OPENAI_API_BASE` is process-global. It redirects *every* OpenAI-routed call
+  in the process, so a hosted judge model and a self-hosted policy cannot
+  coexist in one run. An explicit `--llm-api-base` (about eight lines through
+  `LiteLLMProposer.__init__` and the CLI) removes that limitation and makes the
+  endpoint appear in the audit log. Recommended, but not required to integrate,
+  so it is recorded here rather than done as part of this work.
+- With the variable set, a `--llm-model gpt-4o-mini` default silently goes to
+  the local engine. The flag would say one thing and the traffic do another,
+  which the agent report cannot currently distinguish.
+- The serving engine must accept `response_format: {"type": "json_object"}`.
+  TokenSpeed's OpenAI-compatible route is what would serve this, and that
+  parameter is a dependency of the integration rather than an optional extra —
+  without it the call errors rather than degrading.
+
+### 3.4 The current contract versus the target one
+
+These are not the same contract, and the difference decides how much of the
+reward can stay automatic. Treat the proposer's JSON schema as the **current**
+contract — it exists, it is enforced, and it is machine-checkable — and the
+chatbot's root-cause-and-fix as the **target** one.
+
+| | Current (`aorta agent` proposer) | Target (CIA chatbot) |
+|---|---|---|
+| Root cause | `category`, one of eight closed labels | Free-text root cause, shown to an operator |
+| Fix | `next_mitigations`, registered names only | "The fix", presumably prose plus an action |
+| Evidence shown | `cell_summaries`: detector IDs, verdict, capture excerpt, exit code | Output logs from Waitcheck / ConSan / ASAN / UBSan / ROCgdb / RocJITsu |
+| Consumer | A search loop that runs the next probe cell | A human reading a chat response |
+| Gradable | Fully, by code in this tree | Only the parts that reduce to a closed set |
+
+The good news first: the two contracts **agree on structure**. The current
+schema's `category` is a compressed root cause and `next_mitigations` is a
+compressed fix, so a model trained on the proposer's contract is being trained
+on the target contract's skeleton, not on something orthogonal. The pair is the
+same pair.
+
+Where they diverge is worth naming plainly, because it is the ceiling on
+automatic reward:
+
+**The target's root cause is free text; the current one is a closed label.** A
+category from eight options is gradable by exact match. "The GEMM kernel is
+missing an `s_waitcnt` before reading LDS at offset 0x2f0" is not, by any
+mechanism in [4.1](#41-the-gate-on-both-halves--proposal-validity) or
+[4.2](#42-the-root-cause-half--triage-classification).
+It is the [4.5](#45-free-text-diagnosis--needs-humans) problem, which has no
+automatic reward.
+
+**The target's fix is an action, not a name.** `next_mitigations` is one of 22
+registry entries, checkable in microseconds. "Add an `s_waitcnt vmcnt(0)`
+before the load" is a code change, and verifying it means applying it and
+re-running — the expensive path of
+[4.3](#43-the-fix-half--mitigation-correctness).
+
+**The target sees richer evidence.** The current proposer gets detector IDs; the
+chatbot gets sanitizer and debugger output. That is *more* structure, not less —
+a ConSan `Finding` carries a `code`, `severity`, `kernel_name`, `code_object`
+and `entry_offset` (`instrumentation/rocjitsu_sanitizers/models.py`) — so this
+divergence is an opportunity rather than a problem. Attribution against a
+finding's `code` and `kernel_name` is exactly as gradable as attribution against
+a detector ID.
+
+**The practical consequence, and the recommendation taken:** train against the
+current contract, and treat the target's free-text halves as a presentation
+layer over it rather than as a separate training objective. A model that emits a
+correct `category` plus correct cited evidence plus a correct registered
+mitigation has produced a root cause and a fix — it has produced them in
+structured form, which a chatbot front end can render into prose, and which a
+reward can grade exactly. Training directly on the prose form would forfeit
+every automatic label this plan is built on, in exchange for a judge model on a
+narrow technical domain, which is where reward hacking shows up first.
+
+What that leaves genuinely open is the **response schema the chatbot renders**:
+whether it expects structured fields it formats, or free text it displays. If
+the former, the target contract collapses almost entirely into the current one
+and this plan needs no change. If the latter, a presentation layer has to be
+written, and the free-text quality of it is ungraded. Recorded in
+[A1](#a1) as the remaining piece.
 
 ## 4. The domain and the training signal
 
-"AORTA-like topics and AORTA-like actions" is a good niche for this precisely
-because the actions are checkable. The repository is a corpus: 51 recipes, 22
-registered mitigations, 11 workload classes with their configuration schemas, 35
-documents, a five-tier deterministic failure classifier, and a triage output
-format. An agent good at AORTA-like actions produces valid recipes, correct
-triage reads, and correct mitigation proposals — and the first and third of those
-can be scored by a machine, exactly.
+The domain is **debugging**: triage, diagnosis and failure analysis
+([A2](#a2)), delivered through CIA's chatbot as **a root cause and a fix**
+([3.0](#30-what-cia-is-and-where-a-post-trained-model-sits-in-it)). That pair is
+the spine of this section, because the output contract *is* the pair and the two
+free rewards this repository can offer map onto it one to one:
 
-Ordered by how much of the reward is automatic:
+| Half of the contract | Reward | Labelled by | GPU per sample |
+|---|---|---|---|
+| **Root cause** | Triage classification: the verdict, and the evidence that justifies it ([4.2](#42-the-root-cause-half--triage-classification)) | `aorta.probe.classifier`, deterministically | none |
+| **Fix** | Mitigation correctness: did the proposal make the repro pass ([4.3](#43-the-fix-half--mitigation-correctness)) | A probe cell's own verdict | minutes, or none if harvested offline |
 
-### 4.1 Recipe synthesis — the strongest signal, and the one to build first
+Both halves sit behind one shared gate — the proposal is well-formed, its
+category is in the closed set, its mitigation resolves in the registry
+([4.1](#41-the-gate-on-both-halves--proposal-validity)) — which is free and
+teaches nothing on its own.
 
-**Prompt:** a natural-language benchmarking or triage intent. "Write a recipe that
-finds where TokenSpeed serving throughput stops scaling with concurrency on one
-MI355X." "Write a probe recipe that isolates an RCCL hang to a single mitigation."
+That correspondence is the design, not a convenience. It also explains why the
+ranking changed. The previous version of this section ranked recipe synthesis
+first, on the grounds that a generated recipe either loads, validates and
+dry-runs or it does not — the most exactly machine-checkable reward the
+repository can offer. That ranking optimised for *how automatic the reward is*.
+The domain answer points at the loop's own task instead, and the honest
+consequence is that the best reward available is no longer the most relevant
+one. The cost of that demotion is stated in
+[4.4](#44-recipe-synthesis--now-a-capability-check-not-the-domain) rather than
+absorbed quietly.
 
-**Completion:** a recipe YAML.
+Full ranking, with status:
 
-**Reward, graded, entirely automatic:**
+| # | Signal | Labels from | GPU per sample | Status |
+|---|---|---|---|---|
+| [4.1](#41-the-gate-on-both-halves--proposal-validity) | Proposal format and validity | The consumer's own code | none | Built |
+| [4.2](#42-the-root-cause-half--triage-classification) | Triage classification | `aorta.probe.classifier` | none | Built, no corpus |
+| [4.3](#43-the-fix-half--mitigation-correctness) | Mitigation correctness | A probe cell's verdict | minutes | Not built, needs archive |
+| [4.4](#44-recipe-synthesis--now-a-capability-check-not-the-domain) | Recipe synthesis | Loader + dry-run | ~1 s | Built, demoted |
+| [4.5](#45-free-text-diagnosis--needs-humans) | Free-text diagnosis | Humans or a judge | n/a | Deliberately last |
 
-| Tier | Check | Cost |
+### 4.1 The gate on both halves — proposal validity
+
+**Prompt:** the `cell_summaries` payload from [3.1](#31-what-the-current-consumer-sends).
+**Completion:** the five-key JSON object of [3.2](#32-what-it-demands-back-and-what-it-does-with-a-bad-answer).
+
+This is the outer layer, and it is the cheapest reward in the plan: strict JSON,
+a `category` inside the closed autopsy set, and mitigation names that resolve in
+the registry *and* sit inside the candidate set the loop offered. Zero GPU,
+microseconds per sample, no labelling — the contract is code.
+
+It is scored despite the consumer already validating, because the consumer
+validates quietly. As [3.2](#32-what-it-demands-back-and-what-it-does-with-a-bad-answer)
+sets out, an invented mitigation name is silently filtered and ends the search
+as `agent_stop`; a mistyped field is silently repaired. A reward that delegated
+to the consumer would score both as success. So the ladder in
+[`examples/rl/proposal_reward.py`](../examples/rl/proposal_reward.py) measures
+the contract as *stated*, while recording what the consumer would actually do
+with each proposal:
+
+| Tier | Check | Reward |
 |---|---|---|
-| 1 | Parses as YAML | microseconds |
-| 2 | `aorta.triage.recipe.load_recipe` accepts it | milliseconds |
-| 3 | Every mitigation resolves in the registry | milliseconds |
-| 4 | The named workload's own validation accepts every cell, with unknown-key warnings treated as fatal | milliseconds |
-| 5 | `aorta sweep run --dry-run` succeeds | ~1 second |
-| 6 | The recipe expresses the *asked-for* shape (does the concurrency axis vary? is `num_prompts` scaled with it?) | rubric, partly automatic |
+| 1 | Parses as a JSON object | 0.2 |
+| 2 | The five demanded keys, with the demanded types | 0.4 |
+| 3 | `category` is in the closed set | 0.6 |
+| 4 | A non-empty mitigation list, every name in the registry | 0.8 |
+| 5 | Every name still available, `confidence` in [0, 1] | 1.0 |
 
-Tiers 1-5 are the same code path the CPU gate already runs on every committed
-recipe — `tests/workloads/test_tokenspeed_serve.py` does precisely this — so the
-reward function is a few dozen lines and inherits its correctness from tests that
-already exist. Tier 6 is where a human or a stronger judge model is needed, and
-it is also where most of the value is: a recipe that loads but measures the wrong
-thing is the failure mode that matters, and it is the one this repo's own docs
-spend the most words on.
+It imports `AUTOPSY_CATEGORIES`, `AgentStep`, `AgentPolicy` and
+`get_mitigation` rather than restating any of them, so a new category or
+mitigation changes the reward in the same commit — the same seam discipline the
+other two scorers use.
 
-This is the asset. It is rare to have a domain where the primary artifact is
-machine-verifiable at this granularity, and it should carry most of the training
-signal even if it is not the headline demo.
+The ceiling is the point, and it is asserted as a test: a policy that returns
+one fixed valid proposal every time scores **1.0** and would be accepted by the
+loop every time, while diagnosing nothing. Format is a gate, not a signal. It
+belongs first because it is free and because failing it wastes a real search,
+not because it teaches anything.
 
-### 4.2 Triage classification — free labels at scale
+### 4.2 The root-cause half — triage classification
 
-`aorta.probe.classifier` is deterministic, and it is the source of truth for
-pass/fail by design. So every probe run ever archived is a labelled example:
-input is the cell's logs and report, label is the classifier's verdict plus its
-`failure_detectors_fired` list plus the autopsy category those map to.
+**Prompt:** a failing run's `cell_summaries`.
+**Completion:** the verdict, and the detectors that justify it.
 
-**No human labelling at all.** The reward is exact agreement with the classifier.
-The risk is the mirror image of the opportunity: a model trained to agree with a
-regex-and-tier classifier learns the classifier, not the failure. That is worth
-having anyway — it is what makes the model useful inside the agent loop, where
-the classifier is the arbiter — but it must not be described as diagnosis.
+This is the **root-cause half** of the chatbot's contract, and the primary
+substantive reward: given the evidence the agent will actually hand a model, say
+what happened and why. `aorta.probe.classifier` is deterministic and is the
+source of truth for pass/fail by design, so every archived probe run is a
+labelled example with **no human labelling at all**.
 
-The practical constraint is corpus size. This needs a body of archived probe
-runs, and how many exist is not something this repository can answer. Recorded as
-[assumption A4](#assumptions-to-confirm-with-manoj).
+It is the root-cause half in compressed form rather than in the chatbot's prose
+form — a verdict plus cited evidence, not "the GEMM kernel is missing an
+`s_waitcnt`" — and [3.4](#34-the-current-contract-versus-the-target-one) argues
+that is the right thing to train on: the structured form is what a front end
+renders, and it is the only form a reward can grade exactly.
 
-### 4.3 Mitigation proposal — automatic validity, expensive correctness
+**The sanitizer path is a second, richer label source for this same half**, and
+the CIA diagram makes it on-domain rather than adjacent. A `SanitizerReport`
+carries an `overall_verdict` from the same three-way-plus vocabulary
+(`pass`/`warn`/`fail`/`not_checked`/`error`) and a tuple of `Finding` objects,
+each with a `code`, a `severity` (`warning`/`race`/`error`), a `message`, and
+optionally a `kernel_name`, `code_object` and `entry_offset`
+(`instrumentation/rocjitsu_sanitizers/models.py`). That is *more* structure than
+a detector ID, not less: attribution against a finding's `code` and
+`kernel_name` grades exactly as cleanly as attribution against
+`tier4:collective_timeout`, and it points at a specific kernel and offset, which
+is much closer to a root cause an engineer would accept.
 
-Validity is free: the name resolves in the registry of 22 or it does not.
-Correctness — did the proposed mitigation actually make the repro pass? — is
-answerable without a human, by running the probe cell, but each answer costs a
-GPU node for minutes. That makes it a good *evaluation* metric and a poor
-*training* reward, and a small offline dataset of (symptom, detectors, winning
-mitigation) triples harvested from past probe runs is the affordable
-approximation.
+`triage_reward.py` now labels from `sanitizer_report.json` as well as
+`result.json`, and `--runs` collects both from one tree. The seam is *stronger*
+on this side: `SanitizerReport.from_dict` recomputes `overall_verdict` as the
+max-ranked check verdict and **raises** when the stored value contradicts the
+recomputation, so a rotted report cannot be trained on at all — it fails to
+load and is named. On the probe side the same disagreement is only flagged as
+`stale`.
 
-### 4.4 Diagnosis and doc question-answering — needs humans
+Two deliberate choices. The verdict vocabulary stays the sanitizer's own
+(`pass`/`warn`/`fail`/`not_checked`/`error`) rather than being mapped onto the
+probe's three-way split, because `warn` has no probe equivalent and inventing
+one would be a judgement the tools did not make. And cited evidence is
+namespaced — `waitcheck:wait_hazard`, not `wait_hazard` — so attribution reads
+like a detector ID and cannot be confused with one.
+
+This is the only part of the reward stack that runs on real archived data
+today, because the six committed survey reports are the only real labelled
+evidence in the tree ([4.6](#46-what-the-corpus-actually-contains)).
+
+[`examples/rl/triage_reward.py`](../examples/rl/triage_reward.py) scores two
+terms — verdict exactness at 0.6 and attribution F1 at 0.4 — and recomputes
+every label from the recorded detector IDs through `partition_detectors` and
+`verdict_from_detectors` rather than trusting the stored `verdict` field. That
+catches corpus rot: an archived run whose stored verdict disagrees with today's
+precedence rules is flagged `stale` and reported instead of silently trained on.
+
+Two things about this reward are worth stating precisely, because both are easy
+to get wrong:
+
+**Attribution is what stops "right answer, wrong reason".** Verdict alone is a
+three-way choice and a policy can guess it from surface cues — a negative exit
+code, the word "timeout" — then invent a justification. F1 over the cited
+detector IDs docks exactly that. The fixtures include a run where
+`tier3:vram_growth` fired as a *warn* alongside a genuine segfault, and a policy
+that cites every detector it can see, warns included, scores lower than one that
+cites only the failure signals. Advisory detectors are evidence about the run,
+not justification for the verdict, and only `tier3:vram_growth` is advisory —
+`tier3:thermal_throttle`, which reads like a performance note, is a failure
+detector.
+
+**`category` is deliberately not scored here, even though the contract demands
+it.** There is no deterministic labeller for the autopsy category. The only
+detector-to-category mapping in the tree is `_infer_category_from_detectors`, a
+keyword heuristic used solely by the offline `FakeLLMProposer` — it reads
+`"tier2" in joined` as `rccl_hang`, for instance, which is true of any tier-2
+hang whatever caused it. Scoring against it would train the model to reproduce a
+crude heuristic and call that success. Category correctness needs either human
+labels or a rule table with an owner, and until it has one the reward stops at
+verdict and attribution, which are genuinely derived. This is the one piece of
+the consumer contract that remains unbacked by a label — see [A1](#a1).
+
+The fixtures are shaped like the vertical: one failure per autopsy category the
+contract enumerates, using only detector IDs the tiers can actually emit, which
+is pinned by a test that collects the real vocabulary from the tier modules'
+constants. What is missing is the corpus, and only the corpus —
+[4.6](#46-what-the-corpus-actually-contains).
+
+### 4.3 The fix half — mitigation correctness
+
+**Prompt:** a failing run's evidence.
+**Completion:** the mitigation that fixes it.
+
+This is the **fix half**, and the one whose reward costs real hardware: "did the
+proposed mitigation make the repro pass?" is answered by running the probe cell,
+which is a GPU node for minutes per sample. As a training reward at that price
+it is unusable; per-sample cost has to come down by orders of magnitude, not
+percentages.
+
+Note the same compression as the root-cause half. The chatbot's "fix" is
+presumably an action or a code change; a registered mitigation name is the
+closed-set form of one. For the environment-knob failures aorta's registry
+covers — 22 of them, from `tf32_off` to `hsa_no_sdma` — the name *is* the fix.
+For a missing `s_waitcnt` in a kernel it is not, and nothing in this plan grades
+a patch. That boundary is worth being explicit about: this reward teaches
+"which knob", not "which line".
+
+**Can it be made cheap offline?** Yes in principle, and the mechanism already
+exists. A probe run's own artifacts record the answer: `winning_mitigation`
+parses the `<mitigation>-<diagnostic>` cell directory name back out, and the
+loop writes a `converged` event naming the winner into `agent_log.jsonl`. So any
+completed agent search yields one labelled `(evidence → winning mitigation)`
+example for free, and a probe matrix yields one per cell — a mitigation was
+applied to a failing cell and the outcome was recorded. Harvesting that costs no
+new GPU time at all. The cost moves entirely to *assembling the archive*.
+
+What it would take:
+
+- A harvester that walks archived run directories and emits
+  `(cell_summaries_before, winning_mitigation)` pairs from `matrix.json`,
+  per-cell `result.json` files and `agent_log.jsonl` `converged` events. This is
+  a few hundred lines and needs no hardware. It is not written, because there is
+  nothing to point it at yet.
+- The archive itself. This is the blocker, and it is worse than "small": see
+  below.
+- A reward that accepts *any* mitigation which made the cell pass, not just the
+  one the historical search happened to land on first. Probe matrices often
+  contain several passing cells, and treating the archived winner as uniquely
+  correct would punish a right answer for being a different right answer.
+
+Until the archive exists this stays an evaluation metric rather than a training
+reward, which is the same conclusion as before — but for a different and more
+tractable reason. It is no longer "inherently too expensive"; it is "cheap once
+a corpus exists", and the corpus is now the thing to buy.
+
+### 4.4 Recipe synthesis — now a capability check, not the domain
+
+This is the demotion, and it should be said plainly rather than absorbed: recipe
+synthesis was ranked first in the previous version of this plan and is the best
+reward the repository can offer. A generated recipe either parses, loads,
+resolves its mitigations, passes the workload's own validation and dry-runs, or
+it does not, at five graded tiers with microsecond-to-second cost and no
+labelling. Nothing in the debugging vertical is that exactly checkable.
+
+It is no longer the headline because it is not the task. Writing a recipe is an
+authoring skill; the agent loop never asks for one. Keeping it first would have
+meant training hardest on the thing easiest to grade rather than the thing that
+was asked for — which is the classic way a reward design goes wrong.
+
+It keeps a real role, in two places. First, as a **capability check**: a policy
+that cannot emit valid YAML against a schema will not reliably emit valid JSON
+against one either, and tiers 1–5 are a cheap, harshly-graded probe of exactly
+that. Second, as the **memorisation canary**: the novelty gate in
+[`examples/rl/recipe_reward.py`](../examples/rl/recipe_reward.py) already
+demonstrates a policy earning full tier marks by reproducing a committed recipe
+verbatim, and refuses it. That failure mode is not specific to recipes — a
+debugging policy can equally learn to emit the most common `(category,
+mitigation)` pair in the corpus — so the gate stays as the worked example of the
+problem.
+
+The scorer is **not** being rebuilt. It stays as it is, in the role it now has.
+
+### 4.5 Free-text diagnosis — needs humans
 
 "Given this report, what went wrong and why" is the thing that would impress in a
 demo and the thing with no automatic reward. The `docs/` corpus supports
@@ -383,24 +798,220 @@ retrieval-augmented answering, but grading a free-text explanation needs a human
 or a judge model, and judge-model rewards on a narrow technical domain are where
 reward hacking shows up first. Deliberately last.
 
-### 4.5 What this implies about the run
+Note that the `hypothesis` field in the proposal contract is exactly this
+problem in miniature: it is free text, the consumer stores it verbatim, and it
+becomes the operator's recommended action when the search stops. It is
+ungradable by any of the mechanisms above, and it is deliberately left
+unscored — a proposal earns full marks in [4.1](#41-the-gate-on-both-halves--proposal-validity)
+with a useless hypothesis, which is a known and accepted hole.
 
-Two things follow that a naive plan would get wrong.
+### 4.6 What the corpus actually contains
 
-**The base model must already be able to produce YAML that parses.** With rewards
-concentrated in tiers 1-5, a policy that fails tier 1 gets a flat zero on nearly
-every sample, every group's advantage is zero, and nothing is learned. Qwen3-8B
-clears this comfortably; Qwen3-0.6B is borderline and is the wrong size for the
-demo even though it is the right size for measuring the engine. A short
-supervised warm-up on the 51 committed recipes before any RL is the cheap
-insurance, and it is also the honest baseline to compare against — if supervised
-fine-tuning on 51 recipes gets most of the way, the RL half needs to justify
-itself.
+[A4](#a4) was previously filed as a soft assumption: "does a probe archive
+exist?", affecting whether triage classification is a main signal or a footnote.
+With the vertical settled on debugging, both [4.2](#42-the-root-cause-half--triage-classification)
+and [4.3](#43-the-fix-half--mitigation-correctness)
+depend on it, so it is now the critical path. It was surveyed rather than
+assumed. The result is worse than "small".
 
-**The reward must reject a memorised recipe.** Tiers 1-5 are all satisfied by
-reproducing a committed recipe verbatim, which is the first thing a policy will
-find. The prompt distribution has to ask for shapes that do not exist in the
-corpus, and tier 6 has to check that the recipe answers the question asked.
+The first pass at this counted probe artifacts only. The CIA diagram makes the
+sanitizer fleet on-domain — Waitcheck and ConSan are the two highlighted tools —
+so the inventory was re-run to include sanitizer reports. That changes the count
+and, more importantly, changes the outlook.
+
+**Probe artifacts**, under this node's run areas, excluding source trees:
+
+| Artifact | Count | Usable as a label |
+|---|---|---|
+| `result.json` (per-trial probe results) | 12 | **No** — all 12 are `verdict: pass` |
+| ...of which fired any failure detector | 0 | — |
+| ...distinct cells represented | 2 | — |
+| `matrix.json` | 16 | Metadata only; 3 are perf-sweep schema, not probe cells |
+| `agent_log.jsonl` / `agent_report.md` | 0 | No completed agent search exists |
+
+**Sanitizer artifacts**, committed in `recipes/sanitizers/survey/reports/`:
+
+| Report | Overall verdict | Findings |
+|---|---|---|
+| `gemm_f32_waitcheck` | `warn` | 64, all `wait_hazard`, severity `warning` |
+| `lds_reduce_waitcheck` | `pass` | 0 |
+| `tiny_vecadd_waitcheck` | `pass` | 0 |
+| `gemm_f32_consan` | `error` | 0 — ConSan did not run in that environment |
+| `lds_reduce_consan` | `error` | 0 |
+| `tiny_vecadd_consan` | `error` | 0 |
+
+So the revised count is **18 labelled runs, not 12** — and exactly **one of them
+evidences a real defect**: the 64 `wait_hazard` findings in
+`gemm_f32_waitcheck`, which are 64 findings from one scenario rather than 64
+independent examples. Three of the six sanitizer reports are `error`, meaning
+the tool did not complete, which is the sanitizer analogue of a probe `error`
+verdict and is not a diagnosis. No committed report evidences a ConSan race.
+None of the findings carry a `kernel_name`, so the finest-grained attribution
+the schema allows is not populated in the data that exists.
+
+The headline conclusion therefore stands, slightly softened: **there is
+essentially no labelled failure corpus** — one scenario, not zero, across 18
+runs. Every other archived result is a passing smoke, timing or survey run,
+which is unsurprising in hindsight: these are runs made to validate a harness,
+and a harness is validated by making it succeed.
+
+**What genuinely improves is the generative story, and it improves a lot.** The
+sanitizer path ships deliberate known-bad reproducers and committed ground truth
+for them:
+
+- `recipes/sanitizers/fixtures/repro/consan_lds_race.hip` and
+  `consan_lds_race_2wave.hip` — intentional LDS races.
+- `recipes/sanitizers/fixtures/expected/verdict_baselines.json` — committed
+  expected verdicts: `consan_racy` → `fail` with an "auto replay diagnostic"
+  finding shape, `consan_clean` → `pass`, `waitcheck_gemm` → `warn` with a
+  "missing s_waitcnt" shape.
+- Eleven `daily-*` sanitizer recipes that drive them, plus a
+  `sanitizers-nightly` workflow that runs them.
+
+That is the expensive half of corpus generation already paid for, at least for
+the race and wait-hazard categories: a reproducer whose failure is intentional
+has ground truth by construction, and the expected verdict is in the repository
+to check against. Running those recipes produces labelled failures on demand.
+It is a materially better position than the probe path, where no reproducer for
+any autopsy category exists.
+
+So the shortfall is still most of the thing. A usable first corpus needs, per
+category, on the order of 30 distinct failing runs to train on and a held-out
+set on top; call it 240 failing examples as a floor, against roughly one
+scenario today. But the path to the first few dozen is committed code rather
+than new engineering.
+
+### The workload breadth problem
+
+The diagram's workloads are **Fremont** (with Gsplat and MIOpen conv2D beneath
+it), **Ads**, and TBD. None of them appear in this repository: `rg -i` finds no
+`fremont`, no `gsplat`, and no `ads` workload; `miopen` appears only in
+environment probing and Buck introspection, not as a workload class. The
+workload classes that do exist are `gpu_smoke`, `hrx`, `hrx_perf`, `inference`,
+`llm_determinism`, `race`, `tokenspeed`, `tokenspeed_serve` and `training`.
+
+And the archive that exists covers fewer still. The 12 probe results are
+`training` (emulated DDP and timing) and `gpu_smoke`; the perf sweeps are
+`tokenspeed_serve`; the sanitizer reports are three synthetic HIP kernels
+(`gemm_f32`, `lds_reduce`, `tiny_vecadd`). **Not one archived artifact comes
+from a workload named in the diagram.**
+
+What that means for generalisation is worth stating rather than hoping about. A
+model trained solely on TokenSpeed serving triage learns the detector
+vocabulary, which transfers — the classifier tiers are workload-independent by
+construction — but it also learns the *co-occurrence statistics* of one
+workload's failures, and those do not transfer. An RCCL collective timeout in a
+tensor-parallel LLM server and a correctness fault in a MIOpen convolution
+present through different detectors, with different capture text, at different
+tiers. A policy that has only seen the former will read the latter's evidence
+against the wrong prior.
+
+The mitigation is cheap to state and not cheap to execute: the corpus has to be
+**stratified by workload family, not just by category**. Concretely, the
+recommendation taken here is that the synthetic generator below should emit each
+failure signature under at least two distinct workload shapes, and that any
+real-hardware corpus should include at least one non-TokenSpeed family before
+it is used for training. That is a constraint on the corpus design rather than
+extra node-hours, so it costs nothing to adopt now and is expensive to retrofit.
+
+It also argues against over-fitting this plan to TokenSpeed at all. TokenSpeed
+is the rollout *engine* — that is
+[Phase 2](#phase-2--validate-the-weight-sync-path)'s subject and it remains
+blocked on [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373)
+— but it is not the debugging *domain*, and the diagram makes that explicit by
+not mentioning it.
+
+**What generating it would cost.** Three routes now, not two — the sanitizer
+reproducers add a middle option that is both cheap and real:
+
+*Synthetic, ~0 node-hours.* Probe mode runs arbitrary `subprocess_argv`, and
+`recipes/probe/probe-template-bash.yaml` exists for exactly that. A script that
+exits non-zero, stalls past the hang window, or prints the stderr signatures the
+tier-4 patterns match produces genuine `result.json` files with real detector
+firings, on CPU, in seconds. 240 cells is minutes of wall clock and perhaps two
+days of authoring the generators. The objection — that this trains
+pattern-matching on the classifier's vocabulary rather than on real failures —
+is weaker here than it first looks, because [4.2](#42-the-root-cause-half--triage-classification)
+already concedes that agreeing with the classifier *is* the task inside the
+agent loop. What synthetic data cannot supply is realistic `capture` text and
+realistic co-occurrence between detectors, and those are precisely what
+distinguishes a plausible read from a correct one.
+
+*Sanitizer reproducers, ~2–4 node-hours, and genuinely real.* The committed
+`consan_lds_race*.hip` fixtures and the eleven `daily-*` sanitizer recipes
+produce true tool output — real ConSan replay diagnostics, real Waitcheck
+hazards — against ground truth already in the repository. This is the best
+labelled data available per hour spent, and it needs no new engineering: run the
+recipes, archive the `sanitizer_report.json` files, extend `triage_reward.py` to
+label from them. It covers races and wait hazards well and covers nothing else,
+so it is a strong start rather than a corpus.
+
+*Real, ~24 node-hours plus the hard part.* Genuine failures across the remaining
+categories need genuinely broken GPU workloads. At three trials per cell and
+roughly two minutes per cell including startup, 240 failing cells is about 24
+node-hours — cheap, and not the real cost. The real cost is **authoring
+reliably-reproducing failures for the categories the sanitizer fixtures do not
+cover**, which is engineering time on hardware and is the line item to plan
+around. Some are easy to induce (`oom_fragment`, `launch_error`);
+`checkpoint_race` and `thermal_throttle` are not, and
+`perf_regression` has no detector that evidences it at all.
+
+The recommendation, taken rather than deferred, and revised by the sanitizer
+finding:
+
+1. **Run the committed sanitizer reproducers and archive their reports.** A few
+   node-hours, no new engineering, and it yields *real* tool output against
+   ground truth already in the repository. This is now the first step, ahead of
+   the synthetic generator, because it is nearly as cheap and not synthetic.
+   The scoring half is already done: `triage_reward.py` labels from
+   `sanitizer_report.json` today, and
+   `--runs recipes/sanitizers/survey` scores the six committed reports.
+2. **Build the synthetic generator** for the categories the fixtures do not
+   cover, stratified across at least two workload shapes per signature. This
+   unblocks the reward end-to-end at essentially no cost and turns "no corpus"
+   into "a corpus of known limitations".
+3. **Buy real runs** for the categories where synthetic capture text is least
+   defensible, and for at least one workload family from the diagram.
+
+Do not wait for an archive to appear — nothing in the survey above suggests one
+is accumulating, and three of the six existing sanitizer reports are `error`
+because the tool was unavailable, which is itself a sign that these artifacts
+are not being produced under conditions anyone is curating for reuse.
+
+### 4.7 What this implies about the run
+
+Three things follow that a naive plan would get wrong.
+
+**The base model must already clear the format gate.** With
+[4.1](#41-the-gate-on-both-halves--proposal-validity) as the outer
+layer, a policy that cannot emit a strict JSON object gets a flat 0.2 on nearly
+every sample, every group's advantage is zero, and nothing is learned. This is
+the same argument the previous version of this plan made about YAML, and it
+transfers directly — which is the residual value of
+[4.4](#44-recipe-synthesis--now-a-capability-check-not-the-domain) as a
+capability check. Qwen3-8B clears it comfortably; Qwen3-0.6B is borderline and
+is the wrong size for the demo even though it is the right size for measuring
+the engine. A short supervised warm-up is the cheap insurance, and also the
+honest baseline: if supervised fine-tuning on a few hundred proposals gets most
+of the way, the RL half needs to justify itself.
+
+**The reward must reject a memorised answer.** In the recipe domain this was
+verbatim corpus copying, which the novelty gate refuses. In the debugging domain
+it is duller and harder to see: a policy can learn the corpus's most common
+`(category, mitigation)` pair and emit it unconditionally. That scores full marks
+at [4.1](#41-the-gate-on-both-halves--proposal-validity) — asserted as
+a test — and beats the always-`pass` floor at
+[4.2](#42-the-root-cause-half--triage-classification) whenever
+the corpus is skewed. Both scorers therefore print a degenerate-policy baseline
+next to any real score, and a reward must never be read on its own. The
+synthetic corpus of [4.6](#46-what-the-corpus-actually-contains) has to be
+balanced across categories for this reason, not merely large.
+
+**Nothing above needs the weight transport.** All three built scorers are
+offline functions over archived artifacts, so the reward work proceeds in
+parallel with [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373)
+rather than behind it. The corpus is the binding constraint, and it needs no
+engine at all.
 
 ## 5. Cost: does the claim hold?
 
@@ -805,12 +1416,32 @@ degree, because the receive side hands the tensors to the model's own
 
 ### Phase 3 — reward functions and a supervised baseline
 
-In the separate repo, importing aorta: the graded recipe reward of section 4.1
-and the classifier-agreement reward of 4.2. Then supervised fine-tuning of
-Qwen3-8B on the 51 committed recipes and whatever probe archive exists, and
-measurement of tier-1-through-5 pass rates. **This is the gate on the whole
-effort:** if SFT gets most of the way, the RL phase has to justify itself against
-that number rather than against zero.
+Three scorers now exist in [`examples/rl/`](../examples/rl/), all offline and
+all importing aorta rather than restating it: the proposal-contract ladder
+([4.1](#41-the-gate-on-both-halves--proposal-validity)), the
+classifier-agreement reward
+([4.2](#42-the-root-cause-half--triage-classification)), and
+the recipe reward in its reduced role
+([4.4](#44-recipe-synthesis--now-a-capability-check-not-the-domain)).
+
+What Phase 3 still needs, in order:
+
+1. **The corpus generator** ([4.6](#46-what-the-corpus-actually-contains)). No
+   hardware, no decisions, and nothing substantive can be measured without it.
+   This is the first task, ahead of any training.
+2. **The mitigation-outcome harvester**
+   ([4.3](#43-the-fix-half--mitigation-correctness)),
+   which turns archived probe matrices into `(evidence → winning mitigation)`
+   pairs. Cheap, but pointless before 1.
+3. **Supervised fine-tuning** of Qwen3-8B on the assembled corpus, measuring
+   proposal-tier pass rates and triage reward against the printed degenerate
+   baselines. **This is the gate on the whole effort:** if SFT gets most of the
+   way, the RL phase has to justify itself against that number rather than
+   against zero.
+
+None of this is blocked by
+[tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373), which
+is why it is worth doing now.
 
 ### Phase 4 — the RL loop
 
@@ -836,44 +1467,92 @@ evaluation harness is needed.
 ## Assumptions to confirm with Manoj
 
 Everything that could be settled by reading the repository or running hardware
-has been. What is left needs a decision or an artifact that is not ours, and
-these four block Phase 4 rather than merely refining it:
+has been. Two answers arrived since the first draft: [A2](#a2) settled the
+domain, and a CIA architecture diagram substantially settled [A1](#a1). Between
+them they promoted [A4](#a4) from a soft item to the critical path. What is left
+needs a decision or an artifact that is not ours:
 
 | # | Blocked on | Why it blocks | Costs if wrong |
 |---|---|---|---|
-| [A1](#a1) | The CIA / Sleuth output contract | The reward checks output *format* first; neither system appears in this repository, so there is nothing to check against | Rewrite of the reward's outer layer; the tier ladder survives |
-| [A2](#a2) | What "AORTA-like actions" means | Producing artifacts is automatically scorable; conversational expertise is not | If it means conversation, this is a RAG problem and the RL case largely dissolves |
+| [A4](#a4) | **A corpus of failing runs** | Both substantive rewards need labelled failures; the survey found 18 archived runs and **one** real defect among them ([4.6](#46-what-the-corpus-actually-contains)) | Nothing substantive can be trained. This is now the critical path |
+| [A1](#a1) | The chatbot's response schema; what Sleuth is; a labeller for the autopsy `category` | Structured-versus-free-text decides whether the reward stays fully automatic ([3.4](#34-the-current-contract-versus-the-target-one)) | A presentation layer, and the category term stays unscored; verdict and attribution survive intact |
 | [A3](#a3) | Model choice | Sets the memory and throughput arithmetic in [5](#5-cost-does-the-claim-hold) and [5b](#5b-what-disaggregation-actually-costs) | The cost table, not the design |
 | [A7](#a7) | Who stands up the trainer | No trainer exists here; verl/slime integration, the GRPO loop and its checkpointing are outside this repository | Phase 4 cannot start |
 
-Two further items are blocked but softer: [A4](#a4) (does a probe archive exist)
-decides whether triage classification is a main signal or a footnote — the code
-path for it is built and tested against synthetic fixtures, so only the corpus
-is missing — and [A5](#a5) (whether Toyota is a separate demo) affects scope
+[A5](#a5) (whether Toyota is a separate demo) remains open but affects scope
 rather than feasibility.
+
+A4 is worth separating from the rest, because it is the only one that does not
+need a decision from anyone — it needs work, the work needs no hardware, and
+[4.6](#46-what-the-corpus-actually-contains) recommends a route and takes it.
+The others genuinely wait on someone else.
 
 One item that is **not** blocked on Manoj and should be raised anyway: the
 `nccl` weight transport does not work on this image
-([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer)). That is an
+([Phase 2b](#phase-2b--the-nccl-data-plane-does-not-transfer)). That is an
 upstream TokenSpeed defect, it blocks the loop at every topology and model size,
 and it is ours to file rather than his to decide. Filed as
 [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373).
 
 <a id="a1"></a>
-**A1 — "CIA" and "Sleuth".** Neither appears in this repository. This plan
-assumes the intended first consumer is something shaped like `aorta agent`'s
-`LiteLLMProposer`: an OpenAI-compatible endpoint returning strict JSON with a
-constrained `category` and registered mitigation names. If CIA and Sleuth are
-different systems, their output contract is needed before training, because the
-output format is most of what the reward checks.
+**A1 — the consumer. SUBSTANTIALLY ANSWERED by the CIA architecture diagram.**
+CIA is the **Cluster Intelligence Agent**, and AORTA is the box inside it — not
+a separate system consuming aorta from outside. CIA exposes aorta over MCP, API
+and CLI; a workloads box sits beneath it; and it drives a tool fleet —
+Waitcheck and ConSan highlighted, then ASAN, UBSan, ROCgdb, RocJITsu — against
+MI355 hardware. The front end is an AORTA chatbot that takes input and shows
+**output logs, root cause and the fix**. Sleuth is described as something
+similar. The full reading, and what each part changes, is
+[3.0](#30-what-cia-is-and-where-a-post-trained-model-sits-in-it).
+
+This resolves what the previous version of this document could only guess at.
+It also vindicates the guess: the contract designed against — `aorta agent`'s
+proposer, transcribed in
+[3.1](#31-what-the-current-consumer-sends) — is the right skeleton, because the
+chatbot's root-cause-and-fix pair is the same pair in prose form
+([3.4](#34-the-current-contract-versus-the-target-one)).
+
+Three things remain genuinely open, none of them blocking:
+
+- **The response schema the chatbot renders.** Whether it expects structured
+  fields it formats into prose, or free text it displays verbatim. If
+  structured, the target contract collapses almost entirely into the current one
+  and nothing here changes. If free text, a presentation layer has to be written
+  and its quality is ungraded. This is the one that would change the plan.
+- **What Sleuth actually is.** Described as "something similar" to CIA, which is
+  enough to not design around it and not enough to design for it.
+- **The autopsy `category` has no deterministic labeller.** Unchanged by the
+  diagram, and the narrowest of the three. The contract demands one of eight
+  categories, but nothing in the tree derives the correct category from a run's
+  evidence; the only mapping is `_infer_category_from_detectors`, a keyword
+  heuristic used solely by the offline `FakeLLMProposer`, and training against
+  it would teach the heuristic rather than the diagnosis
+  ([4.2](#42-the-root-cause-half--triage-classification)). Closing it needs
+  human category labels or a rule table someone owns. Until then the reward
+  scores verdict and attribution, which are genuinely derived, and leaves
+  category unscored.
+
+Also noted and deliberately not designed for: **MCP is a plausible serving
+path.** If CIA reaches aorta over MCP, a post-trained model might be reached
+that way rather than through the proposer's LiteLLM call. Nothing in this tree
+serves aorta over MCP today, so this is recorded as an integration option only.
 
 <a id="a2"></a>
-**A2 — "AORTA-like actions" means producing AORTA artifacts.** This plan reads
-the niche as recipe synthesis, triage classification and mitigation proposal,
-because those are what the repository can score automatically. If what was meant
-is conversational expertise about AORTA — answering questions from the docs — the
-machine-checkable reward largely disappears and the effort is a
-retrieval-augmented-generation problem rather than an RL one.
+**A2 — the domain. ANSWERED.** Asked whether the target is producing AORTA
+artifacts or conversational expertise, the answer was:
+
+> "debugging vertical, can we post train to become a good model for use with
+> aorta llm agent?"
+
+So: the domain is debugging — triage, diagnosis, failure analysis — and the
+consumer is `aorta agent`. Both halves of the question are settled by that one
+sentence, and neither answer is the one this plan originally optimised for. The
+consequences are worked through in
+[4](#4-the-domain-and-the-training-signal): the reward ranking changes, recipe
+synthesis is demoted to a capability check, and the corpus becomes the critical
+path. The RAG risk this assumption was hedging against does not materialise —
+"for use with aorta llm agent" is an artifact-producing task with a code
+contract, which is the good case.
 
 <a id="a3"></a>
 **A3 — Model size.** Qwen3-8B is assumed: the largest Qwen3 in the measured set,
@@ -882,10 +1561,45 @@ Qwen3-0.6B is used in the committed recipes because they measure the engine, not
 the model. If the demo needs a specific size, the cost table changes.
 
 <a id="a4"></a>
-**A4 — A probe archive exists.** The classifier-agreement signal needs a body of
-archived probe runs with logs and reports. This repository has the classifier but
-no corpus. How many real runs are retained, and where, decides whether 4.2 is a
-main signal or a footnote.
+**A4 — a corpus of failing runs. SURVEYED: ESSENTIALLY EMPTY, BUT GENERABLE.
+Now the critical path.** This was previously a soft assumption about whether triage
+classification would be a main signal or a footnote. With the debugging vertical
+settled it is load-bearing for both substantive rewards, so it was measured.
+Counting probe artifacts **and** the sanitizer reports the CIA diagram makes
+on-domain: **18 archived labelled runs, of which exactly one evidences a real
+defect** — 64 `wait_hazard` findings from a single Waitcheck scenario. The 12
+probe results are all `pass` with no detectors fired; of the 6 sanitizer
+reports, 2 are `pass` and 3 are `error` because ConSan did not run. Zero
+completed agent searches.
+
+The full survey, the workload-breadth problem, and what generating a corpus
+would cost by each of three routes are in
+[4.6](#46-what-the-corpus-actually-contains). Two things changed once sanitizer
+artifacts were included:
+
+- The count went from 12 to 18 and from zero real defects to one. Materially
+  better than "nothing", still not a corpus.
+- The **generative** position improved a lot. The repository already ships
+  deliberate race reproducers (`consan_lds_race.hip`,
+  `consan_lds_race_2wave.hip`), committed expected verdicts for them
+  (`fixtures/expected/verdict_baselines.json`), eleven `daily-*` sanitizer
+  recipes and a nightly workflow. That is the expensive half of corpus
+  generation already paid for, for races and wait hazards.
+
+Also established, and a constraint on the corpus rather than on hardware: **not
+one archived artifact comes from a workload the diagram names.** Fremont, Gsplat
+and Ads appear nowhere in the tree, and MIOpen only in environment probing. A
+model trained on TokenSpeed serving triage learns a workload-independent
+detector vocabulary but a workload-specific set of co-occurrence priors, so the
+corpus must be stratified by workload family and not only by failure category.
+
+The recommendation, already taken in 4.6: run the committed sanitizer
+reproducers first and label from `sanitizer_report.json`, then build a synthetic
+generator for the uncovered categories, then buy real runs — including at least
+one non-TokenSpeed family.
+
+What is *not* blocked on anyone: this needs no decision and no hardware. It
+needs someone to do it, and it is the highest-value unblocked work in the plan.
 
 <a id="a5"></a>
 **A5 — "Self-serving to Toyota" is a separate demo.** The transcript mentions
@@ -911,9 +1625,9 @@ which matches the source (`weight_transfer/manager.py`, the `else` branch of
 disaggregated onto separate GPUs — but intra-node, so the "no cluster" claim
 survives at a cost of ~33% of generation throughput rather than a second
 machine ([5b](#5b-what-disaggregation-actually-costs)). Measured in
-[Phase 2](#phase-2-validate-the-weight-sync-path). The `nccl` transport then
+[Phase 2](#phase-2--validate-the-weight-sync-path). The `nccl` transport then
 turned out not to transfer at all
-([Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer)), which blocks the
+([Phase 2b](#phase-2b--the-nccl-data-plane-does-not-transfer)), which blocks the
 loop regardless of topology.
 
 <a id="a7"></a>
@@ -927,11 +1641,39 @@ path stops at Phase 3 no matter what the engine does.
 
 ## Known gaps
 
+- **There is almost no corpus of failing runs, and that is now the binding
+  constraint.** Surveyed rather than assumed, across probe and sanitizer
+  artifacts: 18 archived labelled runs, of which **one** evidences a real defect
+  (64 `wait_hazard` findings from a single Waitcheck scenario); the 12 probe
+  results are all `pass`, and 3 of 6 sanitizer reports are `error` because
+  ConSan did not run ([4.6](#46-what-the-corpus-actually-contains), [A4](#a4)).
+  Both substantive rewards are written and tested and neither can be evaluated
+  on real data. This gap is ahead of the engine defect in priority, because it
+  needs no hardware and no decision from anyone — only work, and the committed
+  race reproducers make the first increment cheap.
+- **No archived artifact comes from a workload CIA names.** Fremont, Gsplat and
+  Ads are absent from the tree; MIOpen appears only in environment probing. The
+  detector vocabulary is workload-independent, but failure co-occurrence
+  statistics are not, so a corpus stratified only by category would train a
+  TokenSpeed-shaped prior. Recorded as a corpus-design constraint in
+  [4.6](#46-what-the-corpus-actually-contains) rather than as extra node-hours.
+- **The autopsy `category` is unscored, because nothing can label it.** The
+  proposal contract demands one of eight categories and no deterministic
+  labeller for it exists; the sole mapping in the tree is a keyword heuristic
+  used by the offline fake proposer. Training against that would teach the
+  heuristic, so the triage reward stops at verdict and attribution
+  ([A1](#a1)). This is a genuine hole in an otherwise fully-labelled signal, and
+  it needs human labels or an owned rule table to close.
+- **The format reward can be saturated without diagnosing anything.** A fixed
+  valid proposal scores 1.0 at
+  [4.1](#41-the-gate-on-both-halves--proposal-validity) and is accepted
+  by the agent loop every time. This is asserted as a test rather than left
+  implicit, and it is why the format term is a gate and never the reward.
 - **The weight transport does not work, and that is now measured rather than
   assumed.** The control plane, its lifecycle guards, its validation and
   pause/resume are measured against a live server in
-  [Phase 2](#phase-2-validate-the-weight-sync-path). The transport is measured
-  in [Phase 2b](#phase-2b-the-nccl-data-plane-does-not-transfer) and it is
+  [Phase 2](#phase-2--validate-the-weight-sync-path). The transport is measured
+  in [Phase 2b](#phase-2b--the-nccl-data-plane-does-not-transfer) and it is
   broken: `/update_weights` returns 200 having moved nothing and loads
   uninitialised device memory into the model, filed upstream as
   [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373).

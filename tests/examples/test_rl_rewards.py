@@ -10,7 +10,9 @@ things most likely to rot unnoticed, so they are what these pin down.
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -43,6 +45,36 @@ def recipe_reward():
 @pytest.fixture(scope="module")
 def triage_reward():
     return _load("triage_reward")
+
+
+@pytest.fixture(scope="module")
+def proposal_reward():
+    return _load("proposal_reward")
+
+
+def _real_detector_ids() -> set[str]:
+    """Every detector ID the classifier tiers can actually emit.
+
+    Read from the tier modules' own ``DETECTOR_*`` constants and ID frozensets
+    so a rename shows up as a test failure rather than as a fixture quietly
+    citing a detector that no longer exists.
+    """
+    ids: set[str] = set()
+    for name in (
+        "tier1_process",
+        "tier2_hang",
+        "tier3_kernel",
+        "tier4_patterns",
+        "tier5_custom",
+        "verdict",
+    ):
+        module = importlib.import_module(f"aorta.probe.classifier.{name}")
+        for key, value in vars(module).items():
+            if key.startswith("DETECTOR") and isinstance(value, str) and ":" in value:
+                ids.add(value)
+            elif key.endswith("DETECTOR_IDS") and isinstance(value, frozenset):
+                ids |= {v for v in value if isinstance(v, str) and ":" in v}
+    return ids
 
 
 # --------------------------------------------------------------------------- #
@@ -310,3 +342,346 @@ def test_no_fixture_is_stale_against_the_current_rules(triage_reward):
     stale = [d["cell_name"] for d in triage_reward.FIXTURES
              if triage_reward.label_run(d).stale]
     assert stale == []
+
+
+def test_every_fixture_cites_only_detectors_a_tier_can_emit(triage_reward):
+    """A fixture citing an invented ID trains attribution on a fake vocabulary.
+
+    The attribution term is scored against exactly these IDs, so a fixture that
+    names something no classifier tier produces rewards the model for citing a
+    detector it will never see in a real run. Collected from the tier modules'
+    own constants rather than hard-coded, so a renamed detector fails here
+    instead of rotting silently.
+    """
+    real = _real_detector_ids()
+    assert real, "no detector constants found; the classifier layout moved"
+    for doc in triage_reward.FIXTURES:
+        label = triage_reward.label_run(doc)
+        invented = sorted(label.cited_detectors - real)
+        assert not invented, f"{doc['cell_name']} cites unknown {invented}"
+
+
+def test_the_debugging_fixtures_cover_the_failure_shapes_the_agent_sees(
+    triage_reward,
+):
+    """The vertical is debugging, so the corpus has to contain its shapes.
+
+    One representative per autopsy category the proposal contract enumerates
+    and the classifier can actually evidence. Without these the fixture set
+    only exercises signal/exit-code failures, which is not what `aorta agent`
+    is pointed at.
+    """
+    cited = set()
+    for doc in triage_reward.FIXTURES:
+        cited |= triage_reward.label_run(doc).cited_detectors
+    for required in (
+        "tier4:collective_timeout",  # rccl_hang
+        "tier4:hip_error",  # illegal_mem
+        "tier3:vm_l2_fault",  # illegal_mem, the underlying fault
+        "tier3:thermal_throttle",  # thermal_throttle
+        "tier3:xgmi_link_error",  # fabric
+        "tier4:nan_signature",  # numerics, with a zero exit code
+    ):
+        assert required in cited, f"no fixture evidences {required}"
+
+
+def test_an_advisory_warn_is_never_part_of_the_justification(triage_reward):
+    """`tier3:vram_growth` is a warn, so citing it must not earn attribution.
+
+    The reset-with-warn fixture carries it precisely as a red herring: a policy
+    that lists every detector it can see, warns included, should be docked.
+    """
+    doc = next(
+        d for d in triage_reward.FIXTURES if d["cell_name"] == "reset-with-warn"
+    )
+    label = triage_reward.label_run(doc)
+    assert "tier3:vram_growth" not in label.cited_detectors
+    assert label.verdict == "fail"
+
+    everything = triage_reward.Answer(
+        verdict="fail",
+        detectors=sorted(label.cited_detectors | {"tier3:vram_growth"}),
+    )
+    exact = triage_reward.Answer(
+        verdict="fail", detectors=sorted(label.cited_detectors)
+    )
+    assert (
+        triage_reward.score_answer(everything, label).reward
+        < triage_reward.score_answer(exact, label).reward
+    )
+
+
+# --------------------------------------------------------------------------- #
+# proposal_reward: the contract `aorta agent` actually enforces
+# --------------------------------------------------------------------------- #
+
+
+def test_an_on_contract_proposal_reaches_the_top_tier(proposal_reward):
+    proposal = proposal_reward.Proposal(
+        "valid",
+        json.dumps(
+            {
+                "category": "rccl_hang",
+                "hypothesis": "collective timed out on every rank",
+                "next_mitigations": ["nccl_launch_order_implicit"],
+                "confidence": 0.6,
+                "stop": False,
+            }
+        ),
+        ["nccl_launch_order_implicit", "tf32_off"],
+    )
+    score = proposal_reward.score_proposal(proposal)
+    assert score.tier == proposal_reward.MAX_TIER
+    assert score.reward == 1.0
+    assert score.consumer_outcome == "accepted"
+
+
+def test_a_hallucinated_mitigation_is_docked_and_would_stop_the_search(
+    proposal_reward,
+):
+    """The defect this reward exists for.
+
+    `LiteLLMProposer` filters unrecognised names out before the policy sees
+    them, so a proposal naming only invented mitigations reaches the loop as a
+    well-formed step with nothing to try, and the search ends. Nothing raises.
+    The reward has to notice what the consumer does not.
+    """
+    proposal = proposal_reward.Proposal(
+        "hallucinated",
+        json.dumps(
+            {
+                "category": "rccl_hang",
+                "hypothesis": "disable peer-to-peer",
+                "next_mitigations": ["rccl_p2p_disable"],
+                "confidence": 0.9,
+                "stop": False,
+            }
+        ),
+        ["nccl_launch_order_implicit", "tf32_off"],
+    )
+    score = proposal_reward.score_proposal(proposal)
+    assert score.stopped_at == "tier4_registry"
+    assert score.reward < 1.0
+    assert score.consumer_outcome == "silent_stop"
+
+
+def test_an_invented_category_is_rejected_loudly_by_the_consumer(proposal_reward):
+    """A bad category is the one thing `AgentPolicy` raises on."""
+    proposal = proposal_reward.Proposal(
+        "bad category",
+        json.dumps(
+            {
+                "category": "rccl_timeout",
+                "hypothesis": "h",
+                "next_mitigations": ["tf32_off"],
+                "confidence": 0.5,
+                "stop": False,
+            }
+        ),
+        ["tf32_off"],
+    )
+    score = proposal_reward.score_proposal(proposal)
+    assert score.stopped_at == "tier3_category"
+    assert score.consumer_outcome == "policy_stop"
+
+
+def test_coerced_fields_still_lose_reward_even_though_the_consumer_accepts(
+    proposal_reward,
+):
+    """`AgentStep.from_dict` repairs a bad type; the contract still says no.
+
+    This is why the consumer cannot be used as the oracle: it accepts a
+    proposal whose confidence it silently zeroed.
+    """
+    proposal = proposal_reward.Proposal(
+        "string confidence",
+        json.dumps(
+            {
+                "category": "rccl_hang",
+                "hypothesis": "h",
+                "next_mitigations": ["tf32_off"],
+                "confidence": "high",
+                "stop": False,
+            }
+        ),
+        ["tf32_off"],
+    )
+    score = proposal_reward.score_proposal(proposal)
+    assert score.stopped_at == "tier2_schema"
+    assert score.consumer_outcome == "accepted"
+
+
+def test_prose_around_the_object_earns_nothing(proposal_reward):
+    proposal = proposal_reward.Proposal(
+        "prose", 'Here you go: {"category": "rccl_hang"}', ["tf32_off"]
+    )
+    score = proposal_reward.score_proposal(proposal)
+    assert score.tier == 0
+    assert score.reward == 0.0
+
+
+def test_a_registered_but_unavailable_mitigation_is_docked_one_tier(
+    proposal_reward,
+):
+    """Registered is not the same as offered.
+
+    Re-proposing something already tried is silently filtered too, so it costs
+    an iteration rather than raising.
+    """
+    body = {
+        "category": "rccl_hang",
+        "hypothesis": "h",
+        "next_mitigations": ["hsa_no_sdma"],
+        "confidence": 0.5,
+        "stop": False,
+    }
+    proposal = proposal_reward.Proposal(
+        "already tried",
+        json.dumps(body),
+        ["hsa_no_sdma", "tf32_off"],
+        tried=["hsa_no_sdma"],
+    )
+    score = proposal_reward.score_proposal(proposal)
+    assert score.tier == 4
+    assert score.stopped_at == "tier5_available"
+    assert score.consumer_outcome == "silent_stop"
+
+
+def test_the_ladder_is_monotonic_so_being_more_wrong_never_pays_more(
+    proposal_reward,
+):
+    tiers = [
+        proposal_reward.score_proposal(f).tier for f in proposal_reward.FIXTURES
+    ]
+    assert min(tiers) == 0
+    assert max(tiers) == proposal_reward.MAX_TIER
+    for f in proposal_reward.FIXTURES:
+        score = proposal_reward.score_proposal(f)
+        assert score.reward == pytest.approx(score.tier / proposal_reward.MAX_TIER)
+
+
+def test_every_fixture_stops_where_it_is_meant_to(proposal_reward):
+    """Pins each failure mode to its tier, so a loosened check is visible."""
+    expected = proposal_reward._fixture_expectations()
+    actual = {
+        f.name: proposal_reward.score_proposal(f).tier
+        for f in proposal_reward.FIXTURES
+    }
+    assert actual == expected
+
+
+def test_the_categories_come_from_the_agent_not_a_copy(proposal_reward):
+    """The closed set is imported, so adding a category updates the reward."""
+    from aorta.agent.llm import AUTOPSY_CATEGORIES
+
+    assert proposal_reward.AUTOPSY_CATEGORIES is AUTOPSY_CATEGORIES
+
+
+def test_a_fixed_valid_proposal_scores_full_marks_without_diagnosing_anything(
+    proposal_reward,
+):
+    """The ceiling of a format reward, stated as a test.
+
+    If this ever fails, the reward has started measuring substance and the
+    docstring's claim that it is only a gate is wrong.
+    """
+    rows = {row["policy"]: row for row in proposal_reward.baselines()}
+    fixed = rows["always the same valid proposal"]
+    assert fixed["mean_reward"] == 1.0
+    assert fixed["accepted_rate"] == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# triage_reward: the sanitizer label source
+#
+# Waitcheck and ConSan are the two tools the CIA architecture highlights, so
+# their reports are on-domain evidence for the root-cause half rather than a
+# separate concern. These run against the reports committed under
+# recipes/sanitizers/survey, which are the only real labelled failure evidence
+# in the tree.
+# --------------------------------------------------------------------------- #
+
+_SURVEY = Path(__file__).resolve().parents[2] / "recipes" / "sanitizers" / "survey"
+
+
+def test_the_committed_sanitizer_reports_all_label(triage_reward):
+    """Every committed report loads and yields a verdict from the tools' own set."""
+    labelled = triage_reward.load_sanitizer_reports(_SURVEY)
+    assert len(labelled) == 6, "the committed survey reports moved or changed"
+    verdicts = {label.verdict for _, label in labelled}
+    assert verdicts <= {"pass", "warn", "fail", "not_checked", "error"}
+    assert verdicts == {"pass", "warn", "error"}
+
+
+def test_a_wait_hazard_is_cited_by_its_namespaced_code(triage_reward):
+    """Attribution reads like a detector ID and cannot be confused with one."""
+    labelled = triage_reward.load_sanitizer_reports(_SURVEY)
+    hazard = next(
+        label for src, label in labelled if "gemm_f32_waitcheck" in src
+    )
+    assert hazard.verdict == "warn"
+    assert hazard.cited_detectors == {"waitcheck:wait_hazard"}
+
+
+def test_a_sanitizer_that_did_not_run_attributes_nothing(triage_reward):
+    """An `error` verdict means no observation, so there is nothing to cite.
+
+    Mirrors the probe side, where a trial that never validly ran is `error` and
+    carries no failure detectors.
+    """
+    labelled = triage_reward.load_sanitizer_reports(_SURVEY)
+    errored = [label for src, label in labelled if "consan" in src]
+    assert errored, "expected the ConSan reports to be present"
+    for label in errored:
+        assert label.verdict == "error"
+        assert label.failure_detectors == []
+
+
+def test_a_rotted_report_is_rejected_rather_than_relabelled(triage_reward, tmp_path):
+    """The corpus-rot signal for this source is aorta's own consistency check.
+
+    `SanitizerReport.from_dict` recomputes the overall verdict from the checks
+    and raises when the stored value contradicts it, so a report whose verdict
+    has been tampered with cannot be silently trained on.
+    """
+    import copy
+
+    source = next(_SURVEY.rglob("sanitizer_report.json"))
+    doc = json.loads(source.read_text(encoding="utf-8"))
+
+    tampered = copy.deepcopy(doc)
+    tampered["overall_verdict"] = "pass" if doc["overall_verdict"] != "pass" else "fail"
+    with pytest.raises((ValueError, KeyError, TypeError)):
+        triage_reward.label_sanitizer_report(tampered)
+
+    # And the loader skips it instead of aborting the whole corpus.
+    (tmp_path / "sanitizer_report.json").write_text(
+        json.dumps(tampered), encoding="utf-8"
+    )
+    assert triage_reward.load_sanitizer_reports(tmp_path) == []
+
+
+def test_the_untampered_report_still_labels(triage_reward):
+    """Guards the test above: rejection must be caused by the tampering."""
+    source = next(_SURVEY.rglob("sanitizer_report.json"))
+    doc = json.loads(source.read_text(encoding="utf-8"))
+    label = triage_reward.label_sanitizer_report(doc, source=str(source))
+    assert label.verdict == doc["overall_verdict"]
+    assert label.stale is False
+
+
+def test_scoring_works_unchanged_across_both_label_sources(triage_reward):
+    """One scorer, two label spaces.
+
+    The sanitizer vocabulary includes `warn`, which the probe split has no
+    equivalent for, so the two spaces are deliberately not mapped onto each
+    other. `score_answer` is string equality plus set F1, so it spans both
+    without needing to know which it is looking at.
+    """
+    labelled = triage_reward.load_sanitizer_reports(_SURVEY)
+    for _, label in labelled:
+        oracle = triage_reward.Answer(label.verdict, sorted(label.cited_detectors))
+        assert triage_reward.score_answer(oracle, label).reward == pytest.approx(1.0)
+
+        wrong = triage_reward.Answer("pass" if label.verdict != "pass" else "fail", [])
+        assert triage_reward.score_answer(wrong, label).reward < 1.0
