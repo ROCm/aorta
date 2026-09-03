@@ -48,13 +48,24 @@ class LocalVLLMBackend:
         temperature: float = 0.1,
         streaming: bool = True,
     ) -> ChatOpenAI:
-        """Return a LangChain ChatOpenAI instance pointed at the vLLM server."""
+        """Return a LangChain ChatOpenAI instance pointed at the vLLM server.
+
+        ``llm_max_tokens`` / ``llm_timeout`` / ``llm_max_retries`` are applied
+        here as they are by the remote backends: config documents them as
+        LLM-wide, so a vLLM user setting them and getting no cap at all is the
+        setting silently not meaning what it says. No ``LLMCallCounter``
+        though -- that exists to count billable remote calls, and this flow has
+        none.
+        """
         return ChatOpenAI(
             base_url=settings.vllm_base_url,
             api_key=settings.vllm_api_key,
             model=settings.vllm_model,
             temperature=temperature,
             streaming=streaming,
+            max_tokens=settings.llm_max_tokens,
+            timeout=settings.llm_timeout,
+            max_retries=settings.llm_max_retries,
         )
 
     def health_url(self) -> str:

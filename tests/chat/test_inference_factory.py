@@ -61,6 +61,34 @@ def remote_llm_settings(monkeypatch):
     monkeypatch.setattr(settings, "llm_max_retries", 2)
 
 
+class TestTheSharedLimitsApplyToEveryBackend:
+    """`llm_max_tokens` / `llm_timeout` / `llm_max_retries` are documented as LLM-wide.
+
+    Both remote backends honoured them and the local one did not, so a vLLM
+    user who set a generation cap got no cap -- the setting silently not
+    meaning what its documentation says, which is worse than not offering it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _limits(self, monkeypatch):
+        monkeypatch.setattr(settings, "llm_max_tokens", 256)
+        monkeypatch.setattr(settings, "llm_timeout", 7.5)
+        monkeypatch.setattr(settings, "llm_max_retries", 5)
+
+    def test_the_local_backend_applies_them(self):
+        model = LocalVLLMBackend().get_chat_model()
+
+        assert model.max_tokens == 256
+        assert model.request_timeout == 7.5
+        assert model.max_retries == 5
+
+    def test_it_does_not_count_local_calls_as_billable(self):
+        """`LLMCallCounter` is on the remote backends to count metered calls."""
+        model = LocalVLLMBackend().get_chat_model()
+
+        assert not any(isinstance(cb, LLMCallCounter) for cb in (model.callbacks or []))
+
+
 class TestProviderSelection:
     def test_available_providers_are_the_three_documented_ones(self):
         assert available_providers() == ("litellm", "openai", "vllm")
