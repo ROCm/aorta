@@ -82,6 +82,107 @@ for the workload this extends and every measured number quoted below,
 first consumer, and whose "Relationship to Cluster-Scale Agent Systems" section
 already anticipates being invoked by a cluster agent — which is what CIA is.
 
+## 0. Parked: where this stands and how to resume
+
+**This workstream is parked.** Attention moved to nightly gating. Nothing here
+is half-finished in a way that rots — the scorers and the corpus builder are
+committed, tested and self-contained — but the next step is blocked on a
+question that no amount of further corpus work can answer. Read this section
+and [the blocker](#the-blocker-read-this-before-spending-another-node-hour)
+before resuming.
+
+**State.** Commit `4aac332` on `explore/tokenspeed-rl-rollouts`. **Unpushed, no
+PR.** Both reward scorers are validated end to end against real data:
+`examples/rl/proposal_reward.py` (five-tier proposal-contract ladder) and
+`examples/rl/triage_reward.py` (verdict plus attribution), plus
+`examples/rl/build_corpus.py`, which turns real sanitizer runs into JSONL both
+scorers read with no conversion pass. The committed corpus under
+`examples/rl/corpus/` is **9 scenarios / 54 examples** (9 triage, 45 proposal),
+generated on a gfx950 compute node; `examples/rl/corpus/README.md` records its
+provenance. 48 tests pass under `tests/examples/test_rl_rewards.py`.
+
+### The blocker: read this before spending another node-hour
+
+**The sanitizer label space is disjoint from the eight autopsy categories.** The
+sanitizers answer `pass` / `warn` / `fail` / `error` / `not_checked`. The agent's
+`category` field answers one of `checkpoint_race`, `illegal_mem`,
+`launch_error`, `oom_fragment`, `perf_regression`, `rccl_hang`,
+`thermal_throttle`, `unknown`. No sanitizer report carries a category, and
+nothing maps one space onto the other, because the two describe different
+things: a sanitizer verdict is a kernel-level judgement, an autopsy category is
+a workload-level symptom.
+
+The consequence is structural, not a matter of scale. **The root-cause half of
+the reward cannot be labelled from sanitizer data at any corpus size.** Running
+more reproducers, or more sanitizer recipes, or the same ones on more hardware,
+moves the sanitizer-verdict axis and leaves the category axis at exactly zero
+coverage. Covering it needs probe runs on workloads that genuinely fail, and
+**every archived probe run in the tree is a `pass`** — so there is currently no
+example of any category to learn from, and no labeller to assign one.
+
+This is the single most important thing to resolve before any further corpus
+investment, and it lands directly on an already-open question: [A1](#a1) asks
+whether a labeller or an owned rule table exists for `category`. That question
+now has a much sharper form. There are three ways out and they are not
+equivalent:
+
+1. **A labeller or rule table exists somewhere** — then the categories can be
+   assigned to probe runs and the axis opens up. Cheapest by far, and the
+   reason A1 is worth asking before anything else.
+2. **Nobody owns it** — then aorta owns defining it, and the eight categories
+   become our rule table to write and defend. Real design work, not data work.
+3. **Train only the sanitizer-verdict axis** — honest and immediately possible
+   with what is committed, but it trains the tool-verdict half and leaves the
+   `category` term of the contract unscored, which is a smaller claim than
+   "post-trained for the debugging vertical".
+
+Do not pick between these by generating more data. None of the three is
+distinguished by a larger corpus.
+
+### The 0.629 floor is provisional
+
+On the committed corpus the always-pass degenerate policy earns **0.629**
+against a **1.0** oracle. That gap is narrow, and the reason is the corpus, not
+the scorer: 4 of 9 scenarios are `pass`, so guessing `pass` and citing nothing
+is right most of the time and scores full marks on attribution by the
+empty-empty convention. Read it as a property of a small, pass-heavy sample.
+**Re-measure it once the corpus is balanced rather than treating it as a fixed
+baseline** — and if it stays near 0.6 on a balanced corpus, that is the point at
+which to suspect the scorer instead.
+
+### Generation is cheap; variety is the constraint
+
+A full nine-recipe sweep takes **ten minutes** on one compute node, fixture
+builds included. Corpus size is therefore bounded by workload variety, not by
+node-hours, and the reproducer route needs no upstream decision — it has ground
+truth by construction, because the races are deliberate.
+
+What is missing is breadth. **No archived artifact comes from any workload the
+CIA diagram names** — nothing from Fremont, Gsplat, Ads or MIOpen. The three
+families present (`synthetic_hip_lds`, `synthetic_hip_vecadd`,
+`tensile_gemm_object`) are synthetic HIP kernels and one Tensile object. Every
+example already carries `workload_family` so the corpus can be split and
+checked for balance; that field is free to record now and cannot be backfilled
+onto artifacts that no longer say what produced them.
+
+### Issues filed from this work
+
+| Issue | What |
+|---|---|
+| [aorta#449](https://github.com/ROCm/aorta/issues/449) | An unregistered mitigation name is dropped before validation, so a name-resolution failure records as a genuine `agent_stop` |
+| [aorta#450](https://github.com/ROCm/aorta/issues/450) | `daily-consan-tiny` and `daily-consan-gemm` pair a load-only driver with `consan_policy: strict`, so they can never return a verdict |
+| [aorta#451](https://github.com/ROCm/aorta/issues/451) | A ConSan finding names neither its kernel nor its offset, and its `code` is the raw numeric `kind` |
+
+#449 is the one that matters for this workstream: while it stands, a stop reason
+cannot be trusted, so any reward computed from stop reasons is unsafe.
+
+### Still needs Manoj
+
+The chatbot's response schema; what Sleuth is; whether a `category` labeller
+exists (now the blocker above); model choice; who stands up the trainer; and
+whether Toyota is a separate demo. Detail in
+[Assumptions to confirm with Manoj](#assumptions-to-confirm-with-manoj).
+
 ## 1. Scope: what belongs where
 
 AORTA runs benchmarks and triages failures. It has no optimiser, no dataset
