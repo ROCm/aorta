@@ -287,26 +287,49 @@ def _enable_line_editing(history_file: Path) -> bool:
 # ── async core ────────────────────────────────────────────────────────────
 
 
+def _failure_message(exc: BaseException, backend: Any) -> str:
+    """Render one turn's failure, and log the traceback where it belongs.
+
+    A failure to connect is an expected operational condition -- nothing is
+    listening, or the base URL is wrong -- so it gets the configured backend's
+    own advice and no stack trace. The trace it replaces ran to over 180 lines
+    of httpcore, httpx and langchain frames ending in "Connection error.", and
+    named the address that was tried nowhere in any of them. ``-v`` still
+    prints it: the logging level is what decides whether the ``debug`` call
+    below is emitted.
+
+    Anything else is a bug until proven otherwise and keeps its traceback.
+    """
+    if backend is not None and _load("inference.unreachable").is_connection_failure(exc):
+        logger.debug("LLM backend connection failure", exc_info=True)
+        return f"LLM backend unreachable.\n\n{backend.unreachable_hint()}"
+    logger.exception("Agent graph error")
+    return "An error occurred while processing your request."
+
+
 async def _ask_once(
     invoke_agent: Any,
     query: str,
     history: list,
     output_mode: str,
     quiet: bool,
+    backend: Any = None,
 ) -> tuple[list, bool]:
     """Invoke the agent for one query and render it; also report success.
 
     The caller needs the second element: a one-shot ``aorta chat ask`` that
     exits 0 after failing to answer reports success to whatever is consuming
     the JSON or plain stream.
+
+    *backend* is only used to explain a failure -- see :func:`_failure_message`
+    -- so it stays optional and the agent is still invoked without one.
     """
     suppress = _suppress_stderr_noise() if quiet else contextlib.nullcontext()
     try:
         with suppress:
             reply, history, result = await invoke_agent(query, history)
-    except Exception:
-        logger.exception("Agent graph error")
-        msg = "An error occurred while processing your request."
+    except Exception as exc:
+        msg = _failure_message(exc, backend)
         if output_mode == "json":
             _render_json(query, msg, {})
         else:
@@ -322,7 +345,9 @@ async def _ask_once(
     return history, True
 
 
-async def _interactive_loop(invoke_agent: Any, output_mode: str, quiet: bool) -> None:
+async def _interactive_loop(
+    invoke_agent: Any, output_mode: str, quiet: bool, backend: Any = None
+) -> None:
     """Run a multi-turn REPL session."""
     banner = "AORTA Codebase Assistant  (type exit, quit, or /q to leave)"
     if output_mode == "rich":
@@ -365,7 +390,7 @@ async def _interactive_loop(invoke_agent: Any, output_mode: str, quiet: bool) ->
         if not stripped:
             continue
 
-        history, _ = await _ask_once(invoke_agent, query, history, output_mode, quiet)
+        history, _ = await _ask_once(invoke_agent, query, history, output_mode, quiet, backend)
 
 
 async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) -> bool:
@@ -381,11 +406,11 @@ async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) 
     logger.info("LLM backend: %s", backend.describe())
 
     if query is None:
-        await _interactive_loop(session.invoke_agent, output_mode, quiet)
+        await _interactive_loop(session.invoke_agent, output_mode, quiet, backend)
         # A REPL's exit status describes the session, not any one answer: the
         # user has already seen each failure and chosen to keep going.
         return True
-    _, ok = await _ask_once(session.invoke_agent, query, [], output_mode, quiet)
+    _, ok = await _ask_once(session.invoke_agent, query, [], output_mode, quiet, backend)
     return ok
 
 
@@ -1085,7 +1110,7 @@ _STATUS_MARK = {"ok": "[ ok ]", "warn": "[warn]", "fail": "[FAIL]", "skip": "[ -
 @click.option(
     "--no-backend",
     is_flag=True,
-    help="Skip the LLM backend preflight (which needs the network).",
+    help="Skip the LLM backend probe (which needs the network).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
 def doctor(no_backend: bool, as_json: bool) -> None:

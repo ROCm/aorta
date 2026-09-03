@@ -16,6 +16,11 @@ So ``doctor`` calls ``probe``, which decides reachability itself on a
 diagnostic's budget, and nothing about what a session tolerates changes. The
 first group below would pass against a ``preflight`` that simply raised, which
 is why the second group is here: it is the part that would be a regression.
+
+The last group covers the other half of the same condition: a query with no
+backend produced over 180 lines of httpcore/httpx/langchain frames ending in
+"Connection error.", which named the address it failed to reach nowhere in any
+of them.
 """
 
 from __future__ import annotations
@@ -278,3 +283,103 @@ class TestConnectionFailuresAreRecognisedThroughAWrapper:
         first.__context__ = second
         second.__context__ = first
         assert not is_connection_failure(first)
+
+
+class TestAskExplainsRatherThanTracebacks:
+    """What replaced the 180-odd-line trace, and what still keeps its own."""
+
+    @pytest.fixture()
+    def unreachable_backend(self, nothing_listening: str) -> LocalVLLMBackend:
+        return LocalVLLMBackend()
+
+    @pytest.fixture()
+    def connection_failure(self) -> Exception:
+        """A connect error as the graph delivers it: wrapped, cause chained."""
+        wrapped = RuntimeError("Connection error.")
+        wrapped.__cause__ = httpx.ConnectError("[Errno 111] Connection refused")
+        return wrapped
+
+    def test_the_message_names_the_url_instead_of_a_traceback(
+        self, unreachable_backend, connection_failure, nothing_listening: str
+    ):
+        from aorta.cli import chat as cli
+
+        message = cli._failure_message(connection_failure, unreachable_backend)
+        assert "unreachable" in message.lower()
+        assert nothing_listening in message
+        assert "Traceback" not in message
+
+    def test_the_message_is_short_enough_to_read(
+        self, unreachable_backend, connection_failure
+    ):
+        """It replaced 180-odd lines. A dozen is a message; a hundred is a trace."""
+        from aorta.cli import chat as cli
+
+        message = cli._failure_message(connection_failure, unreachable_backend)
+        assert len(message.splitlines()) < 15
+
+    def test_the_message_says_what_to_do_next(
+        self, unreachable_backend, connection_failure
+    ):
+        from aorta.cli import chat as cli
+
+        message = cli._failure_message(connection_failure, unreachable_backend)
+        assert "AORTA_CHAT_VLLM_BASE_URL" in message
+        assert "aorta chat config init" in message
+
+    def test_the_traceback_is_still_emitted_under_verbose(
+        self, unreachable_backend, connection_failure, caplog
+    ):
+        """``-v`` sets DEBUG, which is the level this record is logged at."""
+        from aorta.cli import chat as cli
+
+        with caplog.at_level(logging.DEBUG, logger="aorta.cli.chat"):
+            cli._failure_message(connection_failure, unreachable_backend)
+
+        records = [r for r in caplog.records if r.exc_info]
+        assert records, "no record carried the traceback"
+        assert any("connection failure" in r.getMessage().lower() for r in records)
+
+    def test_a_quiet_run_does_not_emit_the_traceback(
+        self, unreachable_backend, connection_failure, caplog
+    ):
+        from aorta.cli import chat as cli
+
+        with caplog.at_level(logging.INFO, logger="aorta.cli.chat"):
+            cli._failure_message(connection_failure, unreachable_backend)
+        assert not [r for r in caplog.records if r.exc_info]
+
+    def test_an_unrelated_bug_keeps_its_traceback_and_the_generic_message(
+        self, unreachable_backend, caplog
+    ):
+        """Anything that is not a connection failure is a bug until proven otherwise."""
+        from aorta.cli import chat as cli
+
+        with caplog.at_level(logging.ERROR, logger="aorta.cli.chat"):
+            message = cli._failure_message(ValueError("off by one"), unreachable_backend)
+
+        assert message == "An error occurred while processing your request."
+        assert [r for r in caplog.records if r.exc_info]
+
+    def test_no_backend_falls_back_to_the_generic_message(self, connection_failure):
+        """``_ask_once`` is still callable without one, so this must not explode."""
+        from aorta.cli import chat as cli
+
+        message = cli._failure_message(connection_failure, None)
+        assert message == "An error occurred while processing your request."
+
+    @pytest.mark.asyncio
+    async def test_ask_renders_the_hint_and_reports_failure(
+        self, unreachable_backend, connection_failure, capsys, nothing_listening: str
+    ):
+        """End to end through the one-shot path: the text lands, the status is 1."""
+        from aorta.cli import chat as cli
+
+        async def _invoke(query: str, history: list):
+            raise connection_failure
+
+        _, ok = await cli._ask_once(
+            _invoke, "q", [], "plain", quiet=False, backend=unreachable_backend
+        )
+        assert ok is False
+        assert nothing_listening in capsys.readouterr().out
