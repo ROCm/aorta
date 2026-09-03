@@ -142,8 +142,8 @@ class TestTheCliLifecycle:
         result = CliRunner().invoke(chat, ["index", "runs", "--json"])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
-        assert payload["collection"] == "aorta_runs"
-        assert payload["chunks"] > 0
+        assert payload.get("collection") == "aorta_runs"
+        assert payload.get("chunks", 0) > 0
         assert retriever.collection_chunk_count(wired.index, "aorta_runs") == payload["chunks"]
 
     def test_it_leaves_the_source_collection_alone(self, wired):

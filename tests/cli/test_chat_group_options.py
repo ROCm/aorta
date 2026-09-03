@@ -22,12 +22,25 @@ _CHAT_AVAILABLE = importlib.util.find_spec("langchain_core") is not None
 pytestmark = pytest.mark.skipif(not _CHAT_AVAILABLE, reason="amd-aorta[chat-cli] not installed")
 
 
+class _Dispatched(list):
+    """The recorded ``_dispatch`` calls, with a readable accessor.
+
+    ``only()`` fails with "not called" rather than an ``IndexError`` when a
+    regression stops the subcommand dispatching at all, which is one of the
+    ways this could break.
+    """
+
+    def only(self) -> dict:
+        assert len(self) == 1, f"expected one _dispatch call, got {len(self)}"
+        return self[0]
+
+
 @pytest.fixture()
-def dispatched(monkeypatch):
+def dispatched(monkeypatch) -> _Dispatched:
     """Capture what ``_dispatch`` was called with, without running a query."""
     from aorta.cli import chat as chat_cli
 
-    calls: list[dict] = []
+    calls = _Dispatched()
 
     def _record(query, as_json, plain, llm_provider, llm_model, no_wait, no_redact, verbose):
         calls.append(
@@ -51,32 +64,32 @@ class TestAskInheritsGroupOptions:
     def test_a_provider_before_the_subcommand_is_applied(self, dispatched):
         result = CliRunner().invoke(chat, ["--llm-provider", "openai", "ask", "q"])
         assert result.exit_code == 0, result.output
-        assert dispatched[0]["llm_provider"] == "openai"
+        assert dispatched.only()["llm_provider"] == "openai"
 
     def test_a_model_before_the_subcommand_is_applied(self, dispatched):
         CliRunner().invoke(chat, ["--llm-model", "gpt-4o", "ask", "q"])
-        assert dispatched[0]["llm_model"] == "gpt-4o"
+        assert dispatched.only()["llm_model"] == "gpt-4o"
 
     @pytest.mark.parametrize("flag", ["--no-redact", "--no-wait", "--json", "--plain", "-v"])
     def test_every_group_flag_reaches_the_subcommand(self, dispatched, flag):
         CliRunner().invoke(chat, [flag, "ask", "q"])
-        assert any(dispatched[0].values())
+        assert any(dispatched.only().values())
 
     def test_the_option_after_the_subcommand_still_wins(self, dispatched):
         """The more specific of the two positions is the one the user meant."""
         CliRunner().invoke(
             chat, ["--llm-provider", "openai", "ask", "--llm-provider", "vllm", "q"]
         )
-        assert dispatched[0]["llm_provider"] == "vllm"
+        assert dispatched.only()["llm_provider"] == "vllm"
 
     def test_the_subcommand_alone_is_unaffected(self, dispatched):
         CliRunner().invoke(chat, ["ask", "--llm-provider", "openai", "q"])
-        assert dispatched[0]["llm_provider"] == "openai"
+        assert dispatched.only()["llm_provider"] == "openai"
 
     def test_no_options_anywhere_stays_at_the_defaults(self, dispatched):
         """A profile's own values must not be overridden by a phantom flag."""
         CliRunner().invoke(chat, ["ask", "q"])
-        assert dispatched[0] == {
+        assert dispatched.only() == {
             "query": "q",
             "as_json": False,
             "plain": False,
@@ -129,21 +142,21 @@ class TestUiReceivesThemThroughTheEnvironment:
 
     def test_a_provider_is_passed_to_the_child(self):
         env = self._env_for(["--llm-provider", "openai", "ui"])
-        assert env["AORTA_CHAT_LLM_PROVIDER"] == "openai"
+        assert env.get("AORTA_CHAT_LLM_PROVIDER") == "openai"
 
     def test_no_redact_is_passed_to_the_child(self):
         env = self._env_for(["--no-redact", "ui"])
-        assert env["AORTA_CHAT_REDACT"] == "false"
+        assert env.get("AORTA_CHAT_REDACT") == "false"
 
     def test_a_model_lands_in_the_resolved_providers_field(self):
         """``--llm-model`` does not say whose model it is; the provider decides."""
         env = self._env_for(["--llm-provider", "openai", "--llm-model", "gpt-4o", "ui"])
-        assert env["AORTA_CHAT_REMOTE_LLM_MODEL"] == "gpt-4o"
+        assert env.get("AORTA_CHAT_REMOTE_LLM_MODEL") == "gpt-4o"
         assert "AORTA_CHAT_VLLM_MODEL" not in env
 
     def test_a_vllm_model_lands_in_the_vllm_field(self):
         env = self._env_for(["--llm-provider", "vllm", "--llm-model", "my/local", "ui"])
-        assert env["AORTA_CHAT_VLLM_MODEL"] == "my/local"
+        assert env.get("AORTA_CHAT_VLLM_MODEL") == "my/local"
 
     def test_no_wait_and_verbose_travel_as_their_own_variables(self):
         from aorta.cli.chat import UI_NO_WAIT_ENV, UI_VERBOSE_ENV
@@ -168,7 +181,7 @@ class TestUiReceivesThemThroughTheEnvironment:
         """Replacing rather than extending it would strip HF_HOME and friends."""
         monkeypatch.setenv("HF_HOME", "/shared/hf-cache")
         env = self._env_for(["--no-redact", "ui"])
-        assert env["HF_HOME"] == "/shared/hf-cache"
+        assert env.get("HF_HOME") == "/shared/hf-cache"
 
 
 class TestOptionsTheUiCannotHonour:

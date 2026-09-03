@@ -406,21 +406,34 @@ def carry_over_collections(source: Path, dest: Path) -> list[str]:
 
     import sqlite_vec
 
-    conn = sqlite3.connect(dest)
+    # Explicit transaction control, because the copy has to be all or nothing.
+    # ``dest`` is about to be renamed into place whatever happens here, so a
+    # half-copied collection -- tables created, registry row not yet written --
+    # would ship as part of the new index and read as missing.
+    conn = sqlite3.connect(dest, isolation_level=None)
+    copied: list[str] = []
     try:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        # Only ever read through ``incoming``: the index being replaced must
+        # come out of this untouched.
         conn.execute("ATTACH DATABASE ? AS incoming", (str(source),))
         try:
-            copied = _copy_missing_collections(conn)
+            conn.execute("BEGIN")
+            try:
+                copied = _copy_missing_collections(conn)
+                conn.execute("COMMIT")
+            except sqlite3.DatabaseError:
+                conn.execute("ROLLBACK")
+                raise
         finally:
             conn.execute("DETACH DATABASE incoming")
-    except sqlite3.DatabaseError:
-        # A source file that is not a usable store has nothing to preserve, and
+    except sqlite3.DatabaseError as exc:
+        # A source that is not a usable store has nothing worth preserving, and
         # failing the install over it would be worse than the data loss this
-        # function exists to prevent: the new index is already verified.
-        logger.warning("Could not read %s to preserve its private collections", source)
+        # function exists to prevent: the incoming index is already verified.
+        logger.warning("Could not carry collections over from %s: %s", source, exc)
         return []
     finally:
         conn.close()
@@ -441,11 +454,20 @@ def _copy_missing_collections(conn: sqlite3.Connection) -> list[str]:
     }
     if not theirs:
         return []
-    mine = (
-        {name for (name,) in conn.execute(f'SELECT collection FROM main."{_REGISTRY_TABLE}"')}
-        if _has_registry(conn, "main")
-        else set()
-    )
+    mine: set[str] = set()
+    if _has_registry(conn, "main"):
+        mine = {
+            name for (name,) in conn.execute(f'SELECT collection FROM main."{_REGISTRY_TABLE}"')
+        }
+    else:
+        # A destination with no registry at all still needs one before a
+        # carried collection can be recorded in it. Same DDL the store uses.
+        conn.execute(
+            f'CREATE TABLE main."{_REGISTRY_TABLE}" ('
+            "collection TEXT PRIMARY KEY, "
+            "dimension INTEGER NOT NULL, "
+            "provider TEXT NOT NULL DEFAULT '')"
+        )
 
     copied = []
     for name in sorted(set(theirs) - mine):
@@ -484,7 +506,6 @@ def _copy_missing_collections(conn: sqlite3.Connection) -> list[str]:
             (name, dimension, provider),
         )
         copied.append(name)
-    conn.commit()
     return copied
 
 
@@ -513,11 +534,7 @@ def reset_caches() -> None:
     _vectorstore_cache = None
 
 
-def _check_manifest(
-    index_file: Path,
-    provider: EmbeddingProvider,
-    chunk_count: int | None = None,
-) -> None:
+def _check_manifest(index_file: Path, provider: EmbeddingProvider) -> None:
     """Enforce Decision 20a before the first query, not after it.
 
     Warn on source drift, refuse on an embedding-model or dimension mismatch.
@@ -535,11 +552,12 @@ def _check_manifest(
     normal state, and rebuilding or re-fetching is the fix. ``aorta chat
     doctor`` reports it without raising.
 
-    ``chunk_count`` is the collection's live row count, which is how a manifest
-    that describes different contents than the file holds gets caught. It is
-    deliberately not a hash of the ``.sqlite``: the private run collection
-    shares that file and rewrites it on its own cadence, so a whole-file digest
-    stops matching the moment the user builds run retrieval.
+    The collection's live row count is checked against the manifest here too,
+    which is how a manifest that describes different contents than the file
+    holds gets caught. It is deliberately not a hash of the ``.sqlite``: the
+    private run collection shares that file and rewrites it on its own cadence,
+    so a whole-file digest stops matching the moment the user builds run
+    retrieval.
     """
     from aorta.chat.rag import manifest as manifest_mod
 
@@ -547,6 +565,15 @@ def _check_manifest(
         found = manifest_mod.read_manifest(index_file)
     except manifest_mod.ManifestError as exc:
         raise manifest_mod.IndexMismatchError(str(exc)) from exc
+
+    try:
+        chunk_count = collection_chunk_count(index_file, provider.collection_name())
+    except IndexUnreadableError as exc:
+        raise manifest_mod.IndexMismatchError(
+            f"the chat index at {index_file} has a manifest but cannot be read as a "
+            f"sqlite store ({exc}).\nRe-fetch with 'aorta chat index fetch', or "
+            "rebuild with 'aorta chat index build'."
+        ) from exc
 
     report = manifest_mod.validate(
         found,
@@ -571,12 +598,22 @@ def _installed_version() -> str:
         return ""
 
 
-def collection_chunk_count(path: Path, collection: str) -> int | None:
-    """Rows in ``collection``'s chunk table, or ``None`` when unreadable.
+class IndexUnreadableError(RuntimeError):
+    """The index file is there but cannot be opened as a sqlite store."""
 
-    ``None`` means "no evidence" rather than "empty", so a caller skips the
-    contents check instead of refusing: a file that is not a store, or holds no
-    such collection, has a better error waiting for it further down.
+
+def collection_chunk_count(path: Path, collection: str) -> int | None:
+    """Rows in ``collection``'s chunk table.
+
+    ``None`` when the file holds no such collection. That is an ordinary state
+    -- not indexed yet, or indexed by another provider -- and it has a better
+    error waiting for it downstream, which names the collections that *are*
+    present.
+
+    An unreadable file raises instead of returning ``None``. The distinction is
+    the point: a manifest describing 8,170 chunks over a file nothing can open
+    must fail closed, not pass the contents check by being too damaged to
+    contradict it.
 
     Deliberately raw sqlite rather than a :class:`SqliteVecStore`. The chunk
     table is an ordinary table, so counting it needs neither the sqlite-vec
@@ -585,17 +622,27 @@ def collection_chunk_count(path: Path, collection: str) -> int | None:
     """
     import sqlite3
 
-    if not path.exists() or not _SAFE_COLLECTION.match(collection):
+    if not path.exists():
+        return None
+    if not _SAFE_COLLECTION.match(collection):
+        # Not a name this store could ever have written, so there is no
+        # collection to find rather than a file that cannot be read.
         return None
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return None
+    except sqlite3.Error as exc:
+        raise IndexUnreadableError(f"could not open {path}: {exc}") from exc
     try:
-        row = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()
+        table = f"chunks_{collection}"
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        if present is None:
+            return None
+        row = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
         return int(row[0])
-    except sqlite3.Error:
-        return None
+    except sqlite3.Error as exc:
+        raise IndexUnreadableError(f"could not read {path}: {exc}") from exc
     finally:
         conn.close()
 
@@ -622,9 +669,7 @@ def _get_vectorstore() -> SqliteVecStore:
     # exactly as it did before the count existed: a model mismatch renames the
     # collection, and its refusal names the cause far better than "no such
     # collection" would.
-    _check_manifest(
-        index_file, provider, collection_chunk_count(index_file, provider.collection_name())
-    )
+    _check_manifest(index_file, provider)
     if not store.collection_exists():
         present = ", ".join(store.collection_names()) or "none"
         store.close()

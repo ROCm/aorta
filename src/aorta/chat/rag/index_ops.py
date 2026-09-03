@@ -379,32 +379,42 @@ def check_index(
     field it could read came from the sidecar the interrupted build never got
     round to replacing.
     """
+    from aorta.chat.rag.retriever import IndexUnreadableError, collection_chunk_count
+
     target = Path(index_path) if index_path else settings.index_file
     provider = get_provider()
+    manifest = manifest_mod.read_manifest(target)
+
+    unreadable = ""
+    chunk_count: int | None = None
+    try:
+        chunk_count = collection_chunk_count(target, provider.collection_name())
+    except IndexUnreadableError as exc:
+        # Reported rather than raised, because ``doctor`` calls this to find out
+        # what is wrong and must not be answered with a traceback. It still
+        # becomes a refusal below.
+        unreadable = str(exc)
+
     report = manifest_mod.validate(
-        manifest_mod.read_manifest(target),
+        manifest,
         embedding_model=provider.model_id(),
         collection=provider.collection_name(),
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         installed_version=installed_version(),
-        chunk_count=_installed_chunk_count(target, provider.collection_name()),
+        chunk_count=chunk_count,
     )
+    # A manifest that claims contents over a file nothing can open fails
+    # closed. Gated on the claim: a manifest from a builder that predates
+    # ``chunk_count`` asserts nothing here, so there is nothing to contradict.
+    if unreadable and manifest.chunk_count:
+        report.refusals.append(
+            f"contents: the manifest describes {manifest.chunk_count} chunks, but the "
+            f"index could not be read to check ({unreadable})"
+        )
     if strict:
         report.raise_if_refused(target)
     return report
-
-
-def _installed_chunk_count(target: Path, collection: str) -> int | None:
-    """Live chunk count of ``collection`` in ``target``, or ``None``.
-
-    ``None`` when it cannot be read, so the field checks still get to report
-    what they can -- a caller asking what is wrong with an index must not be
-    answered with a traceback.
-    """
-    from aorta.chat.rag.retriever import collection_chunk_count
-
-    return collection_chunk_count(target, collection)
 
 
 # ── fetching ──────────────────────────────────────────────────────────────

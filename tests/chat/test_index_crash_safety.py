@@ -228,11 +228,7 @@ class TestPartialIndexUnderAStaleManifest:
         self._truncate_in_place(target, keep=1)
 
         with pytest.raises(manifest_mod.IndexMismatchError) as exc:
-            retriever._check_manifest(
-                target,
-                _Provider(),
-                collection_chunk_count(target, COLLECTION),
-            )
+            retriever._check_manifest(target, _Provider())
         assert "REFUSING" in str(exc.value)
 
     def test_doctor_reports_it_rather_than_ok(self, corpus_root: Path, tmp_path: Path, monkeypatch):
@@ -264,6 +260,69 @@ class TestPartialIndexUnderAStaleManifest:
             target, manifest_mod.Manifest(**{**vars(built.manifest), "chunk_count": 0})
         )
         assert index_ops.check_index(target, strict=True).refusals == []
+
+
+class TestAnUnreadableIndexIsNotSkipped:
+    """"Cannot be read" must not reach the same place as "is not there".
+
+    Returning "no evidence" for both would let a file nothing can open pass the
+    contents check by being too damaged to contradict its own manifest.
+    """
+
+    @staticmethod
+    def _clobber(target: Path) -> None:
+        """Leave the sidecars, replace the index with something that is not one."""
+        target.write_bytes(b"not a sqlite database, not even close")
+
+    def test_an_absent_collection_reports_no_evidence(self, corpus_root: Path, tmp_path: Path):
+        """Not indexed by this provider yet is a state, not a failure."""
+        from aorta.chat.rag.retriever import collection_chunk_count
+
+        target = tmp_path / "index.sqlite"
+        _build(corpus_root, target)
+        assert collection_chunk_count(target, "aorta_some_other_provider") is None
+
+    def test_an_absent_file_reports_no_evidence(self, tmp_path: Path):
+        from aorta.chat.rag.retriever import collection_chunk_count
+
+        assert collection_chunk_count(tmp_path / "nothing.sqlite", COLLECTION) is None
+
+    def test_an_unreadable_file_raises_rather_than_returning_none(
+        self, corpus_root: Path, tmp_path: Path
+    ):
+        from aorta.chat.rag.retriever import IndexUnreadableError, collection_chunk_count
+
+        target = tmp_path / "index.sqlite"
+        _build(corpus_root, target)
+        self._clobber(target)
+        with pytest.raises(IndexUnreadableError):
+            collection_chunk_count(target, COLLECTION)
+
+    def test_the_load_path_refuses_it_with_something_to_do(
+        self, corpus_root: Path, tmp_path: Path
+    ):
+        from aorta.chat.rag import retriever
+
+        target = tmp_path / "index.sqlite"
+        _build(corpus_root, target)
+        self._clobber(target)
+        with pytest.raises(manifest_mod.IndexMismatchError) as exc:
+            retriever._check_manifest(target, _Provider())
+        assert "aorta chat index fetch" in str(exc.value)
+
+    def test_doctor_reports_it_rather_than_raising(
+        self, corpus_root: Path, tmp_path: Path, monkeypatch
+    ):
+        from aorta.chat.doctor import FAIL, run_checks
+
+        target = tmp_path / "index.sqlite"
+        _build(corpus_root, target)
+        self._clobber(target)
+        monkeypatch.setattr(settings, "index_path", str(target))
+
+        checks = {check.name: check for check in run_checks(backend=False).checks}
+        assert checks["index manifest"].status == FAIL
+        assert "could not be read" in checks["index manifest"].hint
 
 
 class TestTheLocalRunCollectionSurvives:
@@ -352,6 +411,65 @@ class TestTheLocalRunCollectionSurvives:
 
         assert manifest_mod.sha256_file(target) != built.manifest.index_sha256
         assert index_ops.check_index(target, strict=True).refusals == []
+
+
+class TestTheCarryOverIsAllOrNothing:
+    """The staged file is renamed into place whatever happens here.
+
+    So a copy that fails half way must leave no trace of the collection it was
+    copying, or the new index ships with tables that have no registry row and
+    read as a missing collection.
+    """
+
+    def test_a_failure_part_way_leaves_no_partial_collection(
+        self, corpus_root: Path, tmp_path: Path
+    ):
+        from aorta.chat.rag.retriever import carry_over_collections
+
+        old = tmp_path / "old.sqlite"
+        _build(corpus_root, old)
+        _add_run_collection(old)
+        # Drop the vector table but leave the registry row, so the copy gets
+        # part way -- chunk table created and filled -- and then fails.
+        # sqlite_vec has to be loaded to drop a vec0 table at all.
+        import sqlite_vec
+
+        conn = sqlite3.connect(old)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            conn.execute(f'DROP TABLE "vec_{RUN_COLLECTION}"')
+            conn.commit()
+        finally:
+            conn.close()
+
+        staged = tmp_path / "staged.sqlite"
+        _build(corpus_root, staged)
+
+        assert carry_over_collections(old, staged) == []
+        assert collection_chunk_count(staged, RUN_COLLECTION) is None
+        # And the index it was copying from is untouched.
+        assert collection_chunk_count(old, COLLECTION) is not None
+
+    def test_an_unreadable_source_does_not_fail_the_install(
+        self, corpus_root: Path, tmp_path: Path
+    ):
+        """The incoming index is already verified; losing nothing is the worse trade."""
+        staged_dir = tmp_path / "usb"
+        staged_dir.mkdir()
+        staged = staged_dir / index_ops.ASSET_NAME
+        _build(corpus_root, staged)
+
+        target = tmp_path / "cache" / "index.sqlite"
+        target.parent.mkdir(parents=True)
+        _build(corpus_root, target)
+        target.write_bytes(b"not a database")
+
+        result = index_ops.side_load(staged, index_path=target)
+
+        assert result.index_path == target
+        assert collection_chunk_count(target, COLLECTION) is not None
 
 
 class TestInterruptedSideLoad:
