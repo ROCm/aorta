@@ -35,8 +35,22 @@ class TestRegistration:
     def test_the_index_group_lists_its_subcommands(self, runner: CliRunner):
         result = runner.invoke(chat, ["index", "--help"])
         assert result.exit_code == 0, result.output
-        for subcommand in ("build", "fetch", "digest", "eval"):
+        for subcommand in ("build", "fetch", "digest", "eval", "runs"):
             assert subcommand in result.output
+
+    def test_the_run_collection_has_a_command_of_its_own(self, runner: CliRunner):
+        """``index_run_artifacts()`` had no caller outside its own error text.
+
+        So the run-artifact collection that ``search_run_artifacts`` and the
+        tool prompts both advertise could not be built by any documented route.
+        """
+        result = runner.invoke(chat, ["index", "runs", "--help"])
+        assert result.exit_code == 0, result.output
+        # Whitespace-normalised: Click rewraps the docstring to the terminal
+        # width, so a phrase can land across two lines.
+        help_text = " ".join(result.output.split())
+        assert "run artifacts" in help_text.lower()
+        assert "never part of a published index" in help_text
 
     def test_doctor_is_registered(self, runner: CliRunner):
         result = runner.invoke(chat, ["doctor", "--help"])

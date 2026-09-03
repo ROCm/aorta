@@ -52,18 +52,31 @@ def redaction_status() -> str:
     everything else. The per-request notice reports what a given send had
     removed, but that necessarily arrives after the send, and someone deciding
     what is safe to paste needs the boundary beforehand.
+
+    The claim names *LLM requests* rather than outbound traffic, because
+    ``redact_for_send`` is applied to the message list and nothing else. With
+    ``embedding_provider = "remote"`` the retrieval query and the indexed
+    corpus text reach a second API without passing through it, so that case
+    gets said out loud here as well as in ``docs/chat/redaction.md``.
     """
     if not settings.redact:
         return (
             "**Outbound redaction is off** (`redact = false`). Prompts and "
             "retrieved file contents are sent to the model as they are."
         )
-    return (
-        "Outbound requests have filesystem paths and IP addresses rewritten "
+    lines = [
+        "LLM requests have filesystem paths and IP addresses rewritten "
         "before they leave this machine. Nothing else is removed -- notably "
         "**not** credentials, hostnames or user names -- so treat anything you "
         "paste as leaving the machine."
-    )
+    ]
+    if settings.embedding_provider == "remote":
+        lines.append(
+            "Retrieval on this server uses a **remote embedding API** "
+            '(`embedding_provider = "remote"`), and that path is not redacted: '
+            "your question and the indexed text reach it as they are."
+        )
+    return "\n\n".join(lines)
 
 
 def welcome_message(backend_description: str) -> str:

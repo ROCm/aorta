@@ -10,7 +10,9 @@ word. Registered only when ``enable_shell_tool`` is set (Decision 17a).
 from __future__ import annotations
 
 import shlex
+import shutil
 import subprocess
+from pathlib import Path
 
 from langchain_core.tools import tool
 
@@ -41,6 +43,32 @@ _BLOCKED_PATTERNS = [
 _SHELL_CONTROL_SYNTAX = (";", "&", "`", "$(", ">", "<", "\n", "\r")
 
 
+def _is_allowlisted_binary(token: str) -> bool:
+    """Whether an absolute ``token`` is the same file as an allowlisted name.
+
+    Comparing basenames let ``/tmp/ls`` satisfy an allowlist of ``["ls"]``,
+    because a basename cannot tell it apart from ``/usr/bin/ls``. Resolving
+    both sides can: ``/usr/bin/ls`` is recognised as the ``ls`` the shell would
+    have run, and anything else of that name is not.
+
+    Relative forms (``./ls``, ``bin/ls``) are never accepted this way. They
+    resolve against the command's working directory -- the AORTA tree -- so a
+    file sitting there is by definition not the interpreter on PATH.
+    """
+    if not token.startswith("/"):
+        return False
+    name = token.rsplit("/", 1)[-1]
+    if name not in settings.allowed_commands:
+        return False
+    on_path = shutil.which(name)
+    if on_path is None:
+        return False
+    try:
+        return Path(token).resolve() == Path(on_path).resolve()
+    except OSError:  # pragma: no cover - a path that cannot be stat-ed is not a match
+        return False
+
+
 def _validate_command(command: str) -> str | None:
     """Return an error message if the command is disallowed, else None."""
     lower = command.lower().strip()
@@ -67,13 +95,20 @@ def _validate_command(command: str) -> str | None:
         if not parts:
             return "Empty command."
 
-        executable = parts[0].split("/")[-1]
-        if executable not in settings.allowed_commands:
-            allowed = ", ".join(settings.allowed_commands)
+        executable = parts[0]
+        if executable in settings.allowed_commands:
+            continue
+        if _is_allowlisted_binary(executable):
+            continue
+        name = executable.rsplit("/", 1)[-1]
+        if name in settings.allowed_commands:
             return (
-                f"Command '{executable}' is not in the allowlist. "
-                f"Allowed: {allowed}"
+                f"Command '{executable}' is not in the allowlist. '{name}' is, but "
+                f"this is not the '{name}' on PATH -- add this exact path to "
+                "allowed_commands to permit it."
             )
+        allowed = ", ".join(settings.allowed_commands)
+        return f"Command '{executable}' is not in the allowlist. Allowed: {allowed}"
 
     return None
 

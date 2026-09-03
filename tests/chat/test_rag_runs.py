@@ -123,6 +123,77 @@ def wired(tmp_path: Path, monkeypatch):
     reset_settings()
 
 
+class TestTheCliLifecycle:
+    """``aorta chat index runs`` is the only route to this collection.
+
+    Before it existed, ``index_run_artifacts()`` had no caller outside the
+    ``python -c`` snippet in its own missing-collection message -- so the
+    collection that ``search_run_artifacts`` and the tool prompts advertise
+    could not be built by any documented command.
+    """
+
+    def test_it_builds_the_collection_and_reports_the_count(self, wired):
+        from click.testing import CliRunner
+
+        from aorta.chat.rag import retriever
+        from aorta.cli.chat import chat
+
+        # The CLI resolves the provider through the retriever's factory too.
+        result = CliRunner().invoke(chat, ["index", "runs", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["collection"] == "aorta_runs"
+        assert payload["chunks"] > 0
+        assert retriever.collection_chunk_count(wired.index, "aorta_runs") == payload["chunks"]
+
+    def test_it_leaves_the_source_collection_alone(self, wired):
+        """The independent cadence is the entire reason the two are separate."""
+        from click.testing import CliRunner
+
+        from aorta.chat.rag import retriever
+        from aorta.cli.chat import chat
+
+        source = SqliteVecStore(
+            path=wired.index,
+            embedding=wired.provider.get_embeddings(),
+            collection=wired.provider.collection_name(),
+        )
+        try:
+            source.reset()
+            source.add_texts(["rocm source text"], [{"source": "a.py"}])
+        finally:
+            source.close()
+
+        assert CliRunner().invoke(chat, ["index", "runs"]).exit_code == 0
+        assert retriever.collection_chunk_count(wired.index, "aorta") == 1
+
+    def test_an_empty_run_root_says_so_rather_than_reporting_success(
+        self, wired, tmp_path: Path
+    ):
+        from click.testing import CliRunner
+
+        from aorta.cli.chat import chat
+
+        empty = tmp_path / "no-runs"
+        empty.mkdir()
+        result = CliRunner().invoke(chat, ["index", "runs", "--path", str(empty)])
+        assert result.exit_code == 0, result.output
+        assert "no run artifacts were found" in result.output
+
+    def test_a_missing_run_root_is_a_sentence_not_a_traceback(self, wired, tmp_path: Path):
+        from click.testing import CliRunner
+
+        from aorta.cli.chat import chat
+
+        result = CliRunner().invoke(chat, ["index", "runs", "--path", str(tmp_path / "absent")])
+        assert result.exit_code != 0
+        assert "Run root does not exist" in result.output
+
+    def test_the_missing_collection_message_names_the_command(self):
+        """It used to hand the user a ``python -c`` snippet instead."""
+        assert "aorta chat index runs" in runs_rag._MISSING_COLLECTION
+
+
 class TestCollectionNaming:
     def test_the_run_collection_is_distinct_from_the_source_one(self, wired):
         """Same file, different tables: vec0 fixes a table's dimension at CREATE."""
@@ -285,9 +356,15 @@ class TestSeparationFromTheSourceCollection:
 
 class TestMissingCollection:
     def test_searching_before_indexing_names_how_to_build_it(self, wired):
+        """The command, not the ``python -c`` snippet it used to print.
+
+        Naming an internal function was the only instruction available while
+        no CLI command built this collection; ``aorta chat index runs`` is now
+        the documented route, so that is what the error has to point at.
+        """
         with pytest.raises(runs_rag.RunCollectionMissingError) as exc:
             runs_rag.search_run_docs("anything", k=1)
-        assert "index_run_artifacts" in str(exc.value)
+        assert "aorta chat index runs" in str(exc.value)
 
     def test_the_error_says_the_collection_is_never_published(self, wired):
         """Per-user data. An index-publishing job must not ship this collection."""
@@ -306,7 +383,7 @@ class TestMissingCollection:
 
         out = search_run_artifacts.invoke({"query": "nan"})
         assert out.startswith("Error:")
-        assert "index_run_artifacts" in out
+        assert "aorta chat index runs" in out
 
     def test_the_tool_returns_results_once_indexed(self, wired):
         from aorta.chat.tools.artifacts import search_run_artifacts

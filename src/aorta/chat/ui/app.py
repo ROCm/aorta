@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import chainlit as cl
 
 from aorta.chat import redaction
+from aorta.chat.config import UI_NO_WAIT_ENV, UI_VERBOSE_ENV
 from aorta.chat.inference.providers.factory import get_backend
 from aorta.chat.session import invoke_agent
 from aorta.chat.ui.welcome import welcome_message
 
+# Set by ``aorta chat ui`` from its group-level flags. This is a fresh
+# interpreter, so they cannot arrive any other way.
+_VERBOSE = os.environ.get(UI_VERBOSE_ENV) == "1"
+_SKIP_PREFLIGHT = os.environ.get(UI_NO_WAIT_ENV) == "1"
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if _VERBOSE else logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -36,7 +43,8 @@ async def on_start():
 
     try:
         backend = get_backend()
-        await backend.preflight()
+        if not _SKIP_PREFLIGHT:
+            await backend.preflight()
     except (ImportError, ValueError) as exc:
         logger.error("LLM backend unavailable: %s", exc)
         cl.user_session.set("backend_error", str(exc))
@@ -78,15 +86,26 @@ async def on_message(message: cl.Message):
         await cl.Message(
             content="An error occurred while processing your request. Please try again."
         ).send()
+        # The send already happened before the graph raised, so what left the
+        # machine has to be disclosed whether or not an answer came back. A
+        # user who stops after the failure would otherwise never be told.
+        await _deliver_notice(notice_state)
         return
 
     await thinking_msg.remove()
     cl.user_session.set("history", history)
     await cl.Message(content=reply).send()
+    await _deliver_notice(notice_state)
 
-    # After the answer, not before: the notice reports what this request had
-    # removed, and it is drained so the session sees it once. Without this the
-    # disclosure Decision 16 requires only ever reached the server's stderr.
+
+async def _deliver_notice(notice_state: redaction.NoticeState) -> None:
+    """Drain this session's pending redaction notice into the transcript.
+
+    After the reply, not before: the notice reports what the request that just
+    happened had removed, and draining it is what makes the session see it
+    once. Without this the disclosure Decision 16 requires only ever reached
+    the server's stderr.
+    """
     notice = redaction.take_pending_notice(notice_state)
     if notice:
         await cl.Message(content=f"_{notice}_").send()

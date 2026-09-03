@@ -66,8 +66,7 @@ _WRITE_BATCH = 200
 _MISSING_COLLECTION = (
     "No run-artifact collection in {path}. Either it was never built, or it was "
     "built from a run root with no artifacts in it.\n"
-    "  build:  python -c 'from aorta.chat.rag.runs import index_run_artifacts; "
-    "index_run_artifacts()'\n"
+    "  build:  aorta chat index runs\n"
     "  check:  the run root is {runs_root} (set AORTA_CHAT_RUNS_PATH to change "
     "it), and must contain matrix.json, env.json or host_env.json.\n"
     "Run artifacts are per-user data, so this collection is always built "

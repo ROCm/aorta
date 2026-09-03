@@ -29,6 +29,7 @@ import os
 import sys
 import warnings
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,15 @@ _LLM_PROVIDERS = ("litellm", "openai", "vllm")
 
 #: Likewise hard-coded against ``aorta.chat.config.PROFILE_TEMPLATES``.
 _CONFIG_PROFILES = ("anthropic", "azure-apim", "local-vllm", "openai", "openai-compatible")
+
+#: How the two group-level flags that are not settings reach the Chainlit
+#: child. Hard-coded for the same reason as the lists above, and checked
+#: against ``aorta.chat.config`` by ``tests/cli/test_chat.py``. Reading them
+#: from there would import the chat package just to name a variable, and
+#: ``aorta chat ui`` has to keep working well enough to say which extra is
+#: missing on an install that has none of it.
+UI_NO_WAIT_ENV = "AORTA_CHAT_UI_NO_WAIT"
+UI_VERBOSE_ENV = "AORTA_CHAT_UI_VERBOSE"
 
 
 def _require_python() -> None:
@@ -484,6 +494,33 @@ def _dispatch(
 # ── Click surface ─────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class _GroupOptions:
+    """Options given to ``aorta chat`` *before* a subcommand name.
+
+    Click parses these on the group callback, and the callback used to return
+    without doing anything when a subcommand was present -- so
+    ``aorta chat --llm-provider openai ask q`` parsed cleanly and then ignored
+    the provider, and ``ui``, which has no duplicate options of its own, could
+    not receive them at all. They are carried on the context instead and merged
+    by whichever subcommand runs.
+    """
+
+    as_json: bool = False
+    plain: bool = False
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    no_wait: bool = False
+    no_redact: bool = False
+    verbose: bool = False
+
+
+def _group_options(ctx: click.Context) -> _GroupOptions:
+    """Group-level options, or defaults when the subcommand was reached directly."""
+    parent = ctx.find_root().obj
+    return parent if isinstance(parent, _GroupOptions) else _GroupOptions()
+
+
 @click.group(name="chat", invoke_without_command=True)
 @_common_options
 @click.pass_context
@@ -504,7 +541,17 @@ def chat(
 
       pip install 'amd-aorta[chat-cli]'
     """
+    options = _GroupOptions(
+        as_json=as_json,
+        plain=plain,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        no_wait=no_wait,
+        no_redact=no_redact,
+        verbose=verbose,
+    )
     if ctx.invoked_subcommand is not None:
+        ctx.obj = options
         return
     _dispatch(None, as_json, plain, llm_provider, llm_model, no_wait, no_redact, verbose)
 
@@ -512,7 +559,9 @@ def chat(
 @chat.command(name="ask")
 @click.argument("query")
 @_common_options
+@click.pass_context
 def ask(
+    ctx: click.Context,
     query: str,
     as_json: bool,
     plain: bool,
@@ -523,15 +572,35 @@ def ask(
     verbose: bool,
 ) -> None:
     """Answer QUERY once and exit."""
-    _dispatch(query, as_json, plain, llm_provider, llm_model, no_wait, no_redact, verbose)
+    # The option after the subcommand wins, since it is the more specific of
+    # the two; every default here is falsy, so that is what `or` expresses.
+    group = _group_options(ctx)
+    _dispatch(
+        query,
+        as_json or group.as_json,
+        plain or group.plain,
+        llm_provider or group.llm_provider,
+        llm_model or group.llm_model,
+        no_wait or group.no_wait,
+        no_redact or group.no_redact,
+        verbose or group.verbose,
+    )
 
 
 @chat.command(name="ui")
 @click.option("--host", default="127.0.0.1", show_default=True, help="Bind address.")
 @click.option("--port", default=8000, show_default=True, type=int, help="Bind port.")
-def ui(host: str, port: int) -> None:
-    """Serve the Chainlit web UI (needs the chat-ui extra)."""
+@click.pass_context
+def ui(ctx: click.Context, host: str, port: int) -> None:
+    """Serve the Chainlit web UI (needs the chat-ui extra).
+
+    Group-level options given before ``ui`` are passed to the Chainlit process
+    through the environment, because it is a fresh interpreter that rebuilds
+    the settings from the profile and the environment -- an override applied in
+    this process would not survive the exec.
+    """
     _require_python()
+    child_env = _ui_env(_group_options(ctx))
     import importlib.util
     import subprocess
 
@@ -570,9 +639,58 @@ def ui(host: str, port: int) -> None:
                 host,
                 "--port",
                 str(port),
-            ]
+            ],
+            env=child_env,
         )
     )
+
+
+def _ui_env(options: _GroupOptions) -> dict[str, str]:
+    """The Chainlit child's environment, carrying the group-level overrides.
+
+    Refuses the options the web UI has no way to honour rather than dropping
+    them silently, which is what made them look supported.
+    """
+    if options.as_json or options.plain:
+        raise click.ClickException(
+            "--json and --plain describe this command's own output and mean "
+            "nothing to a web server. Use 'aorta chat ask' for machine-readable "
+            "output, or drop the flag."
+        )
+
+    env = dict(os.environ)
+    if not (options.llm_provider or options.llm_model or options.no_redact):
+        return _with_ui_flags(env, options)
+
+    # Resolved through the same function the REPL uses, so --llm-model lands in
+    # the field belonging to the *resolved* provider rather than a guessed one.
+    resolved = _load("config").apply_cli_overrides(
+        provider=options.llm_provider,
+        model=options.llm_model,
+        redact=False if options.no_redact else None,
+    )
+    if options.llm_provider:
+        env["AORTA_CHAT_LLM_PROVIDER"] = resolved.llm_provider
+    if options.llm_model:
+        field = "VLLM_MODEL" if resolved.llm_provider == "vllm" else "REMOTE_LLM_MODEL"
+        env[f"AORTA_CHAT_{field}"] = options.llm_model
+    if options.no_redact:
+        env["AORTA_CHAT_REDACT"] = "false"
+    return _with_ui_flags(env, options)
+
+
+def _with_ui_flags(env: dict[str, str], options: _GroupOptions) -> dict[str, str]:
+    """Carry the two flags that are behaviour rather than settings.
+
+    Neither is a ``Settings`` field -- they describe what a run does, not how
+    it is configured -- so they travel as their own variables and ``app.py``
+    reads them directly.
+    """
+    if options.no_wait:
+        env[UI_NO_WAIT_ENV] = "1"
+    if options.verbose:
+        env[UI_VERBOSE_ENV] = "1"
+    return env
 
 
 @chat.command(name="tools")
@@ -863,6 +981,53 @@ def index_fetch(
     click.echo(f"  built as  {result.manifest.describe()}")
     for warning in result.warnings:
         click.echo(f"warning: {warning}", err=True)
+
+
+@index_group.command(name="runs")
+@click.option("--path", default=None, help="Run root to index. Defaults to the configured one.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the result as JSON.")
+@click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
+def index_runs(path: str | None, as_json: bool, verbose: bool) -> None:
+    """Index this machine's run artifacts for 'search_run_artifacts'.
+
+    A second collection in the same index file, refreshed on its own cadence:
+    run it again after a sweep without rebuilding the source index. Run
+    artifacts are per-user data, so this collection is always built locally and
+    is never part of a published index.
+    """
+    _index_logging(verbose)
+    runs = _load("rag.runs")
+    config = _load("config")
+    store = _guard(lambda: runs.index_run_artifacts(path))
+    try:
+        chunks = _load("rag.retriever").collection_chunk_count(
+            config.settings.index_file, runs.run_collection_name()
+        )
+    finally:
+        store.close()
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "index": str(config.settings.index_file),
+                    "collection": runs.run_collection_name(),
+                    "chunks": chunks,
+                    "runs_root": str(Path(path).resolve() if path else config.settings.runs_root),
+                },
+                indent=2,
+            )
+        )
+        return
+    click.echo(f"Indexed run artifacts into {config.settings.index_file}")
+    click.echo(f"  collection  {runs.run_collection_name()}")
+    click.echo(f"  chunks      {chunks}")
+    if not chunks:
+        click.echo(
+            "warning: no run artifacts were found, so the collection is empty. "
+            f"Looked under {Path(path).resolve() if path else config.settings.runs_root}.",
+            err=True,
+        )
 
 
 @index_group.command(name="digest")

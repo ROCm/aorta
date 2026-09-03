@@ -6,8 +6,9 @@ chunks, tool output, and — because the assistant indexes your own sweep result
 — the contents of your `matrix.json` and `env.json`.
 
 Each of those is individually reasonable and together they are an exfiltration
-path. So outbound text is rewritten by default, and chat says so the first time
-it changes anything.
+path. So outbound LLM text is rewritten by default, and chat says so the first
+time it changes anything. Only the LLM message list — see the embedding caveat
+below.
 
 ## What is redacted
 

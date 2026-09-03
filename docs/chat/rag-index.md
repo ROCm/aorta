@@ -68,11 +68,25 @@ else, and after changing the chunk settings.
 > nonsense instead of an error. `aorta chat doctor` reports what it finds.
 
 ```bash
-aorta chat index build           # build locally from aorta_path
+aorta chat index build           # build the source collection from aorta_path
 aorta chat index fetch           # download the index matching your version
 aorta chat index fetch --from ./index.sqlite   # side-load, for an air-gapped node
+aorta chat index runs            # (re)build the run-artifact collection, locally
 aorta chat doctor                # extras, backend reachability, index freshness
 ```
+
+`index runs` is the only one that touches the second collection, and the only
+one you need after a sweep. `build`, `fetch` and `--from` all replace the source
+collection and leave it alone.
+
+**Interrupting any of them is safe.** Each writes the new index beside the old
+one and moves it into place in a single step, then writes the manifest, so a
+`Ctrl-C` leaves the previous index and its manifest exactly as they were rather
+than a half-populated file under a manifest describing the complete one. If a
+run is interrupted in the window after the move, the manifest no longer matches
+the chunk count in the index and every query is refused until you rebuild or
+re-fetch — which is the point, because that state cannot produce a correct
+answer and would not otherwise announce itself.
 
 `fetch` is the normal path: the source collection is identical for every user of
 a given AORTA revision, so building it locally is work someone already did. It

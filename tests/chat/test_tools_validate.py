@@ -64,8 +64,20 @@ class TestValidateCommand:
 
     @patch("aorta.chat.tools.run.settings")
     def test_allowed_with_path_prefix(self, mock_settings):
+        """An absolute path is accepted when it *is* the allowlisted binary.
+
+        Resolved rather than string-matched on the basename, which could not
+        distinguish this from ``/tmp/ls``.
+        """
+        import shutil
+
         mock_settings.allowed_commands = ["ls"]
-        assert _validate_command("/usr/bin/ls -la") is None
+        assert _validate_command(f"{shutil.which('ls')} -la") is None
+
+    @patch("aorta.chat.tools.run.settings")
+    def test_a_lookalike_with_a_path_prefix_is_refused(self, mock_settings):
+        mock_settings.allowed_commands = ["ls"]
+        assert _validate_command("/tmp/ls -la") is not None
 
     @patch("aorta.chat.tools.run.settings")
     def test_blocked_executable(self, mock_settings):

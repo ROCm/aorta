@@ -91,6 +91,27 @@ class TestRedactionScopeIsDisclosed:
         assert "off" in text.lower()
         assert "as they are" in text
 
+    def test_the_claim_is_scoped_to_llm_requests(self):
+        """``redact_for_send`` is applied to the message list and nothing else.
+
+        Saying "outbound requests" covered a second egress path it has never
+        touched, which is the half a remote-embedding user needed to know.
+        """
+        configure(redact=True, embedding_provider="local")
+        text = welcome.redaction_status()
+        assert "LLM requests" in text
+        assert "Outbound requests have" not in text
+
+    def test_remote_embeddings_are_named_as_the_exception(self):
+        configure(redact=True, embedding_provider="remote")
+        text = welcome.redaction_status()
+        assert "embedding" in text
+        assert "not redacted" in text
+
+    def test_local_embeddings_do_not_claim_an_exception_that_does_not_apply(self):
+        configure(redact=True, embedding_provider="local")
+        assert "not redacted" not in welcome.redaction_status()
+
 
 class TestWelcomeMessage:
     def test_it_carries_the_backend_description(self):

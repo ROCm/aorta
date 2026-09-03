@@ -48,6 +48,15 @@ logger = logging.getLogger(__name__)
 #: Prefix on every environment variable this class reads.
 ENV_PREFIX = "AORTA_CHAT_"
 
+#: How ``aorta chat ui`` hands its two non-setting flags to the Chainlit child.
+#: Deliberately not :class:`Settings` fields: they describe what one run does
+#: rather than how the install is configured, so a profile has no business
+#: holding them. ``cli/chat.py`` hard-codes the same two names -- it may not
+#: import this module at scope -- and ``tests/cli/test_chat.py`` fails if the
+#: two copies drift.
+UI_NO_WAIT_ENV = f"{ENV_PREFIX}UI_NO_WAIT"
+UI_VERBOSE_ENV = f"{ENV_PREFIX}UI_VERBOSE"
+
 #: The installed ``aorta`` package directory. Used as the default RAG corpus:
 #: it is real code the user demonstrably has, and it is only ever read.
 _AORTA_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
