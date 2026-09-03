@@ -79,6 +79,16 @@ tokenspeed_serve = "aorta.run.validation:PROCESS_OPTIONAL_POLICY"
 [project.entry-points."aorta.workload_startup_env"]
 race = "aorta.run.validation:race_startup_env"
 
+# Extension point for `aorta chat`'s agent tools. The entry-point name is the
+# tool name and must equal the langchain BaseTool's own `name`, since that is
+# what the model is offered and what it asks for. aorta's own tools are NOT
+# listed here -- they register directly in `BUILTIN_CHAT_TOOLS`, the same split
+# `aorta.mitigations` and `aorta.agents` use -- so this group is declared only
+# in a contributing package's pyproject.toml. See docs/chat/extending.md.
+#
+#   [project.entry-points."aorta.chat_tools"]
+#   read_fabric_counters = "my_package.tools:read_fabric_counters"
+
 [project.optional-dependencies]
 # For analysis/visualization scripts
 analysis = [
@@ -114,6 +124,81 @@ agent = [
     "litellm>=1.0.0",
 ]
 
+# ── aorta chat ────────────────────────────────────────────────────────────
+# Split by interface, not by backend: a user knows whether they want a terminal
+# or a browser, not whether they want ONNX or torch.
+#
+# Python range (Decision 13a): chat-cli is 3.11+ because aorta/chat/config.py
+# reads the profile file with stdlib ``tomllib``; chat-ui adds a 3.13 ceiling
+# because Chainlit declares ``Requires-Python <3.14``. Extras cannot carry their
+# own ``requires-python``, so the markers below keep pip from *trying* to
+# resolve these on an out-of-range interpreter, and ``aorta/cli/chat.py``
+# re-checks ``sys.version_info`` so a silently-empty install still produces a
+# sentence rather than an ImportError. (A deliberately-unresolvable sentinel
+# dependency would fail louder at install time, but it means putting a
+# non-existent distribution name in a public package's metadata, which is a
+# name someone else can register.)
+chat-cli = [
+    "langchain>=0.3.0; python_version >= '3.11'",
+    "langchain-openai>=0.2.0; python_version >= '3.11'",
+    "langchain-community>=0.3.0; python_version >= '3.11'",
+    "langchain-text-splitters>=0.3.0; python_version >= '3.11'",
+    "langgraph>=0.2.0; python_version >= '3.11'",
+    "openai>=1.50.0; python_version >= '3.11'",
+    "pydantic>=2.0; python_version >= '3.11'",
+    # >=2.3 is load-bearing: aorta/chat/config.py imports NoDecode, added in 2.3.
+    "pydantic-settings>=2.3; python_version >= '3.11'",
+    # Vector store (Decision 10b). Replaces chromadb, which hard-required
+    # kubernetes, onnxruntime, uvicorn, grpcio and the OpenTelemetry SDK --
+    # ~200 MB of server stack to hold a few thousand code-chunk vectors on
+    # local disk. 0.1.6 is the floor that ships the ``vec0`` virtual table
+    # this code creates; see aorta/chat/rag/sqlite_compat.py.
+    "sqlite-vec>=0.1.6; python_version >= '3.11'",
+    # Embeddings (Decision 19a). BAAI/bge-small-en-v1.5 on onnxruntime, which is
+    # fastembed's own default, so the retrieval quality is BGE's rather than
+    # MiniLM's with no torch anywhere. This is what deleted the CUDA-on-AMD
+    # hazard: sentence-transformers hard-required torch, and pip resolves the
+    # CUDA build by default. Verified against fastembed 0.8.0's metadata rather
+    # than its README: it does NOT depend on `onnx`, and beyond what langchain
+    # already installs it adds only onnxruntime, pillow, protobuf, flatbuffers,
+    # loguru, mmh3 and py-rust-stemmers -- ~30 MB of wheels, ~86 MB installed,
+    # against the 2.7 GB the torch path could resolve. 0.4.0 is the floor for
+    # the cache_dir argument this code passes.
+    "fastembed>=0.4.0; python_version >= '3.11'",
+    "rich>=10.0.0; python_version >= '3.11'",
+]
+
+# Alias, because `pip install amd-aorta[chat]` is what everyone types first.
+chat = [
+    "amd-aorta[chat-cli]",
+]
+
+# chat-cli plus the Chainlit web UI (`aorta chat ui`).
+chat-ui = [
+    "amd-aorta[chat-cli]",
+    "chainlit>=1.3.0; python_version >= '3.11' and python_version < '3.14'",
+]
+
+# For hosts whose Python links sqlite3 older than sqlite-vec's floor (CentOS
+# Stream 9 and RHEL 9 ship 3.34.1), or whose build was compiled without
+# loadable-extension support. The wheel bundles its own sqlite, so no root is
+# needed; aorta/chat/rag/sqlite_compat.py picks it up automatically. A no-op on
+# a current distro.
+chat-sqlite = [
+    "pysqlite3-binary>=0.5.0; python_version >= '3.11'",
+]
+
+# Everything optional: the UI plus native Anthropic/Gemini via LiteLLM. There is
+# deliberately no torch tier -- Decision 19a removed the sentence-transformers
+# path rather than demoting it, because an extra that can put CUDA wheels on a
+# ROCm node is a hazard whether or not it is opt-in.
+chat-all = [
+    "amd-aorta[chat-ui]",
+    "litellm>=1.0.0; python_version >= '3.11'",
+    # ChatLiteLLM moved here out of langchain-community, which deleted it in 0.4.
+    "langchain-litellm>=0.1.0; python_version >= '3.11'",
+]
+
 # For aorta.ebpf kernel tracing module.
 # The runtime requirements are the bpftrace binary and CAP_BPF/CAP_PERFMON
 # (or sudo); no Python deps beyond the base.
@@ -127,6 +212,9 @@ tests = [
     "pytest-timeout>=2.1.0",
     "pytest-xdist>=3.3.0",
     "pytest-forked>=1.6.0",  # per-test process isolation for the CPU CI gate
+    # tests/chat/ awaits the agent graph; pure-python and ~30 KB, so it stays in
+    # the slim extra rather than earning one of its own.
+    "pytest-asyncio>=0.24.0",
 ]
 
 # Development dependencies (tests + lint/type tooling)
@@ -139,7 +227,12 @@ dev = [
     "ruff>=0.1.0",
 ]
 
-# Full installation
+# Full installation.
+#
+# The chat-* extras are deliberately absent. `all` is what the dev and CI
+# stacks install, and that stack is py3.14 (see the classifiers), which is
+# outside chat's supported range -- so including them would resolve to nothing
+# there while adding ~400 MB anywhere else. Ask for chat explicitly.
 all = [
     "amd-aorta[analysis]",
     "amd-aorta[report]",
@@ -196,6 +289,10 @@ include = ["aorta*"]
 [tool.setuptools.package-data]
 aorta = [
     "py.typed",
+    "chat/ui/chainlit.md",
+    # The retrieval eval question set (Decision 19b). Shipped so `aorta chat
+    # index eval` works with no arguments on an installed wheel.
+    "chat/rag/eval_questions.json",
     "ebpf/scripts/*.bt",
     "ebpf/scripts/PROVENANCE.md",
     "workloads/hrx_kernels/*.cpp",

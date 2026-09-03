@@ -46,6 +46,12 @@ experiments/
 artifacts/
 artifacts_*/
 overlap_debug*/
+# Exceptions: `artifacts/` above is meant for run output, but it matches any
+# directory of that name anywhere in the tree -- including the `aorta.artifacts`
+# source package and its tests, which would otherwise be invisible to both git
+# and to tools that honour .gitignore (black, ruff).
+!src/aorta/artifacts/
+!tests/artifacts/
 
 # Experiment outputs and traces
 *.json
@@ -58,6 +64,10 @@ overlap_debug*/
 # Exception: the tokenspeed kernel recipe does not load without its mitigations
 # sidecar, so that file has to be tracked despite the *.json rule above.
 !recipes/tokenspeed/*.json
+# Exception: the retrieval eval's question set is package data, not run output.
+# `aorta chat index eval` reads it with no arguments, and pyproject ships it in
+# the wheel, so the *.json rule above must not swallow it.
+!src/aorta/chat/rag/eval_questions.json
 *_merged_enhanced.json
 nccl_thread_sweep_*.log
 nccl_thread_sweep_summary_*.txt

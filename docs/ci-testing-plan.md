@@ -20,6 +20,7 @@ runners; Phase 2 runs the GPU complement on a self-hosted MI350 runner
 | `pre-commit.yml` | PR + push to `main` | Runs `pre-commit` hooks (whitespace, EOF, YAML) |
 | `cpu-tests.yml` | PR (code-touching paths) + push to `main` | CPU pytest gate (`not gpu and not rocm`) on `ubuntu-latest` |
 | `gpu-tests.yml` | PR (GPU paths) + nightly + dispatch | GPU pytest gate + nightly workload regression on `[self-hosted, gpu]` |
+| `chat-tests.yml` | PR (chat paths) + push to `main` | Real-import `aorta chat` tests on 3.11-3.14 with the chat extras (not required) |
 | `nightly.yml` | cron + dispatch | Builds/publishes rolling dev wheels |
 | `release.yml` / `cleanup_releases.yml` | tags / cron | Release packaging + asset pruning |
 | `gemm-sweep-analysis.yml`, `rccl-warp-speed-analysis.yml` | cron / dispatch | Scheduled analysis jobs |
@@ -615,6 +616,98 @@ reliably green.
   `pr` tier; the heavier full manifest (e.g. the 2-GPU `race` smoke) is reserved
   for nightly / dispatch so PR latency stays low.
 
+## `aorta chat` real-import tests (not a required check)
+
+Workflow: [`.github/workflows/chat-tests.yml`](../.github/workflows/chat-tests.yml)
+
+The required CPU gate installs **no chat extra**, and is deliberately unchanged
+by this workflow. A base `pip install amd-aorta` (`pyyaml` + `click`) is a
+supported and common configuration, so `tests/chat/`'s conftest collect-ignores
+that directory when `langchain_core` is absent. That keeps a ~400 MB resolution
+off the critical path of every PR -- but it also means nothing in the required
+gate ever imports langchain, langgraph, sqlite-vec or Chainlit. This workflow is
+where those imports actually happen.
+
+### Interpreters and extras
+
+The legs are an explicit `include`, not a cross product, because the extras are
+not uniform across the range:
+
+| Python | Extra | Why this pairing |
+| --- | --- | --- |
+| `3.11` | `chat-cli` | Chat's floor -- `src/aorta/chat/config.py` reads the profile with stdlib `tomllib` |
+| `3.12` | `chat-cli` | |
+| `3.13` | `chat-all` | The one leg carrying the full stack (Chainlit plus LiteLLM), at the top of Chainlit's supported range, which is where a `Requires-Python` bump on its side shows up first |
+| `3.14` | `chat-cli` | Chainlit declares `Requires-Python <3.14`, so `chat-ui` / `chat-all` cannot be asked for here |
+
+Naming the extra per leg rather than letting Chainlit's environment marker sort
+it out is deliberate: the marker makes pip resolve it to *nothing* rather than
+fail, and "quietly resolved to nothing" is exactly the state that makes an
+install look successful and a feature look broken.
+
+There is no 3.10 leg. The only thing 3.10 must still do is print an install hint
+instead of an `ImportError`, and the CPU gate's 3.10 leg covers that.
+
+### Two assertions before the tests run
+
+Both exist because the plausible failure here is a green run that tested nothing.
+
+1. **The extra actually installed.** Because `tests/chat/` collect-ignores itself
+   when `langchain_core` is missing, a resolution that silently dropped the extra
+   -- a marker that stopped matching, a yanked wheel, a new interpreter with no
+   wheels yet -- would report "0 failed" and look green. The job imports what the
+   extra was supposed to bring (`langchain_core`, `langchain_openai`,
+   `langgraph`, `openai`, `sqlite_vec`, `fastembed`, plus `chainlit` on a UI leg
+   and `litellm` / `langchain_litellm` on the LiteLLM one) and fails loudly if
+   any is absent.
+2. **No `torch`, no `nvidia-*`.** A chat extra that reached torch would make pip
+   resolve the default PyPI wheel -- the CUDA build -- and deposit CUDA wheels
+   onto what is supposed to be an AMD toolkit. Nothing in this stack should get
+   near it, so the job greps the installed package list and fails a leg that
+   does.
+
+### What it runs
+
+```
+pytest tests/chat tests/cli/test_chat.py tests/cli/test_chat_boundaries.py \
+    tests/agent/test_llm_providers.py -m "not gpu and not rocm" -n auto
+```
+
+The two `tests/cli/` modules are pure-AST import-boundary tests that also run on
+a base install; they are repeated here because this is the job that can prove the
+no-langchain property against an interpreter that really *has* langchain.
+`tests/agent/test_llm_providers.py` joins for the mirror-image reason: its
+real-provider-resolution group deliberately does not mock the chat model, so it
+skips itself on the CPU gate and would otherwise be gated everywhere and run
+nowhere.
+
+### Relevance gate, and the check to require later
+
+Two conventions are copied from `cpu-tests.yml` rather than reinvented, and both
+are load-bearing if this is ever made required:
+
+- Path filtering lives in a cheap `changes` job, **not** on the `pull_request`
+  trigger, for the reason given under
+  [Path gate](#path-gate-fail-open-deny-list): a trigger-level `paths:` filter
+  leaves a required check Pending forever. Unlike the CPU catch-all's deny-list,
+  chat is a self-contained subtree, so this one is an **allow-list** in the shape
+  `gpu-tests.yml` uses: the `src/aorta/chat/` subtree and `src/aorta/cli/chat.py`;
+  `src/aorta/agent/llm.py` and `src/aorta/bundle/writer.py` (the second sanctioned
+  importer of `aorta.chat`, and the module that must keep refusing to package the
+  chat profile); `src/aorta/artifacts/` and `src/aorta/_user_paths.py`, which the
+  chat tools read through; the matching tests; `pyproject.toml`, where the extras
+  and entry-point groups live; and the workflow itself. It still fails open -- an
+  indeterminate answer runs the suite rather than handing a chat-touching PR a
+  green check without testing it.
+- The per-version `pytest (chat, py3.x, <extra>)` legs are **not** the check to
+  require. A matrix skipped by a job-level `if` never emits their contexts
+  ([actions/runner#952](https://github.com/actions/runner/issues/952)). The
+  always-running aggregator at the bottom -- check name **`Chat tests`**, no
+  matrix, `if: always()` -- is the one stable context, named and shaped so it can
+  be added to branch protection later with no further workflow change. It fails
+  if any leg failed or if the relevance gate itself broke, and passes when the
+  matrix was legitimately skipped.
+
 ## Follow-up strategy
 
 With the Phase 1 CPU gate in place, the remaining work is tracked as separate
@@ -641,3 +734,4 @@ per-version `pytest (CPU, py3.x)` legs -- see "Making it a required check".)
 | --- | --- | --- | --- |
 | 1 - CPU gate | `ubuntu-latest` (3.10-3.14) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
 | 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm`, `-n 4` + nightly workload regression | Implemented (`gpu-tests.yml`) |
+| Chat real-import (not required) | `ubuntu-latest` (3.11-3.14, chat extras) | `tests/chat` + the boundary and provider modules, `not gpu and not rocm` | Implemented (`chat-tests.yml`) |

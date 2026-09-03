@@ -1,0 +1,140 @@
+# The RAG index
+
+Chat answers from retrieval, so the index is what decides whether an answer is
+grounded or plausible-sounding. This page covers what is in it, when it must be
+rebuilt, and the one failure mode worth being paranoid about.
+
+## Two collections in one file
+
+The index is a single sqlite file — `$XDG_CACHE_HOME/aorta/chat/index.sqlite`
+by default — holding two collections with different provenance and different
+refresh cadences.
+
+| Collection | Contents | Rebuilt when | Leaves the machine? |
+| --- | --- | --- | --- |
+| Source | The AORTA tree at `aorta_path`: code, docs, recipes | You upgrade or move the checkout | It is public source, and it is what the published index contains |
+| Run artifacts | *Your* sweep output: `matrix.json`, `env.json` | You run a sweep you want to ask about | **Never published.** Built locally, and never shipped as an index asset — but see the note below on remote embeddings |
+
+The split is not tidiness. The run-artifact collection is per-user data that can
+contain customer hostnames, filesystem layouts and environment variables, so it
+must never be built or shipped by CI, and rebuilding the source collection must
+not touch it. Retrieved chunks from it are also the reason
+[redaction](redaction.md) is on by default.
+
+> **"Never published" is not the same as "never sent."** With
+> `embedding_provider = "remote"`, building this collection sends the rendered
+> `matrix.json` and `env.json` text to the embeddings API so it can be turned
+> into vectors, and each later query is sent the same way. That path is not
+> covered by chat-message redaction, which applies to the LLM request rather
+> than the embeddings one. Keep `embedding_provider = "local"` — the default —
+> if this data must not leave the machine.
+
+Alongside the index, chat generates a **repo map** — a function and class index
+over the same tree, at `$XDG_CACHE_HOME/aorta/chat/repo_map.md`. The planner
+gets a capped slice of it in its prompt (`repo_map_prompt_max_chars`), and the
+`search_repo_map` tool queries the whole file.
+
+## The index is valid for exactly one configuration
+
+An index is a set of vectors, and vectors only mean anything to the model that
+produced them. Change any of the following and the old index is not stale, it is
+wrong:
+
+- the embedding model, and therefore its **dimensions**;
+- `chunk_size` / `chunk_overlap`;
+- the source tree the vectors describe.
+
+The first is enforced structurally. The store records each collection's vector
+dimension in a registry table and keys its tables on the collection name — a
+sqlite-vec table's dimension is fixed in its `CREATE` statement — so switching
+embedding provider produces a named error rather than a crash from inside the
+extension, and the two providers' collections can coexist in one file. The local
+and remote providers use different collection names for exactly this reason.
+
+The third is the dangerous one, because **nothing about it errors**. An index
+built against a different revision of AORTA does not fail; it answers
+confidently out of code you do not have. For a debugging assistant that is the
+worst available failure mode, and no amount of care in the prompt detects it.
+
+So: rebuild after upgrading `amd-aorta`, after pointing `aorta_path` somewhere
+else, and after changing the chunk settings.
+
+## Managing it
+
+> **Every index carries a manifest.** It records the AORTA version, embedding
+> model, dimensions and chunk parameters, which is what makes drift detectable:
+> an index whose model or dimensions disagree with the running configuration is
+> refused rather than queried, because a silent mismatch returns plausible
+> nonsense instead of an error. `aorta chat doctor` reports what it finds.
+
+```bash
+aorta chat index build           # build the source collection from aorta_path
+aorta chat index fetch           # download the index matching your version
+aorta chat index fetch --from ./index.sqlite   # side-load, for an air-gapped node
+aorta chat index runs            # (re)build the run-artifact collection, locally
+aorta chat doctor                # extras, backend reachability, index freshness
+```
+
+`index runs` is the only one that touches the second collection, and the only
+one you need after a sweep. `build`, `fetch` and `--from` all replace the source
+collection and leave it alone.
+
+**Interrupting any of them is safe.** `build`, `fetch` and `--from` write the
+new index beside the old one and move it into place in a single step, then write
+the manifest, so a `Ctrl-C` leaves the previous index and its manifest exactly as
+they were rather than a half-populated file under a manifest describing the
+complete one. If a run is interrupted in the window after the move, the manifest
+no longer matches the chunk count in the index and every query is refused until
+you rebuild or re-fetch — which is the point, because that state cannot produce a
+correct answer and would not otherwise announce itself.
+
+`index runs` cannot move a file, because its collection shares the `.sqlite`
+with the source one. It gets the same guarantee a different way: it embeds into
+a scratch database and swaps the finished collection in one transaction, so an
+interruption — or a remote embedding endpoint that stops answering part way
+through — leaves the collection you already had, rather than an empty or
+half-rebuilt one.
+
+`fetch` is the normal path: the source collection is identical for every user of
+a given AORTA revision, so building it locally is work someone already did. It
+resolves by installed version — a released wheel gets that release's asset, a
+`.dev` build gets the rolling `main` asset with a warning about the commit delta.
+
+Building locally is the developer path and the air-gapped path. It takes a few
+minutes and runs on CPU.
+
+The log tells you what it indexed. Expect a few hundred files; tens of thousands
+means `aorta_path` is pointing at a tree that includes build output.
+
+## Air-gapped nodes
+
+`index fetch --from <path>` side-loads an index someone copied in, which solves
+half the problem. The other half is the embedding model: the local provider
+downloads its weights from Hugging Face on first use, so with no egress
+`index fetch` (which resolves a release asset over the network) and `index
+build` both fail — the first for want of the asset, the second for want of the
+model.
+
+The download is ~65 MB, not the 130 MB of the fp32 weights: `fastembed` serves
+this model from a quantised ONNX re-host (`qdrant/bge-small-en-v1.5-onnx-q`),
+which is also why its vectors are not interchangeable with a torch-built
+index's.
+
+Pre-seed the model cache on a connected machine, copy it across, and point at it:
+
+```bash
+export HF_HOME=/shared/hf-cache
+export HF_HUB_OFFLINE=1
+```
+
+`HF_HOME` is checked first and wins when set. Without it the cache is
+`model_cache_path`, which defaults under `$XDG_CACHE_HOME` — set that instead
+if you would rather keep the weights out of a shared Hugging Face cache.
+
+The failure without this arrives as a Hugging Face connection error from inside
+the embedding library, which reads as a bug rather than as "you need to pre-seed
+a cache" — so if that is what you are looking at, this is the section you want.
+
+Alternatively set `embedding_provider = "remote"` if the node can reach an
+embeddings API but not Hugging Face; note that this changes the collection name
+and requires building the index against that provider.
