@@ -91,6 +91,16 @@ question that no amount of further corpus work can answer. Read this section
 and [the blocker](#the-blocker-read-this-before-spending-another-node-hour)
 before resuming.
 
+**"What should I work on first?"** —
+[4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is) answers this
+and is the place to start reading. Duarte, Davianne and Vikhyat prioritised six
+use cases; that section records the table, maps each row to what is actually
+built, and recommends **sanitizer (and race) selection and routing** as the
+starting slice, because it is the only row already scaffolded end to end and
+their independent reasoning for ranking it "very strong" is the same reason it
+turned out cheap. Two of the six rows are blocked by the category question
+below, which is why that question is now ranked first among the open items.
+
 **State.** Commit `4aac332` on `explore/tokenspeed-rl-rollouts`. **Unpushed, no
 PR.** Both reward scorers are validated end to end against real data:
 `examples/rl/proposal_reward.py` (five-tier proposal-contract ladder) and
@@ -178,10 +188,12 @@ cannot be trusted, so any reward computed from stop reasons is unsafe.
 
 ### Still needs Manoj
 
-The chatbot's response schema; what Sleuth is; whether a `category` labeller
-exists (now the blocker above); model choice; who stands up the trainer; and
-whether Toyota is a separate demo. Detail in
-[Assumptions to confirm with Manoj](#assumptions-to-confirm-with-manoj).
+In priority order: whether a `category` labeller or rule table exists, and
+whether the eight-category set should be extended at all — that is the blocker
+above, and it now gates two of the six prioritised use cases, so it is the one
+worth asking first. Then the chatbot's response schema; what Sleuth is; model
+choice; who stands up the trainer; and whether Toyota is a separate demo. Detail
+in [Assumptions to confirm with Manoj](#assumptions-to-confirm-with-manoj).
 
 ## 1. Scope: what belongs where
 
@@ -692,6 +704,167 @@ Full ranking, with status:
 | [4.3](#43-the-fix-half--mitigation-correctness) | Mitigation correctness | A probe cell's verdict | minutes | Not built, needs archive |
 | [4.4](#44-recipe-synthesis--now-a-capability-check-not-the-domain) | Recipe synthesis | Loader + dry-run | ~1 s | Built, demoted |
 | [4.5](#45-free-text-diagnosis--needs-humans) | Free-text diagnosis | Humans or a judge | n/a | Deliberately last |
+
+### 4.0 The six prioritised use cases, and how ready each one is
+
+Duarte, Davianne and Vikhyat produced the first real prioritisation this plan
+has had. It is their work, recorded here because it decides what section 4 is
+for; everything below it is the machinery, and this is the ordering.
+
+| Priority | Use case | TokenSpeed fit? | Why |
+|---|---|---|---|
+| | nondeterminism triage | Strong for RL training | Many scenarios can teach the model to select diagnostics and respond to evidence |
+| | Sanitizer (and Race?) selection and routing | Very strong | Clear choices and rewards make it easy to generate and score many rollouts |
+| | Mitigation-sweep planning | Very strong | The model repeatedly chooses the next experiment, producing a natural RL loop |
+| | NaN/numerics triage | Strong | Supports multiple decisions and verifiable outcomes |
+| **Later due to complexity** | QPS regression investigation | Strong but complex | Requires many iterative experiments, but reward criteria and training data are harder |
+| | WaitCheck repair | Moderate | Highly verifiable, but a single case may not generate enough inference activity |
+
+#### These are not alternatives
+
+The natural way to read a priority column is "pick one". Under
+[A2](#a2)'s framing that reading is wrong, and getting it wrong would shape the
+whole effort incorrectly. A *vertical* is a full slice through one problem
+domain, and the consumer is the existing agent loop — which, in production, will
+meet all six of these. So **the six use cases are the task distribution one
+model has to cover, not a menu.** The priority column is asking which slice to
+*start* with, not which to build.
+
+The consequence is concrete: train narrowly on one row and you get a model good
+at that row and no better than a general-purpose baseline on the other five.
+That is a worse outcome than it sounds, because the baseline is what the agent
+already calls today, so a narrow model would show a strong benchmark number and
+no improvement in the thing the deliverable is judged on.
+
+#### Readiness, row by row
+
+The table rates *fit* — whether a use case suits RL at all. That is the right
+question and their answers hold up. What follows is the orthogonal question of
+*readiness*: what exists in this repository today. The two diverge sharply.
+
+| Use case | Their fit | Readiness now | Gated on |
+|---|---|---|---|
+| Sanitizer (and Race) selection and routing | Very strong | **Scaffolded end to end** | nothing — start here |
+| Mitigation-sweep planning | Very strong | Reward built, corpus absent | [#449](https://github.com/ROCm/aorta/issues/449), a run archive |
+| WaitCheck repair | Moderate | Data exists, attribution does not | [#451](https://github.com/ROCm/aorta/issues/451), case variety |
+| nondeterminism triage | Strong for RL training | **Blocked** | the `category` vocabulary and a labeller |
+| NaN/numerics triage | Strong | **Blocked**, one asset exists | the `category` vocabulary and a labeller |
+| QPS regression investigation | Strong but complex (deferred) | Infrastructure most complete of all six | reward design only |
+
+**Sanitizer (and Race) selection and routing — their "very strong" is correct,
+and this is the only row already scaffolded end to end.** The nine-scenario
+corpus in [4.6](#46-what-the-corpus-actually-contains) *is* this use case: four
+of the five sanitizer verdicts covered, three baseline-gated cases reproducing
+the committed ground truth in `verdict_baselines.json` with zero disagreements,
+and ten minutes for a full sweep. Their stated reasoning — "clear choices and
+rewards make it easy to generate and score many rollouts" — is precisely what
+made it cheap, and they arrived at it independently of the code. **Recommended
+starting slice**, on their judgement and the corpus both.
+
+**Mitigation-sweep planning — also correctly "very strong", and second most
+ready.** Their phrase "the model repeatedly chooses the next experiment" is
+literally the agent's loop: propose `next_mitigations` from the registry,
+observe the cell verdict, propose again until it stops. That is what
+`proposal_reward.py` already grades ([4.1](#41-the-gate-on-both-halves--proposal-validity)),
+and what [4.3](#43-the-fix-half--mitigation-correctness) scores for correctness.
+The gap is a corpus of real sweeps rather than a missing reward.
+
+One prerequisite belongs here rather than in a footnote:
+[#449](https://github.com/ROCm/aorta/issues/449). A loop that records a
+name-resolution failure as a genuine `agent_stop` misattributes its own
+stopping, so any reward computed over that loop is computed over a corrupted
+signal — and this is the row whose reward *is* the loop. Fix or work around
+#449 before training on sweep trajectories.
+
+**WaitCheck repair — their "moderate" is well-founded, and the data confirms
+it from a slightly different angle.** They worried that "a single case may not
+generate enough inference activity". The measurement says the shortage is not
+of records but of distinct ones: 160 findings across the whole run collapse to
+**4 distinct sites**, and the racy reproducer's 64 findings are **one race** —
+one record per lane and LDS byte range, identical instruction pair. Volume
+without variety. Compounding it,
+[#451](https://github.com/ROCm/aorta/issues/451) means per-finding attribution
+is currently unavailable: a finding names neither its kernel nor its offset, so
+"repair" has no target at finding granularity. So: moderate, yes, but the
+binding constraint is variety and attribution rather than case count.
+
+**Nondeterminism triage and NaN/numerics triage — the value is real, the
+readiness is not, and this is where the table is optimistic.** Both are
+workload-level symptoms, so they live in the autopsy `category` space — the axis
+at exactly zero coverage
+([the blocker](#the-blocker-read-this-before-spending-another-node-hour)): the
+label spaces are disjoint, and every archived probe run is a `pass`. "Strong for
+RL training" is true in principle and unimplementable today.
+
+It is worse than a missing labeller, and this is the part worth being precise
+about. The eight categories are `checkpoint_race`, `illegal_mem`,
+`launch_error`, `oom_fragment`, `perf_regression`, `rccl_hang`,
+`thermal_throttle`, `unknown`. **There is no numerics category and no
+nondeterminism category.** A NaN failure and a nondeterministic result both
+classify as `unknown` today, which is not a label a reward can teach against.
+So these two rows need the vocabulary *extended*, not merely populated — a
+design decision about what the closed set should contain, upstream of any
+labelling work.
+
+These two rows are what promote the category question from an open item to the
+top blocker: it now gates **two of six prioritised use cases**, which is why it
+is ranked first in
+[Assumptions](#assumptions-to-confirm-with-manoj) rather than bundled.
+
+*One concrete asset exists for the NaN row, and its shape matters because it is
+the only reproducer identified so far for a blocked use case.*
+`recipes/recom_repro/probe-nan-recom-repro.yaml` in `ROCm/aorta-internal`,
+added by PR #59 in `9bb8a44` on 2026-06-16. Verified by reading it:
+
+- It reproduces a **Shampoo optimiser NaN** in the preconditioner — the
+  confirmed signature is `Encountered nan values in bias-corrected factor
+  matrix`. It wraps a dockerised reproducer as an opaque command.
+- It produces **a labelled failure, not just a sweep**, and this is the good
+  news: `mode: probe` with a two-cell `mitigation_axis` of `none` versus
+  `tf32_off`, where `none` NaNs and `tf32_off` (`DISABLE_TF32=1`) runs clean.
+  That is a failing cell, a passing cell, and a *known-correct mitigation* — so
+  it is an example for the fix half ([4.3](#43-the-fix-half--mitigation-correctness))
+  as well as the root-cause half, which is more than the sanitizer corpus
+  offers.
+- Two caveats. Its labels come from three recipe-local `custom_patterns`, which
+  fire as `custom:recom_nan_*` ids (`tier5_custom.py:169`), because the built-in
+  `tier4:nan_signature` detector only matches `loss=nan` and this workload
+  prints something else. So the evidence vocabulary is recipe-local rather than
+  the shared detector vocabulary, which scores fine but does not stratify
+  across workloads. And it is not cheap: 2 cells x 4 trials x 5000 steps with
+  `timeout_per_trial: 3600`, run sequentially, needing `sudo -E` and a private
+  image. Nothing like the ten-minute sanitizer sweep.
+- It still does not supply a `category`. It gives verdicts and detectors, which
+  is the axis that already works. The blocker above is untouched by it.
+
+**QPS regression investigation — the deferral is right, and there is an irony
+worth recording.** This is the row where the *infrastructure* is most complete
+of all six: the serving workload exists, its metrics exist, and the nightly
+baselines exist. It is also the only one of the six with a category already in
+the closed set (`perf_regression`). So the deferral is about reward design being
+hard — what counts as a correct investigation of a regression — and not about
+tooling being absent. The practical consequence is the opposite of the table's
+ordering: once reward design is solved, this may be the **cheapest** row to
+add rather than the most expensive, because nothing has to be built to feed it.
+
+#### What the CIA workloads would exercise
+
+[The workload breadth problem](#the-workload-breadth-problem) records that no
+archived artifact comes from any workload the CIA diagram names, and that
+variety rather than node-hours is the binding constraint on corpus growth. Read
+against this table, that gap falls unevenly:
+
+| CIA workload | Rows it would exercise |
+|---|---|
+| Fremont, Gsplat, Ads | nondeterminism triage, NaN/numerics triage, QPS regression |
+| MIOpen conv2D | sanitizer/race selection and routing, WaitCheck repair |
+
+So the workloads that would populate the two ready rows are the kernel-level
+ones, and today those rows are fed only by synthetic HIP kernels and a single
+Tensile GEMM object. The three workload-level rows are fed by nothing at all.
+That is the same finding as the category blocker seen from the data side: the
+rows with the best stated fit are the rows with neither a label space nor a
+workload behind them.
 
 ### 4.1 The gate on both halves — proposal validity
 
@@ -1575,18 +1748,31 @@ needs a decision or an artifact that is not ours:
 
 | # | Blocked on | Why it blocks | Costs if wrong |
 |---|---|---|---|
-| [A4](#a4) | **A corpus of failing runs** | Both substantive rewards need labelled failures; the survey found 18 archived runs and **one** real defect among them ([4.6](#46-what-the-corpus-actually-contains)) | Nothing substantive can be trained. This is now the critical path |
-| [A1](#a1) | The chatbot's response schema; what Sleuth is; a labeller for the autopsy `category` | Structured-versus-free-text decides whether the reward stays fully automatic ([3.4](#34-the-current-contract-versus-the-target-one)) | A presentation layer, and the category term stays unscored; verdict and attribution survive intact |
+| [A1](#a1) | **A labeller or rule table for the autopsy `category` — and whether the closed set is even complete** | Ranked first: it now gates **two of six** prioritised use cases. nondeterminism triage and NaN/numerics triage are workload-level symptoms, and the eight categories contain no numerics and no nondeterminism slot, so both classify as `unknown` ([4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is)) | Two prioritised use cases stay unimplementable at any corpus size, and the root-cause half of the contract stays unscored |
+| [A4](#a4) | **A corpus of failing runs** | Both substantive rewards need labelled failures; the survey found 18 archived runs and **one** real defect among them ([4.6](#46-what-the-corpus-actually-contains)) | Nothing substantive can be trained. Generation is cheap, so this is now bounded by workload variety |
+| [A1](#a1) | The chatbot's response schema; what Sleuth is | Structured-versus-free-text decides whether the reward stays fully automatic ([3.4](#34-the-current-contract-versus-the-target-one)) | A presentation layer; verdict and attribution survive intact |
 | [A3](#a3) | Model choice | Sets the memory and throughput arithmetic in [5](#5-cost-does-the-claim-hold) and [5b](#5b-what-disaggregation-actually-costs) | The cost table, not the design |
 | [A7](#a7) | Who stands up the trainer | No trainer exists here; verl/slime integration, the GRPO loop and its checkpointing are outside this repository | Phase 4 cannot start |
 
 [A5](#a5) (whether Toyota is a separate demo) remains open but affects scope
 rather than feasibility.
 
-A4 is worth separating from the rest, because it is the only one that does not
-need a decision from anyone — it needs work, the work needs no hardware, and
+The ranking changed with the prioritisation in
+[4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is). The category
+question used to be one clause inside A1, worth asking mainly because it decided
+whether one reward term could be scored. It is now first, because two of the six
+prioritised use cases live entirely in that label space and neither can be
+started without it. It is also no longer purely a question of *who labels* —
+with no numerics or nondeterminism category in the closed set, the prior
+question is whether the set should be extended, which is a design decision
+rather than a data-gathering one.
+
+A4 remains worth separating from the rest, because it is the only item that
+needs no decision from anyone — it needs work, and
 [4.6](#46-what-the-corpus-actually-contains) recommends a route and takes it.
-The others genuinely wait on someone else.
+What that measurement changed is the shape of the constraint: generation costs
+ten minutes a sweep, so A4 is bounded by workload variety rather than by
+node-hours. The others genuinely wait on someone else.
 
 One item that is **not** blocked on Manoj and should be raised anyway: the
 `nccl` weight transport does not work on this image
@@ -1622,16 +1808,28 @@ Three things remain genuinely open, none of them blocking:
   and its quality is ungraded. This is the one that would change the plan.
 - **What Sleuth actually is.** Described as "something similar" to CIA, which is
   enough to not design around it and not enough to design for it.
-- **The autopsy `category` has no deterministic labeller.** Unchanged by the
-  diagram, and the narrowest of the three. The contract demands one of eight
-  categories, but nothing in the tree derives the correct category from a run's
-  evidence; the only mapping is `_infer_category_from_detectors`, a keyword
-  heuristic used solely by the offline `FakeLLMProposer`, and training against
-  it would teach the heuristic rather than the diagnosis
-  ([4.2](#42-the-root-cause-half--triage-classification)). Closing it needs
-  human category labels or a rule table someone owns. Until then the reward
-  scores verdict and attribution, which are genuinely derived, and leaves
-  category unscored.
+- **The autopsy `category` has no deterministic labeller — and the closed set
+  may be incomplete.** Unchanged by the diagram, and **no longer the narrowest
+  of the three; it is now the first thing to resolve.** The contract demands one
+  of eight categories, but nothing in the tree derives the correct category from
+  a run's evidence; the only mapping is `_infer_category_from_detectors`, a
+  keyword heuristic used solely by the offline `FakeLLMProposer`, and training
+  against it would teach the heuristic rather than the diagnosis
+  ([4.2](#42-the-root-cause-half--triage-classification)).
+
+  The prioritisation in
+  [4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is) is what
+  promoted it. Two of the six prioritised use cases — nondeterminism triage and
+  NaN/numerics triage — are workload-level symptoms that live entirely in this
+  label space, so neither can be started while it is open. And the set itself
+  looks short: there is no numerics category and no nondeterminism category
+  among the eight, so both of those use cases classify as `unknown`, which is
+  not something a reward can teach against. The prior question is therefore
+  whether the closed set should be extended, and only then who labels against
+  it.
+
+  Until it is closed the reward scores verdict and attribution, which are
+  genuinely derived, and leaves category unscored.
 
 Also noted and deliberately not designed for: **MCP is a plausible serving
 path.** If CIA reaches aorta over MCP, a post-trained model might be reached
@@ -1654,6 +1852,42 @@ synthesis is demoted to a capability check, and the corpus becomes the critical
 path. The RAG risk this assumption was hedging against does not materialise —
 "for use with aorta llm agent" is an artifact-producing task with a code
 contract, which is the good case.
+
+The sentence is short, so it is worth being explicit about how it is being
+read, because the whole plan rests on the reading.
+
+**"Debugging vertical."** A vertical is a full slice through one problem domain,
+as opposed to a horizontal capability that spans domains. So the target is not
+one skill applied to GPU problems; it is competence at the **entire activity**
+of debugging a failing GPU workload — take a symptom, choose which diagnostic
+to run, interpret the evidence that comes back, propose a fix. All four steps,
+in the order the activity actually happens. This is what makes the six
+prioritised use cases in [4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is)
+a task distribution rather than a menu: a slice through the domain has to
+handle whatever the domain presents.
+
+**"For use with aorta llm agent."** The second clause fixes the consumer and
+therefore the deliverable. The output is not a standalone artifact judged on its
+own terms — it is a model that **drops into the existing loop and beats a
+general-purpose one there**. That is a narrower and much more testable claim,
+and this repository already has both halves of the test: the contract is
+`LiteLLMProposer`'s, transcribed from source in
+[3.1](#31-what-the-current-consumer-sends), and pointing the agent at a
+self-hosted model needs **no code change** — `OPENAI_API_BASE` and
+`OPENAI_API_KEY`, verified against a mock endpoint rather than assumed
+([3.3](#33-pointing-it-at-a-self-hosted-model-no-code-change)). So "beats a
+general-purpose one" can be measured on the real consumer from the day a
+checkpoint exists, with no integration work in between.
+
+**It agrees with the CIA diagram.** [3.0](#30-what-cia-is-and-where-a-post-trained-model-sits-in-it)
+describes the chatbot as showing a **root cause and a fix**, produced by driving
+a tool fleet against the hardware. That is the same thing from the other
+direction: choosing and interpreting the tools *is* the middle two steps of the
+debugging activity, and root-cause-plus-fix *is* its output. The diagram and the
+sentence are one statement described from the product end and the training end,
+which is the strongest evidence available that the contract in
+[3.4](#34-the-current-contract-versus-the-target-one) is the right one to train
+against.
 
 <a id="a3"></a>
 **A3 — Model size.** Qwen3-8B is assumed: the largest Qwen3 in the measured set,
