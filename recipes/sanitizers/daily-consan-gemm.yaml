@@ -30,7 +30,27 @@ sanitizer_plan:
   sanitizers:
     - consan
   policy:
-    consan_policy: strict
+    # lenient, not strict, because consan_gemm_load is a LOAD-ONLY driver: it calls
+    # hipModuleLoad/hipModuleUnload and never dispatches (consan_load.hip states the
+    # contract -- production StreamK GEMM kernels need hipBLASLt to launch). strict
+    # sets RJ_CONSAN_MOI_REQUIRE_RECORDS, which demands visible dynamic records, so a
+    # driver that never dispatches produces no dispatch packet and no records and
+    # strict fails closed with combined_hook_exit_86 no matter how healthy the run
+    # was. That is what #450 observed: error/error, zero findings, every single time.
+    #
+    # This is the same rule harvest_code_objects.py already applies to its own
+    # load-mode recipes, for the same reason. Under lenient this case verifies what a
+    # load-only run can actually verify -- static instrumentation coverage, i.e. that
+    # ConSan reads, patches and analyzes a real production Tensile object. Measured on
+    # gfx950 / ROCm 7.0.2.2: the object transforms clean (outcome=modified-valid,
+    # 75978 patches over 68894 discovered access sites) and only then did strict
+    # reject it, so the coverage signal was there all along and only the policy
+    # discarded it.
+    #
+    # Dynamic race evidence over a dispatching GEMM is genuinely out of scope here and
+    # is tracked separately; daily-consan-lds-dispatch.yaml is the end-to-end control
+    # that proves the record/replay path works on a caller-supplied object.
+    consan_policy: lenient
     on_missing_backend: fail
     # Raised from the 300s cap of #364, which was chosen only because ROCm/rocm-systems#9964
     # made MOI inventory non-terminating: every ceiling produced the same

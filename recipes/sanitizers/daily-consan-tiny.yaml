@@ -17,6 +17,21 @@ description: >
   buffer(s)" instead of "0" in the require-records message. Making this row pass would
   require a kernel with admissible sites, which is what daily-consan-lds-dispatch.yaml
   already covers.
+
+  ROCm/aorta#450 proposed flipping this case to consan_policy: lenient alongside
+  daily-consan-gemm, on the grounds that both drive a load-only driver. Measured on
+  gfx950 / ROCm 7.0.2.2 before acting, and it does not hold for THIS case: lenient
+  leaves it error/error with zero findings, only relabelling the reason from
+  combined_hook_exit_86 to "consan_coverage_incomplete: verdict applicable=false; no
+  applicable code objects". Removing RJ_CONSAN_MOI_REQUIRE_RECORDS cannot help,
+  because the run is rejected by the coverage cross-check rather than by the record
+  requirement -- an object with no admissible sites has nothing to be complete about.
+  So this case stays strict, where its reason at least names the guardrail it is
+  demonstrating. The expectation is now DECLARED in
+  fixtures/expected/verdict_baselines.json as an expected_error naming
+  combined_hook_exit_86, which is what stops the #450 vacuity sweep flagging it while
+  still failing if this case ever errors for any other reason. Previously the
+  intent lived only in this comment, where no check could read it.
 sanitizer_plan:
   target: gfx950
   source:
@@ -35,6 +50,9 @@ sanitizer_plan:
   sanitizers:
     - consan
   policy:
+    # Deliberately strict, and deliberately NOT changed by #450 -- see the tail of
+    # the description. lenient produces the same error with a vaguer reason here,
+    # because tiny_vecadd has no MOI-admissible sites at all.
     consan_policy: strict
     on_missing_backend: fail
   output:
