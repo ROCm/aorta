@@ -7,7 +7,9 @@ translation Proton needs on AMD, and fail-soft ``.hatchet`` parsing.
 It also carries one guard over the *sibling* GPU module's source
 (``test_gpu_smoke_subprocesses_all_use_the_shared_child_budget``): the GPU legs
 are path-skipped on most PRs, so a convention that only they exercise needs a
-CPU test to hold it.
+CPU test to hold it. Because that guard reads one fixed file, its own detection
+is exercised separately against snippets -- a guard checked only against source
+that already complies cannot say what it would reject.
 """
 
 from __future__ import annotations
@@ -1440,13 +1442,19 @@ def _child_budget_violations(source: str, filename: str = "<snippet>") -> dict[s
         pytest.param("unboundable", "os.system(cmd)", id="os-system"),
     ],
 )
-def test_the_child_budget_guard_sees_every_way_out(kind, snippet):
-    """Each escape from ``_CHILD_TIMEOUT_S`` must be reported, and as its own kind.
+def test_the_child_budget_guard_reports_each_kind_of_escape(kind, snippet):
+    """Each escape must be reported, and filed as its own kind.
 
     The guard below reads one fixed file, so on its own it can only say that
     *today's* calls are bounded. These snippets are what say it would notice a
     new one -- the first version keyed on ``timeout=`` being present, so
     ``subprocess.run(argv)``, the most likely regression of all, sailed past it.
+
+    What it does not claim to cover: a launch spelled with a name outside
+    :data:`_BLOCKS_ON_A_CHILD` and :data:`_UNBOUNDABLE_CHILD_LAUNCH` (say
+    ``os.spawnv`` or a bare ``Popen`` that is never waited on). A budget passed
+    positionally is reported as missing rather than accepted, which is the
+    fail-closed direction.
     """
     found = _child_budget_violations(snippet)
     assert found[kind], f"{snippet!r} not reported as {kind}: {found}"
@@ -1468,7 +1476,7 @@ def test_the_child_budget_guard_accepts_what_it_should(snippet):
 
 
 def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
-    """Every child in the GPU smoke module must be bounded by ``_CHILD_TIMEOUT_S``.
+    """Every child launch in the GPU smoke module must carry ``_CHILD_TIMEOUT_S``.
 
     ``test_proton_smoke_gpu.py`` sizes ``_CHILD_TIMEOUT_S`` so a wedged payload
     surfaces as ``TimeoutExpired`` naming that payload, rather than as the CI
@@ -1476,17 +1484,19 @@ def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
     junit report with it (ROCm/aorta#434). The calls most likely to wedge are
     the ones that build their own argv instead of going through ``_capture``.
 
-    Two ways to leave that budget, and the guard has to reject both. A
+    Three ways to leave that budget, and the guard rejects each separately. A
     ``timeout=`` literal is a *narrowed* budget, and it can appear on any call
-    shape, so that half stays keyed on the keyword rather than the callee:
+    shape, so that check stays keyed on the keyword rather than the callee:
     ``from subprocess import run``, a ``Popen.communicate`` or an ``asyncio``
     wait would each escape a callee-shaped check while leaving the same hole.
     An omitted ``timeout=`` is an *absent* budget -- ``subprocess.run(argv)``
-    is completely unbounded -- and nothing about the keyword can catch that,
-    so the second half does look at the callee, matching its trailing name so
-    the import spelling still does not matter. The keyword spelling is what it
-    requires: ``communicate`` and ``wait`` would also take the budget
-    positionally, and asking for the keyword is what lets the guard see it.
+    is completely unbounded -- and nothing about the keyword can catch that, so
+    that check does look at the callee, matching its trailing name so the
+    import spelling still does not matter. It requires the keyword spelling:
+    ``communicate`` and ``wait`` would also take the budget positionally, and
+    asking for the keyword is what lets the guard see it. ``os.system`` and
+    ``os.popen`` are the third -- no timeout exists to pass, so they are
+    rejected outright.
 
     Checked from the CPU suite because the GPU legs are path-skipped on most
     PRs, so a regression here would otherwise reach `main` unobserved. Read

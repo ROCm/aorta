@@ -72,11 +72,12 @@ _EXAMPLES = [
 #: first and the budget could never actually fire.
 #:
 #: It governs **every** subprocess this module launches, including the ones
-#: that build their own argv instead of going through :func:`_capture`. A raw
-#: ``timeout=`` literal in any of them is a hole in the budget, so
-#: ``tests/instrumentation/test_proton.py`` asserts on the AST that there are
-#: none -- the payloads a wedge is most likely to hit are exactly the ones that
-#: bypass the helper.
+#: that build their own argv instead of going through :func:`_capture` -- the
+#: payloads a wedge is most likely to hit are exactly the ones that bypass the
+#: helper. Two things are a hole in the budget, and
+#: ``tests/instrumentation/test_proton.py`` asserts on this module's AST that
+#: neither is present: a raw ``timeout=`` literal, which narrows the budget,
+#: and a blocking child call carrying no ``timeout=`` at all, which removes it.
 _CHILD_TIMEOUT_S = 120
 
 #: Proton's dlopen failure on an image whose ROCm comes from Python wheels:
