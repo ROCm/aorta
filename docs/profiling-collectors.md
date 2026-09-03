@@ -521,7 +521,10 @@ reproducer, the gdb stack and the 3.7.1-clean / 3.8.0-affected boundary:
 (`protonToolFini` re-enters rocprofiler-sdk from inside a client finalizer) and
 [ROCm/rocm-systems#11123](https://github.com/ROCm/rocm-systems/issues/11123)
 (`invoke_client_finalizer` holds a non-recursive mutex across that callback).
-Neither is fixed yet, so the import order below is a workaround, not a cure.
+Neither issue is closed, and no *released* Triton carries a fix — the one that
+exists, `triton-lang/triton#11009`, landed on `main` after the `v3.8.0` tag was
+cut (see the troubleshooting entry below). So the import order below is a
+workaround rather than a cure.
 Tracked here as [ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
 
 The ordering is free, and it does not fight either backend's contract. What
