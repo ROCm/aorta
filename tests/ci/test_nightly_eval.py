@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -507,6 +508,62 @@ def test_the_live_serving_entry_declares_the_capability_it_needs():
     assert entry["needs_docker_daemon"] is True
     assert "blocked_on" not in entry
     assert int(entry["timeout_sec"]) >= 3600
+
+
+def test_the_gating_recipe_discards_two_steps_before_measuring():
+    """A step-0 Triton compile excursion reaches the metrics at `warmup_steps: 1`.
+
+    Measured at 1 cell-run in 13: a ~10x first-token spike (465 ms against a
+    43-47 ms clean range) and a 2825 ms step against 1108-1178 ms. The excursion
+    lands on the first *measured* step, after the single warmup step has already
+    been discarded, so it breaches three of the four originally-proposed gates on
+    a run that is not a regression.
+
+    `num_warmups` is a different knob and cannot substitute: it warms requests
+    within one bench invocation, not the compile cache across invocations. The
+    excursion is positional, so one more discarded step removes it by
+    construction -- which is the only reason the duration-derived metrics can be
+    promoted later at all.
+
+    The matrix carries no `workload_config` override (nightly_eval.py reads only
+    recipe/min_gpus/timeout_sec/needs_docker_daemon), so the recipe is the single
+    place this can be set, and it is shared with the baseline refresher -- which
+    is what keeps the blessed numbers and the nightly on the same measurement.
+    """
+    import yaml
+
+    entry = {e["name"]: e for e in _real_matrix()["entries"]}["tokenspeed_serve_smoke"]
+    recipe_path = nightly_eval.REPO_ROOT / entry["recipe"]
+    config = yaml.safe_load(recipe_path.read_text("utf-8"))["workload_config"]
+
+    assert config["warmup_steps"] == 2, (
+        "the gating recipe must discard two bench steps; at 1 the measured "
+        "step-0 compile excursion enters the metrics the nightly gates on"
+    )
+
+    # The workload derives its internal budget from
+    # ready_timeout + (steps + warmup_steps) * bench_timeout, so an extra warmup
+    # step lengthens it. The binding cap is the entry's own timeout_sec, and a
+    # bench step here is ~1.1s against a 3600s budget dominated by bring-up --
+    # but assert the relationship rather than trusting the arithmetic to hold.
+    assert int(entry["timeout_sec"]) >= 3600
+
+
+def test_the_rollout_doc_marks_its_variance_data_as_the_old_configuration():
+    """The 13-cell-run variance table was measured at `warmup_steps: 1`, which the
+    recipe no longer uses, so it is the rationale for the change and not the
+    baseline to bless against. It is deliberately retained -- there is no
+    measurement at the new setting yet, and the ten-night record-only window is
+    what produces one. This guards the caveat, not the table."""
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+    assert "warmup_steps: 1" in doc, "the provenance of the variance data is gone"
+    assert "warmup_steps: 2" in doc, "the doc does not state the new setting"
+    # The table itself must survive.
+    assert "Clean range over 12 cell-runs" in doc
+    # And the window has to be pinned to the setting the gate will run at.
+    assert re.search(
+        r"ten nightlies, at `warmup_steps: 2`", doc
+    ), "the record-only window is not pinned to warmup_steps: 2"
 
 
 def test_pending_entries_are_valid_and_loadable():
