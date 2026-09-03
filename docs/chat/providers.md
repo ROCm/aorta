@@ -17,8 +17,24 @@ retrieval then costs nothing.
 [installation](installation.md#the-three-extras) for what each extra costs.
 
 Adding a backend is a new module under `aorta/chat/inference/providers/`
-exposing `name`, `get_chat_model()`, `preflight()` and `describe()`, plus one
-entry in that package's factory. No node, graph or tool code changes.
+exposing `name`, `get_chat_model()`, `preflight()`, `probe()`,
+`unreachable_hint()` and `describe()`, plus one entry in that package's
+factory. No node, graph or tool code changes.
+
+`preflight()` and `probe()` are separate because they answer to different
+callers. A session's preflight may be permissive -- the local vLLM backend waits
+up to five minutes for a server that is still loading weights and then starts
+anyway, rather than refuse a warm-up the user can see progressing. `probe()` is
+the raising counterpart, on a short budget, and is what `aorta chat doctor`
+calls: a diagnostic that inherits the permissive behaviour reports a healthy
+backend when there is none. `unreachable_hint()` supplies the text printed
+instead of a traceback when a query fails to connect.
+
+Only `vllm` reaches the network to answer `probe()`. The two remote backends
+validate configuration and stop there, because a reachability check against a
+metered endpoint means billing the operator for running `doctor` -- so a remote
+provider whose key is valid and whose endpoint is down still reports `ok`, and
+the failure surfaces on the first query as `unreachable_hint()`.
 
 ### Local vLLM
 

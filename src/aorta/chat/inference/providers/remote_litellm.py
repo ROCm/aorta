@@ -107,6 +107,24 @@ class RemoteLiteLLMBackend:
         _require_auth_config()
         logger.info("Using %s", self.describe())
 
+    async def probe(self, timeout: float | None = None) -> None:
+        """Same as :meth:`preflight`, so *timeout* is unused.
+
+        LiteLLM routes to a metered provider, so reaching for the network here
+        would bill the operator for running a diagnostic.
+        """
+        await self.preflight()
+
+    def unreachable_hint(self) -> str:
+        endpoint = settings.remote_llm_base_url.strip()
+        target = endpoint or f"the provider LiteLLM routes {settings.remote_llm_model} to"
+        return (
+            f"could not reach {target}.\n"
+            "Check that the route is correct and reachable from this host:\n"
+            "  export AORTA_CHAT_REMOTE_LLM_BASE_URL=https://...\n"
+            "or set remote_llm_base_url in the profile: aorta chat config init"
+        )
+
     def describe(self) -> str:
         endpoint = settings.remote_llm_base_url.strip() or "LiteLLM's own routing"
         auth = (

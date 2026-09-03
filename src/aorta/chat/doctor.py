@@ -41,6 +41,12 @@ _HF_HOST = "huggingface.co"
 _HF_PORT = 443
 _HF_PROBE_TIMEOUT = 3.0
 
+#: The LLM backend's budget, for the same reason and on the same scale. A local
+#: server that needs longer than this to answer ``/health`` is not one a chat
+#: session can use yet either, so waiting minutes here only delays the same
+#: advice.
+_BACKEND_PROBE_TIMEOUT = 5.0
+
 #: Distributions the chat extras install, grouped by the extra that provides
 #: them. Reported by import name because that is what actually determines
 #: whether a code path works -- a distribution can be installed for a different
@@ -280,11 +286,24 @@ def _check_index(report: Report) -> None:
 
 
 def _check_backend(report: Report) -> None:
-    """Whether the configured LLM backend answers."""
+    """Whether the configured LLM backend answers.
+
+    Calls ``probe`` rather than ``preflight``. The local backend's preflight is
+    deliberately permissive -- it waits five minutes and then starts anyway, so
+    the REPL survives a server that is still loading weights -- which made this
+    check report a confident ``ok`` for the single most likely failure, and
+    spend preflight's whole budget doing it -- 302s measured against a closed
+    port. ``probe`` raises instead, on a diagnostic's budget.
+    """
     import asyncio
 
     try:
+        # Both imports belong under this guard: `unreachable` reaches httpx and
+        # openai, so on the install this check exists to diagnose -- the one
+        # missing the chat extra -- importing it at function scope would crash
+        # the command instead of reporting the missing dependency.
         from aorta.chat.inference.providers.factory import get_backend
+        from aorta.chat.inference.unreachable import BackendUnreachableError
 
         backend = get_backend()
     except (ImportError, ValueError) as exc:
@@ -292,16 +311,23 @@ def _check_backend(report: Report) -> None:
         return
 
     try:
-        asyncio.run(backend.preflight())
+        asyncio.run(backend.probe(timeout=_BACKEND_PROBE_TIMEOUT))
     except Exception as exc:
         # Deliberately broad: a backend may raise anything from httpx, openai or
         # litellm, and a doctor command that propagates one of those has failed
         # at its only job.
+        #
+        # BackendUnreachableError's message is already written to be read by the
+        # operator whose command just stopped, so prefixing it with a class name
+        # would only add noise. Anything else needs its type named.
+        hint = str(exc)
+        if not isinstance(exc, BackendUnreachableError):
+            hint = f"{type(exc).__name__}: {exc}"
         report.add(
             "llm backend",
             FAIL,
             f"{backend.describe()} did not answer",
-            hint=f"{type(exc).__name__}: {exc}",
+            hint=hint,
         )
         return
     report.add("llm backend", OK, backend.describe())
@@ -311,7 +337,7 @@ def run_checks(*, backend: bool = True) -> Report:
     """Run every check and return the report.
 
     Args:
-        backend: Whether to preflight the LLM backend. Off in tests, and worth
+        backend: Whether to probe the LLM backend. Off in tests, and worth
             skipping when the user only wants the local picture.
     """
     report = Report()

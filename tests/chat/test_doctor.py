@@ -200,13 +200,21 @@ class TestIndexChecks:
 
 
 class TestBackendCheck:
+    """The check calls ``probe``, not ``preflight``.
+
+    Which is the whole point: ``preflight`` is allowed to be permissive, so a
+    diagnostic built on it reported ``ok`` for the most likely failure. The
+    reachability behaviour itself lives in test_backend_reachability.py; these
+    pin the report shape against a stand-in backend.
+    """
+
     def test_an_unreachable_backend_fails_with_the_underlying_error(self, monkeypatch):
         from aorta.chat.inference.providers import factory
 
         class _Dead:
             name = "vllm"
 
-            async def preflight(self):
+            async def probe(self, timeout=None):
                 raise ConnectionError("connection refused")
 
             def describe(self):
@@ -217,13 +225,50 @@ class TestBackendCheck:
         assert check.status == FAIL
         assert "connection refused" in check.hint
 
+    def test_an_unexpected_exception_type_is_named_in_the_hint(self, monkeypatch):
+        """Only BackendUnreachableError's message stands on its own."""
+        from aorta.chat.inference.providers import factory
+
+        class _Weird:
+            name = "vllm"
+
+            async def probe(self, timeout=None):
+                raise ConnectionError("connection refused")
+
+            def describe(self):
+                return "vllm at http://localhost:8000/v1"
+
+        monkeypatch.setattr(factory, "get_backend", lambda *a, **k: _Weird())
+        assert _by_name(run_checks(backend=True), "llm backend").hint.startswith(
+            "ConnectionError:"
+        )
+
+    def test_a_permissive_preflight_is_not_what_gets_called(self, monkeypatch):
+        """The false positive, pinned: a backend that starts anyway is still a FAIL."""
+        from aorta.chat.inference.providers import factory
+
+        class _StartsAnyway:
+            name = "vllm"
+
+            async def preflight(self):
+                return None  # what the local backend does after waiting 300s
+
+            async def probe(self, timeout=None):
+                raise ConnectionError("connection refused")
+
+            def describe(self):
+                return "vllm at http://localhost:8000/v1"
+
+        monkeypatch.setattr(factory, "get_backend", lambda *a, **k: _StartsAnyway())
+        assert _by_name(run_checks(backend=True), "llm backend").status == FAIL
+
     def test_a_healthy_backend_is_ok(self, monkeypatch):
         from aorta.chat.inference.providers import factory
 
         class _Alive:
             name = "vllm"
 
-            async def preflight(self):
+            async def probe(self, timeout=None):
                 return None
 
             def describe(self):
@@ -231,3 +276,22 @@ class TestBackendCheck:
 
         monkeypatch.setattr(factory, "get_backend", lambda *a, **k: _Alive())
         assert _by_name(run_checks(backend=True), "llm backend").status == OK
+
+    def test_the_probe_is_given_a_diagnostics_budget(self, monkeypatch):
+        """Five minutes is a session's patience, not a waiting operator's."""
+        from aorta.chat.inference.providers import factory
+
+        budgets: list[float | None] = []
+
+        class _Recording:
+            name = "vllm"
+
+            async def probe(self, timeout=None):
+                budgets.append(timeout)
+
+            def describe(self):
+                return "vllm at http://localhost:8000/v1"
+
+        monkeypatch.setattr(factory, "get_backend", lambda *a, **k: _Recording())
+        run_checks(backend=True)
+        assert budgets and budgets[0] is not None and budgets[0] <= 10

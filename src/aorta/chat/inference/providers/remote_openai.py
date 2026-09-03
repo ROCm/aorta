@@ -66,10 +66,29 @@ class RemoteOpenAIBackend:
         _require_api_key()
         logger.info("Using %s", self.describe())
 
-    def describe(self) -> str:
-        endpoint = (
-            settings.remote_llm_base_url.strip() or "the provider default endpoint"
+    async def probe(self, timeout: float | None = None) -> None:
+        """Same as :meth:`preflight`, so *timeout* is unused.
+
+        A reachability probe here would mean a billable completion against a
+        metered endpoint, which a diagnostic command has no business spending.
+        Configuration is what this backend can be wrong about, and preflight
+        already raises on it.
+        """
+        await self.preflight()
+
+    def unreachable_hint(self) -> str:
+        return (
+            f"could not reach {self._endpoint()}.\n"
+            "Check that the endpoint is correct and reachable from this host:\n"
+            "  export AORTA_CHAT_REMOTE_LLM_BASE_URL=https://...\n"
+            "or set remote_llm_base_url in the profile: aorta chat config init"
         )
+
+    def _endpoint(self) -> str:
+        return settings.remote_llm_base_url.strip() or "the provider default endpoint"
+
+    def describe(self) -> str:
+        endpoint = self._endpoint()
         auth = describe_auth(
             auth_header=settings.remote_llm_auth_header,
             extra_headers=settings.remote_llm_extra_headers,
