@@ -1440,6 +1440,20 @@ def _child_budget_violations(source: str, filename: str = "<snippet>") -> dict[s
         pytest.param("unbounded", "proc.communicate()", id="no-timeout-communicate"),
         pytest.param("unbounded", "proc.wait()", id="no-timeout-wait"),
         pytest.param("unboundable", "os.system(cmd)", id="os-system"),
+        # Spellings a human reviewer mutation-tested against the keyword-only
+        # version of this guard and found it green on. Kept as their own cases
+        # so the three cannot regress independently of the ones above.
+        pytest.param(
+            "unbounded",
+            "subprocess.run(argv, capture_output=True, text=True)",
+            id="reviewer-kwarg-deleted",
+        ),
+        pytest.param("unbounded", "proc.wait(3600)", id="reviewer-positional-wait"),
+        pytest.param(
+            "unbounded",
+            'subprocess.run(argv, **{"timeout": 3600})',
+            id="reviewer-kwargs-unpack",
+        ),
     ],
 )
 def test_the_child_budget_guard_reports_each_kind_of_escape(kind, snippet):
