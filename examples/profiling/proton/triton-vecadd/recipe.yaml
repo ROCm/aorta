@@ -39,11 +39,15 @@ env_passthrough_mode: inherit
 # an argparse "invalid choice: 'rocprofiler'" on 3.7.x and earlier, before your
 # payload runs. Pinning `roctracer` additionally means leaving `mode: cli`:
 # Proton's front-end initialises the HIP runtime only on the path where `-b` is
-# absent -- still true in 3.8.0 -- and roctracer records nothing unless it
-# starts after that, so the pin captures an empty tree and the collector
-# refuses the pairing. See examples/profiling/proton/amd-roctracer for the
-# `mode: env` shape it requires. `rocprofiler` is the opposite case: it is
-# configured when `libproton.so` loads, so its `mode: cli` pin is allowed.
+# absent, and on Triton 3.7.x and earlier roctracer records nothing unless it
+# starts after that, so the pin captures an empty tree. Measured on 3.8.0 the
+# same pin captures normally, but the collector refuses the pairing on every
+# version, because 3.7.x is still shipped by images in use and the failure is
+# silent (removal tracked in ROCm/aorta#439). See
+# examples/profiling/proton/amd-roctracer for the `mode: env` shape it
+# requires -- correct on every version. `rocprofiler` is not subject to this at
+# all: it is configured when `libproton.so` loads, so its `mode: cli` pin is
+# allowed.
 collect:
   proton:
     mode: "cli"

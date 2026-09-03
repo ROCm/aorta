@@ -3,12 +3,25 @@
 Covers the option schema, both attach modes (``cli`` argv rewrite and ``env``
 variable bundle), the ``HIP_VISIBLE_DEVICES`` -> ``ROCR_VISIBLE_DEVICES``
 translation Proton needs on AMD, and fail-soft ``.hatchet`` parsing.
+
+It also carries two guards over the *sibling* GPU module's source: the GPU legs
+are path-skipped on most PRs, so a convention that only they exercise needs a
+CPU test to hold it. One checks that every child launch there carries the shared
+budget (``test_gpu_smoke_subprocesses_all_use_the_shared_child_budget``); the
+other checks the budget's own *value*
+(``test_the_shared_child_budget_value_stays_under_the_gpu_job_timeout``), since
+pinning the constant's name everywhere still permits raising the constant.
+Because the first reads one fixed file, its detection is exercised separately
+against snippets -- a guard checked only against source that already complies
+cannot say what it would reject.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -1364,3 +1377,240 @@ def test_parse_summary_from_streams_consumes_a_lazy_iterator(tmp_path):
     )
     assert metrics.get("proton_kernel_count") == 3
     assert metrics.get("proton_gpu_time_ms") == pytest.approx(2.0)
+
+
+#: Callables that block on a child process and take a ``timeout`` keyword.
+#: Matched on the trailing name only, so ``subprocess.run(...)``,
+#: ``run(...)`` after ``from subprocess import run`` and
+#: ``proc.communicate(...)`` all resolve the same way.
+_BLOCKS_ON_A_CHILD = frozenset(
+    {"run", "call", "check_call", "check_output", "communicate", "wait", "wait_for"}
+)
+
+#: Child launches that cannot be given a timeout at all, so there is no
+#: bounded spelling of them to accept.
+_UNBOUNDABLE_CHILD_LAUNCH = frozenset({"system", "popen"})
+
+
+def _called_name(node: ast.Call) -> str | None:
+    """Trailing identifier of a call's callee, ignoring how it was reached."""
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _child_budget_violations(source: str, filename: str = "<snippet>") -> dict[str, list]:
+    """Ways ``source`` escapes the shared child budget, keyed by how.
+
+    ``narrowed``: a ``timeout=`` that is not ``_CHILD_TIMEOUT_S``, on any call
+    shape. ``unbounded``: a blocking child call with no ``timeout=`` keyword.
+    ``unboundable``: a launch that takes no timeout at all.
+    """
+    tree = ast.parse(source, filename=filename)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    return {
+        "narrowed": [
+            (keyword.lineno, ast.unparse(keyword.value))
+            for node in calls
+            for keyword in node.keywords
+            if keyword.arg == "timeout"
+            and not (
+                isinstance(keyword.value, ast.Name) and keyword.value.id == "_CHILD_TIMEOUT_S"
+            )
+        ],
+        "unbounded": [
+            (node.lineno, ast.unparse(node.func))
+            for node in calls
+            if (_called_name(node) or "") in _BLOCKS_ON_A_CHILD
+            and not any(keyword.arg == "timeout" for keyword in node.keywords)
+        ],
+        "unboundable": [
+            (node.lineno, ast.unparse(node.func))
+            for node in calls
+            if (_called_name(node) or "") in _UNBOUNDABLE_CHILD_LAUNCH
+        ],
+    }
+
+
+def _assigned_int(source: str, name: str) -> int | None:
+    """Value of a module-level ``name = <int literal>`` assignment.
+
+    ``None`` for anything else -- an annotated assignment, an expression, a
+    negation -- so the caller fails closed and says what it could not read
+    rather than silently checking nothing. ``bool`` is rejected despite being
+    an ``int`` subclass: ``True`` would otherwise read as a one-second budget
+    and pass every bound.
+    """
+    for node in ast.parse(source).body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets) and isinstance(
+            node.value, ast.Constant
+        ):
+            value = node.value.value
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return None
+
+
+@pytest.mark.parametrize(
+    ("kind", "snippet"),
+    [
+        pytest.param("narrowed", "subprocess.run(argv, timeout=3600)", id="literal-timeout"),
+        pytest.param("narrowed", "proc.communicate(timeout=600)", id="literal-on-communicate"),
+        pytest.param("unbounded", "subprocess.run(argv)", id="no-timeout-at-all"),
+        pytest.param("unbounded", "run(argv, check=True)", id="no-timeout-bare-import"),
+        pytest.param("unbounded", "subprocess.check_output(argv)", id="no-timeout-check-output"),
+        pytest.param("unbounded", "proc.communicate()", id="no-timeout-communicate"),
+        pytest.param("unbounded", "proc.wait()", id="no-timeout-wait"),
+        pytest.param("unboundable", "os.system(cmd)", id="os-system"),
+        # Spellings a human reviewer mutation-tested against the keyword-only
+        # version of this guard and found it green on. Kept as their own cases
+        # so the three cannot regress independently of the ones above.
+        pytest.param(
+            "unbounded",
+            "subprocess.run(argv, capture_output=True, text=True)",
+            id="reviewer-kwarg-deleted",
+        ),
+        pytest.param("unbounded", "proc.wait(3600)", id="reviewer-positional-wait"),
+        pytest.param(
+            "unbounded",
+            'subprocess.run(argv, **{"timeout": 3600})',
+            id="reviewer-kwargs-unpack",
+        ),
+    ],
+)
+def test_the_child_budget_guard_reports_each_kind_of_escape(kind, snippet):
+    """Each escape must be reported, and filed as its own kind.
+
+    The guard below reads one fixed file, so on its own it can only say that
+    *today's* calls are bounded. These snippets are what say it would notice a
+    new one -- the first version keyed on ``timeout=`` being present, so
+    ``subprocess.run(argv)``, the most likely regression of all, sailed past it.
+
+    What it does not claim to cover: a launch spelled with a name outside
+    :data:`_BLOCKS_ON_A_CHILD` and :data:`_UNBOUNDABLE_CHILD_LAUNCH` (say
+    ``os.spawnv`` or a bare ``Popen`` that is never waited on). A budget passed
+    positionally is reported as missing rather than accepted, which is the
+    fail-closed direction.
+    """
+    found = _child_budget_violations(snippet)
+    assert found[kind], f"{snippet!r} not reported as {kind}: {found}"
+    assert not [k for k in found if k != kind and found[k]], f"{snippet!r} misfiled: {found}"
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param("subprocess.run(argv, timeout=_CHILD_TIMEOUT_S)", id="run"),
+        pytest.param("proc.communicate(timeout=_CHILD_TIMEOUT_S)", id="communicate"),
+        pytest.param("json.load(handle)", id="unrelated-call"),
+        pytest.param("shutil.which('proton')", id="no-child"),
+    ],
+)
+def test_the_child_budget_guard_accepts_what_it_should(snippet):
+    """A guard that flags correct code gets disabled, so pin the negatives too."""
+    assert not any(_child_budget_violations(snippet).values()), snippet
+
+
+def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
+    """Every child launch in the GPU smoke module must carry ``_CHILD_TIMEOUT_S``.
+
+    ``test_proton_smoke_gpu.py`` sizes ``_CHILD_TIMEOUT_S`` so a wedged payload
+    surfaces as ``TimeoutExpired`` naming that payload, rather than as the CI
+    job hitting its own 60-minute cap -- which cancels the run and takes the
+    junit report with it (ROCm/aorta#434). The calls most likely to wedge are
+    the ones that build their own argv instead of going through ``_capture``.
+
+    Three ways to leave that budget, and the guard rejects each separately. A
+    ``timeout=`` literal is a *narrowed* budget, and it can appear on any call
+    shape, so that check stays keyed on the keyword rather than the callee:
+    ``from subprocess import run``, a ``Popen.communicate`` or an ``asyncio``
+    wait would each escape a callee-shaped check while leaving the same hole.
+    An omitted ``timeout=`` is an *absent* budget -- ``subprocess.run(argv)``
+    is completely unbounded -- and nothing about the keyword can catch that, so
+    that check does look at the callee, matching its trailing name so the
+    import spelling still does not matter. It requires the keyword spelling:
+    ``communicate`` and ``wait`` would also take the budget positionally, and
+    asking for the keyword is what lets the guard see it. ``os.system`` and
+    ``os.popen`` are the third -- no timeout exists to pass, so they are
+    rejected outright.
+
+    Checked from the CPU suite because the GPU legs are path-skipped on most
+    PRs, so a regression here would otherwise reach `main` unobserved. Read
+    from the AST rather than grepped so a reflowed call still matches.
+    """
+    source = Path(__file__).with_name("test_proton_smoke_gpu.py")
+    found = _child_budget_violations(source.read_text(encoding="utf-8"), filename=str(source))
+    narrowed, unbounded, unboundable = (
+        found["narrowed"],
+        found["unbounded"],
+        found["unboundable"],
+    )
+
+    assert not narrowed, (
+        f"{source.name} sets a per-call timeout instead of _CHILD_TIMEOUT_S at "
+        f"{narrowed}. A wedged Proton payload would then run past the GPU job's "
+        "own cap, which cancels the job and loses its report -- see ROCm/aorta#434."
+    )
+    assert not unbounded, (
+        f"{source.name} waits on a child without a timeout= keyword at {unbounded}. "
+        "Pass timeout=_CHILD_TIMEOUT_S, or launch through _capture, so a wedge "
+        "fails this test's payload rather than the whole GPU job -- see "
+        "ROCm/aorta#434."
+    )
+    assert not unboundable, (
+        f"{source.name} launches a child that cannot be bounded at {unboundable}. "
+        "os.system and os.popen take no timeout, so a wedge there runs until the "
+        "GPU job's own cap. Use subprocess with timeout=_CHILD_TIMEOUT_S -- see "
+        "ROCm/aorta#434."
+    )
+
+
+def test_the_shared_child_budget_value_stays_under_the_gpu_job_timeout():
+    """The budget's *value* has to be bounded, not just its name.
+
+    The guard above pins every call to ``_CHILD_TIMEOUT_S`` and says nothing
+    about what that constant holds, so raising it in one place reinstates the
+    original incident while leaving all three passes green -- the shortest path
+    back to run 33527313950, where a wedged payload ran until the GPU job's own
+    60-minute cap, which cancels the job and takes the junit report with it
+    (ROCm/aorta#434).
+
+    Anchored to the workflow's ``--timeout`` rather than to a literal here,
+    because "below the thing that would otherwise kill us" is the actual
+    property: a budget above it never fires, and pytest-timeout kills the test
+    from outside with no payload name and no partial output. Either side
+    changing is caught. Comment lines are skipped when reading the workflow --
+    ``gpu-tests.yml`` explains the flag a few lines above passing it, and a
+    guard that reads the prose instead of the flag would keep passing after the
+    two drifted apart.
+    """
+    module = Path(__file__).with_name("test_proton_smoke_gpu.py")
+    budget = _assigned_int(module.read_text(encoding="utf-8"), "_CHILD_TIMEOUT_S")
+    assert budget is not None, (
+        f"{module.name} no longer defines _CHILD_TIMEOUT_S as a module-level int "
+        "literal, so its value cannot be checked. Keep it one, or teach this test "
+        "the new shape -- an unbounded budget is how ROCm/aorta#434 happened."
+    )
+
+    workflow = Path(__file__).parents[2] / ".github" / "workflows" / "gpu-tests.yml"
+    pytest_timeouts = [
+        int(match)
+        for line in workflow.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+        for match in re.findall(r"--timeout=(\d+)", line)
+    ]
+    assert pytest_timeouts, (
+        f"{workflow.name} no longer passes --timeout= to pytest. The child budget is "
+        "sized to sit under it, so that bound needs re-deriving before this test can "
+        "hold anything."
+    )
+
+    assert 0 < budget < min(pytest_timeouts), (
+        f"_CHILD_TIMEOUT_S is {budget}s, which is not below the GPU job's pytest "
+        f"--timeout of {min(pytest_timeouts)}s. A payload wedge would then be killed "
+        "by pytest-timeout from outside -- or, past the job's 60-minute cap, cancel "
+        "the job and lose its report -- instead of failing as a TimeoutExpired that "
+        "names the payload. See ROCm/aorta#434."
+    )

@@ -27,23 +27,38 @@ env_passthrough_mode: inherit
 # `mode: env`, not `mode: cli`, and the reason is mechanical rather than
 # stylistic. Triton's Proton CLI front-end calls its own `_select_backend()`
 # only when `-b` is *absent*, and that call initialises the Triton HIP driver
-# as a side effect. roctracer records nothing when it attaches ahead of the
-# HIP runtime it is tracing, so naming a backend on the CLI hands you a
-# 160-byte hatchet with a bare ROOT frame and an exit status of 0 -- aorta's
-# parser then degrades to `proton_artifact_dir` and the trial silently carries
-# no Proton metrics at all. `mode: env` instead exports `AORTA_PROTON_*` and
-# lets the payload call `proton.start()` after its own `import torch`, so the
-# backend attaches to a live runtime. The collector rejects `mode: cli` with
-# an explicit roctracer backend for exactly this reason. No Triton version
-# fixes it: line 73 of `third_party/proton/proton/proton.py` at the `v3.8.0`
-# tag is still `backend = args.backend if args.backend else
-# _select_backend()`.
+# as a side effect. On Triton 3.7.x and earlier, roctracer records nothing when
+# it attaches ahead of the HIP runtime it is tracing, so naming a backend on
+# the CLI hands you a 160-byte hatchet with a bare ROOT frame and an exit
+# status of 0 -- aorta's parser then degrades to `proton_artifact_dir` and the
+# trial silently carries no Proton metrics at all. `mode: env` instead exports
+# `AORTA_PROTON_*` and lets the payload call `proton.start()` after torch, so
+# the backend attaches to a live runtime.
 #
-# The refusal is roctracer-only. `rocprofiler` has the opposite contract --
-# `libproton.so` configures it from an `__attribute__((constructor))` at load
-# time, so it wants to be set up before HSA rather than after -- and its CLI
-# pin is allowed. That is also why `../amd-rocprofiler/gelu.py` imports Proton
-# before torch while `pipeline.py` here does the reverse.
+# Measured on Triton 3.8.0 (gfx950 / ROCm 10) the same CLI pin captures
+# normally -- 3090 bytes, byte-for-byte what `backend: auto` produces there --
+# so a newer release does fix it, even though the line the empty capture was
+# attributed to is unchanged (`backend = args.backend if args.backend else
+# _select_backend()`, still line 73 of `third_party/proton/proton/proton.py` at
+# the `v3.8.0` tag); something else on that stack brings the runtime up first.
+# The collector nonetheless still rejects `mode: cli` with an explicit
+# roctracer backend on every version, because 3.7.x is what several images in
+# use ship and the failure it prevents is silent. Removing the refusal once the
+# floor reaches 3.8 is tracked in ROCm/aorta#439. `mode: env` is correct on
+# every version, which is why this example uses it.
+#
+# The refusal is roctracer-only. `rocprofiler` is configured by an
+# `__attribute__((constructor))` in `libproton.so` at load time, so it wants to
+# be set up before HSA rather than after, and its CLI pin is allowed.
+#
+# Note this does NOT make the two payloads' import orders differ: every Proton
+# payload here, `pipeline.py` included, imports `triton.profiler` before torch
+# and calls `proton.start()` from `main()` after it. The two backends constrain
+# different events -- rocprofiler when it is CONFIGURED (at import), roctracer
+# when the SESSION STARTS -- and one ordering satisfies both. The earlier
+# "two backends, two import orders" framing here was wrong rather than merely
+# stale; see `../amd-rocprofiler/recipe.yaml` and ROCm/aorta#434 for the
+# measured reason the import order is now uniform.
 #
 # `context: shadow` attributes time to the launch site, which for this payload
 # means one node per Triton kernel; `data: tree` is the `.hatchet` the

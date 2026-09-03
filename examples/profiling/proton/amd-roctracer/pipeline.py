@@ -6,9 +6,12 @@ carries a real launch sequence rather than a single kernel.
 
 Unlike the ``triton-vecadd`` / ``triton-softmax`` payloads this one drives
 Proton itself, because pinning ``roctracer`` only works from inside a live HIP
-runtime -- see the ``import torch`` comment below and ``recipe.yaml``. That is
-specific to this backend: ``rocprofiler`` needs the opposite load order, and
-``instrumentation`` needs no particular one.
+runtime -- see the import comment below and ``recipe.yaml``. That requirement
+is specific to this backend: ``rocprofiler`` is configured when
+``libproton.so`` loads rather than when a session starts, and
+``instrumentation`` needs no particular ordering at all. The three requirements
+do not conflict, so all three ``amd-*`` payloads use one ordering: Proton
+imported before torch, ``proton.start()`` called after it.
 
 Constexpr kernel parameters are spelled lowercase (``block_size`` rather than
 Triton's conventional ``BLOCK_SIZE``) to satisfy this repository's lint
@@ -28,17 +31,30 @@ import math
 import os
 import sys
 
-# ``torch`` is imported at module scope, not lazily inside main(), and that
-# ordering is load-bearing: roctracer records nothing when it attaches before
-# the HIP runtime it is meant to trace, and importing torch is what brings that
-# runtime up. The same constraint is why this example is driven by ``mode: env``
-# -- Triton's Proton CLI initialises the driver only on the path where ``-b`` is
-# absent, so pinning a backend through ``mode: cli`` produces a hatchet holding
-# nothing but a bare ROOT frame, and still exits 0.
+# THE ORDER OF THE NEXT TWO IMPORT BLOCKS IS LOAD-BEARING, in both directions.
+#
+# Proton first, because importing it after torch hangs the process forever at
+# exit on Triton 3.8.0. `libproton.so` calls `rocprofiler_force_configure` from
+# an `__attribute__((constructor))`, so the import registers Proton as a
+# rocprofiler-sdk client; when HSA is already up (a torch import chain is
+# enough) that registration lands late, and the atexit `registration::finalize`
+# then re-enters its own non-recursive registration mutex through Proton's
+# `protonToolFini` and deadlocks. Two imports in this order are the whole
+# reproducer. See ROCm/aorta#434 for the stack.
+#
+# torch before `proton.start()`, because roctracer installs its interceptor at
+# session start and records nothing if it attaches ahead of the HIP runtime.
+# That constraint is about the START call, not the import -- verified: moving
+# the import above torch leaves the capture byte-identical -- which is what
+# makes satisfying both orderings possible at all. It is also why this example
+# is driven by ``mode: env``: Triton's Proton CLI initialises the driver only on
+# the path where ``-b`` is absent, so pinning a backend through ``mode: cli``
+# produced a hatchet holding nothing but a bare ROOT frame on Triton 3.7.x.
+import triton.profiler as proton  # isort: skip  # noqa: I001
+
 import torch
 import triton
 import triton.language as tl
-import triton.profiler as proton
 
 #: Prefix of the variables aorta's ``proton`` collector exports in ``mode: env``.
 _ENV_PREFIX = "AORTA_PROTON_"
@@ -150,11 +166,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         default=None,
-        # ``roctracer`` only. This module imports torch before Proton, which is
-        # what roctracer needs and what rocprofiler cannot tolerate -- it is
-        # configured from a ``libproton.so`` constructor and wants to land before
-        # HSA. Use ``../amd-rocprofiler/gelu.py``, whose imports are the other
-        # way round, for that backend.
+        # ``roctracer`` only, and no longer for an ordering reason: this module
+        # now imports Proton before torch and starts the session after it,
+        # which is exactly what ``../amd-rocprofiler/gelu.py`` does. The
+        # omission stands on what this payload does *not* carry -- gelu.py has
+        # the rocprofiler availability probe and the classifier that turns an
+        # unsupported mode or an unloadable rocprofiler-sdk into a clean exit 2
+        # rather than a traceback. Offering the backend here would hand out a
+        # capture path with none of that handling. Use gelu.py for it.
         choices=("roctracer",),
         help="Proton backend for a standalone capture; ignored when $AORTA_PROTON_BACKEND is set",
     )

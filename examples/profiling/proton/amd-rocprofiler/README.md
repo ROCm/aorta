@@ -265,10 +265,9 @@ payload does publish all three.
   on ordering grounds it is the shape upstream prefers, since it loads
   `libproton` before the payload runs. Env mode is chosen for the `--mode`
   portability and is safe here only because of the next bullet.
-- **The payload's import order is load-bearing, and it is the reverse of the
-  sibling's.** `libproton.so` calls `rocprofiler_force_configure` from an
-  `__attribute__((constructor))`, so importing Proton is what configures
-  rocprofiler-sdk. Triton v3.8.0's
+- **The payload's import order is load-bearing.** `libproton.so` calls
+  `rocprofiler_force_configure` from an `__attribute__((constructor))`, so
+  importing Proton is what configures rocprofiler-sdk. Triton v3.8.0's
   `third_party/proton/csrc/lib/Profiler/RocprofSDK/RocprofSDKProfiler.cpp`
   warns, in the comment above that call, that "any code that fully initializes
   HSA beforehand (e.g. triton's HIP driver query at pytest collection time, or
@@ -276,13 +275,26 @@ payload does publish all three.
   kernel-dispatch buffer tracing installation on already-existing queues,
   producing an empty dispatch buffer and no per-kernel timing data." So
   [`gelu.py`](gelu.py) imports `triton.profiler` and `libproton` **before**
-  `torch`, and says so at the import site. `../amd-roctracer/pipeline.py` does
-  the opposite deliberately — roctracer needs the runtime already up. Two
-  backends, two contracts; do not normalise the two payloads to one import
-  order. Note this ordering claim comes from upstream's source comment and was
-  not measured here — nothing in reach can run this backend (see
-  [Availability](#availability)) — whereas the `roctracer` claim next door is
-  measured.
+  `torch`, and says so at the import site. Note this particular ordering claim
+  comes from upstream's source comment and was not measured here — nothing in
+  reach can run this backend (see [Availability](#availability)) — whereas the
+  `roctracer` claim next door is measured.
+
+  **Every sibling payload now shares this import order**, for a second reason
+  that was measured: on Triton 3.8.0, registering Proton after HSA is up makes
+  the atexit `rocprofiler::registration::finalize()` re-enter its own
+  non-recursive registration mutex through Proton's `protonToolFini` and
+  deadlock, so the process hangs forever after writing a complete capture
+  ([ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434)).
+
+  With that, the payloads no longer differ in ordering at all: each imports
+  Proton first and calls `proton.start()` from `main()`, after torch. That is
+  not a compromise between the two contracts — the contracts constrain
+  *different events*. `rocprofiler` constrains when it is **configured**, and
+  the `libproton.so` constructor does that at import; `roctracer` constrains
+  when the **session starts**. One ordering satisfies both, which is why the
+  "two backends, two import orders" framing this bullet used to carry was
+  wrong rather than merely out of date. Do not let a linter sort these imports.
 - **Device selection.** Proton on AMD reads `ROCR_VISIBLE_DEVICES` and rejects
   `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` for the queue-intercepting
   backends. aorta's collector translates the rejected spellings automatically

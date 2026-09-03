@@ -136,9 +136,11 @@ _AMD_ENV_SIGNALS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICE
 #:   bare ``ROOT``. **This is a 3.7.x-and-earlier defect.** It does not
 #:   reproduce on 3.8.0, where the same pin captured 17 kernels, so the guard
 #:   is a workaround with an expiry rather than a permanent rule. It is kept
-#:   because 3.7.x is what this repo's containers still ship; the inverted GPU
-#:   test asserts the bug is still there and skips itself from 3.8.0 on, so the
-#:   day the floor moves the guard can go with it.
+#:   because 3.7.x is what several images in use still ship, and the failure it
+#:   prevents is silent;
+#:   ``test_cli_mode_pin_captures_nothing_only_on_the_versions_the_guard_targets``
+#:   asserts whichever behaviour the installed Triton has, so the day the floor
+#:   moves the guard can go with it -- tracked in ROCm/aorta#439.
 #: * ``rocprofiler`` is the reverse, and the CLI path is the *safe* one for it.
 #:   Triton 3.8.0 calls ``rocprofiler_force_configure`` from an
 #:   ``__attribute__((constructor))`` in ``libproton.so``, so it is configured
