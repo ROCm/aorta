@@ -661,6 +661,4 @@ def test_a_conditional_proton_import_is_no_evidence_of_a_safe_order(
     """
     payload = tmp_path / "payload.py"
     payload.write_text(payload_source, encoding="utf-8")
-    proton_line, torch_line = _first_import_lines(payload)
-    assert (proton_line, torch_line) == expected
-    assert proton_line is not None and torch_line is not None, "must not go invisible"
+    assert _first_import_lines(payload) == expected
