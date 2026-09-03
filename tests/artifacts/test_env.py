@@ -177,6 +177,36 @@ def test_absent_schema_version_is_unknown():
     assert env.schema_version is None
 
 
+@pytest.mark.parametrize("value", [1, None, "", "v1.16"])
+def test_an_unreadable_schema_version_is_a_missing_field(value):
+    """``require()`` with no arguments promises every modelled field.
+
+    Classifying the value as unknown without recording it told a strict caller
+    the artifact was complete while it held no usable schema version at all.
+    """
+    env = parse_env(_env(schema_version=value))
+
+    assert "schema_version" in env.missing_fields
+    with pytest.raises(MissingFieldError, match="schema_version"):
+        env.require()
+
+
+def test_an_absent_schema_version_is_a_missing_field():
+    env = parse_env(_env_without("schema_version"))
+
+    assert "schema_version" in env.missing_fields
+    with pytest.raises(MissingFieldError):
+        env.require("schema_version")
+
+
+@pytest.mark.parametrize("value", ["1.16", "2.0", "0.9"])
+def test_a_readable_schema_version_is_not_missing_even_when_it_disagrees(value):
+    """"newer" and "older" are values that were read, not values that were not."""
+    env = parse_env(_env(schema_version=value))
+
+    assert "schema_version" not in env.missing_fields
+
+
 # ---- file-level errors ----------------------------------------------------
 
 

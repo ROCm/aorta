@@ -370,6 +370,35 @@ def test_absent_schema_version_is_unknown():
     assert matrix.schema_version is None
 
 
+@pytest.mark.parametrize("value", ["1", 1.0, None, True])
+def test_an_unreadable_schema_version_is_a_missing_field(value):
+    """The no-argument ``require()`` must not pass without a usable version."""
+    doc = _matrix()
+    doc["schema_version"] = value
+
+    matrix = parse_matrix(doc)
+
+    assert "schema_version" in matrix.missing_fields
+    with pytest.raises(MissingFieldError, match="schema_version"):
+        matrix.require()
+
+
+def test_an_absent_schema_version_is_a_missing_field():
+    doc = _matrix()
+    del doc["schema_version"]
+
+    with pytest.raises(MissingFieldError):
+        parse_matrix(doc).require("schema_version")
+
+
+@pytest.mark.parametrize("value", [MATRIX_SCHEMA_VERSION, MATRIX_SCHEMA_VERSION + 1])
+def test_a_readable_schema_version_is_not_missing_even_when_it_disagrees(value):
+    doc = _matrix()
+    doc["schema_version"] = value
+
+    assert "schema_version" not in parse_matrix(doc).missing_fields
+
+
 # ---- file-level errors ----------------------------------------------------
 
 

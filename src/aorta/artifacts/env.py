@@ -88,6 +88,14 @@ def parse_env(doc: Mapping[str, Any], source_path: Path | None = None) -> EnvArt
     """Parse an already-loaded env-snapshot document."""
     reader = FieldReader(doc)
     schema_status, schema_note = classify_dotted_schema(doc.get("schema_version"), ENV_SCHEMA_MAJOR)
+    if schema_status == "unknown":
+        # ``require()`` with no arguments promises every modelled field, and
+        # ``schema_version`` is one. An absent or unparseable value left it out
+        # of ``missing_fields``, so a strict caller was told the artifact was
+        # complete while holding no usable schema version at all. "newer" and
+        # "older" are readable values that disagree, which is a different
+        # thing and stays out of here.
+        reader.record_missing("schema_version")
     captured_at = reader.string("captured_at")
     partial = reader.boolean("partial")
     partial_reasons = reader.string_tuple("partial_reasons")

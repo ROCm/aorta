@@ -293,13 +293,22 @@ def _close_paren(text: str, start: int) -> int | None:
     of which ``run_terminal_command(command="python -c 'print(1)'")`` is the
     ordinary case rather than a corner one. A truncated call still parsed, so
     the tool ran with a silently different argument.
+
+    Escape-aware for the same reason: without it a ``\\"`` closed the quote it
+    was written to sit inside, and the scan resumed treating the rest of the
+    value as code.
     """
     quote: str | None = None
     depth = 0
+    escaped = False
     for index in range(start, len(text)):
         char = text[index]
-        if quote is not None:
-            if char == quote:
+        if escaped:
+            escaped = False
+        elif quote is not None:
+            if char == "\\":
+                escaped = True
+            elif char == quote:
                 quote = None
         elif char in "\"'":
             quote = char
@@ -315,25 +324,58 @@ def _close_paren(text: str, start: int) -> int | None:
 def _parse_action(text: str) -> tuple[str, dict] | None:
     """Extract a tool call from ACTION: tool_name(k="v", ...) format."""
     import re
-    match = re.search(r'ACTION:\s*(\w+)\(', text)
+
+    match = re.search(r"ACTION:\s*(\w+)\(", text)
     if not match:
         return None
     end = _close_paren(text, match.end() - 1)
     if end is None:
         return None
     tool_name = match.group(1)
-    args_str = text[match.end():end].strip()
     if tool_name not in TOOL_REGISTRY:
         return None
-    kwargs: dict = {}
-    if args_str:
-        for part in re.finditer(r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|(\d+))', args_str):
-            key = part.group(1)
-            val = part.group(2) if part.group(2) is not None else (
-                part.group(3) if part.group(3) is not None else int(part.group(4))
-            )
-            kwargs[key] = val
+    kwargs = _parse_action_kwargs(text[match.end() : end])
+    if kwargs is None:
+        return None
     return tool_name, kwargs
+
+
+def _parse_action_kwargs(args: str) -> dict | None:
+    """Parse the argument list as keyword literals, or ``None`` to refuse it.
+
+    Matching values with ``[^"]*`` ended them at the first quote character,
+    escaped or not, so ``search_code(query="say \\"hi\\"")`` parsed as ``say \\``
+    and searched for that -- the tool ran, and the answer was built from the
+    wrong query with nothing on screen to say so. Scanning with ``finditer``
+    also meant anything it failed to match was passed over in silence.
+
+    The syntax the prompt asks for is Python's, so Python parses it, and
+    anything that does not parse is refused whole. A refusal reaches the critic
+    and gets another attempt; a half-read call cannot be noticed by anything.
+    """
+    import ast
+
+    args = args.strip()
+    if not args:
+        return {}
+    try:
+        call = ast.parse(f"_tool({args})", mode="eval").body
+    except (SyntaxError, ValueError):
+        return None
+    if not isinstance(call, ast.Call) or call.args:
+        # Positional arguments have no name to map onto the tool's schema.
+        return None
+    kwargs: dict = {}
+    for keyword in call.keywords:
+        if keyword.arg is None:  # ``**rest``
+            return None
+        try:
+            kwargs[keyword.arg] = ast.literal_eval(keyword.value)
+        except (ValueError, SyntaxError):
+            # A bare name, an f-string, a concatenation: not a literal, so its
+            # value is not knowable here.
+            return None
+    return kwargs
 
 
 def _normalise_tool_name(tool_name: str) -> str:

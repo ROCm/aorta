@@ -200,6 +200,11 @@ def parse_matrix(doc: Mapping[str, Any], source_path: Path | None = None) -> Mat
     schema_status, schema_note = classify_integer_schema(
         doc.get("schema_version"), MATRIX_SCHEMA_VERSION
     )
+    if schema_status == "unknown":
+        # Same reason as ``env.parse_env``: an unreadable schema version is a
+        # modelled field this reader could not get, so the no-argument
+        # ``require()`` must not pass over it.
+        reader.record_missing("schema_version")
     workload = reader.string("workload")
     # ``ticket`` is legitimately null on an untracked run, unlike the rest.
     ticket = reader.nullable_string("ticket")

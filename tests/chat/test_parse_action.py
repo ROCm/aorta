@@ -69,6 +69,53 @@ class TestParseActionValid:
         assert name == "run_terminal_command"
         assert kwargs == {"command": "ls -la"}
 
+
+class TestEscapedQuotes:
+    r"""An escaped quote is part of the value, not the end of it.
+
+    Matching with ``[^"]*`` ended the value at the first ``"`` whatever
+    preceded it, so ``query="say \"hi\""`` parsed as ``say \`` -- the tool ran
+    and the answer was assembled from a query the model never asked for, with
+    nothing anywhere to say so.
+    """
+
+    def test_an_escaped_quote_stays_inside_the_value(self):
+        result = _parse_action(r'ACTION: search_code(query="say \"hi\"")')
+        assert result == ("search_code", {"query": 'say "hi"'})
+
+    def test_an_escaped_quote_does_not_truncate_a_later_argument(self):
+        result = _parse_action(r'ACTION: search_code(query="a \"b\" c", k=2)')
+        assert result == ("search_code", {"query": 'a "b" c', "k": 2})
+
+    def test_an_escaped_single_quote_in_a_single_quoted_value(self):
+        result = _parse_action(r"ACTION: search_code(query='it\'s here')")
+        assert result == ("search_code", {"query": "it's here"})
+
+    def test_a_backslash_at_the_end_of_a_value_survives(self):
+        result = _parse_action(r'ACTION: search_code(query="path\\")')
+        assert result == ("search_code", {"query": "path\\"})
+
+
+class TestUnparseableArgumentsAreRefused:
+    """Half-reading a call is worse than not reading it.
+
+    A refusal reaches the critic and earns another attempt. A call that parsed
+    with some arguments dropped cannot be noticed by anything downstream.
+    """
+
+    def test_an_unterminated_value_is_refused(self):
+        assert _parse_action('ACTION: search_code(query="unclosed') is None
+
+    def test_a_positional_argument_is_refused(self):
+        """There is no name to map it onto the tool's schema with."""
+        assert _parse_action('ACTION: search_code("test")') is None
+
+    def test_a_non_literal_value_is_refused(self):
+        assert _parse_action("ACTION: search_code(query=some_variable)") is None
+
+    def test_trailing_junk_is_not_passed_over_in_silence(self):
+        assert _parse_action('ACTION: search_code(query="a" and then some)') is None
+
     def test_action_embedded_in_text(self):
         text = (
             "Let me search for that.\n"
