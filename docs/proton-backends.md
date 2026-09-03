@@ -96,31 +96,52 @@ the mode.
 
 ## Attach mode is part of the choice
 
-Pinning a backend can commit you to an attach mode, and the two AMD tracing
-backends want **opposite** initialisation orders. This is the part that bites.
+Pinning a backend can commit you to an attach mode, because the two AMD tracing
+backends are configured at **different moments**, and each needs something
+different to be true at its own moment. This is the part that bites.
 
 | Backend | Configured when | Needs at that moment | Attach mode |
 | --- | --- | --- | --- |
-| `roctracer` | session start | HIP runtime **already up** | `mode: env`, payload starts Proton *after* importing torch |
-| `rocprofiler` | `libproton.so` load | HSA **not yet up** | either; `mode: cli`, or `mode: env` with Proton imported *before* torch |
+| `roctracer` | session start, at `proton.start()` | HIP runtime **already up** | `mode: env`, payload calls `proton.start()` *after* importing torch |
+| `rocprofiler` | `libproton.so` load, at *import* | HSA **not yet up** | either; `mode: cli`, or `mode: env` with Proton imported *before* torch |
 | `instrumentation` | session start | no requirement | either |
+
+**Those two requirements look opposed and are not.** They constrain different
+events: `roctracer` constrains when the *session starts*, `rocprofiler`
+constrains when Proton is *imported*. One payload shape satisfies both — import
+`triton.profiler` first, call `proton.start()` after torch — and all three
+`amd-*` examples use it. This page previously said the two wanted opposite
+import orders, which was wrong when written rather than merely stale; see
+[ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434).
 
 So `mode: env` with an explicit `roctracer` is required — the collector refuses
 a `mode: cli` pin of it, because on Triton 3.7.1 that captures a 160-byte tree
 holding a bare `ROOT` from a run that exits 0. That refusal is a 3.7.x-and-
-earlier workaround: the same pin captured 17 kernels on 3.8.0.
+earlier workaround: the same pin captured 17 kernels on 3.8.0. It is kept on
+every version anyway, because 3.7.x is what several images in use ship and the
+failure it prevents is silent; removing it once the floor reaches 3.8 is tracked
+in [#439](https://github.com/ROCm/aorta/issues/439).
 
-And `rocprofiler` is the reverse. Triton 3.8.0 calls
+And `rocprofiler`'s requirement lands on the import instead. Triton 3.8.0 calls
 `rocprofiler_force_configure` from a constructor in `libproton.so`, and its own
 source warns that a torch import chain first makes the SDK skip dispatch-buffer
 tracing on existing queues. So a payload driving it must import Proton before
-torch, which is why
+torch, as
 [`amd-rocprofiler/gelu.py`](../examples/profiling/proton/amd-rocprofiler/gelu.py)
-has its imports in the opposite order to its sibling — deliberately, and
-commented as such.
+does and says at the import site.
 
-The practical rule: **let the example you copied choose the attach mode.** Each
-of the three carries the order its backend needs.
+That import order is now the rule for **every** Proton payload, whatever
+backend it targets, for a second and independent reason: on Triton 3.8.0 the
+reverse order deadlocks the process at exit, after a complete capture has
+already been written, so it reads as a hang with no error
+([ROCm/aorta#434](https://github.com/ROCm/aorta/issues/434)). All three `amd-*`
+payloads mark the import `# isort: skip  # noqa: I001` so the linter cannot
+reorder it, and `test_proton_payloads_import_proton_before_torch` fails the CPU
+suite if one is reversed.
+
+The practical rule: **let the example you copied choose the attach mode, and
+import Proton before torch whatever you copied.** The attach mode still varies
+by backend; the import order no longer does.
 
 ## Combining with `rocprof`
 
@@ -150,9 +171,15 @@ actionable error or a workaround.
   Proton opens the unversioned name. Which library it names follows the
   backend: `libroctracer64.so` below 3.8.0, `librocprofiler-sdk.so` from 3.8.0
   on, since that is where `auto` starts resolving to `rocprofiler`.
-- **`mode: env` captures wedge on the Triton 3.8.0 CI runner.** Tracked in
-  [#434](https://github.com/ROCm/aorta/issues/434); the GPU suite skips those
-  captures from 3.8.0 on rather than letting them consume the job.
+- **`mode: env` captures wedged at exit on Triton 3.8.0** — diagnosed and fixed
+  by import order, so this one is a defect you can now avoid rather than work
+  around. Proton and rocprofiler-sdk self-deadlock in `protonToolFini` when
+  Proton is imported *after* torch: the capture completes, the `.hatchet` is
+  written, and the process then sits in `futex_wait` forever. Import
+  `triton.profiler` before torch and it does not happen; the GPU suite runs
+  those captures rather than skipping them. See
+  [#434](https://github.com/ROCm/aorta/issues/434) and
+  [Attach mode](#attach-mode-is-part-of-the-choice).
 
 ## Worked decisions
 
@@ -177,6 +204,7 @@ table above requires. Record the Triton version — the artifact does not.
 - [Profiling Collectors](profiling-collectors.md) — option schema, attach-mode
   mechanics, artifact layout, analysis recipes, troubleshooting
 - [`examples/profiling/proton/`](../examples/profiling/proton/) — one runnable
-  example per backend, each with the attach mode and import order it needs
+  example per backend, each with the attach mode its backend needs, and all of
+  them importing Proton before torch
 - [Profiling Guide](profiling.md) — capturing and interpreting profiling data
   more generally

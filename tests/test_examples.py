@@ -10,6 +10,7 @@ first thing a new user runs.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -353,22 +354,55 @@ def _imported_module_paths(node: ast.stmt) -> list[str]:
     return []
 
 
+def _load_time_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+    """Statements that run when the module is imported.
+
+    Not the same set as ``module.body``. A ``try:``/``except ImportError:`` or
+    an ``if`` around an optional import -- the ordinary shape for a dependency
+    that may be absent -- runs at load time just as a bare import does, so the
+    nested blocks have to be descended into. Reading only the top level made
+    those imports invisible, and an invisible proton import makes
+    :func:`test_proton_payloads_import_proton_before_torch` *skip* rather than
+    fail: the payload would deadlock and the suite would report green.
+
+    Function and class bodies are excluded, because those really do not run at
+    import time, so an import there cannot decide which library's constructor
+    lands first -- which is the whole property under test.
+
+    Still invisible, and deliberately so: an import performed by a *call* such
+    as ``importlib.import_module("triton.profiler")`` is not an import
+    statement at all. Nothing in the tree does that, and recognising it means
+    tracking string arguments rather than reading the AST's import nodes.
+    """
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        yield node
+        for block in ("body", "orelse", "finalbody"):
+            yield from _load_time_statements(getattr(node, block, None) or [])
+        for handler in getattr(node, "handlers", []):
+            yield from _load_time_statements(handler.body)
+        for case in getattr(node, "cases", []):
+            yield from _load_time_statements(case.body)
+
+
 def _first_import_lines(payload: Path) -> tuple[int | None, int | None]:
     """Line numbers of the payload's first Proton and ``torch`` imports.
 
-    Module-level statements only. An import inside a function does not run at
-    load time, so it cannot decide which library's constructor lands first --
-    which is the whole property under test.
+    Lowest line number rather than first-encountered, because
+    :func:`_load_time_statements` yields an enclosing ``try:`` before the
+    imports inside it and so is not in source order.
     """
-    proton_line = torch_line = None
+    proton_lines: list[int] = []
+    torch_lines: list[int] = []
     module = ast.parse(payload.read_text(encoding="utf-8"))
-    for node in module.body:
+    for node in _load_time_statements(module.body):
         for name in _imported_module_paths(node):
-            if proton_line is None and name.startswith(_PROTON_IMPORT_PREFIXES):
-                proton_line = node.lineno
-            if torch_line is None and (name == "torch" or name.startswith("torch.")):
-                torch_line = node.lineno
-    return proton_line, torch_line
+            if name.startswith(_PROTON_IMPORT_PREFIXES):
+                proton_lines.append(node.lineno)
+            if name == "torch" or name.startswith("torch."):
+                torch_lines.append(node.lineno)
+    return (min(proton_lines, default=None), min(torch_lines, default=None))
 
 
 _PROTON_PAYLOADS = sorted(
@@ -463,3 +497,68 @@ def test_the_order_guard_ignores_imports_it_cannot_attribute(tmp_path):
         encoding="utf-8",
     )
     assert _first_import_lines(payload) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("payload_source", "expected"),
+    [
+        pytest.param(
+            "import torch\ntry:\n    import triton.profiler as proton\nexcept ImportError:\n"
+            "    proton = None\n",
+            (3, 1),
+            id="try-except-around-proton",
+        ),
+        pytest.param(
+            "import torch\nif True:\n    import triton.profiler as proton\n",
+            (3, 1),
+            id="if-around-proton",
+        ),
+        pytest.param(
+            "try:\n    import triton.profiler as proton\nexcept ImportError:\n"
+            "    proton = None\nimport torch\n",
+            (2, 5),
+            id="try-except-in-the-correct-order",
+        ),
+        pytest.param(
+            "import triton.profiler as proton\ntry:\n    import torch\nexcept ImportError:\n"
+            "    torch = None\n",
+            (1, 3),
+            id="try-except-around-torch",
+        ),
+        pytest.param(
+            "with contextlib.suppress(ImportError):\n    import torch\n"
+            "    import triton.profiler as proton\n",
+            (3, 2),
+            id="with-block",
+        ),
+        pytest.param(
+            "def main():\n    import torch\n    import triton.profiler as proton\n",
+            (None, None),
+            id="inside-a-function-does-not-run-at-import",
+        ),
+        pytest.param(
+            "class Holder:\n    import torch\n    import triton.profiler as proton\n",
+            (None, None),
+            id="inside-a-class-body",
+        ),
+    ],
+)
+def test_the_order_guard_sees_imports_nested_in_load_time_blocks(
+    tmp_path, payload_source, expected
+):
+    """A module-level ``try:`` or ``if:`` runs at import, so it must be descended into.
+
+    Reading only ``module.body`` made these invisible, and invisible is the
+    dangerous direction: ``_first_import_lines`` returned ``(None, None)`` and
+    :func:`test_proton_payloads_import_proton_before_torch` *skips* on ``None``,
+    so a payload wrapping its proton import in ``try:``/``except ImportError:``
+    -- the ordinary shape for an optional dependency -- would deadlock at exit
+    and still report green.
+
+    The last two cases are the boundary in the other direction: a function or
+    class body genuinely does not run at import, so an import there decides
+    nothing about which constructor lands first and must stay invisible.
+    """
+    payload = tmp_path / "payload.py"
+    payload.write_text(payload_source, encoding="utf-8")
+    assert _first_import_lines(payload) == expected

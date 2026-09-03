@@ -753,12 +753,19 @@ trying to confirm it:
   devel-symlink fixup creates that soname, which is why CI is exposed and a
   bare `docker run` of the same base is not. A classic `/opt/rocm` install
   ships both spellings. **No GPU is needed** to reproduce it.
-- **Triton must be 3.8.0 exactly.** 3.7.x predates the constructor;
-  `triton-lang/triton#11009` removed the re-entrant call on `main` but landed
-  after the `v3.8.0` tag was cut, so 3.8.0 is the affected window. Once the
-  installed Triton carries that fix the import order stops being load-bearing
-  for this reason (it still is for `rocprofiler`, which needs configuring
-  before HSA).
+- **The Triton build must carry the 3.8.0 finalizer code without
+  `triton-lang/triton#11009`.** That is a property of the build, not of a
+  version string, and it is the boundary to reason with. `v3.8.0` is the known
+  affected *release*: 3.7.x predates the constructor entirely, and #11009
+  removed the re-entrant call on `main` but landed after the `v3.8.0` tag was
+  cut, so no released Triton carries the fix. Do not read safety off any other
+  version, though — a pre-fix source build of `main`, or a future 3.8.x that
+  ships without the backport, contains the same re-entrant finalizer. To settle
+  an unknown build, check whether `protonToolFini` still calls back through
+  `state->finalizeFunc` (`RocprofSDKProfiler.cpp`) rather than comparing
+  version numbers. Once the installed Triton carries the fix the import order
+  stops being load-bearing *for this reason* (it still is for `rocprofiler`,
+  which needs configuring before HSA).
 
 **`rocprofv3 not found`.** Put `rocprofv3` on `$PATH` (it ships with ROCm)
 or set `$ROCPROF_BIN` to the binary. `$ROCPROF_BIN` accepts either a bare

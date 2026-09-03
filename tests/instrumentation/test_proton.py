@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -1429,6 +1430,17 @@ def _child_budget_violations(source: str, filename: str = "<snippet>") -> dict[s
     }
 
 
+def _assigned_int(source: str, name: str) -> int | None:
+    """Value of a module-level ``name = <int literal>`` assignment."""
+    for node in ast.parse(source).body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets) and isinstance(
+            node.value, ast.Constant
+        ):
+            return node.value.value if isinstance(node.value.value, int) else None
+    return None
+
+
 @pytest.mark.parametrize(
     ("kind", "snippet"),
     [
@@ -1540,4 +1552,48 @@ def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
         "os.system and os.popen take no timeout, so a wedge there runs until the "
         "GPU job's own cap. Use subprocess with timeout=_CHILD_TIMEOUT_S -- see "
         "ROCm/aorta#434."
+    )
+
+
+def test_the_shared_child_budget_stays_below_the_pytest_timeout_it_hides_behind():
+    """The budget's *value* has to be bounded, not just its name.
+
+    The guard above pins every call to ``_CHILD_TIMEOUT_S`` and says nothing
+    about what that constant holds, so raising it in one place reinstates the
+    original incident while leaving all three passes green -- the shortest path
+    back to run 33527313950, where a wedged payload ran until the GPU job's own
+    60-minute cap, which cancels the job and takes the junit report with it
+    (ROCm/aorta#434).
+
+    Anchored to the workflow's ``--timeout`` rather than to a literal here,
+    because "below the thing that would otherwise kill us" is the actual
+    property: a budget above it never fires, and pytest-timeout kills the test
+    from outside with no payload name and no partial output. Either side
+    changing is caught.
+    """
+    module = Path(__file__).with_name("test_proton_smoke_gpu.py")
+    budget = _assigned_int(module.read_text(encoding="utf-8"), "_CHILD_TIMEOUT_S")
+    assert budget is not None, (
+        f"{module.name} no longer defines _CHILD_TIMEOUT_S as a module-level int "
+        "literal, so its value cannot be checked. Keep it one, or teach this test "
+        "the new shape -- an unbounded budget is how ROCm/aorta#434 happened."
+    )
+
+    workflow = Path(__file__).parents[2] / ".github" / "workflows" / "gpu-tests.yml"
+    pytest_timeouts = [
+        int(match)
+        for match in re.findall(r"--timeout=(\d+)", workflow.read_text(encoding="utf-8"))
+    ]
+    assert pytest_timeouts, (
+        f"{workflow.name} no longer passes --timeout= to pytest. The child budget is "
+        "sized to sit under it, so that bound needs re-deriving before this test can "
+        "hold anything."
+    )
+
+    assert 0 < budget < min(pytest_timeouts), (
+        f"_CHILD_TIMEOUT_S is {budget}s, which is not below the GPU job's pytest "
+        f"--timeout of {min(pytest_timeouts)}s. A payload wedge would then be killed "
+        "by pytest-timeout from outside -- or, past the job's 60-minute cap, cancel "
+        "the job and lose its report -- instead of failing as a TimeoutExpired that "
+        "names the payload. See ROCm/aorta#434."
     )
