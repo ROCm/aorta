@@ -153,3 +153,35 @@ def test_shell_completion_carries_help_from_the_registry() -> None:
 def test_shell_completion_filters_on_the_incomplete_prefix() -> None:
     completions = main.shell_complete(click.Context(main), "en")
     assert [item.value for item in completions] == ["env", "environments"]
+
+
+def test_unknown_command_still_suggests_a_registered_one() -> None:
+    """A typo must keep getting Click's "Did you mean ...?" hint.
+
+    Click sources the suggestions from ``Group.commands``, which lazy names
+    never enter, so laziness silently drops them; an eagerly built group is the
+    reference for what the user used to see. Click only grew suggestions in
+    8.4, hence comparing against an eager group rather than pinning the text.
+    """
+    eager = click.Group(main.name, commands={name: click.Command(name) for name in _COMMANDS})
+    expected = CliRunner().invoke(eager, ["enviroments"]).output
+    if "Did you mean" not in expected:
+        pytest.skip("this Click does not offer unknown-command suggestions")
+    result = CliRunner().invoke(main, ["enviroments"])
+    assert "environments" in result.output, result.output
+
+
+def test_resolved_commands_carry_their_registry_name() -> None:
+    """The object handed to Click must be named after the key it was reached by.
+
+    Click 8.0.0 builds the child context from ``cmd.name`` rather than the
+    invoked name, so a key that disagrees renders a usage line the user cannot
+    type. Every entry here happens to agree already; the assertion is on
+    ``get_command``, which is what ``bench``'s ``hw_queue_eval`` -> ``cli``
+    entry needs and what keeps a future mismatch from going unnoticed.
+    """
+    ctx = click.Context(main)
+    for name in _COMMANDS:
+        resolved = main.get_command(ctx, name)
+        assert resolved is not None, name
+        assert resolved.name == name

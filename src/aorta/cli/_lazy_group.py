@@ -19,6 +19,7 @@ the command's own, and if any command module is imported eagerly.
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,27 @@ import click
 
 if TYPE_CHECKING:
     from click.shell_completion import CompletionItem
+
+
+def _named(command: click.Command, name: str) -> click.Command:
+    """Return ``command`` carrying ``name``, copying it if it is named otherwise.
+
+    A registry key need not match the loaded object's own ``name``: ``bench``
+    registers ``hw_queue_eval`` against a group defined as ``cli``. Click 8.0.0
+    builds the child context from ``cmd.name`` rather than the invoked name, so
+    the mismatch renders as ``Usage: aorta bench cli ...`` and points the user
+    at a command line that does not exist. That was fixed in Click 8.0.1, but
+    ``click>=8.0.0`` still resolves 8.0.0.
+
+    Copying leaves the module-level command object unmutated -- ``cli`` is also
+    the entry point of ``python -m aorta.hw_queue_eval``, which must keep its
+    own name. The copy is shallow, so subcommands and params stay shared.
+    """
+    if command.name == name:
+        return command
+    renamed = copy(command)
+    renamed.name = name
+    return renamed
 
 
 @dataclass(frozen=True)
@@ -73,7 +95,25 @@ class LazyGroup(click.Group):
         entry = self.lazy_commands.get(cmd_name)
         if entry is None:
             return super().get_command(ctx, cmd_name)
-        return entry.load()
+        return _named(entry.load(), cmd_name)
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        if args and args[0] in self.lazy_commands:
+            return super().resolve_command(ctx, args)
+        # Click draws its "Did you mean ...?" candidates from ``self.commands``,
+        # which lazy names never enter -- so an eager group answers
+        # ``aorta enviroments`` with ``Did you mean 'environments'?`` and this
+        # one would not. Only the keys are read, and only on this
+        # unknown-command path, so bare stand-ins are enough and nothing is
+        # imported. Registered commands keep precedence over the registry.
+        registered = self.commands
+        self.commands = {**{name: click.Command(name) for name in self.lazy_commands}, **registered}
+        try:
+            return super().resolve_command(ctx, args)
+        finally:
+            self.commands = registered
 
     def _summary(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         """Return a command object good enough to read a short help off, no import.

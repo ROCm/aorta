@@ -31,15 +31,58 @@ def _hw_queue_available() -> bool:
     find_spec: aorta.hw_queue_eval files are always present in the source tree,
     but the import fails on a base install because hw_queue_eval.__init__
     pulls torch.
+
+    Mirrors _BenchGroup.get_command's distinction: only an absent *external*
+    dependency means "extra not installed". A missing aorta.hw_queue_eval
+    sub-module is our own bug, and reading it as "extra absent" would skip the
+    real-group tests below instead of failing them.
     """
     try:
         importlib.import_module("aorta.hw_queue_eval.cli")
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as exc:
+        if exc.name is not None and exc.name.startswith("aorta.hw_queue_eval"):
+            raise
         return False
     return True
 
 
 _HW_QUEUE_AVAILABLE = _hw_queue_available()
+
+
+def _raise_on_import(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+    """Make importlib.import_module raise ``exc`` for the availability probe."""
+
+    def raise_it(_name: str) -> None:
+        raise exc
+
+    monkeypatch.setattr(importlib, "import_module", raise_it)
+
+
+def test_availability_probe_reads_an_absent_external_dep_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent third-party dep is what "extra not installed" means."""
+    _raise_on_import(monkeypatch, ModuleNotFoundError("No module named 'torch'", name="torch"))
+    assert _hw_queue_available() is False
+
+
+def test_availability_probe_does_not_mask_an_internal_import_bug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken aorta.hw_queue_eval sub-module must not read as "extra absent".
+
+    Reporting it that way skips every real-group test in this module, so a
+    packaging regression inside the subpackage would land green.
+    """
+    _raise_on_import(
+        monkeypatch,
+        ModuleNotFoundError(
+            "No module named 'aorta.hw_queue_eval.sweep'",
+            name="aorta.hw_queue_eval.sweep",
+        ),
+    )
+    with pytest.raises(ModuleNotFoundError, match="aorta.hw_queue_eval.sweep"):
+        _hw_queue_available()
 
 
 def test_bench_help_lists_hw_queue_eval() -> None:
@@ -190,10 +233,21 @@ def test_hw_queue_group_is_resolved_when_the_extra_is_present(
     """With the import succeeding, ``bench`` hands Click the real inner group.
 
     Stubbed rather than skipped so the happy path stays covered on the base
-    install, where torch (and so hw_queue_eval) is absent.
+    install, where torch (and so hw_queue_eval) is absent. The stub is named
+    ``cli`` because the real group is (``aorta.hw_queue_eval.cli:cli``); a stub
+    pre-named ``hw_queue_eval`` would not exercise the rename below.
     """
+    stub = _stub_hw_queue_group(monkeypatch)
+    result = CliRunner().invoke(bench, ["hw_queue_eval", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "sweep" in result.output
+    assert stub.name == "cli", "the loaded module's own group must not be renamed in place"
 
-    @click.group(name="hw_queue_eval")
+
+def _stub_hw_queue_group(monkeypatch: pytest.MonkeyPatch) -> click.Group:
+    """Stand in for ``aorta.hw_queue_eval.cli:cli``, named as that group really is."""
+
+    @click.group(name="cli")
     def stub() -> None:
         """Stand-in hw_queue_eval group."""
 
@@ -205,6 +259,29 @@ def test_hw_queue_group_is_resolved_when_the_extra_is_present(
         "aorta.cli._lazy_group.import_module",
         lambda _name: types.SimpleNamespace(cli=stub),
     )
+    return stub
+
+
+def test_resolved_group_carries_the_registry_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The group handed to Click must be named ``hw_queue_eval``, not ``cli``.
+
+    Click 8.0.0 builds the child context from ``cmd.name`` rather than the
+    invoked name, so a mismatch renders as ``Usage: aorta bench cli ...`` --
+    a command line the user cannot type. ``click>=8.0.0`` still resolves 8.0.0,
+    and the deleted proxy was explicitly named ``hw_queue_eval``, so this is
+    the invariant that kept the rename invisible.
+    """
+    _stub_hw_queue_group(monkeypatch)
+    resolved = bench.get_command(click.Context(bench), "hw_queue_eval")
+    assert resolved is not None
+    assert resolved.name == "hw_queue_eval"
+
+
+def test_usage_line_uses_the_registry_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--help`` on the resolved group advertises the invocable path."""
+    _stub_hw_queue_group(monkeypatch)
     result = CliRunner().invoke(bench, ["hw_queue_eval", "--help"])
     assert result.exit_code == 0, result.output
-    assert "sweep" in result.output
+    usage = result.output.splitlines()[0]
+    assert "hw_queue_eval" in usage, usage
+    assert " cli " not in usage, usage
