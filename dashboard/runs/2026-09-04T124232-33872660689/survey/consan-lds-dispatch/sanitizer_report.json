@@ -1,0 +1,175 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/lds_dispatch",
+        "command_sha256": "ded4e7b336e6fea0b95c7f59f219c26dcd3a19ec83cbcdd5e8e5df30090ba708",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "228b3dee0b4315534682fe2f86e95998ef0a5e70c0174b4fd06f3504bb82f871",
+        "selected_identity_sha256": "73e36dd2ae744b1a44921673020e2a0c120dc3423d5e70775e3ffc4e0fdc73b4",
+        "selected_kernel": "lds_reduce"
+      },
+      "coverage": [
+        {
+          "access": "5/5",
+          "analysis_complete": true,
+          "applicable": true,
+          "complete": true,
+          "dynamic_complete": true,
+          "fields": {
+            "access_discovered": "5",
+            "access_expert_limit_omitted": "0",
+            "access_patched": "5",
+            "access_placement_or_lowering_failed": "0",
+            "access_resource_failed": "0",
+            "access_selected": "5",
+            "access_supported": "5",
+            "access_unsupported": "0",
+            "atomic_discovered": "0",
+            "atomic_expert_limit_omitted": "0",
+            "atomic_patched": "0",
+            "atomic_placement_or_lowering_failed": "0",
+            "atomic_resource_failed": "0",
+            "atomic_selected": "0",
+            "atomic_supported": "0",
+            "atomic_unsupported": "0",
+            "barrier_discovered": "1",
+            "barrier_expert_limit_omitted": "0",
+            "barrier_patched": "1",
+            "barrier_placement_or_lowering_failed": "0",
+            "barrier_resource_failed": "0",
+            "barrier_selected": "1",
+            "barrier_supported": "1",
+            "barrier_unsupported": "0",
+            "engine": "record_replay",
+            "fence_discovered": "0",
+            "fence_expert_limit_omitted": "0",
+            "fence_patched": "0",
+            "fence_placement_or_lowering_failed": "0",
+            "fence_resource_failed": "0",
+            "fence_selected": "0",
+            "fence_supported": "0",
+            "fence_unsupported": "0",
+            "flavor": "moi",
+            "load": "1",
+            "reader": "102138791166464"
+          },
+          "incomplete_code_objects": 0,
+          "object_id": "reader=102138791166464,load=1",
+          "static_complete": true,
+          "unsupported": 0
+        },
+        {
+          "access": "0/0",
+          "analysis_complete": true,
+          "applicable": false,
+          "complete": false,
+          "dynamic_complete": true,
+          "fields": {
+            "access_discovered": "0",
+            "access_expert_limit_omitted": "0",
+            "access_patched": "0",
+            "access_placement_or_lowering_failed": "0",
+            "access_resource_failed": "0",
+            "access_selected": "0",
+            "access_supported": "0",
+            "access_unsupported": "0",
+            "atomic_discovered": "0",
+            "atomic_expert_limit_omitted": "0",
+            "atomic_patched": "0",
+            "atomic_placement_or_lowering_failed": "0",
+            "atomic_resource_failed": "0",
+            "atomic_selected": "0",
+            "atomic_supported": "0",
+            "atomic_unsupported": "0",
+            "barrier_discovered": "0",
+            "barrier_expert_limit_omitted": "0",
+            "barrier_patched": "0",
+            "barrier_placement_or_lowering_failed": "0",
+            "barrier_resource_failed": "0",
+            "barrier_selected": "0",
+            "barrier_supported": "0",
+            "barrier_unsupported": "0",
+            "engine": "record_replay",
+            "fence_discovered": "0",
+            "fence_expert_limit_omitted": "0",
+            "fence_patched": "0",
+            "fence_placement_or_lowering_failed": "0",
+            "fence_resource_failed": "0",
+            "fence_selected": "0",
+            "fence_supported": "0",
+            "fence_unsupported": "0",
+            "flavor": "moi",
+            "load": "2",
+            "reader": "102138792682176"
+          },
+          "incomplete_code_objects": 0,
+          "object_id": "reader=102138792682176,load=2",
+          "static_complete": true,
+          "unsupported": 0
+        }
+      ],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/lds.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "e8b9c9904ee331260253fbdee9903f242528a4711436b40506eac7c3d1dc9843",
+            "entry_offset": null,
+            "name": "lds_reduce",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 0,
+          "state": "ran",
+          "verdict": "pass"
+        }
+      ],
+      "reason": null,
+      "returncode": 0,
+      "sanitizer": "consan",
+      "state": "ran",
+      "verdict": "pass"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [],
+      "reason": null,
+      "returncode": 0,
+      "sanitizer": "waitcheck_preflight",
+      "state": "ran",
+      "verdict": "pass"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "pass",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/lds.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "e8b9c9904ee331260253fbdee9903f242528a4711436b40506eac7c3d1dc9843",
+          "entry_offset": null,
+          "name": "lds_reduce",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
