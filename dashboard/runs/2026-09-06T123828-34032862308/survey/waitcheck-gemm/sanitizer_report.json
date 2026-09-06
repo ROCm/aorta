@@ -1,0 +1,61 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "path": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck",
+        "sha256": "a70945fb1135a436c13c83ed96a6cff3655784138f4db3d20ef7315ade0a8968"
+      },
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+            "entry_offset": null,
+            "name": "gemm_f32_ss",
+            "target": "gfx950"
+          },
+          "reason": "waitcheck_diagnostics_error: Waitcheck output did not contain an analysis summary",
+          "returncode": 2,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "worklist_not_fully_checked",
+      "returncode": null,
+      "sanitizer": "waitcheck",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+          "entry_offset": null,
+          "name": "gemm_f32_ss",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
