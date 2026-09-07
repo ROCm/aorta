@@ -338,6 +338,252 @@ def test_perf_gate_does_not_arm_a_near_zero_median_itl(tmp_path, monkeypatch):
     assert metrics["p99_itl_ms"] == {"policy": "max", "value": 26.75}
 
 
+# A gpu_smoke cell that has already been blessed with performance bounds, in
+# the shape --perf-gate writes them. This is the state the scope is supposed to
+# protect: sixteen cells belonging to other people's workloads.
+_BLESSED_GPU_SMOKE = {
+    "gpu_smoke::baseline": {
+        "passed": True,
+        "step_time_ms": {"max": 2.5},
+        "metrics": {
+            "tokens_per_sec": {"policy": "min", "value": 900.0},
+            "logits_checksum": {"policy": "equal", "value": "old-checksum"},
+        },
+    },
+}
+
+
+def test_a_scoped_refresh_leaves_other_entries_bounds_untouched(tmp_path, monkeypatch):
+    """The scope exists to PROTECT the other entries, so it must not disarm them.
+
+    The baseline file is rewritten whole, so rebuilding an out-of-scope cell as
+    `{"passed": True}` plus correctness metrics deletes whatever bounds it had.
+    That makes the rollout the scope was added for impossible in the other
+    direction: bless serving, and the next scoped bless of anything else
+    silently ungates serving again.
+    """
+    matrix_doc = {"entries": [
+        {"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"},
+        {"name": "gpu_smoke", "recipe": "r1.yaml"},
+    ]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(
+        refresh_baselines.nightly_eval, "run_entry",
+        _serving_matrix_runner({**_SERVING_SUMMARY, "logits_checksum": {"mean": "fresh"}}))
+
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, True,
+        existing_baselines=_BLESSED_GPU_SMOKE,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    kept = doc["baselines"]["gpu_smoke::baseline"]
+    assert kept["step_time_ms"] == {"max": 2.5}, "the out-of-scope step-time ceiling was disarmed"
+    assert kept["metrics"]["tokens_per_sec"] == {"policy": "min", "value": 900.0}, (
+        "the out-of-scope throughput floor was disarmed"
+    )
+    # Correctness data is still refreshed for it -- carrying the bounds over is
+    # not the same as skipping the entry.
+    assert kept["metrics"]["logits_checksum"] == {"policy": "equal", "value": "fresh"}
+    # And the entry actually under test does get its bounds derived.
+    assert doc["baselines"]["tokenspeed_serve_smoke::baseline"]["step_time_ms"] == {"max": 1375.0}
+
+
+def test_a_correctness_only_refresh_does_not_disarm_existing_gates(tmp_path, monkeypatch):
+    """The same hole through the other door.
+
+    Omitting `--perf-gate` means "do not arm new gates", not "disarm the ones
+    already blessed" -- and the default dispatch of refresh-baselines.yml is
+    exactly this mode, so a routine correctness refresh must not silently revert
+    every gated cell to record-only.
+    """
+    matrix_doc = {"entries": [{"name": "gpu_smoke", "recipe": "r1.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, False, existing_baselines=_BLESSED_GPU_SMOKE)
+
+    kept = doc["baselines"]["gpu_smoke::baseline"]
+    assert kept["step_time_ms"] == {"max": 2.5}
+    assert kept["metrics"]["tokens_per_sec"] == {"policy": "min", "value": 900.0}
+
+
+def test_a_carried_bound_is_not_mutated_by_the_refresh(tmp_path, monkeypatch):
+    """Carried verbatim, and by value: the written document must not alias the
+    input, or a later edit to one would silently change the other."""
+    matrix_doc = {"entries": [{"name": "gpu_smoke", "recipe": "r1.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    existing = {"gpu_smoke::baseline": {"passed": True, "step_time_ms": {"max": 2.5},
+                                        "metrics": {"tokens_per_sec": {"policy": "min",
+                                                                       "value": 900.0}}}}
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, False, existing_baselines=existing)
+
+    doc["baselines"]["gpu_smoke::baseline"]["step_time_ms"]["max"] = 999.0
+    assert existing["gpu_smoke::baseline"]["step_time_ms"]["max"] == 2.5
+
+
+def test_an_in_scope_entry_has_its_stale_bounds_replaced(tmp_path, monkeypatch):
+    """The carry-over must not shadow the derivation it is protecting: a
+    re-bless of the entry under test replaces its old bounds rather than
+    preserving them."""
+    matrix_doc = {"entries": [{"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    existing = {"tokenspeed_serve_smoke::baseline": {
+        "passed": True, "step_time_ms": {"max": 1.0},
+        "metrics": {"median_tpot_ms": {"policy": "max", "value": 0.001}},
+    }}
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, True, existing_baselines=existing,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    spec = doc["baselines"]["tokenspeed_serve_smoke::baseline"]
+    assert spec["step_time_ms"] == {"max": 1375.0}
+    assert spec["metrics"]["median_tpot_ms"] == {"policy": "max", "value": 2.425}
+
+
+def test_a_hand_written_bound_without_a_policy_is_also_carried(tmp_path, monkeypatch):
+    """`compare_to_baseline` falls back to the allowlist when a spec names no
+    policy, so such a spec is a live gate and must survive a refresh too."""
+    matrix_doc = {"entries": [{"name": "gpu_smoke", "recipe": "r1.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    existing = {"gpu_smoke::baseline": {
+        "passed": True, "metrics": {"median_tpot_ms": {"value": 2.0}},
+    }}
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, False, existing_baselines=existing)
+
+    assert doc["baselines"]["gpu_smoke::baseline"]["metrics"]["median_tpot_ms"] == {"value": 2.0}
+
+
+# ---------------------------------------------------------------------------
+# The refresh path and `needs_docker_daemon`.
+#
+# `refresh-baselines.yml` mounts no docker socket, so on that lane a
+# daemon-dependent entry cannot run at all. The flag was only honoured by
+# nightly_eval.evaluate, which left build_baselines running the entry anyway --
+# producing no matrix.json, routing into `incomplete`, and aborting EVERY
+# baseline refresh as partial for as long as such an entry is live.
+# ---------------------------------------------------------------------------
+
+
+def _daemon_matrix():
+    return {"entries": [
+        {"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml", "needs_docker_daemon": True},
+        {"name": "gpu_smoke", "recipe": "r1.yaml"},
+    ]}
+
+
+def test_a_refresh_skips_a_daemon_dependent_entry_rather_than_failing(tmp_path, monkeypatch):
+    """An unrelated refresh must still complete. This is the whole defect: the
+    refresh lane has no socket, so without this the serving row breaks blessing
+    for gpu_smoke, inference_offline and every other workload in the matrix."""
+    ran: list[str] = []
+
+    def run(entry, out_dir):
+        ran.append(entry["name"])
+        return _serving_matrix_runner()(entry, out_dir)
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", run)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "docker_daemon",
+                        lambda: (False, "docker info failed: Cannot connect to the Docker daemon"))
+
+    doc = refresh_baselines.build_baselines(_daemon_matrix(), tmp_path, 0.25, 0.15, False)
+
+    assert ran == ["gpu_smoke"], "the daemon-dependent entry was run without a daemon"
+    assert "gpu_smoke::baseline" in doc["baselines"]
+    assert not any(k.startswith("tokenspeed_serve_smoke::") for k in doc["baselines"])
+
+
+def test_a_daemon_dependent_entry_keeps_its_baseline_on_a_lane_with_no_socket(
+        tmp_path, monkeypatch):
+    """Same contract as an 8-GPU entry on a 1-GPU box: an entry this lane cannot
+    exercise keeps whatever it was blessed with, rather than being reverted to
+    record-only by a refresh that never measured it."""
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "docker_daemon",
+                        lambda: (False, "no docker client on PATH"))
+
+    existing = {"tokenspeed_serve_smoke::baseline": {
+        "passed": True, "step_time_ms": {"max": 1462.0},
+        "metrics": {"median_tpot_ms": {"policy": "max", "value": 2.4}},
+    }}
+    doc = refresh_baselines.build_baselines(
+        _daemon_matrix(), tmp_path, 0.25, 0.15, False, existing_baselines=existing)
+
+    assert doc["baselines"]["tokenspeed_serve_smoke::baseline"] == \
+        existing["tokenspeed_serve_smoke::baseline"]
+
+
+def test_blessing_a_daemon_dependent_entry_that_cannot_run_is_refused(tmp_path, monkeypatch):
+    """The one case where skipping is wrong. Scoping perf gating to an entry
+    that never ran would emit a correctness-only refresh that reads, in the PR
+    diff, exactly like a successful bless -- the same failure the unknown-name
+    check refuses."""
+    import pytest
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "docker_daemon",
+                        lambda: (False, "no docker client on PATH"))
+
+    with pytest.raises(SystemExit, match="needs a docker daemon this lane cannot reach"):
+        refresh_baselines.build_baselines(
+            _daemon_matrix(), tmp_path, 0.25, 0.15, True,
+            perf_gate_entries={"tokenspeed_serve_smoke"})
+
+
+def test_a_daemon_dependent_entry_is_refreshed_when_a_daemon_is_reachable(tmp_path, monkeypatch):
+    """The other half: the skip disappears on a lane that does have the socket,
+    with no further edit -- so the flag cannot silently make the entry
+    unblessable forever."""
+    ran: list[str] = []
+
+    def run(entry, out_dir):
+        ran.append(entry["name"])
+        return _serving_matrix_runner()(entry, out_dir)
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", run)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "docker_daemon",
+                        lambda: (True, "daemon 29.7.2"))
+
+    doc = refresh_baselines.build_baselines(
+        _daemon_matrix(), tmp_path, 0.25, 0.15, True,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    assert ran == ["tokenspeed_serve_smoke", "gpu_smoke"]
+    assert doc["baselines"]["tokenspeed_serve_smoke::baseline"]["step_time_ms"] == {"max": 1375.0}
+
+
+def test_the_probe_is_only_consulted_by_entries_that_declare_it(tmp_path, monkeypatch):
+    """A broken daemon must not quarantine the rest of the refresh, exactly as
+    it does not on the nightly path."""
+    probed: list[bool] = []
+
+    def probe():
+        probed.append(True)
+        return False, "no docker client on PATH"
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "docker_daemon", probe)
+
+    matrix_doc = {"entries": [{"name": "gpu_smoke", "recipe": "r1.yaml"}]}
+    doc = refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, False)
+
+    assert probed == []
+    assert "gpu_smoke::baseline" in doc["baselines"]
+
+
 def _refresh_cli(*argv):
     import subprocess
     import sys
@@ -443,10 +689,11 @@ def _fake_run(ran):
 
 def test_an_entry_needing_a_daemon_skips_rather_than_fails_when_there_is_none(
         tmp_path, monkeypatch):
-    """The socket is a per-lane opt-in that grants effective root, so no lane
-    sets it and "no daemon" is the normal state. An entry that needs one must
-    therefore skip -- a fail would redden every nightly until a security
-    decision that is not the pipeline's to make."""
+    """The socket is a per-lane opt-in that grants effective root, so it is
+    granted to the nightly lane and to nothing else -- which makes "no daemon"
+    the normal state everywhere else, not a fault. An entry that needs one must
+    therefore skip: failing would redden a lane for declining a privilege it was
+    right to decline."""
     monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 8)
     monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
     monkeypatch.setattr(nightly_eval, "docker_daemon",
