@@ -11,6 +11,16 @@ inputs:
       base image (public) is pulled anonymously.
     required: false
     default: ""
+  docker-socket:
+    description: >-
+      Mount the HOST docker daemon socket into the CI container, for workloads
+      that launch a container of their own (tokenspeed_serve). Off by default,
+      and it should stay off for every lane that does not need it: a container
+      that can reach the daemon can start a privileged one bind-mounting /, so
+      this is effectively root on the runner. Read the security note in
+      docker/docker-compose.docker-socket.yaml before setting it.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -37,9 +47,25 @@ runs:
           echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
         fi
 
+    # The socket override is a second `-f`, not an edit to the base compose, so
+    # a lane that does not ask for it gets a container with no route to the
+    # daemon -- the same posture as before this input existed. `up` needs the
+    # override; `build` does not, since it adds no build stage.
     - name: Build and start ROCm CI container
       shell: bash
       working-directory: docker
+      env:
+        # NOT `DOCKER_SOCKET`: the override reads that name as the socket's host
+        # PATH, so a true/false flag under it would be substituted as the bind
+        # source and compose would mount a directory called `true`.
+        MOUNT_DOCKER_SOCKET: ${{ inputs.docker-socket }}
       run: |
+        files="-f docker-compose.build.yaml"
+        if [ "${MOUNT_DOCKER_SOCKET}" = "true" ]; then
+          echo "::warning::Mounting the host docker socket into ${CONTAINER_NAME:-the CI container}: this grants effective root on the runner."
+          files="${files} -f docker-compose.docker-socket.yaml"
+        fi
+        # shellcheck disable=SC2086
         bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
-        bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml up -d
+        # shellcheck disable=SC2086
+        bash ../scripts/ci/docker_compose.sh --env-file .env.ci ${files} up -d

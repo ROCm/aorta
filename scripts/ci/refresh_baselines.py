@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,41 @@ import eval_lib  # noqa: E402
 import nightly_eval  # noqa: E402
 
 
+def _existing_for(existing_baselines: dict[str, Any], name: str) -> dict[str, Any]:
+    """Every existing baseline belonging to one matrix entry, by cell key prefix."""
+    return {k: v for k, v in existing_baselines.items() if k.split("::", 1)[0] == name}
+
+
+def _carry_metric_bounds(
+    existing_spec: dict[str, Any],
+    metric_specs: dict[str, Any],
+    *,
+    only_underivable: bool,
+) -> list[str]:
+    """Copy forward the bounds this run is not going to re-derive.
+
+    The baseline file is rewritten WHOLE, so a bound not written back here is
+    deleted. Correctness (`equal`-policy) metrics are the one deliberate
+    exclusion: re-deriving those from the current run is the point of a refresh.
+
+    `only_underivable` narrows the carry to the metrics `--perf-gate` *cannot*
+    produce -- `_NO_AUTO_GATE` entries such as `median_itl_ms`, and anything not
+    on the allowlist at all. Those are hand-written by definition, so the
+    refresher has nothing to put back in their place, and a re-bless of this
+    very cell would otherwise silently drop them.
+    """
+    carried = []
+    for mname, mspec in (existing_spec.get("metrics") or {}).items():
+        if only_underivable and eval_lib.is_auto_gateable(mname):
+            continue
+        effective = (mspec or {}).get("policy") or eval_lib.metric_policy(mname)
+        if effective == "equal":
+            continue
+        metric_specs[mname] = copy.deepcopy(mspec)
+        carried.append(mname)
+    return carried
+
+
 def build_baselines(
     matrix_doc: dict[str, Any],
     out_dir: Path,
@@ -31,6 +67,7 @@ def build_baselines(
     throughput_margin: float,
     perf_gate: bool,
     existing_baselines: dict[str, Any] | None = None,
+    perf_gate_entries: set[str] | None = None,
 ) -> dict[str, Any]:
     existing_baselines = existing_baselines or {}
     ngpu = nightly_eval.gpu_count()
@@ -38,6 +75,8 @@ def build_baselines(
     incomplete: list[str] = []
     preserved: list[str] = []
     dropped: list[str] = []
+    carried_gates: list[str] = []
+    handwritten_gates: list[str] = []
 
     for entry in matrix_doc.get("entries") or []:
         name = entry["name"]
@@ -49,8 +88,7 @@ def build_baselines(
             # instead CARRY OVER any baselines this entry already has (never
             # silently reverting a live gate to record-only). If it has none
             # yet, note it as still-unblessed rather than failing.
-            carried = {k: v for k, v in existing_baselines.items()
-                       if k.split("::", 1)[0] == name}
+            carried = _existing_for(existing_baselines, name)
             if carried:
                 baselines.update(carried)
                 preserved.append(
@@ -60,6 +98,41 @@ def build_baselines(
             else:
                 dropped.append(f"{name} (needs {min_gpus} GPU(s), have {ngpu}; no existing baseline)")
             continue
+
+        # The same contract, for the other capability an entry can declare. A
+        # daemon-dependent entry is not runnable on a lane with no docker
+        # socket, and `refresh-baselines.yml` mounts none -- so running it
+        # anyway produces no matrix.json, which routes into `incomplete` and
+        # aborts the refresh as partial. Every baseline refresh would fail for
+        # as long as such an entry is live, including refreshes of workloads
+        # that have nothing to do with it.
+        if entry.get("needs_docker_daemon"):
+            reachable, detail = nightly_eval.docker_daemon()
+            if not reachable:
+                # ... except when the operator asked to bless exactly this
+                # entry. Carrying it over silently would produce a refresh that
+                # reads, in the PR diff, like a successful scoped bless of a
+                # cell that never ran -- which is the failure the unknown-name
+                # check in main() already refuses to allow.
+                if perf_gate_entries and name in perf_gate_entries:
+                    raise SystemExit(
+                        f"--perf-gate-entry names {name}, which needs a docker "
+                        f"daemon this lane cannot reach ({detail}). Blessing it "
+                        "requires running it: dispatch from a lane with the "
+                        "socket mounted, or write its bounds by hand (which the "
+                        "rollout doc's step 6 does anyway) -- a refresh cannot "
+                        "derive a bound from a cell it did not run."
+                    )
+                carried = _existing_for(existing_baselines, name)
+                if carried:
+                    baselines.update(carried)
+                    preserved.append(
+                        f"{name} (needs a docker daemon: {detail}; "
+                        f"kept {len(carried)} existing baseline(s))"
+                    )
+                else:
+                    dropped.append(f"{name} (needs a docker daemon: {detail}; no existing baseline)")
+                continue
 
         rc, matrix_path, timed_out = nightly_eval.run_entry(entry, out_dir)
         if timed_out:
@@ -93,22 +166,78 @@ def build_baselines(
             summary = metrics.get("summary") or {}
             metric_specs: dict[str, Any] = {}
 
+            # Performance thresholds (min/max) are opt-in via --perf-gate. Only
+            # allowlisted metrics are gated; unknown metrics (step_time_p99,
+            # final_loss, ...) are NEVER auto-gated as min.
+            #
+            # --perf-gate is also scopable to named entries, because this file is
+            # rewritten WHOLE on every refresh: without a scope, arming one
+            # workload's perf gates arms every other entry's at the same time,
+            # off whatever single run happened to be under way. Those entries
+            # have no variance evidence behind them, and a bound derived from one
+            # observation is the flaky-gate failure this whole exercise exists to
+            # avoid -- so rolling gating out per workload has to be expressible.
+            derive_perf = perf_gate and (not perf_gate_entries or name in perf_gate_entries)
+
+            # Whatever bounds this cell already had are carried over verbatim
+            # whenever this run is NOT deriving new ones for it. The file is
+            # rewritten whole, so the alternative is that a scoped bless of
+            # workload B disarms workload A -- the exact inverse of what the
+            # scope is for, since the scope exists to PROTECT the other entries.
+            # The same hole is reachable through the default (correctness-only)
+            # mode, which is why this is keyed on "not deriving" rather than on
+            # "scoped": omitting --perf-gate means "do not arm new gates", never
+            # "disarm the ones already blessed".
+            #
+            # Correctness metrics are deliberately excluded from the carry-over:
+            # they are re-derived from this run below, which is the whole point
+            # of refreshing them. Everything else -- min/max bounds, hand-written
+            # specs, an unrecognised policy someone added by hand -- is left
+            # exactly as it was found.
+            existing_spec = existing_baselines.get(key) or {}
+
+            if not derive_perf:
+                if "step_time_ms" in existing_spec:
+                    spec["step_time_ms"] = copy.deepcopy(existing_spec["step_time_ms"])
+                _carry_metric_bounds(existing_spec, metric_specs, only_underivable=False)
+                if "step_time_ms" in spec or metric_specs:
+                    carried_gates.append(
+                        f"{key} ({len(metric_specs)} metric bound(s)"
+                        f"{', step_time_ms' if 'step_time_ms' in spec else ''})"
+                    )
+
             # Correctness metrics (equal-policy checksums) are blessed in the
             # DEFAULT mode too -- a wrong-but-finite output must be caught even
-            # without perf gating.
+            # without perf gating. Applied after the carry-over so this run's
+            # observation wins for the metrics it did re-derive.
             for mname, value in summary.items():
                 if value is not None and eval_lib.is_correctness_metric(mname):
                     metric_specs[mname] = {"policy": "equal", "value": value}
 
-            # Performance thresholds (min/max) are opt-in via --perf-gate. Only
-            # allowlisted metrics are gated; unknown metrics (step_time_p99,
-            # final_loss, ...) are NEVER auto-gated as min.
-            if perf_gate:
+            if derive_perf:
+                # Deriving is not the same as re-deriving EVERYTHING. A bound
+                # this run cannot produce still has to survive a re-bless of the
+                # very cell it belongs to, or --perf-gate quietly deletes it:
+                # `_NO_AUTO_GATE` metrics (`median_itl_ms`) and anything off the
+                # allowlist are hand-written, so there is nothing to put back.
+                # Same principle as the out-of-scope carry-over above -- a
+                # refresh may decline to arm a gate, never disarm one.
+                kept = _carry_metric_bounds(existing_spec, metric_specs, only_underivable=True)
+                if kept:
+                    handwritten_gates.append(f"{key} ({', '.join(sorted(kept))})")
+
                 st = metrics.get("mean_step_time_ms")
                 if st is not None:
                     spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
+                elif "step_time_ms" in existing_spec:
+                    # The cell reported no mean_step_time_ms, so there is no new
+                    # ceiling to write. Dropping the old one would disarm it on
+                    # a run that never measured it; `compare_to_baseline` treats
+                    # a missing observation against a live ceiling as a failure,
+                    # which is the loud outcome rather than the silent one.
+                    spec["step_time_ms"] = copy.deepcopy(existing_spec["step_time_ms"])
                 for mname, value in summary.items():
-                    if value is None or not eval_lib.is_performance_metric(mname):
+                    if value is None or not eval_lib.is_auto_gateable(mname):
                         continue
                     policy = eval_lib.metric_policy(mname)  # "min" or "max"
                     if policy == "min":
@@ -126,8 +255,9 @@ def build_baselines(
     # Regenerating from such a run would drop those gates from the (fully
     # replaced) baseline file, silently reverting those workloads to
     # record-only. Fail atomically before writing anything. Note: entries the
-    # runner can't physically exercise (insufficient GPUs) are NOT fatal --
-    # their existing baselines are carried over above.
+    # runner can't exercise at all -- insufficient GPUs, or a declared docker
+    # daemon this lane has no route to -- are NOT fatal; their existing
+    # baselines are carried over above.
     if incomplete:
         raise SystemExit(
             "refusing partial baseline refresh -- these entries/cells ran but did "
@@ -136,9 +266,15 @@ def build_baselines(
 
     for note in preserved:
         print(f"[refresh] carried over baseline(s): {note}", flush=True)
-    for note in dropped:
-        print(f"[refresh] WARNING still unblessed (insufficient GPUs, no prior baseline): {note}",
+    for note in carried_gates:
+        print(f"[refresh] kept existing performance bounds (out of perf-gate scope): {note}",
               flush=True)
+    for note in handwritten_gates:
+        print(f"[refresh] kept hand-written bound(s) --perf-gate cannot re-derive: {note}",
+              flush=True)
+    for note in dropped:
+        print(f"[refresh] WARNING still unblessed (runner cannot exercise it, no prior "
+              f"baseline): {note}", flush=True)
 
     return {"version": 1, "baselines": baselines}
 
@@ -154,9 +290,30 @@ def main() -> int:
     ap.add_argument("--perf-gate", action="store_true",
                     help="also emit step-time/throughput bounds (Phase 5 perf gating); "
                          "default is correctness-only baselines")
+    ap.add_argument("--perf-gate-entry", action="append", default=[], metavar="NAME",
+                    help="restrict --perf-gate to this matrix entry (repeatable). "
+                         "Every other entry has its correctness data refreshed and its "
+                         "existing performance bounds carried over untouched, so perf "
+                         "gating can be rolled out one workload at a time. Default "
+                         "(no flag) re-derives bounds for every entry, as before.")
     args = ap.parse_args()
 
     matrix_doc = nightly_eval._load_yaml(nightly_eval.MATRIX)
+
+    perf_gate_entries = set(args.perf_gate_entry)
+    if perf_gate_entries:
+        if not args.perf_gate:
+            raise SystemExit("--perf-gate-entry has no effect without --perf-gate")
+        # A misspelled entry would otherwise scope perf gating to nothing and
+        # produce a correctness-only refresh that reads as a successful bless.
+        known = {e["name"] for e in matrix_doc.get("entries") or []}
+        unknown = sorted(perf_gate_entries - known)
+        if unknown:
+            raise SystemExit(
+                f"--perf-gate-entry names no such matrix entry: {', '.join(unknown)}\n"
+                f"known entries: {', '.join(sorted(known))}"
+            )
+
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     existing_baselines: dict[str, Any] = {}
@@ -166,7 +323,7 @@ def main() -> int:
 
     doc = build_baselines(
         matrix_doc, args.work_dir, args.step_time_margin, args.throughput_margin,
-        args.perf_gate, existing_baselines,
+        args.perf_gate, existing_baselines, perf_gate_entries or None,
     )
 
     header = (
