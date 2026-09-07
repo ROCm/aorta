@@ -444,8 +444,13 @@ so the claim is checked rather than asserted.
 
 ## What blocks this today
 
-The matrix entry is live, and what remains is a decision rather than an
-engineering task.
+Nothing, as of 2026-09-03. The matrix entry is live, the socket is signed off
+for the nightly lane, and `nightly-eval.yml` sets `docker_socket: true`. What
+remains is the measurement: ten record-only nights, from
+[step 3](#the-rollout-sequence) onward.
+
+This section is kept because the *shape* of the plumbing is what the sign-off
+was given against, and because the argument is worth being able to re-read.
 
 `nightly_eval.py` runs *inside* the `aorta-ci-gpu` container
 (`eval-reusable.yml` → `docker_cmd.sh exec`), and `tokenspeed_serve` runs the
@@ -457,14 +462,18 @@ help — it defers perf bounds, not failures.
 Both pieces now exist, the image has been built, and a cell has been run to
 completion from inside the container (see
 [Verification](#verification-status)). The client half is therefore done and
-proven. The daemon half is a per-lane opt-in that no lane sets, because it grants
-effective root on the runner and that is the CI owner's call.
+proven. The daemon half is a per-lane opt-in, granted to the nightly lane and to
+nothing else — see [Security](#security-the-marginal-risk-and-what-actually-bounds-it).
 
-The entry lives in `entries` with `needs_docker_daemon: true`, which is what makes
-that safe: on a runner without a socket it skips with the reason recorded, rather
-than failing. `tests/ci/test_nightly_eval.py` covers both halves of that — the
-skip when no daemon is reachable, and the run when one is — so the day a lane
-flips the flag is a configuration change, not a discovery.
+The entry lives in `entries` with `needs_docker_daemon: true`, which is what
+keeps that a configuration choice rather than a load-bearing one: on any lane
+without the socket the entry skips with the reason recorded, rather than failing.
+That still matters after the sign-off, because it is what keeps the socket
+scoped to one lane — `refresh-baselines.yml`, `bump-validate.yml` and every
+other consumer of the matrix can run without it.
+`tests/ci/test_nightly_eval.py` covers both halves on the nightly path, and
+`refresh_baselines.build_baselines` honours the same flag, with both halves
+covered too.
 
 ### The enabling change
 
@@ -490,8 +499,8 @@ caller's rather than the reusable workflow's — setting it centrally would gran
 the socket to a PR-triggered lane as a side effect of enabling the nightly.
 `bump-validate.yml` therefore pins it `false` explicitly, and
 `sanitizers-nightly.yml` never sees it, using `rocm-ci-setup` directly with no
-`docker-socket` argument. **No lane currently sets it `true`** — see the security
-note below.
+`docker-socket` argument. **`nightly-eval.yml` is the only lane that sets it
+`true`** — see the security note below for the sign-off and its basis.
 
 **3. `work_dir` must be an explicitly configured shared path.** This is the detail
 most likely to be missed, because nothing reports it as a path problem.
@@ -556,6 +565,25 @@ The demonstration used a fresh path created *through the daemon* so it landed
 root-owned, which is exactly what the workload's own error message advises an
 administrator to do.
 
+**Creating it is not the same as repairing it**, and the runner needs the second
+one. `mkdir -p` is a no-op on a directory that already exists: run as root over
+a leftover user-owned root it returns 0 and changes neither owner nor mode, so
+the next run fails the same ownership check with the remedy apparently already
+applied. Say what the end state is instead — the sequence below is idempotent
+whether or not the directory is there, and is what to run on the runner before
+the nightly first executes the entry:
+
+```bash
+docker run --rm -v /tmp:/mnt busybox:1.37 sh -c \
+  "mkdir -p /mnt/ts-work-serve && chown 0:0 /mnt/ts-work-serve && chmod 1777 /mnt/ts-work-serve"
+docker run --rm -v /tmp:/mnt busybox:1.37 stat -c "%n %u:%g %a" /mnt/ts-work-serve
+```
+
+`chown` the root and nothing under it: the per-uid scratch directories beneath
+it belong to whichever uid created them, and `-R` would take those from a
+co-tenant. The second line is worth running — the check the workload makes is on
+the root's owner, so `0:0 1777` is the whole acceptance criterion.
+
 The operational trap in that is worth stating on its own: **the ten record-only
 runs cannot share a `work_dir` with the containerised nightly** if they are taken
 by hand as an ordinary user. Either take them as root, or give the two a separate
@@ -580,46 +608,97 @@ outside the workspace that `eval-reusable.yml`'s "Reclaim results ownership" ste
 chowns. They are cleaned per trial unless `keep_work_dir` is set, but a runner
 that fills `/tmp` with root-owned scratch is a plausible future complaint.
 
-### Security: this grants effective root on the runner
+### Security: the marginal risk, and what actually bounds it
 
-Stated plainly, because it is the part most easily lost in a diff: a process that
-can talk to the Docker daemon can ask it for a privileged container that
-bind-mounts `/`. That is root on the host, with no exploit involved. Mounting the
-socket into `aorta-ci-gpu` therefore hands the host to anything running in that
-container — including every package the nightly installs from an index.
+**Signed off for the nightly lane on 2026-09-03**, and `nightly-eval.yml` sets
+`docker_socket: true` accordingly. The reasoning is recorded here rather than
+only in a review thread, because it is the durable part: a future reader deciding
+whether a *second* lane may have the socket needs the argument, not the verdict.
 
-The mitigating argument is real but partial. The container is already
-`privileged: true` with `seccomp=unconfined` on a self-hosted runner, so on a
-dedicated, trusted, single-tenant node this widens an already-wide posture rather
-than opening a new one. The argument fails on a shared or multi-tenant runner.
+Stated plainly first, because it is the part most easily lost in a diff: a
+process that can talk to the Docker daemon can ask it for a privileged container
+that bind-mounts `/`. That is root on the host, with no exploit involved. So the
+mount is genuinely root-equivalent, and nothing below disputes that.
 
-**If the CI owner is not willing to accept it, the recommended alternative is to
-run the serving workload outside the CI container entirely** — as a step on the
-runner host, which already has a client and the socket, publishing its results
-JSON into the harness's results directory. The nightly keeps the socket out of
-the container, and the only cost is that this one cell is invoked differently
-from the other sixteen. A socket proxy allowlisting just the container
-create/start/logs/remove calls is a middle option; rootless Docker is a third.
-Nested docker-in-docker is not on the list: it needs `privileged` too, so it
-trades no privilege away, and it gives the engine a different filesystem view,
+**What it is not is a new capability on this runner.** Before any container
+exists, `eval-reusable.yml`'s first step runs
+
+```yaml
+docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws
+```
+
+as a plain host step, falling back to `sudo -n docker info` and then to `sudo
+chown -R`. `refresh-baselines.yml` opens the same way. So the runner account
+already has direct daemon access *and* passwordless sudo, and any job step that
+can execute on this runner is already host-root capable — with or without the
+socket. The socket makes that reachable from inside `aorta-ci-gpu` as well as
+from the job shell, which is a convenience, not a new privilege. Reasoning about
+it as though the container were the boundary overstates what the container was
+ever doing.
+
+**What bounds the risk is write access to the repository, and that is checkable.**
+Three things, each of which can be re-verified by grep rather than taken on
+trust:
+
+- There is **no `pull_request_target`** anywhere in `.github/` — so no workflow
+  runs fork code with repository secrets or on a privileged trigger.
+- Both PR-reachable routes to the self-hosted runner carry an explicit fork
+  guard: `gpu-tests.yml` (twice) and `bump-validate.yml` gate on
+  `github.event.pull_request.head.repo.full_name == github.repository`. A fork PR
+  therefore never reaches this runner at all.
+- Neither of those lanes can obtain the socket even so. `gpu-tests.yml` does not
+  go through `eval-reusable.yml` and passes no socket argument; `bump-validate.yml`
+  pins `docker_socket: false` explicitly rather than inheriting a default that a
+  later edit could flip. `sanitizers-nightly.yml` calls `rocm-ci-setup` directly
+  and passes nothing.
+
+So the population that can reach the daemon through this mount is exactly the
+population that can push a branch to this repository — which is the population
+that can already run `sudo` on the runner through any workflow step. That is the
+whole of the marginal risk, and it is close to zero.
+
+**The "single-tenant runner" framing is withdrawn**, because it was doing work
+the argument does not need and cannot currently support. `ROCm/aorta` and
+`ROCm/aorta-internal` hold *separate repo-level runner registrations*
+(`smci350-rck-g03-f16-12` and `smci350-internal`), and the internal
+registration's July jobs reported machine `sharkmi300x-3` — an MI300X box —
+despite carrying an `mi350x` label. Whether the two registrations share a
+physical host is **not confirmed as of today**. It does not need to be: the
+argument above rests on what the runner account can already do and on who can
+reach it, neither of which changes with tenancy. Co-tenancy would matter for
+*measurement* (a neighbour's load moving the numbers), which is a separate
+question handled by the ten-night window and the two-cell control, not by this
+grant.
+
+**The alternatives, kept for the case where a future lane wants the socket and
+this argument does not carry over.** Run the serving workload outside the CI
+container entirely — as a step on the runner host, which already has a client and
+the socket, publishing its results JSON into the harness's results directory. A
+socket proxy allowlisting just the container create/start/logs/remove calls is a
+middle option; rootless Docker is a third, and it is the only one that is a real
+reduction rather than a re-arrangement, precisely because of the sudo point
+above. Nested docker-in-docker is not on the list: it needs `privileged` too, so
+it trades no privilege away, and it gives the engine a different filesystem view,
 which breaks exactly the bind mounts described above.
-
-This branch deliberately leaves the decision open: the mechanism is in place and
-switched off, and turning it on is one flag plus a named sign-off.
 
 ### What is still missing
 
-**One thing, and it is a decision rather than a piece of work: no lane enables
-the socket.** That is the sign-off described above, and it is deliberately not
-this branch's to give.
+Nothing in the plumbing. Two operational preconditions before the entry first
+runs, both on the runner rather than in this repository:
 
-Everything else on this list has been done. The entry is therefore in `entries`
-rather than `pending_entries`, carrying `needs_docker_daemon: true` — so on a
-runner without the socket it **skips**, with the reason in the results, instead
-of failing on `Cannot connect to the Docker daemon`. When the nightly lane sets
-`docker_socket: true` the entry starts running with no further edit. Promoting it
-without that flag would have been the mistake the matrix file's own header warns
-about: an entry may only be added once it can actually pass on the runner.
+1. **`/tmp/ts-work-serve` must exist root-owned and `1777`** — the sequence is
+   under [work_dir](#the-enabling-change) above, and note that `mkdir -p` alone
+   does not repair a pre-existing user-owned root.
+2. **Both pinned digests must hold for the whole window** — the base image in
+   `docker/Dockerfile.ci-gpu` and the engine image in the recipe. See
+   [the stack-bump section](#a-stack-bump-does-not-get-absorbed-by-the-window--it-invalidates-it).
+
+The entry is in `entries` rather than `pending_entries`, carrying
+`needs_docker_daemon: true`, so on any lane without the socket — the baseline
+refresher, `bump-validate` — it **skips** with the reason in the results instead
+of failing on `Cannot connect to the Docker daemon`. Promoting it without that
+flag would have been the mistake the matrix file's own header warns about: an
+entry may only be added once it can actually pass on the runner.
 
 ### Verification status
 
@@ -747,9 +826,13 @@ without leaving a binary behind; the client negotiates against an older (29.1.3)
 daemon; `docker compose config` resolves all three mounts with the scratch mount
 identical on both sides.
 
-Not verified, because it is the thing awaiting sign-off: the entry has never run
-under `nightly_eval.py` on a CI runner, only under `aorta sweep run` in the
-container by hand. The skip path is covered by tests rather than by a runner.
+Still not verified, and it is now the first thing the nightly will establish:
+the entry has never run under `nightly_eval.py` on the CI runner, only under
+`aorta sweep run` in the container by hand. Night one is therefore a bring-up
+observation as much as a measurement — treat a failure there as plumbing until
+shown otherwise, and see the two operational preconditions under
+[What is still missing](#what-is-still-missing) before counting it. The skip
+path is covered by tests rather than by a runner.
 
 To reproduce:
 
@@ -758,8 +841,17 @@ cd docker
 bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
 docker run --rm aorta:ci-gpu docker --version
 
-# work root must be root-owned; creating it through the daemon is the easy way
-docker run --rm -v /tmp:/mnt busybox:1.37 mkdir -p /mnt/ts-work-serve
+# The work root must be root-owned, and `mkdir -p` on its own does not make it
+# so: on a node where an earlier host-side sweep left a /tmp/ts-work-serve owned
+# by that user, `mkdir -p` as root sees an existing directory and returns 0
+# having changed nothing -- so the run still fails the ownership check, with the
+# remedy apparently already applied. State the owner and the mode explicitly;
+# the sequence is idempotent whether or not the directory is there.
+#
+# `chown` on the root only, never `-R`: the per-uid scratch beneath it belongs
+# to whoever created it, and the check the workload makes is on the root's owner.
+docker run --rm -v /tmp:/mnt busybox:1.37 sh -c \
+  "mkdir -p /mnt/ts-work-serve && chown 0:0 /mnt/ts-work-serve && chmod 1777 /mnt/ts-work-serve"
 
 export TS_SERVE_WORK_DIR=/tmp/ts-work-serve
 bash ../scripts/ci/docker_compose.sh --env-file .env.ci \
@@ -772,9 +864,9 @@ docker exec aorta-ci-gpu aorta sweep run \
 
 ## The rollout sequence
 
-Steps 1–2 are **done**. Step 3 cannot start until a lane enables the socket,
-because until then the entry skips rather than records. Everything from step 3 is
-the part this document is really specifying.
+Steps 1–2a are **done**: the entry is live and the nightly lane has the socket,
+so the first nightly after this merges starts recording. Everything from step 3
+is the part this document is really specifying.
 
 **1. ~~Promote the entry.~~ Done.** It is in `entries` with `min_gpus: 1`,
 `timeout_sec: 3600` and `needs_docker_daemon: true`.
@@ -795,10 +887,9 @@ python -m pytest tests/workloads/test_tokenspeed_serve.py -q
 aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml --dry-run
 ```
 
-**2a. Enable the socket on the nightly lane.** The plumbing is in place; the
-decision is not this branch's to make — see
-[Security](#security-this-grants-effective-root-on-the-runner). It is one line in
-`.github/workflows/nightly-eval.yml`, plus a named sign-off:
+**2a. ~~Enable the socket on the nightly lane.~~ Done**, signed off 2026-09-03
+— see [Security](#security-the-marginal-risk-and-what-actually-bounds-it) for
+the basis. It is one line in `.github/workflows/nightly-eval.yml`:
 
 ```yaml
     uses: ./.github/workflows/eval-reusable.yml
@@ -816,9 +907,12 @@ directly and passes no `docker-socket`, so it inherits the action default of
 hand the socket to every lane at once and is the mistake this shape exists to
 prevent.
 
-Until the sign-off lands, leave it `false`: the entry reports `skip` with
-`needs a docker daemon: ...` in its reasons, which is visible on the dashboard
-and costs the nightly nothing.
+The grant is per lane, and it should stay that way. Any *other* lane wanting the
+socket is a fresh decision, and the argument recorded under Security does not
+transfer to a lane whose trigger is reachable from a fork or from an unreviewed
+branch — that argument is what bounds this one. The dashboard also makes the
+absence visible rather than silent: on a lane without the socket the entry
+reports `skip` with `needs a docker daemon: ...` in its reasons.
 
 **3. Let it record for ten nightlies, at `warmup_steps: 2`.** It will report
 `recording` on the dashboard.
@@ -882,6 +976,32 @@ absorbed by raising `warmup_steps` again.
 
 **5. Bless, scoped to this entry only.**
 
+> [!IMPORTANT]
+> **For `tokenspeed_serve_smoke`, this is a hand-written baseline, not a
+> refresher run.** `refresh-baselines.yml` does not mount the docker socket —
+> the sign-off is scoped to the nightly lane — so on that lane the entry
+> declares a capability the lane does not have and skips. Dispatching a refresh
+> with `perf_gate_entry: tokenspeed_serve_smoke` is therefore **refused
+> outright**, with a message saying so, rather than producing a correctness-only
+> file that reads in the PR diff exactly like a successful bless.
+>
+> This costs less than it sounds like, because step 6 below replaces every
+> number the refresher derives with one computed from the ten-night window, and
+> deletes most of the keys it writes. What the refresher would contribute is a
+> skeleton. So write the two keys into `config/ci/regression_baselines.yaml`
+> directly, in a PR, using the values from step 6 — same review, same file,
+> fewer moving parts, and no GPU runner time.
+>
+> That is safe now in a way it was not before: a later refresh of any other
+> entry **carries these bounds over untouched**, in both the scoped and the
+> default correctness-only modes. Two options if the refresher's convenience is
+> wanted for this entry later: extend the sign-off to the refresh lane (a
+> dispatch-only lane, so the fork-guard part of the argument is trivially
+> satisfied — but it is a separate decision), or run the sweep on the runner
+> host and hand-transcribe. Neither is on the critical path.
+
+The mechanism itself, for the entries that can use it:
+
 ```
 Actions -> Refresh baselines -> Run workflow
 ```
@@ -891,7 +1011,7 @@ with the dispatch form filled in as
 | Input | Value |
 |---|---|
 | `perf_gate` | `true` |
-| `perf_gate_entry` | `tokenspeed_serve_smoke` |
+| `perf_gate_entry` | the entry under test, e.g. `inference_offline` |
 | `step_time_margin` | `0.25` (default) |
 | `throughput_margin` | `0.15` (default) |
 
@@ -899,7 +1019,7 @@ which the workflow turns into
 
 ```bash
 python scripts/ci/refresh_baselines.py --perf-gate \
-  --perf-gate-entry tokenspeed_serve_smoke
+  --perf-gate-entry inference_offline
 ```
 
 The scope is not optional. Without it the same PR arms step-time ceilings for
@@ -907,16 +1027,28 @@ every other entry in the matrix from that one run, so leaving `perf_gate_entry`
 empty with `perf_gate: true` logs a warning on the job. It is a warning rather
 than a hard failure because an unscoped refresh is the legitimate end state once
 every workload has variance data behind it — but during rollout it is not what
-you want. A misspelled entry name is rejected rather than silently scoping to
-nothing, and setting `perf_gate_entry` without `perf_gate` fails immediately
-instead of after the wheel install.
+you want. Three ways of getting the scope wrong all fail rather than degrade: a
+misspelled entry name is rejected rather than silently scoping to nothing; a
+scope without `perf_gate` fails immediately instead of after the wheel install;
+and a value that is non-empty but is only delimiters (`,`, a stray tab) is
+rejected too, because it would otherwise parse to no names and leave a bare
+`--perf-gate` — the unscoped global refresh, reached by an operator who thought
+they had scoped it, and without even the unscoped warning.
+
+What the scope does *not* do any more is disarm anything. Out-of-scope entries
+keep their existing `step_time_ms` and metric bounds verbatim while their
+correctness data is refreshed, which is what makes per-workload rollout additive
+rather than a game of whack-a-mole. The same holds in the default,
+correctness-only mode: omitting `--perf-gate` means "do not arm new gates", not
+"disarm the ones already blessed".
 
 `perf_gate_entry` accepts several names, comma- or space-separated, mapping to
 one `--perf-gate-entry` each. For this rollout it should be exactly one.
 
-**6. Correct the PR diff by hand, then merge.** The refresher derives bounds from
-the *single* run it just did, and from every auto-gateable metric it observed.
-Two edits are needed, both mechanical:
+**6. Write the two bounds, then merge.** Whether the numbers come from a
+refresher diff or are written by hand (as they are for this entry — see the note
+in step 5), the same two edits apply, because the refresher derives bounds from
+the *single* run it just did and from every auto-gateable metric it observed:
 
 - Replace each bound with one derived from the ten-run window: `max × 1.25` for a
   `max` metric, `min × 0.85` for a `min` metric.
@@ -927,11 +1059,13 @@ Two edits are needed, both mechanical:
   `median_tpot_ms` and `p99_itl_ms`. `median_itl_ms` will not be there;
   `_NO_AUTO_GATE` keeps the refresher from writing it.
 
-Deleting `step_time_ms.max` is the one that needs attention, because it is the
-bound `--perf-gate` always writes and the only one on this list that is not a
-metric key. Leaving it in by inattention arms the gate the measured excursion
-breaches hardest — 2825 ms against a 1462 ms ceiling. It is the most likely
-mistake in this whole sequence.
+`step_time_ms.max` is the one that needs attention, because it is the bound
+`--perf-gate` always writes, the only one on this list that is not a metric key,
+and — when hand-writing — the one most easily added out of a sense of
+completeness. Including it arms the gate the measured excursion breaches
+hardest: 2825 ms against a 1462 ms ceiling. It is the most likely mistake in
+this whole sequence. The end state is exactly two metric keys per cell,
+`median_tpot_ms` and `p99_itl_ms`, alongside `passed: true`.
 
 This hand-editing is the honest cost of the current tooling, and it is bounded:
 ten keys across two cells, on a PR a human reviews anyway, and it is meant to
@@ -1009,10 +1143,14 @@ absorb an unexplained excursion is usually too wide to catch a regression, and
 the widening tends to be permanent. Go back to record-only, find out what moved,
 then re-bless from a longer window.
 
-One whole-file caveat: any later `refresh-baselines` run rewrites
-`regression_baselines.yaml` completely, so a hand-reverted cell will be re-armed
-by the next unscoped `--perf-gate` refresh. Scope those runs with
-`--perf-gate-entry`, or check the diff for cells you had deliberately demoted.
+One whole-file caveat, now much narrower than it was: any later
+`refresh-baselines` run rewrites `regression_baselines.yaml` completely, but a
+run that is not deriving bounds for a cell carries that cell's existing bounds
+over untouched — so a hand-reverted cell stays reverted through a scoped refresh
+of another entry and through a default correctness-only refresh. The one thing
+that re-arms it is an **unscoped** `--perf-gate` refresh, which re-derives every
+cell by definition. Scope those runs with `--perf-gate-entry`, or check the diff
+for cells you had deliberately demoted.
 
 ## Assumptions
 
@@ -1042,12 +1180,16 @@ was not enough a decision was made and is recorded here.
   building a flag for it now would fix a metric set we are explicitly planning to
   change.
 - **`needs_docker_daemon` over leaving the entry staged.** A launch was
-  demonstrated, so the entry has earned promotion; but the socket is still off by
-  design, and an entry in `entries` that cannot reach a daemon fails every night.
-  Rather than choose between a stale `pending_entries` row and a red nightly, the
-  capability was made declarable, exactly as `min_gpus` already is for GPU count.
-  The cost is one field and one probe; the alternative was for the promotion to
-  wait on a security decision it does not actually depend on.
+  demonstrated, so the entry had earned promotion; but the socket was still off
+  at the time, and an entry in `entries` that cannot reach a daemon fails every
+  night. Rather than choose between a stale `pending_entries` row and a red
+  nightly, the capability was made declarable, exactly as `min_gpus` already is
+  for GPU count. The socket has since been signed off for the nightly lane,
+  which does not make the field redundant — it is what keeps the grant *scoped*
+  to that lane, since the baseline refresher and `bump-validate` run the same
+  matrix without it and now skip the entry instead of failing on it. Both
+  consumers honour the flag; only the nightly did at first, which broke every
+  baseline refresh and was caught in review.
 - **`warmup_steps` raised to 2.** Reversed from "left at 1" earlier in this
   branch. The step-0 excursion is positional, so one more discarded step removes
   it by construction, and it is measured at 1 cell-run in 13 — frequent enough

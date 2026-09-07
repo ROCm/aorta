@@ -19,11 +19,26 @@
 # A process that can talk to the docker daemon can start a container that is
 # privileged and bind-mounts `/`, which is root on the host with no further
 # exploit -- so this mount hands anything running in the container, including
-# any code the nightly installs from an index, the whole node. The base compose
-# is already `privileged: true` with `seccomp=unconfined`, so on a dedicated,
-# trusted, single-tenant CI runner this widens an already-wide posture rather
-# than opening a new one. On a shared or multi-tenant runner it is NOT
-# acceptable, and the alternatives, in order of preference, are:
+# any code the nightly installs from an index, the whole node.
+#
+# What makes it acceptable on ROCm/aorta's runner is NOT tenancy, which is what
+# an earlier version of this note claimed. It is that the privilege is already
+# there and that reachability is bounded:
+#
+#   * eval-reusable.yml and refresh-baselines.yml both open with `docker run -v
+#     "$ws":/ws ...` and `sudo -n` as PLAIN HOST steps, before any container
+#     exists. The runner account therefore has daemon access and passwordless
+#     sudo already; the base compose is `privileged: true` with
+#     `seccomp=unconfined` on top of that. This mount relocates an existing
+#     capability into the container, it does not introduce one.
+#   * Reachability equals write access to the repository. There is no
+#     `pull_request_target` anywhere in .github/, and both PR-reachable routes to
+#     the runner gate on head.repo.full_name == github.repository, so fork code
+#     never runs there.
+#
+# Neither of those holds automatically elsewhere. On CI where a PR-triggered lane
+# can reach the daemon, or where the runner account is NOT already sudo-capable,
+# this is not acceptable, and the alternatives, in order of preference, are:
 #
 #   1. Run the serving workload outside the CI container -- as a step on the
 #      runner host, which already has a docker client and the socket, publishing

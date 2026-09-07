@@ -37,12 +37,26 @@ jobs:
       do_alert: true
       # The nightly is the ONLY lane that gets the host docker socket: the
       # tokenspeed_serve_smoke entry launches the TokenSpeed container itself, so
-      # it needs a route to the daemon. This lane is not PR-triggered -- it runs
-      # on a published nightly wheel or an explicit dispatch -- which is what
-      # makes the grant acceptable. Do not copy this line into bump-validate.yml.
-      # Until the socket is signed off, leaving this false is also safe: the
-      # entry declares `needs_docker_daemon: true` and reports `skip` with the
-      # reason recorded rather than failing the nightly.
+      # it needs a route to the daemon. Signed off 2026-09-03, for this lane
+      # only. Do not copy this line into bump-validate.yml or any other lane.
+      #
+      # What the sign-off rests on, in one line each -- the full argument is in
+      # docs/tokenspeed-gating-rollout.md under Security:
+      #   * The marginal risk is close to zero. eval-reusable.yml's first step
+      #     already runs `docker run -v "$ws":/ws` and `sudo -n` as PLAIN HOST
+      #     steps, before any container exists, so the runner account has daemon
+      #     access and passwordless sudo today. The socket moves that inside
+      #     aorta-ci-gpu; it does not create it.
+      #   * Reachability is bounded by write access, and that is greppable: no
+      #     `pull_request_target` anywhere in .github/, and both PR-reachable
+      #     routes to this runner (gpu-tests.yml, bump-validate.yml) gate on
+      #     head.repo.full_name == github.repository, so fork code never lands
+      #     here at all.
+      #   * Neither PR lane can obtain it regardless: gpu-tests.yml does not use
+      #     eval-reusable.yml and passes no socket argument, and
+      #     bump-validate.yml pins `docker_socket: false` explicitly rather than
+      #     inheriting a default a later edit could flip.
+      # Not part of the argument: runner tenancy. See the doc.
       docker_socket: true
     secrets: inherit
 

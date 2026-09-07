@@ -108,15 +108,19 @@ entries:
   # min before the image pull and any cold-cache weight download, and a timeout
   # is an unconditional entry FAILURE rather than a slow record.
   #
-  # `needs_docker_daemon` is what makes this row safe to have here today. The
-  # nightly runs nightly_eval.py INSIDE aorta-ci-gpu, and `tokenspeed_serve`
-  # starts the TokenSpeed engine in its own container, so it needs a docker
-  # client in the image (present, and proven: the built image carries 29.7.2 and
-  # no daemon) plus a route to a daemon (a per-lane opt-in that no lane sets,
-  # because it grants effective root on the runner and that is the CI owner's
-  # call). Until a lane sets `docker-socket: true` this entry SKIPS, with the
-  # reason in the results, rather than failing on "cannot connect to the Docker
-  # daemon" -- the same contract min_gpus gives the 8-GPU rows.
+  # `needs_docker_daemon` is what keeps this row scoped to one lane. The nightly
+  # runs nightly_eval.py INSIDE aorta-ci-gpu, and `tokenspeed_serve` starts the
+  # TokenSpeed engine in its own container, so it needs a docker client in the
+  # image (present, and proven: the built image carries 29.7.2 and no daemon)
+  # plus a route to a daemon -- a per-lane opt-in, granted to nightly-eval.yml
+  # on 2026-09-03 and to nothing else, because it grants effective root on the
+  # runner. On any other lane that runs this matrix -- refresh-baselines.yml,
+  # bump-validate.yml -- this entry SKIPS, with the reason in the results,
+  # rather than failing on "cannot connect to the Docker daemon". The same
+  # contract min_gpus gives the 8-GPU rows, and BOTH consumers of this file
+  # honour it: nightly_eval.evaluate and refresh_baselines.build_baselines. The
+  # refresher honouring it is not cosmetic -- without that, this row aborts
+  # every baseline refresh, for every unrelated workload, as a partial refresh.
   #
   # Proven on gfx950 on 2026-09-02: two sweeps driven from inside the CI
   # container over a mounted socket, four cell-runs, all passed, twelve clean

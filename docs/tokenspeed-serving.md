@@ -1003,9 +1003,11 @@ off `output_len` there rejected a correct export.
 
 ## Not done yet
 
-- **Blessed nightly baselines.** The metrics are gateable but no serving recipe
-  is in the nightly matrix yet, so nothing is gated. The matrix lives in
-  `aorta-internal`, where perf gating is still awaiting review.
+- **Blessed nightly baselines.** `tokenspeed_serve_smoke` is now live in
+  `config/ci/nightly_eval_matrix.yaml` — in this repository, not `aorta-internal`
+  — but it is **record-only**: no serving baseline has been blessed, so nothing
+  is gated yet. The bless waits on a ten-night window;
+  [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md) is the sequence.
 - **`sharegpt` measured on hardware.** The plumbing is tested; no run has been
   made against a real ShareGPT file, so there are no numbers from it yet.
 - **TP=4 and above.** TP 1 and 2 work; 4 fails to come up, diagnosed as far as
