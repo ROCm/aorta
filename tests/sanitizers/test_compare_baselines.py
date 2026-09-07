@@ -384,6 +384,66 @@ def test_expected_error_is_rejected_on_a_gated_key(tmp_path, monkeypatch, capsys
     assert "not allowed on a gated case" in capsys.readouterr().err
 
 
+# The flip side of the rejection above: because that declaration is impossible,
+# the sweep must not advise it. Advice an operator cannot follow is the same
+# defect shape as an option that is accepted and ignored.
+
+_IMPOSSIBLE_ADVICE = "declare it as an 'expected_error' entry"
+
+
+def test_vacuous_advice_is_followable_for_a_colliding_survey_key(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # informational/waitcheck-gemm resolves to the gated key waitcheck_gemm, so
+    # test_expected_error_is_rejected_on_a_gated_key above is what an operator
+    # who followed the old advice would have got -- exit 2, and for every row,
+    # since the baselines then fail to load at all.
+    _write_case(
+        tmp_path, "informational/waitcheck-gemm", _errored("waitcheck", "worklist_not_fully_checked")
+    )
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert _IMPOSSIBLE_ADVICE not in out
+    assert "--known-vacuous informational/waitcheck-gemm" in out
+    # And the advice it gives instead actually works.
+    argv = [
+        "prog",
+        "--vacuous-only",
+        "--known-vacuous",
+        "informational/waitcheck-gemm",
+        str(tmp_path),
+    ]
+    assert comparator.main(argv) == 0
+
+
+def test_vacuous_advice_for_a_gated_report_does_not_point_at_the_sweep(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # The gated report itself, rather than the colliding survey directory.
+    # --known-vacuous cannot rescue this one either: _compare_case judges it
+    # against its own baseline and still fails it, so sending the operator to the
+    # sweep would be a second piece of advice that does not work.
+    _write_case(tmp_path, "waitcheck", _errored("waitcheck", "worklist_not_fully_checked"))
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert _IMPOSSIBLE_ADVICE not in out
+    assert "--known-vacuous" not in out
+    assert "gated case with a baseline of its own" in out
+
+
+def test_vacuous_advice_still_points_at_expected_error_for_an_ordinary_row(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # The remedy above is scoped to colliding keys; every other row keeps the
+    # declaration advice, which is correct and reachable for it.
+    _write_case(tmp_path, "informational/consan-gemm", _errored("consan", "growth_limit"))
+    assert comparator.main(["prog", "--vacuous-only", str(tmp_path)]) == 1
+    assert _IMPOSSIBLE_ADVICE in capsys.readouterr().out
+
+
 def test_committed_baselines_declarations_are_well_formed() -> None:
     # The check above only bites if the shipped file satisfies it.
     comparator._load_baselines(_REPO_ROOT / comparator._BASELINES)

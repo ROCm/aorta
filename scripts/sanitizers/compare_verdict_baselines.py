@@ -280,7 +280,49 @@ def _reasons(report: SanitizerReport) -> list[str]:
     return sorted({check.reason for check in report.checks if check.reason})
 
 
-def _vacuous_problems(report: SanitizerReport, expected: object) -> list[str]:
+def _vacuous_remedy(name: str, case_dir: str) -> str:
+    """What an operator can actually do about a vacuous row.
+
+    Usually the answer is an ``expected_error``, but that is *impossible* when
+    the row's baseline key is also a gated key: ``_load_baselines`` rejects the
+    declaration outright, so following the advice yields exit 2 -- and not only
+    for this row, since the baselines then fail to load for every case.
+
+    ``informational/waitcheck-gemm`` sits in exactly that position today,
+    because ``_case_key`` maps it onto the gated key ``waitcheck_gemm``. It is
+    masked only because the nightly lists it as ``--known-vacuous``, which is
+    why the advice has to be right now rather than later: the person who would
+    hit it is whoever removes that suppression, with no context for why the
+    obvious remedy does not work.
+    """
+    if name not in _CASES:
+        return (
+            f"Either the recipe is misconfigured (see ROCm/aorta#450) or, if this outcome "
+            f"is intended, declare it as an 'expected_error' entry in {_BASELINES}."
+        )
+    if Path(case_dir) / "sanitizer_report.json" in _GATED_BY_PATH:
+        # The gated report itself. `_compare_case` judges it against a baseline of
+        # its own, so nothing the sweep offers could make this row acceptable.
+        return (
+            f"This is a gated case with a baseline of its own, so a vacuous outcome here "
+            f"is a regression to fix in the recipe -- or a baseline to update, if the new "
+            f"outcome is the correct one. It cannot be excused with an 'expected_error': "
+            f"{_BASELINES} rejects one on a gated key."
+        )
+    return (
+        f"Either the recipe is misconfigured (see ROCm/aorta#450), or this outcome is "
+        f"wrong for a reason tracked elsewhere -- in which case pass "
+        f"'--known-vacuous {case_dir}' at the call site. It cannot be declared as an "
+        f"'expected_error': {name} is also a gated baseline key, so {_BASELINES} rejects "
+        f"the declaration there because it could not be attributed to this report or to "
+        f"the gated one. Rename this case directory so the two stop colliding if you need "
+        f"to record the outcome as correct."
+    )
+
+
+def _vacuous_problems(
+    name: str, case_dir: str, report: SanitizerReport, expected: object
+) -> list[str]:
     """Reject a run that terminated without producing any signal.
 
     Returns problems when the report ended in a vacuous execution status with
@@ -296,7 +338,9 @@ def _vacuous_problems(report: SanitizerReport, expected: object) -> list[str]:
     it were the ``error`` that was reviewed.
 
     ``expected_error`` is validated at load time, so anything reaching here is
-    well-formed.
+    well-formed. ``name`` and ``case_dir`` are taken so that the advice on an
+    undeclared row can be one the caller is actually able to follow -- see
+    :func:`_vacuous_remedy`.
     """
     status = report.execution_status.value
     if status not in _VACUOUS_STATUSES:
@@ -310,9 +354,8 @@ def _vacuous_problems(report: SanitizerReport, expected: object) -> list[str]:
     declared = expected.get("expected_error") if isinstance(expected, dict) else None
     if declared is None:
         return [
-            f"{shape} -- the run produced no sanitizer signal at all. Either the recipe "
-            f"is misconfigured (see ROCm/aorta#450) or, if this outcome is intended, "
-            f"declare it as an 'expected_error' entry in {_BASELINES}."
+            f"{shape} -- the run produced no sanitizer signal at all. "
+            f"{_vacuous_remedy(name, case_dir)}"
         ]
 
     mismatches = []
@@ -387,7 +430,7 @@ def _sweep_vacuous(
             print(f"{name}: report failed strict validation: {exc}")
             failed = True
             continue
-        problems = _vacuous_problems(report, baselines.get(name))
+        problems = _vacuous_problems(name, case_dir, report, baselines.get(name))
         if case_dir in suppressed:
             seen_suppressed.add(case_dir)
             if problems:
