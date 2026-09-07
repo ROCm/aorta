@@ -28,7 +28,7 @@ entries:
   # passes -- a genuine continuous-batch workload/recipe issue to fix separately.
   # Re-add this entry once that smoke passes on hardware. (The nightly eval
   # correctly caught this via fail-closed; it's excluded here only so the broken
-  # workload doesn't block unrelated stack-bump / CI PRs.)
+  # workload doesn't turn every nightly red until the recipe is fixed.)
 
   # NOTE: HRX recipes are intentionally NOT wired here. The shipped
   # recipes/hrx/*.yaml use literal `/path/to/hrx-root` preload paths and build
