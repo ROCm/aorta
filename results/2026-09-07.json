@@ -1,22 +1,22 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-07T11:19:55.070644+00:00",
+  "generated_at": "2026-09-07T13:08:55.466786+00:00",
   "build": {
     "amd_aorta_version": "0.3.1rc20260907",
     "torch": "2.13.0+rocm10.0.0",
     "hip": "7.15.26333",
     "rocm": "10.0.0",
-    "upstream_run_id": "34115289502",
-    "head_sha": "4b4553ef14af08e7ee2d68a888b68cd6a88803f7",
-    "wheel_file": "amd_aorta-0.3.1rc20260907-py3-none-any.whl",
+    "upstream_run_id": "",
+    "head_sha": "d5a8bba0383e88f983a16cc1617e89b80b7faaa7",
+    "wheel_file": null,
     "lane": "gate",
     "base_image": null
   },
   "summary": {
-    "total": 16,
+    "total": 18,
     "pass": 16,
     "fail": 0,
-    "record": 0,
+    "record": 2,
     "skip": 0
   },
   "entries": [
@@ -27,8 +27,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 196.4782765135169,
-        "mean_wall_clock_sec": 3.5779965110123158,
+        "mean_step_time_ms": 197.3956637084484,
+        "mean_wall_clock_sec": 3.5748569825664163,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "sum": 8.0,
@@ -41,8 +41,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/gpu_smoke/CI-GPU-SMOKE/gpu_smoke/2026-09-07T11-13-55/matrix.json",
-      "duration_sec": 11.680476,
+      "matrix_path": ".nightly-eval/gpu_smoke/CI-GPU-SMOKE/gpu_smoke/2026-09-07T12-47-42/matrix.json",
+      "duration_sec": 11.730768,
       "error": null
     },
     {
@@ -52,20 +52,20 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 46.176566975191236,
-        "mean_wall_clock_sec": 10.375957494601607,
+        "mean_step_time_ms": 45.840152306482196,
+        "mean_wall_clock_sec": 10.409567089751363,
         "step_time_source": "per_step",
         "summary": {
           "parameter_count": 33170432.0,
           "batch_size": 4.0,
           "prompt_len": 128.0,
           "generate_tokens": 32.0,
-          "prefill_latency_ms": 1.1894055642187595,
-          "decode_latency_ms": 1.233853752754869,
-          "tokens_per_sec": 3241.875296054381,
+          "prefill_latency_ms": 1.2239820789545774,
+          "decode_latency_ms": 1.240325400665883,
+          "tokens_per_sec": 3224.9601579170703,
           "decoded_tokens": 496.0,
-          "step_time_p50": 44.241676572710276,
-          "step_time_p99": 51.80501665920019,
+          "step_time_p50": 44.10527879372239,
+          "step_time_p99": 51.16958634927869,
           "logits_checksum": 33904201.0
         }
       },
@@ -82,8 +82,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/inference_offline/EXAMPLE-INFERENCE-SMOKE/inference/2026-09-07T11-14-06/matrix.json",
-      "duration_sec": 19.142646,
+      "matrix_path": ".nightly-eval/inference_offline/EXAMPLE-INFERENCE-SMOKE/inference/2026-09-07T12-47-54/matrix.json",
+      "duration_sec": 18.991927,
       "error": null
     },
     {
@@ -93,16 +93,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1365.3608988970518,
-        "mean_wall_clock_sec": 11.806580193340778,
+        "mean_step_time_ms": 1382.312619825825,
+        "mean_wall_clock_sec": 12.064604211598635,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 2.0,
           "parameter_count": 656896.0,
           "final_loss": 6.936877250671387,
-          "step_time_p50": 1.0603684931993484,
-          "step_time_p99": 2.8379235975444317
+          "step_time_p50": 1.1549359187483788,
+          "step_time_p99": 64.70366971567273
         }
       },
       "deltas": {},
@@ -110,8 +110,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_ddp/EXAMPLE-TRAINING-DDP/training/2026-09-07T11-14-27/matrix.json",
-      "duration_sec": 23.047733,
+      "matrix_path": ".nightly-eval/training_ddp/EXAMPLE-TRAINING-DDP/training/2026-09-07T12-48-14/matrix.json",
+      "duration_sec": 22.795354,
       "error": null
     },
     {
@@ -121,16 +121,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1309.0775057207793,
-        "mean_wall_clock_sec": 11.57877492532134,
+        "mean_step_time_ms": 1304.0629161987454,
+        "mean_wall_clock_sec": 11.46343036647886,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 2.0,
           "parameter_count": 2361856.0,
           "final_loss": 254.41094970703125,
-          "step_time_p50": 6.810949184000492,
-          "step_time_p99": 9.609586726874113
+          "step_time_p50": 6.117451936006546,
+          "step_time_p99": 8.109848406165838
         }
       },
       "deltas": {},
@@ -138,8 +138,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_fsdp/EXAMPLE-TRAINING-FSDP/training/2026-09-07T11-14-49/matrix.json",
-      "duration_sec": 22.696681,
+      "matrix_path": ".nightly-eval/training_fsdp/EXAMPLE-TRAINING-FSDP/training/2026-09-07T12-48-36/matrix.json",
+      "duration_sec": 22.64618,
       "error": null
     },
     {
@@ -149,11 +149,11 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1508.5563659667969,
-        "mean_wall_clock_sec": 13.013415588065982,
+        "mean_step_time_ms": 1545.6221103668213,
+        "mean_wall_clock_sec": 12.989618870429695,
         "step_time_source": "elapsed_per_iter",
         "summary": {
-          "avg_step_time_ms": 1508.5563659667969,
+          "avg_step_time_ms": 1545.6221103668213,
           "layers_verified": 15.0,
           "layer_checksum_mismatches": 0.0,
           "eff_num_heads": 4.0,
@@ -174,8 +174,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/race/RACE-SMOKE/race/2026-09-07T11-15-12/matrix.json",
-      "duration_sec": 22.995551,
+      "matrix_path": ".nightly-eval/race/RACE-SMOKE/race/2026-09-07T12-48-59/matrix.json",
+      "duration_sec": 22.643909,
       "error": null
     },
     {
@@ -185,8 +185,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 7633.223825134337,
-        "mean_wall_clock_sec": 17.16455256845802,
+        "mean_step_time_ms": 7757.66477547586,
+        "mean_wall_clock_sec": 17.56995164975524,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -202,8 +202,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T11-15-35/matrix.json",
-      "duration_sec": 78.823499,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T12-49-22/matrix.json",
+      "duration_sec": 80.324746,
       "error": null
     },
     {
@@ -213,8 +213,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 7502.739558927715,
-        "mean_wall_clock_sec": 15.558827917091548,
+        "mean_step_time_ms": 7844.59799900651,
+        "mean_wall_clock_sec": 15.649446780793369,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -230,8 +230,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T11-15-35/matrix.json",
-      "duration_sec": 78.823499,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T12-49-22/matrix.json",
+      "duration_sec": 80.324746,
       "error": null
     },
     {
@@ -241,8 +241,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 7478.257625363767,
-        "mean_wall_clock_sec": 17.052484485320747,
+        "mean_step_time_ms": 7999.31913241744,
+        "mean_wall_clock_sec": 17.83814888354391,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -258,8 +258,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T11-15-35/matrix.json",
-      "duration_sec": 78.823499,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T12-49-22/matrix.json",
+      "duration_sec": 80.324746,
       "error": null
     },
     {
@@ -269,8 +269,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 7994.585487060249,
-        "mean_wall_clock_sec": 19.218849684111774,
+        "mean_step_time_ms": 8204.101249575615,
+        "mean_wall_clock_sec": 19.238697244785726,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -286,8 +286,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T11-15-35/matrix.json",
-      "duration_sec": 78.823499,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-07T12-49-22/matrix.json",
+      "duration_sec": 80.324746,
       "error": null
     },
     {
@@ -297,16 +297,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1336.8452263530344,
-        "mean_wall_clock_sec": 12.528743266128004,
+        "mean_step_time_ms": 1341.2948665209115,
+        "mean_wall_clock_sec": 13.008129136636853,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 8.0,
           "parameter_count": 656896.0,
           "final_loss": 6.936975479125977,
-          "step_time_p50": 1.4119213446974754,
-          "step_time_p99": 2.869680505245924
+          "step_time_p50": 1.2554535642266273,
+          "step_time_p99": 28.068636618554592
         }
       },
       "deltas": {},
@@ -314,8 +314,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_ddp_8gpu/EXAMPLE-TRAINING-DDP/training/2026-09-07T11-16-54/matrix.json",
-      "duration_sec": 27.551331,
+      "matrix_path": ".nightly-eval/training_ddp_8gpu/EXAMPLE-TRAINING-DDP/training/2026-09-07T12-50-42/matrix.json",
+      "duration_sec": 27.453152,
       "error": null
     },
     {
@@ -325,16 +325,16 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1358.9334110729396,
-        "mean_wall_clock_sec": 12.984997812658548,
+        "mean_step_time_ms": 1355.4905629716814,
+        "mean_wall_clock_sec": 12.794411721639335,
         "step_time_source": "per_step",
         "summary": {
           "rank": 0.0,
           "world_size": 8.0,
           "parameter_count": 2361856.0,
           "final_loss": 254.3743896484375,
-          "step_time_p50": 5.852070637047291,
-          "step_time_p99": 63.27667551115155
+          "step_time_p50": 5.672031082212925,
+          "step_time_p99": 15.283760819584131
         }
       },
       "deltas": {},
@@ -342,8 +342,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/training_fsdp_8gpu/EXAMPLE-TRAINING-FSDP/training/2026-09-07T11-17-22/matrix.json",
-      "duration_sec": 27.604331,
+      "matrix_path": ".nightly-eval/training_fsdp_8gpu/EXAMPLE-TRAINING-FSDP/training/2026-09-07T12-51-10/matrix.json",
+      "duration_sec": 27.904844,
       "error": null
     },
     {
@@ -353,11 +353,11 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 1843.0723190307617,
-        "mean_wall_clock_sec": 17.945392372086644,
+        "mean_step_time_ms": 1735.275411605835,
+        "mean_wall_clock_sec": 17.760247363708913,
         "step_time_source": "elapsed_per_iter",
         "summary": {
-          "avg_step_time_ms": 1843.0723190307617,
+          "avg_step_time_ms": 1735.275411605835,
           "layers_verified": 15.0,
           "layer_checksum_mismatches": 0.0,
           "eff_num_heads": 4.0,
@@ -378,8 +378,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/race_8gpu/RACE-SMOKE/race/2026-09-07T11-17-49/matrix.json",
-      "duration_sec": 27.752186,
+      "matrix_path": ".nightly-eval/race_8gpu/RACE-SMOKE/race/2026-09-07T12-51-37/matrix.json",
+      "duration_sec": 27.952519,
       "error": null
     },
     {
@@ -389,8 +389,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8925.676642917097,
-        "mean_wall_clock_sec": 22.078035694546998,
+        "mean_step_time_ms": 8763.517430983484,
+        "mean_wall_clock_sec": 21.83303417917341,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -406,8 +406,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T11-18-17/matrix.json",
-      "duration_sec": 98.755125,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T12-52-05/matrix.json",
+      "duration_sec": 98.603465,
       "error": null
     },
     {
@@ -417,8 +417,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8570.197618566453,
-        "mean_wall_clock_sec": 20.134569078683853,
+        "mean_step_time_ms": 8596.219229511917,
+        "mean_wall_clock_sec": 20.032046787440777,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -434,8 +434,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T11-18-17/matrix.json",
-      "duration_sec": 98.755125,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T12-52-05/matrix.json",
+      "duration_sec": 98.603465,
       "error": null
     },
     {
@@ -445,8 +445,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 8800.511062145233,
-        "mean_wall_clock_sec": 22.04585743509233,
+        "mean_step_time_ms": 8704.807007685304,
+        "mean_wall_clock_sec": 21.822793493047357,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -462,8 +462,8 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T11-18-17/matrix.json",
-      "duration_sec": 98.755125,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T12-52-05/matrix.json",
+      "duration_sec": 98.603465,
       "error": null
     },
     {
@@ -473,8 +473,8 @@
       "verdict": "pass",
       "reasons": [],
       "metrics": {
-        "mean_step_time_ms": 9086.045951582491,
-        "mean_wall_clock_sec": 24.04234038013965,
+        "mean_step_time_ms": 9747.324050404131,
+        "mean_wall_clock_sec": 24.552614335902035,
         "step_time_source": "elapsed_per_iter",
         "summary": {
           "rank": 0.0,
@@ -490,8 +490,144 @@
       "failed_count": 0,
       "error_count": 0,
       "trials": 1,
-      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T11-18-17/matrix.json",
-      "duration_sec": 98.755125,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-07T12-52-05/matrix.json",
+      "duration_sec": 98.603465,
+      "error": null
+    },
+    {
+      "entry": "tokenspeed_serve_smoke",
+      "recipe": "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml",
+      "cell": "baseline",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 1125.0132235387962,
+        "mean_wall_clock_sec": 647.073237487115,
+        "step_time_source": "per_step",
+        "summary": {
+          "num_prompts": 32.0,
+          "input_len": 512.0,
+          "output_len": 128.0,
+          "max_concurrency": 8.0,
+          "num_warmups": 1.0,
+          "bench_steps": 3.0,
+          "warmup_steps": 2.0,
+          "server_startup_sec": 355.0,
+          "duration": 1.1250132235387962,
+          "total_input_tokens": 16384.0,
+          "total_output_tokens": 4096.0,
+          "request_throughput": 28.444175349141698,
+          "output_throughput": 3640.8544446901374,
+          "total_token_throughput": 18204.272223450684,
+          "max_output_tokens_per_s": 3598.0,
+          "max_concurrent_requests": 32.0,
+          "mean_ttft_ms": 45.45756373166417,
+          "median_ttft_ms": 45.27563756952683,
+          "std_ttft_ms": 39.67774297323296,
+          "p50_ttft_ms": 45.27563756952683,
+          "p90_ttft_ms": 49.63722319031755,
+          "p99_ttft_ms": 190.75253249766953,
+          "mean_tpot_ms": 1.802236981765707,
+          "median_tpot_ms": 1.8962065266381725,
+          "std_tpot_ms": 0.3393214897545353,
+          "p50_tpot_ms": 1.8962065266381725,
+          "p90_tpot_ms": 1.9402847869756812,
+          "p99_tpot_ms": 1.9611971045348042,
+          "mean_itl_ms": 1.8458401981299313,
+          "median_itl_ms": 0.0017862766981124878,
+          "std_itl_ms": 6.5395534825961485,
+          "p50_itl_ms": 0.0017862766981124878,
+          "p90_itl_ms": 1.8923814718921979,
+          "p99_itl_ms": 34.29696350979305,
+          "mean_e2el_ms": 274.34166041590896,
+          "median_e2el_ms": 285.5932085464398,
+          "std_e2el_ms": 18.52852448286681,
+          "p50_e2el_ms": 285.5932085464398,
+          "p90_e2el_ms": 292.25758782898384,
+          "p99_e2el_ms": 295.3499731017898,
+          "completed_total": 96.0,
+          "failed_total": 0.0,
+          "tokens_per_sec": 3640.8544446901374,
+          "container_elapsed_sec": 643.7651888411492
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/tokenspeed_serve_smoke/TOKENSPEED-SERVE-SMOKE/tokenspeed_serve/2026-09-07T12-53-43/matrix.json",
+      "duration_sec": 912.078761,
+      "error": null
+    },
+    {
+      "entry": "tokenspeed_serve_smoke",
+      "recipe": "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml",
+      "cell": "no-scratch-reclaim",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 1139.7079856445391,
+        "mean_wall_clock_sec": 256.89868020638824,
+        "step_time_source": "per_step",
+        "summary": {
+          "num_prompts": 32.0,
+          "input_len": 512.0,
+          "output_len": 128.0,
+          "max_concurrency": 8.0,
+          "num_warmups": 1.0,
+          "bench_steps": 3.0,
+          "warmup_steps": 2.0,
+          "server_startup_sec": 187.0,
+          "duration": 1.1397079856445391,
+          "total_input_tokens": 16384.0,
+          "total_output_tokens": 4096.0,
+          "request_throughput": 28.085350915116837,
+          "output_throughput": 3594.924917134955,
+          "total_token_throughput": 17974.62458567478,
+          "max_output_tokens_per_s": 3554.6666666666665,
+          "max_concurrent_requests": 32.0,
+          "mean_ttft_ms": 46.04994322289713,
+          "median_ttft_ms": 46.6030763151745,
+          "std_ttft_ms": 40.720385017468125,
+          "p50_ttft_ms": 46.6030763151745,
+          "p90_ttft_ms": 50.877585945030056,
+          "p99_ttft_ms": 194.38779524527516,
+          "mean_tpot_ms": 1.8131884461631778,
+          "median_tpot_ms": 1.9104113249875743,
+          "std_tpot_ms": 0.34435549325993686,
+          "p50_tpot_ms": 1.9104113249875743,
+          "p90_tpot_ms": 1.986475030737599,
+          "p99_tpot_ms": 2.010331005298012,
+          "mean_itl_ms": 1.8586049348997633,
+          "median_itl_ms": 0.0017465402682622273,
+          "std_itl_ms": 6.326728056505239,
+          "p50_itl_ms": 0.0017465402682622273,
+          "p90_itl_ms": 1.9574780638019245,
+          "p99_itl_ms": 35.79513882286849,
+          "mean_e2el_ms": 276.3248758856207,
+          "median_e2el_ms": 279.20975799982745,
+          "std_e2el_ms": 18.52664058998525,
+          "p50_e2el_ms": 279.20975799982745,
+          "p90_e2el_ms": 298.4927464276552,
+          "p99_e2el_ms": 301.5764143348982,
+          "completed_total": 96.0,
+          "failed_total": 0.0,
+          "tokens_per_sec": 3594.924917134955,
+          "container_elapsed_sec": 253.5125820832327
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/tokenspeed_serve_smoke/TOKENSPEED-SERVE-SMOKE/tokenspeed_serve/2026-09-07T12-53-43/matrix.json",
+      "duration_sec": 912.078761,
       "error": null
     }
   ]
