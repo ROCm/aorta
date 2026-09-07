@@ -84,6 +84,15 @@ already anticipates being invoked by a cluster agent — which is what CIA is.
 
 ## 0. Parked: where this stands and how to resume
 
+**The decisions Manoj asked for are now in
+[rl-post-training-decisions.md](rl-post-training-decisions.md)**: trainer
+(slime), base model (Qwen3-8B, not GLM-5.3-Flash, with the arithmetic), topology
+and the asks that block. Two of its findings contradict what follows here and
+should be read before acting on this section — upstream deleted the
+`weight_transfer` package that [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373)
+is filed against, and the missing `ipc` backend is not what blocks a colocated
+single-node topology.
+
 **This workstream is parked.** Attention moved to nightly gating. Nothing here
 is half-finished in a way that rots — the scorers and the corpus builder are
 committed, tested and self-contained — but the next step is blocked on a
