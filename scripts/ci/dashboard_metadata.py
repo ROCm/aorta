@@ -354,12 +354,24 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 ),
                 setup_extra=[
                     {
+                        "title": "Serving-specific: pull the pinned engine image",
+                        "commands": [
+                            "docker pull lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78",
+                        ],
+                    },
+                    {
                         "title": "Serving-specific: pre-warm the model cache as the running uid",
                         "commands": [
-                            "export HF_HOME=/tmp/ts-work-serve/u$(id -u)/hf",
-                            "# run_as_current_user defaults to true: a cache populated by a",
-                            "# root container leaves the trial failing with PermissionError",
-                            "docker pull lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78",
+                            "# The path is load-bearing. The workload derives its cache from",
+                            "# workload_config.hf_home, falling back to <work_dir>/u<uid>/hf --",
+                            "# it does not read an inherited HF_HOME, so a download into any",
+                            "# other directory populates a cache the run never mounts and the",
+                            "# first cell downloads the weights again regardless.",
+                            "# run_as_current_user defaults to true, so download as the uid",
+                            "# that will run the sweep: a cache populated by a root container",
+                            "# leaves the trial failing with PermissionError.",
+                            "mkdir -p /tmp/ts-work-serve/u$(id -u)/hf",
+                            "HF_HOME=/tmp/ts-work-serve/u$(id -u)/hf hf download Qwen/Qwen3-0.6B",
                         ],
                     },
                 ],
