@@ -524,6 +524,35 @@ def test_known_vacuous_conflicts_with_a_declaration(tmp_path, monkeypatch, capsy
     assert "Pick one" in capsys.readouterr().err
 
 
+def test_known_vacuous_also_applies_to_the_gate_mode(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # --vacuous-only picks which halves run; it does not change what the sweep
+    # means. So a suppression the caller declared has to be honoured with or
+    # without it -- the list used to be parsed, conflict-checked, and then
+    # dropped here, which failed the row as an ordinary vacuous report.
+    _write_all_matching(tmp_path)
+    _write_case(tmp_path, "informational/consan-gemm", _errored("consan", "growth_limit"))
+    assert comparator.main(["prog", str(tmp_path)]) == 1
+    assert "expected_error" in capsys.readouterr().out
+    argv = ["prog", "--known-vacuous", "informational/consan-gemm", str(tmp_path)]
+    assert comparator.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "KNOWN VACUOUS, not failing" in out
+    assert "expected_error" not in out
+
+
+def test_known_vacuous_conflict_is_caught_in_the_gate_mode_too(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(_REPO_ROOT)
+    # The conflict check sits ahead of the mode branch, so forwarding the list
+    # must not open a path on which a contradictory row is accepted.
+    _write_all_matching(tmp_path)
+    argv = ["prog", "--known-vacuous", "informational/consan-tiny", str(tmp_path)]
+    assert comparator.main(argv) == 2
+    assert "Pick one" in capsys.readouterr().err
+
+
 def test_comparator_rejects_bad_usage(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     assert comparator.main(["prog"]) == 2

@@ -73,7 +73,11 @@ Usage::
 
 ``--vacuous-only`` is for result trees that do not contain the gated cases at
 all -- notably the non-gating survey job, which runs in its own job with its own
-output root and is where the two #450 recipes actually live.
+output root and is where the two #450 recipes actually live. It selects which
+*halves* run, nothing more: ``--require`` and ``--known-vacuous`` both describe
+the sweep, so they mean the same thing with or without it. An option that is
+accepted and then quietly ignored on one path is the very shape this script
+exists to catch.
 """
 
 from __future__ import annotations
@@ -504,7 +508,7 @@ def main(argv: list[str]) -> int:
         else:
             print(f"{name}: ok ({report.overall_verdict.value})")
 
-    if _sweep_vacuous(root, baselines, required):
+    if _sweep_vacuous(root, baselines, required, known_vacuous):
         failed = True
     return 1 if failed else 0
 
