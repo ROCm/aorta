@@ -194,8 +194,12 @@ controls stay hidden unless it runs.
   Out-of-scope entries have their correctness data refreshed and their existing
   performance bounds **carried over untouched**, so per-workload rollout is
   additive -- blessing one workload cannot disarm another. The same holds in the
-  default mode: omitting `--perf-gate` does not disarm anything either. Only an
-  *unscoped* `--perf-gate` re-derives every cell.
+  default mode: omitting `--perf-gate` does not disarm anything either. An
+  *unscoped* `--perf-gate` re-derives every cell it can, but even that never
+  deletes a bound it cannot reproduce: a hand-written spec on a `_NO_AUTO_GATE`
+  metric (`median_itl_ms`) or on a metric off the allowlist survives a re-bless
+  of its own cell, because `--perf-gate` has nothing to put back in its place.
+  A refresh may decline to arm a gate; it never disarms one.
   Both are dispatch inputs on `refresh-baselines.yml` (`perf_gate` and
   `perf_gate_entry`, the latter taking a comma- or space-separated list), so a
   scoped refresh is runnable from the Actions UI without editing the workflow.

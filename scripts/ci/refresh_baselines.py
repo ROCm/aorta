@@ -30,6 +30,36 @@ def _existing_for(existing_baselines: dict[str, Any], name: str) -> dict[str, An
     return {k: v for k, v in existing_baselines.items() if k.split("::", 1)[0] == name}
 
 
+def _carry_metric_bounds(
+    existing_spec: dict[str, Any],
+    metric_specs: dict[str, Any],
+    *,
+    only_underivable: bool,
+) -> list[str]:
+    """Copy forward the bounds this run is not going to re-derive.
+
+    The baseline file is rewritten WHOLE, so a bound not written back here is
+    deleted. Correctness (`equal`-policy) metrics are the one deliberate
+    exclusion: re-deriving those from the current run is the point of a refresh.
+
+    `only_underivable` narrows the carry to the metrics `--perf-gate` *cannot*
+    produce -- `_NO_AUTO_GATE` entries such as `median_itl_ms`, and anything not
+    on the allowlist at all. Those are hand-written by definition, so the
+    refresher has nothing to put back in their place, and a re-bless of this
+    very cell would otherwise silently drop them.
+    """
+    carried = []
+    for mname, mspec in (existing_spec.get("metrics") or {}).items():
+        if only_underivable and eval_lib.is_auto_gateable(mname):
+            continue
+        effective = (mspec or {}).get("policy") or eval_lib.metric_policy(mname)
+        if effective == "equal":
+            continue
+        metric_specs[mname] = copy.deepcopy(mspec)
+        carried.append(mname)
+    return carried
+
+
 def build_baselines(
     matrix_doc: dict[str, Any],
     out_dir: Path,
@@ -46,6 +76,7 @@ def build_baselines(
     preserved: list[str] = []
     dropped: list[str] = []
     carried_gates: list[str] = []
+    handwritten_gates: list[str] = []
 
     for entry in matrix_doc.get("entries") or []:
         name = entry["name"]
@@ -163,15 +194,12 @@ def build_baselines(
             # of refreshing them. Everything else -- min/max bounds, hand-written
             # specs, an unrecognised policy someone added by hand -- is left
             # exactly as it was found.
+            existing_spec = existing_baselines.get(key) or {}
+
             if not derive_perf:
-                existing_spec = existing_baselines.get(key) or {}
                 if "step_time_ms" in existing_spec:
                     spec["step_time_ms"] = copy.deepcopy(existing_spec["step_time_ms"])
-                for mname, mspec in (existing_spec.get("metrics") or {}).items():
-                    effective = (mspec or {}).get("policy") or eval_lib.metric_policy(mname)
-                    if effective == "equal":
-                        continue
-                    metric_specs[mname] = copy.deepcopy(mspec)
+                _carry_metric_bounds(existing_spec, metric_specs, only_underivable=False)
                 if "step_time_ms" in spec or metric_specs:
                     carried_gates.append(
                         f"{key} ({len(metric_specs)} metric bound(s)"
@@ -187,9 +215,27 @@ def build_baselines(
                     metric_specs[mname] = {"policy": "equal", "value": value}
 
             if derive_perf:
+                # Deriving is not the same as re-deriving EVERYTHING. A bound
+                # this run cannot produce still has to survive a re-bless of the
+                # very cell it belongs to, or --perf-gate quietly deletes it:
+                # `_NO_AUTO_GATE` metrics (`median_itl_ms`) and anything off the
+                # allowlist are hand-written, so there is nothing to put back.
+                # Same principle as the out-of-scope carry-over above -- a
+                # refresh may decline to arm a gate, never disarm one.
+                kept = _carry_metric_bounds(existing_spec, metric_specs, only_underivable=True)
+                if kept:
+                    handwritten_gates.append(f"{key} ({', '.join(sorted(kept))})")
+
                 st = metrics.get("mean_step_time_ms")
                 if st is not None:
                     spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
+                elif "step_time_ms" in existing_spec:
+                    # The cell reported no mean_step_time_ms, so there is no new
+                    # ceiling to write. Dropping the old one would disarm it on
+                    # a run that never measured it; `compare_to_baseline` treats
+                    # a missing observation against a live ceiling as a failure,
+                    # which is the loud outcome rather than the silent one.
+                    spec["step_time_ms"] = copy.deepcopy(existing_spec["step_time_ms"])
                 for mname, value in summary.items():
                     if value is None or not eval_lib.is_auto_gateable(mname):
                         continue
@@ -222,6 +268,9 @@ def build_baselines(
         print(f"[refresh] carried over baseline(s): {note}", flush=True)
     for note in carried_gates:
         print(f"[refresh] kept existing performance bounds (out of perf-gate scope): {note}",
+              flush=True)
+    for note in handwritten_gates:
+        print(f"[refresh] kept hand-written bound(s) --perf-gate cannot re-derive: {note}",
               flush=True)
     for note in dropped:
         print(f"[refresh] WARNING still unblessed (runner cannot exercise it, no prior "

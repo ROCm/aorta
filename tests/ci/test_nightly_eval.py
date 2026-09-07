@@ -446,6 +446,114 @@ def test_an_in_scope_entry_has_its_stale_bounds_replaced(tmp_path, monkeypatch):
     assert spec["metrics"]["median_tpot_ms"] == {"policy": "max", "value": 2.425}
 
 
+def test_a_re_bless_keeps_a_hand_written_no_auto_gate_bound(tmp_path, monkeypatch):
+    """Deriving is not re-deriving *everything*.
+
+    `median_itl_ms` is on the gating allowlist but in `_NO_AUTO_GATE`: gateable
+    when a baseline names it by hand, never armed by `--perf-gate`, because it
+    is measured at ~0 and a relative margin around zero is not a bound. So the
+    refresher has nothing to put back in its place -- and carrying bounds over
+    only when the run is NOT deriving meant a scoped re-bless of this very entry
+    silently deleted it. A refresh may decline to arm a gate; it must never
+    disarm one.
+    """
+    matrix_doc = {"entries": [{"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    existing = {"tokenspeed_serve_smoke::baseline": {
+        "passed": True,
+        "metrics": {
+            "median_itl_ms": {"policy": "max", "value": 5.0},
+            "median_tpot_ms": {"policy": "max", "value": 0.001},
+        },
+    }}
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, True, existing_baselines=existing,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    metrics = doc["baselines"]["tokenspeed_serve_smoke::baseline"]["metrics"]
+    assert metrics["median_itl_ms"] == {"policy": "max", "value": 5.0}, (
+        "the hand-written median_itl_ms ceiling was dropped by a re-bless of its own entry"
+    )
+    # The observation is 0.0, so had it been auto-armed the ceiling would be 0.0
+    # -- a gate that cannot pass. That is the whole reason it is _NO_AUTO_GATE.
+    assert metrics["median_itl_ms"]["value"] != 0.0
+    # And the auto-gateable neighbour is still re-derived rather than carried.
+    assert metrics["median_tpot_ms"] == {"policy": "max", "value": 2.425}
+
+
+def test_a_re_bless_keeps_a_bound_on_a_metric_off_the_allowlist(tmp_path, monkeypatch):
+    """Same argument, one step further out: a spec naming a metric the allowlist
+    does not know is hand-written by definition, so `--perf-gate` can never
+    reproduce it and must not delete it either."""
+    matrix_doc = {"entries": [{"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", _serving_matrix_runner())
+
+    existing = {"tokenspeed_serve_smoke::baseline": {
+        "passed": True, "metrics": {"kv_cache_hit_rate": {"policy": "min", "value": 0.9}},
+    }}
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, True, existing_baselines=existing,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    metrics = doc["baselines"]["tokenspeed_serve_smoke::baseline"]["metrics"]
+    assert metrics["kv_cache_hit_rate"] == {"policy": "min", "value": 0.9}
+
+
+def test_a_re_bless_without_a_step_time_observation_keeps_the_old_ceiling(tmp_path, monkeypatch):
+    """`mean_step_time_ms` is read with `.get`, so a cell can report none.
+
+    With no observation there is no new ceiling to write, and dropping the old
+    one would disarm it on a run that never measured it. `compare_to_baseline`
+    treats a missing observation against a live ceiling as a failure, which is
+    the loud outcome rather than the silent one.
+    """
+    def run_without_step_time(entry, out_dir):
+        mpath = _write_matrix(out_dir / entry["name"] / "matrix.json",
+                              [{"name": "baseline", "error": None, "passed_count": 1,
+                                "failed_count": 0, "error_count": 0,
+                                "mean_step_time_ms": None,
+                                "metrics_summary": _SERVING_SUMMARY}])
+        return 0, mpath, False
+
+    matrix_doc = {"entries": [{"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", run_without_step_time)
+
+    existing = {"tokenspeed_serve_smoke::baseline": {
+        "passed": True, "step_time_ms": {"max": 1462.0},
+    }}
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, True, existing_baselines=existing,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    assert doc["baselines"]["tokenspeed_serve_smoke::baseline"]["step_time_ms"] == {"max": 1462.0}
+
+
+def test_a_re_bless_does_not_resurrect_a_correctness_metric(tmp_path, monkeypatch):
+    """The carry-over's one deliberate exclusion, re-pinned on the derive path.
+
+    Correctness metrics are re-derived from this run -- that is the point of a
+    refresh -- so a stale checksum must not survive alongside the fresh one."""
+    matrix_doc = {"entries": [{"name": "tokenspeed_serve_smoke", "recipe": "ts.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(
+        refresh_baselines.nightly_eval, "run_entry",
+        _serving_matrix_runner({**_SERVING_SUMMARY, "logits_checksum": {"mean": "fresh"}}))
+
+    existing = {"tokenspeed_serve_smoke::baseline": {
+        "passed": True, "metrics": {"logits_checksum": {"policy": "equal", "value": "stale"}},
+    }}
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, True, existing_baselines=existing,
+        perf_gate_entries={"tokenspeed_serve_smoke"})
+
+    metrics = doc["baselines"]["tokenspeed_serve_smoke::baseline"]["metrics"]
+    assert metrics["logits_checksum"] == {"policy": "equal", "value": "fresh"}
+
+
 def test_a_hand_written_bound_without_a_policy_is_also_carried(tmp_path, monkeypatch):
     """`compare_to_baseline` falls back to the allowlist when a spec names no
     policy, so such a spec is a live gate and must survive a refresh too."""

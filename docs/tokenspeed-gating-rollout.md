@@ -1149,8 +1149,17 @@ run that is not deriving bounds for a cell carries that cell's existing bounds
 over untouched — so a hand-reverted cell stays reverted through a scoped refresh
 of another entry and through a default correctness-only refresh. The one thing
 that re-arms it is an **unscoped** `--perf-gate` refresh, which re-derives every
-cell by definition. Scope those runs with `--perf-gate-entry`, or check the diff
-for cells you had deliberately demoted.
+cell it can. Scope those runs with `--perf-gate-entry`, or check the diff for
+cells you had deliberately demoted.
+
+"Every cell it can" is the precise claim, and the exception matters for this
+rollout specifically: a bound `--perf-gate` cannot *produce* is never deleted by
+it either, because there would be nothing to put back. That covers a hand-written
+`median_itl_ms` ceiling — the metric is allowlisted but `_NO_AUTO_GATE`, so the
+refresher skips it — and any spec naming a metric off the allowlist entirely.
+Both survive a re-bless of their own cell. So if the window later justifies
+gating `median_itl_ms` by hand, a subsequent refresh of this same entry will not
+quietly undo it.
 
 ## Assumptions
 
