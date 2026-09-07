@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
 import re
 import subprocess
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1033,6 +1036,47 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert any("layer_checksum_mismatches" in c for c in race8)
 
 
+def test_the_serving_prewarm_step_populates_the_cache_the_workload_resolves():
+    """A step titled "pre-warm the model cache" has to actually do it.
+
+    `tokenspeed_serve` derives its cache from `workload_config.hf_home`, falling
+    back to `<work_dir>/u<uid>/hf`; it never reads an inherited `HF_HOME`. So an
+    `export HF_HOME=...` plus `docker pull` warms the *image* cache and nothing
+    else, and an operator following the guide still pays the model download
+    while believing it was preloaded -- and an offline reproduction still fails.
+    The path here must agree with the recipe's `work_dir`, which is what makes
+    the command effective rather than plausible.
+    """
+    import yaml
+
+    meta = gen_dashboard.load_dashboard_metadata()
+    repro = (meta["workloads"] or {})["tokenspeed_serve_smoke"]["repro"]
+    steps = {step["title"]: step["commands"] for step in repro["setup"]}
+
+    prewarm = [cmds for title, cmds in steps.items() if "pre-warm the model cache" in title]
+    assert prewarm, f"no model-cache pre-warm step: {sorted(steps)}"
+    commands = [c for c in prewarm[0] if not c.lstrip().startswith("#")]
+
+    recipe = yaml.safe_load(
+        (_REPO_ROOT / "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml").read_text("utf-8")
+    )
+    config = recipe["workload_config"]
+    # If the recipe ever sets hf_home, that becomes the resolved path and this
+    # command has to follow it there.
+    assert "hf_home" not in config, "hf_home is now set in the recipe; update the pre-warm path"
+    resolved = f"{config['work_dir']}/u$(id -u)/hf"
+
+    assert any(f"HF_HOME={resolved} hf download {config['model']}" in c for c in commands), (
+        f"the pre-warm does not download {config['model']} into {resolved}: {commands}"
+    )
+    # And the image pull is its own step, so neither title claims the other's work.
+    assert any("docker pull" in c for cmds in steps.values() for c in cmds)
+    assert not any("docker pull" in c for c in commands), (
+        "the image pull is inside the model-cache step, which is how the "
+        "original claim came to be wrong"
+    )
+
+
 def test_determinism_verify_reads_repo_relative_failed_trial(tmp_path):
     run_dir = (
         tmp_path
@@ -1974,13 +2018,36 @@ def test_the_daemon_socket_is_opt_in_rather_than_always_mounted():
         )
 
 
-def _socket_enabling_lanes():
+def _socket_is_statically_off(value: object) -> bool:
+    """Is this socket value provably off by reading the file?
+
+    Exactly two things are: the input not being passed at all (both the action
+    and the reusable workflow default to `false`), and an explicit literal
+    false. Everything else -- `${{ true }}`, `${{ inputs.something }}`,
+    `${{ github.event_name != 'pull_request' }}`, `1`, `yes`, `on` -- is a value
+    whose runtime truth cannot be decided here, and GitHub's truthiness rules
+    are not this file's to reimplement.
+
+    So the guard is fail-closed on the value rather than matching the literal
+    string `true`. Matching `true` was the hole: a PR-triggered caller written
+    as `docker_socket: ${{ true }}` gets the socket at runtime and would have
+    been absent from `enabled`, leaving an invariant test that passes over
+    precisely the case it exists to prevent. A guard with a hole in it is worse
+    than no guard, because it is also a claim.
+    """
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text == "" or text.lower() == "false"
+
+
+def _socket_lanes_from(docs: dict[str, dict]) -> tuple[list[str], dict[str, str]]:
     """Every route by which a job can end up with the host docker socket.
 
     There are two, and a tripwire that knows only the first is blind to the one
     the nightly actually uses:
 
-    1. a job that calls `rocm-ci-setup` directly and passes `docker-socket: true`;
+    1. a job that calls `rocm-ci-setup` directly and passes `docker-socket`;
     2. a job that calls a reusable workflow which forwards its own input to that
        action -- `eval-reusable.yml`'s `docker_socket`.
 
@@ -1988,32 +2055,72 @@ def _socket_enabling_lanes():
     workflow's `uses:` string to the input name it forwards. The forwarding map
     is discovered rather than hardcoded, so a second reusable wrapper is covered
     the day it is added.
-    """
-    workflows = sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml"))
 
+    Takes the parsed workflows as an argument rather than reading them, so the
+    mutation tests below can run this exact logic against a mutated tree.
+    """
     forwarding: dict[str, str] = {}
-    for path in workflows:
-        for job in (_load_workflow(path.name).get("jobs") or {}).values():
+    for name, doc in docs.items():
+        for job in (doc.get("jobs") or {}).values():
             for step in job.get("steps") or []:
                 if "rocm-ci-setup" not in (step.get("uses") or ""):
                     continue
                 value = str((step.get("with") or {}).get("docker-socket", ""))
                 match = re.search(r"\binputs\.([A-Za-z_][A-Za-z0-9_-]*)", value)
                 if match:
-                    forwarding[f"./.github/workflows/{path.name}"] = match.group(1)
+                    forwarding[f"./.github/workflows/{name}"] = match.group(1)
 
     enabled = []
-    for path in workflows:
-        for name, job in (_load_workflow(path.name).get("jobs") or {}).items():
+    for name, doc in docs.items():
+        forwards = forwarding.get(f"./.github/workflows/{name}")
+        for job_name, job in (doc.get("jobs") or {}).items():
             for step in job.get("steps") or []:
                 if "rocm-ci-setup" not in (step.get("uses") or ""):
                     continue
-                if str((step.get("with") or {}).get("docker-socket", "")).lower() == "true":
-                    enabled.append(f"{path.name}:{name}")
+                value = (step.get("with") or {}).get("docker-socket")
+                # Forwarding is not enabling: this step hands the choice to the
+                # caller, and the caller's own value is judged below. Matched
+                # against the input this workflow was *discovered* to forward,
+                # so `${{ inputs.docker_socket || true }}` or an expression over
+                # anything else does not get waved through as plumbing.
+                if forwards and str(value).strip() == f"${{{{ inputs.{forwards} }}}}":
+                    continue
+                if not _socket_is_statically_off(value):
+                    enabled.append(f"{name}:{job_name}")
             forwarded = forwarding.get(job.get("uses") or "")
-            if forwarded and str((job.get("with") or {}).get(forwarded, "")).lower() == "true":
-                enabled.append(f"{path.name}:{name}")
+            if forwarded and not _socket_is_statically_off((job.get("with") or {}).get(forwarded)):
+                enabled.append(f"{name}:{job_name}")
     return sorted(enabled), forwarding
+
+
+def _all_workflow_docs() -> dict[str, dict]:
+    return {
+        path.name: _load_workflow(path.name)
+        for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+    }
+
+
+def _socket_enabling_lanes():
+    return _socket_lanes_from(_all_workflow_docs())
+
+
+def _pr_triggered_from(docs: dict[str, dict]) -> set[str]:
+    """Workflow filenames reachable from a pull request.
+
+    Derived from each workflow's `on:` block rather than a filename list, so a
+    PR-triggered lane added later is covered without editing a test.
+    """
+    pr_triggered = set()
+    for name, doc in docs.items():
+        # PyYAML parses the `on:` key as the boolean True.
+        triggers = doc.get(True) or {}
+        if isinstance(triggers, str):
+            triggers = {triggers: None}
+        if isinstance(triggers, list):
+            triggers = dict.fromkeys(triggers)
+        if {"pull_request", "pull_request_target"} & set(triggers):
+            pr_triggered.add(name)
+    return pr_triggered
 
 
 def test_only_the_nightly_lane_gets_the_daemon_socket():
@@ -2059,29 +2166,117 @@ def test_no_pr_triggered_lane_can_reach_the_host_docker_daemon():
     Derived from each workflow's `on:` block rather than a filename list, so a
     PR-triggered lane added later is covered without editing this test.
     """
-    enabled, _ = _socket_enabling_lanes()
-
-    pr_triggered = set()
-    for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
-        # PyYAML parses the `on:` key as the boolean True.
-        triggers = _load_workflow(path.name).get(True) or {}
-        if isinstance(triggers, str):
-            triggers = {triggers: None}
-        if isinstance(triggers, list):
-            triggers = dict.fromkeys(triggers)
-        if {"pull_request", "pull_request_target"} & set(triggers):
-            pr_triggered.add(path.name)
+    docs = _all_workflow_docs()
+    enabled, forwarding = _socket_lanes_from(docs)
+    pr_triggered = _pr_triggered_from(docs)
 
     assert "bump-validate.yml" in pr_triggered, (
         "bump-validate.yml is no longer PR-triggered; this guard was written "
         "around it and needs rechecking"
     )
-    offenders = sorted(e for e in enabled if e.split(":")[0] in pr_triggered)
+    offenders = _pr_socket_offenders(docs)
     assert offenders == [], (
         f"PR-triggered lanes with the host docker socket: {offenders}. These run "
         "pull-request code on the self-hosted runner, so this is remote root for "
         "anyone who can open a PR."
     )
+    assert not (set(enabled) & pr_triggered), enabled
+    assert forwarding, "the forwarding route is no longer discoverable"
+
+    # And a PR-triggered caller must PIN it rather than inherit the default:
+    # relying on the default means a later change to that default arms this lane
+    # silently, which is the whole reason bump-validate.yml says `false` out loud.
+    _assert_pr_lanes_pin_the_socket(docs)
+
+
+def _pr_socket_offenders(docs: dict[str, dict]) -> list[str]:
+    """PR-reachable lanes that are not provably socket-free. The single
+    computation both the guard and its mutation tests below run."""
+    enabled, _ = _socket_lanes_from(docs)
+    pr_triggered = _pr_triggered_from(docs)
+    return sorted(e for e in enabled if e.split(":")[0] in pr_triggered)
+
+
+def test_the_socket_guard_treats_anything_but_an_explicit_false_as_enabling():
+    """The classifier the guard above rests on, tabulated.
+
+    `${{ true }}` is the case that motivated this: it is truthy to GitHub, it is
+    not the string `true`, and a guard comparing against that string would call
+    the lane socket-free while the socket was mounted.
+    """
+    for value in (None, "", "  ", "false", "False", "FALSE", False):
+        assert _socket_is_statically_off(value), value
+    for value in (
+        "true", True, "True",
+        "${{ true }}", "${{ !false }}", "${{ inputs.docker_socket }}",
+        "${{ github.event_name != 'pull_request' }}",
+        "${{ vars.ENABLE_SOCKET }}", "${{ secrets.X != '' }}",
+        "1", "yes", "on", "${{ inputs.docker_socket || true }}",
+    ):
+        assert not _socket_is_statically_off(value), value
+
+
+def test_a_pr_lane_cannot_smuggle_the_socket_through_an_expression():
+    """Mutation test, over the real workflow tree with one value replaced.
+
+    Each of these arms the socket on `bump-validate.yml` -- a `pull_request`
+    lane on the same self-hosted runner -- at runtime, and each must be caught
+    by reading the file. Run against the same `_pr_socket_offenders` the guard
+    above uses, so it is that guard being mutation-tested and not a copy of it.
+    """
+    for mutant in (
+        True, "true", "${{ true }}", "${{ !false }}", "1", "yes",
+        "${{ github.event_name == 'pull_request' }}",
+        "${{ inputs.docker_socket }}",
+    ):
+        docs = copy.deepcopy(_all_workflow_docs())
+        job = docs["bump-validate.yml"]["jobs"]["validate"]
+        assert "docker_socket" in job["with"], "the mutation target moved"
+        job["with"]["docker_socket"] = mutant
+        assert _pr_socket_offenders(docs) == ["bump-validate.yml:validate"], (
+            f"docker_socket: {mutant!r} on a PR-triggered lane was not caught"
+        )
+
+    # And deleting the explicit `false` -- relying on the default -- is caught
+    # too, by the pinning half of the guard.
+    docs = copy.deepcopy(_all_workflow_docs())
+    del docs["bump-validate.yml"]["jobs"]["validate"]["with"]["docker_socket"]
+    assert _pr_socket_offenders(docs) == [], "an omitted input is off, by both defaults"
+    with pytest.raises(AssertionError, match="must pin it false explicitly"):
+        _assert_pr_lanes_pin_the_socket(docs)
+
+
+def _assert_pr_lanes_pin_the_socket(docs: dict[str, dict]) -> None:
+    _, forwarding = _socket_lanes_from(docs)
+    for name in sorted(_pr_triggered_from(docs)):
+        for job_name, job in (docs[name].get("jobs") or {}).items():
+            forwarded = forwarding.get(job.get("uses") or "")
+            if not forwarded:
+                continue
+            value = (job.get("with") or {}).get(forwarded)
+            assert value is not None, (
+                f"{name}:{job_name} calls {job.get('uses')} without setting "
+                f"{forwarded}; a PR-triggered lane must pin it false explicitly "
+                "so a change to the default cannot arm it"
+            )
+            assert _socket_is_statically_off(value), f"{name}:{job_name}: {forwarded}={value!r}"
+
+
+def test_a_hardcoded_socket_inside_the_reusable_workflow_is_caught():
+    """The forwarding step is exempted from the step scan, so that exemption
+    must be narrow: it applies to the forward itself, not to any value that
+    happens to sit in that position. Hardcoding a value there hands the socket
+    to every caller of the reusable workflow at once, PR lanes included."""
+    for mutant in ("${{ true }}", True, "${{ inputs.docker_socket || true }}"):
+        docs = copy.deepcopy(_all_workflow_docs())
+        steps = docs["eval-reusable.yml"]["jobs"]["eval"]["steps"]
+        target = [s for s in steps if "rocm-ci-setup" in (s.get("uses") or "")]
+        assert target, "the mutation target moved"
+        target[0]["with"]["docker-socket"] = mutant
+        enabled, _ = _socket_lanes_from(docs)
+        assert "eval-reusable.yml:eval" in enabled, (
+            f"docker-socket: {mutant!r} hardcoded in the shared workflow was not caught"
+        )
 
 
 def test_the_socket_toggle_does_not_shadow_a_compose_substitution():
@@ -2245,6 +2440,102 @@ def test_the_scoped_refresh_reaches_the_container_as_environment():
     )
     # And forwarded across the container boundary, or the inner bash sees nothing.
     assert "-e PERF_GATE_ENTRY=" in step["run"]
+
+
+def _validate_perf_gate_body() -> str:
+    """The `run` body of refresh-baselines.yml's input validation step.
+
+    It takes its inputs through `env:` rather than `${{ }}` (see the test
+    above), so it is ordinary bash with no Actions-only syntax in it -- which
+    means the tests below can execute the real step instead of asserting the
+    shape of it.
+    """
+    for job in (_load_workflow("refresh-baselines.yml").get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            if str(step.get("name", "")).startswith("Validate perf-gate inputs"):
+                return step["run"]
+    raise AssertionError("refresh-baselines.yml has no perf-gate validation step")
+
+
+def _validate(perf_gate: str, perf_gate_entry: str):
+    return subprocess.run(
+        ["bash", "-c", _validate_perf_gate_body()],
+        env={**os.environ, "PERF_GATE": perf_gate, "PERF_GATE_ENTRY": perf_gate_entry},
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_a_delimiter_only_scope_is_rejected_rather_than_silently_global():
+    """The dangerous input is not the empty one, it is the one that looks set.
+
+    `,` is non-empty, so a raw `-n` check passes it; it then yields no names
+    when split, contributes no `--perf-gate-entry` flags, and leaves a bare
+    `--perf-gate` -- a GLOBAL perf refresh arming step-time ceilings on all
+    sixteen cells from one observation each. It would not even warn, because the
+    unscoped warning is keyed on the raw value being empty. An operator who
+    typed a scope would get the exact outcome the scope exists to prevent.
+    """
+    for scope in (",", ", ,", ",,,", " ", "\t", " , \t "):
+        out = _validate("true", scope)
+        assert out.returncode != 0, f"scope {scope!r} was accepted: {out.stdout}"
+        assert "::error::" in out.stdout, out.stdout
+        assert "names no matrix entry" in out.stdout
+
+
+def test_a_real_scope_and_an_empty_one_both_still_pass_validation():
+    """The fix must not cost the two invocations that are legitimate: a named
+    scope, and a deliberate unscoped refresh."""
+    named = _validate("true", "tokenspeed_serve_smoke")
+    assert named.returncode == 0, named.stdout + named.stderr
+    assert "::error::" not in named.stdout
+    assert "::warning::" not in named.stdout, "a scoped refresh must not warn"
+    assert "tokenspeed_serve_smoke" in named.stdout
+
+    unscoped = _validate("true", "")
+    assert unscoped.returncode == 0, unscoped.stdout + unscoped.stderr
+    assert "::warning::" in unscoped.stdout
+    assert "::error::" not in unscoped.stdout
+
+    # A list is still a list.
+    listed = _validate("true", "gpu_smoke, tokenspeed_serve_smoke")
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    assert "gpu_smoke" in listed.stdout and "tokenspeed_serve_smoke" in listed.stdout
+
+
+def test_a_scope_without_perf_gate_is_still_rejected():
+    """Unchanged behaviour, re-pinned because the check now runs on parsed names
+    rather than on the raw string."""
+    out = _validate("false", "gpu_smoke")
+    assert out.returncode != 0
+    assert "no effect without perf_gate" in out.stdout
+    # And a delimiter-only scope with perf_gate off is rejected too, rather
+    # than being read as "no scope, so nothing to complain about".
+    assert _validate("false", ",").returncode != 0
+
+
+def test_the_scope_is_not_glob_expanded_against_the_workspace():
+    """The parse splits an unquoted expansion, which is also a glob. A scope of
+    `*` must stay one (bogus, later-rejected) name rather than becoming a list
+    of filenames -- which on the runner would be the repository root, and would
+    turn a typo into a long list of `--perf-gate-entry` flags."""
+    out = _validate("true", "*")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "perf-gate scope: *" in out.stdout, out.stdout
+    assert "README" not in out.stdout and "scripts" not in out.stdout
+
+
+def test_the_container_side_split_also_refuses_to_degrade_to_a_global_refresh():
+    """Defence in depth at the point the degradation would happen. The
+    validation step runs on the host and the flags are built inside the
+    container, so the guard that matters for correctness is the inner one; the
+    outer is there to fail in seconds instead of after a wheel install."""
+    run = _refresh_baselines_script_step()["run"]
+    assert re.search(r'_named=0', run), (
+        "the container-side split does not count the names it produced, so a "
+        "delimiter-only scope would leave a bare --perf-gate"
+    )
+    assert re.search(r'if\s+\[\s+"\$\{_named\}"\s+-eq\s+0\s+\]', run), run
+    assert "refusing to fall back to a global perf refresh" in run
 
 
 def test_an_unscoped_perf_refresh_is_flagged_but_not_blocked():
