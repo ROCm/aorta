@@ -81,7 +81,25 @@ jobs:
           PERF_GATE_ENTRY: ${{ inputs.perf_gate_entry }}
         run: |
           set -euo pipefail
-          if [ -n "${PERF_GATE_ENTRY}" ] && [ "${PERF_GATE}" != "true" ]; then
+          # Noglob before the word-splitting below: an unquoted expansion is
+          # also a glob, and a scope of `*` would otherwise become a list of
+          # filenames from the workspace root.
+          set -f
+          # Parse the scope FIRST, then validate what parsing produced. A raw
+          # non-empty test is not the same question: `,`, `, ,` or a lone tab
+          # are all non-empty and name no entries, so they would pass the check
+          # below, contribute no --perf-gate-entry flags, and leave a bare
+          # --perf-gate -- degrading a scoped bless into the unscoped global
+          # refresh this input exists to prevent, and without even the unscoped
+          # warning, since the raw value is not empty. Same delimiters as the
+          # container-side split, which is what makes this a preview of it.
+          names=( ${PERF_GATE_ENTRY//,/ } )
+
+          if [ -n "${PERF_GATE_ENTRY}" ] && [ "${#names[@]}" -eq 0 ]; then
+            echo "::error::perf_gate_entry (${PERF_GATE_ENTRY}) is delimiters only and names no matrix entry. Leave it empty for a deliberate unscoped refresh, or name the workload under test."
+            exit 1
+          fi
+          if [ "${#names[@]}" -gt 0 ] && [ "${PERF_GATE}" != "true" ]; then
             echo "::error::perf_gate_entry has no effect without perf_gate: true"
             exit 1
           fi
@@ -89,8 +107,13 @@ jobs:
           # legitimate end-state operation (bless everything once every workload
           # has variance data), and it is the behaviour every existing dispatch
           # of this workflow has had. Loud, not blocked.
-          if [ "${PERF_GATE}" = "true" ] && [ -z "${PERF_GATE_ENTRY}" ]; then
+          if [ "${PERF_GATE}" = "true" ] && [ "${#names[@]}" -eq 0 ]; then
             echo "::warning::Unscoped perf refresh: this arms step-time ceilings on EVERY matrix entry from a single observation each. Set perf_gate_entry to scope it to the workload under test."
+          fi
+          if [ "${#names[@]}" -gt 0 ]; then
+            echo "perf-gate scope: ${names[*]}"
+          else
+            echo "perf-gate scope: none (unscoped)"
           fi
 
       - name: Set up ROCm CI container
@@ -136,12 +159,23 @@ jobs:
             # trailing comma) are dropped rather than passed as an empty string,
             # which the known-entry check in refresh_baselines.py would reject.
             if [ -n "${PERF_GATE_ENTRY}" ]; then
+              _named=0
               IFS=", " read -r -a _entries <<< "${PERF_GATE_ENTRY}"
               for _e in "${_entries[@]}"; do
                 if [ -n "${_e}" ]; then
                   args+=(--perf-gate-entry "${_e}")
+                  _named=$((_named + 1))
                 fi
               done
+              # Second layer under the validation step, at the point where the
+              # degradation would actually happen. A non-empty scope that
+              # yields no names must not fall through to a bare --perf-gate:
+              # that is a GLOBAL perf refresh arming ceilings on every entry,
+              # which is the opposite of what the operator asked for.
+              if [ "${_named}" -eq 0 ]; then
+                echo "perf_gate_entry was set but named no entries; refusing to fall back to a global perf refresh" >&2
+                exit 1
+              fi
             fi
             python scripts/ci/refresh_baselines.py \
               --step-time-margin "${STEP_TIME_MARGIN:-0.25}" \
