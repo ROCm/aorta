@@ -285,6 +285,51 @@ class TestRefusalText:
         assert "aorta chat index build" in text
         assert "aorta chat doctor" in text
 
+    def test_a_remote_embedder_is_not_told_to_fetch(self, monkeypatch):
+        """The impossible remedy, offered first, is what sends people to a workaround.
+
+        CI publishes one index asset and builds it with the local embedder, so
+        "the index matching this install" does not exist for a remote provider
+        and never will. Following that line gets a second refusal with different
+        wording, from which the reasonable conclusion is that chat is broken.
+        """
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        text = self._refusal()
+        commands = [line for line in text.splitlines() if line.startswith("  aorta")]
+        assert not any("index fetch" in line for line in commands)
+        assert any("index build" in line for line in commands)
+
+
+class TestRemedyLines:
+    """Which commands a mismatch is resolved by depends on the embedding provider."""
+
+    def test_a_local_provider_leads_with_fetch(self):
+        lines = manifest_mod.remedy_lines("local")
+        assert lines[0].strip().startswith("aorta chat index fetch")
+
+    def test_a_remote_provider_explains_the_absence_rather_than_hiding_it(self):
+        """Otherwise the user goes looking for the command the docs mention."""
+        text = "\n".join(manifest_mod.remedy_lines("remote"))
+        assert "is not offered here" in text
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in text
+
+    def test_doctor_is_not_told_to_run_doctor(self):
+        text = "\n".join(manifest_mod.remedy_lines("local", include_doctor=False))
+        assert "aorta chat doctor" not in text
+
+    def test_it_reads_the_configured_provider_when_not_given_one(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        assert "is not offered here" in "\n".join(manifest_mod.remedy_lines())
+
+    def test_an_empty_provider_setting_is_treated_as_local(self, monkeypatch):
+        """It is the shipped default, and the one the published index is built with."""
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "")
+        assert manifest_mod._configured_embedding_provider() == "local"
+
 
 class TestWarnings:
     def test_version_drift_warns_rather_than_refuses(self):

@@ -256,13 +256,74 @@ class ValidationReport:
             raise IndexMismatchError(_refusal_text(index_path, self.refusals, self.manifest))
 
 
+def _configured_embedding_provider() -> str:
+    """The provider this install embeds with, for choosing a remedy.
+
+    Read lazily so this module stays importable without the chat settings, and
+    defaulted to ``local`` rather than to "unknown": that is the shipped default
+    and the one the published index is built with, so a configuration that
+    cannot be read is far likelier to be a local one than a remote one.
+    """
+    try:
+        from aorta.chat.config import settings
+
+        return str(settings.embedding_provider or "local").strip().lower() or "local"
+    except Exception:  # pragma: no cover - a settings object that will not load
+        logger.debug("could not resolve the configured embedding provider", exc_info=True)
+        return "local"
+
+
+def remedy_lines(
+    embedding_provider: str | None = None,
+    *,
+    include_doctor: bool = True,
+) -> list[str]:
+    """The commands that resolve an index/provider mismatch, for this install.
+
+    Conditional on the provider because ``index fetch`` cannot help a remote
+    embedder: CI publishes one asset, built with the local provider, so "the
+    index matching this install" does not exist for a remote one and never
+    will. Offering it first sends the user to a second refusal with different
+    wording, from which the reasonable conclusion is that chat is broken.
+
+    Args:
+        embedding_provider: Override for the configured provider. ``None``
+            reads it from the settings.
+        include_doctor: Whether to suggest ``aorta chat doctor``. Off for
+            ``doctor``'s own report, which is already that output.
+    """
+    provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
+    doctor_line = ["  aorta chat doctor          show what the two sides currently disagree on"]
+
+    if provider == "local":
+        return [
+            "  aorta chat index fetch     download the index matching this install",
+            "  aorta chat index build     rebuild locally with the configured provider",
+            *(doctor_line if include_doctor else []),
+        ]
+
+    return [
+        "  aorta chat index build     re-embed the corpus with the configured",
+        "                             provider -- slow, and every chunk goes",
+        "                             through the embeddings API",
+        *(doctor_line if include_doctor else []),
+        "",
+        "'aorta chat index fetch' is not offered here: the published index is built",
+        "with the local embedder, so no published asset can match a remote one, and",
+        f"fetching it under embedding_provider = {provider!r} would produce this same",
+        'refusal again. Set embedding_provider = "local" (or the environment',
+        "variable AORTA_CHAT_EMBEDDING_PROVIDER=local) and the fetch works, at no",
+        "cost in embedding API calls.",
+    ]
+
+
 def _refusal_text(index_path: str | Path, refusals: list[str], manifest: Manifest) -> str:
     """Compose the refusal. Its job is to be impossible to skim past.
 
     It leads with the consequence rather than the mismatch, because the
     mismatch is not self-evidently serious to someone who just wants an answer,
-    and it ends with three concrete commands, because a refusal the user cannot
-    act on gets worked around.
+    and it ends with concrete commands, because a refusal the user cannot act
+    on gets worked around.
     """
     rule = "=" * 72
     lines = [
@@ -282,9 +343,7 @@ def _refusal_text(index_path: str | Path, refusals: list[str], manifest: Manifes
         f"Index built as: {manifest.describe()}",
         "",
         "Resolve it by one of:",
-        "  aorta chat index fetch     download the index matching this install",
-        "  aorta chat index build     rebuild locally with the configured provider",
-        "  aorta chat doctor          show what the two sides currently disagree on",
+        *remedy_lines(),
         "",
     ]
     return "\n".join(lines)
@@ -418,6 +477,7 @@ __all__ = [
     "manifest_path",
     "now_stamp",
     "read_manifest",
+    "remedy_lines",
     "sha256_file",
     "validate",
     "write_manifest",

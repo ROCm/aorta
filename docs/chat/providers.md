@@ -186,6 +186,11 @@ The symptom is distinctive — `finish_reason` is `stop`, output tokens are
 non-zero, and `content` is empty — and the logs say so:
 `act_node ... produced no text despite N output tokens`.
 
+`aorta chat doctor` reports the resolved mode as its own check, and warns before
+you spend a query on it when `text` is paired with a remote model whose name
+reads as a reasoning one. A gateway can call a deployment anything, so the check
+also names `native` on the line it prints for a name it does not recognise.
+
 Both protocols run the same tools, retrieval and critic, and both are guarded
 the same way: an empty reply is never used as the answer, unproductive rounds
 are capped at two, a repeated identical tool call is answered with "you already

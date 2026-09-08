@@ -111,6 +111,15 @@ check compares the model name and not only the flow. That is the reason
 [choosing a remote embedder](configuration.md#configuring-a-remote-embedding-provider-by-hand)
 means taking over the build.
 
+A fetch downloads vectors, not the embedding model, so straight afterwards
+`doctor` reports the model cache as cold. With a valid index present that is
+reported as `[--] ... does not need to be yet`, because the weights download
+themselves on the first query. **Do not "pre-warm" with `aorta chat index
+build`**: its `--output` defaults to the index you just fetched and its corpus
+defaults to `src/aorta` alone, so it would overwrite a code-and-prose index with
+a code-only one and drop `docs/` and `README.md` out of retrieval. To download
+the weights on their own, `doctor` prints the one-line `TextEmbedding` command.
+
 Building locally is the developer path and the air-gapped path. It takes a few
 minutes and runs on CPU.
 

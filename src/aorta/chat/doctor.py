@@ -19,6 +19,7 @@ whose command just failed.
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import sys
 from dataclasses import dataclass, field
@@ -71,6 +72,33 @@ _EXTRA_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
 #: Extras whose absence is not a problem. ``chat-cli`` is required; the rest are
 #: opt-in surfaces, so "not installed" is a fact rather than a finding.
 _REQUIRED_EXTRAS = frozenset({"chat-cli"})
+
+#: Downloading the embedding weights and nothing else -- which is what a
+#: "pre-warm" is. The same invocation ``fastembed_bge.PRE_SEED_PROCEDURE`` uses
+#: in its first step, quoted rather than imported because that procedure is a
+#: paragraph and this is a line; a test pins the two together.
+#:
+#: Deliberately *not* ``aorta chat index build``, which this check used to
+#: advise. That command's ``--output`` defaults to the index this install
+#: already reads and its corpus defaults to ``src/aorta`` alone, so as a
+#: pre-warm it overwrites a fetched index with one that has no ``docs/`` and no
+#: ``README.md`` in it -- and says nothing about having done either.
+_WARM_COMMAND = (
+    "python -c 'from fastembed import TextEmbedding; "
+    'TextEmbedding("{model}", cache_dir="{cache}")\''
+)
+
+#: LLM providers that talk to a remote OpenAI-compatible endpoint. A local vLLM
+#: is excluded on purpose: ``text`` is the correct mode for a stock server,
+#: which needs ``--enable-auto-tool-choice`` and a ``--tool-call-parser`` before
+#: ``native`` works at all.
+_REMOTE_LLM_PROVIDERS = frozenset({"openai", "litellm"})
+
+#: Model names that mark a reasoning model. A heuristic -- a gateway can call a
+#: deployment anything -- so it only decides whether the tool-mode check warns
+#: or merely informs. Both branches name ``native`` and the symptom, because the
+#: case this cannot recognise is exactly the one a user reaches after hitting it.
+_REASONING_MODEL_PATTERN = re.compile(r"gpt-oss|qwq|reasoner|reasoning|\b(?:o[1-4]|r1)\b")
 
 
 @dataclass
@@ -173,6 +201,32 @@ def _probe_huggingface() -> bool:
         return False
 
 
+def _index_is_healthy() -> bool:
+    """Whether an index is present and this install can query it as-is.
+
+    Asked so the cold-cache hint can be conditioned on what the user already
+    has. ``_check_embedding_model`` runs before ``_check_index`` because
+    provider-before-index reads better in the report, so it cannot read the
+    later check's result; running the same validation twice costs one sqlite
+    open and no network, which is cheaper than reordering the output.
+
+    Warnings do not disqualify an index. Source drift is a reason to refresh
+    it, not a reason for advice that would replace it with a worse one.
+    """
+    from aorta.chat.config import settings
+    from aorta.chat.rag.index_ops import check_index
+
+    if not settings.index_file.exists():
+        return False
+    try:
+        return not check_index(settings.index_file, strict=False).refusals
+    except Exception:
+        # Unreadable, unparseable, no manifest: all mean the same thing here,
+        # which is that there is nothing worth protecting from a rebuild.
+        logger.debug("index health probe failed", exc_info=True)
+        return False
+
+
 def _check_embedding_model(report: Report) -> None:
     """Whether queries can be embedded at all, and what to do when they cannot."""
     from aorta.chat.rag.embeddings.factory import get_provider
@@ -202,13 +256,36 @@ def _check_embedding_model(report: Report) -> None:
         return
 
     if _probe_huggingface():
+        warm = _WARM_COMMAND.format(model=state["model"], cache=state["cache_dir"])
+        if _index_is_healthy():
+            # Not a warning. ``index fetch`` downloads somebody else's vectors
+            # and never needs the local weights, so a correctly completed fetch
+            # -- the documented normal path -- always lands here. A warning that
+            # fires on every correct setup is how people learn to skim the one
+            # command that also reports the fatal mismatches.
+            report.add(
+                "embedding model cache",
+                SKIP,
+                f"{state['model']} is not cached, and does not need to be yet",
+                hint=(
+                    "Your index is present and matches this install, and the "
+                    "weights\n"
+                    "download themselves (~65 MB) on the first query. Nothing "
+                    "to do.\n"
+                    "To get them ahead of that without touching the index:\n"
+                    f"  {warm}"
+                ),
+            )
+            return
         report.add(
             "embedding model cache",
             WARN,
             f"{state['model']} is not cached, but HuggingFace is reachable",
             hint=(
-                "It will be downloaded (~65 MB) on the first query or index "
-                "build. Pre-warm it now with: aorta chat index build"
+                "It will be downloaded (~65 MB) the first time anything embeds "
+                "text.\n"
+                "To get it now, without building anything:\n"
+                f"  {warm}"
             ),
         )
         return
@@ -259,6 +336,12 @@ def _check_index(report: Report) -> None:
         return
 
     if result.refusals:
+        # Remedies come from the manifest module so this and the query-time
+        # refusal cannot drift apart, and they are conditional for the same
+        # reason: on a remote embedder, `index fetch` is guaranteed to refuse in
+        # turn, and a first remedy that cannot work gets the whole refusal
+        # worked around.
+        remedies = "\n".join(manifest_mod.remedy_lines(include_doctor=False))
         report.add(
             "index manifest",
             FAIL,
@@ -268,9 +351,7 @@ def _check_index(report: Report) -> None:
                 "This is not a cosmetic mismatch. The index holds vectors from a "
                 "different embedding model, so retrieval would compare numbers "
                 "that are not comparable and answer confidently from the wrong "
-                "chunks.\n"
-                "  aorta chat index fetch     get the index matching this install\n"
-                "  aorta chat index build     rebuild with the configured provider"
+                "chunks.\n" + remedies
             ),
         )
         return
@@ -283,6 +364,77 @@ def _check_index(report: Report) -> None:
         )
         return
     report.add("index manifest", OK, result.manifest.describe())
+
+
+def _check_tool_mode(report: Report) -> None:
+    """Which protocol the act loop will use to call tools, and whether it fits.
+
+    ``text`` is the default because it has no endpoint requirement, so it is the
+    only mode a stock local vLLM can drive. A reasoning model cannot drive it:
+    it puts its working in a channel of its own and returns empty ``content``
+    where the ``ACTION:`` line was expected, so every action-routed query spends
+    its whole retry budget and answers nothing. Until this check existed the
+    first signal of that was the failed query.
+    """
+    from aorta.chat.config import settings
+
+    mode = str(settings.llm_tool_mode or "").strip().lower()
+    provider = str(settings.llm_provider or "").strip().lower()
+
+    if mode not in ("native", "text"):
+        report.add(
+            "llm tool mode",
+            FAIL,
+            f"{settings.llm_tool_mode!r} is not a tool mode",
+            hint=(
+                'Set llm_tool_mode to "text" or "native". Any other value '
+                "raises on the\n"
+                "first action-routed question rather than at startup."
+            ),
+        )
+        return
+    if mode == "native":
+        report.add("llm tool mode", OK, "native (the provider's function-calling API)")
+        return
+    if provider not in _REMOTE_LLM_PROVIDERS:
+        report.add("llm tool mode", OK, "text (ACTION: lines parsed out of the reply)")
+        return
+
+    model = str(getattr(settings, "remote_llm_model", "") or "")
+    if _REASONING_MODEL_PATTERN.search(model.lower()):
+        report.add(
+            "llm tool mode",
+            WARN,
+            f"text, and {model} is a reasoning model",
+            hint=(
+                "In text mode the model has to write 'ACTION: tool(arg=\"v\")' "
+                "for aorta\n"
+                "to parse. A reasoning model writes that in a channel of its "
+                "own and\n"
+                "returns empty content instead, so the act loop re-prompts "
+                "until it gives\n"
+                "up and the question is answered with nothing.\n"
+                'Set llm_tool_mode = "native" in chat.toml, or '
+                "AORTA_CHAT_LLM_TOOL_MODE=native.\n"
+                "It needs an endpoint that accepts the 'tools' parameter, "
+                "which a remote\n"
+                "OpenAI-compatible gateway normally does."
+            ),
+        )
+        return
+    report.add(
+        "llm tool mode",
+        OK,
+        f"text, on remote {provider} ({model})",
+        hint=(
+            "If an action-routed question comes back with no answer, the first "
+            "thing\n"
+            'to change is llm_tool_mode = "native". Reasoning models cannot '
+            "write the\n"
+            "ACTION: lines text mode parses, and a gateway can call one "
+            "anything."
+        ),
+    )
 
 
 def _check_backend(report: Report) -> None:
@@ -349,6 +501,7 @@ def run_checks(*, backend: bool = True) -> Report:
         ("sqlite", _check_sqlite),
         ("embedding provider", _check_embedding_model),
         ("chat index", _check_index),
+        ("llm tool mode", _check_tool_mode),
     ):
         try:
             check(report)

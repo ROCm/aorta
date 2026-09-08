@@ -32,12 +32,43 @@ def _by_name(report, name: str):
     return found[0]
 
 
+def _write_index(monkeypatch, tmp_path: Path, **overrides) -> Path:
+    """Install an index and a matching manifest, and point the settings at it."""
+    from aorta.chat.rag import manifest as manifest_mod
+    from aorta.chat.rag.embeddings.factory import get_provider
+
+    index = tmp_path / "index.sqlite"
+    index.write_bytes(b"x" * 2048)
+    monkeypatch.setattr(settings, "index_path", str(index))
+    values = {
+        "aorta_version": doctor._dist_version("amd-aorta"),
+        "aorta_sha": "a" * 40,
+        "embedding_provider": "local",
+        "embedding_model": MODEL,
+        "dimensions": 384,
+        "collection": get_provider().collection_name(),
+        "chunk_size": settings.chunk_size,
+        "chunk_overlap": settings.chunk_overlap,
+        "index_sha256": manifest_mod.sha256_file(index),
+    }
+    values.update(overrides)
+    manifest_mod.write_manifest(index, manifest_mod.Manifest(**values))
+    return index
+
+
 @pytest.fixture(autouse=True)
 def offline_but_quiet(monkeypatch, tmp_path: Path):
-    """No network probes and no LLM preflight; each test opts into what it needs."""
+    """No network probes and no LLM preflight; each test opts into what it needs.
+
+    ``index_path`` is pinned at an absent file rather than left alone because
+    the embedding-cache hint is now conditioned on index health, so a developer
+    who happens to have a real index in ``~/.cache`` would otherwise get a
+    different report from CI.
+    """
     monkeypatch.setattr(doctor, "_probe_huggingface", lambda: True)
     monkeypatch.setattr(settings, "embedding_provider", "local")
     monkeypatch.setattr(settings, "embedding_model", MODEL)
+    monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
 
 
@@ -102,12 +133,55 @@ class TestEmbeddingModelCache:
         assert check.status == OK
         assert MODEL in check.detail
 
-    def test_a_cold_cache_with_egress_is_only_a_warning(self, monkeypatch):
+    def test_a_cold_cache_with_egress_and_no_index_is_only_a_warning(self, monkeypatch):
         """It will download itself on first use, so this is information."""
         monkeypatch.setattr(doctor, "_probe_huggingface", lambda: True)
         check = _by_name(run_checks(backend=False), "embedding model cache")
         assert check.status == WARN
-        assert "aorta chat index build" in check.hint
+        assert "65 MB" in check.hint
+
+    def test_a_cold_cache_beside_a_healthy_index_is_not_a_warning(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """``index fetch`` never warms the cache, so the happy path landed here.
+
+        A warning that fires on every correctly completed setup teaches people
+        to skim the one command that also reports the fatal mismatches.
+        """
+        _write_index(monkeypatch, tmp_path)
+        check = _by_name(run_checks(backend=False), "embedding model cache")
+        assert check.status == SKIP
+        assert "Nothing to do" in check.hint
+
+    def test_the_pre_warm_advice_never_says_index_build(self, monkeypatch, tmp_path: Path):
+        """It would overwrite a fetched index with a code-only one, silently.
+
+        ``index build`` defaults ``--output`` to the index already installed and
+        its corpus to ``src/aorta`` alone, so following it drops ``docs/`` and
+        ``README.md`` out of retrieval to download a file that downloads itself.
+        """
+        without_index = _by_name(run_checks(backend=False), "embedding model cache").hint
+        _write_index(monkeypatch, tmp_path)
+        with_index = _by_name(run_checks(backend=False), "embedding model cache").hint
+
+        for hint in (without_index, with_index):
+            assert "index build" not in hint
+            assert "TextEmbedding" in hint
+
+    def test_the_pre_warm_command_is_the_one_the_procedure_uses(self, monkeypatch):
+        """Two copies of an invocation drift; this is what stops them."""
+        from aorta.chat.rag.embeddings.fastembed_bge import PRE_SEED_PROCEDURE
+
+        monkeypatch.setattr(doctor, "_probe_huggingface", lambda: True)
+        hint = _by_name(run_checks(backend=False), "embedding model cache").hint
+        command = next(line.strip() for line in hint.splitlines() if "TextEmbedding" in line)
+
+        # Same invocation, different cache_dir: the procedure seeds a machine
+        # that has egress, this one seeds the machine being diagnosed.
+        prefix = "python -c 'from fastembed import TextEmbedding; TextEmbedding(\""
+        assert command.startswith(prefix)
+        assert prefix in PRE_SEED_PROCEDURE.format(model=MODEL, cache="/tmp/cache")
+        assert MODEL in command
 
     def test_a_cold_cache_with_no_egress_fails_and_prints_the_procedure(self, monkeypatch):
         monkeypatch.setattr(doctor, "_probe_huggingface", lambda: False)
@@ -156,7 +230,7 @@ class TestIndexChecks:
         assert _by_name(report, "index manifest").status == WARN
 
     def test_a_matching_manifest_is_ok(self, monkeypatch, tmp_path: Path):
-        index = self._write_index(monkeypatch, tmp_path)
+        index = _write_index(monkeypatch, tmp_path)
         check = _by_name(run_checks(backend=False), "index manifest")
         assert check.status == OK
         assert MODEL in check.detail
@@ -164,39 +238,107 @@ class TestIndexChecks:
 
     def test_a_mismatched_manifest_fails_and_says_why_it_matters(self, monkeypatch, tmp_path: Path):
         """The report has to convey that this is not cosmetic."""
-        self._write_index(monkeypatch, tmp_path, embedding_model="other/model")
+        _write_index(monkeypatch, tmp_path, embedding_model="other/model")
         check = _by_name(run_checks(backend=False), "index manifest")
         assert check.status == FAIL
         assert "queries are refused" in check.detail
         assert "not comparable" in check.procedure
 
+    def test_the_mismatch_remedy_offers_fetch_on_a_local_provider(
+        self, monkeypatch, tmp_path: Path
+    ):
+        _write_index(monkeypatch, tmp_path, embedding_model="other/model")
+        check = _by_name(run_checks(backend=False), "index manifest")
+        assert "aorta chat index fetch" in check.procedure
+        # It is already running; suggesting it back is noise.
+        assert "aorta chat doctor" not in check.procedure
+
+    def test_the_mismatch_remedy_does_not_lead_with_fetch_on_a_remote_provider(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """CI publishes one asset, built locally, so a fetch would refuse in turn."""
+        from aorta.chat.rag import manifest as manifest_mod
+
+        _write_index(monkeypatch, tmp_path, embedding_model="other/model")
+        # Only the remedy's view of the provider, not the factory's: building a
+        # real remote provider needs an endpoint and a key, which is a different
+        # check's problem.
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        check = _by_name(run_checks(backend=False), "index manifest")
+        commands = [line for line in check.procedure.splitlines() if line.startswith("  aorta")]
+        assert commands == ["  aorta chat index build     re-embed the corpus with the configured"]
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in check.procedure
+
     def test_version_drift_warns_rather_than_failing(self, monkeypatch, tmp_path: Path):
-        self._write_index(monkeypatch, tmp_path, aorta_version="0.0.1")
+        _write_index(monkeypatch, tmp_path, aorta_version="0.0.1")
         check = _by_name(run_checks(backend=False), "index manifest")
         assert check.status == WARN
         assert any("source drift" in line for line in check.hint.splitlines())
 
-    def _write_index(self, monkeypatch, tmp_path: Path, **overrides) -> Path:
-        from aorta.chat.rag import manifest as manifest_mod
-        from aorta.chat.rag.embeddings.factory import get_provider
 
-        index = tmp_path / "index.sqlite"
-        index.write_bytes(b"x" * 2048)
-        monkeypatch.setattr(settings, "index_path", str(index))
-        values = {
-            "aorta_version": doctor._dist_version("amd-aorta"),
-            "aorta_sha": "a" * 40,
-            "embedding_provider": "local",
-            "embedding_model": MODEL,
-            "dimensions": 384,
-            "collection": get_provider().collection_name(),
-            "chunk_size": settings.chunk_size,
-            "chunk_overlap": settings.chunk_overlap,
-            "index_sha256": manifest_mod.sha256_file(index),
-        }
-        values.update(overrides)
-        manifest_mod.write_manifest(index, manifest_mod.Manifest(**values))
-        return index
+class TestToolMode:
+    """The setup-time signal for a failure that otherwise only shows as a dead query.
+
+    ``text`` is the shipped default and a reasoning model cannot drive it: it
+    writes its working to a separate channel and returns empty content where the
+    ``ACTION:`` line should be, so the act loop re-prompts until it gives up.
+    The user-facing give-up message points here, so this check has to name both
+    the problem and the setting that fixes it.
+    """
+
+    def test_the_resolved_mode_is_always_reported(self, monkeypatch):
+        monkeypatch.setattr(settings, "llm_tool_mode", "native")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == OK
+        assert "native" in check.detail
+
+    def test_text_on_a_local_vllm_is_correct_and_says_nothing(self, monkeypatch):
+        """A stock vLLM needs extra server flags before native works at all."""
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "vllm")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == OK
+        assert not check.hint
+
+    def test_text_with_a_reasoning_model_warns_and_names_the_setting(self, monkeypatch):
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "remote_llm_model", "GPT-oss-20B")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == WARN
+        assert "GPT-oss-20B" in check.detail
+        assert 'llm_tool_mode = "native"' in check.hint
+        assert "empty content" in check.hint
+
+    @pytest.mark.parametrize("model", ["gpt-oss-120b", "o3-mini", "deepseek-r1", "Qwen/QwQ-32B"])
+    def test_the_reasoning_models_it_recognises(self, monkeypatch, model):
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "litellm")
+        monkeypatch.setattr(settings, "remote_llm_model", model)
+        assert _by_name(run_checks(backend=False), "llm tool mode").status == WARN
+
+    @pytest.mark.parametrize("model", ["gpt-4o-mini", "claude-sonnet-4", "llama-3.3-70b"])
+    def test_a_model_that_can_drive_text_mode_is_not_warned_about(self, monkeypatch, model):
+        """A warning on every correct setup is worth less than no warning."""
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "remote_llm_model", model)
+        assert _by_name(run_checks(backend=False), "llm tool mode").status == OK
+
+    def test_it_still_points_at_native_for_a_deployment_name_it_cannot_read(self, monkeypatch):
+        """A gateway can call a deployment anything, so the OK line has to carry the fix too."""
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "remote_llm_model", "prod-chat-deployment")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == OK
+        assert 'llm_tool_mode = "native"' in check.hint
+
+    def test_an_unknown_mode_fails_before_it_raises_mid_query(self, monkeypatch):
+        monkeypatch.setattr(settings, "llm_tool_mode", "function_calling")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == FAIL
+        assert "function_calling" in check.detail
 
 
 class TestBackendCheck:
@@ -239,9 +381,7 @@ class TestBackendCheck:
                 return "vllm at http://localhost:8000/v1"
 
         monkeypatch.setattr(factory, "get_backend", lambda *a, **k: _Weird())
-        assert _by_name(run_checks(backend=True), "llm backend").hint.startswith(
-            "ConnectionError:"
-        )
+        assert _by_name(run_checks(backend=True), "llm backend").hint.startswith("ConnectionError:")
 
     def test_a_permissive_preflight_is_not_what_gets_called(self, monkeypatch):
         """The false positive, pinned: a backend that starts anyway is still a FAIL."""
