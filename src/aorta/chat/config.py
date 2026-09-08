@@ -624,13 +624,18 @@ def write_profile(values: dict[str, Any], path: Path | None = None) -> Path:
     return path
 
 
-#: Spellings of ``embedding_provider`` that select the local flow.
-#: ``rag/embeddings/factory.py`` owns the list; it is repeated here because
-#: importing that module pulls in langchain_core and both provider modules,
-#: which ``aorta chat config init`` has no other reason to load. Same
-#: arrangement as ``_CONFIG_PROFILES`` in ``cli/chat.py``, and
+#: How ``rag/embeddings/factory.py`` resolves ``embedding_provider``: accepted
+#: spelling to the flow it selects. Repeated here rather than imported, because
+#: that module pulls in langchain_core and both provider modules and ``aorta
+#: chat config init`` has no other reason to load them -- the same arrangement
+#: as ``_CONFIG_PROFILES`` in ``cli/chat.py``, and
 #: ``tests/chat/test_config_wizard.py`` fails if the two drift apart.
-LOCAL_EMBEDDING_PROVIDERS = frozenset({"local", "onnx", "fastembed"})
+EMBEDDING_PROVIDER_FLOWS: dict[str, str] = {
+    "local": "local",
+    "onnx": "local",
+    "fastembed": "local",
+    "remote": "remote",
+}
 
 
 def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
@@ -644,14 +649,15 @@ def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
     them follow, which is the shape of failure this whole path exists to stop.
 
     ``index fetch`` is promised only when the provider *and* the model agree
-    with the defaults CI publishes the asset under. :func:`rag.manifest.validate`
-    refuses on the model name and on the embedding identity, which for the local
-    provider is the model name again -- so a local install on a hand-set
-    ``embedding_model`` is refused exactly like a remote one.
+    with the defaults CI publishes the asset under.
+    :func:`aorta.chat.rag.manifest.validate` refuses on the model name and on
+    the embedding identity, which for the local provider is the model name
+    again -- so a local install on a hand-set ``embedding_model`` is refused
+    exactly like a remote one.
     """
     try:
         current = get_settings()
-    except Exception as exc:  # pydantic ValidationError, or a field validator
+    except Exception as exc:  # pydantic ValidationError, a field validator, ConfigFileError
         # The profile is already on disk at this point, so an unrelated bad
         # AORTA_CHAT_* value must not turn a successful write into a traceback.
         return [
@@ -660,7 +666,18 @@ def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
         ]
 
     default_model = Settings.model_fields["embedding_model"].default
-    if current.embedding_provider.strip().lower() not in LOCAL_EMBEDDING_PROVIDERS:
+    flow = EMBEDDING_PROVIDER_FLOWS.get(current.embedding_provider.strip().lower())
+    if flow is None:
+        # Naming a command here would be the same defect one layer down: the
+        # factory raises on an unrecognised name, so neither build nor fetch
+        # can run until this is corrected.
+        lines = [
+            f"Embeddings: {current.embedding_provider!r} is not an embedding "
+            f"provider this aorta knows "
+            f"({', '.join(sorted(EMBEDDING_PROVIDER_FLOWS))}). Indexing and "
+            "querying will both fail until it is corrected."
+        ]
+    elif flow == "remote":
         lines = [
             f"Embeddings: {current.embedding_provider}, via "
             f"{current.remote_embedding_model}. The published index is built "
@@ -679,9 +696,9 @@ def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
             "installs the published index unchanged."
         ]
 
-    # Naming the variable matters more than naming the value: the line above
+    # Name the environment variable, not only its effect: the line above
     # otherwise contradicts the file the user was just told was written, with
-    # nothing on screen to say which one wins.
+    # nothing on screen to say which of the two wins.
     overridden = [
         f"{ENV_PREFIX}{field.upper()}"
         for field in ("embedding_provider", "embedding_model")
@@ -779,8 +796,8 @@ def validate_profile(path: Path | None = None) -> list[str]:
 
 
 __all__ = [
+    "EMBEDDING_PROVIDER_FLOWS",
     "ENV_PREFIX",
-    "LOCAL_EMBEDDING_PROVIDERS",
     "PROFILE_FILE_MODE",
     "PROFILE_PROMPTS",
     "PROFILE_TEMPLATES",

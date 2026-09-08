@@ -105,7 +105,7 @@ class TestNoTemplateOptsIntoRemoteEmbeddings:
         the two disagreeing, not the particular value.
         """
         default = config.Settings.model_fields["embedding_provider"].default
-        assert config.PROFILE_TEMPLATES[name]["embedding_provider"] == default
+        assert config.PROFILE_TEMPLATES[name].get("embedding_provider") == default
 
     def test_no_template_selects_remote_embeddings_it_cannot_reach(self):
         """The durable half of the guard, and what closes #443 and gap 1a.
@@ -276,11 +276,12 @@ class TestConfigInit:
     def test_it_names_the_build_when_a_template_picks_a_remote_embedder(
         self, monkeypatch, chat_profile
     ):
-        """The other arm, which no shipped template can reach today.
+        """The other arm, by the route no shipped template takes today.
 
-        Every template is local, so nothing exercises the branch that tells the
-        user the published index will not match theirs. An untested arm is how
-        that message ends up naming the wrong command on the day a template
+        Every template is local, so only an environment override
+        (``test_the_advice_follows_the_environment_and_not_the_template``)
+        reaches this branch on a stock install. Pinning the template route as
+        well is what keeps the message naming the right command on the day one
         deliberately picks remote -- the case
         ``test_no_template_selects_remote_embeddings_it_cannot_reach`` is
         written to keep allowing.
@@ -320,6 +321,7 @@ class TestConfigInit:
         monkeypatch.setenv("AORTA_CHAT_EMBEDDING_PROVIDER", "remote")
         config.reset_settings()
         result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
         assert "AORTA_CHAT_EMBEDDING_PROVIDER" in result.output
         assert 'embedding_provider = "local"' in chat_profile.read_text(encoding="utf-8")
 
@@ -342,7 +344,14 @@ class TestConfigInit:
         assert "index build" in result.output
         assert "index fetch" not in result.output
 
-    @pytest.mark.parametrize("spelling", sorted(config.LOCAL_EMBEDDING_PROVIDERS - {"local"}))
+    @pytest.mark.parametrize(
+        "spelling",
+        sorted(
+            name
+            for name, flow in config.EMBEDDING_PROVIDER_FLOWS.items()
+            if flow == "local" and name != "local"
+        ),
+    )
     def test_an_accepted_spelling_of_local_is_still_local(
         self, spelling, monkeypatch, chat_profile
     ):
@@ -359,21 +368,39 @@ class TestConfigInit:
         assert "index fetch" in result.output
         assert "index build" not in result.output
 
-    def test_the_local_spellings_match_the_factory(self):
+    def test_the_provider_table_matches_the_factory(self):
         """Duplicated because importing the factory would pull in langchain_core.
 
-        ``config init`` has no other reason to load it, so the list is repeated
-        rather than imported -- the same arrangement as ``_CONFIG_PROFILES``,
-        and this is the guard on it.
+        ``config init`` has no other reason to load it, so the resolution table
+        is repeated rather than imported -- the same arrangement as
+        ``_CONFIG_PROFILES``, and this is the guard on it. Checked as an
+        equality over the whole table, not just the local half: a provider the
+        factory grew and this copy did not would otherwise be reported as a
+        name aorta does not know.
         """
         from aorta.chat.rag.embeddings import factory
 
-        resolves_local = {
-            name
-            for name, target in {**{k: k for k in factory._PROVIDERS}, **factory._ALIASES}.items()
-            if target == "local"
-        }
-        assert resolves_local == set(config.LOCAL_EMBEDDING_PROVIDERS)
+        assert {
+            **{name: name for name in factory._PROVIDERS},
+            **factory._ALIASES,
+        } == config.EMBEDDING_PROVIDER_FLOWS
+
+    def test_an_unknown_provider_is_named_rather_than_guessed_at(
+        self, monkeypatch, chat_profile
+    ):
+        """Neither command works, so neither may be recommended.
+
+        The factory raises on a name it does not recognise, so reporting a
+        typo'd provider as though it were remote and sending the user to
+        ``index build`` is the same unfollowable advice one layer down.
+        """
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_PROVIDER", "remvote")
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "remvote" in result.output
+        assert "index build" not in result.output
+        assert "index fetch" not in result.output
 
     def test_a_broken_environment_does_not_traceback_over_a_written_profile(
         self, monkeypatch, chat_profile
