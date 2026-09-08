@@ -733,10 +733,15 @@ def _tool_mode_is_explicit() -> bool:
     -- environment, profile file and the CLI's own ``configure()`` overrides --
     which is the intended reading: all three are someone stating a preference.
     """
-    try:
-        return "llm_tool_mode" in settings.model_fields_set
-    except TypeError:  # a test's stand-in settings object
-        return False
+    fields_set = getattr(settings, "model_fields_set", None)
+    if not isinstance(fields_set, (set, frozenset)):
+        # Not a real pydantic model -- a stand-in settings object in a test.
+        # Answer "explicit", because this gate exists to protect a stated
+        # preference and ``False`` is the answer that overrides one. Failing
+        # open here would let the escalation move a mode the user chose, which
+        # is the single thing the docstring above promises it will not do.
+        return True
+    return "llm_tool_mode" in fields_set
 
 
 def _resolved_tool_mode() -> str:

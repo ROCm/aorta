@@ -188,17 +188,25 @@ non-zero, and `content` is empty — and the logs say so:
 
 **AORTA now acts on that signature rather than only logging it.** On seeing it,
 the query is retried once through `native` and the protocol is kept for the rest
-of the session, with one log line saying so. The default stays `text`, because
+of the process, with one log line saying so. The default stays `text`, because
 flipping it globally would break a stock local vLLM (see the endpoint row
 above) — this is detection, not a new default.
 
-Two things follow from that:
+Three things follow from that:
 
 - **An explicit `llm_tool_mode` is never overridden**, whether it comes from
   the profile file, `AORTA_CHAT_LLM_TOOL_MODE` or a CLI flag. If you set `text`
   deliberately, set it; the escalation only ever moves the built-in default.
 - **It is bounded.** The retry buys one native round, not a second loop, and it
-  happens once per session rather than once per query.
+  happens once per process rather than once per query.
+- **The scope is the process, not the conversation.** Under `aorta chat` that is
+  the same thing, but `aorta chat ui` serves many browser sessions from one
+  server, and there the escalation is shared by all of them. That is deliberate:
+  what was detected is a property of the *model* — it emits reasoning instead of
+  an `ACTION:` line — so it is equally true for every session talking to that
+  endpoint, and sharing it means only the first query in the process pays the
+  wasted round. Nothing about a conversation is carried across; the state is one
+  boolean about protocol support.
 
 If the model returns nothing on *both* protocols, the act loop answers from
 retrieved context instead of dead-ending, and labels that answer as having used
@@ -284,7 +292,7 @@ Knobs that lower the bill, roughly in order of effect:
 | `404` on an `*.openai.azure.com` endpoint | Azure OpenAI needs the `litellm` backend, not `openai`. |
 | `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
 | `I wasn't able to answer that: something in my own configuration...` | The model returned empty content on both tool protocols. Run `aorta chat doctor`; the log line beside it names the cause. |
-| `Retrying this query on native function calling` | Not an error. The model returned reasoning but no answer under `text`, so chat switched protocol for this session. Set `llm_tool_mode` yourself to pin it either way. |
+| `Retrying this query on native function calling` | Not an error. The model returned reasoning but no answer under `text`, so chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
 | An answer prefixed `I could not use my tools for this question` | The act loop gave up and the answer came from retrieved context alone, so anything needing a live lookup is missing from it. Same underlying cause as the row above. |
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
 | `Waiting for vLLM at ...` when you meant to go remote | `llm_provider` is still `vllm`. Check the backend line printed at startup. |

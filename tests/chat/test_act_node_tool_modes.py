@@ -552,6 +552,24 @@ class TestAnExplicitProtocolIsAuthoritative:
         config.reset_settings()
         assert nodes._tool_mode_is_explicit() is True
 
+    def test_an_unreadable_fields_set_is_treated_as_a_choice(self, monkeypatch):
+        """The gate has to fail towards *not* overriding.
+
+        ``model_fields_set`` is how a stated preference is told apart from the
+        built-in default, so a settings object that cannot answer leaves the
+        question open -- and of the two answers, ``False`` is the one that lets
+        the escalation move a mode the user may well have chosen. Guessing in
+        that direction would break the only promise this gate makes.
+        """
+        class _StandInSettings:
+            """What a test double looks like: no real ``model_fields_set``."""
+
+            llm_tool_mode = "text"
+            model_fields_set = MagicMock()
+
+        monkeypatch.setattr(nodes, "settings", _StandInSettings())
+        assert nodes._tool_mode_is_explicit() is True
+
     @pytest.mark.asyncio
     async def test_a_chosen_text_mode_survives_the_dead_end(self, text_mode):
         """The suite's own conftest export is the explicit setting here."""
