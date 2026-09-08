@@ -59,10 +59,17 @@ def _unreachable_remote_embedding_fields(
 
     Empty for a template that does not select remote embeddings at all: the
     fields are read by nothing then.
+
+    A template key only counts as set when it carries a value. ``PROFILE_TEMPLATES``
+    already uses ``""`` as a placeholder for a field the wizard is expected to fill
+    (``openai-compatible``'s ``remote_llm_base_url``), so counting bare presence
+    would let ``remote_embedding_api_key = ""`` satisfy a guard whose whole point
+    is that the key must be reachable. A placeholder is only honest when the
+    wizard asks for it, which the ``prompted`` half covers.
     """
     if template.get("embedding_provider") != "remote":
         return []
-    collected = set(template) | set(prompted)
+    collected = {key for key, value in template.items() if value} | set(prompted)
     return sorted({"remote_embedding_base_url", "remote_embedding_api_key"} - collected)
 
 
@@ -133,6 +140,24 @@ class TestNoTemplateOptsIntoRemoteEmbeddings:
             ("remote_llm_base_url", "remote_llm_model", "remote_llm_api_key"),
         )
         assert missing == ["remote_embedding_api_key", "remote_embedding_base_url"]
+
+    def test_an_empty_placeholder_nobody_prompts_for_is_not_a_setting(self):
+        """The decoy: the shape a loose guard would wave through.
+
+        Both fields are present, so a presence-only check reports nothing
+        missing -- while ``remote_api.py`` raises on the empty key and the empty
+        base URL resolves to ``api.openai.com``. Only the prompted placeholder
+        is legitimate, and that one is left out of the expectation.
+        """
+        missing = _unreachable_remote_embedding_fields(
+            {
+                "embedding_provider": "remote",
+                "remote_embedding_base_url": "",
+                "remote_embedding_api_key": "",
+            },
+            ("remote_embedding_base_url",),
+        )
+        assert missing == ["remote_embedding_api_key"]
 
     @pytest.mark.parametrize("name", sorted(config.PROFILE_TEMPLATES))
     def test_a_local_template_carries_no_remote_embedding_settings(self, name):
@@ -247,6 +272,29 @@ class TestConfigInit:
         assert result.exit_code == 0, result.output
         assert "Embeddings: local" in result.output
         assert "index fetch" in result.output
+
+    def test_it_names_the_build_when_a_template_picks_a_remote_embedder(
+        self, monkeypatch, chat_profile
+    ):
+        """The other arm, which no shipped template can reach today.
+
+        Every template is local, so nothing exercises the branch that tells the
+        user the published index will not match theirs. An untested arm is how
+        that message ends up naming the wrong command on the day a template
+        deliberately picks remote -- the case
+        ``test_no_template_selects_remote_embeddings_it_cannot_reach`` is
+        written to keep allowing.
+        """
+        monkeypatch.setitem(
+            config.PROFILE_TEMPLATES,
+            "openai",
+            {**config.PROFILE_TEMPLATES["openai"], "embedding_provider": "remote"},
+        )
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "Embeddings: remote" in result.output
+        assert "index build" in result.output
+        assert "Embeddings: local" not in result.output
 
     def test_the_key_is_not_echoed_while_being_typed(self, chat_profile):
         result = CliRunner().invoke(
