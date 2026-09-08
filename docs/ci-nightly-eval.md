@@ -188,7 +188,27 @@ controls stay hidden unless it runs.
   `refresh_baselines.py --perf-gate` (adds `step_time_ms.max` plus per-metric
   `policy`/`value` bounds -- min for throughput, max for latency/step-time, equal
   for checksums -- that the comparator then enforces; a required metric that is
-  absent is a failure).
+  absent is a failure).   `--perf-gate-entry <name>` (repeatable) restricts that to
+  named entries: the baseline file is rewritten whole, so an unscoped refresh
+  arms *every* entry's perf gates from whichever single run it just did.
+  Out-of-scope entries have their correctness data refreshed and their existing
+  performance bounds **carried over untouched**, so per-workload rollout is
+  additive -- blessing one workload cannot disarm another. The same holds in the
+  default mode: omitting `--perf-gate` does not disarm anything either. An
+  *unscoped* `--perf-gate` re-derives every cell it can, but even that never
+  deletes a bound it cannot reproduce: a hand-written spec on a `_NO_AUTO_GATE`
+  metric (`median_itl_ms`) or on a metric off the allowlist survives a re-bless
+  of its own cell, because `--perf-gate` has nothing to put back in its place.
+  A refresh may decline to arm a gate; it never disarms one.
+  Both are dispatch inputs on `refresh-baselines.yml` (`perf_gate` and
+  `perf_gate_entry`, the latter taking a comma- or space-separated list), so a
+  scoped refresh is runnable from the Actions UI without editing the workflow.
+  A `perf_gate_entry` that is non-empty but names nothing (`,`, whitespace) is
+  rejected rather than degrading into the unscoped refresh.
+  A worked example of rolling gating out for one workload -- which metrics to
+  bound, how many record-only runs to take first, and what to derive the
+  threshold from -- is in
+  [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md).
 
 ## Baselines
 
@@ -205,10 +225,18 @@ empty baseline file means **record-only** (nightly won't be red before blessing)
 The refresh **fails atomically** if any entry *ran* but couldn't be blessed
 (timeout / missing or empty `matrix.json` / a cell that didn't pass) — this
 prevents silently reverting live gates to record-only. Entries the runner
-**can't physically exercise** (e.g. `min_gpus: 8` variants on a smaller box) are
-**not** fatal: their existing baselines are carried over unchanged, so you can
-still refresh single-GPU baselines on a small runner and only re-bless the
-multi-GPU entries on an 8-GPU box.
+**can't exercise at all** are **not** fatal: their existing baselines are
+carried over unchanged, so you can still refresh single-GPU baselines on a small
+runner and only re-bless the multi-GPU entries on an 8-GPU box. Two declared
+capabilities behave this way, and both are honoured on the refresh path as well
+as by the nightly:
+
+- `min_gpus` — e.g. the `min_gpus: 8` variants on a smaller box.
+- `needs_docker_daemon` — an entry whose workload starts its own container. The
+  refresh lane mounts no docker socket, so such an entry skips there. Naming it
+  in `--perf-gate-entry` is a **hard error** rather than a skip: a refresh cannot
+  derive a bound from a cell it did not run, and a correctness-only file reads in
+  the PR diff exactly like a successful bless.
 
 ## Automated ROCm + dependency bumps
 

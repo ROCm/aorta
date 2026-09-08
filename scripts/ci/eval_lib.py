@@ -66,6 +66,22 @@ _METRIC_POLICIES: dict[str, str] = {
     "checksum": "equal",
 }
 
+# Allowlisted metrics that must never be blessed AUTOMATICALLY -- gateable when a
+# baseline names them by hand, but skipped by `refresh_baselines.py --perf-gate`.
+#
+# The allowlist above answers "may this metric be gated at all", and until now
+# that was also the whole of the answer to "should --perf-gate emit a bound for
+# it", because the refresher gates every allowlisted metric it observes. Those
+# are different questions for a metric whose observed value sits at or near
+# zero: --perf-gate derives `value * (1 + margin)`, and a relative margin around
+# zero is not a bound. `median_itl_ms` is measured at ~0 (the gateway delivers
+# several tokens per SSE chunk, so most recorded inter-token gaps are ~0 and the
+# real gaps land in `p99_itl_ms`), and an observation of exactly 0.0 blesses a
+# ceiling of 0.0 -- after which ANY positive inter-token gap fails the cell. That
+# is not a noisy gate, it is one that cannot pass. Excluding it here keeps the
+# metric charted and hand-gateable while stopping a refresh from arming it.
+_NO_AUTO_GATE: frozenset[str] = frozenset({"median_itl_ms"})
+
 
 def metric_policy(name: str) -> str | None:
     """Return the comparison policy (min/max/equal) for a metric, or None if the
@@ -85,6 +101,17 @@ def is_correctness_metric(name: str) -> bool:
 def is_performance_metric(name: str) -> bool:
     """True for allowlisted min/max metrics (throughput floors, latency ceilings)."""
     return _METRIC_POLICIES.get(name) in ("min", "max")
+
+
+def is_auto_gateable(name: str) -> bool:
+    """True for performance metrics `refresh_baselines.py --perf-gate` may bless.
+
+    Narrower than ``is_performance_metric``: see ``_NO_AUTO_GATE`` for why a
+    metric can be gateable by hand and still be wrong to arm from a margin.
+    ``compare_to_baseline`` is unaffected -- a baseline that names such a metric
+    explicitly is still enforced.
+    """
+    return is_performance_metric(name) and name not in _NO_AUTO_GATE
 
 
 def cell_passed(cell: dict[str, Any]) -> bool:

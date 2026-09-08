@@ -47,6 +47,18 @@ workload_config:
   output_len: 128
   max_concurrency: 8
   num_warmups: 1
+  # Two discarded bench steps, not the default one. A step-0 Triton compile
+  # excursion shows up in roughly 1 cell-run in 13 -- a ~10x first-token spike
+  # (465 ms against a 43-47 ms clean range) and a 2825 ms step against a
+  # 1108-1178 ms range -- and it survives `warmup_steps: 1`, because the compile
+  # lands in the first *measured* step after the single warmup step has already
+  # run. `num_warmups` cannot cover it: that warms requests within one bench
+  # invocation, not the compile cache across invocations. The excursion is
+  # positional, so discarding one more whole step removes it by construction.
+  # See the variance section of docs/tokenspeed-gating-rollout.md -- and note
+  # that every number in that table was taken at `warmup_steps: 1`, so the
+  # record-only window has to be re-taken at this setting before any bless.
+  warmup_steps: 2
   # Hold OSL fixed. Without it a model that emits EOS early produces short
   # outputs, so TPOT and throughput would describe a different amount of work
   # per cell and the two cells would no longer be comparable.

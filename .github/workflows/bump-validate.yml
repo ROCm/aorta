@@ -29,4 +29,11 @@ jobs:
     with:
       ref: ${{ github.event.pull_request.head.sha }}
       do_alert: false      # PRs must not file/close the nightly regression issue
+      # Explicitly off, not merely defaulted off. This lane runs PR head code on
+      # the self-hosted runner, so it must have no route to the host docker
+      # daemon -- a container that can reach the daemon can start a privileged
+      # one bind-mounting /. Stating it here means a future change to the
+      # input's default cannot silently arm the socket on a PR-triggered lane.
+      # The tokenspeed_serve_smoke entry reports `skip` without it, by design.
+      docker_socket: false
     secrets: inherit
