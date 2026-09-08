@@ -780,8 +780,9 @@ class _EscalationState:
     escalated: bool = False
     #: Set when the endpoint refused the escalated native request. A stock
     #: local vLLM without ``--enable-auto-tool-choice`` rejects any request
-    #: carrying ``tools``, and re-learning that once a query would bill a
-    #: guaranteed failure per query.
+    #: carrying ``tools``, and rediscovering that once a query would bill a
+    #: failure this process has already seen. An endpoint restarted with the
+    #: flag mid-process is not picked up; restarting chat is the way back.
     native_rejected: bool = False
 
 
@@ -948,13 +949,17 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
     every provider client spells its failures differently, and the one not
     enumerated is the one that reaches the user.
     """
-    llm = _get_llm(temperature=0.1, streaming=False)
-    messages = [
-        _build_answer_message(state.get("retrieved_context", "")),
-        *state["messages"],
-    ]
-    _ensure_ends_with_user(messages)
+    # Building the model is inside the guard, not before it. ``_get_llm``
+    # resolves the backend and can fail for the same reasons the call can, and
+    # the docstring above promises "" for a failure rather than for one of two
+    # failures.
     try:
+        llm = _get_llm(temperature=0.1, streaming=False)
+        messages = [
+            _build_answer_message(state.get("retrieved_context", "")),
+            *state["messages"],
+        ]
+        _ensure_ends_with_user(messages)
         response = await _send(llm, messages)
     except Exception as exc:  # last-resort extra call; see the docstring
         logger.warning(
@@ -1272,7 +1277,7 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
 async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
     """ReAct-style loop: LLM outputs ACTION lines, we execute and feed back.
 
-    Returns :data:`_ESCALATE_TO_NATIVE` instead of a state update when the model
+    Returns an :class:`_EscalateToNative` instead of a state update when the model
     cannot drive this protocol at all; :func:`act_node` turns that into the
     retry.
     """

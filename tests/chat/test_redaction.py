@@ -398,12 +398,27 @@ def _binding_source(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | Non
         current = parent
 
 
-def _smuggled_model_bindings(source: str) -> list[str]:
-    """Complaints about allowlisted receiver names in *source* bound to a model.
+#: The only bindings ``graph/nodes.py`` may give the allowlisted receiver names,
+#: as ``ast.unparse`` renders them. Pinning the expressions rather than only
+#: rejecting ``_get_llm`` is what closes the escapes the walk cannot see on its
+#: own -- an alias (``llm = _get_llm()`` then ``retriever = llm``) reads as
+#: innocent one step at a time, and a two-line detour is not a technique anyone
+#: has to be clever to find. Editing this map is meant to be the deliberate act.
+_PERMITTED_RECEIVER_BINDINGS = {
+    "retriever": {"get_retriever()"},
+    "tool_fn": {"TOOL_REGISTRY.get(name)"},
+}
 
-    Reports a binding it cannot read as well as one it can see is wrong, so the
-    two failures the guard has to survive -- a new smuggling route and a new
-    syntax for an old one -- both come out as a message rather than a pass.
+
+def _receiver_bindings(source: str) -> list[tuple[str, str | None, int]]:
+    """Every place *source* binds an allowlisted receiver name, and what from.
+
+    Yields ``(name, bound_expression_source, lineno)``, with ``None`` for a form
+    :func:`_binding_source` cannot read. Covers the shapes that put a value on a
+    name: assignment (plain, annotated, augmented, walrus, unpacked), ``for``,
+    ``with``, comprehensions, ``import ... as`` and function parameters. It does
+    *not* resolve values through intermediate variables -- that is what
+    :data:`_PERMITTED_RECEIVER_BINDINGS` is for.
     """
     tree = ast.parse(source)
     parents = {
@@ -411,30 +426,47 @@ def _smuggled_model_bindings(source: str) -> list[str]:
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
-    complaints = []
+    bindings = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.arg):
-            name = node.arg
+        if isinstance(node, ast.alias):
+            # `import x as retriever` binds a name without an `ast.Name` node
+            # anywhere, so the Store walk below never sees it.
+            name, assigned = (node.asname or node.name), None
+        elif isinstance(node, ast.arg):
+            # A parameter's value comes from a caller this file cannot see, so
+            # there is nothing here that could clear it.
+            name, assigned = node.arg, None
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            name = node.id
+            name, assigned = node.id, _binding_source(node, parents)
         else:
             continue
-        if name not in _NON_MODEL_AINVOKE_RECEIVERS:
-            continue
-        assigned = _binding_source(node, parents)
+        if name in _NON_MODEL_AINVOKE_RECEIVERS:
+            bindings.append((name, assigned, getattr(node, "lineno", 0)))
+    return bindings
+
+
+def _smuggled_model_bindings(source: str) -> list[str]:
+    """Complaints about allowlisted receiver names in *source* bound to a model.
+
+    Reports a binding it cannot read as well as one it can see is wrong, so the
+    two failures the guard has to survive -- a new smuggling route and a new
+    syntax for an old one -- both come out as a message rather than a pass.
+    """
+    complaints = []
+    for name, assigned, lineno in _receiver_bindings(source):
         if assigned is None:
             complaints.append(
-                f"line {node.lineno}: '{name}' is allowlisted out of the _send "
-                "gate and is bound by a form this guard cannot read, so it "
-                "cannot show that no chat model reaches it"
+                f"line {lineno}: '{name}' is allowlisted out of the _send gate "
+                "and is bound by a form this guard cannot read, so it cannot "
+                "show that no chat model reaches it"
             )
         elif "_get_llm" in assigned:
             # The whole bound expression, not just the part that lands on this
             # name: a tuple unpack hides which element is which, and over-
             # reporting there is the safe direction for a guard.
             complaints.append(
-                f"line {node.lineno}: '{name}' is allowlisted out of the _send "
-                f"gate but is assigned a chat model: {assigned}"
+                f"line {lineno}: '{name}' is allowlisted out of the _send gate "
+                f"but is assigned a chat model: {assigned}"
             )
     return complaints
 
@@ -491,23 +523,36 @@ class TestGraphChokepoint:
         source = Path(nodes_path()).read_text(encoding="utf-8")
         assert _smuggled_model_bindings(source) == []
 
-    def test_the_guard_actually_inspects_the_receivers_it_allowlists(self):
-        """A guard that matches nothing passes for the wrong reason.
+    def test_the_allowlisted_names_are_bound_only_to_what_they_claim(self):
+        """The stronger half: pin the bindings, not just reject ``_get_llm``.
 
-        Both allowlisted names are bound in ``graph/nodes.py`` today, so a
-        rename that left the allowlist behind would make the check above vacuous
-        while it kept reporting green. Counting the bindings is what notices.
+        The check above answers "is a model assigned here?", and a two-line
+        detour answers no to it -- ``llm = _get_llm()`` then ``retriever = llm``
+        mentions ``_get_llm`` on neither line that matters. An allowlist of
+        *bindings* has no such gap, and it also makes the check above
+        non-vacuous: a rename that left ``_NON_MODEL_AINVOKE_RECEIVERS`` behind
+        would otherwise keep reporting green against nothing.
         """
         source = Path(nodes_path()).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        bound = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Store)
-            and node.id in _NON_MODEL_AINVOKE_RECEIVERS
-        }
-        assert bound == set(_NON_MODEL_AINVOKE_RECEIVERS)
+        found: dict[str, set[str]] = {}
+        for name, assigned, _lineno in _receiver_bindings(source):
+            found.setdefault(name, set()).add(assigned)
+        assert found == {
+            name: set(expected)
+            for name, expected in _PERMITTED_RECEIVER_BINDINGS.items()
+        }, (
+            "graph/nodes.py binds a receiver that is allowlisted out of the "
+            "_send gate somewhere new. Confirm it still holds no chat model, "
+            "then update _PERMITTED_RECEIVER_BINDINGS deliberately."
+        )
+
+    def test_an_alias_of_a_model_is_caught_by_the_pinned_bindings(self):
+        """The escape the ``_get_llm`` walk cannot see, named as its own case."""
+        aliased = "llm = _get_llm()\nretriever = llm\n"
+        assert _smuggled_model_bindings(aliased) == []
+        found = {name for name, _assigned, _lineno in _receiver_bindings(aliased)}
+        assert found == {"retriever"}
+        assert ("retriever", "llm", 2) in _receiver_bindings(aliased)
 
     @pytest.mark.parametrize(
         "binding",
@@ -529,14 +574,21 @@ class TestGraphChokepoint:
         """One syntax for "bind this name" is not the same as all of them."""
         assert _smuggled_model_bindings(binding), binding
 
-    def test_a_binding_the_guard_cannot_read_is_reported_not_ignored(self):
-        """A parameter's value comes from a caller, so nothing here can clear it.
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            "async def f(retriever):\n    pass\n",
+            "from aorta.chat.graph.nodes import _get_llm as tool_fn",
+        ],
+    )
+    def test_a_binding_the_guard_cannot_read_is_reported_not_ignored(self, binding):
+        """Neither form has a value this file can inspect, so neither is cleared.
 
         Reported rather than skipped: staying silent on an unfamiliar shape is
         how an allowlist stops being a guard, since the next smuggling route is
         by definition one this code has not seen.
         """
-        complaints = _smuggled_model_bindings("async def f(retriever):\n    pass\n")
+        complaints = _smuggled_model_bindings(binding)
         assert len(complaints) == 1
         assert "cannot read" in complaints[0]
 
