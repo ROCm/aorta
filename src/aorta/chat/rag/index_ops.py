@@ -428,7 +428,8 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
       would compose two individually-correct behaviours into a dead end --
       refused, told to rebuild, refused again -- on a user who is already
       stuck. Vectors that are not comparable to this install's queries cannot
-      answer anything, so there is nothing to protect.
+      answer anything, and neither can a store that will not open, so in
+      either case there is nothing to protect.
 
       Asked through :func:`check_index`, which reads the *store* and not only
       the manifest. Asking ``_validate_against_provider`` instead -- the

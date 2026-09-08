@@ -102,8 +102,9 @@ re-download the embedding weights.
 | `fetch` | downloaded, and different | replaced, printing what changed |
 | `fetch` or `--from` | built locally | refused; pass `--force` |
 | `build` | built locally | rebuilt, as usual |
-| `build` (any corpus but the published one) | downloaded | refused; pass `--force` |
+| `build` (any corpus but the published one) | downloaded, and usable | refused; pass `--force` |
 | `build --public-only` | downloaded | rebuilt; it is the same corpus, so nothing is lost |
+| `build` | downloaded, but not usable by this install | rebuilt; it cannot answer anything, so nothing is lost |
 | `fetch` or `--from` | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
 | `build` | a manifest whose `corpus_roots` cannot be read | refused, unless a row above already exempts it; pass `--force` |
 
