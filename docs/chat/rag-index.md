@@ -105,7 +105,9 @@ resolves by installed version — a released wheel gets that release's asset, a
 It is the normal path for every chat provider, because the embedding provider is
 a separate choice and every `config init` profile leaves it local. The asset is
 built by CI under default settings, so `fetch` works exactly as long as your
-install still embeds with the local model — which is the reason
+install still embeds with the default local model — a hand-set
+`embedding_model` is refused just as a remote provider is, because the manifest
+check compares the model name and not only the flow. That is the reason
 [choosing a remote embedder](configuration.md#configuring-a-remote-embedding-provider-by-hand)
 means taking over the build.
 
@@ -145,7 +147,9 @@ the embedding library, which reads as a bug rather than as "you need to pre-seed
 a cache" — so if that is what you are looking at, this is the section you want.
 
 **A node that can reach an embeddings API but not Hugging Face** is the one
-case remote embeddings are genuinely for, and it is this one. It is not a
+case remote embeddings are genuinely for — but only where the pre-seeded cache
+above is out of reach, because that keeps embeddings local, free and unmetered
+on exactly the same node. Reach for it first. Remote is not a
 drop-in switch: it changes the collection name, makes the published asset
 unusable so `index build` becomes mandatory on every upgrade, bills you per
 query as well as per build, and sends the corpus — including the run-artifact

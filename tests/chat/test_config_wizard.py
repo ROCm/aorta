@@ -296,6 +296,101 @@ class TestConfigInit:
         assert "index build" in result.output
         assert "Embeddings: local" not in result.output
 
+    def test_the_advice_follows_the_environment_and_not_the_template(
+        self, monkeypatch, chat_profile
+    ):
+        """``AORTA_CHAT_*`` outranks the file ``config init`` has just written.
+
+        Reporting the template would tell a user with the override exported
+        that local embeddings were configured and send them to ``index fetch``,
+        which then refuses the published asset -- advice their own environment
+        does not let them follow, which is the failure this command was changed
+        to stop rather than to reproduce.
+        """
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_PROVIDER", "remote")
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "Embeddings: remote" in result.output
+        assert "index build" in result.output
+        assert "index fetch" not in result.output
+
+    def test_it_says_where_the_override_came_from(self, monkeypatch, chat_profile):
+        """Otherwise the line contradicts the file it was just told was written."""
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_PROVIDER", "remote")
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER" in result.output
+        assert 'embedding_provider = "local"' in chat_profile.read_text(encoding="utf-8")
+
+    def test_a_hand_set_local_model_does_not_get_promised_fetch_either(
+        self, monkeypatch, chat_profile
+    ):
+        """The provider alone is not the test the manifest applies.
+
+        ``rag/manifest.validate`` refuses on the model name and on the
+        embedding identity, which for the local provider *is* the model name --
+        so a local install on another model is refused exactly like a remote
+        one, and must not be sent to ``index fetch``.
+        """
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "Embeddings: local" in result.output
+        assert "bge-large-en-v1.5" in result.output
+        assert "index build" in result.output
+        assert "index fetch" not in result.output
+
+    @pytest.mark.parametrize("spelling", sorted(config.LOCAL_EMBEDDING_PROVIDERS - {"local"}))
+    def test_an_accepted_spelling_of_local_is_still_local(
+        self, spelling, monkeypatch, chat_profile
+    ):
+        """``onnx`` and ``fastembed`` resolve to the local flow in the factory.
+
+        Reading the setting as an opaque string would tell these users the
+        published index does not match theirs and send them to a build they do
+        not need -- the same unfollowable advice, pointed the other way.
+        """
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_PROVIDER", spelling)
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "index fetch" in result.output
+        assert "index build" not in result.output
+
+    def test_the_local_spellings_match_the_factory(self):
+        """Duplicated because importing the factory would pull in langchain_core.
+
+        ``config init`` has no other reason to load it, so the list is repeated
+        rather than imported -- the same arrangement as ``_CONFIG_PROFILES``,
+        and this is the guard on it.
+        """
+        from aorta.chat.rag.embeddings import factory
+
+        resolves_local = {
+            name
+            for name, target in {**{k: k for k in factory._PROVIDERS}, **factory._ALIASES}.items()
+            if target == "local"
+        }
+        assert resolves_local == set(config.LOCAL_EMBEDDING_PROVIDERS)
+
+    def test_a_broken_environment_does_not_traceback_over_a_written_profile(
+        self, monkeypatch, chat_profile
+    ):
+        """The file is already on disk by the time the settings are merged.
+
+        An unrelated bad ``AORTA_CHAT_*`` value used to be invisible here,
+        because the command never built ``Settings``. Now that it does, it must
+        report the problem rather than exit non-zero over a write that worked.
+        """
+        monkeypatch.setenv("AORTA_CHAT_LLM_TIMEOUT", "not-a-number")
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert chat_profile.exists()
+        assert "config validate" in result.output
+
     def test_the_key_is_not_echoed_while_being_typed(self, chat_profile):
         result = CliRunner().invoke(
             chat,

@@ -624,6 +624,78 @@ def write_profile(values: dict[str, Any], path: Path | None = None) -> Path:
     return path
 
 
+#: Spellings of ``embedding_provider`` that select the local flow.
+#: ``rag/embeddings/factory.py`` owns the list; it is repeated here because
+#: importing that module pulls in langchain_core and both provider modules,
+#: which ``aorta chat config init`` has no other reason to load. Same
+#: arrangement as ``_CONFIG_PROFILES`` in ``cli/chat.py``, and
+#: ``tests/chat/test_config_wizard.py`` fails if the two drift apart.
+LOCAL_EMBEDDING_PROVIDERS = frozenset({"local", "onnx", "fastembed"})
+
+
+def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
+    """What this install will embed with, and which index command follows.
+
+    Read from the merged settings rather than from *profile_values*, because
+    ``AORTA_CHAT_*`` outranks the file ``config init`` has just written. A user
+    with ``AORTA_CHAT_EMBEDDING_PROVIDER=remote`` exported would otherwise be
+    told local embeddings were configured and sent to ``index fetch``, which
+    then refuses the published asset -- advice the environment does not let
+    them follow, which is the shape of failure this whole path exists to stop.
+
+    ``index fetch`` is promised only when the provider *and* the model agree
+    with the defaults CI publishes the asset under. :func:`rag.manifest.validate`
+    refuses on the model name and on the embedding identity, which for the local
+    provider is the model name again -- so a local install on a hand-set
+    ``embedding_model`` is refused exactly like a remote one.
+    """
+    try:
+        current = get_settings()
+    except Exception as exc:  # pydantic ValidationError, or a field validator
+        # The profile is already on disk at this point, so an unrelated bad
+        # AORTA_CHAT_* value must not turn a successful write into a traceback.
+        return [
+            f"Embeddings: cannot be resolved -- {exc}",
+            "Sort the environment out first: aorta chat config validate",
+        ]
+
+    default_model = Settings.model_fields["embedding_model"].default
+    if current.embedding_provider.strip().lower() not in LOCAL_EMBEDDING_PROVIDERS:
+        lines = [
+            f"Embeddings: {current.embedding_provider}, via "
+            f"{current.remote_embedding_model}. The published index is built "
+            "with the local model, so 'aorta chat index build' is required "
+            "before querying."
+        ]
+    elif current.embedding_model != default_model:
+        lines = [
+            f"Embeddings: local, on this machine ({current.embedding_model}). "
+            f"The published index is built with {default_model}, so 'aorta "
+            "chat index build' is required before querying."
+        ]
+    else:
+        lines = [
+            "Embeddings: local, on this machine. 'aorta chat index fetch' "
+            "installs the published index unchanged."
+        ]
+
+    # Naming the variable matters more than naming the value: the line above
+    # otherwise contradicts the file the user was just told was written, with
+    # nothing on screen to say which one wins.
+    overridden = [
+        f"{ENV_PREFIX}{field.upper()}"
+        for field in ("embedding_provider", "embedding_model")
+        if getattr(current, field)
+        != profile_values.get(field, Settings.model_fields[field].default)
+    ]
+    if overridden:
+        lines.append(
+            f"That is {' and '.join(overridden)} from the environment, which "
+            "outranks the profile just written."
+        )
+    return lines
+
+
 def mask(value: str) -> str:
     """Render a credential as its length and last four characters.
 
@@ -708,6 +780,7 @@ def validate_profile(path: Path | None = None) -> list[str]:
 
 __all__ = [
     "ENV_PREFIX",
+    "LOCAL_EMBEDDING_PROVIDERS",
     "PROFILE_FILE_MODE",
     "PROFILE_PROMPTS",
     "PROFILE_TEMPLATES",
@@ -717,6 +790,7 @@ __all__ = [
     "Settings",
     "apply_cli_overrides",
     "configure",
+    "describe_embeddings",
     "effective_settings",
     "get_settings",
     "mask",

@@ -174,11 +174,18 @@ deliberate, manual change, and this is the whole procedure.
 
 ### When this is the right choice
 
-**One case, and it is narrow: a node that can reach an embeddings API but
-cannot reach Hugging Face.** The local embedder downloads ~65 MB of ONNX weights
-from Hugging Face on first use, so a host firewalled off from it — but allowed
-out to a corporate gateway — cannot embed locally at all. Remote embeddings are
-the way out of that, and the only reason the code path exists.
+**One case, and it is narrow: a node that can reach an embeddings API, cannot
+reach Hugging Face, and cannot have its model cache pre-seeded.** The local
+embedder downloads ~65 MB of ONNX weights from Hugging Face on first use, so a
+host firewalled off from it — but allowed out to a corporate gateway — has
+nothing to embed with until those weights arrive by some other route.
+
+Copying them in is that other route, and it is the better one: the
+[pre-seeded cache](rag-index.md#air-gapped-nodes) keeps embeddings local, free
+and unmetered on a host that cannot reach Hugging Face at all. Try it first.
+Remote embeddings are what is left when it is impractical — no second machine on
+the same AORTA version, no way to move 65 MB onto the node, or a policy against
+carrying model weights — and that is the only reason the code path exists.
 
 Everything else that looks like a reason is not one:
 
@@ -201,7 +208,9 @@ risk to be managed.
    place.** CI builds the index asset with default settings, so its vectors are
    the local model's. An index is only meaningful to the model that produced it,
    and the manifest check refuses a mismatch rather than answering from it. So
-   `aorta chat index fetch` will refuse the download, and an already-fetched
+   `aorta chat index fetch` refuses to *install* what it downloaded — the
+   manifest is validated after the asset has been transferred and checksummed,
+   so you pay for the download and then get the refusal — and an already-fetched
    index will refuse every query. You take over building the index yourself, on
    every AORTA upgrade, until you [go back](#going-back).
 2. **Every query costs money, not just the build.** The one-off index build
@@ -301,11 +310,11 @@ them every time you rebuild. Skipping it leaves the run-artifact tools without
 an index they can read, which is a worse assistant but not an egress you did
 not choose.
 
-Not `index fetch` — that will refuse, correctly, because the published asset is
-the local model's. `index build` embeds everything under `aorta_path` through
-the provider you just configured, and writes it to a collection named after
-that provider and model, so the local collection already in the file is not
-overwritten.
+Not `index fetch` — it downloads the asset and then refuses to install it,
+correctly, because the published asset is the local model's. `index build`
+embeds everything under `aorta_path` through the provider you just configured,
+and writes it to a collection named after that provider and model, so the local
+collection already in the file is not overwritten.
 
 Know what you are giving up in coverage as well as in cost: `aorta_path`
 defaults to the installed `aorta` package, so a local build indexes the code
