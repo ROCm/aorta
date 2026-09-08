@@ -13,7 +13,9 @@ belong to ``aorta.probe.redaction`` and are tested with the bundle:
 
 from __future__ import annotations
 
+import ast
 import io
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -351,6 +353,91 @@ class TestSummaryWording:
 #: still has to go through ``_send``.
 _NON_MODEL_AINVOKE_RECEIVERS = frozenset({"retriever", "tool_fn"})
 
+#: How each AST node that can bind a name exposes the expression it binds
+#: *from*. The guard below walks bindings rather than assignments because the
+#: shapes are not interchangeable: ``retriever: BaseChatModel = _get_llm()`` is
+#: an ``ast.AnnAssign``, and a check that only visited ``ast.Assign`` waved it
+#: straight through while the allowlist still exempted ``retriever.ainvoke(...)``
+#: from the chokepoint test above.
+_BINDING_SOURCE_ATTR = {
+    ast.Assign: "value",
+    ast.AnnAssign: "value",
+    ast.AugAssign: "value",
+    ast.NamedExpr: "value",
+    ast.For: "iter",
+    ast.AsyncFor: "iter",
+    ast.comprehension: "iter",
+    ast.withitem: "context_expr",
+}
+
+
+def _binding_source(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | None:
+    """The source text the binding at *node* takes its value from.
+
+    ``""`` when the form binds no value at all (a bare annotation), and ``None``
+    when it is a shape :data:`_BINDING_SOURCE_ATTR` cannot read -- a function
+    parameter, say, whose value comes from a caller this file cannot see. The
+    caller fails on ``None`` rather than passing, because a guard that goes
+    quiet on an unfamiliar shape is a guard that can be walked around by
+    reaching for one.
+    """
+    current = node
+    while True:
+        parent = parents.get(current)
+        if parent is None:
+            return None
+        attr = _BINDING_SOURCE_ATTR.get(type(parent))
+        if attr is not None:
+            value = getattr(parent, attr, None)
+            return "" if value is None else ast.unparse(value)
+        if isinstance(
+            parent,
+            (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            return None
+        current = parent
+
+
+def _smuggled_model_bindings(source: str) -> list[str]:
+    """Complaints about allowlisted receiver names in *source* bound to a model.
+
+    Reports a binding it cannot read as well as one it can see is wrong, so the
+    two failures the guard has to survive -- a new smuggling route and a new
+    syntax for an old one -- both come out as a message rather than a pass.
+    """
+    tree = ast.parse(source)
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    complaints = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg):
+            name = node.arg
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            name = node.id
+        else:
+            continue
+        if name not in _NON_MODEL_AINVOKE_RECEIVERS:
+            continue
+        assigned = _binding_source(node, parents)
+        if assigned is None:
+            complaints.append(
+                f"line {node.lineno}: '{name}' is allowlisted out of the _send "
+                "gate and is bound by a form this guard cannot read, so it "
+                "cannot show that no chat model reaches it"
+            )
+        elif "_get_llm" in assigned:
+            # The whole bound expression, not just the part that lands on this
+            # name: a tuple unpack hides which element is which, and over-
+            # reporting there is the safe direction for a guard.
+            complaints.append(
+                f"line {node.lineno}: '{name}' is allowlisted out of the _send "
+                f"gate but is assigned a chat model: {assigned}"
+            )
+    return complaints
+
 
 class TestGraphChokepoint:
     async def test_every_node_send_goes_through_the_gate(self):
@@ -373,9 +460,6 @@ class TestGraphChokepoint:
         being guarded against is a *new* call site, which no existing test would
         exercise.
         """
-        import ast
-        from pathlib import Path
-
         source = Path(nodes_path()).read_text(encoding="utf-8")
         offenders = []
         for node in ast.walk(ast.parse(source)):
@@ -404,23 +488,57 @@ class TestGraphChokepoint:
         by receiver name is only as good as what those names are bound to, so
         this pins that neither is ever assigned from ``_get_llm``.
         """
-        import ast
-        from pathlib import Path
-
         source = Path(nodes_path()).read_text(encoding="utf-8")
-        for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.Assign):
-                continue
-            targets = {
-                target.id for target in node.targets if isinstance(target, ast.Name)
-            }
-            if not targets & _NON_MODEL_AINVOKE_RECEIVERS:
-                continue
-            assigned = ast.unparse(node.value)
-            assert "_get_llm" not in assigned, (
-                f"{targets & _NON_MODEL_AINVOKE_RECEIVERS} is allowlisted out of "
-                f"the _send gate but is assigned a chat model: {assigned}"
-            )
+        assert _smuggled_model_bindings(source) == []
+
+    def test_the_guard_actually_inspects_the_receivers_it_allowlists(self):
+        """A guard that matches nothing passes for the wrong reason.
+
+        Both allowlisted names are bound in ``graph/nodes.py`` today, so a
+        rename that left the allowlist behind would make the check above vacuous
+        while it kept reporting green. Counting the bindings is what notices.
+        """
+        source = Path(nodes_path()).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        bound = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and node.id in _NON_MODEL_AINVOKE_RECEIVERS
+        }
+        assert bound == set(_NON_MODEL_AINVOKE_RECEIVERS)
+
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            "retriever = _get_llm()",
+            # The one the previous version of this guard let through: an
+            # annotation makes it an `ast.AnnAssign`, which `ast.Assign` alone
+            # never visited, while the allowlist above still exempted
+            # `retriever.ainvoke(...)` from the chokepoint test.
+            "retriever: BaseChatModel = _get_llm()",
+            "retriever, other = _get_llm(), 1",
+            "if (tool_fn := _get_llm()):\n    pass",
+            "with _get_llm() as retriever:\n    pass",
+            "for tool_fn in [_get_llm()]:\n    pass",
+            "candidates = [tool_fn for tool_fn in [_get_llm()]]",
+        ],
+    )
+    def test_every_binding_form_is_seen_by_the_guard(self, binding):
+        """One syntax for "bind this name" is not the same as all of them."""
+        assert _smuggled_model_bindings(binding), binding
+
+    def test_a_binding_the_guard_cannot_read_is_reported_not_ignored(self):
+        """A parameter's value comes from a caller, so nothing here can clear it.
+
+        Reported rather than skipped: staying silent on an unfamiliar shape is
+        how an allowlist stops being a guard, since the next smuggling route is
+        by definition one this code has not seen.
+        """
+        complaints = _smuggled_model_bindings("async def f(retriever):\n    pass\n")
+        assert len(complaints) == 1
+        assert "cannot read" in complaints[0]
 
 
 def nodes_path() -> str:

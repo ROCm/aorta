@@ -38,10 +38,9 @@ from aorta.chat.graph.nodes import (
 def _no_sticky_escalation():
     """Undo any auto-escalation, which is process-wide by design.
 
-    ``_escalated_to_native`` is deliberately a module global: "keep it for the
-    process" is the point, and the whole test run is one process. Without this
-    an escalation in one test silently puts the next one on the native
-    protocol.
+    ``_EscalationState`` is deliberately process-wide: "keep it for the process"
+    is the point, and the whole test run is one process. Without this an
+    escalation in one test silently puts the next one on the native protocol.
     """
     nodes.reset_tool_mode_escalation()
     yield
@@ -427,17 +426,23 @@ class TestNativeLoop:
         assert result["messages"][0].content == _NO_ANSWER_MSG
 
 
-def _dead_end_reply(output_tokens: int = 105, reasoning: str | None = None):
+def _dead_end_reply(
+    output_tokens: int = 105,
+    reasoning: str | None = None,
+    finish_reason: str = "stop",
+):
     """The signature docs/chat/providers.md calls distinctive.
 
-    Empty ``content`` with a non-zero output-token count: the model spent tokens
-    and returned no text, so the text went somewhere this protocol cannot read.
-    Taken from the reporter's transcript -- "round 1 produced no text despite
-    105 output tokens".
+    Empty ``content``, a non-zero output-token count and ``finish_reason:
+    stop``: the model spent tokens, finished normally and returned no text, so
+    the text went somewhere this protocol cannot read. Taken from the
+    reporter's transcript -- "round 1 produced no text despite 105 output
+    tokens".
     """
     return AIMessage(
         content="",
         additional_kwargs={"reasoning": reasoning} if reasoning else {},
+        response_metadata={"finish_reason": finish_reason} if finish_reason else {},
         usage_metadata={
             "input_tokens": 900,
             "output_tokens": output_tokens,
@@ -513,6 +518,39 @@ class TestTheDeadEndSignature:
         reply = AIMessage(content="")
         reply.usage_metadata = {"output_tokens": "many"}  # type: ignore[assignment]
         assert not nodes._is_reasoning_dead_end(reply)
+
+    @pytest.mark.parametrize("reason", ["length", "content_filter", "max_tokens"])
+    def test_a_stated_cutoff_disqualifies_the_token_signal(self, reason):
+        """Tokens spent with no text also describes a truncation or a filter.
+
+        Neither is a protocol problem -- native would run out of tokens too --
+        and this is the half of the trigger that would otherwise switch the
+        whole process on one of them.
+        """
+        assert not nodes._is_reasoning_dead_end(
+            _dead_end_reply(finish_reason=reason)
+        )
+
+    def test_anthropics_field_name_is_read_as_well(self):
+        """LiteLLM normalises to ``finish_reason``; langchain-anthropic does not."""
+        reply = _dead_end_reply(finish_reason="")
+        reply.response_metadata = {"stop_reason": "max_tokens"}
+        assert not nodes._is_reasoning_dead_end(reply)
+
+    def test_an_unstated_finish_reason_does_not_disqualify_it(self):
+        """The field is optional, so requiring it would silence the escalation.
+
+        Same asymmetry as the reasoning channel: a *stated* cutoff is evidence,
+        an absent one is not, and a gateway that omits it is the one this was
+        written for.
+        """
+        assert nodes._is_reasoning_dead_end(_dead_end_reply(finish_reason=""))
+
+    def test_the_reasoning_channel_survives_a_cutoff(self):
+        """It is the stronger signal: the answer demonstrably went elsewhere."""
+        assert nodes._is_reasoning_dead_end(
+            _dead_end_reply(reasoning="analysis...", finish_reason="length")
+        )
 
     def test_requiring_the_channel_is_a_one_line_change(self, monkeypatch):
         """What flipping the flag buys, so the option stays real rather than aspirational."""
@@ -688,11 +726,177 @@ class TestAutoEscalationToNative:
         assert first == 1
         assert caplog.text.count("Retrying this query on native") == 1
         assert "AORTA_CHAT_LLM_TOOL_MODE" in caplog.text
-        # Points at the startup line, which does name the protocol, rather than
-        # at `aorta chat doctor`, which reports extras, the backend, the index
-        # and the model cache but nothing about the tool protocol.
-        assert "LLM backend" in caplog.text
+        # Names the protocol itself rather than sending the reader to the
+        # startup banner, which `aorta chat ui` never prints (#468). Not
+        # `aorta chat doctor` either: it reports extras, the backend, the index
+        # and the model cache, but nothing about the tool protocol.
+        assert "'text' protocol" in caplog.text
         assert "aorta chat doctor" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_the_announcement_reports_only_what_was_observed(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """It used to assert reasoning came back even when nothing said so.
+
+        ``_REQUIRE_REASONING_CHANNEL`` is False, so the trigger fires on tokens
+        alone far more often than on a populated channel -- and a log line that
+        claims an unobserved fact is the kind that sends someone hunting for a
+        reasoning field their gateway never sent.
+        """
+        plain, _bound = _escalating_llm()
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+        ):
+            await act_node(_state())
+        assert "105 output tokens spent on empty content" in caplog.text
+        assert "side channel" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_an_observed_reasoning_channel_is_named(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        plain, _bound = _escalating_llm()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply(reasoning="hmm"))
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+        ):
+            await act_node(_state())
+        assert "reasoning returned on a side channel" in caplog.text
+
+
+class TestConcurrentQueriesShareTheSwitch:
+    """One flag, two requests already in flight, and who is owed the retry.
+
+    ``aorta chat ui`` serves many browser sessions from one process, so two
+    queries can be inside the text loop at once. Making the transition and the
+    retry share a single "have we escalated?" test meant the second one read
+    its own dead end as somebody else's business.
+    """
+
+    def test_a_second_dead_end_still_gets_the_retry(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The flag suppresses the transition and its log line, not the retry.
+
+        Called directly rather than through two concurrent ``act_node`` runs
+        because the ordering under test is exactly the one an event loop will
+        not reproduce on demand: both requests past the guard, then one of them
+        setting it.
+        """
+        assert nodes._escalate_to_native(_dead_end_reply()) is True
+        assert nodes._escalate_to_native(_dead_end_reply()) is True
+
+    def test_the_second_one_is_not_announced_again(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        with caplog.at_level("WARNING"):
+            nodes._escalate_to_native(_dead_end_reply())
+            nodes._escalate_to_native(_dead_end_reply())
+        assert caplog.text.count("Retrying this query on native") == 1
+
+    def test_an_explicit_protocol_still_comes_first(self, text_mode):
+        """Reordering the flag must not have reordered the gate that matters."""
+        assert nodes._escalate_to_native(_dead_end_reply()) is False
+
+    def test_a_reply_without_the_signature_still_comes_first(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        nodes._escalate_to_native(_dead_end_reply())
+        assert nodes._escalate_to_native(AIMessage(content="")) is False
+
+
+class TestAnEndpointThatRefusesNative:
+    """The escalation is speculative, so it must not make the query worse.
+
+    A stock local vLLM started without ``--enable-auto-tool-choice`` rejects any
+    request carrying ``tools`` -- and its user is exactly who the escalation
+    targets, because never setting ``llm_tool_mode`` is what makes them eligible.
+    """
+
+    @staticmethod
+    def _refusing_llm():
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(
+            side_effect=RuntimeError(
+                "400: 'auto' tool choice requires --enable-auto-tool-choice"
+            )
+        )
+        plain.bind_tools = MagicMock(return_value=bound)
+        return plain, bound
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_does_not_escape_the_graph(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Unhandled it replaced a poor answer with a traceback out of the run."""
+        plain, _bound = self._refusing_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            result = await act_node(_state())
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_the_switch_is_rolled_back(self, text_mode, tool_mode_not_chosen):
+        """Left set, it sent every later query straight into the same refusal."""
+        plain, _bound = self._refusing_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+        assert nodes._resolved_tool_mode() == "text"
+
+    @pytest.mark.asyncio
+    async def test_native_is_not_tried_again_in_this_process(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Rolling back alone would re-buy the refusal once per query."""
+        plain, bound = self._refusing_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+            await act_node(_state())
+        assert bound.ainvoke.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_the_reason_and_the_remedy_are_logged(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        plain, _bound = self._refusing_llm()
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+        ):
+            await act_node(_state())
+        assert "refused by the endpoint" in caplog.text
+        assert "--enable-auto-tool-choice" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_loop_that_ran_a_tool_keeps_its_trace(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The label depends on it, and the sentinel used to drop it.
+
+        One tool call, then two silent rounds: tools *did* run, so the fallback
+        must not tell the user it could not use any.
+        """
+        from aorta.chat.graph.nodes import _DEGRADED_ANSWER_PREFIX
+
+        plain, _bound = self._refusing_llm()
+        plain.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(content='ACTION: list_files(path=".")'),
+                _dead_end_reply(),
+                _dead_end_reply(),
+            ]
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+        ):
+            result = await act_node(_state())
+        assert _DEGRADED_ANSWER_PREFIX not in result["messages"][0].content
+        assert result["tool_trace"]
 
 
 class TestTheDegradedRetrievalFallback:
@@ -781,6 +985,44 @@ class TestTheDegradedRetrievalFallback:
         with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
             result = await act_node(_state())
         assert result["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_that_raises_still_reports_the_dead_end(self, text_mode):
+        """This call is an addition to a path that previously made none.
+
+        The likeliest reason the act loop dead-ended is an unwell backend, which
+        is exactly when this extra call raises -- and letting it through would
+        turn the give-up notice into a traceback on the query that needed the
+        notice most.
+        """
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(content=""),
+                AIMessage(content=""),
+                RuntimeError("connection reset by peer"),
+            ]
+        )
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            result = await act_node(_state())
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_a_failed_fallback_is_diagnosable(self, text_mode, caplog):
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(content=""),
+                AIMessage(content=""),
+                RuntimeError("connection reset by peer"),
+            ]
+        )
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+        ):
+            await act_node(_state())
+        assert "connection reset by peer" in caplog.text
 
     @pytest.mark.asyncio
     async def test_a_loop_that_did_run_a_tool_is_not_labelled_as_toolless(

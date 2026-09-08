@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import (
@@ -295,6 +296,28 @@ def _output_tokens(response: Any) -> int:
         return int(usage.get("output_tokens") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+#: Finish reasons that say the reply was cut off or filtered rather than
+#: completed. OpenAI spells them ``length`` and ``content_filter``; Anthropic
+#: reports ``max_tokens`` on ``stop_reason``. Used only to *disqualify* the
+#: token signal, never as a requirement -- see :func:`_is_reasoning_dead_end`.
+_INCOMPLETE_FINISH_REASONS = frozenset({"length", "content_filter", "max_tokens"})
+
+
+def _finish_reason(response: Any) -> str:
+    """Why the provider says generation stopped, lowercased, or "" if unsaid.
+
+    ``finish_reason`` is the OpenAI field and ``stop_reason`` the Anthropic one;
+    both arrive on ``response_metadata`` and neither is guaranteed, so "" means
+    "the stack did not say" rather than "it completed".
+    """
+    metadata = getattr(response, "response_metadata", None) or {}
+    for field in ("finish_reason", "stop_reason"):
+        value = metadata.get(field)
+        if value:
+            return str(value).strip().lower()
+    return ""
 
 
 def _log_empty_content(response: Any, node: str) -> None:
@@ -702,25 +725,73 @@ def _is_reasoning_dead_end(response: Any) -> bool:
     it. Hence the asymmetry: either fact alone is enough by default, and
     :data:`_REQUIRE_REASONING_CHANNEL` turns the channel into a requirement in
     one line if it is ever shown to be dependable.
+
+    The token half carries the finish reason with it, because "spent tokens and
+    said nothing" also describes a length cutoff and a content filter, and
+    neither is a protocol problem: switching the process to native would not
+    make a truncated reply complete. A *stated* cutoff therefore disqualifies
+    it. An unstated one does not, for the same reason the reasoning channel is
+    not required -- the field is optional and differently named per provider,
+    and demanding it would mean the escalation never fires on a gateway that
+    omits it. The reasoning channel stays sufficient on its own either way: it
+    is direct evidence the answer went somewhere this protocol cannot read.
     """
     has_reasoning = bool(_reasoning_channel(response))
-    spent_tokens = _output_tokens(response) > 0
+    cut_short = _finish_reason(response) in _INCOMPLETE_FINISH_REASONS
+    spent_tokens = _output_tokens(response) > 0 and not cut_short
     if _REQUIRE_REASONING_CHANNEL:
         return has_reasoning and spent_tokens
     return has_reasoning or spent_tokens
 
 
-#: Set for the rest of the process once the signature above is seen. "Keep it
-#: for the process": a model that cannot drive the text protocol on one query
-#: cannot drive it on the next, and paying two wasted rounds per query to
-#: rediscover that is the cost this exists to remove.
-_escalated_to_native = False
+def _dead_end_signature(response: Any) -> str:
+    """What was actually observed, for a log line that must not overstate it.
+
+    :func:`_is_reasoning_dead_end` has two sufficient halves and either fires
+    alone, so a message naming the reasoning channel unconditionally reported a
+    fact that had usually not been observed.
+    """
+    parts = []
+    tokens = _output_tokens(response)
+    if tokens:
+        parts.append(f"{tokens} output tokens spent on empty content")
+    if _reasoning_channel(response):
+        parts.append("reasoning returned on a side channel")
+    return ", ".join(parts) or "empty content"
+
+
+@dataclass
+class _EscalationState:
+    """What this process has learned about which tool protocol the endpoint serves.
+
+    Process-wide on purpose, and deliberately *not* the per-session shape
+    :class:`aorta.chat.redaction.NoticeState` uses. That notice is a disclosure
+    owed to one user, so one Chainlit session's must not consume another's.
+    This is a fact about the endpoint every session in the process talks to, so
+    scoping it per session would put the two wasted rounds back on every
+    browser tab -- which is the cost it exists to remove.
+
+    A mutable object rather than two module globals so that the escalation and
+    the rollback that undoes it read and write one thing.
+    """
+
+    #: Set once the dead-end signature is seen. What moves *later* queries
+    #: straight to native, through :func:`_resolved_tool_mode`.
+    escalated: bool = False
+    #: Set when the endpoint refused the escalated native request. A stock
+    #: local vLLM without ``--enable-auto-tool-choice`` rejects any request
+    #: carrying ``tools``, and re-learning that once a query would bill a
+    #: guaranteed failure per query.
+    native_rejected: bool = False
+
+
+_escalation = _EscalationState()
 
 
 def reset_tool_mode_escalation() -> None:
-    """Forget any auto-escalation. For tests, which share one process."""
-    global _escalated_to_native
-    _escalated_to_native = False
+    """Forget what was learned about the protocol. For tests, which share one process."""
+    _escalation.escalated = False
+    _escalation.native_rejected = False
 
 
 def _tool_mode_is_explicit() -> bool:
@@ -753,7 +824,7 @@ def _tool_mode_is_explicit() -> bool:
 def _resolved_tool_mode() -> str:
     """The tool protocol to use now, after any auto-escalation."""
     mode = settings.llm_tool_mode.strip().lower()
-    if mode == "text" and _escalated_to_native:
+    if mode == "text" and _escalation.escalated:
         return "native"
     return mode
 
@@ -767,25 +838,35 @@ def _escalate_to_native(response: Any) -> bool:
     * the failure has to look like the protocol rather than the query, or a
       truncation would silently change the user's configured protocol;
     * the user must not have chosen the protocol themselves;
-    * and it happens once per process, so the retry cannot recur per query.
+    * and the endpoint must not already have refused the native protocol, or
+      every query would pay for rediscovering a refusal.
+
+    What happens once per process is the *transition* and its log line, not the
+    retry -- which is why the flag is read after the gates rather than as one
+    of them. Two Chainlit sessions can both be inside the text loop when the
+    first flips it, and testing it first made the second read its own dead end
+    as somebody else's business: it returned False and fell through to the
+    degraded fallback without ever trying the protocol just chosen for it.
     """
-    global _escalated_to_native
-    if _escalated_to_native or _tool_mode_is_explicit():
+    if _tool_mode_is_explicit() or _escalation.native_rejected:
         return False
     if not _is_reasoning_dead_end(response):
         return False
-    _escalated_to_native = True
-    logger.warning(
-        "The model returned reasoning but no answer and no tool call, which is "
-        "how a reasoning model behaves on the 'text' tool protocol. Retrying "
-        "this query on native function calling, and using it for the rest of "
-        "this process. Set AORTA_CHAT_LLM_TOOL_MODE to choose the protocol "
-        "yourself; the 'LLM backend' line at startup names the one that was in "
-        "force when this process began."
-    )
+    first = not _escalation.escalated
+    _escalation.escalated = True
+    if first:
+        logger.warning(
+            "The model returned no answer and no tool call (%s), which is how a "
+            "reasoning model behaves on the 'text' tool protocol. Retrying this "
+            "query on native function calling, and using it for the rest of "
+            "this process. Set AORTA_CHAT_LLM_TOOL_MODE to choose the protocol "
+            "yourself; this process started on the 'text' protocol.",
+            _dead_end_signature(response),
+        )
     return True
 
 
+@dataclass(frozen=True)
 class _EscalateToNative:
     """Sentinel: the text loop gave up and the protocol, not the query, is why.
 
@@ -793,12 +874,14 @@ class _EscalateToNative:
     the escalation is then visible at the dispatch point rather than buried
     inside one protocol's implementation, and ``_act_text`` keeps its single
     job of driving one protocol.
+
+    It carries the trace the abandoned loop accumulated because the label on a
+    fallback answer depends on it: if the native retry cannot run at all, the
+    query still has to land on :func:`_abandoned_result`, and a loop that ran a
+    tool before going quiet must not be told there that it used none.
     """
 
-    __slots__ = ()
-
-
-_ESCALATE_TO_NATIVE = _EscalateToNative()
+    trace: tuple[str, ...] = ()
 
 #: Goes into the answer slot, so it names nothing internal: no environment
 #: variable, neither tool protocol, and no class of model. The user asked a
@@ -842,11 +925,28 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
     This is the same single call that route makes, on the context ``retrieve``
     already gathered, so it adds one call and no retrieval work. It is also
     independent of the auto-escalation above and worth having alongside it: it
-    covers a tool outage, a provider hiccup, and any future model that can drive
-    neither protocol.
+    covers a provider hiccup on one protocol, an endpoint that refuses the
+    other, and any future model that can drive neither.
 
-    Returns "" when the model produces nothing, so the caller still reports the
-    dead end rather than an empty answer.
+    It does *not* cover a tool outage, which the surrounding docs used to claim.
+    A failing tool still appends its error to the trace, and
+    :func:`_abandoned_result` sends any non-empty trace to the plain notice --
+    because "I could not use my tools" is false once a tool has run, and an
+    untrue label is what this fallback exists to avoid.
+
+    Returns "" when the model produces nothing *or when the call fails*, so the
+    caller still reports the dead end rather than an empty answer or an error.
+
+    That second half is the same rule as the escalated native retry in
+    :func:`_escalated_native_attempt`, and for the same reason: this is an
+    extra call the user did not ask for, added to a path that previously made
+    none, so the worst it may do is fail to improve the notice they were
+    already getting. The likeliest reason the act loop dead-ended is a backend
+    that is unwell, which is exactly when this call is most likely to raise --
+    letting it through would turn the give-up message into a traceback on the
+    query that needed the message most. Broad for the same reason as there:
+    every provider client spells its failures differently, and the one not
+    enumerated is the one that reaches the user.
     """
     llm = _get_llm(temperature=0.1, streaming=False)
     messages = [
@@ -854,7 +954,16 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
         *state["messages"],
     ]
     _ensure_ends_with_user(messages)
-    response = await _send(llm, messages)
+    try:
+        response = await _send(llm, messages)
+    except Exception as exc:  # last-resort extra call; see the docstring
+        logger.warning(
+            "The fallback answer from retrieved context failed too (%s: %s), so "
+            "this query has no answer to give.",
+            type(exc).__name__,
+            exc,
+        )
+        return ""
     text = str(response.content or "").strip()
     if not text:
         _log_empty_content(response, "act_node retrieval fallback")
@@ -935,13 +1044,56 @@ async def act_node(state: AgentState) -> dict[str, Any]:
         return await _act_native(state)
     if mode == "text":
         result = await _act_text(state)
-        if result is _ESCALATE_TO_NATIVE:
-            return await _act_native(state, escalated=True)
+        if isinstance(result, _EscalateToNative):
+            return await _escalated_native_attempt(state, list(result.trace))
         return result
     raise ValueError(
         f"unknown llm_tool_mode: {settings.llm_tool_mode!r} "
         "(expected one of native, text)"
     )
+
+
+async def _escalated_native_attempt(
+    state: AgentState, trace: list[str]
+) -> dict[str, Any]:
+    """The native retry, and what happens when the endpoint will not serve it.
+
+    The retry is speculative: the user asked a question, not for a protocol
+    change, so it must not be able to leave them worse off than the dead end it
+    is trying to rescue. A stock local vLLM started without
+    ``--enable-auto-tool-choice`` refuses any request carrying ``tools``, and
+    that user is precisely the one the escalation targets -- they never set
+    ``llm_tool_mode``, so nothing marks their endpoint as text-only until a
+    native request comes back refused.
+
+    Unhandled, that refusal turned a poor answer into a traceback out of the
+    graph, and the sticky switch then did the same to every later query. So the
+    attempt is caught, the switch is rolled back, native is written off for the
+    rest of the process, and the query lands on the same fallback it would have
+    had if the escalation had never fired.
+
+    The catch is broad on purpose. Which exception a refused ``tools`` payload
+    raises depends on the provider client, the gateway and the LangChain
+    wrapper between them -- a ``BadRequestError``, an ``APIError``, an httpx
+    status error -- and enumerating them means the one that was missed is the
+    one that reaches the user as a traceback, which is the whole failure being
+    fixed. ``Exception`` leaves ``CancelledError`` and ``KeyboardInterrupt``
+    fatal, so an interrupted query is still interrupted.
+    """
+    try:
+        return await _act_native(state, escalated=True)
+    except Exception as exc:
+        _escalation.escalated = False
+        _escalation.native_rejected = True
+        logger.warning(
+            "The native tool protocol was refused by the endpoint (%s: %s), so "
+            "the automatic switch has been rolled back and will not be tried "
+            "again in this process. A local vLLM must be started with "
+            "--enable-auto-tool-choice to serve it.",
+            type(exc).__name__,
+            exc,
+        )
+        return await _abandoned_result(state, trace)
 
 
 def _act_messages(state: AgentState) -> list[Any]:
@@ -1187,7 +1339,7 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
                     # rather than done here so act_node issues the retry: this
                     # function's job is to drive one protocol, not to pick one.
                     if _escalate_to_native(response):
-                        return _ESCALATE_TO_NATIVE
+                        return _EscalateToNative(tuple(tool_trace))
                     return await _abandoned_result(state, tool_trace)
                 messages.append(HumanMessage(content=_SEARCH_REPROMPT_MSG))
                 continue

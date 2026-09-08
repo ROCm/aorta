@@ -208,10 +208,24 @@ Three things follow from that:
   wasted round. Nothing about a conversation is carried across; the state is one
   boolean about protocol support.
 
+One gap: the startup line comes from the CLI entry points, so `aorta chat` and
+`aorta chat ask` get it and `aorta chat ui` does not — its Chainlit welcome
+banner names the provider but not the protocol, which is the front door where
+the process-wide scope above matters most.
+[#468](https://github.com/ROCm/aorta/issues/468) tracks putting it there. Until
+then, a UI operator reads the protocol from the escalation warning in the
+server log, or from `aorta chat doctor`.
+
 If the model returns nothing on *both* protocols, the act loop answers from
 retrieved context instead of dead-ending, and labels that answer as having used
-no tools. That covers a tool outage as well as a model that can drive neither
-protocol.
+no tools. It applies only when no tool ran at all: once one has — including one
+that returned an error — "I could not use my tools" would be untrue, so that
+loop gets the plain give-up notice instead. A tool *outage* is therefore not
+covered by it. What is covered is a model that can drive neither protocol, and
+an endpoint that refuses the escalated one (a stock local vLLM without
+`--enable-auto-tool-choice` does): that refusal rolls the switch back, is not
+retried for the rest of the process, and lands on this same fallback rather
+than escaping as an error.
 
 `aorta chat doctor` reports the resolved mode as its own check, and warns before
 you spend a query on it when `text` is paired with a model whose name reads as a
@@ -291,8 +305,9 @@ Knobs that lower the bill, roughly in order of effect:
 | `Incorrect API key provided: unused` from `platform.openai.com` | `remote_llm_auth_header` is set but `remote_llm_base_url` is empty, so the request went to OpenAI. The preflight line says `at the provider default endpoint` when this is wrong. |
 | `404` on an `*.openai.azure.com` endpoint | Azure OpenAI needs the `litellm` backend, not `openai`. |
 | `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
-| `I wasn't able to answer that: something in my own configuration...` | The model returned empty content on both tool protocols. Run `aorta chat doctor`; the log line beside it names the cause. |
-| `Retrying this query on native function calling` | Not an error. The model returned reasoning but no answer under `text`, so chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
+| `I wasn't able to answer that: something in my own configuration...` | Every route the act loop had left returned nothing usable — which of them were tried depends on `llm_tool_mode`, so run `aorta chat doctor` and read the warning logged beside this message; it names the step that gave up. |
+| `Retrying this query on native function calling` | Not an error. The model returned no answer and no tool call under `text`, and the line names the signature that was observed. Chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
+| `The native tool protocol was refused by the endpoint` | The escalation above tried native and the endpoint rejected it — a local vLLM needs `--enable-auto-tool-choice`. The switch is rolled back and not retried; set `llm_tool_mode = "text"` to skip the attempt entirely. |
 | An answer prefixed `I could not use my tools for this question` | The act loop gave up and the answer came from retrieved context alone, so anything needing a live lookup is missing from it. Same underlying cause as the row above. |
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
 | `Waiting for vLLM at ...` when you meant to go remote | `llm_provider` is still `vllm`. Check the backend line printed at startup. |
