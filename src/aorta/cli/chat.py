@@ -49,8 +49,7 @@ _MIN_PYTHON = (3, 11)
 _MAX_PYTHON_UI = (3, 14)
 
 _INSTALL_HINT = (
-    "'aorta chat' requires the chat-cli extra.\n"
-    "Install it with:  pip install 'amd-aorta[chat-cli]'"
+    "'aorta chat' requires the chat-cli extra.\nInstall it with:  pip install 'amd-aorta[chat-cli]'"
 )
 
 #: Hard-coded rather than read from ``aorta.chat.inference.providers.factory``:
@@ -839,10 +838,7 @@ def config_show(reveal: bool, as_json: bool) -> None:
         click.echo(f"  {key} = {values[key]!r}")
     if not reveal:
         click.echo("")
-        click.echo(
-            "API keys and extra-header values are masked. "
-            "Pass --reveal to print them."
-        )
+        click.echo("API keys and extra-header values are masked. Pass --reveal to print them.")
 
 
 @config_group.command(name="validate")
@@ -951,9 +947,7 @@ def index_build(
     _index_logging(verbose)
     ops = _load("rag.index_ops")
     result = _guard(
-        lambda: ops.build_index(
-            _resolve_corpus(path, public_only), index_path=output, force=force
-        )
+        lambda: ops.build_index(_resolve_corpus(path, public_only), index_path=output, force=force)
     )
 
     if as_json:
@@ -1080,6 +1074,82 @@ def index_fetch(
         click.echo(f"  replaced  {change}")
     for warning in result.warnings:
         click.echo(f"warning: {warning}", err=True)
+
+
+#: The fields worth putting side by side, and what to call them in the table.
+#: ``built_at`` is last and deliberately not the basis of the verdict: it is
+#: wall-clock from whoever built the index, so a locally-built one can carry a
+#: later timestamp while indexing *older* source. ``corpus_digest`` and
+#: ``aorta_sha`` are the honest answer to "which source".
+_STATUS_ROWS = (
+    ("model", "embedding_model"),
+    ("dimensions", "dimensions"),
+    ("aorta", "aorta_version"),
+    ("aorta_sha", "aorta_sha"),
+    ("corpus", "corpus_digest"),
+    ("index_sha256", "index_sha256"),
+    ("chunks", "chunk_count"),
+    ("built_at", "built_at"),
+)
+
+
+def _echo_status_table(local: dict, published: dict) -> None:
+    """Print both manifests as two columns, so a difference is visible."""
+    click.echo(f"  {'':<13}{'local':<44}published")
+    for label, key in _STATUS_ROWS:
+        left = str(local.get(key, "") or "-")
+        right = str(published.get(key, "") or "-")
+        # Truncated for width only. The digests differ in their leading
+        # characters when they differ at all, and --json carries them in full.
+        click.echo(f"  {label:<13}{left[:42]:<44}{right[:42]}")
+
+
+@index_group.command(name="status")
+@click.option(
+    "--version",
+    default=None,
+    help="Published version or tag to compare against. Overrides version matching.",
+)
+@click.option("--index", "index_path", default=None, help="Local index. Defaults to the cache.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the comparison as JSON.")
+@click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
+def index_status(version: str | None, index_path: str | None, as_json: bool, verbose: bool) -> None:
+    """Compare the local index against the published one, without downloading it.
+
+    Reads the two manifests and nothing else, so it costs about a kilobyte.
+    This is the comparison nightly.yml already does in bash to decide whether
+    to republish.
+
+    A missing or unreadable published manifest is reported as 'no baseline',
+    never as 'up to date'. Exits non-zero only when the two cannot be compared.
+    """
+    _index_logging(verbose)
+    ops = _load("rag.index_ops")
+    comparison = _guard(lambda: ops.compare_index(version=version, index_path=index_path))
+
+    if as_json:
+        click.echo(json.dumps(ops.comparison_to_dict(comparison), indent=2))
+    else:
+        payload = ops.comparison_to_dict(comparison)
+        click.echo(f"verdict: {comparison.summary}")
+        click.echo("")
+        click.echo(f"  local      {payload['local']['index_path']} ({comparison.provenance})")
+        # Named explicitly: a dev install resolves to the rolling tag, so a
+        # verdict that does not say which asset it compared against is
+        # ambiguous.
+        click.echo(f"  published  {comparison.source.describe()}")
+        click.echo("")
+        _echo_status_table(payload["local"], payload["published"])
+        if comparison.differences:
+            click.echo("")
+            for difference in comparison.differences:
+                click.echo(f"  differs    {difference}")
+        if comparison.baseline_error:
+            click.echo("")
+            click.echo(f"warning: {comparison.baseline_error}", err=True)
+
+    if comparison.verdict == ops.VERDICT_NO_BASELINE:
+        raise click.exceptions.Exit(1)
 
 
 @index_group.command(name="runs")

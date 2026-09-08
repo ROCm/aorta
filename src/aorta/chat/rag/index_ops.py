@@ -915,7 +915,9 @@ def fetch_index(
 
     local = _local_manifest(dest)
     if not force and _is_same_index(local, manifest):
-        logger.info("Already up to date; the published asset was not downloaded.")
+        # At debug, because ``up_to_date`` is on the result and the caller
+        # renders it -- the CLI would otherwise print the same sentence twice.
+        logger.debug("%s already holds the published index; skipping the asset.", dest)
         return FetchResult(
             index_path=dest,
             manifest=manifest,
@@ -962,6 +964,163 @@ def fetch_index(
         notes=list(source.notes),
         changes=changes,
     )
+
+
+# ── comparing the two sides ───────────────────────────────────────────────
+
+#: The verdicts :func:`compare_index` can reach. Named rather than inlined so
+#: ``--json`` consumers have a closed set to switch on, and so the honest
+#: distinction between "the same" and "nothing to compare against" is visible
+#: in one place: ``nightly.yml``'s own comment makes the same point, that a
+#: missing published manifest means *no baseline* and must never be reported as
+#: up to date.
+VERDICT_UP_TO_DATE = "up_to_date"
+VERDICT_PUBLISHED_DIFFERS = "published_differs"
+VERDICT_LOCALLY_BUILT = "locally_built"
+VERDICT_INCOMPATIBLE = "incompatible"
+VERDICT_NO_LOCAL_INDEX = "no_local_index"
+VERDICT_NO_BASELINE = "no_baseline"
+
+_VERDICT_SUMMARY = {
+    VERDICT_UP_TO_DATE: "up to date; the local index is the published one",
+    VERDICT_PUBLISHED_DIFFERS: "the published index differs from the local one",
+    VERDICT_LOCALLY_BUILT: (
+        "the local index was built here, so the published one is not a newer copy of it"
+    ),
+    VERDICT_INCOMPATIBLE: (
+        "the published index is not usable by this install's embedding provider"
+    ),
+    VERDICT_NO_LOCAL_INDEX: "no local index; nothing has been installed yet",
+    VERDICT_NO_BASELINE: "no published baseline to compare against",
+}
+
+
+@dataclass
+class IndexComparison:
+    """The local index and the published one, side by side.
+
+    Answers gap 4b's question -- "is the index in the cache the same as the
+    remote one, and which is newer" -- from the two manifests alone, so it
+    transfers ~1 KB rather than the index.
+    """
+
+    source: IndexSource
+    index_path: Path
+    local: manifest_mod.Manifest | None
+    published: manifest_mod.Manifest | None
+    verdict: str
+    #: Why the published manifest could not be read, when it could not be.
+    baseline_error: str = ""
+    #: Field-by-field differences, when both sides are readable.
+    differences: list[str] = field(default_factory=list)
+    provenance: str = PROVENANCE_UNKNOWN
+
+    @property
+    def summary(self) -> str:
+        return _VERDICT_SUMMARY.get(self.verdict, self.verdict)
+
+    @property
+    def up_to_date(self) -> bool:
+        return self.verdict == VERDICT_UP_TO_DATE
+
+
+def _side(manifest: manifest_mod.Manifest | None) -> dict[str, Any]:
+    """One side of the comparison, as the fields gap 4b asks for."""
+    if manifest is None:
+        return {}
+    return {
+        "embedding_model": manifest.embedding_model,
+        "embedding_identity": manifest.embedding_identity,
+        "built_at": manifest.built_at,
+        "aorta_version": manifest.aorta_version,
+        "aorta_sha": manifest.aorta_sha,
+        "corpus_digest": manifest.corpus_digest,
+        "corpus_roots": list(manifest.corpus_roots),
+        "index_sha256": manifest.index_sha256,
+        "chunk_count": manifest.chunk_count,
+        "dimensions": manifest.dimensions,
+    }
+
+
+def compare_index(
+    version: str | None = None,
+    index_path: str | Path | None = None,
+    source: IndexSource | None = None,
+) -> IndexComparison:
+    """Compare the installed index against the published one, read-only.
+
+    Downloads the ~1 KB manifest and nothing else. This is the comparison
+    ``nightly.yml``'s ``digest`` step already does in bash to decide whether to
+    republish, so the capability is proven and load-bearing for the release
+    process -- it was simply not exposed to the user who asked for it.
+
+    Nothing here writes, and an unreachable host is a *result* rather than an
+    error: "there is no baseline" is the honest answer, and the one thing it
+    must not be rendered as is "up to date".
+    """
+    dest = Path(index_path) if index_path else settings.index_file
+    source = source or resolve_source(version)
+    local = _local_manifest(dest)
+
+    published: manifest_mod.Manifest | None = None
+    baseline_error = ""
+    try:
+        published = _parse_manifest(_download_text(source.manifest_url), source)
+    except IndexFetchError as exc:
+        baseline_error = str(exc)
+
+    if published is None:
+        verdict = VERDICT_NO_BASELINE
+    elif _validate_against_provider(published).refusals:
+        # Checked before the content comparison: an index this install cannot
+        # query is not made usable by being newer.
+        verdict = VERDICT_INCOMPATIBLE
+    elif local is None:
+        verdict = VERDICT_NO_LOCAL_INDEX
+    elif _is_same_index(local, published):
+        verdict = VERDICT_UP_TO_DATE
+    elif index_provenance(local) == PROVENANCE_LOCAL:
+        # Deliberately not a recency claim. ``built_at`` is wall-clock from
+        # whoever built it, so a local index can carry a later timestamp while
+        # indexing older source -- and it is the one case where "just fetch"
+        # is the wrong advice, because the fetch would discard it.
+        verdict = VERDICT_LOCALLY_BUILT
+    else:
+        verdict = VERDICT_PUBLISHED_DIFFERS
+
+    return IndexComparison(
+        source=source,
+        index_path=dest,
+        local=local,
+        published=published,
+        verdict=verdict,
+        baseline_error=baseline_error,
+        differences=_refresh_notes(local, published) if published is not None else [],
+        provenance=index_provenance(local) if local is not None else PROVENANCE_UNKNOWN,
+    )
+
+
+def comparison_to_dict(comparison: IndexComparison) -> dict[str, Any]:
+    """``index status --json``, matching the other index subcommands."""
+    return {
+        "verdict": comparison.verdict,
+        "summary": comparison.summary,
+        "up_to_date": comparison.up_to_date,
+        # Named explicitly because a dev install resolves to the rolling tag:
+        # without this the verdict does not say what it compared against.
+        "compared_against": {
+            "source": comparison.source.describe(),
+            "manifest_url": comparison.source.manifest_url,
+        },
+        "local": {
+            "index_path": str(comparison.index_path),
+            "provenance": comparison.provenance,
+            **_side(comparison.local),
+        },
+        "published": _side(comparison.published),
+        "differences": comparison.differences,
+        "baseline_error": comparison.baseline_error,
+    }
 
 
 def side_load(
@@ -1045,13 +1204,22 @@ __all__ = [
     "PROVENANCE_LOCAL",
     "PROVENANCE_PUBLISHED",
     "PROVENANCE_UNKNOWN",
+    "VERDICT_INCOMPATIBLE",
+    "VERDICT_LOCALLY_BUILT",
+    "VERDICT_NO_BASELINE",
+    "VERDICT_NO_LOCAL_INDEX",
+    "VERDICT_PUBLISHED_DIFFERS",
+    "VERDICT_UP_TO_DATE",
     "BuildResult",
     "FetchResult",
+    "IndexComparison",
     "IndexFetchError",
     "IndexOverwriteError",
     "IndexSource",
     "build_index",
     "check_index",
+    "compare_index",
+    "comparison_to_dict",
     "compute_digest",
     "corpus_provenance",
     "describe_target",

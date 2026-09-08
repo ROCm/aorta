@@ -74,12 +74,42 @@ aorta chat index build           # build the source collection from aorta_path
 aorta chat index fetch           # download the index matching your version
 aorta chat index fetch --from ./index.sqlite   # side-load, for an air-gapped node
 aorta chat index runs            # (re)build the run-artifact collection, locally
+aorta chat index status          # compare the local index against the published one
 aorta chat doctor                # extras, backend reachability, index freshness
 ```
 
 `index runs` is the only one that touches the second collection, and the only
 one you need after a sweep. `build`, `fetch` and `--from` all replace the source
 collection and leave it alone.
+
+`index status` writes nothing. It reads the local manifest, downloads the
+published one — about a kilobyte, not the index — and prints both sides plus a
+one-line verdict, with `--json` for scripting. A published manifest it cannot
+read is reported as *no baseline* rather than as *up to date*, and the verdict
+names which asset it compared against, because a `.dev` install resolves to the
+rolling `main` tag rather than to a release.
+
+### What replaces what
+
+Overwriting is guarded, and deliberately not symmetrically. A fetched index
+costs a download to replace; a locally built one may not be reproducible at all,
+because the tree it indexed may have moved and a node with no egress cannot
+re-download the embedding weights.
+
+| You run | Over an index that was | Result |
+|---|---|---|
+| `fetch` | downloaded, and identical | *already up to date*; no asset is transferred |
+| `fetch` | downloaded, and different | replaced, printing what changed |
+| `fetch` or `--from` | built locally | refused; pass `--force` |
+| `build` | built locally | rebuilt, as usual |
+| `build` (narrower corpus) | downloaded | refused; pass `--force` |
+| `build --public-only` | downloaded | rebuilt; it is the same corpus, so nothing is lost |
+
+A refusal names what would be lost and the flag that proceeds anyway, following
+`config init --force` rather than prompting, so a script and a terminal behave
+identically. An index the running configuration would *refuse* is never
+protected: rebuilding one you cannot query loses nothing, and `doctor` tells you
+to rebuild it.
 
 **Interrupting any of them is safe.** `build`, `fetch` and `--from` write the
 new index beside the old one and move it into place in a single step, then write

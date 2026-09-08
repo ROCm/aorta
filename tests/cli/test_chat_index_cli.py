@@ -255,6 +255,127 @@ class TestDoctorOutput:
         assert payload["checks"][0]["name"] == "python"
 
 
+class TestStatus:
+    """The read-only comparison, which CI had in bash and the user did not."""
+
+    @staticmethod
+    def _serve(monkeypatch, *, manifest_overrides=None, reachable=True) -> None:
+        """Publish a manifest the local provider accepts, or nothing at all."""
+        import io
+        import urllib.error
+        import urllib.request
+
+        from aorta.chat.config import settings
+        from aorta.chat.rag import manifest as manifest_mod
+        from aorta.chat.rag.embeddings.base import build_collection_name
+        from aorta.chat.rag.embeddings.fastembed_bge import LOCAL_COLLECTION_PREFIX
+
+        model = "BAAI/bge-small-en-v1.5"
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", model)
+
+        values = {
+            "aorta_version": "0.2.1",
+            "aorta_sha": "b" * 40,
+            "embedding_provider": "local",
+            "embedding_model": model,
+            "dimensions": 384,
+            # Derived, so group E's rename flows through with no edit here.
+            "collection": build_collection_name(LOCAL_COLLECTION_PREFIX, model),
+            "chunk_size": settings.chunk_size,
+            "chunk_overlap": settings.chunk_overlap,
+            "index_sha256": "c" * 64,
+            "corpus_roots": ["src/aorta", "docs", "README.md"],
+            "corpus_digest": "published123",
+            "built_at": "2026-09-01T00:00:00+00:00",
+        }
+        values.update(manifest_overrides or {})
+        body = manifest_mod.Manifest(**values).to_json().encode()
+
+        class _Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.close()
+                return False
+
+        def _urlopen(url, timeout=None):  # noqa: ARG001 - signature match
+            if not reachable:
+                raise urllib.error.URLError("Network is unreachable")
+            return _Response(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+
+    def test_it_is_registered_alongside_the_other_index_commands(self, runner: CliRunner):
+        result = runner.invoke(chat, ["index", "--help"])
+        assert "status" in result.output
+
+    def test_it_prints_both_sides_and_a_verdict(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        self._serve(monkeypatch)
+
+        result = runner.invoke(
+            chat, ["index", "status", "--version", "0.2.1", "--index", str(tmp_path / "absent")]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "verdict:" in result.output
+        assert "local" in result.output and "published" in result.output
+        # Which asset was compared against, since a dev install resolves to
+        # the rolling tag and the verdict would otherwise be ambiguous.
+        assert "v0.2.1" in result.output
+
+    def test_the_json_form_is_machine_readable(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        self._serve(monkeypatch)
+
+        result = runner.invoke(
+            chat,
+            [
+                "index",
+                "status",
+                "--version",
+                "0.2.1",
+                "--index",
+                str(tmp_path / "absent"),
+                "--json",
+            ],
+        )
+
+        payload = json.loads(result.stdout)
+        assert payload["verdict"] == "no_local_index"
+        assert payload["up_to_date"] is False
+        assert payload["published"]["corpus_digest"] == "published123"
+
+    def test_no_baseline_exits_non_zero_and_is_not_called_up_to_date(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        """The one rendering that would be actively misleading."""
+        self._serve(monkeypatch, reachable=False)
+
+        result = runner.invoke(
+            chat, ["index", "status", "--version", "0.2.1", "--index", str(tmp_path / "absent")]
+        )
+
+        assert result.exit_code == 1
+        assert "no published baseline" in result.output
+        assert "up to date" not in result.output
+
+    def test_an_unreachable_host_is_a_sentence_not_a_traceback(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        self._serve(monkeypatch, reachable=False)
+
+        result = runner.invoke(
+            chat, ["index", "status", "--version", "0.2.1", "--index", str(tmp_path / "absent")]
+        )
+
+        assert "Traceback" not in result.output
+
+
 class TestDigest:
     def test_it_prints_json_a_workflow_can_parse(self, runner: CliRunner, tmp_path: Path):
         """nightly.yml reads this to decide whether to rebuild at all."""

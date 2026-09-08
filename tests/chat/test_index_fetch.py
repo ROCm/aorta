@@ -783,6 +783,171 @@ class TestFetchWillNotSilentlyDiscardALocalBuild:
         assert side_load(origin, index_path=dest, force=True).index_path == dest
 
 
+class TestCompareIndex:
+    """Gap 4b: "is the cached index the same as the remote one, and which is newer".
+
+    Answerable from the two manifests alone, which is what `nightly.yml`
+    already does in bash to decide whether to republish -- so the capability
+    was proven and load-bearing for the release process while the CLI did not
+    expose it.
+    """
+
+    def test_an_identical_pair_is_up_to_date(self, server, tmp_path: Path):
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_UP_TO_DATE
+        assert comparison.up_to_date is True
+
+    def test_it_transfers_only_the_manifest(self, server, tmp_path: Path):
+        """The whole point of comparing manifests rather than indexes."""
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        server.requested.clear()
+
+        index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert server.requested
+        assert all(url.endswith(manifest_mod.MANIFEST_SUFFIX) for url in server.requested)
+
+    def test_it_writes_nothing(self, server, tmp_path: Path):
+        """Read-only, so it is safe to suggest to someone who is already stuck."""
+        dest = tmp_path / "cache" / "i.sqlite"
+        dest.parent.mkdir(parents=True)
+
+        index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert list(dest.parent.iterdir()) == []
+
+    def test_an_unreachable_baseline_is_not_reported_as_up_to_date(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """`nightly.yml`'s own comment: no baseline must not read as no change."""
+
+        def _refuse(url, timeout=None):  # noqa: ARG001 - signature match
+            raise urllib.error.URLError("Network is unreachable")
+
+        monkeypatch.setattr(index_ops.urllib.request, "urlopen", _refuse)
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(BODY)
+        manifest_mod.write_manifest(dest, _manifest())
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_NO_BASELINE
+        assert comparison.up_to_date is False
+        assert "Network is unreachable" in comparison.baseline_error
+
+    def test_a_missing_published_manifest_is_no_baseline_rather_than_an_exception(
+        self, server, tmp_path: Path
+    ):
+        del server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX]
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert comparison.verdict == index_ops.VERDICT_NO_BASELINE
+
+    def test_no_local_index_is_its_own_verdict(self, server, tmp_path: Path):
+        comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "absent")
+
+        assert comparison.verdict == index_ops.VERDICT_NO_LOCAL_INDEX
+        assert comparison.local is None
+        assert comparison.published is not None
+
+    def test_a_differing_published_index_lists_the_fields(self, server, tmp_path: Path):
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"stale")
+        manifest_mod.write_manifest(
+            dest,
+            _manifest(
+                corpus_roots=["src/aorta", "docs", "README.md"],
+                index_sha256="0" * 64,
+                corpus_digest="old123",
+                aorta_sha="0ldsha0" + "0" * 33,
+            ),
+        )
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_PUBLISHED_DIFFERS
+        reported = " ".join(comparison.differences)
+        assert "corpus_digest" in reported
+        assert "aorta_sha" in reported
+
+    def test_a_locally_built_index_is_not_called_stale(self, server, tmp_path: Path):
+        """ "Newer" is the wrong frame here: fetching would discard it.
+
+        ``built_at`` is wall-clock from whoever built the index, so a local one
+        can carry a later timestamp over *older* source. This verdict says what
+        is true -- the two are not versions of each other.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"built here")
+        manifest_mod.write_manifest(
+            dest, _manifest(corpus_roots=["/home/dev/aorta"], index_sha256="1" * 64)
+        )
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_LOCALLY_BUILT
+        assert comparison.provenance == index_ops.PROVENANCE_LOCAL
+
+    def test_an_unusable_published_index_says_so_rather_than_offering_it(
+        self, server, tmp_path: Path
+    ):
+        """Being newer does not make an index this install cannot query useful."""
+        _reserialise(server, _manifest(embedding_model="other/model"))
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert comparison.verdict == index_ops.VERDICT_INCOMPATIBLE
+
+    def test_the_payload_names_which_asset_it_compared_against(self, server, tmp_path: Path):
+        """A dev install resolves to the rolling tag, so the verdict is
+        ambiguous without this."""
+        comparison = index_ops.compare_index(
+            index_path=tmp_path / "i.sqlite",
+            source=resolve_source(installed="0.2.2.dev122+g45edc3d"),
+        )
+        payload = index_ops.comparison_to_dict(comparison)
+
+        assert ROLLING_TAG in payload["compared_against"]["source"]
+        assert ROLLING_TAG in payload["compared_against"]["manifest_url"]
+
+    def test_every_verdict_has_a_sentence(self):
+        """A raw enum value reaching the user would be the register's own complaint."""
+        for verdict in (
+            index_ops.VERDICT_UP_TO_DATE,
+            index_ops.VERDICT_PUBLISHED_DIFFERS,
+            index_ops.VERDICT_LOCALLY_BUILT,
+            index_ops.VERDICT_INCOMPATIBLE,
+            index_ops.VERDICT_NO_LOCAL_INDEX,
+            index_ops.VERDICT_NO_BASELINE,
+        ):
+            assert index_ops._VERDICT_SUMMARY[verdict] != verdict
+
+    def test_the_payload_carries_every_field_the_register_asked_for(self, server, tmp_path: Path):
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+
+        payload = index_ops.comparison_to_dict(
+            index_ops.compare_index(version="0.2.1", index_path=dest)
+        )
+
+        for side in ("local", "published"):
+            for key in (
+                "embedding_model",
+                "embedding_identity",
+                "built_at",
+                "aorta_sha",
+                "corpus_digest",
+                "index_sha256",
+            ):
+                assert key in payload[side], f"{side} is missing {key}"
+
+
 class TestSideLoad:
     """Decision 21b: index only. The model is a documented pre-seed, not an asset."""
 
