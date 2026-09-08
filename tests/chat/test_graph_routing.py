@@ -69,7 +69,7 @@ class TestRouterNodeFallback:
     async def test_the_fallback_is_reported_rather_than_silent(self, caplog):
         with caplog.at_level("WARNING"):
             await self._route("")
-        assert "names neither route" in caplog.text
+        assert "does not name exactly one route" in caplog.text
 
 
 class TestOnlyUnclassifiedRepliesChanged:

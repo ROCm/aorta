@@ -301,9 +301,11 @@ def _log_empty_content(response: Any, node: str) -> None:
     """Record why a node produced no text, when the model still spent tokens.
 
     Reasoning models can put everything in a side channel and return empty
-    content. The token counts make that diagnosable; ``langchain-openai`` did
-    not surface gpt-oss's ``reasoning`` field when this was written, so it is
-    read defensively in case a version or a gateway does.
+    content. The token counts make that diagnosable; the channel itself is read
+    through :func:`_reasoning_channel`, which tries every field in
+    :data:`_REASONING_FIELDS` because no stack was known to populate one when
+    this was written -- so it is read defensively in case a version or a
+    gateway does.
     """
     usage = getattr(response, "usage_metadata", None) or {}
     logger.warning(
@@ -489,7 +491,8 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     if route is None:
         route = _ROUTER_FALLBACK_ROUTE
         logger.warning(
-            "Router reply %r names neither route; classifying as %s.",
+            "Router reply %r does not name exactly one route; classifying as "
+            "%s.",
             route_text,
             route,
         )
@@ -670,7 +673,7 @@ _MAX_ESCALATED_ROUNDS = 1
 #: Require the reasoning channel before escalating, rather than merely letting
 #: it confirm. **Left False deliberately, and it is one line to flip.**
 #:
-#: The register's decision was to sharpen the trigger with "and the reasoning
+#: Review asked for the trigger to be sharpened with "and the reasoning
 #: channel is populated", because "empty content plus non-zero output tokens"
 #: also matches a truncation, a content filter or a stop-sequence bug. That
 #: needs one fact this repository cannot supply: whether the reporter's gateway
@@ -708,7 +711,7 @@ def _is_reasoning_dead_end(response: Any) -> bool:
 
 
 #: Set for the rest of the process once the signature above is seen. "Keep it
-#: for the session": a model that cannot drive the text protocol on one query
+#: for the process": a model that cannot drive the text protocol on one query
 #: cannot drive it on the next, and paying two wasted rounds per query to
 #: rediscover that is the cost this exists to remove.
 _escalated_to_native = False
@@ -729,9 +732,12 @@ def _tool_mode_is_explicit() -> bool:
     escalating there would trade a bad answer for a failed request.
 
     pydantic-settings records which fields a source supplied, so "the user asked
-    for text" is distinguishable from "text is the default". Every source counts
-    -- environment, profile file and the CLI's own ``configure()`` overrides --
-    which is the intended reading: all three are someone stating a preference.
+    for text" is distinguishable from "text is the default". Every source
+    counts, which is the intended reading: each one is someone stating a
+    preference. Today that means ``AORTA_CHAT_LLM_TOOL_MODE`` and the profile
+    file; ``aorta chat`` has no flag for the protocol, but a future one would
+    count too, because :func:`aorta.chat.config.configure` passes flags as
+    constructor arguments and those land in ``model_fields_set`` as well.
     """
     fields_set = getattr(settings, "model_fields_set", None)
     if not isinstance(fields_set, (set, frozenset)):
@@ -755,8 +761,8 @@ def _resolved_tool_mode() -> str:
 def _escalate_to_native(response: Any) -> bool:
     """Decide, and record, whether to retry this round in the native protocol.
 
-    Returns True having switched the session over. Three things have to hold,
-    and each maps to a trap the register names:
+    Returns True having switched the process over. Three things have to hold,
+    and each closes one way this could go wrong:
 
     * the failure has to look like the protocol rather than the query, or a
       truncation would silently change the user's configured protocol;
@@ -773,8 +779,9 @@ def _escalate_to_native(response: Any) -> bool:
         "The model returned reasoning but no answer and no tool call, which is "
         "how a reasoning model behaves on the 'text' tool protocol. Retrying "
         "this query on native function calling, and using it for the rest of "
-        "this session. Set AORTA_CHAT_LLM_TOOL_MODE to choose the protocol "
-        "yourself; 'aorta chat doctor' reports which one is in force."
+        "this process. Set AORTA_CHAT_LLM_TOOL_MODE to choose the protocol "
+        "yourself; the 'LLM backend' line at startup names the one that was in "
+        "force when this process began."
     )
     return True
 
@@ -796,9 +803,13 @@ _ESCALATE_TO_NATIVE = _EscalateToNative()
 #: Goes into the answer slot, so it names nothing internal: no environment
 #: variable, neither tool protocol, and no class of model. The user asked a
 #: question and must not get a configuration lecture back. Everything specific
-#: is still recorded -- on the log line beside the abandon branch, and in
-#: ``aorta chat doctor``, which is where an operator looks and which reports
-#: the resolved tool protocol.
+#: is still recorded on the log lines beside the abandon branch, including the
+#: tool protocol, which the ``LLM backend`` line names at startup. ``aorta chat
+#: doctor`` is named because it is where an operator looks first and it covers
+#: the configuration faults that reach this message by other routes -- an
+#: unreachable backend, a missing index. It does not report the tool protocol;
+#: adding that check lives in ``chat/doctor.py``, which this change does not
+#: touch.
 _NO_ANSWER_MSG = (
     "I wasn't able to answer that: something in my own configuration is "
     "stopping me from working on this request. Run `aorta chat doctor` for "
@@ -857,8 +868,9 @@ async def _abandoned_result(state: AgentState, trace: list[str]) -> dict[str, An
     answered. It is what ``critic_node`` judges, and an empty value makes the
     critic return no feedback, which sends the graph to ``END`` -- so the
     fallback cannot be rejected into a retry that re-enters the act loop, which
-    is the cap the register asks for. It is also honest: no command was run and
-    no tool output exists for a critic to check the answer against.
+    is what keeps :data:`_MAX_UNPRODUCTIVE_ROUNDS` meaningful. It is also
+    honest: no command was run and no tool output exists for a critic to check
+    the answer against.
 
     One attempt per entry to the act loop, and on the ordinary path the empty
     ``command_output`` means there is only ever one entry.

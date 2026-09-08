@@ -39,9 +39,9 @@ def _no_sticky_escalation():
     """Undo any auto-escalation, which is process-wide by design.
 
     ``_escalated_to_native`` is deliberately a module global: "keep it for the
-    session" is the point, and a test process is one session for every test in
-    it. Without this an escalation in one test silently puts the next one on the
-    native protocol.
+    process" is the point, and the whole test run is one process. Without this
+    an escalation in one test silently puts the next one on the native
+    protocol.
     """
     nodes.reset_tool_mode_escalation()
     yield
@@ -118,9 +118,9 @@ class TestTheGiveUpMessageIsForTheUser:
     Four sentences naming an environment variable, an internal text protocol, a
     provider API and a class of model the user never chose -- phrased as a
     condition they cannot evaluate. The reporter's note was "the chatbot should
-    not talk about model". The specifics are still logged, and ``aorta chat
-    doctor`` reports the resolved protocol; the answer slot gets one plain
-    sentence and a command to run.
+    not talk about model". The specifics are still logged, and the tool
+    protocol is named on the startup ``LLM backend`` line; the answer slot gets
+    one plain sentence and a command to run.
     """
 
     @pytest.mark.parametrize(
@@ -476,8 +476,8 @@ def tool_mode_not_chosen(monkeypatch):
 class TestTheDeadEndSignature:
     """The trigger, and why it has two halves rather than one.
 
-    **The live check behind this was not run.** The register's decision was to
-    sharpen the trigger with "and the reasoning channel is populated", which
+    **The live check behind this was not run.** Review asked for the trigger to
+    be sharpened with "and the reasoning channel is populated", which
     needs one fact from outside this repository: whether the reporter's AMD APIM
     gateway populates ``additional_kwargs["reasoning"]``. Establishing that
     needs a query against their endpoint, and there are no credentials for it
@@ -603,7 +603,7 @@ class TestAutoEscalationToNative:
     async def test_it_costs_one_extra_call_not_a_second_loop(
         self, text_mode, tool_mode_not_chosen
     ):
-        """The budget the register was explicit about: 4 wasted calls, not more.
+        """The bounded budget: 4 wasted calls in the act node, not more.
 
         Two text rounds are what the query already paid for; the retry adds one.
         """
@@ -662,7 +662,7 @@ class TestAutoEscalationToNative:
         assert result["messages"][0].content == _NO_ANSWER_MSG
 
     @pytest.mark.asyncio
-    async def test_it_is_kept_for_the_session(self, text_mode, tool_mode_not_chosen):
+    async def test_it_is_kept_for_the_process(self, text_mode, tool_mode_not_chosen):
         """Otherwise every query pays the two wasted rounds again to rediscover it."""
         plain, bound = _escalating_llm()
         with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
@@ -688,7 +688,11 @@ class TestAutoEscalationToNative:
         assert first == 1
         assert caplog.text.count("Retrying this query on native") == 1
         assert "AORTA_CHAT_LLM_TOOL_MODE" in caplog.text
-        assert "aorta chat doctor" in caplog.text
+        # Points at the startup line, which does name the protocol, rather than
+        # at `aorta chat doctor`, which reports extras, the backend, the index
+        # and the model cache but nothing about the tool protocol.
+        assert "LLM backend" in caplog.text
+        assert "aorta chat doctor" not in caplog.text
 
 
 class TestTheDegradedRetrievalFallback:
@@ -759,8 +763,12 @@ class TestTheDegradedRetrievalFallback:
         fake = self._llm("An answer from context.")
         with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
             result = await act_node(_state())
-        assert result["command_output"] == ""
+        assert result.get("command_output") == ""
 
+        # Subscripted, not ``.get``: ``route_after_critic`` reads this with
+        # ``state.get(...)``, so a missing key is indistinguishable from ``None``
+        # and ``.get(...) is None`` would pass vacuously if the critic stopped
+        # returning the field at all.
         verdict = await critic_node({**_state(), **result, "iteration": 0})
         assert verdict["critic_feedback"] is None
 

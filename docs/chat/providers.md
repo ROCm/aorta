@@ -195,7 +195,7 @@ above) — this is detection, not a new default.
 Three things follow from that:
 
 - **An explicit `llm_tool_mode` is never overridden**, whether it comes from
-  the profile file, `AORTA_CHAT_LLM_TOOL_MODE` or a CLI flag. If you set `text`
+  the profile file or `AORTA_CHAT_LLM_TOOL_MODE`. If you set `text`
   deliberately, set it; the escalation only ever moves the built-in default.
 - **It is bounded.** The retry buys one native round, not a second loop, and it
   happens once per process rather than once per query.
