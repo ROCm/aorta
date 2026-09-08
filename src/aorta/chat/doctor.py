@@ -97,6 +97,59 @@ _VLLM_NATIVE_NOTE = (
     "--tool-call-parser; a stock server does not accept the 'tools' parameter."
 )
 
+#: The half of the remote-embedder story ``manifest.remedy_lines`` cannot tell.
+#:
+#: That function stops *offering* ``index fetch`` where it is guaranteed to
+#: refuse, and names ``embedding_provider = "local"`` as what makes the fetch
+#: work. What it cannot say is that the setting is probably not a decision
+#: anyone made. Every profile template ``aorta chat config init`` shipped for a
+#: remote LLM wrote ``embedding_provider = "remote"`` explicitly, and
+#: ``config.write_profile`` runs only on ``config init`` -- so a profile created
+#: before the templates changed still carries it, and nothing rewrites it. The
+#: published index cannot be read that way, which leaves those installs in the
+#: state this command exists to end: a fetch that refuses, and a build that
+#: sends every chunk of the corpus through the embeddings API.
+#:
+#: So this names the edit rather than only the consequence. ``--force`` comes
+#: second on purpose: it rewrites the whole profile from the current template,
+#: discarding hand edits and re-prompting for the key, where the one-line
+#: change keeps everything else. And it ends by saying what to do if the remote
+#: embedder *was* deliberate, because for that install flipping to local would
+#: be the wrong advice and the line has no way to tell the two apart.
+#:
+#: Deliberately does **not** restate why the fetch refuses. ``remedy_lines``
+#: already prints that paragraph on the row that owns the index verdict, and
+#: rendering the two together showed the same argument twice, forty lines
+#: apart. A report that repeats itself is one people learn to skim, which is
+#: the failure this whole batch is about -- so this carries only the half
+#: ``remedy_lines`` structurally cannot: that the setting came from a template,
+#: and what to do about it. The setting *name* appears in both, because that is
+#: the action rather than the argument.
+_REMOTE_EMBEDDING_MIGRATION = (
+    # Names its own subject rather than opening on "this": --json emits hint
+    # and procedure as separate fields, so a pronoun here points at nothing
+    # for a reader who has only the one.
+    "A remote embedding provider is very likely not a choice anyone made here.\n"
+    "Every 'aorta chat config init' profile for a remote LLM used to set\n"
+    'embedding_provider = "remote", and nothing rewrites a chat.toml that\n'
+    "already exists -- write_profile runs only on 'config init' -- so a profile\n"
+    "created before the templates changed still carries it.\n"
+    "\n"
+    "Three ways to change it, cheapest first:\n"
+    '  embedding_provider = "local"         edit chat.toml, keeping the rest\n'
+    "  AORTA_CHAT_EMBEDDING_PROVIDER=local  for a single session\n"
+    "  aorta chat config init --force       rewrite the profile from the\n"
+    "                                       current template; this discards\n"
+    "                                       hand edits and asks for the API\n"
+    "                                       key again\n"
+    "Local embedding runs on CPU, makes no API calls, and downloads ~65 MB of\n"
+    "weights once. It does not change which LLM you talk to -- only how the\n"
+    "corpus and your questions are turned into vectors.\n"
+    "\n"
+    "If the remote embedder *was* deliberate, keep it and build the index\n"
+    "locally; the index checks below say what this install currently needs."
+)
+
 #: Model names that mark a reasoning model. A heuristic -- a gateway can call a
 #: deployment anything, and a vLLM server is launched under whatever name its
 #: operator gave it -- so it only decides whether the tool-mode check warns or
@@ -418,11 +471,16 @@ def _collection_schema_defect(
 def _index_is_healthy() -> bool:
     """Whether an index is present and this install can query it as-is.
 
-    Asked so the cold-cache hint can be conditioned on what the user already
-    has. ``_check_embedding_model`` runs before ``_check_index`` because
+    Asked by both halves of ``_check_embedding_model``, so that neither the
+    cold-cache hint nor the remote-profile advice fires on an install that is
+    already fine: the first would say "nothing to do" over an unusable index,
+    the second would tell a working remote setup to abandon it.
+    ``_check_embedding_model`` runs before ``_check_index`` because
     provider-before-index reads better in the report, so it cannot read the
     later check's result; running the same validation twice costs two sqlite
-    opens and no network, which is cheaper than reordering the output.
+    opens and no network, which is cheaper than reordering the output. Twice is
+    the ceiling either way -- the two callers are on mutually exclusive
+    branches of the provider check.
 
     Warnings do not disqualify an index. Source drift is a reason to refresh
     it, not a reason for advice that would replace it with a worse one.
@@ -453,6 +511,15 @@ def _index_is_healthy() -> bool:
     same raise surfaces there regardless: a guard here could only make the two
     readers of one helper disagree about one failure, which is the drift this
     PR removed.
+
+    ``_check_remote_embedding_profile`` *does* catch around its call, which is
+    a different thing and not a re-litigation of the above. A guard in here
+    would change what every caller learns about the file. A guard out there
+    changes only what that one check is willing to conclude when the probe did
+    not finish -- it abstains, having no premise, and the exception still
+    reaches the report through ``_check_index`` under the name it belongs to.
+    Letting it escape *that* call instead was measured, and put two
+    ``embedding provider`` rows in one report.
     """
     from aorta.chat.config import settings
     from aorta.chat.rag.index_ops import check_index
@@ -471,6 +538,80 @@ def _index_is_healthy() -> bool:
     return not _store_defect(index_file)
 
 
+def _check_remote_embedding_profile(report: Report) -> None:
+    """Whether a remote embedding profile is one this install can answer from.
+
+    The migration gap raised on #462. That PR flips the profile templates to
+    local embeddings, but ``config.write_profile`` runs only on ``config
+    init``, so it cannot reach a ``chat.toml`` that already exists. Everyone who
+    ran ``config init`` with a remote-LLM profile before the change keeps
+    ``embedding_provider = "remote"`` on disk, gets no signal from that PR, and
+    stays in the state that motivated this one: no published index they can
+    read, and nothing naming the one line that fixes it.
+
+    ``config validate`` was the other candidate and is the wrong home twice
+    over -- it is rarely run, and a remote embedding profile is not *invalid*.
+    It is valid and incompatible with the published index, which is a different
+    statement and the kind a doctor makes. This command is also the only one
+    that has already resolved the provider and read the index, which are the
+    two facts the diagnosis needs.
+
+    **Conditioned on the index, not on the provider.** An install that chose a
+    remote embedder deliberately and built a matching index locally is correct,
+    and telling it to flip to local would be wrong -- so this fires only where
+    there is no index this install can query. That is the same discipline as
+    the cold-cache line above: a warning that fires on a correct setup is how
+    people learn to skim the command that also reports the fatal mismatches,
+    and gap 2a -- the reason this PR exists -- was exactly that mistake.
+
+    ``WARN`` rather than ``FAIL`` because the provider itself is fine and
+    working. ``_check_index`` owns the verdict on the index and reports it
+    below, with the remedies; this line explains why the obvious remedy is
+    missing from that list and what to change so it comes back.
+
+    Costs one more ``check_index`` and sqlite open, on the remote path only,
+    which previously did no index work at all. That makes two per run at worst
+    -- the same ceiling the local cold-cache path already has, and for the same
+    reason: reordering the report to share one result reads worse than the
+    second read costs, and neither touches the network.
+    """
+    try:
+        healthy = _index_is_healthy()
+    except Exception as exc:
+        # A probe that did not finish establishes nothing, so this abstains
+        # rather than guessing which way it would have gone. Letting it escape
+        # instead was measured: a broken sqlite-vec install put *two*
+        # ``embedding provider`` rows in one report, an ``ok`` and a ``fail``,
+        # because ``run_checks`` labels a raising check with its own name --
+        # and blamed the embedding provider for a sqlite fault. ``_check_index``
+        # already reports that same exception one row down, under the name it
+        # belongs to.
+        #
+        # Not a reversal of the argument about ``_index_is_healthy``'s last
+        # line: that was against wrapping the line *inside* the helper, which
+        # would have changed what ``_check_index`` reports. This is a caller
+        # declining to draw a conclusion, and it leaves the helper's contract
+        # and the index verdict exactly as they were.
+        logger.debug("index probe failed; no profile advice: %s", exc)
+        return
+    if healthy:
+        # A deliberate remote embedder with an index built to match it. Nothing
+        # to migrate, and nothing this line could say that would be true.
+        return
+    report.add(
+        "embedding profile",
+        WARN,
+        "remote embeddings, and no index this install can query",
+        hint=(
+            "This profile selects a remote embedding provider, and the\n"
+            "published index cannot be read that way -- which is why\n"
+            "'aorta chat index fetch' is not offered as an index remedy.\n"
+            'Setting embedding_provider = "local" brings it back; see below.'
+        ),
+        procedure=_REMOTE_EMBEDDING_MIGRATION,
+    )
+
+
 def _check_embedding_model(report: Report) -> None:
     """Whether queries can be embedded at all, and what to do when they cannot."""
     from aorta.chat.rag.embeddings.factory import get_provider
@@ -486,6 +627,7 @@ def _check_embedding_model(report: Report) -> None:
         # A remote embedder needs a key and an endpoint, not a cache; the
         # provider reports its own configuration problems when built.
         report.add("embedding model cache", SKIP, "remote provider; no local weights needed")
+        _check_remote_embedding_profile(report)
         return
 
     from aorta.chat.rag.embeddings import fastembed_bge

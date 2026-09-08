@@ -109,6 +109,17 @@ for an absent index, a refused one and a stale one — and name `aorta chat inde
 build` instead. The messages a *failing query* prints are not conditioned yet
 and can still name the fetch; on a remote provider, read them as `build`.
 
+Withholding the fetch is only half of it, because a remote embedder is often
+not a decision anyone made — every `aorta chat config init` profile for a
+remote LLM used to set `embedding_provider = "remote"`, and nothing rewrites a
+`chat.toml` that already exists. So `aorta chat doctor` also warns when the
+configured provider is remote *and* there is no index this install can query,
+and names the edit: `embedding_provider = "local"`, the
+`AORTA_CHAT_EMBEDDING_PROVIDER=local` spelling for one session, or `aorta chat
+config init --force` to rewrite the profile from the current template. It stays
+quiet for a remote embedder with an index built to match, which is a correct
+setup that should not be told to change.
+
 It is the normal path for every chat provider, because the embedding provider is
 a separate choice and every `config init` profile leaves it local. The asset is
 built by CI under default settings, so `fetch` works exactly as long as your

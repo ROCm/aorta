@@ -703,6 +703,189 @@ class TestIndexChecks:
         assert any("source drift" in line for line in check.hint.splitlines())
 
 
+class TestRemoteEmbeddingProfile:
+    """The migration gap raised on #462, which lands here rather than there.
+
+    ``config.write_profile`` runs only on ``config init``, so flipping the
+    profile templates to local embeddings cannot reach a ``chat.toml`` that
+    already exists. Anyone who ran ``config init`` with a remote-LLM profile
+    before that change keeps ``embedding_provider = "remote"`` on disk and gets
+    no signal at all: the published index cannot be read that way, so
+    ``index fetch`` refuses, and this PR's ``remedy_lines`` work stops
+    *offering* the fetch without ever saying that flipping to local is what
+    brings it back.
+
+    The hard part is not saying it. It is not saying it to the install that
+    chose a remote embedder on purpose and built an index to match -- which is
+    correct, and for which "flip to local" is wrong advice. So the trigger is
+    index health, never the provider alone.
+    """
+
+    def _remote(self, monkeypatch) -> None:
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "")
+
+    def test_a_remote_profile_with_no_index_is_told_what_to_change(self, monkeypatch):
+        """The stuck state: a fetch that refuses, and nothing naming the one line."""
+        self._remote(monkeypatch)
+        check = _by_name(run_checks(backend=False), "embedding profile")
+
+        assert check.status == WARN
+        assert "remote embeddings" in check.detail
+        # The reviewer's two requirements: name the incompatibility, name the edit.
+        assert "published" in check.hint
+        assert 'embedding_provider = "local"' in check.hint
+        assert 'embedding_provider = "local"' in check.procedure
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in check.procedure
+
+    def test_it_names_the_profile_rewrite_as_the_alternative(self, monkeypatch):
+        """``config init --force`` fixes it, and nobody knows to run it."""
+        self._remote(monkeypatch)
+        check = _by_name(run_checks(backend=False), "embedding profile")
+
+        assert "aorta chat config init --force" in check.procedure
+        # And says what it costs, since it discards hand edits and re-prompts.
+        assert "discards" in check.procedure
+
+    def test_it_says_where_the_setting_probably_came_from(self, monkeypatch):
+        """Migration advice, not a scolding: the template wrote it, not the user.
+
+        This is the sentence that makes the check worth a row of its own.
+        ``remedy_lines`` can name the setting; only this can say that a profile
+        written before the templates changed still carries it and that nothing
+        on any normal path will rewrite it.
+        """
+        self._remote(monkeypatch)
+        procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
+
+        assert "templates changed" in procedure
+        assert "write_profile runs" in procedure
+
+    def test_it_does_not_fire_on_a_remote_profile_with_an_index_to_match(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The test this check exists to pass, and the one that makes it safe.
+
+        A deliberate remote embedder with an index built by that embedder is a
+        correct setup. Telling it to flip to local would discard a working
+        index and be wrong on the facts. Conditioning on the provider alone
+        would do exactly that -- and a warning on a correct setup is the defect
+        this whole PR exists to remove, so recreating one here would be
+        self-defeating.
+        """
+        self._remote(monkeypatch)
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        _write_index(monkeypatch, tmp_path, embedding_model=get_provider().model_id())
+
+        report = run_checks(backend=False)
+        assert _by_name(report, "index manifest").status == OK
+        assert not [check for check in report.checks if check.name == "embedding profile"]
+
+    def test_it_does_not_fire_on_a_local_profile(self, monkeypatch, tmp_path: Path):
+        """Nothing to migrate; ``index fetch`` is offered and works."""
+        _write_index(monkeypatch, tmp_path)
+        report = run_checks(backend=False)
+        assert not [check for check in report.checks if check.name == "embedding profile"]
+
+    def test_a_remote_profile_over_a_refused_index_is_told_too(self, monkeypatch, tmp_path: Path):
+        """An index present but built by something else is the same dead end."""
+        self._remote(monkeypatch)
+        _write_index(monkeypatch, tmp_path, embedding_model="somebody/else")
+
+        report = run_checks(backend=False)
+        assert _by_name(report, "index manifest").status == FAIL
+        assert _by_name(report, "embedding profile").status == WARN
+
+    @pytest.mark.parametrize("how", STORE_DAMAGE)
+    def test_a_remote_profile_over_a_clobbered_store_is_told_too(
+        self, monkeypatch, tmp_path: Path, how
+    ):
+        """Index health is the trigger, so every unusable state reaches it.
+
+        The message points at the index checks rather than claiming the
+        provider is the whole fault, because for these states a rebuild is the
+        proportionate fix and flipping to local is merely *a* fix.
+        """
+        self._remote(monkeypatch)
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        collection = get_provider().collection_name()
+        _write_index(monkeypatch, tmp_path, embedding_model=get_provider().model_id())
+        _break_store(settings.index_file, collection, how)
+
+        check = _by_name(run_checks(backend=False), "embedding profile")
+        assert check.status == WARN
+        assert "index checks below" in check.procedure
+
+    def test_it_composes_with_the_remedies_rather_than_repeating_them(self, monkeypatch):
+        """Two halves of one diagnosis, on two rows, saying different things.
+
+        ``remedy_lines`` explains why the fetch is absent from the remedy list;
+        this explains where the setting came from and what to change. Rendering
+        the first draft showed both reciting the CI-publishes-one-asset
+        argument forty lines apart, which is how a report teaches people to
+        skim it -- the failure this batch exists to fix. So the split is
+        asserted, not left to whoever reads the two strings next.
+        """
+        self._remote(monkeypatch)
+        report = run_checks(backend=False)
+
+        index = _by_name(report, "chat index")
+        assert index.status == FAIL
+        # The index row still owns the fetch argument, and still withholds the
+        # fetch itself.
+        assert "aorta chat index fetch     download" not in index.hint
+        assert "no published asset can match a remote one" in index.hint
+
+        profile = _by_name(report, "embedding profile")
+        assert "no published asset can match a remote one" not in profile.procedure
+        assert "CI publishes" not in profile.procedure
+        # What each row uniquely carries.
+        assert "write_profile runs" not in index.hint
+        assert 'embedding_provider = "local"' in profile.hint
+
+    def test_a_raising_index_probe_leaves_the_provider_row_alone(self, monkeypatch, tmp_path: Path):
+        """Measured, not assumed: letting it escape put two rows under one name.
+
+        ``run_checks`` labels a raising check with the label it was registered
+        under, which for this one is ``embedding provider`` -- so a broken
+        sqlite-vec produced an ``ok`` provider row *and* a ``fail`` provider
+        row in the same report, blaming the embedder for a sqlite fault.
+        ``_check_index`` reports that exception a row later under its own name,
+        so abstaining here loses no information and costs one wrong label.
+        """
+        self._remote(monkeypatch)
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        _write_index(monkeypatch, tmp_path, embedding_model=get_provider().model_id())
+
+        def _explode(*args, **kwargs):
+            raise ImportError("sqlite-vec extension not loadable")
+
+        monkeypatch.setattr(doctor, "_store_defect", _explode)
+        report = run_checks(backend=False)
+
+        provider_rows = [check for check in report.checks if check.name == "embedding provider"]
+        assert [check.status for check in provider_rows] == [OK]
+        assert not [check for check in report.checks if check.name == "embedding profile"]
+        # Reported once, under the name it belongs to.
+        assert [check.status for check in report.checks if check.name == "chat index"] == [OK, FAIL]
+
+    def test_it_is_a_warning_because_the_profile_is_valid_not_broken(self, monkeypatch):
+        """Which is why this is not ``config validate``'s job.
+
+        A remote embedding profile is valid and incompatible with the published
+        index. Those are different statements, and only the second one is a
+        doctor's to make.
+        """
+        self._remote(monkeypatch)
+        assert _by_name(run_checks(backend=False), "embedding profile").status == WARN
+        # The provider itself works, and says so on its own line.
+        assert _by_name(run_checks(backend=False), "embedding provider").status == OK
+
+
 class TestToolMode:
     """The setup-time signal for a failure that otherwise only shows as a dead query.
 
