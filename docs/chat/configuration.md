@@ -241,8 +241,15 @@ which four are required and two apply only behind a gateway:
 | `remote_embedding_model` | required | Has a default, but set it explicitly — it names the collection. |
 | `remote_embedding_base_url` | required in practice | Only omit it if you mean OpenAI's own API. |
 | `remote_embedding_api_key` | required | Empty raises at first use. |
-| `remote_embedding_auth_header` | gateway only | Header name instead of a bearer token. |
+| `remote_embedding_auth_header` | gateway only | Header name instead of a bearer token. For Azure API Management that is exactly `Ocp-Apim-Subscription-Key`. |
 | `remote_embedding_extra_headers` | gateway only | Any other headers the gateway wants. |
+
+**Coming from the `azure-apim` profile?** That profile pre-fills
+`remote_llm_auth_header = "Ocp-Apim-Subscription-Key"` for the chat side, and it
+used to pre-fill `remote_embedding_auth_header` with the same string. It no
+longer does — embeddings are local in that profile now, so there was nothing for
+it to configure — which makes this the one value the wizard used to hand you and
+no longer does. It is the same string on both sides.
 
 In `~/.config/aorta/chat.toml`:
 
@@ -329,9 +336,16 @@ aorta chat doctor
 ```
 
 The index check should pass, and the `embedding provider` line should name your
-endpoint and model rather than `provider default`. A refusal here means the
-index and the configuration still disagree — usually step 3 was skipped, or was
-run before step 1 took effect.
+model and the endpoint you configured.
+
+`provider default` where you expected an endpoint is **not** in itself a
+failure: that is what the line prints whenever `remote_embedding_base_url` is
+empty, which is the supported way to mean OpenAI's own API. It is a symptom only
+if you meant to point at a gateway — in which case step 1 did not take effect,
+and your corpus is going to OpenAI with a header it does not read.
+
+A refusal here means the index and the configuration still disagree — usually
+step 3 was skipped, or was run before step 1 took effect.
 
 ### Going back
 
@@ -340,6 +354,21 @@ Remove or unset the six settings and re-fetch:
 ```bash
 aorta chat index fetch
 ```
+
+That is the whole way back **only if `embedding_model` is still at its default**.
+It is not one of the six, and it is the one other setting the published asset is
+checked against: `manifest.validate` refuses on the model name, on the collection
+name and on the embedding identity, and for the local provider all three are
+derived from `embedding_model`. A hand-set value is therefore refused exactly as
+a remote provider was. Clear it as well, or keep it and rebuild with
+`aorta chat index build`.
+
+`chunk_size` and `chunk_overlap` are a different case and do **not** block the
+re-fetch. They are compared, but as warnings: the vectors are still the published
+model's, and the chunker only ran at build time, so what a mismatch costs you is
+that retrieved spans are not the size the prompt budget was tuned for. Restore
+them if you changed them, but they will not stop `index fetch` and they never
+made the published asset unusable.
 
 The two providers use different collection names and coexist in the one
 `.sqlite` file, so switching to remote never disturbed the local collection:
