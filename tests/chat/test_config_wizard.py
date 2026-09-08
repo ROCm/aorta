@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 import tomllib
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from aorta.chat import config
 from aorta.cli.chat import _CONFIG_PROFILES, chat
@@ -429,12 +430,11 @@ class TestConfigInit:
     def test_a_rejected_extra_header_is_not_echoed_back(self, value, monkeypatch, chat_profile):
         """A malformed header map must not print the credential it carries.
 
-        ``str(ValidationError)`` embeds pydantic's ``input_value``, and the
-        ``extra_headers`` validator quotes the offending pair in its own
-        message, so both spellings of a bad value reached the terminal with the
-        key intact -- from the one command a user runs immediately after typing
-        one in, and for a field ``config show`` masks. The field name still has
-        to appear, or the line is not actionable.
+        ``str(ValidationError)`` embeds pydantic's ``input_value``, so both
+        spellings of a bad value reached the terminal with the key intact --
+        from the one command a user runs immediately after typing one in, and
+        for a field ``config show`` masks. The field name still has to appear,
+        or the line is not actionable.
         """
         monkeypatch.setenv("AORTA_CHAT_REMOTE_EMBEDDING_EXTRA_HEADERS", value)
         config.reset_settings()
@@ -634,3 +634,45 @@ class TestConfigValidate:
         chat_profile.write_text(f"{field} = {{}}\n", encoding="utf-8")
         chat_profile.chmod(0o644)
         assert config.validate_profile(chat_profile) == []
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "Authorization: Bearer sk-SUPERSECRET-abcd1234",
+            '{"Authorization": "Bearer sk-SUPERSECRET-abcd1234"',
+        ],
+        ids=["comma-form", "json-form"],
+    )
+    def test_a_rejected_extra_header_is_not_echoed_back(self, value, monkeypatch, chat_profile):
+        """The command ``config init`` points at must not leak what it warned about.
+
+        ``config init`` answers a rejected credential with "sort the environment
+        out first: aorta chat config validate". This is that command, and it
+        interpolated the same raw ``ValidationError`` -- so following the advice
+        printed the key. The field name still has to appear, or the report is
+        not actionable.
+        """
+        config.write_profile({"chunk_size": 128}, chat_profile)
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_EMBEDDING_EXTRA_HEADERS", value)
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "validate"])
+        assert result.exit_code == 1, result.output
+        assert "SUPERSECRET" not in result.output
+        assert "input_value" not in result.output
+        assert "remote_embedding_extra_headers" in result.output
+
+    def test_the_validator_names_the_position_not_the_value(self, chat_profile):
+        """The message is rendered by consumers this module does not control.
+
+        ``ValidationError`` is a ``ValueError``, so the two ``str(exc)``
+        handlers in ``cli/chat.py`` catch this one too. Keeping the rejected
+        pair out of the message is what stops it surfacing there; the position
+        is what a user counts commas to find anyway.
+        """
+        with pytest.raises(ValidationError) as caught:
+            config.Settings(
+                remote_embedding_extra_headers="user=alice,Authorization: Bearer sk-SECRET"
+            )
+        rendered = str(caught.value)
+        assert "extra header #2 is missing '='" in rendered
+        assert "sk-SECRET" not in rendered.split("input_value=")[0]

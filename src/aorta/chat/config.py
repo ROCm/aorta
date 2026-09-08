@@ -332,12 +332,18 @@ class Settings(BaseSettings):
                     'either user=alice,x-tenant=amd or {"user": "alice"}.'
                 ) from exc
         headers: dict[str, str] = {}
-        for pair in text.split(","):
+        # Positional, not quoted: whatever is in a header map may be a
+        # credential (SECRET_MAPPING_FIELDS), and this message is rendered by
+        # every consumer of the resulting ValidationError -- including two
+        # handlers in ``cli/chat.py`` that print ``str(exc)`` and catch this
+        # because pydantic's ValidationError is a ValueError. The position is
+        # what the user counts commas to find anyway.
+        for position, pair in enumerate(text.split(","), start=1):
             if not pair.strip():
                 continue
             if "=" not in pair:
                 raise ValueError(
-                    f"extra header {pair.strip()!r} is missing '='. Use "
+                    f"extra header #{position} is missing '='. Use "
                     'either user=alice,x-tenant=amd or {"user": "alice"}.'
                 )
             name, _, header_value = pair.partition("=")
@@ -641,11 +647,12 @@ EMBEDDING_PROVIDER_FLOWS: dict[str, str] = {
 def _unresolvable_settings_reason(exc: Exception) -> str:
     """Why the settings would not load, named without quoting any value.
 
-    ``str(ValidationError)`` carries pydantic's ``input_value``, and the
-    ``extra_headers`` validator quotes the offending pair in its own message, so
-    interpolating either would print through ``config init`` the very gateway key
-    that :data:`SECRET_MAPPING_FIELDS` masks in ``config show``, keeps out of
-    ``aorta bundle``, and mode-checks on disk.
+    ``str(ValidationError)`` carries pydantic's ``input_value``, so interpolating
+    it would print the very gateway key that :data:`SECRET_MAPPING_FIELDS` masks
+    in ``config show``, keeps out of ``aorta bundle``, and mode-checks on disk.
+    The validators in this module are written not to echo a rejected value
+    either, but that is their own discipline and does not cover ``input_value``,
+    which pydantic appends whatever the message says.
 
     A field name is enough to act on and cannot itself be a credential, so only
     names are reported. The rejected value is withheld whatever field it arrived
@@ -653,6 +660,9 @@ def _unresolvable_settings_reason(exc: Exception) -> str:
     ``remote_llm_base_url`` query string is as much a leak as one in an extra
     header, and a rule keyed on field names would fail open on the field nobody
     classified.
+
+    Used by :func:`describe_embeddings` and :func:`validate_profile` -- the echo
+    printed after a key is typed in, and the command that echo points at.
     """
     if isinstance(exc, ValidationError):
         fields = sorted({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
@@ -779,9 +789,11 @@ def effective_settings(reveal: bool = False) -> dict[str, Any]:
 def validate_profile(path: Path | None = None) -> list[str]:
     """Return the problems with the on-disk profile; empty means healthy.
 
-    Reports unreadable/malformed files, keys that no longer exist, values that
-    fail validation, and a profile holding a credential at a permissive mode --
-    the last being a real finding on a shared node, not a style note.
+    Reports unreadable/malformed files, keys that no longer exist, the *names* of
+    fields whose values fail validation, and a profile holding a credential at a
+    permissive mode -- the last being a real finding on a shared node, not a
+    style note. Names and not values, because a rejected value may itself be a
+    credential: see :func:`_unresolvable_settings_reason`.
 
     "Credential" is :data:`SECRET_FIELDS` plus a non-empty
     :data:`SECRET_MAPPING_FIELDS` map, so a profile whose only secret is a
@@ -804,7 +816,10 @@ def validate_profile(path: Path | None = None) -> list[str]:
     try:
         Settings()
     except Exception as exc:  # pydantic ValidationError, or a field validator
-        problems.append(f"{path}: {exc}")
+        # Field names only, for the reason _unresolvable_settings_reason gives:
+        # this is the command ``config init`` sends a user to after their key was
+        # rejected, so it is the last place that may echo the key back.
+        problems.append(f"{path}: {_unresolvable_settings_reason(exc)}")
 
     # SECRET_MAPPING_FIELDS counts too: a profile whose only credential sits in
     # an extra header is exactly as sensitive as one with remote_llm_api_key
