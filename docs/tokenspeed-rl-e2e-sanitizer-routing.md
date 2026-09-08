@@ -16,6 +16,17 @@ cannot tell any two policies apart.
 Three things have to change before this use case is trainable, and none of them
 is more corpus. They are in [What to fix](#5-what-to-fix).
 
+> **Status, 2026-09-08.** The two reward-design fixes have landed and the
+> recorded proposals have been re-scored against them: the ladder now spans
+> 0.5400 to 1.0000 where it was flat at 1.0000, and the model no longer ties a
+> constant on the primary condition. It does not clear the whole acceptance
+> test — two of the four criteria fail on the widened condition, and one of them
+> fails for a reason no reward can address. §1 through §4 below are left as the
+> record of the original run; [§5](#5-what-to-fix) is the record of the fixes,
+> the numbers, and the failures. The caveats in
+> [§7](#7-what-nine-scenarios-can-and-cannot-support) apply unchanged to the new
+> numbers — the effective n is still 9, not 45, and now demonstrably so.
+
 ## 0. Run provenance
 
 | | |
@@ -201,14 +212,28 @@ kernel-level data race, so the honest answers here are `unknown` and a wrong
 label. The model picked both, and the reward paid 1.0 for each.
 
 **Shotgunning.** On the corpus's 2-name set, 20 of 45 named both. On the
-20-name registry the lists ran to 3, 4, 7, 9, 11 and in one case **17
-mitigations at once** — all registered, all offered, so all scored 1.0. The
-ladder has no precision term: a proposal naming 17 candidates is worth exactly
-what the single right name is worth, and it would cost the agent loop 17
-iterations to work through. Most-proposed names were
-`debug_hip_dynamic_queues_1` (39/45) and `debug_hip_dynamic_queues_2` (35/45),
+20-name registry the lists ran to 1, 3, 7, 9 and **11 mitigations at once** —
+all registered, all offered, so all scored 1.0. The ladder has no precision
+term: a proposal naming 11 candidates is worth exactly what the single right
+name is worth. Most-proposed names were `debug_hip_dynamic_queues_1` (40/45),
+`debug_clr_no_batch_cpu_sync` (35/45) and `debug_hip_dynamic_queues_2` (35/45),
 chosen at much the same rate across LDS races, GEMM wait hazards and
 zero-finding tool errors alike — which is not a targeted choice.
+
+> **Corrected 2026-09-08**, while implementing [§5](#5-what-to-fix). This
+> paragraph previously read "3, 4, 7, 9, 11 and in one case **17 mitigations at
+> once**", and gave the cost as "17 iterations". Neither reproduces from
+> `hard.json`: the observed list lengths are 1, 3, 7, 9, 11, the maximum is
+> **11**, no proposal named 4 or 17, and the counts are per-scenario constants
+> (all five samples of a scenario name the same list — see the
+> [sampling defect](#54-a-second-cause-of-zero-advantage-that-no-reward-can-fix)).
+> The cost model was also wrong in a way that mattered for the fix: `loop.py`
+> appends **every** proposed name to the mitigation axis and runs a probe cell
+> for each, then charges the whole proposal **one** unit of the iteration
+> budget. So a k-name proposal costs k GPU cells inside a single iteration, and
+> `check_iteration_budget` does not restrain shotgunning at all. That is a
+> stronger argument for the precision term than the original sentence, and it is
+> what `precision_credit` is derived from.
 
 **`consumer_outcome`: all 45 `accepted`, 0 `silent_stop`, 0 `policy_stop`.** The
 asymmetry the brief asked about — a proposal scored 0.8 that the real loop would
@@ -220,25 +245,244 @@ the ladder catches them; this model just does not produce them.
 
 ## 5. What to fix
 
-In priority order. The first two are reward-design changes, cheap and testable
-without a GPU.
+Items 1 and 2 were **implemented on 2026-09-08** and the recorded proposals
+re-scored under them; this section is now the record of that rather than a plan.
+Items 3 and 4 are unchanged and still open. Item 5 is new, and it is the one
+that changes the outlook.
 
-1. **Stop paying full marks for `unknown`.** Either exclude it from tier 3's
-   accepted set, or gate it on the evidence genuinely not supporting a
-   category. At 88.9% abstention this single change is the difference between a
-   saturated reward and a graded one.
-2. **Add a precision term to the mitigation tiers.** Score
-   `1/len(next_mitigations)` or similar, so hedging across the candidate set
-   costs something. A 17-name proposal must not tie a 1-name one.
+### 5.1 Implemented: `unknown` no longer earns full marks
+
+`proposal_reward.py` grades tier 3 instead of passing it. A category in the
+closed set that is *not* `unknown` earns the whole 0.2 step; `unknown` earns
+`ABSTENTION_CREDIT` (0.5) of it. Declining therefore costs **0.1**, and an
+abstaining proposal tops out at 0.9 rather than 1.0.
+
+The dock is deliberately small, and the reason is the trap in this fix. Both
+options this section originally offered were rejected:
+
+- **Excluding `unknown` from tier 3's accepted set** drops an abstention to 0.4
+  while *any* in-set category — right or wrong — still earns 1.0. That is a 0.6
+  gradient pointing straight at "invent a confident label", and on this corpus
+  it is not hypothetical: [§4](#4-what-the-model-actually-gets-wrong) establishes
+  that 8 of 9 scenarios have **no correct category available**, so the policy it
+  trains is one that emits a wrong label instead of an honest `unknown`. That is
+  worse for an operator and worse for the loop, which routes on the category. It
+  would also put the reward in disagreement with `AgentPolicy.validate_step`,
+  which accepts `unknown` — the exact drift `proposal_reward.py`'s docstring is
+  built to avoid.
+- **Gating the credit on "the evidence genuinely does not support a category"**
+  is *not implementable*. That predicate needs the per-scenario category labels
+  that do not exist. It is item 3 wearing a different hat, so this section
+  offered as an alternative to fix 1 something that is really a restatement of
+  fix 3.
+
+A third candidate, not in the original list, was rejected on the data:
+**coupling the credit to `confidence`**, docking an abstention that also claims
+certainty. It is attractive — incoherence is checkable without labels, and it
+does not push the policy toward a confident wrong label, because committing and
+abstaining stay equally available. But the recorded model abstains at confidence
+0.6–0.95 while both constant templates abstain at exactly 0.5, so the term ranks
+a two-line constant **above** the model on 8 of 9 scenarios. It inverts the one
+comparison this exercise exists to make. Worth revisiting once a correctness
+signal exists to anchor it.
+
+What survives is still not clean, and the residue should be stated rather than
+buried: **partial credit keeps a wrong-but-specific label worth more than an
+honest abstention** (a full step against half a step). It shrinks the perverse
+gradient from 0.6 to 0.1 rather than removing it. Its real merit is graceful
+degradation — when the category set is widened to cover kernel-level races, the
+same term becomes correctness-sensitive with no rewrite.
+
+### 5.2 Implemented: a precision term on the mitigation block
+
+The tier 4–5 block is scaled by `precision_credit(k) = min(1, 2/k)` for a
+k-name proposal. The cost model is the loop's, not a preference: `loop.py` runs
+a probe cell per name and charges one unit of iteration budget for the whole
+proposal, so k names is k GPU cells and the budget does not restrain it.
+
+The free pair is what neutralises the perversity a brevity term invites. With no
+correctness signal the reward cannot tell a right name from a wrong one, so any
+brevity term makes a 1-name proposal beat a 2-name proposal that *contains* the
+right name. `1/len(next_mitigations)` — the form this section suggested — puts a
+0.2 reward cliff exactly there, the largest single step the term can produce. At
+`FREE_MITIGATIONS = 2` the two tie instead, so the reward never pays a policy to
+drop a correct name in order to look decisive.
+
+**It relocates the perversity rather than removing it, and that has to be said
+plainly.** At three names and up, a single confident wrong name still outscores
+a list containing the right one. No function of the list's *shape* can fix that;
+it needs a correctness signal. See [§5.5](#55-is-the-contracts-fix-half-worth-a-gpu-now).
+
+One consequence is deliberate and worth flagging for anyone reading a score:
+**the reward is no longer a pure function of the tier.** A wide enough sweep at
+tier 5 can score below a precise proposal at tier 4, or below a tier-3 miss.
+Tier and reward are therefore reported separately by `Score`.
+
+### 5.3 What the re-score showed
+
+`examples/rl/rescore_e2e.py` re-scores the recorded raw completions offline — no
+GPU, no server — reading `raw` and never the stored reward, so the "before"
+column is the original run's own number.
+
+```bash
+python examples/rl/rescore_e2e.py \
+    /apps/vikhande/rl-e2e/results/{faithful,hard}.json
+```
+
+Ordered by the faithful condition, which is the primary one — its candidate set
+is the corpus's. Note that `hard` **reorders** the ladder, and that reordering is
+the substance of criterion 1's failure below.
+
+| policy | reads input? | faithful (2 offered) | hard (20 offered) |
+|---|---|---:|---:|
+| `oracle_contract_perfect` | no | **1.0000** | **1.0000** |
+| **Qwen3-8B, 45 samples** | **yes** | **0.9111** | **0.7174** |
+| `honest_abstainer` | no | 0.9000 | 0.9000 |
+| `abstain_and_pick_first` | no | 0.9000 | 0.9000 |
+| `abstain_and_shotgun` | no | 0.9000 | 0.5400 |
+| `always_prose` | no | 0.0000 | 0.0000 |
+
+Before: every row except `always_prose` was 1.0000. The four acceptance
+criteria, honestly:
+
+| # | criterion | faithful | hard |
+|---|---|:-:|:-:|
+| 1 | both abstain templates strictly below the model | **pass** | **fail** |
+| 2 | contract-perfect reference at or near the top | **pass** | **pass** |
+| 3 | non-zero within-group spread | **fail** | **fail** |
+| 4 | model between the constants and the reference | **pass** | **fail** |
+
+Three of four on the faithful condition, two of four on the widened one. What
+each failure means:
+
+**Criterion 1 fails on `hard`, and the way it fails is the finding.**
+`abstain_and_pick_first` scores 0.9000 against the model's 0.7174. A two-line
+constant that declines to classify and names one mitigation beats a real model,
+*because* the model hedges and the constant does not. The precision term added
+to punish hedging handed the win to a constant. Note also that
+`abstain_and_pick_first` and `honest_abstainer` score **identically** — they are
+the same policy up to the hypothesis text, and this reward does not read the
+hypothesis. Criterion 4 fails on `hard` as a direct consequence of criterion 1.
+
+**Criterion 1 passes on `faithful` by 0.0111, and the margin is worth
+distrusting.** It comes entirely from `consan-racy`, the single scenario where
+the model committed to a category instead of abstaining — and that category,
+`checkpoint_race`, is *wrong*. So the model's whole advantage over a constant on
+the primary condition is one confidently wrong label. The perversity is not
+theoretical; it is what the passing number is made of.
+
+**Criterion 2 passes, with a caveat that undercuts the word "perfect".** The
+reference commits to a category and spends one cell, so it scores 1.0. But on 8
+of 9 scenarios its category is *knowingly wrong*, because the closed set has no
+name for the failure. There is no policy on this corpus that is both honest and
+top-scoring: the ceiling is 1.0, the honest ceiling is 0.9, and the 0.1 between
+them is what the reward currently charges for telling the truth.
+
+**Criterion 3 fails, and no reward change can fix it** — see below.
+
+The always-`pass` degenerate floor is **0.5333, unchanged**, and it must be:
+fixes 1 and 2 are entirely inside `proposal_reward.py`, and the floor is a
+`triage_reward.py` number. Confirmed by re-running
+`triage_reward.py --corpus examples/rl/corpus/triage.jsonl`, and it still checks
+independently as `0.6·(4/9) + 0.4·(6/9)`. The brief's 0.629 still reproduces
+nowhere.
+
+### 5.4 A second cause of zero advantage that no reward can fix
+
+**All five samples in every scenario group are byte-identical.** The 45 recorded
+proposals are 9 distinct completions, each repeated five times, in both
+conditions.
+
+`LiteLLMProposer.propose` sends no `temperature` and `run_e2e.py` injected none
+(`temperature_injected: null`, and the recorded request carries only `model`,
+`response_format` and the messages), so the engine decoded at its default and
+sampling was effectively greedy.
+
+This matters more than it first looks. A reward is a function of the completion,
+and the loop state is constant inside a group, so **identical completions earn
+identical rewards under any reward function whatsoever.** Within-group spread is
+therefore exactly zero for reasons that have nothing to do with saturation, and
+criterion 3 was unsatisfiable on this data before a single line was changed.
+[§3](#3-does-the-scoring-discriminate-no-it-is-saturated-with-no-headroom)
+attributed 9-of-9 degenerate groups to the reward's ceiling; that was one of two
+independent causes, and this is the other.
+
+The distinction is pinned by a pair of tests rather than argued: five copies of
+one completion give zero spread, and four differing completions on the same
+scenario and loop state give non-zero spread under the same grader. So the
+reward is not what blocks criterion 3.
+
+`rescore_e2e.py` reports `distinct_completions` per group and fails under
+`--check-determinism` when any group collapses to one. As a substitute
+measurement it reports `spread_across_on_contract_policies` — the range the
+reward achieves on one scenario across the policies that clear the format gate,
+**0.1000** on faithful and **0.4600** on hard, against 0.0000 before. That
+demonstrates the reward regained discriminative power. It is *not* criterion 3
+and must not be reported as if it were: it needs several policies, whereas GRPO
+needs one policy sampled several times.
+
+**Consequence for the trainer:** a rollout must set a non-zero temperature, or
+GRPO gets a zero advantage regardless of the reward. This is a one-line change
+to the rollout path, and it needs a GPU to re-measure, so it is not done here.
+
+### 5.5 Is the contract's fix half worth a GPU now?
+
+**Yes — and the case is much stronger than before this exercise.**
+
+The general shape of the two implemented fixes is the argument. With no
+correctness signal, every available term scores **form**, and each form-based
+term is gameable in its own direction:
+
+| term | what it rewards | how it is gamed |
+|---|---|---|
+| category membership (before) | naming anything in the set | abstain — `unknown` is in the set |
+| abstention credit (fix 1) | committing to a category | commit to a *wrong* category |
+| precision (fix 2) | short mitigation lists | name one wrong thing confidently |
+| calibration (rejected) | coherent confidence | emit a humble constant |
+
+Fixing one direction opens another, and the re-score measured the trade rather
+than predicting it: fix 2 broke the shotgun tie (`abstain_and_shotgun` fell from
+1.0000 to 0.5400) and in the same move let a one-name constant beat the model.
+Every row in that table is gameable because every row scores the *shape* of a
+proposal, and shape is all that is observable without running the mitigation.
+
+The plan deferred the fix half — scoring whether a proposed mitigation actually
+resolves the reproducer — because it needs a probe cell and a GPU. That
+deferral now looks like the expensive choice:
+
+- It is the only term that is **not** gameable by form, because it is checked by
+  execution rather than inspection.
+- It is the only term that makes fix 2's residual perversity go away, rather
+  than relocating it: with a resolve signal, a list containing the right name
+  beats one wrong name on merit, and precision becomes a tie-break instead of
+  the whole mitigation signal.
+- It does **not** need the category labels of item 3, so it is unblocked today.
+  Uniquely among the open items, it can be built without waiting on anything.
+- The scaffolding it needs already exists and is measured: the corpus is built
+  from real reproducers, and `run_e2e.py` plus the serving script take under two
+  minutes on one GPU ([§8](#8-is-the-sanitizer-selection-use-case-ready)).
+
+The honest summary is that fixes 1 and 2 bought range — 1.0000 → 0.9111 and
+0.7174, with a real ladder underneath — and bought no *truth*. That was the
+cheapest way to find out that form is not enough, which is what it was for. But
+form is now demonstrably exhausted, and further work on form-only terms should
+be expected to relocate perversities rather than remove them.
+
+### 5.6 Still open, unchanged
+
 3. **The category axis still has no labels**, so tier 3 cannot be made
    *correct*-sensitive rather than *membership*-sensitive. This is the same
    blocker, unchanged, and it now has a measured consequence rather than a
    predicted one: 8 of 9 scenarios have no right answer available in the closed
-   set. Widening the set to cover kernel-level races is the smallest fix.
+   set. Widening the set to cover kernel-level races is the smallest fix. Fix 1
+   is built to become correctness-sensitive the moment this lands.
 4. **Default `--grammar-backend xgrammar` wherever a recipe serves a model an
    agent will call**, or make `LiteLLMProposer` degrade when `response_format`
    is refused. Right now the two halves of the integration disagree and only
-   the untested half is configured.
+   the untested half is configured. Not filed yet.
+5. **Set a non-zero rollout temperature** ([§5.4](#54-a-second-cause-of-zero-advantage-that-no-reward-can-fix)).
+   Without it there is no within-group spread and so no GRPO gradient, whatever
+   the reward says.
 
 ## 6. Triage: verdict versus attribution
 
@@ -313,6 +557,27 @@ from Qwen3-8B is a two-line constant that reads no input. Fixes 1 and 2 in
 [§5](#5-what-to-fix) are small, local to `proposal_reward.py`, and testable
 against the committed corpus without a node. Fix 3 is the category-labelling
 blocker, unchanged and still first among the open questions.
+
+**Updated 2026-09-08, after fixes 1 and 2.** Still no — but the blocker moved,
+and it moved onto something that costs a GPU rather than something free. The
+reward now has range and a real ladder, and the two constants no longer tie the
+model on the primary condition. Two things stand between here and a training
+run, and neither is a reward-design change:
+
+1. **The rollout must sample.** Every group's five completions came back
+   byte-identical, so the GRPO advantage is zero for reasons no reward can
+   touch ([§5.4](#54-a-second-cause-of-zero-advantage-that-no-reward-can-fix)).
+   One line, one GPU, one re-measure.
+2. **The mitigation half needs a resolve signal.** Form-based terms are now
+   demonstrably exhausted — each one fixes a perversity by creating another, and
+   the re-score measured that trade
+   ([§5.5](#55-is-the-contracts-fix-half-worth-a-gpu-now)). The contract's fix
+   half is the only term that is not gameable by inspection, and unlike fix 3 it
+   is unblocked today.
+
+So the recommendation is unchanged in direction and sharper in content: this row
+is still the right starting slice, and the next node-hour spent on it should go
+to the probe cell, not to another reward term.
 
 The recommendation from
 [4.0](tokenspeed-rl-post-training.md#40-the-six-prioritised-use-cases-and-how-ready-each-one-is)

@@ -550,14 +550,269 @@ def test_a_registered_but_unavailable_mitigation_is_docked_one_tier(
 def test_the_ladder_is_monotonic_so_being_more_wrong_never_pays_more(
     proposal_reward,
 ):
-    tiers = [
-        proposal_reward.score_proposal(f).tier for f in proposal_reward.FIXTURES
-    ]
+    """The tier ladder still spans 0 to MAX_TIER, and the ungraded part is flat.
+
+    ``reward == tier / MAX_TIER`` used to hold for every fixture. It no longer
+    does, deliberately: that identity is exactly what made the reward saturate,
+    since it left the reward blind to *how* a tier was reached. It still holds
+    wherever neither graded term applies -- a committed category and a
+    mitigation list inside the free budget -- which covers every fixture that
+    predates fixes 1 and 2, so a regression in the ungraded path is still
+    caught here.
+    """
+    m = proposal_reward
+    tiers = [m.score_proposal(f).tier for f in m.FIXTURES]
     assert min(tiers) == 0
-    assert max(tiers) == proposal_reward.MAX_TIER
-    for f in proposal_reward.FIXTURES:
-        score = proposal_reward.score_proposal(f)
-        assert score.reward == pytest.approx(score.tier / proposal_reward.MAX_TIER)
+    assert max(tiers) == m.MAX_TIER
+    for f in m.FIXTURES:
+        score = m.score_proposal(f)
+        ungraded = (
+            score.category_credit == 1.0
+            and score.n_mitigations <= m.FREE_MITIGATIONS
+        )
+        if ungraded:
+            assert score.reward == pytest.approx(score.tier / m.MAX_TIER)
+        else:
+            assert score.reward < score.tier / m.MAX_TIER
+
+
+def test_the_reward_is_the_documented_sum_of_graded_tier_steps(proposal_reward):
+    """Pins the formula, so the two graded terms cannot drift from the docstring."""
+    m = proposal_reward
+    for f in m.FIXTURES:
+        score = m.score_proposal(f)
+        expected = m.TIER_STEP * min(score.tier, 2)
+        if score.tier >= 3:
+            expected += m.TIER_STEP * score.category_credit
+        if score.tier >= 4:
+            expected += m.TIER_STEP * (score.tier - 3) * score.precision
+        assert score.reward == pytest.approx(expected)
+
+
+def test_every_fixture_earns_the_reward_it_is_meant_to(proposal_reward):
+    """The companion to the tier map: four fixtures now share tier 5 and differ."""
+    expected = proposal_reward._reward_expectations()
+    actual = {
+        f.name: proposal_reward.score_proposal(f).reward
+        for f in proposal_reward.FIXTURES
+    }
+    assert set(actual) == set(expected)
+    for name, want in expected.items():
+        assert actual[name] == pytest.approx(want), name
+    # The point of the whole exercise: tier 5 is no longer a single value.
+    top = {
+        f.name: proposal_reward.score_proposal(f).reward
+        for f in proposal_reward.FIXTURES
+        if proposal_reward.score_proposal(f).tier == proposal_reward.MAX_TIER
+    }
+    assert len(set(top.values())) > 1, top
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1: declining to classify must not earn full marks
+#
+# `unknown` is a member of the closed autopsy set, so a proposal that refuses
+# the classification task used to clear the tier that exists to test it and
+# reach 1.0. The trap in fixing this is that on the committed corpus `unknown`
+# is frequently the *honest* answer -- 8 of 9 scenarios have no correct category
+# available -- so a penalty that pushes the policy towards a confident wrong
+# label is worse than the saturation it removes. These tests pin the ordering
+# that keeps that from happening.
+# --------------------------------------------------------------------------- #
+
+
+def _proposal(proposal_reward, category="rccl_hang", mitigations=None, **over):
+    body = {
+        "category": category,
+        "hypothesis": "h",
+        "next_mitigations": (
+            ["nccl_launch_order_implicit"] if mitigations is None else mitigations
+        ),
+        "confidence": 0.5,
+        "stop": False,
+    }
+    body.update(over)
+    return proposal_reward.Proposal(
+        "under test",
+        json.dumps(body),
+        ["nccl_launch_order_implicit", "hsa_no_sdma", "tf32_off", "xnack"],
+    )
+
+
+def test_declining_to_classify_no_longer_earns_full_marks(proposal_reward):
+    """The headline of fix 1."""
+    m = proposal_reward
+    score = m.score_proposal(_proposal(m, category="unknown"))
+    assert score.tier == m.MAX_TIER
+    assert score.reward < 1.0
+    assert score.category_credit == m.ABSTENTION_CREDIT
+    assert score.abstained is True
+
+
+def test_an_abstention_still_clears_the_tier_the_consumer_accepts(proposal_reward):
+    """Docked, not rejected -- the reward must not disagree with `AgentPolicy`.
+
+    `unknown` is in `AUTOPSY_CATEGORIES` and `validate_step` accepts it, so a
+    grader that failed the tier would be scoring a contract the consumer does
+    not enforce. That drift is the failure mode this module is built to avoid,
+    which is why fix 1 grades the step instead of closing the set.
+    """
+    m = proposal_reward
+    score = m.score_proposal(_proposal(m, category="unknown"))
+    assert score.tier >= 3
+    assert score.stopped_at == ""
+    assert score.consumer_outcome == "accepted"
+
+
+def test_declining_beats_leaving_the_closed_set(proposal_reward):
+    """The ordering that stops fix 1 rewarding dishonesty.
+
+    committed > declined > outside the set. The middle term is the load-bearing
+    one: an honest `unknown` has to stay worth more than an invented category,
+    or the reward pays a policy to guess its way out of the abstention penalty.
+    """
+    m = proposal_reward
+    committed = m.score_proposal(_proposal(m, category="rccl_hang")).reward
+    declined = m.score_proposal(_proposal(m, category="unknown")).reward
+    outside = m.score_proposal(_proposal(m, category="rccl_timeout")).reward
+    assert committed > declined > outside
+
+
+def test_the_abstention_dock_is_one_partial_step_not_a_whole_tier(proposal_reward):
+    """Pins how *small* the dock is, which is the actual design decision.
+
+    Excluding `unknown` from tier 3's accepted set -- the first option the
+    report offered -- would have dropped an abstention to 0.4 while any in-set
+    category, right or wrong, still earned 1.0: a 0.6 gradient pointing at
+    "invent a confident label". Grading the step instead costs one partial
+    step. If this test starts failing upwards, that gradient is being rebuilt.
+    """
+    m = proposal_reward
+    committed = m.score_proposal(_proposal(m, category="rccl_hang")).reward
+    declined = m.score_proposal(_proposal(m, category="unknown")).reward
+    dock = committed - declined
+    assert dock == pytest.approx(m.TIER_STEP * (1.0 - m.ABSTENTION_CREDIT))
+    # Strictly smaller than dropping the abstention a whole tier would be.
+    assert dock < m.TIER_STEP
+    # And far smaller than the exclusion alternative it was chosen over.
+    assert dock < (committed - 2 * m.TIER_STEP)
+
+
+# --------------------------------------------------------------------------- #
+# Fix 2: hedging across the candidate set has to cost something
+#
+# `run_agent_loop` appends every proposed name to the mitigation axis and runs a
+# probe cell for each, while charging the whole proposal one unit of the
+# iteration budget -- so shotgunning is free against the limit the policy
+# enforces and expensive in the resource the operator pays for.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_shotgun_proposal_no_longer_ties_a_targeted_one(proposal_reward):
+    """The headline of fix 2, at the size the real run produced."""
+    m = proposal_reward
+    offered = [f"m{i}" for i in range(17)]
+    wide = m.precision_credit(len(offered))
+    narrow = m.precision_credit(1)
+    assert narrow == 1.0
+    assert wide < narrow
+    # Same tier, same category, different reward.
+    one = m.score_proposal(_proposal(m, mitigations=["nccl_launch_order_implicit"]))
+    many = m.score_proposal(
+        _proposal(
+            m,
+            mitigations=["nccl_launch_order_implicit", "hsa_no_sdma", "tf32_off"],
+        )
+    )
+    assert one.tier == many.tier == m.MAX_TIER
+    assert many.reward < one.reward
+
+
+def test_naming_a_primary_and_one_fallback_costs_nothing(proposal_reward):
+    """The perversity a pure brevity term creates, neutralised at its own margin.
+
+    With no correctness signal the reward cannot tell a right name from a wrong
+    one, so any brevity term makes a one-name proposal beat a two-name proposal
+    that *contains* the right name. `1/len` puts the largest step the term can
+    produce exactly there. A free pair makes the two tie instead, so the reward
+    never pays a policy to drop a correct name in order to look decisive.
+
+    It only relocates the problem: at three names and up a confident wrong
+    single name still wins. That needs a correctness signal, not a better shape.
+    """
+    m = proposal_reward
+    assert m.FREE_MITIGATIONS >= 2
+    one = m.score_proposal(_proposal(m, mitigations=["nccl_launch_order_implicit"]))
+    pair = m.score_proposal(
+        _proposal(m, mitigations=["nccl_launch_order_implicit", "hsa_no_sdma"])
+    )
+    assert pair.reward == pytest.approx(one.reward)
+    # And the relocation is real, so it is pinned rather than left implicit.
+    three = m.score_proposal(
+        _proposal(
+            m,
+            mitigations=["nccl_launch_order_implicit", "hsa_no_sdma", "tf32_off"],
+        )
+    )
+    assert three.reward < one.reward
+
+
+def test_hedging_never_pays_more_than_being_precise(proposal_reward):
+    m = proposal_reward
+    credits = [m.precision_credit(n) for n in range(1, 41)]
+    assert credits == sorted(credits, reverse=True)
+    assert credits[0] == 1.0
+    assert credits[-1] < 0.1
+
+
+def test_precision_is_the_reciprocal_of_the_cell_count_past_the_free_pair(
+    proposal_reward,
+):
+    """The cost model stated as arithmetic: k names is k probe cells."""
+    m = proposal_reward
+    for n in range(1, m.FREE_MITIGATIONS + 1):
+        assert m.precision_credit(n) == 1.0
+    for n in range(m.FREE_MITIGATIONS + 1, 25):
+        assert m.precision_credit(n) == pytest.approx(m.FREE_MITIGATIONS / n)
+    # An empty list never reaches the block, but the function is still total.
+    assert m.precision_credit(0) == 0.0
+
+
+def test_the_two_saturation_routes_are_now_separately_visible(proposal_reward):
+    """Abstaining and shotgunning were both routes to 1.0; now they compound.
+
+    The recorded model did both at once on most scenarios, so the reward has to
+    dock both independently rather than collapsing them into one penalty.
+    """
+    m = proposal_reward
+    wide = ["nccl_launch_order_implicit", "hsa_no_sdma", "tf32_off", "xnack"]
+    clean = m.score_proposal(_proposal(m)).reward
+    abstains = m.score_proposal(_proposal(m, category="unknown")).reward
+    shotguns = m.score_proposal(_proposal(m, mitigations=wide)).reward
+    both = m.score_proposal(
+        _proposal(m, category="unknown", mitigations=wide)
+    ).reward
+    assert both < abstains < clean
+    assert both < shotguns < clean
+
+
+def test_a_constant_that_reads_nothing_is_no_longer_worth_a_diagnosis(
+    proposal_reward,
+):
+    """The saturation, restated as the comparison that failed before.
+
+    Both abstaining constants scored 1.0 on the shipped fixtures, tying the
+    on-contract baseline. They no longer do.
+    """
+    rows = {row["policy"]: row for row in proposal_reward.baselines()}
+    diagnosis = rows["always the same valid proposal"]["mean_reward"]
+    assert diagnosis == 1.0
+    for constant in ("always abstain, one mitigation", "always abstain, shotgun everything"):
+        assert rows[constant]["mean_reward"] < diagnosis
+    # The one that stays uncomfortably high, and is worth keeping in view: a
+    # single-name abstention reads no input and still clears 0.85, because a
+    # cheap answer is most of what a form reward can see.
+    assert rows["always abstain, one mitigation"]["mean_reward"] > 0.85
 
 
 def test_every_fixture_stops_where_it_is_meant_to(proposal_reward):
@@ -799,6 +1054,164 @@ def test_the_corpus_scores_through_the_proposal_scorer(
     assert by_variant["hallucinated_name"] == {3}
     assert by_variant["invalid_category"] == {2}
     assert by_variant["already_tried"] == {4}
+
+
+# --------------------------------------------------------------------------- #
+# rescore_e2e: re-reading a recorded run under a changed grader
+#
+# The offline half of `run_e2e.py`. The property worth pinning hardest is the
+# one that decides whether the acceptance test can be satisfied at all: a group
+# whose completions are byte-identical cannot have within-group spread under
+# *any* reward, so a zero there is a statement about the rollout and not about
+# the grader. Conflating the two would have the reward blamed for a sampling
+# defect, or a sampling fix credited to the reward.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def rescore_e2e():
+    return _load("rescore_e2e")
+
+
+def _recorded(completions, candidates=None, tried=None):
+    """A minimal `run_e2e.py` results document, one scenario per completion list."""
+    candidates = candidates or ["hip_launch_blocking", "amd_log_level_4", "none"]
+    tried = tried or []
+    proposals = []
+    for scenario, raws in completions.items():
+        for index, raw in enumerate(raws):
+            proposals.append({
+                "scenario_id": scenario,
+                "sample": index,
+                "raw": raw,
+                # The "before" reward, as the original run recorded it.
+                "reward": 1.0,
+                "tier": 5,
+            })
+    return {
+        "meta": {
+            "condition": "test",
+            "model": "test-model",
+            "candidates": candidates,
+            "tried": tried,
+        },
+        "proposals": proposals,
+    }
+
+
+def _completion(category="unknown", mitigations=("amd_log_level_4",), hypothesis="h"):
+    return json.dumps({
+        "category": category,
+        "hypothesis": hypothesis,
+        "next_mitigations": list(mitigations),
+        "confidence": 0.7,
+        "stop": False,
+    })
+
+
+def test_rescoring_reads_the_raw_completion_not_the_stored_reward(rescore_e2e):
+    """Otherwise the re-score would just echo the number it was meant to replace."""
+    doc = _recorded({"s": [_completion()] * 3})
+    rows = rescore_e2e.rescore_recorded(doc)
+    assert len(rows) == 3
+    for row in rows:
+        assert row["reward_before"] == 1.0
+        assert row["reward_after"] < 1.0
+
+
+def test_identical_completions_cannot_produce_within_group_spread(rescore_e2e):
+    """The reason acceptance criterion 3 cannot be met on the recorded rollouts.
+
+    A reward is a function of the completion and the loop state, and the loop
+    state is constant inside a group. So five copies of one completion earn five
+    copies of one reward, and the within-group spread GRPO needs is exactly zero
+    no matter what the grader does. This is the rollout's defect, not the
+    reward's: `LiteLLMProposer.propose` sends no temperature.
+    """
+    doc = _recorded({"s": [_completion()] * 5})
+    result = rescore_e2e.analyse(doc)
+    group = result["per_scenario"]["s"]
+
+    assert group["distinct_completions"] == 1
+    assert group["spread_within_group"] == 0.0
+    assert result["criteria"]["3_within_group_spread_nonzero"]["holds"] is False
+
+
+def test_differing_completions_do_produce_within_group_spread(rescore_e2e):
+    """The guard on the test above: the zero must come from the data, not the grader.
+
+    Same grader, same scenario, same loop state -- only the completions differ,
+    and the spread appears. So the reward is not what blocks criterion 3, and a
+    rollout sampled at a non-zero temperature would produce a usable advantage.
+    """
+    doc = _recorded({
+        "s": [
+            _completion(category="rccl_hang", mitigations=("amd_log_level_4",)),
+            _completion(category="unknown", mitigations=("amd_log_level_4",)),
+            _completion(
+                category="unknown",
+                mitigations=("amd_log_level_4", "hip_launch_blocking"),
+            ),
+            "not JSON at all",
+        ]
+    })
+    result = rescore_e2e.analyse(doc)
+    group = result["per_scenario"]["s"]
+
+    assert group["distinct_completions"] == 4
+    assert group["spread_within_group"] > 0.0
+    assert result["criteria"]["3_within_group_spread_nonzero"]["holds"] is True
+
+
+def test_the_constant_templates_are_scored_on_the_models_own_loop_state(
+    rescore_e2e, proposal_reward
+):
+    """A constant measured against a different candidate set proves nothing."""
+    doc = _recorded({"s": [_completion()]})
+    result = rescore_e2e.analyse(doc)
+    references = result["references"]
+
+    # Two offered names, so the shotgun template names both.
+    assert references["abstain_and_shotgun"]["n_mitigations"] == 2
+    assert references["abstain_and_pick_first"]["n_mitigations"] == 1
+    # Every constant is on contract except the prose one, which is the point:
+    # they fail on substance, not on format.
+    assert references["always_prose"]["tier"] == 0
+    for name in ("oracle_contract_perfect", "abstain_and_shotgun", "honest_abstainer"):
+        assert references[name]["tier"] == proposal_reward.MAX_TIER
+
+
+def test_the_contract_perfect_reference_still_tops_the_ladder(rescore_e2e):
+    """Criterion 2. It commits to a category and spends one cell, so it is 1.0.
+
+    Worth reading with `REFERENCE_CATEGORY`'s comment: this reference is perfect
+    against *this reward*, and on the committed corpus its category is knowingly
+    wrong, because the closed set has no name for a kernel-level data race.
+    """
+    doc = _recorded({"s": [_completion()]})
+    result = rescore_e2e.analyse(doc)
+    assert result["references"]["oracle_contract_perfect"]["reward"] == 1.0
+    assert result["criteria"]["2_reference_at_top"]["holds"] is True
+
+
+def test_an_abstaining_one_name_constant_is_the_hard_case_for_criterion_one(
+    rescore_e2e,
+):
+    """The honest failure the re-score found, pinned so it cannot be lost.
+
+    `abstain_and_pick_first` and `honest_abstainer` are the same policy up to
+    the hypothesis text, and this reward cannot tell them apart -- it does not
+    read the hypothesis. So the cheapest legal abstention scores what the best
+    honest answer scores, and on a wide candidate set it beats a model that
+    hedges. Fixing that needs a term the constant cannot satisfy.
+    """
+    doc = _recorded({"s": [_completion()]})
+    result = rescore_e2e.analyse(doc)
+    references = result["references"]
+    assert (
+        references["abstain_and_pick_first"]["reward"]
+        == references["honest_abstainer"]["reward"]
+    )
 
 
 def test_a_verdict_outside_the_vocabulary_is_rejected(triage_reward, tmp_path):
