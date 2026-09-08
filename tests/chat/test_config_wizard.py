@@ -418,6 +418,32 @@ class TestConfigInit:
         assert chat_profile.exists()
         assert "config validate" in result.output
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "Authorization: Bearer sk-SUPERSECRET-abcd1234",
+            '{"Authorization": "Bearer sk-SUPERSECRET-abcd1234"',
+        ],
+        ids=["comma-form", "json-form"],
+    )
+    def test_a_rejected_extra_header_is_not_echoed_back(self, value, monkeypatch, chat_profile):
+        """A malformed header map must not print the credential it carries.
+
+        ``str(ValidationError)`` embeds pydantic's ``input_value``, and the
+        ``extra_headers`` validator quotes the offending pair in its own
+        message, so both spellings of a bad value reached the terminal with the
+        key intact -- from the one command a user runs immediately after typing
+        one in, and for a field ``config show`` masks. The field name still has
+        to appear, or the line is not actionable.
+        """
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_EMBEDDING_EXTRA_HEADERS", value)
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "SUPERSECRET" not in result.output
+        assert "input_value" not in result.output
+        assert "remote_embedding_extra_headers" in result.output
+
     def test_the_key_is_not_echoed_while_being_typed(self, chat_profile):
         result = CliRunner().invoke(
             chat,

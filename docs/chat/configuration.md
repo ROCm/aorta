@@ -342,11 +342,19 @@ aorta chat index fetch
 ```
 
 The two providers use different collection names and coexist in the one
-`.sqlite` file, so the local collection is still where it was. The re-fetch is
-not there to replace it — it is there to restore the manifest, which the remote
-`index build` rewrote to name the remote model, and which is checked before any
-query. `aorta chat index build` restores it just as well if you would rather not
-go back to the published asset.
+`.sqlite` file, so switching to remote never disturbed the local collection:
+the remote `index build` staged a database that lacked it, and installing a
+staged database carries over whatever collections the incoming one is missing.
+
+Coming back is not symmetric, because the published asset *does* contain a local
+collection. On the default `embedding_model` it has the same name as yours, so
+`index fetch` installs the published one over it, and restores the manifest that
+the remote `index build` had rewritten to name the remote model. That is what
+you want when your local collection came from the published asset in the first
+place. When you built it yourself over a wider corpus — an `aorta_path` pointing
+at a source checkout, so `docs/` and `README.md` were indexed too — reach for
+`aorta chat index build` instead: it restores the manifest just as well and
+keeps your own corpus rather than replacing it with the package-only build.
 
 ## Example profile
 

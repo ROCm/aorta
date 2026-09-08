@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import tomllib
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -638,6 +638,29 @@ EMBEDDING_PROVIDER_FLOWS: dict[str, str] = {
 }
 
 
+def _unresolvable_settings_reason(exc: Exception) -> str:
+    """Why the settings would not load, named without quoting any value.
+
+    ``str(ValidationError)`` carries pydantic's ``input_value``, and the
+    ``extra_headers`` validator quotes the offending pair in its own message, so
+    interpolating either would print through ``config init`` the very gateway key
+    that :data:`SECRET_MAPPING_FIELDS` masks in ``config show``, keeps out of
+    ``aorta bundle``, and mode-checks on disk.
+
+    A field name is enough to act on and cannot itself be a credential, so only
+    names are reported. The rejected value is withheld whatever field it arrived
+    in, rather than only for the fields named secret: an ``api-key`` in a
+    ``remote_llm_base_url`` query string is as much a leak as one in an extra
+    header, and a rule keyed on field names would fail open on the field nobody
+    classified.
+    """
+    if isinstance(exc, ValidationError):
+        fields = sorted({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
+        if fields:
+            return f"aorta rejected {', '.join(fields)}"
+    return f"the settings could not be loaded ({type(exc).__name__})"
+
+
 def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
     """What this install will embed with, and which index command follows.
 
@@ -660,8 +683,10 @@ def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
     except Exception as exc:  # pydantic ValidationError, a field validator, ConfigFileError
         # The profile is already on disk at this point, so an unrelated bad
         # AORTA_CHAT_* value must not turn a successful write into a traceback.
+        # Rendered without the rejected value, which can be a credential: see
+        # _unresolvable_settings_reason.
         return [
-            f"Embeddings: cannot be resolved -- {exc}",
+            f"Embeddings: cannot be resolved -- {_unresolvable_settings_reason(exc)}",
             "Sort the environment out first: aorta chat config validate",
         ]
 
