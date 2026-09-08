@@ -21,7 +21,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from aorta.chat.graph import nodes
 from aorta.chat.graph.nodes import (
+    _MAX_ESCALATED_ROUNDS,
     _MAX_UNPRODUCTIVE_ROUNDS,
     _NO_ANSWER_MSG,
     TOOL_REGISTRY,
@@ -29,6 +31,20 @@ from aorta.chat.graph.nodes import (
     _normalise_tool_name,
     act_node,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_sticky_escalation():
+    """Undo any auto-escalation, which is process-wide by design.
+
+    ``_escalated_to_native`` is deliberately a module global: "keep it for the
+    session" is the point, and a test process is one session for every test in
+    it. Without this an escalation in one test silently puts the next one on the
+    native protocol.
+    """
+    nodes.reset_tool_mode_escalation()
+    yield
+    nodes.reset_tool_mode_escalation()
 
 
 def _state(query: str = "find all mitigations"):
@@ -370,6 +386,234 @@ class TestNativeLoop:
         ):
             result = await act_node(_state())
         assert result["messages"][0].content == _NO_ANSWER_MSG
+
+
+def _dead_end_reply(output_tokens: int = 105, reasoning: str | None = None):
+    """The signature docs/chat/providers.md calls distinctive.
+
+    Empty ``content`` with a non-zero output-token count: the model spent tokens
+    and returned no text, so the text went somewhere this protocol cannot read.
+    Taken from the reporter's transcript -- "round 1 produced no text despite
+    105 output tokens".
+    """
+    return AIMessage(
+        content="",
+        additional_kwargs={"reasoning": reasoning} if reasoning else {},
+        usage_metadata={
+            "input_tokens": 900,
+            "output_tokens": output_tokens,
+            "total_tokens": 900 + output_tokens,
+        },
+    )
+
+
+def _escalating_llm(native_reply: str = "Answered natively."):
+    """A model that dead-ends on the text protocol and answers on the native one.
+
+    Which is the whole claim under test, and the one the docs measured: the same
+    query drove 8 real tool calls and a complete answer in ``native`` after 0
+    parseable actions in 8 rounds of ``text``.
+    """
+    plain = MagicMock()
+    plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+    bound = MagicMock()
+    bound.ainvoke = AsyncMock(return_value=AIMessage(content=native_reply))
+    plain.bind_tools = MagicMock(return_value=bound)
+    return plain, bound
+
+
+@pytest.fixture()
+def tool_mode_not_chosen(monkeypatch):
+    """Nobody set ``llm_tool_mode``, so the default is in force.
+
+    The suite exports ``AORTA_CHAT_LLM_TOOL_MODE=text`` in ``conftest`` to keep
+    itself independent of the developer's profile, which makes the setting
+    explicit for every test -- and an explicit setting is authoritative. Tests
+    about the escalation therefore have to say which of the two they mean.
+    """
+    monkeypatch.setattr(nodes, "_tool_mode_is_explicit", lambda: False)
+
+
+class TestTheDeadEndSignature:
+    """The trigger, and why it has two halves rather than one.
+
+    **The live check behind this was not run.** The register's decision was to
+    sharpen the trigger with "and the reasoning channel is populated", which
+    needs one fact from outside this repository: whether the reporter's AMD APIM
+    gateway populates ``additional_kwargs["reasoning"]``. Establishing that
+    needs a query against their endpoint, and there are no credentials for it
+    here.
+
+    So the trigger fires on the documented token signature, tightens itself when
+    the channel happens to be present, and ``_REQUIRE_REASONING_CHANNEL`` turns
+    the channel into a requirement in one line if it is ever shown to be
+    dependable. Both paths are tested because only one of them is verified.
+    """
+
+    def test_tokens_spent_on_no_text_is_the_signature(self):
+        assert nodes._is_reasoning_dead_end(_dead_end_reply())
+
+    def test_a_populated_reasoning_channel_is_too(self):
+        """Even with no usage metadata: a gateway may report one and not both."""
+        assert nodes._is_reasoning_dead_end(
+            AIMessage(content="", additional_kwargs={"reasoning": "let me think"})
+        )
+
+    def test_vllms_field_name_is_read_as_well(self):
+        """``langchain-openai`` says ``reasoning``; vLLM says ``reasoning_content``."""
+        assert nodes._is_reasoning_dead_end(
+            AIMessage(content="", additional_kwargs={"reasoning_content": "hmm"})
+        )
+
+    def test_an_empty_reply_that_spent_nothing_is_not_the_signature(self):
+        """A truncation or a dropped request must not change the protocol."""
+        assert not nodes._is_reasoning_dead_end(AIMessage(content=""))
+        assert not nodes._is_reasoning_dead_end(_dead_end_reply(output_tokens=0))
+
+    def test_a_malformed_token_count_is_read_as_none(self):
+        reply = AIMessage(content="")
+        reply.usage_metadata = {"output_tokens": "many"}  # type: ignore[assignment]
+        assert not nodes._is_reasoning_dead_end(reply)
+
+    def test_requiring_the_channel_is_a_one_line_change(self, monkeypatch):
+        """What flipping the flag buys, so the option stays real rather than aspirational."""
+        monkeypatch.setattr(nodes, "_REQUIRE_REASONING_CHANNEL", True)
+        assert not nodes._is_reasoning_dead_end(_dead_end_reply())
+        assert nodes._is_reasoning_dead_end(_dead_end_reply(reasoning="analysis..."))
+
+
+class TestAnExplicitProtocolIsAuthoritative:
+    """``AORTA_CHAT_LLM_TOOL_MODE`` is documented, so a choice must stick.
+
+    A stock local vLLM started without ``--enable-auto-tool-choice`` cannot
+    serve the native protocol at all, so escalating there would trade a bad
+    answer for a failed request. The escalation exists for the user who never
+    made a choice.
+    """
+
+    def test_the_built_in_default_is_not_a_choice(self, monkeypatch):
+        from aorta.chat import config
+
+        monkeypatch.delenv("AORTA_CHAT_LLM_TOOL_MODE", raising=False)
+        config.reset_settings()
+        assert nodes._tool_mode_is_explicit() is False
+
+    def test_the_environment_variable_is_a_choice(self, monkeypatch):
+        from aorta.chat import config
+
+        monkeypatch.setenv("AORTA_CHAT_LLM_TOOL_MODE", "text")
+        config.reset_settings()
+        assert nodes._tool_mode_is_explicit() is True
+
+    def test_the_profile_file_is_a_choice(self, chat_profile, monkeypatch):
+        from aorta.chat import config
+
+        monkeypatch.delenv("AORTA_CHAT_LLM_TOOL_MODE", raising=False)
+        chat_profile.write_text('llm_tool_mode = "text"\n', encoding="utf-8")
+        config.reset_settings()
+        assert nodes._tool_mode_is_explicit() is True
+
+    @pytest.mark.asyncio
+    async def test_a_chosen_text_mode_survives_the_dead_end(self, text_mode):
+        """The suite's own conftest export is the explicit setting here."""
+        plain, _bound = _escalating_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            result = await act_node(_state())
+        plain.bind_tools.assert_not_called()
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+
+
+class TestAutoEscalationToNative:
+    """Between "we recognised this exact failure" and "we stopped", try the fix.
+
+    The reporter's transcript: 4 billed calls, `act_node` logging the signature
+    on both rounds, and no answer. The docs already recorded that the same query
+    in ``native`` drove 8 real tool calls and answered completely, so the one
+    thing missing was the retry.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_query_is_retried_on_the_native_protocol(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        plain, bound = _escalating_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            result = await act_node(_state())
+        plain.bind_tools.assert_called_once()
+        assert result["messages"][0].content == "Answered natively."
+
+    @pytest.mark.asyncio
+    async def test_it_costs_one_extra_call_not_a_second_loop(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The budget the register was explicit about: 4 wasted calls, not more.
+
+        Two text rounds are what the query already paid for; the retry adds one.
+        """
+        plain, bound = _escalating_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+        assert plain.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS
+        assert bound.ainvoke.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_retry_that_also_dead_ends_stops_after_one_round(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """A model that says nothing on both protocols has answered the question.
+
+        A second native round could not add information, and the final synthesis
+        call is skipped too: asking a model that has said nothing three times to
+        summarise is one more billed call for the same result.
+        """
+        plain, bound = _escalating_llm()
+        bound.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            result = await act_node(_state())
+        assert bound.ainvoke.await_count == _MAX_ESCALATED_ROUNDS
+        assert plain.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_a_plain_empty_reply_does_not_change_the_protocol(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Only the documented signature escalates, not any empty answer."""
+        plain, _bound = _escalating_llm()
+        plain.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            result = await act_node(_state())
+        plain.bind_tools.assert_not_called()
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_it_is_kept_for_the_session(self, text_mode, tool_mode_not_chosen):
+        """Otherwise every query pays the two wasted rounds again to rediscover it."""
+        plain, bound = _escalating_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+            plain.ainvoke.reset_mock()
+            await act_node(_state())
+        # Second query went straight to native: no text rounds at all.
+        plain.ainvoke.assert_not_awaited()
+        assert bound.ainvoke.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_it_is_announced_once_and_says_who_decides(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        plain, _bound = _escalating_llm()
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+        ):
+            await act_node(_state())
+            first = caplog.text.count("Retrying this query on native")
+            await act_node(_state())
+        assert first == 1
+        assert caplog.text.count("Retrying this query on native") == 1
+        assert "AORTA_CHAT_LLM_TOOL_MODE" in caplog.text
+        assert "aorta chat doctor" in caplog.text
 
 
 class TestWastedCallGuards:

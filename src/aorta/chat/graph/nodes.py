@@ -265,13 +265,44 @@ def _build_answer_message(context: str = "") -> SystemMessage:
     return SystemMessage(content=ANSWER_PROMPT.format(context=context))
 
 
+#: Fields a serving stack may expose the model's reasoning on.
+#: ``langchain-openai`` surfaces gpt-oss's channel as ``reasoning``; vLLM's own
+#: OpenAI server calls it ``reasoning_content``. Both are read because neither
+#: is guaranteed to be there.
+_REASONING_FIELDS = ("reasoning", "reasoning_content")
+
+
+def _reasoning_channel(response: Any) -> str:
+    """The model's reasoning text, from whichever field the stack exposes it on.
+
+    Read defensively and used only as a signal. Whether any particular gateway
+    populates either field is not knowable from here, so nothing may *depend* on
+    it being present -- see :func:`_is_reasoning_dead_end`.
+    """
+    extra = getattr(response, "additional_kwargs", None) or {}
+    for field in _REASONING_FIELDS:
+        value = extra.get(field)
+        if value:
+            return str(value)
+    return ""
+
+
+def _output_tokens(response: Any) -> int:
+    """Output tokens *response* reports, or 0 when it reports none usably."""
+    usage = getattr(response, "usage_metadata", None) or {}
+    try:
+        return int(usage.get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _log_empty_content(response: Any, node: str) -> None:
     """Record why a node produced no text, when the model still spent tokens.
 
     Reasoning models can put everything in a side channel and return empty
-    content. The token counts make that diagnosable; ``langchain-openai`` does
-    not currently surface gpt-oss's ``reasoning`` field, so it is read
-    defensively in case a future version does.
+    content. The token counts make that diagnosable; ``langchain-openai`` did
+    not surface gpt-oss's ``reasoning`` field when this was written, so it is
+    read defensively in case a version or a gateway does.
     """
     usage = getattr(response, "usage_metadata", None) or {}
     logger.warning(
@@ -280,7 +311,7 @@ def _log_empty_content(response: Any, node: str) -> None:
         node,
         usage.get("output_tokens", "an unknown number of"),
     )
-    reasoning = (getattr(response, "additional_kwargs", None) or {}).get("reasoning")
+    reasoning = _reasoning_channel(response)
     if reasoning:
         logger.debug("%s reasoning channel: %s", node, reasoning)
 
@@ -598,6 +629,135 @@ _SEARCH_REPROMPT_NATIVE_MSG = _SEARCH_REPROMPT_BODY + "Call one of them now."
 #: each round is a billed call: gpt-oss burned 11 on one query before this cap.
 _MAX_UNPRODUCTIVE_ROUNDS = 2
 
+#: The same cap for the one native round the escalation below buys, and it is
+#: 1 rather than 2 on purpose. A model that can drive the function-calling API
+#: returns structured ``tool_calls`` on its first round, which counts as
+#: productive; a model that returns nothing again has answered the only question
+#: the retry was asked. A second round could not add information, and this
+#: escalation must not reopen the call-count problem the cap above exists for.
+_MAX_ESCALATED_ROUNDS = 1
+
+#: Require the reasoning channel before escalating, rather than merely letting
+#: it confirm. **Left False deliberately, and it is one line to flip.**
+#:
+#: The register's decision was to sharpen the trigger with "and the reasoning
+#: channel is populated", because "empty content plus non-zero output tokens"
+#: also matches a truncation, a content filter or a stop-sequence bug. That
+#: needs one fact this repository cannot supply: whether the reporter's gateway
+#: populates the field. Checking it needs a live query against their AMD APIM
+#: endpoint, and **that check has not been run** -- there are no credentials for
+#: it here.
+#:
+#: So the trigger runs on the documented token signature and *tightens itself*
+#: when the channel turns out to be there (see
+#: :func:`_is_reasoning_dead_end`). Flipping this to True is the whole of the
+#: change if the live check later says the field is reliable; until then,
+#: requiring an unverified field would mean the escalation silently never fires
+#: on the very gateway it was written for.
+_REQUIRE_REASONING_CHANNEL = False
+
+
+def _is_reasoning_dead_end(response: Any) -> bool:
+    """Whether an empty reply is the documented reasoning-model signature.
+
+    ``docs/chat/providers.md`` calls the signature distinctive: ``finish_reason:
+    stop``, non-zero output tokens, empty ``content``. The model spent tokens
+    and returned no text, so the text went somewhere this protocol cannot read.
+
+    A populated reasoning channel is near-proof of that, and its absence proves
+    nothing -- a gateway may strip it, and ``langchain-openai`` may not surface
+    it. Hence the asymmetry: either fact alone is enough by default, and
+    :data:`_REQUIRE_REASONING_CHANNEL` turns the channel into a requirement in
+    one line if it is ever shown to be dependable.
+    """
+    has_reasoning = bool(_reasoning_channel(response))
+    spent_tokens = _output_tokens(response) > 0
+    if _REQUIRE_REASONING_CHANNEL:
+        return has_reasoning and spent_tokens
+    return has_reasoning or spent_tokens
+
+
+#: Set for the rest of the process once the signature above is seen. "Keep it
+#: for the session": a model that cannot drive the text protocol on one query
+#: cannot drive it on the next, and paying two wasted rounds per query to
+#: rediscover that is the cost this exists to remove.
+_escalated_to_native = False
+
+
+def reset_tool_mode_escalation() -> None:
+    """Forget any auto-escalation. For tests, which share one process."""
+    global _escalated_to_native
+    _escalated_to_native = False
+
+
+def _tool_mode_is_explicit() -> bool:
+    """Whether ``llm_tool_mode`` was chosen by the user rather than defaulted.
+
+    ``AORTA_CHAT_LLM_TOOL_MODE`` is a documented knob, and a user who set
+    ``text`` deliberately must not be overridden -- a stock local vLLM without
+    ``--enable-auto-tool-choice`` cannot serve the native protocol at all, so
+    escalating there would trade a bad answer for a failed request.
+
+    pydantic-settings records which fields a source supplied, so "the user asked
+    for text" is distinguishable from "text is the default". Every source counts
+    -- environment, profile file and the CLI's own ``configure()`` overrides --
+    which is the intended reading: all three are someone stating a preference.
+    """
+    try:
+        return "llm_tool_mode" in settings.model_fields_set
+    except TypeError:  # a test's stand-in settings object
+        return False
+
+
+def _resolved_tool_mode() -> str:
+    """The tool protocol to use now, after any auto-escalation."""
+    mode = settings.llm_tool_mode.strip().lower()
+    if mode == "text" and _escalated_to_native:
+        return "native"
+    return mode
+
+
+def _escalate_to_native(response: Any) -> bool:
+    """Decide, and record, whether to retry this round in the native protocol.
+
+    Returns True having switched the session over. Three things have to hold,
+    and each maps to a trap the register names:
+
+    * the failure has to look like the protocol rather than the query, or a
+      truncation would silently change the user's configured protocol;
+    * the user must not have chosen the protocol themselves;
+    * and it happens once per process, so the retry cannot recur per query.
+    """
+    global _escalated_to_native
+    if _escalated_to_native or _tool_mode_is_explicit():
+        return False
+    if not _is_reasoning_dead_end(response):
+        return False
+    _escalated_to_native = True
+    logger.warning(
+        "The model returned reasoning but no answer and no tool call, which is "
+        "how a reasoning model behaves on the 'text' tool protocol. Retrying "
+        "this query on native function calling, and using it for the rest of "
+        "this session. Set AORTA_CHAT_LLM_TOOL_MODE to choose the protocol "
+        "yourself; 'aorta chat doctor' reports which one is in force."
+    )
+    return True
+
+
+class _EscalateToNative:
+    """Sentinel: the text loop gave up and the protocol, not the query, is why.
+
+    Returned in place of a state update so that ``act_node`` owns the retry --
+    the escalation is then visible at the dispatch point rather than buried
+    inside one protocol's implementation, and ``_act_text`` keeps its single
+    job of driving one protocol.
+    """
+
+    __slots__ = ()
+
+
+_ESCALATE_TO_NATIVE = _EscalateToNative()
+
 #: Goes into the answer slot, so it names nothing internal: no environment
 #: variable, neither tool protocol, and no class of model. The user asked a
 #: question and must not get a configuration lecture back. Everything specific
@@ -635,12 +795,20 @@ _FINAL_ANSWER_MSG = (
 
 
 async def act_node(state: AgentState) -> dict[str, Any]:
-    """Tool-using loop, in whichever protocol ``llm_tool_mode`` selects."""
-    mode = settings.llm_tool_mode.strip().lower()
+    """Tool-using loop, in whichever protocol ``llm_tool_mode`` selects.
+
+    Also the one place the protocol can change: the text loop reports back that
+    the model cannot drive it, and the retry in the native protocol is issued
+    from here rather than from inside the loop that gave up.
+    """
+    mode = _resolved_tool_mode()
     if mode == "native":
         return await _act_native(state)
     if mode == "text":
-        return await _act_text(state)
+        result = await _act_text(state)
+        if result is _ESCALATE_TO_NATIVE:
+            return await _act_native(state, escalated=True)
+        return result
     raise ValueError(
         f"unknown llm_tool_mode: {settings.llm_tool_mode!r} "
         "(expected one of native, text)"
@@ -692,12 +860,17 @@ def _ensure_ends_with_user(messages: list[Any]) -> None:
         messages.append(HumanMessage(content=_RETRY_NUDGE))
 
 
-async def _act_native(state: AgentState) -> dict[str, Any]:
+async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, Any]:
     """Tool loop over the OpenAI function-calling API.
 
     What reasoning models expect. The provider returns structured ``tool_calls``
     and ``finish_reason=tool_calls``, so nothing depends on the model reproducing
     a text syntax, and there is no parsing to fail.
+
+    *escalated* marks the retry :func:`act_node` issues after the text loop
+    reported that the model cannot drive it. It buys one round rather than two
+    (:data:`_MAX_ESCALATED_ROUNDS`), because by then the query has already been
+    paid for twice.
     """
     plain = _get_llm(temperature=0.1, streaming=False)
     llm = plain.bind_tools(list(TOOL_REGISTRY.values()))
@@ -712,9 +885,16 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
     max_rounds = (
         settings.max_act_rounds_search if is_search else settings.max_act_rounds
     )
+    unproductive_cap = _MAX_ESCALATED_ROUNDS if escalated else _MAX_UNPRODUCTIVE_ROUNDS
     unproductive = 0
     seen: set[str] = set()
     trace: list[str] = []
+    # Distinguishes the two ways out of the loop below. Falling out of the range
+    # means the model was still working when the round budget ran out, which is
+    # what the final synthesis call is for; giving up on empty rounds means it
+    # produced nothing, and asking a model that has said nothing twice for a
+    # summary of nothing is one more billed call for the same result.
+    gave_up = False
 
     for round_num in range(max_rounds):
         response = await _send(llm, messages)
@@ -730,7 +910,8 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
                 }
             unproductive += 1
             _log_empty_content(response, f"act_node round {round_num + 1}")
-            if unproductive >= _MAX_UNPRODUCTIVE_ROUNDS:
+            if unproductive >= unproductive_cap:
+                gave_up = True
                 break
             messages.append(HumanMessage(content=_SEARCH_REPROMPT_NATIVE_MSG))
             continue
@@ -761,6 +942,20 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
             result = _execute_tool(call["name"], call["args"])
             trace.append(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}")
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+
+    if gave_up:
+        logger.warning(
+            "Act loop abandoned after %d round(s) in native mode with no tool "
+            "call and no text.%s",
+            unproductive,
+            " Escalating from the text protocol did not help, so the model is "
+            "returning nothing on either." if escalated else "",
+        )
+        return {
+            "messages": [AIMessage(content=_NO_ANSWER_MSG)],
+            "command_output": "",
+            "tool_trace": trace,
+        }
 
     # Reaching here means the loop never produced a tool-free reply, so the
     # budget ran out mid-task. Say so: the answer will read as truncated, and
@@ -794,8 +989,13 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
     }
 
 
-async def _act_text(state: AgentState) -> dict[str, Any]:
-    """ReAct-style loop: LLM outputs ACTION lines, we execute and feed back."""
+async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
+    """ReAct-style loop: LLM outputs ACTION lines, we execute and feed back.
+
+    Returns :data:`_ESCALATE_TO_NATIVE` instead of a state update when the model
+    cannot drive this protocol at all; :func:`act_node` turns that into the
+    retry.
+    """
     llm = _get_llm(temperature=0.1, streaming=False)
 
     context = state.get("retrieved_context", "")
@@ -855,6 +1055,11 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
                         "AORTA_CHAT_LLM_TOOL_MODE=native.",
                         unproductive,
                     )
+                    # The one place the protocol gets to change. Signalled
+                    # rather than done here so act_node issues the retry: this
+                    # function's job is to drive one protocol, not to pick one.
+                    if _escalate_to_native(response):
+                        return _ESCALATE_TO_NATIVE
                     return {
                         "messages": [AIMessage(content=_NO_ANSWER_MSG)],
                         "command_output": "",
