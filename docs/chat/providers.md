@@ -186,11 +186,13 @@ The symptom is distinctive — `finish_reason` is `stop`, output tokens are
 non-zero, and `content` is empty — and the logs say so:
 `act_node ... produced no text despite N output tokens`.
 
+### Automatic escalation to `native`
+
 **AORTA now acts on that signature rather than only logging it.** On seeing it,
 the query is retried once through `native`; if that retry answers, the protocol
 is kept for the rest of the process and one log line says so. The default stays
 `text`, because flipping it globally would break a stock local vLLM (see the
-endpoint row above) — this is detection, not a new default.
+endpoint row in the table above) — this is detection, not a new default.
 
 Four things follow from that:
 
@@ -227,22 +229,38 @@ Four things follow from that:
   moment each get their own retry — the shared state records the outcome, it
   does not ration the attempt.
 
-One gap: the startup line comes from the CLI entry points, so `aorta chat` and
-`aorta chat ask` get it and `aorta chat ui` does not — its Chainlit welcome
-banner names the provider but not the protocol, which is the front door where
-the process-wide scope above matters most.
+### Reading the protocol that is actually in force
+
+Two places name it, and both come from this change. The `LLM backend:` line
+logged at startup names the protocol alongside the provider. The escalation logs
+a line of its own when it fires, and that one names the protocol itself rather
+than pointing at the startup banner, so it stands on its own wherever it is
+read — including in a server log where the startup line has scrolled away.
+
+`aorta chat doctor` is the third place, and what it says there is owned by
+[#463](https://github.com/ROCm/aorta/pull/463) rather than by this change: it
+adds a hint to the tool-mode line naming the configured protocol and what it
+costs. The two startup signals above are what this change contributes and they
+do not depend on #463 having landed.
+
+One gap in them: the startup line comes from the CLI entry points, so
+`aorta chat` and `aorta chat ask` get it and `aorta chat ui` does not — its
+Chainlit welcome banner names the provider but not the protocol, which is the
+front door where the process-wide scope above matters most.
 [#468](https://github.com/ROCm/aorta/issues/468) tracks putting it there. Until
-then, a UI operator reads the protocol from the escalation warning in the
+it does, a UI operator reads the protocol from the escalation warning in the
 server log, or from `aorta chat doctor`.
+
+### Answering from retrieved context when the act loop gives up
 
 When the act loop gives up, it makes one tool-free attempt to answer from the
 context `retrieve` already gathered, and labels that answer as having used no
-tools. **This is independent of the escalation above** and worth stating
+tools. **This is independent of the escalation to `native`** and worth stating
 separately, because the two are often confused: it fires whenever the loop
 abandons with no tool run, including under an explicitly configured
-`llm_tool_mode = "text"` where no native retry is attempted at all. So an
-action-routed question to a reasoning model does not come back empty-handed
-even when the protocol never moves.
+`llm_tool_mode = "text"`, where the escalation is refused outright and no native
+retry is attempted at all. So an action-routed question to a reasoning model
+does not come back empty-handed even when the protocol never moves.
 
 It applies only when no tool ran at all: once one has — including one that
 returned an error, and including one the escalated native retry made before the
@@ -343,7 +361,9 @@ Knobs that lower the bill, roughly in order of effect:
 | `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
 | `I wasn't able to answer that: something in my own configuration...` | The act loop produced no usable text. Which attempts it made first depends on `llm_tool_mode` and on whether a tool had already run, so read the warning logged beside this message — it names the step that gave up. `aorta chat doctor` covers the configuration faults that reach this message by other routes. |
 | `this process will use native from here` | Not an error. The model returned no answer and no tool call under `text` — the line names the signature that was observed — and native answered it, so chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
-| `The escalated native tool-calling request failed` | The retry above was tried and the request did not come back. If it is a local vLLM, it needs both `--enable-auto-tool-choice` and a matching `--tool-call-parser` (see the endpoint row above); otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
+| `The escalated native tool-calling request failed ... without making a tool call` | The retry was tried and the request did not come back, having called nothing. If it is a local vLLM, it needs both `--enable-auto-tool-choice` and a matching `--tool-call-parser` (see the endpoint row in the table above); otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
+| `The escalated native tool-calling request failed before it could call anything` | The same outcome, one step earlier: the backend could not even be built or the tool schemas could not be bound, so no request was made. Counts as an attempt in the same way. Read the exception named on the line — this is a backend or configuration fault, not a protocol one. |
+| `... drove N tool call(s) and then failed` | Structured tool calling *works* on this endpoint and the backend fell over afterwards. So the protocol **does** move to `native`, and this deliberately does not count against the two-failure budget — otherwise two transient errors after working tool calls would strand the process on `text`. The answer is built from whatever those calls gathered. |
 | `The escalated native tool-calling request returned no answer and no tool call either` | The retry reached the endpoint and the model was as silent on `native` as it was on `text`, so the protocol is not what it is failing on. `text` stays in force, and this counts as one of the two attempts above. Nothing here is a configuration fault; the model cannot drive either protocol for this query. |
 | An answer prefixed `I could not use my tools for this question` | The act loop gave up and the answer came from retrieved context alone, so anything needing a live lookup is missing from it. Same underlying cause as the row above. |
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
