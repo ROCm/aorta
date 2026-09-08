@@ -254,4 +254,4 @@ Knobs that lower the bill, roughly in order of effect:
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
 | `Waiting for vLLM at ...` when you meant to go remote | `llm_provider` is still `vllm`. Check the backend line printed at startup. |
 | The call-count line never appears | Expected on `llm_provider = "vllm"`; only the remote backends attach the counter. |
-| `extra header 'user' is missing '='` | `remote_llm_extra_headers` takes `name=value` pairs or a JSON object. |
+| `extra header #N is missing '='` | `remote_llm_extra_headers` takes `name=value` pairs or a JSON object. `#N` is the position in the comma-separated list, counted from 1 — the entry itself is not quoted back, because a header value may be a credential. |
