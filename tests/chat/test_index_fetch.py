@@ -379,7 +379,7 @@ class TestIdentityIsCheckedBeforeTheAsset:
         fetch_index(version="0.2.1", index_path=dest)
 
         installed = json.loads(manifest_mod.manifest_path(dest).read_text(encoding="utf-8"))
-        assert installed["some_future_field"] == "keep me"
+        assert installed.get("some_future_field") == "keep me"
 
 
 class TestAlreadyUpToDate:
@@ -677,6 +677,38 @@ class TestProvenanceIsReadOffTheManifest:
         """Neither guard fires without positive evidence of what it protects."""
         assert index_ops.index_provenance(_manifest()) == index_ops.PROVENANCE_UNKNOWN
 
+    @pytest.mark.parametrize(
+        "roots",
+        ["src/aorta", "docs", None, 7, {"src/aorta": 1}, ["src/aorta", 42]],
+        ids=["str-with-slash", "bare-str", "null", "int", "object", "mixed-list"],
+    )
+    def test_a_recorded_value_that_is_not_a_list_of_paths_is_invalid(self, roots):
+        """``Manifest.from_dict`` type-checks nothing, so this has to.
+
+        Iterating a string yields characters and ``Path("/").is_absolute()`` is
+        true, so ``"src/aorta"`` classified as a *local build* and ``"docs"``
+        as a *published* one -- both answers derived from nothing -- while
+        ``[42]`` raised ``TypeError`` straight past the CLI's error guard.
+        """
+        manifest = manifest_mod.Manifest.from_dict(
+            {**json.loads(_manifest().to_json()), "corpus_roots": roots}
+        )
+
+        assert index_ops.index_provenance(manifest) == index_ops.PROVENANCE_INVALID
+
+    def test_the_status_payload_reports_an_unusable_value_as_null(self):
+        """Not as the characters of a string, which is what ``list()`` gave."""
+        manifest = manifest_mod.Manifest.from_dict(
+            {**json.loads(_manifest().to_json()), "corpus_roots": "src/aorta"}
+        )
+
+        assert index_ops._side(manifest)["corpus_roots"] is None
+
+    def test_the_two_sides_of_the_payload_declare_one_key_set(self):
+        """The invariant, not the instance: a new field is covered for free."""
+        assert set(index_ops._side(_manifest())) == set(index_ops._SIDE_FIELDS)
+        assert set(index_ops._side(None)) == set(index_ops._SIDE_FIELDS)
+
     def test_a_renamed_published_subpath_is_still_published(self):
         """Read the shape, not the list, so renaming `docs/` reclassifies nothing."""
         manifest = _manifest(corpus_roots=["src/aorta", "documentation"])
@@ -765,6 +797,29 @@ class TestFetchWillNotSilentlyDiscardALocalBuild:
 
         assert fetch_index(version="0.2.1", index_path=dest).index_path == dest
         assert dest.read_bytes() == BODY
+
+    def test_an_unclassifiable_manifest_is_refused_rather_than_guessed(
+        self, server, tmp_path: Path
+    ):
+        """The guard must not be reachable around by a broken sidecar.
+
+        A hand-carried manifest recording ``corpus_roots`` as a scalar used to
+        be classified by iterating it: ``"docs"`` came out *published*, so the
+        fetch went ahead and overwrote whatever was there, and ``[42]`` left a
+        ``TypeError`` traceback. Neither answer is available, so this refuses.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"an index of unknown provenance")
+        raw = json.loads(_manifest(index_sha256="0" * 64).to_json())
+        raw["corpus_roots"] = "docs"
+        manifest_mod.manifest_path(dest).write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError, match="cannot classify"):
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert dest.read_bytes() == b"an index of unknown provenance"
+        assert server.requested == [], "it should refuse before any request"
+        assert fetch_index(version="0.2.1", index_path=dest, force=True).index_path == dest
 
     def test_side_load_carries_the_same_guard(self, tmp_path: Path):
         """Or `--from` becomes the way around it by accident."""

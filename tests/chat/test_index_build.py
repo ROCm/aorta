@@ -15,6 +15,7 @@ re-uploading tens of megabytes on a night when nothing indexable changed.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -453,6 +454,68 @@ class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
 
         assert result.index_path == target
         assert index_ops.check_index(target, strict=True).refusals == []
+
+    def test_an_unclassifiable_manifest_is_refused_rather_than_guessed(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The guard reads ``corpus_roots``, which nothing type-checks.
+
+        A sidecar recording it as the string ``"src/aorta"`` classified as a
+        *local* build -- because iterating the string yields ``"/"``, and
+        ``Path("/").is_absolute()`` is true -- so this guard returned early and
+        the published index was overwritten anyway. The mirror spelling
+        ``"docs"`` classified as published. Both are answers from nothing.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+        path = index_ops.manifest_mod.manifest_path(target)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["corpus_roots"] = "src/aorta"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert "cannot classify" in str(exc.value)
+        assert "corpus_roots is a str" in str(exc.value)
+        assert target.read_bytes() == b"the published index"
+        assert index_ops.build_index(local_corpus(repo), index_path=target, force=True)
+
+    def test_the_refusal_does_not_claim_a_loss_that_did_not_happen(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """``build --path <a checkout>`` does cover ``docs/`` and ``README.md``.
+
+        The message asserted "no 'docs/' or 'README.md' coverage"
+        unconditionally, which is true of the default corpus (the installed
+        package alone) and false for any build pointed at a full checkout --
+        an error message stating a fact the invocation disproves.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        corpus = local_corpus(repo)
+        covered = {
+            str(document.metadata.get("source", "")) for document in corpus_mod.load_corpus(corpus)
+        }
+        assert any("README" in source for source in covered), "fixture must cover README.md"
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(corpus, index_path=target)
+
+        message = str(exc.value)
+        assert "no 'docs/' or 'README.md' coverage" not in message
+        # What is always true of a corpus reaching this branch, and both sides.
+        assert "no public-tree provenance" in message
+        assert str(repo) in message
 
     def test_a_local_build_over_a_local_build_needs_nothing(
         self, repo: Path, tmp_path, monkeypatch

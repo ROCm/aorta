@@ -1125,7 +1125,9 @@ def index_status(version: str | None, index_path: str | None, as_json: bool, ver
     to republish.
 
     A missing or unreadable published manifest is reported as 'no baseline',
-    never as 'up to date'. Exits non-zero only when the two cannot be compared.
+    never as 'up to date', and is the only verdict that exits non-zero -- an
+    absent *local* index is a normal answer for someone who has not installed
+    one yet.
     """
     _index_logging(verbose)
     ops = _load("rag.index_ops")

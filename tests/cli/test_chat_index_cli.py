@@ -345,10 +345,45 @@ class TestStatus:
             ],
         )
 
+        assert result.exit_code == 0, result.output
         payload = json.loads(result.stdout)
-        assert payload["verdict"] == "no_local_index"
-        assert payload["up_to_date"] is False
-        assert payload["published"]["corpus_digest"] == "published123"
+        assert payload.get("verdict") == "no_local_index"
+        assert payload.get("up_to_date") is False
+        assert payload.get("published", {}).get("corpus_digest") == "published123"
+
+    def test_both_sides_carry_the_same_keys_with_no_baseline(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        """``--json`` is a contract, so a key must not vanish in a branch.
+
+        ``published`` was an empty object whenever the baseline could not be
+        read, which is the run a consumer most needs to inspect -- and the
+        happy-path test above could not see it, because every key is there.
+        """
+        self._serve(monkeypatch, reachable=False)
+
+        result = runner.invoke(
+            chat,
+            [
+                "index",
+                "status",
+                "--version",
+                "0.2.1",
+                "--index",
+                str(tmp_path / "absent"),
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        from aorta.chat.rag.index_ops import _SIDE_FIELDS
+
+        for key in _SIDE_FIELDS:
+            assert key in payload.get("published", {}), f"published lost {key}"
+            assert key in payload.get("local", {}), f"local lost {key}"
+            assert payload["published"][key] is None
+        assert payload.get("baseline_error")
 
     def test_no_baseline_exits_non_zero_and_is_not_called_up_to_date(
         self, runner: CliRunner, tmp_path: Path, monkeypatch

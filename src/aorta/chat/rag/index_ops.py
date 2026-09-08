@@ -253,6 +253,35 @@ PROVENANCE_LOCAL = "local"
 #: A manifest that records no roots at all, from a builder predating the field.
 PROVENANCE_UNKNOWN = "unknown"
 
+#: A manifest whose ``corpus_roots`` is *present* and unusable, so nothing can
+#: be concluded from it. Deliberately distinct from :data:`PROVENANCE_UNKNOWN`:
+#: absent roots are a layout, an unusable value is a broken sidecar, and the
+#: write guards treat the two differently.
+PROVENANCE_INVALID = "invalid"
+
+
+def _corpus_roots(manifest: manifest_mod.Manifest) -> list[str] | None:
+    """``corpus_roots`` as a list of strings, or ``None`` when it is unusable.
+
+    ``Manifest.from_dict`` is forward-tolerant and type-checks nothing, so a
+    hand-written or hand-edited sidecar -- which is the side-load path's
+    ordinary case -- can carry a scalar here. Iterating a string yields
+    characters and ``Path("/").is_absolute()`` is true, so ``"src/aorta"``
+    classified as a local build and ``"docs"`` as a published one, both from
+    nothing at all; ``[42]`` raised ``TypeError`` straight past the CLI's
+    error guard. A field that decides whether a destructive overwrite is
+    refused has to be validated rather than coerced.
+
+    One reader, shared by the guards and by ``index status``'s payload, so the
+    verdict and the reported value cannot disagree about what was readable.
+    """
+    roots = manifest.corpus_roots
+    if not isinstance(roots, (list, tuple)):
+        return None
+    if not all(isinstance(root, str) for root in roots):
+        return None
+    return list(roots)
+
 
 def _roots_provenance(roots: list[str] | tuple[str, ...]) -> str:
     """Classify a set of corpus roots by shape.
@@ -274,9 +303,14 @@ def index_provenance(manifest: manifest_mod.Manifest) -> str:
     """Whether an index was published or built here, read off its manifest.
 
     Inferred rather than stored, because ``corpus_roots`` already distinguishes
-    the two without a manifest schema bump.
+    the two without a manifest schema bump. A recorded value that is not a list
+    of paths yields :data:`PROVENANCE_INVALID` rather than a classification
+    derived from iterating it -- see :func:`_corpus_roots`.
     """
-    return _roots_provenance(manifest.corpus_roots or [])
+    roots = _corpus_roots(manifest)
+    if roots is None:
+        return PROVENANCE_INVALID
+    return _roots_provenance(roots)
 
 
 def corpus_provenance(corpus: corpus_mod.Corpus) -> str:
@@ -307,6 +341,25 @@ def _local_manifest(index_path: str | Path) -> manifest_mod.Manifest | None:
         return None
 
 
+def _unclassifiable_error(target: Path, roots: object, command: str) -> IndexOverwriteError:
+    """The refusal for a manifest whose ``corpus_roots`` cannot be read.
+
+    Shared by both write guards, because neither of them may guess: the two
+    provenances are protected differently and only one of them is something
+    the network can give back. Names the type rather than echoing the value,
+    which is third-party text of unbounded size.
+    """
+    return IndexOverwriteError(
+        f"the index at {target} has a manifest this build cannot classify: "
+        f"corpus_roots is a {type(roots).__name__}, not a list of paths, so "
+        "whether the index was downloaded or built here cannot be read.\n"
+        "A downloaded index costs a download to replace; a local build may not "
+        "be reproducible at all. Refusing rather than guessing which one is "
+        "there.\n"
+        f"Overwrite it deliberately:  {command} --force"
+    )
+
+
 def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
     """Stop an incoming index from silently discarding one built on this machine.
 
@@ -317,11 +370,22 @@ def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
     rebuild the weights. So the incoming-index paths (``fetch`` and its
     ``--from`` side-load, which would otherwise be the accidental way around
     this) guard against overwriting a local build, and only that.
+
+    A manifest recording *no* roots is not protected: absent is a layout, from
+    a builder predating the field, and refusing every such index would refuse
+    every pre-field install's routine refresh. A manifest recording roots that
+    cannot be read is refused -- that is a broken sidecar, not an old one, and
+    it is the one case where guessing could discard the unrecoverable side.
     """
     if force:
         return
     local = _local_manifest(dest)
-    if local is None or index_provenance(local) != PROVENANCE_LOCAL:
+    if local is None:
+        return
+    provenance = index_provenance(local)
+    if provenance == PROVENANCE_INVALID:
+        raise _unclassifiable_error(dest, local.corpus_roots, command)
+    if provenance != PROVENANCE_LOCAL:
         return
     raise IndexOverwriteError(
         f"the index at {dest} was built on this machine, not downloaded.\n"
@@ -362,27 +426,41 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
       answer anything, so there is nothing to protect.
     * **A destination with no published manifest**, which includes every first
       build and every local-over-local rebuild.
+
+    A destination whose ``corpus_roots`` is present but unreadable is refused
+    instead, once the exemptions above have not applied.
     """
     if force or corpus_provenance(corpus) == PROVENANCE_PUBLISHED:
         return
     local = _local_manifest(target)
-    if local is None or index_provenance(local) != PROVENANCE_PUBLISHED:
+    if local is None:
+        return
+    provenance = index_provenance(local)
+    if provenance not in (PROVENANCE_PUBLISHED, PROVENANCE_INVALID):
         return
     if _validate_against_provider(local).refusals:
+        # Ahead of both refusals, so a refused index is exempt whether or not
+        # its manifest is readable; either refusal would otherwise compose two
+        # individually-correct behaviours into a dead end.
         logger.info(
             "The index at %s is refused by this install's embedding provider, "
             "so rebuilding it loses nothing.",
             target,
         )
         return
+    if provenance == PROVENANCE_INVALID:
+        raise _unclassifiable_error(target, local.corpus_roots, "aorta chat index build")
     raise IndexOverwriteError(
         f"the index at {target} covers the published corpus, and this build "
         "would not.\n"
         f"  there now  {local.describe()}\n"
         f"             corpus {', '.join(local.corpus_roots)}\n"
         f"  building   corpus {corpus.describe()}\n"
-        "That replaces it with a narrower index: no 'docs/' or 'README.md' "
-        "coverage, and no public-tree provenance.\n"
+        "That replaces it with an index over a different corpus -- the two are "
+        "above -- and one with no public-tree provenance, since only a "
+        "--public-only build records the published root set. The default build "
+        "corpus is the installed package alone, so it typically drops 'docs/' "
+        "and 'README.md' as well.\n"
         "Refresh the published one instead:  aorta chat index fetch\n"
         "Or pass --force to build over it:   aorta chat index build --force"
     )
@@ -1024,10 +1102,37 @@ class IndexComparison:
         return self.verdict == VERDICT_UP_TO_DATE
 
 
+#: The manifest fields ``index status`` puts side by side. Enumerated so both
+#: sides carry the same keys whether or not there is a manifest to fill them.
+_SIDE_FIELDS = (
+    "embedding_model",
+    "embedding_identity",
+    "built_at",
+    "aorta_version",
+    "aorta_sha",
+    "corpus_digest",
+    "corpus_roots",
+    "index_sha256",
+    "chunk_count",
+    "dimensions",
+)
+
+
 def _side(manifest: manifest_mod.Manifest | None) -> dict[str, Any]:
-    """One side of the comparison, as the fields gap 4b asks for."""
+    """One side of the comparison, as the fields gap 4b asks for.
+
+    Every key is always present, with ``None`` for "there is no manifest on
+    this side". ``--json`` is a contract, and returning ``{}`` made
+    ``published`` an empty object in the no-baseline branch -- so a consumer
+    indexing the documented shape got a ``KeyError`` on exactly the run it
+    most needed to inspect, while the reachable branch it was written against
+    carried all ten keys.
+
+    ``corpus_roots`` is read through :func:`_corpus_roots`, so an unusable
+    recorded value reports ``None`` rather than the characters of a string.
+    """
     if manifest is None:
-        return {}
+        return dict.fromkeys(_SIDE_FIELDS)
     return {
         "embedding_model": manifest.embedding_model,
         "embedding_identity": manifest.embedding_identity,
@@ -1035,7 +1140,7 @@ def _side(manifest: manifest_mod.Manifest | None) -> dict[str, Any]:
         "aorta_version": manifest.aorta_version,
         "aorta_sha": manifest.aorta_sha,
         "corpus_digest": manifest.corpus_digest,
-        "corpus_roots": list(manifest.corpus_roots),
+        "corpus_roots": _corpus_roots(manifest),
         "index_sha256": manifest.index_sha256,
         "chunk_count": manifest.chunk_count,
         "dimensions": manifest.dimensions,
@@ -1201,6 +1306,7 @@ __all__ = [
     "BASE_URL_ENV",
     "RELEASE_BASE_URL",
     "ROLLING_TAG",
+    "PROVENANCE_INVALID",
     "PROVENANCE_LOCAL",
     "PROVENANCE_PUBLISHED",
     "PROVENANCE_UNKNOWN",

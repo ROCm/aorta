@@ -102,14 +102,20 @@ re-download the embedding weights.
 | `fetch` | downloaded, and different | replaced, printing what changed |
 | `fetch` or `--from` | built locally | refused; pass `--force` |
 | `build` | built locally | rebuilt, as usual |
-| `build` (narrower corpus) | downloaded | refused; pass `--force` |
+| `build` (any corpus but the published one) | downloaded | refused; pass `--force` |
 | `build --public-only` | downloaded | rebuilt; it is the same corpus, so nothing is lost |
+| any of them | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
 
 A refusal names what would be lost and the flag that proceeds anyway, following
 `config init --force` rather than prompting, so a script and a terminal behave
 identically. An index the running configuration would *refuse* is never
 protected: rebuilding one you cannot query loses nothing, and `doctor` tells you
 to rebuild it.
+
+Which side built an index is read off its manifest's `corpus_roots`, so an index
+whose manifest records *no* roots — one built before the field existed — is not
+protected either way. One that records roots this build cannot read is a broken
+sidecar rather than an old one, and is refused rather than guessed at.
 
 **Interrupting any of them is safe.** `build`, `fetch` and `--from` write the
 new index beside the old one and move it into place in a single step, then write
