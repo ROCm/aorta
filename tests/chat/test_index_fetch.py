@@ -511,6 +511,10 @@ class TestAlreadyUpToDate:
         change report raised ``TypeError`` -- ``KeyError`` for a JSON object,
         which subscripts by key -- out of the comparison whose entire job is to
         report on a manifest that looks wrong, and past the CLI's error guard.
+
+        ``built_at`` is the control rather than a regression case: it was never
+        truncated, so it survived all four values before this fix and is here
+        to pin that rendering did not break the field that already worked.
         """
         dest = tmp_path / "i.sqlite"
         dest.write_bytes(b"stale")
@@ -1124,6 +1128,50 @@ class TestSideLoad:
     def test_a_missing_file_is_reported(self, tmp_path: Path):
         with pytest.raises(IndexFetchError, match="no index at"):
             side_load(tmp_path / "absent.sqlite", index_path=tmp_path / "i.sqlite")
+
+    def test_the_suggested_command_survives_an_awkward_path(self, tmp_path: Path):
+        """The refusal prints a command to run, and the path is the user's.
+
+        ``--from /home/o'brien/staged index.sqlite`` pasted back into a shell
+        does not parse -- unbalanced quote, then word splitting. Same class as
+        the pre-seed procedure #463 fixed; the remedy here is only the shell
+        half, since nothing interpolates into a Python literal.
+        """
+        import shlex
+
+        staging = tmp_path / "o'brien dir"
+        staging.mkdir()
+        origin = staging / ASSET_NAME
+        origin.write_bytes(BODY)
+        manifest_mod.write_manifest(origin, _manifest())
+
+        dest = tmp_path / "cache" / "index.sqlite"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b"an index built here")
+        manifest_mod.write_manifest(
+            dest,
+            _manifest(
+                corpus_roots=[str(tmp_path / "checkout")],
+                index_sha256=manifest_mod.sha256_file(dest),
+            ),
+        )
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            side_load(origin, index_path=dest)
+
+        suggested = next(
+            line for line in str(exc.value).splitlines() if "--from" in line
+        ).split(":", 1)[1]
+        # The whole point: it parses, and comes back as the path we passed in.
+        assert shlex.split(suggested) == [
+            "aorta",
+            "chat",
+            "index",
+            "fetch",
+            "--from",
+            str(origin.resolve()),
+            "--force",
+        ]
 
     def test_a_staged_index_without_a_manifest_is_refused(self, tmp_path: Path):
         """Side-loading is where a mismatch is most likely, not least.

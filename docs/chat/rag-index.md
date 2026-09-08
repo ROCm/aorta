@@ -109,9 +109,12 @@ re-download the embedding weights.
 
 A refusal names what would be lost and the flag that proceeds anyway, following
 `config init --force` rather than prompting, so a script and a terminal behave
-identically. An index the running configuration would *refuse* is never
-protected: rebuilding one you cannot query loses nothing, and `doctor` tells you
-to rebuild it.
+identically. An index the running configuration cannot *use* is never protected:
+rebuilding one you cannot query loses nothing, and `doctor` tells you to rebuild
+it. "Cannot use" is the same question the first query asks, store included — an
+embedding-model or identity mismatch, a manifest that disagrees with the
+contents, or a `.sqlite` that cannot be opened at all. A merely *stale* index is
+not in that set; it still answers, so a narrowing build over it is still refused.
 
 Which side built an index is read off its manifest's `corpus_roots`, so an index
 whose manifest records *no* roots — one built before the field existed — is not
@@ -122,7 +125,7 @@ The exemptions come first, which is why the `build` row above is qualified. An
 unreadable `corpus_roots` means the index is either a published one or a local
 one, and both of the `build` exemptions give the same answer down both branches:
 a `--public-only` build records the published corpus whichever it replaced, and
-an index this install would refuse is unusable whoever built it — while a local
+an index this install cannot use is unusable whoever built it — while a local
 index is never protected from `build` in the first place. So proceeding there is
 not a guess about which one is on disk; it is what both possibilities agree on.
 `fetch` and `--from` carry no such exemption, so for them the refusal is

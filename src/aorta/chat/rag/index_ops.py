@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import urllib.error
@@ -421,18 +422,38 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
       safe under a restored or re-used ``index-out/`` -- and a guard that
       blocked them would stop the published index updating at all, which is
       worse than the defect being guarded against.
-    * **An index this install would refuse.** For an embedding-identity
+    * **An index this install cannot use.** For an embedding-identity
       mismatch, the manifest refusal and ``doctor`` both name ``index build``
       as the remedy, and it is the right one. Demanding ``--force`` on top
       would compose two individually-correct behaviours into a dead end --
       refused, told to rebuild, refused again -- on a user who is already
       stuck. Vectors that are not comparable to this install's queries cannot
       answer anything, so there is nothing to protect.
+
+      Asked through :func:`check_index`, which reads the *store* and not only
+      the manifest. Asking ``_validate_against_provider`` instead -- the
+      manifest alone -- made this exemption narrower than the advice it exists
+      to keep followable: an index whose ``.sqlite`` cannot be opened at all
+      has an entirely valid manifest, so it was refused a rebuild while every
+      reader that touches the file says to rebuild it. One reader for "can
+      this install use what is there", shared with the load path.
     * **A destination with no published manifest**, which includes every first
       build and every local-over-local rebuild.
 
     A destination whose ``corpus_roots`` is present but unreadable is refused
     instead, once the exemptions above have not applied.
+
+    A *stale* index needs no exemption and deliberately does not get one.
+    Source drift is a warning rather than a refusal, so it does not reach the
+    branch below -- and on a remote embedding provider, where ``doctor`` names
+    ``index build`` for drift because a fetch would land an asset that provider
+    refuses, the index in front of the guard is already exempt for a different
+    reason: either it is a local build (classified ``local``, and a local index
+    is never protected from ``build``), or it is the published asset, which a
+    remote provider refuses on its model and collection. Both paths permit the
+    rebuild without widening anything. On a *local* provider a drift warning
+    names ``index fetch``, and refusing a narrowing build there is the whole
+    point of this guard.
     """
     if force or corpus_provenance(corpus) == PROVENANCE_PUBLISHED:
         return
@@ -442,22 +463,24 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
     provenance = index_provenance(local)
     if provenance not in (PROVENANCE_PUBLISHED, PROVENANCE_INVALID):
         return
-    if _validate_against_provider(local).refusals:
-        # Ahead of both refusals, so a refused index is exempt whether or not
+    unusable = check_index(target, strict=False).refusals
+    if unusable:
+        # Ahead of both refusals, so an unusable index is exempt whether or not
         # its manifest is readable; either refusal would otherwise compose two
         # individually-correct behaviours into a dead end.
         #
         # Ahead of the unreadable-provenance refusal specifically, which looks
         # like a hole and is not: an unreadable manifest is either a published
-        # index or a local one, and a *refused* index reaches the same verdict
+        # index or a local one, and an *unusable* index reaches the same verdict
         # down both branches -- a refused published index is exempt by the rule
         # above, and a local index is never protected from `build` at all (the
         # early return above). So returning here is not a guess about which one
         # is on disk; it is the answer both possibilities give.
         logger.info(
-            "The index at %s is refused by this install's embedding provider, "
-            "so rebuilding it loses nothing.",
+            "The index at %s is not usable by this install, so rebuilding it "
+            "loses nothing: %s",
             target,
+            "; ".join(unusable),
         )
         return
     if provenance == PROVENANCE_INVALID:
@@ -693,14 +716,29 @@ def check_index(
         installed_version=installed_version(),
         chunk_count=chunk_count,
     )
-    # A manifest that claims contents over a file nothing can open fails
-    # closed. Gated on the claim: a manifest from a builder that predates
-    # ``chunk_count`` asserts nothing here, so there is nothing to contradict.
-    if unreadable and manifest.chunk_count:
-        report.refusals.append(
-            f"contents: the manifest describes {manifest.chunk_count} chunks, but the "
-            f"index could not be read to check ({unreadable})"
+    # A file nothing can open fails closed, whatever its manifest claims.
+    #
+    # This used to be gated on ``manifest.chunk_count``, on the reasoning that a
+    # manifest predating the field asserts nothing and so has nothing to
+    # contradict. That reads the wrong question. "Is the manifest's claim
+    # contradicted" and "can this index be queried at all" are different, and
+    # only the second one decides whether the index is usable -- the load path
+    # (``retriever._check_manifest``) refuses an unreadable store outright, with
+    # no such gate, so the gate made this reader *more permissive than the load
+    # path it exists to predict*: a legacy manifest over filler bytes reported
+    # no refusals here while the first query refused the same file. It also
+    # defeated this function's own docstring, and PR #463 grew a second
+    # store-reading helper in ``doctor`` to work around it.
+    if unreadable:
+        # Two messages, because "describes 0 chunks" would be a claim the
+        # manifest never made.
+        claim = (
+            f"the manifest describes {manifest.chunk_count} chunks, but the index "
+            "could not be read to check"
+            if manifest.chunk_count
+            else "the index could not be read as a sqlite store"
         )
+        report.refusals.append(f"contents: {claim} ({unreadable})")
     if strict:
         report.raise_if_refused(target)
     return report
@@ -963,6 +1001,13 @@ def _manifest_text(value: object) -> str:
 
     ``None`` becomes empty rather than ``"None"`` so the callers' own wording
     for a missing field still fires.
+
+    Rendering rather than validating, deliberately, and the asymmetry with
+    ``corpus_roots`` is the point: these fields are *reported*, and a reported
+    field survives being odd -- a caller reads "corpus_digest: unknown -> abc"
+    and knows what it is looking at. ``corpus_roots`` is *used*, to decide
+    whether a destructive overwrite is refused, so it gets a validity verdict
+    instead. A field whose only job is to be shown does not need one.
     """
     return "" if value is None else str(value)
 
@@ -1318,7 +1363,16 @@ def side_load(
     dest = Path(index_path) if index_path else settings.index_file
     if origin == dest.resolve():
         raise IndexFetchError(f"{origin} is already the configured index path")
-    _refuse_if_locally_built(dest, force=force, command=f"aorta chat index fetch --from {origin}")
+    # ``shlex.quote``, because this string is printed as a command to run and
+    # ``origin`` is a user-supplied path: a space or an apostrophe (a
+    # ``/home/o'brien`` home directory is enough) otherwise yields advice that
+    # does not parse in the shell it is pasted into. Quoting is a no-op for an
+    # ordinary path, so the usual message is unchanged.
+    _refuse_if_locally_built(
+        dest,
+        force=force,
+        command=f"aorta chat index fetch --from {shlex.quote(str(origin))}",
+    )
 
     manifest_source = manifest_mod.manifest_path(origin)
     if not manifest_source.exists():
