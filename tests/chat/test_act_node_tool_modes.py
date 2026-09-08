@@ -923,6 +923,106 @@ class TestAnEndpointThatRefusesNative:
         assert result["tool_trace"]
 
 
+class TestAnEndpointThatAnswersNothingOnNativeEither:
+    """The other way the retry fails: it returns, and it says nothing.
+
+    ``_act_native`` hands back a state update on every path out, including the
+    two that gave up, so "the call returned" was never evidence the protocol
+    works -- and committing on it moved the whole process onto a protocol that
+    had answered nothing. Reading the answer back off the result does not work
+    either: ``_abandoned_result`` blanks ``command_output`` for the critic's
+    sake and the synthesis path substitutes the give-up notice for empty text,
+    so the shapes collide. Hence the explicit signal.
+    """
+
+    @staticmethod
+    def _silent_llm():
+        """Dead-ends on text, and is just as silent on the native retry."""
+        plain, bound = _escalating_llm()
+        bound.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        return plain, bound
+
+    @pytest.mark.asyncio
+    async def test_the_switch_is_never_committed(self, text_mode, tool_mode_not_chosen):
+        plain, _bound = self._silent_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+        assert nodes._resolved_tool_mode() == "text"
+
+    @pytest.mark.asyncio
+    async def test_the_next_query_still_starts_on_text(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The behavioural half: committing here skipped text for every query."""
+        plain, _bound = self._silent_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+            plain.ainvoke.reset_mock()
+            await act_node(_state())
+        # Text rounds ran again, so the protocol did not move under the user.
+        assert plain.ainvoke.await_count >= _MAX_UNPRODUCTIVE_ROUNDS
+
+    @pytest.mark.asyncio
+    async def test_a_silent_retry_spends_the_same_budget_as_a_failed_one(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Otherwise the retry is billed on every query, forever.
+
+        Nothing was learned about the endpoint, so there is no reason to keep
+        paying a native round to rediscover it -- which is the same argument
+        ``_MAX_UNPRODUCTIVE_ROUNDS`` exists for one level down.
+        """
+        plain, bound = self._silent_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            for _ in range(nodes._MAX_NATIVE_FAILURES + 2):
+                await act_node(_state())
+        assert bound.ainvoke.await_count == nodes._MAX_NATIVE_FAILURES
+
+    @pytest.mark.asyncio
+    async def test_it_is_reported_as_an_attempt_and_not_as_a_config_fault(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """The endpoint served the request, so naming a server flag would mislead."""
+        plain, _bound = self._silent_llm()
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+        ):
+            await act_node(_state())
+        assert "no answer and no tool call either" in caplog.text
+        assert f"attempt 1 of {nodes._MAX_NATIVE_FAILURES}" in caplog.text
+        assert "this process will use native from here" not in caplog.text
+        assert "--enable-auto-tool-choice" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_commits_even_when_the_synthesis_is_empty(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """A tool call *is* the protocol working, whatever happened after it.
+
+        The model drove ``tools`` successfully; that the synthesis which
+        followed came back empty is a different failure, and refusing to commit
+        on it would make every later query pay the text rounds again to
+        rediscover a protocol already shown to work.
+        """
+        plain, bound = self._silent_llm()
+        bound.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[_tool_call("list_files", {"path": "."})],
+                ),
+                _dead_end_reply(),
+            ]
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+        ):
+            await act_node(_state())
+        assert nodes._resolved_tool_mode() == "native"
+
+
 class TestTheDegradedRetrievalFallback:
     """The act loop abandoning is survivable, and the reporter proved it.
 

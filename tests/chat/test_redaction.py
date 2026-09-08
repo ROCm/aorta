@@ -398,6 +398,26 @@ def _binding_source(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | Non
         current = parent
 
 
+#: Nodes that bind a name through a *string* field instead of an
+#: ``ast.Name(Store)`` child, and the field holding it. The Store walk below
+#: cannot see any of them, so each was a way past the guard while the allowlist
+#: still exempted ``retriever.ainvoke(...)`` from the chokepoint test above:
+#: ``match _get_llm():`` / ``case retriever:`` binds through ``MatchAs.name``,
+#: ``case [*tool_fn]`` through ``MatchStar.name``, ``case {**retriever}``
+#: through ``MatchMapping.rest``, and ``except Exception as retriever:`` through
+#: ``ExceptHandler.name``.
+#:
+#: All are recorded as unreadable rather than resolved, which is not a shortcut:
+#: a pattern capture takes its value from a subject expression several nodes
+#: away, and a handler takes whichever exception was raised, so neither has a
+#: bound expression on the node that could clear it.
+_STRING_FIELD_BINDERS = {
+    ast.MatchAs: "name",
+    ast.MatchStar: "name",
+    ast.MatchMapping: "rest",
+    ast.ExceptHandler: "name",
+}
+
 #: The only bindings ``graph/nodes.py`` may give the allowlisted receiver names,
 #: as ``ast.unparse`` renders them. Pinning the expressions rather than only
 #: rejecting ``_get_llm`` is what closes the escapes the walk cannot see on its
@@ -416,9 +436,10 @@ def _receiver_bindings(source: str) -> list[tuple[str, str | None, int]]:
     Yields ``(name, bound_expression_source, lineno)``, with ``None`` for a form
     :func:`_binding_source` cannot read. Covers the shapes that put a value on a
     name: assignment (plain, annotated, augmented, walrus, unpacked), ``for``,
-    ``with``, comprehensions, ``import ... as`` and function parameters. It does
-    *not* resolve values through intermediate variables -- that is what
-    :data:`_PERMITTED_RECEIVER_BINDINGS` is for.
+    ``with``, comprehensions, ``import ... as``, function parameters, ``match``
+    pattern captures and ``except ... as``. It does *not* resolve values through
+    intermediate variables -- that is what :data:`_PERMITTED_RECEIVER_BINDINGS`
+    is for.
     """
     tree = ast.parse(source)
     parents = {
@@ -428,10 +449,17 @@ def _receiver_bindings(source: str) -> list[tuple[str, str | None, int]]:
     }
     bindings = []
     for node in ast.walk(tree):
+        string_field = _STRING_FIELD_BINDERS.get(type(node))
         if isinstance(node, ast.alias):
             # `import x as retriever` binds a name without an `ast.Name` node
             # anywhere, so the Store walk below never sees it.
             name, assigned = (node.asname or node.name), None
+        elif string_field is not None:
+            # A pattern capture or an `except ... as` name. The field is `None`
+            # for the forms that bind nothing -- `case _:`, a mapping pattern
+            # with no `**rest`, a bare `except:` -- and `None` matches no
+            # receiver name below, so those fall out without a special case.
+            name, assigned = getattr(node, string_field, None), None
         elif isinstance(node, ast.arg):
             # A parameter's value comes from a caller this file cannot see, so
             # there is nothing here that could clear it.
@@ -579,10 +607,20 @@ class TestGraphChokepoint:
         [
             "async def f(retriever):\n    pass\n",
             "from aorta.chat.graph.nodes import _get_llm as tool_fn",
+            # Every one of these binds through a *string* field on the node
+            # rather than an `ast.Name(Store)`, so the Store walk saw nothing at
+            # all and the allowlist went on exempting the receiver from the
+            # chokepoint test -- a model reaching `.ainvoke` with `_send`
+            # skipped entirely.
+            "match _get_llm():\n    case retriever:\n        pass\n",
+            "match x:\n    case object() as retriever:\n        pass\n",
+            "match _get_llm():\n    case [*tool_fn]:\n        pass\n",
+            "match _get_llm():\n    case {**retriever}:\n        pass\n",
+            "try:\n    pass\nexcept Exception as retriever:\n    pass\n",
         ],
     )
     def test_a_binding_the_guard_cannot_read_is_reported_not_ignored(self, binding):
-        """Neither form has a value this file can inspect, so neither is cleared.
+        """None of these has a value this file can inspect, so none is cleared.
 
         Reported rather than skipped: staying silent on an unfamiliar shape is
         how an allowlist stops being a guard, since the next smuggling route is
@@ -591,6 +629,25 @@ class TestGraphChokepoint:
         complaints = _smuggled_model_bindings(binding)
         assert len(complaints) == 1
         assert "cannot read" in complaints[0]
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "match x:\n    case _:\n        pass\n",
+            "match x:\n    case {'a': 1}:\n        pass\n",
+            "try:\n    pass\nexcept Exception:\n    pass\n",
+        ],
+    )
+    def test_a_form_that_binds_no_name_is_not_reported(self, source):
+        """The other half of failing closed: it must not fail *noisily*.
+
+        ``case _:``, a mapping pattern with no ``**rest`` and a bare ``except:``
+        all carry the string field the check above reads, set to ``None``. A
+        guard that reported the *node* rather than the name it binds would
+        complain about all three, and one that cries wolf on ordinary syntax
+        gets edited out of the way.
+        """
+        assert _smuggled_model_bindings(source) == []
 
 
 def nodes_path() -> str:

@@ -206,7 +206,10 @@ Four things follow from that:
   back exactly as it would have if the escalation had never fired. Two such
   failures write native off for the rest of the process — two rather than one
   because a timeout and a permanent refusal arrive identically, and what tells
-  them apart is whether it happens again.
+  them apart is whether it happens again. A retry that comes back *silent*
+  counts the same as one that errored: "the request returned" is not "the
+  protocol works", and a model that says nothing on either protocol must not be
+  billed for a native round on every query from then on.
 - **The scope is the process, not the conversation.** Under `aorta chat` that is
   the same thing, but `aorta chat ui` serves many browser sessions from one
   server, and there the escalation is shared by all of them. That is deliberate:
@@ -233,9 +236,12 @@ that returned an error — "I could not use my tools" would be untrue, so that
 loop gets the plain give-up notice instead. A tool *outage* is therefore not
 covered by it. What is covered is a model that can drive neither protocol, and
 an endpoint that refuses the escalated one (a stock local vLLM without
-`--enable-auto-tool-choice` does): that refusal rolls the switch back, is not
-retried for the rest of the process, and lands on this same fallback rather
-than escaping as an error.
+`--enable-auto-tool-choice` and a matching `--tool-call-parser` does): that
+refusal never moves the protocol — the switch is thrown only once native has
+answered, so there is nothing to roll back — and it lands on this same fallback
+rather than escaping as an error. It takes two such failures to write native
+off for the rest of the process, so one transient timeout does not disable the
+escalation; the warning names which attempt it was.
 
 `aorta chat doctor` reports the resolved mode as its own check, and warns before
 you spend a query on it when `text` is paired with a model whose name reads as a
@@ -317,7 +323,8 @@ Knobs that lower the bill, roughly in order of effect:
 | `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
 | `I wasn't able to answer that: something in my own configuration...` | The act loop produced no usable text. Which attempts it made first depends on `llm_tool_mode` and on whether a tool had already run, so read the warning logged beside this message — it names the step that gave up. `aorta chat doctor` covers the configuration faults that reach this message by other routes. |
 | `this process will use native from here` | Not an error. The model returned no answer and no tool call under `text` — the line names the signature that was observed — and native answered it, so chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
-| `The escalated native tool-calling request failed` | The retry above was tried and the request did not come back. If it is a local vLLM, it needs `--enable-auto-tool-choice`; otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
+| `The escalated native tool-calling request failed` | The retry above was tried and the request did not come back. If it is a local vLLM, it needs both `--enable-auto-tool-choice` and a matching `--tool-call-parser` (see the endpoint row above); otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
+| `The escalated native tool-calling request returned no answer and no tool call either` | The retry reached the endpoint and the model was as silent on `native` as it was on `text`, so the protocol is not what it is failing on. `text` stays in force, and this counts as one of the two attempts above. Nothing here is a configuration fault; the model cannot drive either protocol for this query. |
 | An answer prefixed `I could not use my tools for this question` | The act loop gave up and the answer came from retrieved context alone, so anything needing a live lookup is missing from it. Same underlying cause as the row above. |
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
 | `Waiting for vLLM at ...` when you meant to go remote | `llm_provider` is still `vllm`. Check the backend line printed at startup. |

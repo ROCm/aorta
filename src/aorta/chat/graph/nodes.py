@@ -771,18 +771,27 @@ class _EscalationState:
     scoping it per session would put the two wasted rounds back on every
     browser tab -- which is the cost it exists to remove.
 
-    A mutable object rather than two module globals so that the escalation and
-    the rollback that undoes it read and write one thing.
+    A mutable object rather than two module globals so that the commit and the
+    failure count read and write one thing. There is no rollback to pair them
+    with: the switch is thrown only once native has answered, so the state it
+    would have had to undo is never reached.
     """
 
     #: Set once native has actually answered, never merely on deciding to try
     #: it. What moves *later* queries straight to native, through
     #: :func:`_resolved_tool_mode`.
     escalated: bool = False
-    #: Escalated attempts that raised. Counted rather than latched because one
-    #: failure does not say which kind it was: a stock local vLLM without
-    #: ``--enable-auto-tool-choice`` refuses the protocol permanently, while a
-    #: timeout or a 503 refuses it for a minute.
+    #: Escalated attempts that did not answer: one that raised, and one that
+    #: came back as empty as the text round it was sent to rescue. Counted
+    #: rather than latched because one failure does not say which kind it was: a
+    #: stock local vLLM without ``--enable-auto-tool-choice`` and a matching
+    #: ``--tool-call-parser`` refuses the protocol permanently, while a timeout
+    #: or a 503 refuses it for a minute.
+    #:
+    #: A silent attempt counts the same as a raised one so that the retry cannot
+    #: be billed on every query to a model that answers on neither protocol.
+    #: Nothing was learned about the endpoint either way, and the budget is the
+    #: same budget.
     native_failures: int = 0
 
 
@@ -808,8 +817,9 @@ def _tool_mode_is_explicit() -> bool:
 
     ``AORTA_CHAT_LLM_TOOL_MODE`` is a documented knob, and a user who set
     ``text`` deliberately must not be overridden -- a stock local vLLM without
-    ``--enable-auto-tool-choice`` cannot serve the native protocol at all, so
-    escalating there would trade a bad answer for a failed request.
+    ``--enable-auto-tool-choice`` and a matching ``--tool-call-parser`` cannot
+    serve the native protocol at all, so escalating there would trade a bad
+    answer for a failed request.
 
     pydantic-settings records which fields a source supplied, so "the user asked
     for text" is distinguishable from "text is the default". Every source
@@ -854,8 +864,9 @@ def _escalate_to_native(response: Any) -> bool:
     * the failure has to look like the protocol rather than the query, or a
       truncation would silently change the user's configured protocol;
     * the user must not have chosen the protocol themselves;
-    * and native must not already have failed :data:`_MAX_NATIVE_FAILURES`
-      times, or every query would pay to rediscover a refusal.
+    * and native must not already have failed to answer
+      :data:`_MAX_NATIVE_FAILURES` times, or every query would pay a round to
+      rediscover that.
     """
     if _tool_mode_is_explicit():
         return False
@@ -889,6 +900,20 @@ def _commit_escalation(signature: str) -> None:
         "process started on the 'text' protocol.",
         signature,
     )
+
+
+def _record_escalation_failure() -> str:
+    """Count an escalated attempt that did not answer; return what follows next.
+
+    Shared by the two ways the retry can fail to rescue a query -- the request
+    raised, or it came back as silent as the text round before it. Both spend
+    the same budget, and both leave the protocol where it was, so counting them
+    in one place is what stops a caller from spending it forever by forgetting.
+    """
+    _escalation.native_failures += 1
+    if _escalation.native_failures >= _MAX_NATIVE_FAILURES:
+        return " native will not be tried again in this process."
+    return " a later query may try again."
 
 
 @dataclass(frozen=True)
@@ -1095,8 +1120,9 @@ async def _escalated_native_attempt(
     The retry is speculative: the user asked a question, not for a protocol
     change, so it must not be able to leave them worse off than the dead end it
     is trying to rescue. A stock local vLLM started without
-    ``--enable-auto-tool-choice`` refuses any request carrying ``tools``, and
-    that user is precisely the one the escalation targets -- they never set
+    ``--enable-auto-tool-choice`` and a matching ``--tool-call-parser`` refuses
+    any request carrying ``tools``, and that user is precisely the one the
+    escalation targets -- they never set
     ``llm_tool_mode``, so nothing marks their endpoint as text-only until a
     native request comes back refused. Unhandled, that refusal turned a poor
     answer into a traceback out of the graph. Caught, the query lands on the
@@ -1115,28 +1141,51 @@ async def _escalated_native_attempt(
     timeout, and the log line says so instead of diagnosing on the caller's
     behalf; :data:`_MAX_NATIVE_FAILURES` is what tells them apart, by whether
     the failure repeats.
+
+    A request that comes back *silent* is the second way the retry fails, and it
+    is the reason this reads :attr:`_NativeOutcome.answered` rather than simply
+    committing on a return. Every exit from the native loop is a state update,
+    including the two that gave up, so "did not raise" says nothing about
+    whether the protocol worked -- and committing on it handed the rest of the
+    process to a protocol that had answered nothing. It counts against the same
+    budget as a raise: nothing was learned about the endpoint, and a model that
+    is silent on both protocols must not be billed for a native round on every
+    query from here on.
     """
     try:
-        result = await _act_native(state, escalated=True)
+        outcome = await _run_native_loop(state, escalated=True)
     except Exception as exc:
-        _escalation.native_failures += 1
-        exhausted = _escalation.native_failures >= _MAX_NATIVE_FAILURES
+        followup = _record_escalation_failure()
         logger.warning(
             "The escalated native tool-calling request failed (%s: %s). This is "
             "attempt %d of %d;%s Answering from retrieved context instead. If "
             "it is a local vLLM, it must be started with "
-            "--enable-auto-tool-choice to serve this protocol.",
+            "--enable-auto-tool-choice and a matching --tool-call-parser to "
+            "serve this protocol.",
             type(exc).__name__,
             exc,
             _escalation.native_failures,
             _MAX_NATIVE_FAILURES,
-            " native will not be tried again in this process."
-            if exhausted
-            else " a later query may try again.",
+            followup,
         )
         return await _abandoned_result(state, trace)
+    if not outcome.answered:
+        # The retry ran and the model was as silent on native as it had been on
+        # text. Committing here is what the switch has to refuse to do: a
+        # protocol that has never answered would then be selected for every
+        # later query on the strength of an attempt that failed.
+        followup = _record_escalation_failure()
+        logger.warning(
+            "The escalated native tool-calling request returned no answer and "
+            "no tool call either, so the 'text' protocol stays in force. This "
+            "is attempt %d of %d;%s",
+            _escalation.native_failures,
+            _MAX_NATIVE_FAILURES,
+            followup,
+        )
+        return outcome.result
     _commit_escalation(signature)
-    return result
+    return outcome.result
 
 
 def _act_messages(state: AgentState) -> list[Any]:
@@ -1184,6 +1233,28 @@ def _ensure_ends_with_user(messages: list[Any]) -> None:
         messages.append(HumanMessage(content=_RETRY_NUDGE))
 
 
+@dataclass(frozen=True)
+class _NativeOutcome:
+    """A native loop's state update, and whether the protocol actually answered.
+
+    The second field exists because the first cannot carry it. Every way out of
+    the loop returns a state update, including the ones that gave up, so
+    "returned without raising" is not the same as "native works" -- and
+    :func:`_commit_escalation` needs the second question answered, not the
+    first. Reading it back off the result was tried and does not work either:
+    :func:`_abandoned_result` blanks ``command_output`` by design, and the
+    final-synthesis path substitutes :data:`_NO_ANSWER_MSG` for empty text, so
+    both a rescued query and an abandoned one can present the same shape.
+    """
+
+    result: dict[str, Any]
+    #: Whether native demonstrably drove the protocol: it returned prose, or it
+    #: made at least one tool call. False only when the loop gave up having seen
+    #: neither -- which is the same model behaviour that started the escalation,
+    #: now observed on the protocol that was supposed to fix it.
+    answered: bool
+
+
 async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, Any]:
     """Tool loop over the OpenAI function-calling API.
 
@@ -1195,6 +1266,17 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
     reported that the model cannot drive it. It buys one round rather than two
     (:data:`_MAX_ESCALATED_ROUNDS`), because by then the query has already been
     paid for twice.
+    """
+    return (await _run_native_loop(state, escalated=escalated)).result
+
+
+async def _run_native_loop(
+    state: AgentState, escalated: bool = False
+) -> _NativeOutcome:
+    """:func:`_act_native`, plus the answer to "did native work?".
+
+    Split out so the escalated retry can tell a rescue from a second dead end.
+    Ordinary native queries go through the wrapper and discard the extra fact.
     """
     plain = _get_llm(temperature=0.1, streaming=False)
     llm = plain.bind_tools(list(TOOL_REGISTRY.values()))
@@ -1227,11 +1309,14 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
 
         if not tool_calls:
             if text:
-                return {
-                    "messages": [AIMessage(content=text)],
-                    "command_output": text,
-                    "tool_trace": trace,
-                }
+                return _NativeOutcome(
+                    result={
+                        "messages": [AIMessage(content=text)],
+                        "command_output": text,
+                        "tool_trace": trace,
+                    },
+                    answered=True,
+                )
             unproductive += 1
             _log_empty_content(response, f"act_node round {round_num + 1}")
             if unproductive >= unproductive_cap:
@@ -1278,7 +1363,9 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
             " Escalating from the text protocol did not help, so the model is "
             "returning nothing on either." if escalated else "",
         )
-        return await _abandoned_result(state, trace)
+        return _NativeOutcome(
+            result=await _abandoned_result(state, trace), answered=False
+        )
 
     # Reaching here means the loop never produced a tool-free reply, so the
     # budget ran out mid-task. Say so: the answer will read as truncated, and
@@ -1302,14 +1389,23 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
     messages.append(HumanMessage(content=_FINAL_ANSWER_MSG))
     final = await _send(plain, messages)
     text = str(final.content or "").strip()
+    # Read before the substitution below, which would otherwise make an empty
+    # synthesis indistinguishable from a real answer to the caller.
+    synthesised = bool(text)
     if not text:
         _log_empty_content(final, "act_node final")
         text = _NO_ANSWER_MSG
-    return {
-        "messages": [AIMessage(content=text)],
-        "command_output": text,
-        "tool_trace": trace,
-    }
+    return _NativeOutcome(
+        result={
+            "messages": [AIMessage(content=text)],
+            "command_output": text,
+            "tool_trace": trace,
+        },
+        # A tool call is proof the protocol works even when the synthesis that
+        # followed it came back empty: the model drove `tools` successfully, and
+        # what failed after that is not the protocol.
+        answered=bool(trace) or synthesised,
+    )
 
 
 async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
