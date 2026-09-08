@@ -356,6 +356,50 @@ class TestRemedyLines:
             assert "is not offered here" not in "\n".join(lines), alias
 
 
+class TestRefreshCommand:
+    """The one-command form, for the messages that are prose rather than a report."""
+
+    def test_a_local_provider_is_told_to_fetch(self):
+        assert manifest_mod._refresh_command("local") == "aorta chat index fetch"
+
+    def test_a_remote_provider_is_told_to_build(self):
+        assert manifest_mod._refresh_command("remote") == "aorta chat index build"
+
+    def test_it_agrees_with_the_block_form(self):
+        """Two independent answers to "is a fetch worth suggesting" would drift.
+
+        Read off the command lines rather than the whole block: the remote
+        block names ``index fetch`` in prose precisely to say it is not on
+        offer, so a substring search over all of it answers the wrong question.
+        """
+        for provider in ("local", "remote"):
+            commands = [
+                line for line in manifest_mod.remedy_lines(provider) if line.startswith("  aorta")
+            ]
+            offered = any("index fetch" in line for line in commands)
+            assert offered == (manifest_mod._refresh_command(provider) == "aorta chat index fetch")
+
+    def test_a_missing_manifest_names_a_command_the_provider_can_run(self, monkeypatch, tmp_path):
+        """The message doctor prints for an index nobody can verify.
+
+        It reaches a remote install through ``doctor``'s "cannot be verified"
+        branch and through the query-time refusal, so a hardcoded fetch here is
+        the same impossible remedy in two more places.
+        """
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        with pytest.raises(manifest_mod.ManifestError) as excinfo:
+            manifest_mod.read_manifest(tmp_path / "index.sqlite")
+        assert "no manifest beside" in str(excinfo.value)
+        assert "index fetch" not in str(excinfo.value)
+        assert "aorta chat index build" in str(excinfo.value)
+
+    def test_a_malformed_schema_version_names_one_too(self, monkeypatch):
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "local")
+        with pytest.raises(manifest_mod.ManifestError) as excinfo:
+            manifest_mod.ensure_supported_schema(_manifest(schema_version="1"), "the index")
+        assert "aorta chat index fetch" in str(excinfo.value)
+
+
 class TestWarnings:
     def test_version_drift_warns_rather_than_refuses(self):
         report = validate(
@@ -376,6 +420,25 @@ class TestWarnings:
             installed_version="0.3.0",
         )
         assert any("aorta chat index fetch" in line for line in report.warnings)
+
+    def test_the_drift_warning_does_not_name_fetch_on_a_remote_provider(self, monkeypatch):
+        """The index still works here, so the advice must be a command that runs.
+
+        A fetch under a remote embedder is refused rather than stale, so
+        answering "your index is a little old" with it trades a warning the
+        user could act on for an error they cannot.
+        """
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            installed_version="0.3.0",
+        )
+        drift = [line for line in report.warnings if "source drift" in line]
+        assert drift
+        assert not any("index fetch" in line for line in drift)
+        assert any("aorta chat index build" in line for line in drift)
 
     def test_an_identical_version_does_not_warn(self):
         report = validate(

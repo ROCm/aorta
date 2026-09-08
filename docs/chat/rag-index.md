@@ -101,6 +101,11 @@ half-rebuilt one.
 a given AORTA revision, so building it locally is work someone already did. It
 resolves by installed version — a released wheel gets that release's asset, a
 `.dev` build gets the rolling `main` asset with a warning about the commit delta.
+It is only *offered* as a remedy under `embedding_provider = "local"`: the
+published asset is built with the local embedder, so a fetch under a remote one
+is refused before anything is installed. Every place that suggests how to get or
+replace an index — a missing index, a refused one, a stale one — reads the
+configured provider first and names `aorta chat index build` instead.
 
 It is the normal path for every chat provider, because the embedding provider is
 a separate choice and every `config init` profile leaves it local. The asset is
@@ -112,14 +117,17 @@ check compares the model name and not only the flow. That is the reason
 means taking over the build.
 
 A fetch downloads vectors, not the embedding model, so straight afterwards
-`doctor` reports the model cache as cold. With a valid index present that is
-reported as `[ -- ] ... does not need to be yet`, because the weights download
-themselves on the first query. **Do not "pre-warm" with `aorta chat index
-build`**: its `--output` defaults to the index you just fetched and its corpus
-defaults to `src/aorta` alone, so it is an attempt to replace a code-and-prose
-index with a code-only one, dropping `docs/` and `README.md` out of retrieval.
-To download the weights on their own, `doctor` prints the one-line
-`TextEmbedding` command.
+`doctor` reports the model cache as cold. With an index present that this
+install could query — one that opens, holds chunks for this provider, and
+matches the manifest — that is reported as `[ -- ] ... does not need to be yet`,
+because the weights download themselves on the first query. An index that fails
+any of those stays a warning: there is then nothing for the softer wording to
+protect, and "nothing to do" over an unusable index withholds the remedy.
+**Do not "pre-warm" with `aorta chat index build`**: its `--output` defaults to
+the index you just fetched and its corpus defaults to `src/aorta` alone, so it
+is an attempt to replace a code-and-prose index with a code-only one, dropping
+`docs/` and `README.md` out of retrieval. To download the weights on their own,
+`doctor` prints the one-line `TextEmbedding` command.
 
 Building locally is the developer path and the air-gapped path. It takes a few
 minutes and runs on CPU.

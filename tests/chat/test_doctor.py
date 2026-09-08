@@ -32,13 +32,48 @@ def _by_name(report, name: str):
     return found[0]
 
 
-def _write_index(monkeypatch, tmp_path: Path, **overrides) -> Path:
-    """Install an index and a matching manifest, and point the settings at it."""
+def _fill_index(index: Path, collection: str, rows: int = 3) -> None:
+    """Write the one table the health probe and the contents check read.
+
+    A real sqlite file rather than filler bytes, because "healthy" now means
+    an index this install could query, and filler bytes are precisely the
+    clobbered index that has to read as unhealthy. Built with stdlib sqlite3
+    and no sqlite-vec: the chunk table is an ordinary table, which is the same
+    reason ``collection_chunk_count`` can count it without an embedding model.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(index)
+    try:
+        conn.execute(f'CREATE TABLE "chunks_{collection}" (id INTEGER PRIMARY KEY, text TEXT)')
+        conn.executemany(
+            f'INSERT INTO "chunks_{collection}" (text) VALUES (?)',
+            [(f"chunk {n}",) for n in range(rows)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _write_index(
+    monkeypatch, tmp_path: Path, *, readable: bool = True, rows: int = 3, **overrides
+) -> Path:
+    """Install an index and a matching manifest, and point the settings at it.
+
+    ``readable=False`` leaves filler bytes where the sqlite store should be --
+    the state a truncated copy or a clobbered file leaves behind, and the one
+    whose manifest still describes an index that is no longer under it.
+    ``rows=0`` is the readable half of the same problem: a store that opens and
+    holds nothing for this install to retrieve.
+    """
     from aorta.chat.rag import manifest as manifest_mod
     from aorta.chat.rag.embeddings.factory import get_provider
 
     index = tmp_path / "index.sqlite"
-    index.write_bytes(b"x" * 2048)
+    if readable:
+        _fill_index(index, get_provider().collection_name(), rows=rows)
+    else:
+        index.write_bytes(b"x" * 2048)
     monkeypatch.setattr(settings, "index_path", str(index))
     values = {
         "aorta_version": doctor._dist_version("amd-aorta"),
@@ -153,6 +188,30 @@ class TestEmbeddingModelCache:
         assert check.status == SKIP
         assert "Nothing to do" in check.hint
 
+    def test_a_legacy_manifest_over_an_unreadable_index_is_not_healthy(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Saying "nothing to do" over an unopenable index is worse than over-warning.
+
+        A manifest predating ``chunk_count`` claims no contents, so
+        ``check_index`` has nothing to contradict and records no refusal --
+        while the query path refuses the same file unconditionally. Reading
+        only the refusal list would tell a user whose index is unusable that
+        their setup is fine, and withhold the remedy.
+        """
+        _write_index(monkeypatch, tmp_path, readable=False)
+        check = _by_name(run_checks(backend=False), "embedding model cache")
+        assert check.status == WARN
+        assert "Nothing to do" not in check.hint
+
+    def test_an_index_holding_nothing_for_this_install_is_not_healthy(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """An interrupted build leaves the manifest over a store with no chunks."""
+        _write_index(monkeypatch, tmp_path, rows=0)
+        check = _by_name(run_checks(backend=False), "embedding model cache")
+        assert check.status == WARN
+
     def test_the_pre_warm_advice_never_says_index_build(self, monkeypatch, tmp_path: Path):
         """It would overwrite a fetched index with a code-only one, silently.
 
@@ -229,6 +288,39 @@ class TestIndexChecks:
         assert check.status == FAIL
         assert "aorta chat index fetch" in check.hint
         assert "aorta chat index build" in check.hint
+        # It is already running; suggesting it back is noise.
+        assert "aorta chat doctor" not in check.hint
+
+    def test_the_absent_index_remedy_does_not_offer_fetch_on_a_remote_provider(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """A fresh remote install is the likeliest way to reach this branch.
+
+        ``fetch_index`` validates the published manifest against the configured
+        provider before installing anything, and the published asset is built
+        with the local embedder -- so the user who has done nothing wrong yet
+        would be led straight into a refusal.
+        """
+        from aorta.chat.rag import manifest as manifest_mod
+
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        check = _by_name(run_checks(backend=False), "chat index")
+        assert check.status == FAIL
+        commands = [line for line in check.hint.splitlines() if line.startswith("  aorta")]
+        assert not any("index fetch" in line for line in commands)
+        assert any("index build" in line for line in commands)
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in check.hint
+
+    def test_the_absent_and_refused_remedies_are_the_same_list(self, monkeypatch, tmp_path: Path):
+        """Two hand-written lists are how one of them keeps the impossible command."""
+        _write_index(monkeypatch, tmp_path, embedding_model="other/model")
+        refused = _by_name(run_checks(backend=False), "index manifest").procedure
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
+        absent = _by_name(run_checks(backend=False), "chat index").hint
+
+        assert absent
+        assert absent in refused
 
     def test_an_index_without_a_manifest_warns(self, monkeypatch, tmp_path: Path):
         index = tmp_path / "index.sqlite"
@@ -275,8 +367,46 @@ class TestIndexChecks:
         monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
         check = _by_name(run_checks(backend=False), "index manifest")
         commands = [line for line in check.procedure.splitlines() if line.startswith("  aorta")]
-        assert commands == ["  aorta chat index build     re-embed the corpus with the configured"]
+        assert commands == ["  aorta chat index build     embed the corpus with the configured"]
         assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in check.procedure
+
+    def test_a_manifest_over_an_unreadable_store_is_not_reported_as_matching(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The query path refuses this file, so the report must not call it a match.
+
+        ``check_index`` only turns an unopenable index into a refusal when the
+        manifest claims a chunk count to contradict, so a manifest predating
+        that field left this state reported as ``ok``.
+        """
+        _write_index(monkeypatch, tmp_path)
+        assert _by_name(run_checks(backend=False), "index manifest").status == OK
+
+        _write_index(monkeypatch, tmp_path, readable=False)
+        check = _by_name(run_checks(backend=False), "index manifest")
+        assert check.status == FAIL
+        assert "cannot read" in check.detail
+        assert "aorta chat index build" in check.procedure
+
+    @pytest.mark.parametrize("state", ["healthy", "unreadable", "empty"])
+    def test_both_readers_of_index_health_agree(self, monkeypatch, tmp_path: Path, state):
+        """One report must not call the index fine on one line and unusable on another.
+
+        The cold-cache hint gates on index health and the manifest line reports
+        it. They were two separate reads of the same question, which is how the
+        manifest line came to say ``ok`` over a file the hint had already
+        concluded was unusable; they share one helper for that reason.
+        """
+        _write_index(
+            monkeypatch,
+            tmp_path,
+            readable=state != "unreadable",
+            rows=0 if state == "empty" else 3,
+        )
+        report = run_checks(backend=False)
+        queryable = _by_name(report, "index manifest").status == OK
+        assert queryable == (state == "healthy")
+        assert queryable == (_by_name(report, "embedding model cache").status == SKIP)
 
     def test_version_drift_warns_rather_than_failing(self, monkeypatch, tmp_path: Path):
         _write_index(monkeypatch, tmp_path, aorta_version="0.0.1")

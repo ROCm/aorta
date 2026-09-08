@@ -200,8 +200,8 @@ def read_manifest(index_path: str | Path) -> Manifest:
             f"no manifest beside the index at {index_path}.\n"
             "An index without one cannot be checked against this install's "
             "embedding model, which is the check that stops a silently "
-            "mismatched index answering from the wrong vectors. Re-fetch with "
-            "'aorta chat index fetch', or rebuild with 'aorta chat index build'."
+            "mismatched index answering from the wrong vectors. Replace it "
+            f"with '{_refresh_command()}'."
         ) from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestError(f"could not read the manifest at {path}: {exc}") from exc
@@ -228,8 +228,7 @@ def ensure_supported_schema(manifest: Manifest, subject: str) -> None:
         raise ManifestError(
             f"the manifest for {subject} carries a non-integer schema version "
             f"({version!r}), so it is malformed and cannot be interpreted. "
-            "Re-fetch with 'aorta chat index fetch', or rebuild with "
-            "'aorta chat index build'."
+            f"Replace it with '{_refresh_command()}'."
         )
     if version > SCHEMA_VERSION:
         raise ManifestError(
@@ -282,18 +281,34 @@ def _configured_embedding_provider() -> str:
         return "local"
 
 
+def _refresh_command(embedding_provider: str | None = None) -> str:
+    """The single command that gets this install a current index, named inline.
+
+    ``remedy_lines`` is the block form, for the places that can spend several
+    lines on it; this is for the sentence that only has room for one command.
+    Conditional on the same fact, so the two cannot disagree about whether a
+    fetch is worth suggesting.
+    """
+    provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
+    return "aorta chat index fetch" if provider == "local" else "aorta chat index build"
+
+
 def remedy_lines(
     embedding_provider: str | None = None,
     *,
     include_doctor: bool = True,
 ) -> list[str]:
-    """The commands that resolve an index/provider mismatch, for this install.
+    """The commands that get this install an index it can query.
 
     Conditional on the provider because ``index fetch`` cannot help a remote
     embedder: CI publishes one asset, built with the local provider, so "the
     index matching this install" does not exist for a remote one and never
-    will. Offering it first sends the user to a second refusal with different
-    wording, from which the reasonable conclusion is that chat is broken.
+    will. Offering it first sends the user to a refusal with different wording,
+    from which the reasonable conclusion is that chat is broken.
+
+    Worded for an index that is absent as much as for one that is refused,
+    because both states want the same list and a remedy that is only correct
+    for one of them is how the second state keeps the impossible command.
 
     Args:
         embedding_provider: Override for the configured provider, as one of
@@ -308,22 +323,22 @@ def remedy_lines(
     if provider == "local":
         return [
             "  aorta chat index fetch     download the index matching this install",
-            "  aorta chat index build     rebuild locally with the configured provider",
+            "  aorta chat index build     build one locally with the configured provider",
             *(doctor_line if include_doctor else []),
         ]
 
     return [
-        "  aorta chat index build     re-embed the corpus with the configured",
+        "  aorta chat index build     embed the corpus with the configured",
         "                             provider -- slow, and every chunk goes",
         "                             through the embeddings API",
         *(doctor_line if include_doctor else []),
         "",
         "'aorta chat index fetch' is not offered here: the published index is built",
         "with the local embedder, so no published asset can match a remote one, and",
-        f"fetching it under embedding_provider = {provider!r} would produce this same",
-        'refusal again. Set embedding_provider = "local" (or the environment',
-        "variable AORTA_CHAT_EMBEDDING_PROVIDER=local) and the fetch works, at no",
-        "cost in embedding API calls.",
+        f"fetching it under embedding_provider = {provider!r} would be refused in",
+        'turn. Set embedding_provider = "local" (or the environment variable',
+        "AORTA_CHAT_EMBEDDING_PROVIDER=local) and the fetch works, at no cost in",
+        "embedding API calls.",
     ]
 
 
@@ -457,17 +472,21 @@ def validate(
             f"configured value is {chunk_overlap}"
         )
 
+    # Named through ``_refresh_command`` for the reason ``remedy_lines`` is
+    # conditional: on a remote embedder a fetch is refused rather than stale,
+    # so advising it here would answer a warning about an index that still
+    # works with a command that cannot run.
     if installed_version and manifest.aorta_version != installed_version:
         report.warnings.append(
             f"source drift: index was built from aorta {manifest.aorta_version}"
             f"{f' ({manifest.aorta_sha[:7]})' if manifest.aorta_sha else ''}, this "
             f"install is {installed_version}. Answers may cite code that has "
-            "since changed; refresh with 'aorta chat index fetch'"
+            f"since changed; refresh with '{_refresh_command()}'"
         )
     elif installed_sha and manifest.aorta_sha and not manifest.aorta_sha.startswith(installed_sha):
         report.warnings.append(
             f"source drift: index was built at {manifest.aorta_sha[:7]}, this "
-            f"install reports {installed_sha}. Refresh with 'aorta chat index fetch'"
+            f"install reports {installed_sha}. Refresh with '{_refresh_command()}'"
         )
 
     return report

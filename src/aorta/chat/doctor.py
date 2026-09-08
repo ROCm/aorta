@@ -25,6 +25,7 @@ import sys
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -217,30 +218,73 @@ def _probe_huggingface() -> bool:
         return False
 
 
+def _store_defect(index_file: Path) -> str:
+    """Why this install's collection cannot be read out of ``index_file``, or "".
+
+    The half ``check_index`` does not report. It escalates an unopenable index
+    to a refusal only when the manifest claims a chunk count to contradict, and
+    a manifest written before that field existed claims none -- so a clobbered
+    legacy index comes back from it with an empty refusal list, even though the
+    query path refuses that file unconditionally
+    (``retriever._check_manifest``).
+
+    Both readers of index health below go through this one function, because a
+    report that says the index matches on one line and is unusable on another
+    is worse than either answer on its own.
+    """
+    from aorta.chat.rag.embeddings.factory import get_provider
+    from aorta.chat.rag.retriever import collection_chunk_count
+
+    try:
+        chunks = collection_chunk_count(index_file, get_provider().collection_name())
+    except Exception as exc:
+        # Deliberately broad, for the same reason as ``_check_backend``: a
+        # damaged index surfaces as IndexUnreadableError, sqlite3.Error or
+        # OSError depending on how it is damaged, and a doctor that propagates
+        # one of those has failed at its only job. The message is the hint.
+        logger.debug("index store probe failed", exc_info=True)
+        return str(exc)
+    # ``None`` is no chunk table for this install's collection and ``0`` is an
+    # empty one -- an interrupted build, or a file indexed by another provider.
+    # Neither can answer a question.
+    if not chunks:
+        return f"no chunks for this install's collection in {index_file}"
+    return ""
+
+
 def _index_is_healthy() -> bool:
     """Whether an index is present and this install can query it as-is.
 
     Asked so the cold-cache hint can be conditioned on what the user already
     has. ``_check_embedding_model`` runs before ``_check_index`` because
     provider-before-index reads better in the report, so it cannot read the
-    later check's result; running the same validation twice costs one sqlite
-    open and no network, which is cheaper than reordering the output.
+    later check's result; running the same validation twice costs two sqlite
+    opens and no network, which is cheaper than reordering the output.
 
     Warnings do not disqualify an index. Source drift is a reason to refresh
     it, not a reason for advice that would replace it with a worse one.
+
+    An empty refusal list is not on its own enough -- see ``_store_defect`` --
+    so the file is read as well. Getting this wrong is asymmetric: a spurious
+    ``False`` costs a warning the user can ignore, while a spurious ``True``
+    tells someone whose index is unusable that there is nothing to do, and
+    withholds the remedy.
     """
     from aorta.chat.config import settings
     from aorta.chat.rag.index_ops import check_index
 
-    if not settings.index_file.exists():
+    index_file = settings.index_file
+    if not index_file.exists():
         return False
     try:
-        return not check_index(settings.index_file, strict=False).refusals
+        if check_index(index_file, strict=False).refusals:
+            return False
     except Exception:
         # Unreadable, unparseable, no manifest: all mean the same thing here,
         # which is that there is nothing worth protecting from a rebuild.
         logger.debug("index health probe failed", exc_info=True)
         return False
+    return not _store_defect(index_file)
 
 
 def _check_embedding_model(report: Report) -> None:
@@ -284,7 +328,7 @@ def _check_embedding_model(report: Report) -> None:
                 SKIP,
                 f"{state['model']} is not cached, and does not need to be yet",
                 hint=(
-                    "Your index is present and matches this install, and the "
+                    "Your index is readable and matches this install, and the "
                     "weights\n"
                     "download themselves (~65 MB) on the first query. Nothing "
                     "to do.\n"
@@ -318,20 +362,22 @@ def _check_embedding_model(report: Report) -> None:
 
 
 def _check_index(report: Report) -> None:
-    """Index presence, and whether its manifest matches this install."""
+    """Index presence, and whether the manifest and the store under it fit this install."""
     from aorta.chat.config import settings
     from aorta.chat.rag import manifest as manifest_mod
 
     index_file = settings.index_file
     if not index_file.exists():
+        # The same conditional list the refusal below uses, and for the same
+        # reason: a fresh install on a remote embedder is the state most likely
+        # to reach this branch, and it is the one for which `index fetch` is
+        # guaranteed to refuse. Naming it first there would put the impossible
+        # remedy in front of the user who has done nothing wrong yet.
         report.add(
             "chat index",
             FAIL,
             f"absent at {index_file}",
-            hint=(
-                "aorta chat index fetch     download the prebuilt index\n"
-                "aorta chat index build     build one from local code"
-            ),
+            hint="\n".join(manifest_mod.remedy_lines(include_doctor=False)),
         )
         return
 
@@ -371,6 +417,29 @@ def _check_index(report: Report) -> None:
             ),
         )
         return
+
+    # After the refusals, which already cover this when the manifest claims a
+    # chunk count -- and more specifically, since they name the number. This is
+    # the case they miss: a manifest predating that field over a store that
+    # cannot be read. The query path refuses it regardless, so reporting it as
+    # a matching index would contradict both that path and the cold-cache line
+    # above, which gates on the same helper.
+    defect = _store_defect(index_file)
+    if defect:
+        report.add(
+            "index manifest",
+            FAIL,
+            "describes an index this install cannot read",
+            hint=defect,
+            procedure=(
+                "The manifest and the store under it are from different builds, "
+                "or the file did not arrive intact. Queries are refused rather "
+                "than answered from whatever survived.\n"
+                + "\n".join(manifest_mod.remedy_lines(include_doctor=False))
+            ),
+        )
+        return
+
     if result.warnings:
         report.add(
             "index manifest",
