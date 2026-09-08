@@ -1,14 +1,120 @@
-"""Tests for route_after_critic() and graph structure."""
+"""Tests for router_node(), route_after_critic() and graph structure."""
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from langchain_core.messages import AIMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END
 
 from aorta.chat.graph.graph import build_graph, route_after_critic
-from aorta.chat.graph.nodes import finalize_node
+from aorta.chat.graph.nodes import _parse_route, finalize_node, router_node
+
+
+class TestParseRoute:
+    """The classification itself, without a model in the way."""
+
+    def test_a_bare_route_name_parses(self):
+        assert _parse_route("question") == "question"
+        assert _parse_route("action") == "action"
+
+    def test_a_name_inside_a_sentence_still_parses(self):
+        assert _parse_route("this is an action") == "action"
+
+    def test_an_empty_reply_names_nothing(self):
+        assert _parse_route("") is None
+
+    def test_a_reply_naming_neither_names_nothing(self):
+        assert _parse_route("let me look at the code") is None
+
+    def test_a_reply_naming_both_is_ambiguous_rather_than_a_winner(self):
+        """Substring matching has to be symmetric to be honest.
+
+        ``"question" in text`` alone called this one ``question`` while
+        ``"action" in text`` alone would have called it ``action``; neither is a
+        classification the model made.
+        """
+        assert _parse_route("action, not question") is None
+
+
+class TestRouterNodeFallback:
+    """Which branch a reply that classified nothing lands on.
+
+    It used to be ``action``, by omission: ``"question" if "question" in reply
+    else "action"``. That is the branch a model returning empty content cannot
+    drive, and empty content is exactly what such a model returns -- so a
+    router that failed to answer routed into the one branch guaranteed to fail.
+    """
+
+    @staticmethod
+    async def _route(reply: str) -> str:
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=AIMessage(content=reply))
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=llm):
+            result = await router_node(
+                {"messages": [HumanMessage(content="where are the tokenspeed docs?")]}
+            )
+        return result["route"]
+
+    @pytest.mark.parametrize("reply", ["question", "action"])
+    async def test_a_real_classification_is_honoured(self, reply):
+        assert await self._route(reply) == reply
+
+    @pytest.mark.parametrize("reply", ["", "   ", "let me check", "action or question"])
+    async def test_anything_unrecognised_prefers_the_answerable_branch(self, reply):
+        """``question`` degrades to a retrieval-only answer; ``action`` to none."""
+        assert await self._route(reply) == "question"
+
+    async def test_the_fallback_is_reported_rather_than_silent(self, caplog):
+        with caplog.at_level("WARNING"):
+            await self._route("")
+        assert "names neither route" in caplog.text
+
+
+class TestOnlyUnclassifiedRepliesChanged:
+    """The bound on this change, and the reason it is not a reweighting.
+
+    Gap 3c also proposed biasing the router away from ``action``. The reported
+    symptom does not support that: the reply was a real ``'action'``, the prompt
+    asked for ``action`` on a "find"-shaped question, and the query died in the
+    act loop rather than in the classifier. Reweighting would move queries the
+    model *did* classify, which is exactly what
+    https://github.com/ROCm/aorta/issues/433 warns regresses in mirror image.
+
+    So the change is confined to replies that classify nothing. This test is the
+    proof: for every reply naming exactly one route -- which is every reply the
+    model is asked for, and every reply either issue's repro produced -- the new
+    rule agrees with the old one.
+    """
+
+    @staticmethod
+    def _old_rule(route_text: str) -> str:
+        """Verbatim from before: ``"question" if "question" in reply else "action"``."""
+        return "question" if "question" in route_text else "action"
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "question",
+            "action",
+            "Question",
+            "this is an action",
+            "question.",
+            "the answer is: action",
+            # #433's repro shape: a run question the model calls a question.
+            "question -- it asks about a run on this machine",
+        ],
+    )
+    def test_a_real_classification_is_decided_exactly_as_before(self, reply):
+        lowered = reply.strip().lower()
+        assert _parse_route(lowered) == self._old_rule(lowered)
+
+    @pytest.mark.parametrize("reply", ["", "let me check", "unsure"])
+    def test_only_a_reply_naming_no_route_moved(self, reply):
+        """The one changed case, and the one that had no classification in it."""
+        assert self._old_rule(reply) == "action"
+        assert _parse_route(reply) is None
 
 
 class TestRouteAfterCritic:

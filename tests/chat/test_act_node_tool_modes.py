@@ -95,6 +95,87 @@ class TestSuiteIsIndependentOfLocalConfig:
         assert nodes.settings.llm_tool_mode == "text"
 
 
+class TestTheGiveUpMessageIsForTheUser:
+    """It used to be a developer diagnostic printed in the answer slot.
+
+    Four sentences naming an environment variable, an internal text protocol, a
+    provider API and a class of model the user never chose -- phrased as a
+    condition they cannot evaluate. The reporter's note was "the chatbot should
+    not talk about model". The specifics are still logged, and ``aorta chat
+    doctor`` reports the resolved protocol; the answer slot gets one plain
+    sentence and a command to run.
+    """
+
+    @pytest.mark.parametrize(
+        "leak",
+        [
+            "AORTA_CHAT",
+            "ACTION:",
+            "reasoning model",
+            "function-calling",
+            "native",
+            "protocol",
+            "tool",
+        ],
+    )
+    def test_it_names_no_internals(self, leak):
+        assert leak.lower() not in _NO_ANSWER_MSG.lower()
+
+    def test_it_leaves_the_user_able_to_reach_the_fix(self):
+        """Shorter is not the goal -- reachable is. Hence the command."""
+        assert "aorta chat doctor" in _NO_ANSWER_MSG
+
+    def test_it_stays_short_enough_to_read_as_an_answer(self):
+        assert len(_NO_ANSWER_MSG) < 200
+
+    @pytest.mark.asyncio
+    async def test_the_diagnostic_moved_to_the_log_rather_than_vanishing(
+        self, text_mode, caplog
+    ):
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+        ):
+            await act_node(_state())
+        assert "AORTA_CHAT_LLM_TOOL_MODE" in caplog.text
+
+
+class TestTheRepromptMatchesTheProtocol:
+    """The nudge asked for an ``ACTION:`` line in both loops.
+
+    Harmless while only a deliberate setting reached the native path; wrong once
+    auto-escalation puts users there, because the function-calling path does not
+    parse that syntax and asking for it teaches the model to emit it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_native_loop_never_asks_for_an_action_line(self, native_mode):
+        plain, bound = _fake_llm([AIMessage(content="")] * 8, final_text="")
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+        sent = [
+            message.content
+            for call in bound.ainvoke.call_args_list
+            for message in call[0][0]
+        ]
+        assert not any("ACTION:" in text for text in sent if isinstance(text, str))
+
+    @pytest.mark.asyncio
+    async def test_the_text_loop_still_does(self, text_mode):
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            await act_node(_state())
+        sent = [
+            message.content
+            for call in fake.ainvoke.call_args_list
+            for message in call[0][0]
+        ]
+        assert any("ACTION:" in text for text in sent if isinstance(text, str))
+
+
 class TestModeDispatch:
     @pytest.mark.asyncio
     async def test_native_binds_tools(self, native_mode):

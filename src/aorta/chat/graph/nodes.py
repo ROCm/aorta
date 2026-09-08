@@ -413,6 +413,26 @@ def _execute_tool(tool_name: str, kwargs: dict) -> str:
 # ──────────────────── Router ─────────────────────
 
 
+#: Where a reply that names no route goes. ``question`` because that branch is
+#: retrieval plus a single answer call and needs no tool protocol at all, so its
+#: worst case is a retrieval-only answer rather than none. ``action`` was the
+#: old fallback, and it is the branch a model returning empty content cannot
+#: drive -- so an empty router reply, which is exactly what such a model
+#: produces, was routed into the one branch guaranteed to fail.
+_ROUTER_FALLBACK_ROUTE = "question"
+
+
+def _parse_route(route_text: str) -> str | None:
+    """The route *route_text* names, or ``None`` if it names neither or both.
+
+    Substring matching is generous enough for a one-word reply, but it has to be
+    symmetric. Testing only for ``question`` made every other string mean
+    ``action`` by omission -- including ``""``, which is not a classification.
+    """
+    named = [name for name in ("question", "action") if name in route_text]
+    return named[0] if len(named) == 1 else None
+
+
 async def router_node(state: AgentState) -> dict[str, Any]:
     """Classify intent: pure Q&A vs action-requiring."""
     llm = _get_llm(temperature=0.0, streaming=False)
@@ -425,9 +445,17 @@ async def router_node(state: AgentState) -> dict[str, Any]:
             HumanMessage(content=last_msg.content),
         ]
     )
-    route_text = response.content.strip().lower()
-    route = "question" if "question" in route_text else "action"
-    logger.info("Router classified as: %s (raw: %r)", route, route_text)
+    route_text = str(response.content or "").strip().lower()
+    route = _parse_route(route_text)
+    if route is None:
+        route = _ROUTER_FALLBACK_ROUTE
+        logger.warning(
+            "Router reply %r names neither route; classifying as %s.",
+            route_text,
+            route,
+        )
+    else:
+        logger.info("Router classified as: %s (raw: %r)", route, route_text)
     return {"route": route}
 
 
@@ -551,22 +579,35 @@ _SEARCH_FORCE_MSG = (
     "Do NOT answer from RETRIEVED CONTEXT alone."
 )
 
-_SEARCH_REPROMPT_MSG = (
+_SEARCH_REPROMPT_BODY = (
     "You responded without using any tools. This is a search query that requires "
     "thorough exploration of the codebase. You MUST call grep_code or search_repo_map "
-    "FIRST to find all relevant results. Please issue an ACTION: line now."
+    "FIRST to find all relevant results. "
 )
+
+#: One nudge per protocol. The text loop asks for a syntax it parses; the native
+#: loop asks for a tool call. Sending the ``ACTION:`` wording to a model bound
+#: through the function-calling API asked it for the one thing that path does not
+#: read -- and the auto-escalation below means users who never chose the native
+#: protocol now reach it.
+_SEARCH_REPROMPT_MSG = _SEARCH_REPROMPT_BODY + "Please issue an ACTION: line now."
+_SEARCH_REPROMPT_NATIVE_MSG = _SEARCH_REPROMPT_BODY + "Call one of them now."
 
 #: Consecutive rounds where the model neither called a tool nor said anything.
 #: A model that cannot drive the protocol will not learn it by round eight, and
 #: each round is a billed call: gpt-oss burned 11 on one query before this cap.
 _MAX_UNPRODUCTIVE_ROUNDS = 2
 
+#: Goes into the answer slot, so it names nothing internal: no environment
+#: variable, neither tool protocol, and no class of model. The user asked a
+#: question and must not get a configuration lecture back. Everything specific
+#: is still recorded -- on the log line beside the abandon branch, and in
+#: ``aorta chat doctor``, which is where an operator looks and which reports
+#: the resolved tool protocol.
 _NO_ANSWER_MSG = (
-    "I could not complete that request. The model did not produce an answer or "
-    "call any tools. If you are using a reasoning model, set "
-    "AORTA_CHAT_LLM_TOOL_MODE=native so it can call tools through the OpenAI "
-    "function-calling API instead of the ACTION: text protocol."
+    "I wasn't able to answer that: something in my own configuration is "
+    "stopping me from working on this request. Run `aorta chat doctor` for "
+    "details."
 )
 
 #: Sent with the final synthesis call, which runs without tools bound. Offered
@@ -691,7 +732,7 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
             _log_empty_content(response, f"act_node round {round_num + 1}")
             if unproductive >= _MAX_UNPRODUCTIVE_ROUNDS:
                 break
-            messages.append(HumanMessage(content=_SEARCH_REPROMPT_MSG))
+            messages.append(HumanMessage(content=_SEARCH_REPROMPT_NATIVE_MSG))
             continue
 
         unproductive = 0
