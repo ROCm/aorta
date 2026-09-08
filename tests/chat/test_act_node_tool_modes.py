@@ -1453,6 +1453,107 @@ class TestTheFallbackDoesNotAskForToolOutputItCannotHave:
         assert isinstance(llm.ainvoke.await_args.args[0][-1], HumanMessage)
 
 
+class TestTheReportedTraceDescribesTheQueryNotTheProtocol:
+    """``tool_trace`` is state the critic and the next turn read, so it must be whole.
+
+    Three ways out of the escalated native loop, and every one of them reports
+    a trace: the rescue, the synthesis and the give-up. Each was reached by a
+    text loop that may already have run a tool, and dropping that work loses a
+    real tool result from the record on a query that has paid the most for it.
+    """
+
+    @staticmethod
+    def _text_ran_a_tool_then_dead_ended(native_reply):
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(content='ACTION: list_files(path=".")'),
+                _dead_end_reply(),
+                _dead_end_reply(),
+                AIMessage(content="Synthesised."),
+            ]
+        )
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(**native_reply)
+        plain.bind_tools = MagicMock(return_value=bound)
+        return plain
+
+    @pytest.mark.asyncio
+    async def test_a_native_rescue_keeps_the_text_protocols_tool_result(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The escalation worked, which is no reason to forget how it got there."""
+        plain = self._text_ran_a_tool_then_dead_ended(
+            {"return_value": AIMessage(content="Rescued answer.")}
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="from_text.py"),
+        ):
+            result = await act_node(_state())
+        assert result["messages"][0].content == "Rescued answer."
+        assert any("from_text.py" in entry for entry in result["tool_trace"])
+
+    @pytest.mark.asyncio
+    async def test_a_native_synthesis_keeps_it_too(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The other reporting exit: budget spent, synthesis asked for.
+
+        The two protocols' tool results are given different values on purpose.
+        Native runs a tool of its own on this path, so a fixture that returned
+        one string for both would pass on the native entry alone and assert
+        nothing about the text protocol's.
+        """
+        plain = self._text_ran_a_tool_then_dead_ended(
+            {
+                "side_effect": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[_tool_call("list_files", {"path": "native"})],
+                    ),
+                    AIMessage(content=""),
+                    AIMessage(content=""),
+                ]
+            }
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch(
+                "aorta.chat.graph.nodes._execute_tool",
+                side_effect=["from_text.py", "from_native.py"],
+            ),
+        ):
+            result = await act_node(_state())
+        joined = "\n".join(result["tool_trace"])
+        assert "from_text.py" in joined
+        assert "from_native.py" in joined
+
+    @pytest.mark.asyncio
+    async def test_the_other_protocols_work_cannot_buy_a_synthesis_call(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The distinction the merge must not erase.
+
+        ``answered`` and the give-up branch still read the native loop's *own*
+        trace. If the merged trace were used there instead, a native round that
+        gathered nothing would look productive because the text loop had run a
+        tool, and would be billed for a synthesis call to summarise nothing.
+        """
+        plain = self._text_ran_a_tool_then_dead_ended(
+            {"return_value": _dead_end_reply()}
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="from_text.py"),
+        ):
+            result = await act_node(_state())
+        # Gave up rather than synthesising: the plain notice, not "Synthesised."
+        assert result["messages"][0].content != "Synthesised."
+        # ...and the text protocol's work is still in the record.
+        assert any("from_text.py" in entry for entry in result["tool_trace"])
+
+
 class TestTheExtraSendsDoNotRepeatTheRedactionNotice:
     """Two new outbound paths in one turn, and still one notice.
 

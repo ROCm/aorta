@@ -816,8 +816,15 @@ class TestGraphChokepoint:
         case to pin -- the assertion worth making is that the oracle does not
         depend on the scan being right.
         """
+        import sys
+
+        # Patched through this module's own object rather than by dotted path:
+        # the importable name for a test module depends on pytest's import mode
+        # and rootdir, and a target that resolves here but not in CI would make
+        # this pass for the wrong reason. No `raising=False` -- the attribute
+        # must exist, and a rename should fail this test rather than skip it.
         monkeypatch.setattr(
-            "tests.chat.test_redaction._receiver_bindings", lambda _source: []
+            sys.modules[__name__], "_receiver_bindings", lambda _source: []
         )
         complaints = _smuggled_model_bindings("retriever = _get_llm()")
         assert len(complaints) == 1

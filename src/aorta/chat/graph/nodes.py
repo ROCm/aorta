@@ -987,6 +987,11 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
     because "I could not use my tools" is false once a tool has run, and an
     untrue label is what this fallback exists to avoid.
 
+    The trailing user turn this needs is :data:`_FALLBACK_RETRY_NUDGE`, not the
+    default: this request carries no tools, so the default's "ground every claim
+    in output you obtained from a tool in this turn" would be an instruction it
+    makes impossible to follow.
+
     Returns "" when the model produces nothing *or when the call fails*, so the
     caller still reports the dead end rather than an empty answer or an error.
 
@@ -1141,6 +1146,17 @@ async def _escalated_native_attempt(
     timeout, and the log line says so instead of diagnosing on the caller's
     behalf; :data:`_MAX_NATIVE_FAILURES` is what tells them apart, by whether
     the failure repeats.
+
+    There is one thing the catch *can* read, and it changes the verdict:
+    whether the model emitted structured ``tool_calls`` before the failure,
+    which :class:`_NativeLoopError` carries out with the trace. A failure with a
+    tool call behind it is not a failure of the protocol -- native demonstrably
+    worked and the backend then fell over -- so it commits the switch and
+    spends none of the budget, which exists to write off an endpoint native is
+    not *served* on. Without that split, two transient 503s after working tool
+    calls would strand the process on ``text`` for good. A refused ``tools``
+    payload raises on the first request, before any tool call, so the shape the
+    budget is aimed at still lands in it.
 
     A request that comes back *silent* is the second way the retry fails, and it
     is the reason this reads :attr:`_NativeOutcome.answered` rather than simply
@@ -1373,12 +1389,14 @@ async def _run_native_loop(
     Ordinary native queries go through the wrapper and discard the extra fact.
 
     *prior_trace* is what already ran before this loop started -- the text
-    protocol's tool results, when this is the escalated retry. It is kept
-    separate from the loop's own ``trace`` rather than seeding it, because the
-    two answer different questions: the loop's trace decides whether *this*
-    protocol gathered anything worth synthesising, while the pair together
-    decide whether the query as a whole may be labelled "no tool ran". Seeding
-    would conflate them and buy a synthesis call off the back of a tool the
+    protocol's tool results, when this is the escalated retry. It is kept as a
+    separate variable rather than seeding ``trace``, because the two answer
+    different questions. The loop's own ``trace`` decides whether *this*
+    protocol gathered anything worth synthesising, and whether it may be said to
+    have driven the protocol; the two together describe the *query*, which is
+    what ``tool_trace`` reports and what the "no tool ran" label is about.
+    :func:`whole_trace` is the merge, and every reporting exit uses it; seeding
+    would conflate the two and buy a synthesis call off the back of a tool the
     other protocol ran.
     """
     plain = _get_llm(temperature=0.1, streaming=False)
@@ -1411,6 +1429,19 @@ async def _run_native_loop(
     # summary of nothing is one more billed call for the same result.
     gave_up = False
 
+    def whole_trace() -> list[str]:
+        """Every tool result this *query* has, not just this protocol's.
+
+        What goes into ``tool_trace``, on every way out of this loop. The state
+        update is read by ``critic_node`` and carried into the next turn, and it
+        describes the query -- so a tool the text protocol ran before the dead
+        end belongs in it even when native is the protocol that answered.
+        Distinct from the bare ``trace`` on purpose: that one decides whether
+        *this* protocol gathered enough to be worth a synthesis call, and must
+        not be able to buy one off the back of the other protocol's work.
+        """
+        return [*(prior_trace or []), *trace]
+
     async def send(model: Any) -> Any:
         """:func:`_send`, with the loop's progress attached to a failure.
 
@@ -1435,7 +1466,7 @@ async def _run_native_loop(
                     result={
                         "messages": [AIMessage(content=text)],
                         "command_output": text,
-                        "tool_trace": trace,
+                        "tool_trace": whole_trace(),
                     },
                     answered=True,
                 )
@@ -1491,7 +1522,7 @@ async def _run_native_loop(
         # must not have its query labelled "I could not use my tools", which is
         # what an empty trace tells `_abandoned_result` to do.
         return _NativeOutcome(
-            result=await _abandoned_result(state, [*(prior_trace or []), *trace]),
+            result=await _abandoned_result(state, whole_trace()),
             answered=False,
         )
 
@@ -1544,11 +1575,13 @@ async def _run_native_loop(
         result={
             "messages": [AIMessage(content=text)],
             "command_output": text,
-            "tool_trace": trace,
+            "tool_trace": whole_trace(),
         },
         # A tool call is proof the protocol works even when the synthesis that
         # followed it came back empty: the model drove `tools` successfully, and
-        # what failed after that is not the protocol.
+        # what failed after that is not the protocol. Read off `trace`, not
+        # `whole_trace()`, so the other protocol's work cannot answer for this
+        # one -- that is the distinction the two exist to keep.
         answered=bool(trace) or synthesised,
     )
 
