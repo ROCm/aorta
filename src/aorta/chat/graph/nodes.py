@@ -770,6 +770,88 @@ _NO_ANSWER_MSG = (
     "details."
 )
 
+#: Prefixed to a fallback answer, and the labelling is not decoration. Silently
+#: answering from retrieval when the user's question needed tools is exactly how
+#: https://github.com/ROCm/aorta/issues/433 misled people, and a fallback that
+#: did it unlabelled would trade one defect for its mirror image. Says what was
+#: not done and what that costs, in the user's terms.
+_DEGRADED_ANSWER_PREFIX = (
+    "I could not use my tools for this question, so what follows comes only "
+    "from the documentation and run records I already have indexed. Anything "
+    "that needed me to go and look is missing from it."
+)
+
+
+async def _fallback_retrieval_answer(state: AgentState) -> str:
+    """One tool-free answer attempt after the act loop abandoned, or "".
+
+    The reporter proved this works before it was written: the same information
+    need, asked twice a minute apart against one model and one index, cost 4
+    billed calls and returned nothing through the ``action`` route and 2 calls
+    and a correct answer through ``question``. Only the classification differed
+    -- the index, the retrieval and the model were all fine, and the ``question``
+    route never touches a tool protocol, so the empty-content behaviour that
+    kills the act loop does not apply to it.
+
+    This is the same single call that route makes, on the context ``retrieve``
+    already gathered, so it adds one call and no retrieval work. It is also
+    independent of the auto-escalation above and worth having alongside it: it
+    covers a tool outage, a provider hiccup, and any future model that can drive
+    neither protocol.
+
+    Returns "" when the model produces nothing, so the caller still reports the
+    dead end rather than an empty answer.
+    """
+    llm = _get_llm(temperature=0.1, streaming=False)
+    messages = [
+        _build_answer_message(state.get("retrieved_context", "")),
+        *state["messages"],
+    ]
+    _ensure_ends_with_user(messages)
+    response = await _send(llm, messages)
+    text = str(response.content or "").strip()
+    if not text:
+        _log_empty_content(response, "act_node retrieval fallback")
+    return text
+
+
+async def _abandoned_result(state: AgentState, trace: list[str]) -> dict[str, Any]:
+    """What the act loop returns once it has given up: a fallback, or the notice.
+
+    ``command_output`` is deliberately left empty even when the fallback
+    answered. It is what ``critic_node`` judges, and an empty value makes the
+    critic return no feedback, which sends the graph to ``END`` -- so the
+    fallback cannot be rejected into a retry that re-enters the act loop, which
+    is the cap the register asks for. It is also honest: no command was run and
+    no tool output exists for a critic to check the answer against.
+
+    One attempt per entry to the act loop, and on the ordinary path the empty
+    ``command_output`` means there is only ever one entry.
+
+    A loop that ran a tool before going quiet gets the plain notice instead. The
+    label would be false there -- tools *did* run -- and an inaccurate label is
+    the thing this fallback is careful about in the first place.
+    """
+    if trace:
+        return {
+            "messages": [AIMessage(content=_NO_ANSWER_MSG)],
+            "command_output": "",
+            "tool_trace": trace,
+        }
+    answer = await _fallback_retrieval_answer(state)
+    if answer:
+        logger.info(
+            "Answered from retrieved context after the act loop abandoned. The "
+            "answer is labelled as degraded: no tool ran for this query."
+        )
+        answer = f"{_DEGRADED_ANSWER_PREFIX}\n\n{answer}"
+    return {
+        "messages": [AIMessage(content=answer or _NO_ANSWER_MSG)],
+        "command_output": "",
+        "tool_trace": trace,
+    }
+
+
 #: Sent with the final synthesis call, which runs without tools bound. Offered
 #: tools, a model that has not yet found what it wants keeps calling them and
 #: returns no prose, so a loop that gathered plenty still answered nothing.
@@ -943,7 +1025,10 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
             trace.append(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}")
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
 
-    if gave_up:
+    # A loop that gathered results before going quiet still has material, so it
+    # keeps the final synthesis call below; one that produced nothing at all has
+    # nothing to synthesise from and would only be billed for saying so again.
+    if gave_up and not trace:
         logger.warning(
             "Act loop abandoned after %d round(s) in native mode with no tool "
             "call and no text.%s",
@@ -951,11 +1036,7 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
             " Escalating from the text protocol did not help, so the model is "
             "returning nothing on either." if escalated else "",
         )
-        return {
-            "messages": [AIMessage(content=_NO_ANSWER_MSG)],
-            "command_output": "",
-            "tool_trace": trace,
-        }
+        return await _abandoned_result(state, trace)
 
     # Reaching here means the loop never produced a tool-free reply, so the
     # budget ran out mid-task. Say so: the answer will read as truncated, and
@@ -1060,11 +1141,7 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
                     # function's job is to drive one protocol, not to pick one.
                     if _escalate_to_native(response):
                         return _ESCALATE_TO_NATIVE
-                    return {
-                        "messages": [AIMessage(content=_NO_ANSWER_MSG)],
-                        "command_output": "",
-                        "tool_trace": tool_trace,
-                    }
+                    return await _abandoned_result(state, tool_trace)
                 messages.append(HumanMessage(content=_SEARCH_REPROMPT_MSG))
                 continue
 

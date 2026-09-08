@@ -571,8 +571,26 @@ class TestAutoEscalationToNative:
         with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
             result = await act_node(_state())
         assert bound.ainvoke.await_count == _MAX_ESCALATED_ROUNDS
-        assert plain.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS
+        # Two text rounds, then one retrieval fallback. No final synthesis.
+        assert plain.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS + 1
         assert result["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_the_worst_case_budget_is_named(self, text_mode, tool_mode_not_chosen):
+        """Everything above and below, added up, for the case where nothing works.
+
+        The reporter's failure billed 4 calls -- router, plan, two act rounds --
+        and answered nothing. Total act-node spend when every layer fails is two
+        text rounds, one native round and one retrieval fallback, so the query
+        costs 6 calls rather than 4. Both extra calls buy an attempt at an
+        answer; if either succeeds the user gets one where they previously got
+        none. Pinned here so a later change to any one layer has to face the sum.
+        """
+        plain, bound = _escalating_llm()
+        bound.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+        assert plain.ainvoke.await_count + bound.ainvoke.await_count == 4
 
     @pytest.mark.asyncio
     async def test_a_plain_empty_reply_does_not_change_the_protocol(
@@ -616,15 +634,141 @@ class TestAutoEscalationToNative:
         assert "aorta chat doctor" in caplog.text
 
 
-class TestWastedCallGuards:
+class TestTheDegradedRetrievalFallback:
+    """The act loop abandoning is survivable, and the reporter proved it.
+
+    The same information need, asked twice a minute apart against one model and
+    one index: 4 billed calls and nothing through the ``action`` route, 2 calls
+    and a correct answer naming both files through ``question``. The index,
+    retrieval and model were all fine -- the routing decision was the sole
+    determinant of success -- so the fallback's output is demonstrated rather
+    than hoped for.
+    """
+
+    @staticmethod
+    def _llm(fallback_text: str):
+        """Dead-ends every act round, answers the tool-free fallback call."""
+        replies = [AIMessage(content=""), AIMessage(content="")]
+        replies.append(AIMessage(content=fallback_text))
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(side_effect=replies)
+        return fake
+
     @pytest.mark.asyncio
-    async def test_the_text_loop_gives_up_instead_of_spending_the_budget(self, text_mode):
-        """gpt-oss burned 11 calls here; the cap is 2 unproductive rounds."""
+    async def test_it_answers_instead_of_dead_ending(self, text_mode):
+        fake = self._llm("The TokenSpeed docs are docs/tokenspeed.md.")
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            result = await act_node(_state())
+        assert "docs/tokenspeed.md" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_the_answer_is_labelled_as_degraded(self, text_mode):
+        """Unlabelled, this would be #433's defect in mirror image."""
+        from aorta.chat.graph.nodes import _DEGRADED_ANSWER_PREFIX
+
+        fake = self._llm("The TokenSpeed docs are docs/tokenspeed.md.")
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            result = await act_node(_state())
+        reply = result["messages"][0].content
+        assert reply.startswith(_DEGRADED_ANSWER_PREFIX)
+        assert "could not use my tools" in reply
+
+    @pytest.mark.asyncio
+    async def test_the_label_names_no_internals_either(self):
+        """Same rule as the give-up message: it lands in the answer slot."""
+        from aorta.chat.graph.nodes import _DEGRADED_ANSWER_PREFIX
+
+        for leak in ("AORTA_CHAT", "ACTION:", "act loop", "retrieval", "native"):
+            assert leak.lower() not in _DEGRADED_ANSWER_PREFIX.lower()
+
+    @pytest.mark.asyncio
+    async def test_it_is_capped_at_one_attempt(self, text_mode):
+        fake = self._llm("An answer from context.")
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            await act_node(_state())
+        assert fake.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS + 1
+
+    @pytest.mark.asyncio
+    async def test_it_cannot_re_enter_the_act_loop(self, text_mode):
+        """Which is what returns the call-count problem the cap exists for.
+
+        ``command_output`` is what the critic judges, and it stays empty -- so
+        the critic returns no feedback and the graph ends. An answer with no tool
+        output behind it would otherwise be rejected as ungrounded and sent
+        straight back into the loop that just gave up.
+        """
+        from aorta.chat.graph.nodes import critic_node
+
+        fake = self._llm("An answer from context.")
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            result = await act_node(_state())
+        assert result["command_output"] == ""
+
+        verdict = await critic_node({**_state(), **result, "iteration": 0})
+        assert verdict["critic_feedback"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_that_also_says_nothing_reports_the_dead_end(
+        self, text_mode
+    ):
         fake = MagicMock()
         fake.ainvoke = AsyncMock(return_value=AIMessage(content=""))
         with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
             result = await act_node(_state())
-        assert fake.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_a_loop_that_did_run_a_tool_is_not_labelled_as_toolless(
+        self, native_mode
+    ):
+        """The label has to stay true, so this case gets the plain notice.
+
+        One tool call, then silence: tools *did* run, so "I could not use my
+        tools" would be false -- and an inaccurate label is the exact thing this
+        fallback is careful about.
+        """
+        from aorta.chat.graph.nodes import _DEGRADED_ANSWER_PREFIX
+
+        plain, _bound = _fake_llm(
+            [
+                AIMessage(content="", tool_calls=[_tool_call("list_files", {})]),
+                AIMessage(content=""),
+                AIMessage(content=""),
+            ],
+            final_text="",
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+        ):
+            result = await act_node(_state())
+        assert _DEGRADED_ANSWER_PREFIX not in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_the_fallback_is_reported_in_the_log(self, text_mode, caplog):
+        fake = self._llm("An answer from context.")
+        with (
+            caplog.at_level("INFO"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
+        ):
+            await act_node(_state())
+        assert "Answered from retrieved context" in caplog.text
+
+
+class TestWastedCallGuards:
+    @pytest.mark.asyncio
+    async def test_the_text_loop_gives_up_instead_of_spending_the_budget(self, text_mode):
+        """gpt-oss burned 11 calls here; the cap is 2 unproductive rounds.
+
+        Plus the single retrieval fallback that now follows an abandoned loop --
+        which is where the answer comes from when it works, and is capped at one
+        attempt. Three calls in total, not a budget's worth.
+        """
+        fake = MagicMock()
+        fake.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
+            result = await act_node(_state())
+        assert fake.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS + 1
         assert result["messages"][0].content == _NO_ANSWER_MSG
 
     @pytest.mark.asyncio
