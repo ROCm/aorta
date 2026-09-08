@@ -363,7 +363,14 @@ class TestTheLocalRunCollectionSurvives:
             store.close()
 
     def test_a_side_load_keeps_it(self, corpus_root: Path, tmp_path: Path):
-        """The air-gapped update path replaces the file just as a fetch does."""
+        """The air-gapped update path replaces the file just as a fetch does.
+
+        ``force`` throughout this class and the two below: the target is a
+        local build, which ``side_load`` now refuses to overwrite without it.
+        What is under test is what survives the replacement, so the guard is
+        satisfied rather than exercised -- it has its own tests in
+        ``test_index_fetch.py``.
+        """
         staged_dir = tmp_path / "usb"
         staged_dir.mkdir()
         staged = staged_dir / index_ops.ASSET_NAME
@@ -375,7 +382,7 @@ class TestTheLocalRunCollectionSurvives:
         _build(corpus_root, target)
         _add_run_collection(target)
 
-        result = index_ops.side_load(staged, index_path=target)
+        result = index_ops.side_load(staged, index_path=target, force=True)
 
         assert collection_chunk_count(target, RUN_COLLECTION) == 2
         assert any("kept this machine" in warning for warning in result.warnings)
@@ -393,7 +400,7 @@ class TestTheLocalRunCollectionSurvives:
         (small / "only.py").write_text("x = 1\n", encoding="utf-8")
         _build(small, target)
 
-        index_ops.side_load(staged, index_path=target)
+        index_ops.side_load(staged, index_path=target, force=True)
 
         assert collection_chunk_count(target, COLLECTION) == incoming.chunk_count
 
@@ -467,7 +474,7 @@ class TestTheCarryOverIsAllOrNothing:
         _build(corpus_root, target)
         target.write_bytes(b"not a database")
 
-        result = index_ops.side_load(staged, index_path=target)
+        result = index_ops.side_load(staged, index_path=target, force=True)
 
         assert result.index_path == target
         assert collection_chunk_count(target, COLLECTION) is not None
@@ -494,7 +501,7 @@ class TestInterruptedSideLoad:
 
         monkeypatch.setattr(index_ops.shutil, "copy2", _die)
         with pytest.raises(OSError, match="no space left"):
-            index_ops.side_load(staged, index_path=target)
+            index_ops.side_load(staged, index_path=target, force=True)
 
         assert target.read_bytes() == before_bytes
         assert _sidecars(target) == before_sidecars

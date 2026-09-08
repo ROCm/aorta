@@ -105,7 +105,17 @@ _NO_EGRESS_HINT = (
 
 
 class IndexFetchError(RuntimeError):
-    """The published index could not be downloaded or verified."""
+    """An index could not be downloaded, verified, or written."""
+
+
+class IndexOverwriteError(IndexFetchError):
+    """Refusing to replace an existing index that this command cannot give back.
+
+    A subclass rather than a sibling so ``cli/chat.py``'s known-exception list
+    needs no change to surface it. That list exists because these messages are
+    the deliverable -- a refusal the user cannot act on gets worked around --
+    and it already renders :class:`IndexFetchError` verbatim.
+    """
 
 
 @dataclass(frozen=True)
@@ -230,6 +240,154 @@ def resolve_source(version: str | None = None, installed: str | None = None) -> 
 _STAGING_PREFIX = ".aorta-index-"
 
 
+# ── who built the index that is already there ─────────────────────────────
+
+#: A CI-published index. ``corpus_roots`` holds the tracked subpaths
+#: ``published_corpus`` was given, so every entry is repository-relative.
+PROVENANCE_PUBLISHED = "published"
+
+#: Built on this machine. ``local_corpus`` records the one absolute path it
+#: walked, so a single absolute root is the signature.
+PROVENANCE_LOCAL = "local"
+
+#: A manifest that records no roots at all, from a builder predating the field.
+PROVENANCE_UNKNOWN = "unknown"
+
+
+def _roots_provenance(roots: list[str] | tuple[str, ...]) -> str:
+    """Classify a set of corpus roots by shape.
+
+    ``published_corpus`` labels its roots with the repository-relative subpaths
+    it was handed (``src/aorta``, ``docs``, ``README.md``); ``local_corpus``
+    labels its single root with the absolute path it resolved. Reading the
+    shape rather than matching the published list means renaming a published
+    subpath does not silently reclassify every index.
+    """
+    if not roots:
+        return PROVENANCE_UNKNOWN
+    if any(Path(root).is_absolute() for root in roots):
+        return PROVENANCE_LOCAL
+    return PROVENANCE_PUBLISHED
+
+
+def index_provenance(manifest: manifest_mod.Manifest) -> str:
+    """Whether an index was published or built here, read off its manifest.
+
+    Inferred rather than stored, because ``corpus_roots`` already distinguishes
+    the two without a manifest schema bump.
+    """
+    return _roots_provenance(manifest.corpus_roots or [])
+
+
+def corpus_provenance(corpus: corpus_mod.Corpus) -> str:
+    """The provenance an index built from ``corpus`` would record.
+
+    The same rule applied to the corpus rather than to a finished manifest, so
+    a guard can compare what is about to be built against what is already
+    there instead of only inspecting the destination.
+    """
+    return _roots_provenance(corpus.roots_label or corpus.subpaths)
+
+
+def _local_manifest(index_path: str | Path) -> manifest_mod.Manifest | None:
+    """The installed index's sidecar, or ``None`` when there is not a usable one.
+
+    Absent, unreadable and unparseable all collapse to ``None`` deliberately.
+    Every caller is deciding what to do *about* the local index, and none of
+    those decisions is improved by a traceback out of a sidecar that is already
+    broken -- the load path is where a bad manifest has to be fatal.
+    """
+    target = Path(index_path)
+    if not target.exists():
+        return None
+    try:
+        return manifest_mod.read_manifest(target)
+    except manifest_mod.ManifestError as exc:
+        logger.debug("No usable manifest beside %s: %s", target, exc)
+        return None
+
+
+def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
+    """Stop an incoming index from silently discarding one built on this machine.
+
+    The two directions are not symmetric, which is why this is not a blanket
+    guard. A *fetched* index is trivially re-fetchable, so replacing one costs
+    a download; a *locally built* one may not be reproducible at all, because
+    the tree it indexed may have moved or the node may have no egress to
+    rebuild the weights. So the incoming-index paths (``fetch`` and its
+    ``--from`` side-load, which would otherwise be the accidental way around
+    this) guard against overwriting a local build, and only that.
+    """
+    if force:
+        return
+    local = _local_manifest(dest)
+    if local is None or index_provenance(local) != PROVENANCE_LOCAL:
+        return
+    raise IndexOverwriteError(
+        f"the index at {dest} was built on this machine, not downloaded.\n"
+        f"  built as  {local.describe()}\n"
+        f"  corpus    {', '.join(local.corpus_roots)}\n"
+        "Replacing it with the published index discards a build the network "
+        "cannot give back -- the tree it indexed may have moved, and rebuilding "
+        "needs the embedding weights again.\n"
+        f"Pass --force to overwrite it:  {command} --force"
+    )
+
+
+def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool) -> None:
+    """Stop a *narrower* build from silently downgrading a published index.
+
+    The mirror of :func:`_refuse_if_locally_built`, and the mechanism behind
+    the bad advice this guard exists to catch: ``doctor`` used to suggest a
+    bare ``index build`` as a cache pre-warm, which defaults ``--output`` to
+    the same path and its corpus to ``local_corpus`` -- so it replaced a
+    published index covering ``src/aorta``, ``docs`` and ``README.md`` with one
+    covering ``src/aorta`` alone, and said nothing.
+
+    Three things are therefore exempt, and each of them is a case where the
+    guard would refuse something that loses nothing:
+
+    * **A build whose own corpus is the published one.** ``--public-only``
+      produces the same shape it would be replacing, so this is a refresh, not
+      a downgrade. This is also what keeps ``nightly.yml`` and ``release.yml``
+      safe under a restored or re-used ``index-out/`` -- and a guard that
+      blocked them would stop the published index updating at all, which is
+      worse than the defect being guarded against.
+    * **An index this install would refuse.** For an embedding-identity
+      mismatch, the manifest refusal and ``doctor`` both name ``index build``
+      as the remedy, and it is the right one. Demanding ``--force`` on top
+      would compose two individually-correct behaviours into a dead end --
+      refused, told to rebuild, refused again -- on a user who is already
+      stuck. Vectors that are not comparable to this install's queries cannot
+      answer anything, so there is nothing to protect.
+    * **A destination with no published manifest**, which includes every first
+      build and every local-over-local rebuild.
+    """
+    if force or corpus_provenance(corpus) == PROVENANCE_PUBLISHED:
+        return
+    local = _local_manifest(target)
+    if local is None or index_provenance(local) != PROVENANCE_PUBLISHED:
+        return
+    if _validate_against_provider(local).refusals:
+        logger.info(
+            "The index at %s is refused by this install's embedding provider, "
+            "so rebuilding it loses nothing.",
+            target,
+        )
+        return
+    raise IndexOverwriteError(
+        f"the index at {target} covers the published corpus, and this build "
+        "would not.\n"
+        f"  there now  {local.describe()}\n"
+        f"             corpus {', '.join(local.corpus_roots)}\n"
+        f"  building   corpus {corpus.describe()}\n"
+        "That replaces it with a narrower index: no 'docs/' or 'README.md' "
+        "coverage, and no public-tree provenance.\n"
+        "Refresh the published one instead:  aorta chat index fetch\n"
+        "Or pass --force to build over it:   aorta chat index build --force"
+    )
+
+
 # ── installing ────────────────────────────────────────────────────────────
 
 
@@ -261,6 +419,8 @@ def _install_staged(staged: Path, dest: Path) -> list[str]:
 def build_index(
     corpus: corpus_mod.Corpus | None = None,
     index_path: str | Path | None = None,
+    *,
+    force: bool = False,
 ) -> BuildResult:
     """Build an index plus its manifest from ``corpus``.
 
@@ -270,6 +430,9 @@ def build_index(
             :func:`~aorta.chat.rag.corpus.published_corpus`, whose tracked-file
             allowlist is the hard half of the public-tree guard.
         index_path: Where to write. Defaults to ``settings.index_file``.
+        force: Build a narrower corpus over a published index. Without it that
+            is refused -- see :func:`_refuse_if_published`, which lists what is
+            exempt, including the ``--public-only`` build CI runs.
     """
     import time
 
@@ -280,6 +443,10 @@ def build_index(
     corpus = corpus or corpus_mod.local_corpus(settings.aorta_path)
     target = Path(index_path) if index_path else settings.index_file
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Before the corpus load and the embedding pass, not after: a build takes
+    # tens of minutes, and refusing at the end of one would be worse than not
+    # refusing at all.
+    _refuse_if_published(target, corpus, force=force)
 
     logger.info("Loading corpus: %s", corpus.describe())
     documents = corpus_mod.load_corpus(corpus)
@@ -663,24 +830,6 @@ def _validate_against_provider(manifest: manifest_mod.Manifest) -> manifest_mod.
     )
 
 
-def _local_manifest(index_path: str | Path) -> manifest_mod.Manifest | None:
-    """The installed index's sidecar, or ``None`` when there is not a usable one.
-
-    Absent, unreadable and unparseable all collapse to ``None`` deliberately.
-    Every caller is deciding what to do *about* the local index, and none of
-    those decisions is improved by a traceback out of a sidecar that is already
-    broken -- the load path is where a bad manifest has to be fatal.
-    """
-    target = Path(index_path)
-    if not target.exists():
-        return None
-    try:
-        return manifest_mod.read_manifest(target)
-    except manifest_mod.ManifestError as exc:
-        logger.debug("No usable manifest beside %s: %s", target, exc)
-        return None
-
-
 def _refresh_notes(
     local: manifest_mod.Manifest | None, incoming: manifest_mod.Manifest
 ) -> list[str]:
@@ -721,6 +870,8 @@ def fetch_index(
     version: str | None = None,
     index_path: str | Path | None = None,
     source: IndexSource | None = None,
+    *,
+    force: bool = False,
 ) -> FetchResult:
     """Download, verify, validate and install the published index.
 
@@ -742,10 +893,17 @@ def fetch_index(
     Checksum verification stays where it was, because it genuinely needs the
     bytes. Nothing is installed until it and the manifest/checksum agreement
     both pass.
+
+    ``force`` overwrites a locally-built index, and re-downloads an asset that
+    is already installed.
     """
     dest = Path(index_path) if index_path else settings.index_file
     source = source or resolve_source(version)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # Free, and therefore first: refusing before any network I/O means a user
+    # who is about to lose a local build is told so immediately rather than
+    # after a download.
+    _refuse_if_locally_built(dest, force=force, command="aorta chat index fetch")
 
     # The text is kept, not re-serialised from the dataclass at install time:
     # ``from_dict`` drops keys this version predates, and writing them back out
@@ -756,7 +914,7 @@ def fetch_index(
     report.raise_if_refused(source.index_url)
 
     local = _local_manifest(dest)
-    if _is_same_index(local, manifest):
+    if not force and _is_same_index(local, manifest):
         logger.info("Already up to date; the published asset was not downloaded.")
         return FetchResult(
             index_path=dest,
@@ -806,12 +964,17 @@ def fetch_index(
     )
 
 
-def side_load(staged: str | Path, index_path: str | Path | None = None) -> FetchResult:
+def side_load(
+    staged: str | Path, index_path: str | Path | None = None, *, force: bool = False
+) -> FetchResult:
     """Adopt a locally staged index (Decision 21b's ``--from``).
 
     The manifest sidecar is required, not optional: side-loading is the path an
     air-gapped user takes, and it is the path where a mismatched index is most
     likely, because the file was carried by hand from somewhere else.
+
+    It is also the third write path, so it carries ``fetch``'s guard: without
+    it, ``--from`` would be the way to overwrite a local build by accident.
     """
     origin = Path(staged).expanduser().resolve()
     if origin.is_dir():
@@ -828,6 +991,7 @@ def side_load(staged: str | Path, index_path: str | Path | None = None) -> Fetch
     dest = Path(index_path) if index_path else settings.index_file
     if origin == dest.resolve():
         raise IndexFetchError(f"{origin} is already the configured index path")
+    _refuse_if_locally_built(dest, force=force, command=f"aorta chat index fetch --from {origin}")
 
     manifest_source = manifest_mod.manifest_path(origin)
     if not manifest_source.exists():
@@ -878,15 +1042,21 @@ __all__ = [
     "BASE_URL_ENV",
     "RELEASE_BASE_URL",
     "ROLLING_TAG",
+    "PROVENANCE_LOCAL",
+    "PROVENANCE_PUBLISHED",
+    "PROVENANCE_UNKNOWN",
     "BuildResult",
     "FetchResult",
     "IndexFetchError",
+    "IndexOverwriteError",
     "IndexSource",
     "build_index",
     "check_index",
     "compute_digest",
+    "corpus_provenance",
     "describe_target",
     "fetch_index",
+    "index_provenance",
     "resolve_source",
     "side_load",
 ]

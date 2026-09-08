@@ -925,19 +925,36 @@ def index_group() -> None:
     help="Index only git-tracked files of a ROCm/aorta checkout (what CI publishes).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the build result as JSON.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Build over a downloaded index, replacing it with this narrower one.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
 def index_build(
-    path: str | None, output: str | None, public_only: bool, as_json: bool, verbose: bool
+    path: str | None,
+    output: str | None,
+    public_only: bool,
+    as_json: bool,
+    force: bool,
+    verbose: bool,
 ) -> None:
     """Build the index from source on this machine.
 
     The air-gapped and developer path. Needs the embedding weights, which are
     downloaded once (~65 MB) unless the cache is pre-seeded -- run 'aorta chat
     doctor' first if this node has no egress.
+
+    Refuses to build over an index that was downloaded rather than built here,
+    because a local build covers less; pass --force to do it anyway.
     """
     _index_logging(verbose)
     ops = _load("rag.index_ops")
-    result = _guard(lambda: ops.build_index(_resolve_corpus(path, public_only), index_path=output))
+    result = _guard(
+        lambda: ops.build_index(
+            _resolve_corpus(path, public_only), index_path=output, force=force
+        )
+    )
 
     if as_json:
         click.echo(
@@ -997,12 +1014,18 @@ def _echo_fetch_target(source: Any, output: str | None) -> None:
 )
 @click.option("--output", default=None, help="Where to install it. Defaults to the cache.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the result as JSON.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite an index built on this machine, and re-download an identical one.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
 def index_fetch(
     version: str | None,
     from_path: str | None,
     output: str | None,
     as_json: bool,
+    force: bool,
     verbose: bool,
 ) -> None:
     """Download the prebuilt index matching this aorta version.
@@ -1010,6 +1033,10 @@ def index_fetch(
     An exact release version takes that release's asset; a development version
     takes the rolling asset built from main and reports how far off it is.
     Pass --version to override, or --from to side-load a staged file.
+
+    A refresh of an index that was itself downloaded proceeds and reports what
+    changed; one that would replace a locally-built index is refused, because
+    the network cannot give that back. Pass --force to overwrite it.
     """
     if version and from_path:
         raise click.UsageError("--version and --from are mutually exclusive.")
@@ -1017,7 +1044,7 @@ def index_fetch(
     ops = _load("rag.index_ops")
 
     if from_path:
-        result = _guard(lambda: ops.side_load(from_path, index_path=output))
+        result = _guard(lambda: ops.side_load(from_path, index_path=output, force=force))
     else:
         # Resolved and echoed here, before the first request, then handed to
         # `fetch_index` so it resolves once. Everything below runs after the
@@ -1027,7 +1054,7 @@ def index_fetch(
         # `resolve_source` is pure, so this costs no network.
         source = _guard(lambda: ops.resolve_source(version))
         _echo_fetch_target(source, output)
-        result = _guard(lambda: ops.fetch_index(source=source, index_path=output))
+        result = _guard(lambda: ops.fetch_index(source=source, index_path=output, force=force))
 
     if as_json:
         click.echo(

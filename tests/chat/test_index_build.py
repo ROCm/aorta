@@ -338,6 +338,153 @@ class TestBuildIndex:
         assert files == result.file_count
 
 
+class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
+    """A local build covers less than the published one, and used to say nothing.
+
+    This is the mechanism behind the bad advice the guard exists to catch:
+    ``index build`` defaults ``--output`` to the live index and its corpus to
+    ``local_corpus``, so following a suggestion to "build" replaced an index
+    covering ``src/aorta``, ``docs`` and ``README.md`` with one covering a
+    single tree.
+    """
+
+    @staticmethod
+    def _install_published(target: Path, monkeypatch, **overrides) -> None:
+        """Put a manifest at ``target`` that looks like a CI-published index."""
+        from aorta.chat.rag import manifest as manifest_mod
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"the published index")
+        values = {
+            "aorta_version": "0.2.1",
+            "aorta_sha": "a" * 40,
+            "embedding_provider": "local",
+            "embedding_model": "fake/model",
+            "dimensions": 8,
+            "collection": "aorta_fake",
+            "chunk_size": settings.chunk_size,
+            "chunk_overlap": settings.chunk_overlap,
+            "index_sha256": manifest_mod.sha256_file(target),
+            "corpus_roots": list(PUBLISHED_SUBPATHS),
+        }
+        values.update(overrides)
+        manifest_mod.write_manifest(target, manifest_mod.Manifest(**values))
+
+    def test_it_refuses_and_names_what_would_be_lost(self, repo: Path, tmp_path, monkeypatch):
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        assert "docs/" in message and "README.md" in message
+        assert "aorta chat index fetch" in message
+        assert "--force" in message
+        assert target.read_bytes() == b"the published index"
+
+    def test_a_published_build_over_a_published_index_is_a_refresh_not_a_downgrade(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The guard is about the corpus narrowing, not about the path being occupied.
+
+        `--public-only` produces the same shape it would replace, so refusing
+        it protects nothing -- and refusing it is how a guard keyed on the
+        destination alone would break `nightly.yml` and `release.yml` the first
+        time their `index-out/` was restored or re-used, which stops the
+        published index updating at all.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        result = index_ops.build_index(published_corpus(repo), index_path=target)
+
+        assert result.manifest.corpus_roots == list(PUBLISHED_SUBPATHS)
+        assert target.read_bytes() != b"the published index"
+
+    def test_force_builds_over_it(self, repo: Path, tmp_path, monkeypatch):
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target, force=True)
+        assert target.read_bytes() != b"the published index"
+
+    def test_a_refused_index_is_exempt_so_the_advice_stays_followable(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The cross-PR interaction, which neither diff shows on its own.
+
+        ``doctor`` and the manifest refusal both name ``aorta chat index build``
+        as the remedy for an embedding-identity mismatch, and that is the right
+        remedy. A refused index is still an existing index at the destination,
+        so a guard keyed on presence alone would compose the two into a dead
+        end: refused, told to rebuild, refused again -- landing on a user who
+        is already stuck.
+
+        There is also nothing to protect. Vectors that are not comparable to
+        this install's queries cannot answer anything, so rebuilding over them
+        is not destructive. The guard is for a *usable* published index.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        # Built by a different embedding model: exactly what `validate` refuses.
+        self._install_published(target, monkeypatch, embedding_model="some/other-model")
+
+        assert index_ops.check_index(target, strict=False).refusals, (
+            "the fixture must be an index this install would actually refuse"
+        )
+
+        result = index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert result.index_path == target
+        assert index_ops.check_index(target, strict=True).refusals == []
+
+    def test_a_local_build_over_a_local_build_needs_nothing(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """Rebuilding your own index is the ordinary developer loop."""
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "index.sqlite"
+        index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target)
+
+    def test_a_fresh_destination_needs_nothing(self, repo: Path, tmp_path, monkeypatch):
+        """What CI does: `--output` into a directory it just created.
+
+        A guard that tripped here would stop the published index updating at
+        all, which is worse than the defect it is guarding against.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        out = tmp_path / "index-out"
+        out.mkdir()
+
+        result = index_ops.build_index(
+            published_corpus(repo), index_path=out / "aorta-chat-index.sqlite"
+        )
+
+        assert result.index_path.exists()
+
+
 def _install_fake_embedder(monkeypatch) -> None:
     """Replace the provider with a deterministic 8-dimension bag-of-words model.
 

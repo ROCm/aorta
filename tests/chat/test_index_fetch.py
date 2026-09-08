@@ -657,6 +657,132 @@ class TestTransferFailures:
             fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
 
 
+class TestProvenanceIsReadOffTheManifest:
+    """Which side built an index decides which guard applies to it.
+
+    Inferred rather than stored: a schema field would be clearer and would
+    cost a manifest version bump, and the two corpora already label their roots
+    differently.
+    """
+
+    def test_published_roots_are_repository_relative(self):
+        manifest = _manifest(corpus_roots=["src/aorta", "docs", "README.md"])
+        assert index_ops.index_provenance(manifest) == index_ops.PROVENANCE_PUBLISHED
+
+    def test_a_local_build_records_one_absolute_path(self):
+        manifest = _manifest(corpus_roots=["/home/someone/src/aorta"])
+        assert index_ops.index_provenance(manifest) == index_ops.PROVENANCE_LOCAL
+
+    def test_a_manifest_predating_the_field_is_unknown_rather_than_guessed(self):
+        """Neither guard fires without positive evidence of what it protects."""
+        assert index_ops.index_provenance(_manifest()) == index_ops.PROVENANCE_UNKNOWN
+
+    def test_a_renamed_published_subpath_is_still_published(self):
+        """Read the shape, not the list, so renaming `docs/` reclassifies nothing."""
+        manifest = _manifest(corpus_roots=["src/aorta", "documentation"])
+        assert index_ops.index_provenance(manifest) == index_ops.PROVENANCE_PUBLISHED
+
+    def test_the_same_rule_classifies_a_corpus_before_it_is_built(self):
+        """So `build` can compare what it is about to make against what is there."""
+        from aorta.chat.rag import corpus as corpus_mod
+
+        published = corpus_mod.Corpus(
+            base=Path("/repo"), subpaths=("src/aorta",), roots_label=corpus_mod.PUBLISHED_SUBPATHS
+        )
+        assert index_ops.corpus_provenance(published) == index_ops.PROVENANCE_PUBLISHED
+
+        local = corpus_mod.Corpus(base=Path("/repo"), subpaths=(".",), roots_label=("/repo",))
+        assert index_ops.corpus_provenance(local) == index_ops.PROVENANCE_LOCAL
+
+
+class TestFetchWillNotSilentlyDiscardALocalBuild:
+    """The two directions are not symmetric, so neither is a blanket guard.
+
+    A fetched index costs a download to replace. A locally built one may not be
+    reproducible at all -- the tree it indexed may have moved, and an
+    air-gapped node cannot re-download the weights. So the incoming-index paths
+    guard against overwriting a local build, and only that.
+    """
+
+    @staticmethod
+    def _install_local_build(dest: Path) -> None:
+        dest.write_bytes(b"an index built here")
+        manifest_mod.write_manifest(
+            dest,
+            _manifest(
+                corpus_roots=[str(dest.parent / "checkout")],
+                index_sha256=manifest_mod.sha256_file(dest),
+            ),
+        )
+
+    def test_fetch_over_a_local_build_refuses_and_names_the_flag(self, server, tmp_path: Path):
+        dest = tmp_path / "i.sqlite"
+        self._install_local_build(dest)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        message = str(exc.value)
+        assert "built on this machine" in message
+        assert "--force" in message
+        assert dest.read_bytes() == b"an index built here"
+
+    def test_it_refuses_before_any_request(self, server, tmp_path: Path):
+        """The local manifest is free to read, so the refusal costs no network."""
+        dest = tmp_path / "i.sqlite"
+        self._install_local_build(dest)
+
+        with pytest.raises(index_ops.IndexOverwriteError):
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert server.requested == []
+
+    def test_force_overwrites_it(self, server, tmp_path: Path):
+        dest = tmp_path / "i.sqlite"
+        self._install_local_build(dest)
+
+        fetch_index(version="0.2.1", index_path=dest, force=True)
+
+        assert dest.read_bytes() == BODY
+
+    def test_force_also_re_downloads_an_identical_asset(self, server, tmp_path: Path):
+        """Otherwise the up-to-date short-circuit would swallow the override."""
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        server.requested.clear()
+
+        assert fetch_index(version="0.2.1", index_path=dest, force=True).up_to_date is False
+        assert any(url.endswith(ASSET_NAME) for url in server.requested)
+
+    def test_a_routine_refresh_of_a_fetched_index_is_not_refused(self, server, tmp_path: Path):
+        """`fetch` is the documented way to refresh; demanding --force would
+        train people to always pass it."""
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"stale")
+        manifest_mod.write_manifest(
+            dest, _manifest(corpus_roots=["src/aorta", "docs", "README.md"], index_sha256="0" * 64)
+        )
+
+        assert fetch_index(version="0.2.1", index_path=dest).index_path == dest
+        assert dest.read_bytes() == BODY
+
+    def test_side_load_carries_the_same_guard(self, tmp_path: Path):
+        """Or `--from` becomes the way around it by accident."""
+        staging = tmp_path / "usb"
+        staging.mkdir()
+        origin = staging / ASSET_NAME
+        origin.write_bytes(BODY)
+        manifest_mod.write_manifest(origin, _manifest())
+
+        dest = tmp_path / "i.sqlite"
+        self._install_local_build(dest)
+
+        with pytest.raises(index_ops.IndexOverwriteError, match="built on this machine"):
+            side_load(origin, index_path=dest)
+
+        assert side_load(origin, index_path=dest, force=True).index_path == dest
+
+
 class TestSideLoad:
     """Decision 21b: index only. The model is a documented pre-seed, not an asset."""
 

@@ -200,6 +200,66 @@ class TestDigestSkip:
         assert not any("digest" in str(step.get("id", "")) for step in job["steps"])
 
 
+class TestTheBuildCommandTheWorkflowsRunStillParses:
+    """Both jobs invoke `index build` non-interactively, and cannot be prompted.
+
+    A new option on that command -- an overwrite guard's ``--force``, say --
+    must not become something the workflow has to pass. If the published build
+    ever stops running, the published index stops updating at all, which is
+    worse than whatever the guard was protecting against, and the workflow is
+    the one caller that cannot report the problem to a human.
+    """
+
+    @staticmethod
+    def _build_argv(job: dict) -> list[str]:
+        """The `aorta chat index ...` arguments the job's build step passes."""
+        run = next(s["run"] for s in job["steps"] if "index build" in str(s.get("run", "")))
+        # The step is a shell block with a line continuation and a `mkdir`
+        # before it, so the command is recovered rather than assumed.
+        command = " ".join(run.replace("\\\n", " ").split())
+        _, _, arguments = command.partition("aorta chat index build")
+        assert arguments.strip(), "no arguments found on the build command"
+        return arguments.split()
+
+    @_needs_chat
+    def test_the_workflow_argv_is_accepted_by_the_command(self, index_job):
+        """Parsed against the real command, so a renamed flag fails here."""
+        import click
+
+        from aorta.cli.chat import chat
+
+        name, job = index_job
+        index_build = chat.commands["index"].commands["build"]
+
+        with click.Context(index_build) as ctx:
+            # ``make_context`` parses and type-checks without running the body,
+            # which would need a real public checkout and an embedding model.
+            index_build.make_context("build", self._build_argv(job), parent=ctx)
+
+    def test_the_build_writes_into_a_directory_it_creates_itself(self, index_job):
+        """So "the destination already exists" is never true on this path."""
+        name, job = index_job
+        step = next(s for s in job["steps"] if "index build" in str(s.get("run", "")))
+
+        assert "mkdir -p index-out" in step["run"], name
+        assert "--output index-out/" in " ".join(step["run"].replace("\\\n", " ").split()), name
+
+    def test_no_option_the_workflow_omits_is_required(self, index_job):
+        """A required option would fail the job rather than prompt it."""
+        from aorta.cli.chat import chat
+
+        name, job = index_job
+        index_build = chat.commands["index"].commands["build"]
+        passed = {argument for argument in self._build_argv(job) if argument.startswith("--")}
+
+        for parameter in index_build.params:
+            if parameter.required:
+                assert any(opt in passed for opt in parameter.opts), (
+                    f"{name}: index build now requires {parameter.name}, "
+                    "which the workflow does not pass"
+                )
+
+
 class TestJobHygiene:
     def test_the_index_job_is_separate_from_the_publish_job(self):
         """It must not be able to delay or fail the wheel/PyPI publish."""
