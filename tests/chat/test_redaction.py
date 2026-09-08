@@ -342,6 +342,16 @@ class TestSummaryWording:
         assert summary.describe() == expected
 
 
+#: Receivers in ``graph/nodes.py`` whose ``ainvoke`` sends nothing to a
+#: provider, and which are therefore outside what ``_send`` guards. A retriever
+#: queries the local sqlite index; a tool runs local code. Both are awaited
+#: rather than called, so neither blocks the event loop out from under a
+#: concurrent Chainlit session (issue #444) -- and neither carries a message
+#: that redaction would have anything to say about. Anything not named here
+#: still has to go through ``_send``.
+_NON_MODEL_AINVOKE_RECEIVERS = frozenset({"retriever", "tool_fn"})
+
+
 class TestGraphChokepoint:
     async def test_every_node_send_goes_through_the_gate(self):
         """``_send`` is the single seam, so a node added later cannot bypass it."""
@@ -371,6 +381,12 @@ class TestGraphChokepoint:
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.Attribute) or node.attr != "ainvoke":
                 continue
+            receiver = node.value
+            if (
+                isinstance(receiver, ast.Name)
+                and receiver.id in _NON_MODEL_AINVOKE_RECEIVERS
+            ):
+                continue
             # `_send` itself is the sanctioned caller.
             offenders.append(node.lineno)
         # One permitted occurrence: the call inside `_send`.
@@ -378,6 +394,33 @@ class TestGraphChokepoint:
             f"graph/nodes.py calls .ainvoke at lines {offenders}; every outbound "
             "call must go through _send so the redaction gate applies."
         )
+
+    def test_the_allowlist_cannot_be_used_to_smuggle_a_model_out(self):
+        """The narrowing above is only safe while those names hold no model.
+
+        The gate is about messages leaving for a provider, so awaiting a
+        retriever or a tool is not egress -- both stay on this machine, and both
+        are awaited to keep the event loop free (issue #444). But an allowlist
+        by receiver name is only as good as what those names are bound to, so
+        this pins that neither is ever assigned from ``_get_llm``.
+        """
+        import ast
+        from pathlib import Path
+
+        source = Path(nodes_path()).read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Assign):
+                continue
+            targets = {
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            }
+            if not targets & _NON_MODEL_AINVOKE_RECEIVERS:
+                continue
+            assigned = ast.unparse(node.value)
+            assert "_get_llm" not in assigned, (
+                f"{targets & _NON_MODEL_AINVOKE_RECEIVERS} is allowlisted out of "
+                f"the _send gate but is assigned a chat model: {assigned}"
+            )
 
 
 def nodes_path() -> str:

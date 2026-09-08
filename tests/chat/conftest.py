@@ -231,9 +231,16 @@ def make_llm_sequence(*llms: MagicMock) -> Callable[..., MagicMock]:
 
 @pytest.fixture()
 def fake_retriever():
-    """Return a mock retriever that yields fixed documents."""
-    mock = MagicMock()
-    mock.invoke.return_value = [
+    """Return a mock retriever that yields fixed documents.
+
+    Both ``invoke`` and ``ainvoke`` answer, with the same documents.
+    ``retrieve_node`` awaits ``ainvoke`` so that a retrieval cannot block the
+    event loop under a concurrent Chainlit session, and a bare ``MagicMock``
+    answers that with a ``MagicMock`` that cannot be awaited -- a failure that
+    points at the fixture rather than at the node. ``invoke`` stays for the
+    tests that assert on the synchronous call directly.
+    """
+    docs = [
         Document(
             page_content="def run_scenario(name):\n    pass",
             metadata={"source": "src/runner.py", "start_line": 1, "end_line": 2},
@@ -243,4 +250,7 @@ def fake_retriever():
             metadata={"source": "config/defaults.py", "start_line": 5, "end_line": 5},
         ),
     ]
+    mock = MagicMock()
+    mock.invoke.return_value = docs
+    mock.ainvoke = AsyncMock(return_value=docs)
     return mock

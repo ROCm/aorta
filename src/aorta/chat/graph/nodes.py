@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -419,12 +420,19 @@ def _normalise_tool_name(tool_name: str) -> str:
     return tool_name.split("<|", 1)[0].strip()
 
 
-def _execute_tool(tool_name: str, kwargs: dict) -> str:
+async def _execute_tool(tool_name: str, kwargs: dict) -> str:
     """Call a tool and return its string result, or an error the model can read.
 
     An unknown name must not raise: in the native protocol the name comes
     straight from the provider, so a hallucinated or mangled one would abort the
     whole graph run instead of giving the model a chance to correct itself.
+
+    ``ainvoke``, because a tool call is the longest blocking thing in the act
+    loop and the loop is awaited from a Chainlit request handler: ``grep_code``
+    walks the tree, ``search_code`` embeds a query, and
+    ``run_terminal_command`` runs a subprocess up to its timeout. ``BaseTool``
+    hands a tool with no coroutine to ``run_in_executor``, so a synchronous
+    tool still runs off the event loop without needing its own wrapper here.
     """
     name = _normalise_tool_name(tool_name)
     tool_fn = TOOL_REGISTRY.get(name)
@@ -435,7 +443,7 @@ def _execute_tool(tool_name: str, kwargs: dict) -> str:
             f"{', '.join(sorted(TOOL_REGISTRY))}."
         )
     try:
-        result = tool_fn.invoke(kwargs)
+        result = await tool_fn.ainvoke(kwargs)
     except Exception as exc:
         result = f"Tool error: {exc}"
     return str(result)
@@ -496,7 +504,10 @@ async def router_node(state: AgentState) -> dict[str, Any]:
 async def plan_node(state: AgentState) -> dict[str, Any]:
     """Generate a step-by-step plan for action-type requests."""
     llm = _get_llm(temperature=0.1)
-    repo_map = load_repo_map()
+    # Offloaded for the same reason as retrieval: this reads the whole repo
+    # map off disk, which is around 3 MB for AORTA, on a coroutine a Chainlit
+    # request handler is awaiting.
+    repo_map = await asyncio.to_thread(load_repo_map)
     last_msg = state["messages"][-1]
 
     response = await _send(
@@ -519,6 +530,12 @@ async def retrieve_node(state: AgentState) -> dict[str, Any]:
 
     Both, because this feeds the branch that has no tools. Retrieving only
     source left a run question answerable only from code.
+
+    Neither retrieval may run on the event loop. This coroutine is awaited from
+    a Chainlit request handler, and with remote embeddings each blocks on network
+    I/O while with local embeddings each blocks on CPU work in the ONNX model --
+    so a synchronous call here stalls every concurrent session behind whichever
+    one is retrieving.
     """
     last_human = None
     for msg in reversed(state["messages"]):
@@ -531,7 +548,14 @@ async def retrieve_node(state: AgentState) -> dict[str, Any]:
 
     try:
         retriever = get_retriever()
-        docs = retriever.invoke(last_human)
+        # ``ainvoke``, not ``invoke``. This is enough for the CPU-bound local
+        # provider as well as the remote one: ``SqliteVecStore`` implements only
+        # the synchronous search, and ``VectorStore``'s async default hands that
+        # to ``run_in_executor`` -- so the embedding work lands on a thread
+        # either way, which is what the issue's ``asyncio.to_thread`` caveat
+        # asks for. ``search_run_docs`` below is a plain function with no such
+        # shim, so that one is dispatched explicitly.
+        docs = await retriever.ainvoke(last_human)
     except FileNotFoundError:
         return {
             "retrieved_context": "(Index not built yet -- run indexing first.)"
@@ -541,7 +565,7 @@ async def retrieve_node(state: AgentState) -> dict[str, Any]:
     for doc in docs:
         src = doc.metadata.get("source", "?")
         chunks.append(f"### {src}\n```\n{doc.page_content}\n```")
-    chunks.extend(_run_artifact_chunks(last_human))
+    chunks.extend(await asyncio.to_thread(_run_artifact_chunks, last_human))
 
     if not chunks:
         return {"retrieved_context": "(No relevant code found.)"}
@@ -549,13 +573,19 @@ async def retrieve_node(state: AgentState) -> dict[str, Any]:
 
 
 def _run_artifact_chunks(query: str) -> list[str]:
-    """Run-artifact context for the branch that has no tools.
+    """Run-artifact context for the branch that has no tools. Blocking.
+
+    Deliberately left synchronous and dispatched with :func:`asyncio.to_thread`
+    by its caller. ``search_run_docs`` goes straight to
+    ``max_marginal_relevance_search`` rather than through a retriever, so there
+    is no ``ainvoke`` shim to offload the embedding work -- and the work is the
+    same network or ONNX-CPU cost the retriever pays.
 
     The router sends a specific question -- "why did this sweep fail?" -- down
     the ``question`` path by design, because it is specific. That branch never
     calls a tool, so without this it could only answer from source code, and
     the run artifacts the command exists to explain were unreachable by the
-    route most likely to ask about them.
+    route most likely to ask about them (issue #433).
 
     A missing collection is the common case, not an error: most installs have
     never run ``aorta chat index runs``. This is supplementary context, so
@@ -1021,7 +1051,7 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
                 )
                 continue
             seen.add(signature)
-            result = _execute_tool(call["name"], call["args"])
+            result = await _execute_tool(call["name"], call["args"])
             trace.append(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}")
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
 
@@ -1177,7 +1207,7 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
         unproductive = 0
         tool_name, kwargs = action
         logger.info("Act round %d: %s(%s)", round_num + 1, tool_name, kwargs)
-        result = _execute_tool(tool_name, kwargs)
+        result = await _execute_tool(tool_name, kwargs)
         # The result starts on its own line so that ``Exit code: N`` stays at
         # the start of one: ``critic_node`` scans this trace with
         # ``line.startswith(_EXIT_CODE_PREFIX)``, so putting the result after

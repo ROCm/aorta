@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import threading
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from aorta.chat.graph import nodes
 from tests.chat.conftest import make_fake_llm
 
 
@@ -45,13 +47,76 @@ class TestRetrieveNode:
     @pytest.mark.asyncio
     async def test_empty_docs(self):
         mock_ret = MagicMock()
-        mock_ret.invoke.return_value = []
+        mock_ret.ainvoke = AsyncMock(return_value=[])
         with patch("aorta.chat.graph.nodes.get_retriever", return_value=mock_ret):
             from aorta.chat.graph.nodes import retrieve_node
 
             state = {"messages": [HumanMessage(content="obscure query")]}
             result = await retrieve_node(state)
             assert "No relevant code" in result["retrieved_context"]
+
+
+class TestRetrievalDoesNotBlockTheEventLoop:
+    """Issue #444, and it applies to both retrievals in this node.
+
+    ``retrieve_node`` is a coroutine a Chainlit request handler awaits. With
+    remote embeddings a retrieval blocks on network I/O and with local
+    embeddings on CPU work in the ONNX model, so a synchronous call here stalls
+    every concurrent session behind whichever one is retrieving. Fixing only the
+    source retriever would leave the loop blocked on run-artifact search, which
+    pays the same cost.
+
+    "Did not block" has no direct probe, so the two offloads are asserted by
+    thread identity: work that ran on the loop's own thread did block it.
+    """
+
+    @staticmethod
+    def _state(query: str = "why did this sweep fail?"):
+        return {"messages": [HumanMessage(content=query)]}
+
+    @pytest.mark.asyncio
+    async def test_the_source_retriever_is_awaited_not_called(self, fake_retriever):
+        with patch.object(nodes, "get_retriever", return_value=fake_retriever):
+            await nodes.retrieve_node(self._state("how do I run scenarios?"))
+        fake_retriever.ainvoke.assert_awaited_once_with("how do I run scenarios?")
+        fake_retriever.invoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_artifact_search_runs_off_the_loop(self, fake_retriever):
+        ran_on: list[int] = []
+
+        def _record(query, k):
+            ran_on.append(threading.get_ident())
+            return []
+
+        with (
+            patch.object(nodes, "get_retriever", return_value=fake_retriever),
+            patch("aorta.chat.rag.runs.search_run_docs", side_effect=_record),
+        ):
+            await nodes.retrieve_node(self._state())
+
+        assert ran_on, "search_run_docs was never reached"
+        assert threading.get_ident() not in ran_on
+
+    @pytest.mark.asyncio
+    async def test_the_repo_map_read_runs_off_the_loop(self):
+        """Around 3 MB for AORTA, read whole on every planning call."""
+        ran_on: list[int] = []
+
+        def _record(*_args, **_kwargs):
+            ran_on.append(threading.get_ident())
+            return "(map)"
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=AIMessage(content="1. Read main.py"))
+        with (
+            patch.object(nodes, "_get_llm", return_value=llm),
+            patch.object(nodes, "load_repo_map", side_effect=_record),
+        ):
+            await nodes.plan_node(self._state("find all mitigations"))
+
+        assert ran_on, "load_repo_map was never reached"
+        assert threading.get_ident() not in ran_on
 
 
 class TestRunArtifactsReachTheToolFreeBranch:
@@ -97,7 +162,7 @@ class TestRunArtifactsReachTheToolFreeBranch:
         from aorta.chat.graph import nodes
 
         empty = MagicMock()
-        empty.invoke.return_value = []
+        empty.ainvoke = AsyncMock(return_value=[])
         with (
             patch.object(nodes, "get_retriever", return_value=empty),
             patch(

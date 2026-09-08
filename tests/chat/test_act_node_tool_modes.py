@@ -16,6 +16,7 @@ query and some tokens to discover:
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -245,25 +246,63 @@ class TestToolNameNormalisation:
 
 
 class TestExecuteToolNeverRaises:
-    def test_an_unknown_tool_returns_a_readable_error(self):
-        result = _execute_tool("no_such_tool", {})
+    """Awaited rather than called, so a tool cannot stall the event loop.
+
+    ``grep_code`` walks the tree, ``search_code`` embeds a query and
+    ``run_terminal_command`` runs a subprocess up to its timeout, all from a
+    coroutine a Chainlit request handler is awaiting. ``BaseTool.ainvoke`` hands
+    a tool with no coroutine of its own to ``run_in_executor``, so a synchronous
+    tool still runs off the loop and needs no wrapper here (issue #444).
+    """
+
+    async def test_an_unknown_tool_returns_a_readable_error(self):
+        result = await _execute_tool("no_such_tool", {})
         assert "no tool named" in result
 
-    def test_the_error_lists_what_is_available(self):
+    async def test_the_error_lists_what_is_available(self):
         """So the model can correct itself on the next round."""
-        result = _execute_tool("no_such_tool", {})
+        result = await _execute_tool("no_such_tool", {})
         for name in TOOL_REGISTRY:
             assert name in result
 
-    def test_a_mangled_name_is_executed_rather_than_rejected(self):
-        with patch.dict(TOOL_REGISTRY, {"list_files": MagicMock(invoke=lambda _: "ok")}):
-            assert _execute_tool("list_files<|channel|>commentary", {}) == "ok"
+    async def test_a_mangled_name_is_executed_rather_than_rejected(self):
+        stub = MagicMock(ainvoke=AsyncMock(return_value="ok"))
+        with patch.dict(TOOL_REGISTRY, {"list_files": stub}):
+            assert await _execute_tool("list_files<|channel|>commentary", {}) == "ok"
 
-    def test_a_tool_that_raises_is_reported_not_propagated(self):
+    async def test_a_tool_that_raises_is_reported_not_propagated(self):
         boom = MagicMock()
-        boom.invoke.side_effect = RuntimeError("disk on fire")
+        boom.ainvoke = AsyncMock(side_effect=RuntimeError("disk on fire"))
         with patch.dict(TOOL_REGISTRY, {"list_files": boom}):
-            assert "disk on fire" in _execute_tool("list_files", {})
+            assert "disk on fire" in await _execute_tool("list_files", {})
+
+    async def test_a_real_registry_tool_still_runs_through_ainvoke(self):
+        """Against the real ``BaseTool``, not a stub, so the shim is exercised."""
+        result = await _execute_tool("list_files", {"path": "."})
+        assert result and "no tool named" not in result
+
+    async def test_a_synchronous_tool_runs_off_the_event_loop(self):
+        """The claim that awaiting is enough for a tool with no coroutine.
+
+        A stub ``AsyncMock`` would prove nothing -- it runs on the loop. This
+        uses a real ``@tool``, so ``BaseTool``'s ``run_in_executor`` fallback is
+        what is being tested, and thread identity is what shows it worked.
+        """
+        from langchain_core.tools import tool
+
+        ran_on: list[int] = []
+
+        @tool
+        def record_thread(path: str = ".") -> str:
+            """Record which thread this ran on."""
+            ran_on.append(threading.get_ident())
+            return "ok"
+
+        with patch.dict(TOOL_REGISTRY, {"list_files": record_thread}):
+            assert await _execute_tool("list_files", {"path": "."}) == "ok"
+
+        assert ran_on, "the tool never ran"
+        assert threading.get_ident() not in ran_on
 
 
 class TestNativeLoop:
