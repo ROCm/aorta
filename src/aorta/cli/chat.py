@@ -49,7 +49,8 @@ _MIN_PYTHON = (3, 11)
 _MAX_PYTHON_UI = (3, 14)
 
 _INSTALL_HINT = (
-    "'aorta chat' requires the chat-cli extra.\nInstall it with:  pip install 'amd-aorta[chat-cli]'"
+    "'aorta chat' requires the chat-cli extra.\n"
+    "Install it with:  pip install 'amd-aorta[chat-cli]'"
 )
 
 #: Hard-coded rather than read from ``aorta.chat.inference.providers.factory``:
@@ -838,7 +839,10 @@ def config_show(reveal: bool, as_json: bool) -> None:
         click.echo(f"  {key} = {values[key]!r}")
     if not reveal:
         click.echo("")
-        click.echo("API keys and extra-header values are masked. Pass --reveal to print them.")
+        click.echo(
+            "API keys and extra-header values are masked. "
+            "Pass --reveal to print them."
+        )
 
 
 @config_group.command(name="validate")
