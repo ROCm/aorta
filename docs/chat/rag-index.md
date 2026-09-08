@@ -116,9 +116,10 @@ A fetch downloads vectors, not the embedding model, so straight afterwards
 reported as `[--] ... does not need to be yet`, because the weights download
 themselves on the first query. **Do not "pre-warm" with `aorta chat index
 build`**: its `--output` defaults to the index you just fetched and its corpus
-defaults to `src/aorta` alone, so it would overwrite a code-and-prose index with
-a code-only one and drop `docs/` and `README.md` out of retrieval. To download
-the weights on their own, `doctor` prints the one-line `TextEmbedding` command.
+defaults to `src/aorta` alone, so it is an attempt to replace a code-and-prose
+index with a code-only one, dropping `docs/` and `README.md` out of retrieval.
+To download the weights on their own, `doctor` prints the one-line
+`TextEmbedding` command.
 
 Building locally is the developer path and the air-gapped path. It takes a few
 minutes and runs on CPU.
