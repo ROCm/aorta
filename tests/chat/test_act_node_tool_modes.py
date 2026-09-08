@@ -16,6 +16,7 @@ query and some tokens to discover:
 
 from __future__ import annotations
 
+import logging
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,19 +33,6 @@ from aorta.chat.graph.nodes import (
     _normalise_tool_name,
     act_node,
 )
-
-
-@pytest.fixture(autouse=True)
-def _no_sticky_escalation():
-    """Undo any auto-escalation, which is process-wide by design.
-
-    ``_EscalationState`` is deliberately process-wide: "keep it for the process"
-    is the point, and the whole test run is one process. Without this an
-    escalation in one test silently puts the next one on the native protocol.
-    """
-    nodes.reset_tool_mode_escalation()
-    yield
-    nodes.reset_tool_mode_escalation()
 
 
 def _state(query: str = "find all mitigations"):
@@ -1290,3 +1278,282 @@ class TestWastedCallGuards:
             result = await act_node(_state())
         assert bound.ainvoke.await_count == _MAX_UNPRODUCTIVE_ROUNDS
         assert result["messages"][0].content == _NO_ANSWER_MSG
+
+
+class TestABackendThatFallsOverPartWayThroughNative:
+    """A failure *after* native worked is not a failure of native.
+
+    The escalated retry's progress lives in the loop's locals, so an exception
+    used to discard it: the tool results went missing, and the endpoint was
+    charged a native failure on the strength of a round that had demonstrably
+    driven ``tools``. Two of those wrote native off for the process.
+    """
+
+    @staticmethod
+    def _llm_that_breaks_after_one_tool_call():
+        """Text dead-ends; native calls a tool, then the backend goes away."""
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="", tool_calls=[_tool_call("list_files", {"path": "."})]
+                ),
+                RuntimeError("503 Service Unavailable"),
+            ]
+        )
+        plain.bind_tools = MagicMock(return_value=bound)
+        return plain, bound
+
+    @pytest.mark.asyncio
+    async def test_the_native_tool_result_survives_the_failure(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The results were gathered; losing them loses the query's only material."""
+        plain, _bound = self._llm_that_breaks_after_one_tool_call()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py\nb.py"),
+        ):
+            result = await act_node(_state())
+        assert any("a.py" in entry for entry in result["tool_trace"])
+
+    @pytest.mark.asyncio
+    async def test_the_answer_is_not_labelled_as_toolless(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """A tool ran, so the degraded label would be a false statement."""
+        from aorta.chat.graph.nodes import _DEGRADED_ANSWER_PREFIX
+
+        plain, _bound = self._llm_that_breaks_after_one_tool_call()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+        ):
+            result = await act_node(_state())
+        assert _DEGRADED_ANSWER_PREFIX not in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_count_against_the_native_failure_budget(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Two transient 503s must not strand the process on ``text`` for good."""
+        plain, _bound = self._llm_that_breaks_after_one_tool_call()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+        ):
+            await act_node(_state())
+        assert nodes._escalation.native_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_the_protocol_moves_because_tool_calling_demonstrably_worked(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The escalation asks one question, and this run answered it yes.
+
+        Deliberately different from ``TestAnEndpointThatRefusesNative``, where
+        the refusal arrives *before* any tool call and so proves the opposite.
+        The two cases reach the same ``except`` and must not reach the same
+        conclusion.
+        """
+        plain, _bound = self._llm_that_breaks_after_one_tool_call()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+        ):
+            await act_node(_state())
+        assert nodes._escalation.escalated is True
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_before_any_tool_call_still_counts_as_a_failure(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The other half of the split, so the new branch cannot swallow both."""
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=RuntimeError("400: tools not supported"))
+        plain.bind_tools = MagicMock(return_value=bound)
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+        assert nodes._escalation.native_failures == 1
+        assert nodes._escalation.escalated is False
+
+    @pytest.mark.asyncio
+    async def test_a_backend_that_cannot_even_be_built_is_still_caught(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Only the calls *inside* the loop carry progress.
+
+        The loop resolves the backend and binds the tool schemas before it makes
+        any request, and those raise plainly rather than as a
+        ``_NativeLoopError``. Narrowing the caller's ``except`` to the new
+        exception alone would have put the traceback back on the query this
+        whole path exists to keep an answer on.
+        """
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        plain.bind_tools = MagicMock(side_effect=RuntimeError("no tool schema"))
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            result = await act_node(_state())
+        assert result["messages"][0].content
+        assert nodes._escalation.native_failures == 1
+
+
+class TestTheFallbackDoesNotAskForToolOutputItCannotHave:
+    """The retrieval fallback runs without tools, so its nudge must not want any.
+
+    ``_ensure_ends_with_user`` appends a user turn whenever the conversation
+    ends on an assistant one, which is exactly the shape a critic-triggered
+    retry produces. The default nudge tells the model to ground every claim in
+    tool output "obtained in this turn" -- an instruction this request makes
+    impossible, on the one path guaranteed to receive it.
+    """
+
+    @staticmethod
+    def _state_after_a_rejected_answer():
+        state = _state()
+        state["messages"] = [
+            HumanMessage(content="find all mitigations"),
+            AIMessage(content="A rejected answer."),
+        ]
+        state["critic_feedback"] = "Not grounded in any tool output."
+        return state
+
+    @pytest.mark.asyncio
+    async def test_the_fallback_nudge_replaces_the_tool_grounding_one(self, text_mode):
+        from aorta.chat.graph.nodes import (
+            _FALLBACK_RETRY_NUDGE,
+            _RETRY_NUDGE,
+            _fallback_retrieval_answer,
+        )
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=AIMessage(content="From the docs: ..."))
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=llm):
+            answer = await _fallback_retrieval_answer(
+                self._state_after_a_rejected_answer()
+            )
+        assert answer == "From the docs: ..."
+        sent = [str(m.content) for m in llm.ainvoke.await_args.args[0]]
+        assert _FALLBACK_RETRY_NUDGE in sent
+        assert _RETRY_NUDGE not in sent
+
+    @pytest.mark.asyncio
+    async def test_the_trailing_turn_is_still_a_user_turn(self, text_mode):
+        """The nudge's other job: models that disallow prefill reject the request."""
+        from aorta.chat.graph.nodes import _fallback_retrieval_answer
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=AIMessage(content="ok"))
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=llm):
+            await _fallback_retrieval_answer(self._state_after_a_rejected_answer())
+        assert isinstance(llm.ainvoke.await_args.args[0][-1], HumanMessage)
+
+
+class TestTheExtraSendsDoNotRepeatTheRedactionNotice:
+    """Two new outbound paths in one turn, and still one notice.
+
+    The notice is owed once per session, not once per redacting turn, and this
+    PR is the first thing to put three separate ``_send`` call sites inside a
+    single act turn: the text rounds, the escalated native round, and the
+    retrieval fallback. Each redacts, so each *could* have announced itself.
+    Pinned here rather than in ``test_redaction.py`` because what is new is
+    these paths, not the notice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_one_notice_covers_every_send_in_an_escalated_turn(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        import io
+
+        from aorta.chat import redaction
+
+        redaction.reset_session_notice()
+        stderr = io.StringIO()
+
+        async def plain_invoke(messages, **_kwargs):
+            joined = " ".join(str(getattr(m, "content", "")) for m in messages)
+            # Empty on the text protocol, fine on the tool-free fallback.
+            return _dead_end_reply() if "ACTION:" in joined else AIMessage(content="ok")
+
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=plain_invoke)
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        plain.bind_tools = MagicMock(return_value=bound)
+        state = _state("find mitigations in /home/cust7/secret/run.log")
+        state["retrieved_context"] = "### /home/cust7/secret/run.log\n```\nx\n```"
+
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch.object(redaction, "_notice_stream", lambda: stderr),
+        ):
+            await act_node(state)
+
+        # The turn really did make the extra calls this test is about.
+        assert plain.ainvoke.await_count + bound.ainvoke.await_count >= 3
+        assert stderr.getvalue().count("aorta chat: redacted") == 1
+
+
+class TestTheGiveUpLogDoesNotBlameTheRoundBudget:
+    """The line an operator reads has to name the limit that was actually hit.
+
+    A native loop that gathered results and *then* went quiet fell through to
+    the budget message -- "hit its N-round budget with the model still calling
+    tools" -- when neither half was true. It sent the reader to MAX_ACT_ROUNDS,
+    the one knob that would not have helped.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_loop_that_went_quiet_after_a_tool_call_says_so(
+        self, native_mode, caplog
+    ):
+        plain = MagicMock()
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="", tool_calls=[_tool_call("list_files", {"path": "."})]
+                ),
+                AIMessage(content=""),
+                AIMessage(content=""),
+            ]
+        )
+        plain.ainvoke = AsyncMock(return_value=AIMessage(content="Final answer."))
+        plain.bind_tools = MagicMock(return_value=bound)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await act_node(_state())
+        assert "gave up after" in caplog.text
+        assert "tool result(s) already gathered" in caplog.text
+        assert "round budget was not the limit" in caplog.text
+        assert "still calling tools" not in caplog.text
+        # The synthesis still runs -- only the log line was wrong.
+        assert result["messages"][0].content == "Final answer."
+
+    @pytest.mark.asyncio
+    async def test_a_loop_that_really_ran_out_of_rounds_still_says_that(
+        self, native_mode, caplog
+    ):
+        """The message this fix must not take away from the case it belongs to."""
+        calls = [
+            AIMessage(content="", tool_calls=[_tool_call("list_files", {"path": f"{i}"})])
+            for i in range(12)
+        ]
+        plain, _bound = _fake_llm(calls, final_text="Final answer.")
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+            caplog.at_level(logging.WARNING),
+        ):
+            await act_node(_state())
+        assert "still calling tools" in caplog.text
+        assert "Raise MAX_ACT_ROUNDS" in caplog.text
+        assert "gave up after" not in caplog.text

@@ -210,6 +210,12 @@ Four things follow from that:
   counts the same as one that errored: "the request returned" is not "the
   protocol works", and a model that says nothing on either protocol must not be
   billed for a native round on every query from then on.
+  "Answered" means the model returned prose **or** made at least one tool call.
+  A retry that drove a real tool call and then hit a backend error has proved
+  the protocol works, so it moves the protocol and does *not* spend one of the
+  two failures — otherwise two transient 503s after working tool calls would
+  strand the process on `text` for good. Only a failure with no tool call
+  behind it counts, which is the shape a refused `tools` payload actually has.
 - **The scope is the process, not the conversation.** Under `aorta chat` that is
   the same thing, but `aorta chat ui` serves many browser sessions from one
   server, and there the escalation is shared by all of them. That is deliberate:
@@ -229,13 +235,21 @@ the process-wide scope above matters most.
 then, a UI operator reads the protocol from the escalation warning in the
 server log, or from `aorta chat doctor`.
 
-If the model returns nothing on *both* protocols, the act loop answers from
-retrieved context instead of dead-ending, and labels that answer as having used
-no tools. It applies only when no tool ran at all: once one has — including one
-that returned an error — "I could not use my tools" would be untrue, so that
-loop gets the plain give-up notice instead. A tool *outage* is therefore not
-covered by it. What is covered is a model that can drive neither protocol, and
-an endpoint that refuses the escalated one (a stock local vLLM without
+When the act loop gives up, it makes one tool-free attempt to answer from the
+context `retrieve` already gathered, and labels that answer as having used no
+tools. **This is independent of the escalation above** and worth stating
+separately, because the two are often confused: it fires whenever the loop
+abandons with no tool run, including under an explicitly configured
+`llm_tool_mode = "text"` where no native retry is attempted at all. So an
+action-routed question to a reasoning model does not come back empty-handed
+even when the protocol never moves.
+
+It applies only when no tool ran at all: once one has — including one that
+returned an error, and including one the escalated native retry made before the
+backend fell over — "I could not use my tools" would be untrue, so that query
+gets the plain give-up notice instead. A tool *outage* is therefore not covered
+by it. What is covered is a model that can drive neither protocol, and an
+endpoint that refuses the escalated one (a stock local vLLM without
 `--enable-auto-tool-choice` and a matching `--tool-call-parser` does): that
 refusal never moves the protocol — the switch is thrown only once native has
 answered, so there is nothing to roll back — and it lands on this same fallback
@@ -256,6 +270,12 @@ that rejects `tools` answers normally, and the remote backends are not called
 at all — their `probe()` is a configuration preflight, deliberately, so that a
 diagnostic cannot bill you for a round trip. The startup line names the
 resolved protocol alongside the provider.
+
+The one path that still ends with no answer is a model that also returns empty
+content on the tool-free route. That is rarer than it sounds: the reporter's
+transcript shows the same question answered correctly through the `question`
+route in 2 calls while the `action` route returned nothing in 4, because the
+empty-content behaviour belongs to the tool protocols and not to the model.
 
 Both protocols run the same tools, retrieval and critic, and both are guarded
 the same way: an empty reply is never used as the answer, unproductive rounds

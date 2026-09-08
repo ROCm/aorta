@@ -1011,7 +1011,7 @@ async def _fallback_retrieval_answer(state: AgentState) -> str:
             _build_answer_message(state.get("retrieved_context", "")),
             *state["messages"],
         ]
-        _ensure_ends_with_user(messages)
+        _ensure_ends_with_user(messages, _FALLBACK_RETRY_NUDGE)
         response = await _send(llm, messages)
     except Exception as exc:  # last-resort extra call; see the docstring
         logger.warning(
@@ -1154,14 +1154,60 @@ async def _escalated_native_attempt(
     """
     try:
         outcome = await _run_native_loop(state, escalated=True, prior_trace=trace)
-    except Exception as exc:
+    except _NativeLoopError as failure:
+        # Everything the native loop achieved before it broke, in front of what
+        # the text loop had achieved before it gave up. Both belong to the same
+        # query, and `_abandoned_result` reads the pair to decide whether "I
+        # could not use my tools" is a true thing to tell this user.
+        whole_trace = [*trace, *failure.trace]
+        if failure.tool_called:
+            # Native drove structured `tool_calls` and *then* the backend fell
+            # over. The protocol is not what failed, so this must not spend the
+            # budget that exists to write off an endpoint native is not served
+            # on -- two transient 503s after a working tool call would
+            # otherwise strand the process on `text` for good. Committed for
+            # the same reason `_NativeOutcome.answered` counts a tool call as
+            # proof: the question the escalation asks has been answered yes.
+            _commit_escalation(signature)
+            logger.warning(
+                "The escalated native tool-calling request drove %d tool "
+                "call(s) and then failed (%s: %s). Structured tool calling "
+                "works on this endpoint, so the protocol moves to native "
+                "anyway and this does not count against the %d-failure budget. "
+                "Answering from what was gathered.",
+                len(failure.trace),
+                type(failure.cause).__name__,
+                failure.cause,
+                _MAX_NATIVE_FAILURES,
+            )
+            return await _abandoned_result(state, whole_trace)
         followup = _record_escalation_failure()
         logger.warning(
-            "The escalated native tool-calling request failed (%s: %s). This is "
-            "attempt %d of %d;%s Answering from retrieved context instead. If "
-            "it is a local vLLM, it must be started with "
-            "--enable-auto-tool-choice and a matching --tool-call-parser to "
-            "serve this protocol.",
+            "The escalated native tool-calling request failed (%s: %s) without "
+            "making a tool call. This is attempt %d of %d;%s Answering from "
+            "retrieved context instead. If it is a local vLLM, it must be "
+            "started with --enable-auto-tool-choice and a matching "
+            "--tool-call-parser to serve this protocol.",
+            type(failure.cause).__name__,
+            failure.cause,
+            _escalation.native_failures,
+            _MAX_NATIVE_FAILURES,
+            followup,
+        )
+        return await _abandoned_result(state, whole_trace)
+    except Exception as exc:
+        # Still broad, and for the reason the docstring gives: only the calls
+        # inside the loop are wrapped as `_NativeLoopError`, and the loop also
+        # resolves the backend and binds the tool schemas before it makes any.
+        # Those raise plainly, and letting them through would put the traceback
+        # back on the query this whole path exists to keep an answer on.
+        followup = _record_escalation_failure()
+        logger.warning(
+            "The escalated native tool-calling request failed before it could "
+            "call anything (%s: %s). This is attempt %d of %d;%s Answering "
+            "from retrieved context instead. If it is a local vLLM, it must be "
+            "started with --enable-auto-tool-choice and a matching "
+            "--tool-call-parser to serve this protocol.",
             type(exc).__name__,
             exc,
             _escalation.native_failures,
@@ -1219,8 +1265,21 @@ _RETRY_NUDGE = (
     "ground every claim in output you obtained from a tool in this turn."
 )
 
+#: The same trailing-user-turn job as :data:`_RETRY_NUDGE`, for the one caller
+#: that has no tools to ground anything in. The retrieval fallback runs on the
+#: unbound model under a prompt that forbids tool use, so telling it to ground
+#: every claim "in output you obtained from a tool in this turn" set it a task
+#: the request it arrived in makes impossible -- and it landed exactly on the
+#: critic-retry path, where a rejected answer is the last thing in state and so
+#: the nudge is guaranteed to be appended. Names the source that *is* available.
+_FALLBACK_RETRY_NUDGE = (
+    "Your previous answer was rejected by the validation step, and no tools are "
+    "available for this attempt. Answer from the documentation and run records "
+    "quoted above, and say plainly which parts of the question they do not cover."
+)
 
-def _ensure_ends_with_user(messages: list[Any]) -> None:
+
+def _ensure_ends_with_user(messages: list[Any], nudge: str = _RETRY_NUDGE) -> None:
     """Append a user turn when the conversation ends with an assistant one.
 
     Anthropic treats a trailing assistant message as a prefill to continue, and
@@ -1228,9 +1287,14 @@ def _ensure_ends_with_user(messages: list[Any]) -> None:
     not support assistant message prefill. The conversation must end with a user
     message."* That is exactly the shape a critic-triggered retry produces, since
     the rejected answer is the last thing in state.
+
+    *nudge* is what that turn says. It is a parameter because the turn is not
+    only padding -- it is an instruction the model will follow -- so a caller
+    that cannot honour the default must pass one it can; see
+    :data:`_FALLBACK_RETRY_NUDGE`.
     """
     if messages and isinstance(messages[-1], AIMessage):
-        messages.append(HumanMessage(content=_RETRY_NUDGE))
+        messages.append(HumanMessage(content=nudge))
 
 
 @dataclass(frozen=True)
@@ -1253,6 +1317,34 @@ class _NativeOutcome:
     #: neither -- which is the same model behaviour that started the escalation,
     #: now observed on the protocol that was supposed to fix it.
     answered: bool
+
+
+class _NativeLoopError(Exception):
+    """A backend failure inside the native loop, plus what the loop had achieved.
+
+    The loop's progress lives in locals, so an exception used to discard it: a
+    query whose first native round drove a real tool call and whose *second*
+    round hit a 503 came back through the caller's ``except`` with the tool
+    result gone -- which meant the plain "I could not use my tools" notice on a
+    query where one had, and a native failure counted against
+    :data:`_MAX_NATIVE_FAILURES` on an endpoint that had just demonstrated the
+    protocol works. Carrying both facts out with the exception is what lets the
+    caller tell "native is not served here" from "native worked and the backend
+    then fell over", which are the two things that budget exists to separate.
+    """
+
+    def __init__(self, cause: Exception, trace: list[str], tool_called: bool):
+        super().__init__(str(cause))
+        #: The provider/gateway error, for the caller's log line.
+        self.cause = cause
+        #: Tool results gathered before the failure, in loop order.
+        self.trace = list(trace)
+        #: Whether the model emitted structured ``tool_calls`` at least once.
+        #: The same "the protocol works" test :attr:`_NativeOutcome.answered`
+        #: applies, and deliberately not "a tool succeeded" -- a tool that
+        #: errored still proves the model drove ``tools``, which is the only
+        #: question the escalation is asking.
+        self.tool_called = tool_called
 
 
 async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, Any]:
@@ -1306,6 +1398,12 @@ async def _run_native_loop(
     unproductive = 0
     seen: set[str] = set()
     trace: list[str] = []
+    # Whether the model ever emitted structured `tool_calls`, which is the
+    # question "does this endpoint serve native?" reduces to. Tracked separately
+    # from `trace` because it has to survive an exception -- see
+    # `_NativeLoopError` -- and because the two can diverge: a round whose
+    # every call was a duplicate of one already made appends nothing.
+    tool_called = False
     # Distinguishes the two ways out of the loop below. Falling out of the range
     # means the model was still working when the round budget ran out, which is
     # what the final synthesis call is for; giving up on empty rounds means it
@@ -1313,8 +1411,21 @@ async def _run_native_loop(
     # summary of nothing is one more billed call for the same result.
     gave_up = False
 
+    async def send(model: Any) -> Any:
+        """:func:`_send`, with the loop's progress attached to a failure.
+
+        Every outbound call in this loop goes through here so that a backend
+        that falls over mid-loop cannot take the tool results already gathered
+        down with it. Reads ``trace`` and ``tool_called`` as free variables, so
+        it reports whatever had been achieved at the moment of the failure.
+        """
+        try:
+            return await _send(model, messages)
+        except Exception as exc:
+            raise _NativeLoopError(exc, trace, tool_called) from exc
+
     for round_num in range(max_rounds):
-        response = await _send(llm, messages)
+        response = await send(llm)
         tool_calls = getattr(response, "tool_calls", None) or []
         text = str(response.content or "").strip()
 
@@ -1337,6 +1448,7 @@ async def _run_native_loop(
             continue
 
         unproductive = 0
+        tool_called = True
         messages.append(response)
         for call in tool_calls:
             signature = f"{call['name']}({sorted((call['args'] or {}).items())})"
@@ -1383,16 +1495,33 @@ async def _run_native_loop(
             answered=False,
         )
 
-    # Reaching here means the loop never produced a tool-free reply, so the
-    # budget ran out mid-task. Say so: the answer will read as truncated, and
-    # the cause is a knob the user can turn.
-    logger.warning(
-        "Act loop hit its %d-round budget with the model still calling tools; "
-        "asking for a final answer now. Raise MAX_ACT_ROUNDS%s if this query "
-        "needs more steps.",
-        max_rounds,
-        "_SEARCH" if is_search else "",
-    )
+    # Reaching here means the loop never produced a tool-free reply, and there
+    # are two ways that happens. Both get the synthesis call below, and they are
+    # logged apart because the operator reading the line is diagnosing one or
+    # the other: a budget that wants raising, or a model that went quiet.
+    if gave_up:
+        # `gave_up` with a non-empty trace: the model stopped answering after
+        # gathering results, so the budget was *not* exhausted and it was not
+        # still calling tools. Saying it was sent the reader to MAX_ACT_ROUNDS,
+        # which is the one knob that would not have helped.
+        logger.warning(
+            "Act loop gave up after %d empty round(s) in native mode with "
+            "%d tool result(s) already gathered; asking for a final answer from "
+            "those. The round budget was not the limit -- the model stopped "
+            "producing tool calls and text.",
+            unproductive,
+            len(trace),
+        )
+    else:
+        # The budget really did run out mid-task. Say so: the answer will read
+        # as truncated, and the cause is a knob the user can turn.
+        logger.warning(
+            "Act loop hit its %d-round budget with the model still calling "
+            "tools; asking for a final answer now. Raise MAX_ACT_ROUNDS%s if "
+            "this query needs more steps.",
+            max_rounds,
+            "_SEARCH" if is_search else "",
+        )
     # Final synthesis runs on the *unbound* model: offered tools, the model
     # keeps calling them and returns no prose, which is how a completed loop
     # still ended in an empty answer.
@@ -1403,7 +1532,7 @@ async def _run_native_loop(
     # system prompt while the conversation still ended on tool results, and the
     # model carried on working. As a user turn it is positionally last.
     messages.append(HumanMessage(content=_FINAL_ANSWER_MSG))
-    final = await _send(plain, messages)
+    final = await send(plain)
     text = str(final.content or "").strip()
     # Read before the substitution below, which would otherwise make an empty
     # synthesis indistinguishable from a real answer to the caller.

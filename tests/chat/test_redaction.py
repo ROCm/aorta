@@ -353,6 +353,25 @@ class TestSummaryWording:
 #: still has to go through ``_send``.
 _NON_MODEL_AINVOKE_RECEIVERS = frozenset({"retriever", "tool_fn"})
 
+#: Every way a LangChain model can be driven asynchronously, all of which are
+#: egress and none of which may skip ``_send``. Only ``ainvoke`` is used today,
+#: so the extra names guard the future rather than the present -- but a guard
+#: that only knows the verb currently in use stops being a guard on the first
+#: day someone reaches for a different one, and streaming is the obvious
+#: candidate.
+_MODEL_INVOCATION_VERBS = frozenset(
+    {
+        "ainvoke",
+        "abatch",
+        "abatch_as_completed",
+        "agenerate",
+        "astream",
+        "astream_events",
+        "astream_log",
+        "atransform",
+    }
+)
+
 #: How each AST node that can bind a name exposes the expression it binds
 #: *from*. The guard below walks bindings rather than assignments because the
 #: shapes are not interchangeable: ``retriever: BaseChatModel = _get_llm()`` is
@@ -398,25 +417,78 @@ def _binding_source(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | Non
         current = parent
 
 
-#: Nodes that bind a name through a *string* field instead of an
-#: ``ast.Name(Store)`` child, and the field holding it. The Store walk below
-#: cannot see any of them, so each was a way past the guard while the allowlist
-#: still exempted ``retriever.ainvoke(...)`` from the chokepoint test above:
-#: ``match _get_llm():`` / ``case retriever:`` binds through ``MatchAs.name``,
-#: ``case [*tool_fn]`` through ``MatchStar.name``, ``case {**retriever}``
-#: through ``MatchMapping.rest``, and ``except Exception as retriever:`` through
-#: ``ExceptHandler.name``.
+#: ``(node type, field)`` pairs that carry an identifier which *provably cannot*
+#: be a binding, and are therefore the only string fields the scan below skips.
 #:
-#: All are recorded as unreadable rather than resolved, which is not a shortcut:
-#: a pattern capture takes its value from a subject expression several nodes
-#: away, and a handler takes whichever exception was raised, so neither has a
-#: bound expression on the node that could clear it.
-_STRING_FIELD_BINDERS = {
-    ast.MatchAs: "name",
-    ast.MatchStar: "name",
-    ast.MatchMapping: "rest",
-    ast.ExceptHandler: "name",
+#: This list is the inverse of the one that used to be here, and the inversion
+#: is the point. Enumerating the shapes that *do* bind sprang a leak three times
+#: running -- ``AnnAssign``, then ``import x as y``, then ``match`` captures and
+#: ``except ... as name`` -- because that design's default for a shape it had
+#: not been taught was *allow*, and the next way past a guard is by definition
+#: one its author had not thought of. So the default is now the other way: any
+#: string field holding an allowlisted receiver name counts as a binding this
+#: guard cannot read, and a new binding syntax fails it instead of slipping
+#: through. ``def``/``async def``/``class`` names, which the enumerated version
+#: missed, need no entry to be caught -- that is what changed.
+#:
+#: Each exemption is a *read* of a name owned elsewhere, not a binding of one
+#: here: ``obj.retriever`` reads an attribute off an object, a string literal is
+#: data, ``f(retriever=x)`` names a parameter in the callee's signature, and
+#: ``from retriever import x`` names a module rather than binding ``retriever``.
+#: Adding to this list means asserting a field cannot bind, which is a much
+#: harder thing to be wrong about by omission.
+_NON_BINDING_IDENTIFIER_FIELDS = {
+    (ast.Attribute, "attr"),
+    (ast.Constant, "value"),
+    (ast.keyword, "arg"),
+    (ast.ImportFrom, "module"),
 }
+
+
+def _module_bound_names(source: str) -> set[str]:
+    """Every name *source* binds, in any scope, according to CPython itself.
+
+    The completeness oracle for the scan below, and the second half of failing
+    closed. ``symtable`` is the compiler's own binding analysis, so it is closed
+    by construction: it already knows every binding form the language has, and
+    it will know the next one without this file being edited. That is exactly
+    the property an enumerated table could not have.
+
+    It is used only to answer "is this name bound at all?", because that is the
+    question it answers without any scope-naming guesswork -- comprehensions are
+    inlined on 3.12 and named on older versions, lambdas and classes have their
+    own conventions, and a guard that mismatched those would cry wolf on
+    ordinary code. Cross-checked against the AST scan, which is what supplies
+    line numbers and the bound expressions that can clear a binding.
+    """
+    # Imported here rather than at module scope: this file's import block is
+    # shared with another PR in the same series, and a local import keeps the
+    # two sets of additions textually apart.
+    import symtable
+
+    bound: set[str] = set()
+
+    def visit(table) -> None:
+        for symbol in table.get_symbols():
+            if symbol.is_assigned() or symbol.is_imported() or symbol.is_parameter():
+                bound.add(symbol.get_name())
+        for child in table.get_children():
+            visit(child)
+
+    visit(symtable.symtable(source, "<guard>", "exec"))
+    return bound
+
+
+def _alias_bound_name(node: ast.alias) -> str:
+    """The name an ``import`` statement actually binds.
+
+    ``import a.b as c`` binds ``c``; ``import a.b`` binds ``a``, not ``a.b``,
+    even though ``alias.name`` holds the whole dotted path. Reading the field
+    literally meant ``import retriever.client`` recorded ``retriever.client``,
+    which matches no allowlisted receiver -- so the import went unnoticed while
+    ``retriever.ainvoke(...)`` stayed exempt from the chokepoint test.
+    """
+    return node.asname or node.name.split(".", 1)[0]
 
 #: The only bindings ``graph/nodes.py`` may give the allowlisted receiver names,
 #: as ``ast.unparse`` renders them. Pinning the expressions rather than only
@@ -434,12 +506,22 @@ def _receiver_bindings(source: str) -> list[tuple[str, str | None, int]]:
     """Every place *source* binds an allowlisted receiver name, and what from.
 
     Yields ``(name, bound_expression_source, lineno)``, with ``None`` for a form
-    :func:`_binding_source` cannot read. Covers the shapes that put a value on a
-    name: assignment (plain, annotated, augmented, walrus, unpacked), ``for``,
-    ``with``, comprehensions, ``import ... as``, function parameters, ``match``
-    pattern captures and ``except ... as``. It does *not* resolve values through
-    intermediate variables -- that is what :data:`_PERMITTED_RECEIVER_BINDINGS`
-    is for.
+    :func:`_binding_source` cannot read.
+
+    Two rules, and no list of binding shapes to keep up to date:
+
+    * An ``ast.Name`` in ``Store``/``Del`` context is a binding, and
+      :func:`_binding_source` tries to read what it is bound to. This is the
+      only case that can be *cleared*.
+    * Any other node carrying a string field whose value is an allowlisted
+      receiver name is a binding this guard cannot read, unless the field is in
+      :data:`_NON_BINDING_IDENTIFIER_FIELDS`. That covers ``def``, ``async
+      def``, ``class``, ``import``, parameters, ``match`` captures, ``except
+      ... as`` and anything the language grows later, without naming any of
+      them.
+
+    It does *not* resolve values through intermediate variables -- that is what
+    :data:`_PERMITTED_RECEIVER_BINDINGS` is for.
     """
     tree = ast.parse(source)
     parents = {
@@ -448,29 +530,52 @@ def _receiver_bindings(source: str) -> list[tuple[str, str | None, int]]:
         for child in ast.iter_child_nodes(parent)
     }
     bindings = []
-    for node in ast.walk(tree):
-        string_field = _STRING_FIELD_BINDERS.get(type(node))
-        if isinstance(node, ast.alias):
-            # `import x as retriever` binds a name without an `ast.Name` node
-            # anywhere, so the Store walk below never sees it.
-            name, assigned = (node.asname or node.name), None
-        elif string_field is not None:
-            # A pattern capture or an `except ... as` name. The field is `None`
-            # for the forms that bind nothing -- `case _:`, a mapping pattern
-            # with no `**rest`, a bare `except:` -- and `None` matches no
-            # receiver name below, so those fall out without a special case.
-            name, assigned = getattr(node, string_field, None), None
-        elif isinstance(node, ast.arg):
-            # A parameter's value comes from a caller this file cannot see, so
-            # there is nothing here that could clear it.
-            name, assigned = node.arg, None
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            name, assigned = node.id, _binding_source(node, parents)
-        else:
-            continue
+
+    def record(name: str, assigned: str | None, node: ast.AST) -> None:
         if name in _NON_MODEL_AINVOKE_RECEIVERS:
             bindings.append((name, assigned, getattr(node, "lineno", 0)))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                record(node.id, _binding_source(node, parents), node)
+            continue
+        if isinstance(node, ast.alias):
+            # The one node whose field semantics are conditional rather than
+            # positional: which of `name`/`asname` binds depends on the other.
+            # Handled here so the generic rule below cannot report `retriever`
+            # for `import retriever.client as rc`, which binds only `rc`.
+            record(_alias_bound_name(node), None, node)
+            continue
+        for field in node._fields:
+            value = getattr(node, field, None)
+            for item in value if isinstance(value, list) else [value]:
+                if not isinstance(item, str) or not item.isidentifier():
+                    continue
+                if (type(node), field) in _NON_BINDING_IDENTIFIER_FIELDS:
+                    continue
+                # Nothing on the node bears an expression this could be cleared
+                # against: a pattern capture takes its value from a subject
+                # several nodes away, a handler takes whichever exception was
+                # raised, a parameter takes whatever a caller passed, and a
+                # `def` takes whatever its decorators return.
+                record(item, None, node)
     return bindings
+
+
+def _unaccounted_bound_names(source: str) -> list[str]:
+    """Allowlisted receivers CPython says *source* binds and the scan missed.
+
+    The cross-check that makes the scan's completeness testable instead of
+    assumed. If ``symtable`` reports a binding of an allowlisted name and the
+    AST walk found none, the walk has a blind spot -- and the honest thing for a
+    guard to do about a blind spot is fail, since the whole point of the
+    allowlist is a claim that these names never hold a chat model.
+    """
+    found = {name for name, _assigned, _lineno in _receiver_bindings(source)}
+    return sorted(
+        (_module_bound_names(source) & set(_NON_MODEL_AINVOKE_RECEIVERS)) - found
+    )
 
 
 def _smuggled_model_bindings(source: str) -> list[str]:
@@ -496,6 +601,12 @@ def _smuggled_model_bindings(source: str) -> list[str]:
                 f"line {lineno}: '{name}' is allowlisted out of the _send gate "
                 f"but is assigned a chat model: {assigned}"
             )
+    for name in _unaccounted_bound_names(source):
+        complaints.append(
+            f"'{name}' is allowlisted out of the _send gate and is bound "
+            "somewhere this guard's AST scan does not see, per symtable, so it "
+            "cannot show that no chat model reaches it"
+        )
     return complaints
 
 
@@ -513,17 +624,28 @@ class TestGraphChokepoint:
         sent = llm.ainvoke.await_args.args[0]
         assert "/home/cust7" not in sent[0].content
 
-    def test_no_node_calls_ainvoke_directly(self):
+    def test_no_node_calls_a_model_directly(self):
         """The gate is only worth anything if it is the only way out.
 
         Asserted against the source rather than by mocking, because the failure
         being guarded against is a *new* call site, which no existing test would
         exercise.
+
+        Every async invocation verb, not just ``ainvoke``: nothing in
+        ``src/aorta/chat/`` streams today, so a bare ``ainvoke`` check passes,
+        but streaming is the natural next thing a UI wants and ``plan_node`` and
+        ``answer_node`` already build their model without ``streaming=False``.
+        An ``astream`` added later would bypass ``_send`` *and* the guard whose
+        job is to notice that, which is the one combination this test cannot
+        afford.
         """
         source = Path(nodes_path()).read_text(encoding="utf-8")
         offenders = []
         for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.Attribute) or node.attr != "ainvoke":
+            if (
+                not isinstance(node, ast.Attribute)
+                or node.attr not in _MODEL_INVOCATION_VERBS
+            ):
                 continue
             receiver = node.value
             if (
@@ -532,10 +654,10 @@ class TestGraphChokepoint:
             ):
                 continue
             # `_send` itself is the sanctioned caller.
-            offenders.append(node.lineno)
+            offenders.append((node.lineno, node.attr))
         # One permitted occurrence: the call inside `_send`.
         assert len(offenders) == 1, (
-            f"graph/nodes.py calls .ainvoke at lines {offenders}; every outbound "
+            f"graph/nodes.py invokes a model at {offenders}; every outbound "
             "call must go through _send so the redaction gate applies."
         )
 
@@ -617,6 +739,23 @@ class TestGraphChokepoint:
             "match _get_llm():\n    case [*tool_fn]:\n        pass\n",
             "match _get_llm():\n    case {**retriever}:\n        pass\n",
             "try:\n    pass\nexcept Exception as retriever:\n    pass\n",
+            # `def`, `async def` and `class` bind through `name` too, and the
+            # enumerated version of this guard did not list them -- the fourth
+            # leak, and the one that prompted the redesign. A decorator can
+            # return anything, so a decorated `def retriever` is a real route:
+            # `@something` over `def retriever(): ...` leaves `retriever`
+            # holding whatever the decorator returned, which may be a model.
+            # None of these needed a new entry to be caught.
+            "def retriever():\n    return _get_llm()\n",
+            "async def retriever():\n    return _get_llm()\n",
+            "class tool_fn:\n    pass\n",
+            "@wraps\ndef retriever():\n    pass\n",
+            # A dotted import binds only its first component, but `alias.name`
+            # holds the whole path -- so this recorded `retriever.client`,
+            # matched no allowlisted receiver, and went unreported while
+            # `retriever.ainvoke(...)` stayed exempt from the chokepoint test.
+            "import retriever.client\n",
+            "import tool_fn.a.b\n",
         ],
     )
     def test_a_binding_the_guard_cannot_read_is_reported_not_ignored(self, binding):
@@ -636,6 +775,20 @@ class TestGraphChokepoint:
             "match x:\n    case _:\n        pass\n",
             "match x:\n    case {'a': 1}:\n        pass\n",
             "try:\n    pass\nexcept Exception:\n    pass\n",
+            # The cost of the inverted default is that ordinary *reads* of these
+            # identifiers must not be mistaken for bindings, so each of the
+            # exemptions in `_NON_BINDING_IDENTIFIER_FIELDS` gets a case. A
+            # guard that cried wolf on `obj.retriever` would be edited out of
+            # the way, which is the failure mode this half exists to prevent.
+            "obj.retriever\n",
+            "x = 'retriever'\n",
+            "f(retriever=1)\n",
+            "from retriever import thing\n",
+            "print(tool_fn)\n",
+            # Binds `rc`, not `retriever`: `asname` replaces the dotted path
+            # rather than adding to it, so reading both fields would report a
+            # name this statement never introduces.
+            "import retriever.client as rc\n",
         ],
     )
     def test_a_form_that_binds_no_name_is_not_reported(self, source):
@@ -648,6 +801,41 @@ class TestGraphChokepoint:
         gets edited out of the way.
         """
         assert _smuggled_model_bindings(source) == []
+
+    def test_symtable_catches_a_binding_the_ast_scan_cannot_see(self, monkeypatch):
+        """The scan's completeness is cross-checked, not asserted.
+
+        This is the half that makes a fifth patch unnecessary rather than
+        overdue. The scan above reports unknown *shapes*, but it is still code
+        in this file reading nodes it was written against; ``symtable`` is
+        CPython's own binding analysis, so it already knows every binding form
+        the language has and will know the next one without this file changing.
+
+        Driven by blinding the AST scan completely, because a blind spot that
+        can be constructed in Python today would be a bug to fix rather than a
+        case to pin -- the assertion worth making is that the oracle does not
+        depend on the scan being right.
+        """
+        monkeypatch.setattr(
+            "tests.chat.test_redaction._receiver_bindings", lambda _source: []
+        )
+        complaints = _smuggled_model_bindings("retriever = _get_llm()")
+        assert len(complaints) == 1
+        assert "symtable" in complaints[0]
+        assert "retriever" in complaints[0]
+
+    def test_the_oracle_stays_quiet_when_the_scan_accounts_for_everything(self):
+        """The other direction: agreement between the two must not complain.
+
+        ``graph/nodes.py`` binds both allowlisted names, so this would fire on
+        the real file if the two disagreed about ordinary code -- which is what
+        makes the assertion in
+        ``test_the_allowlist_cannot_be_used_to_smuggle_a_model_out`` non-vacuous
+        rather than green because nothing is being compared.
+        """
+        source = Path(nodes_path()).read_text(encoding="utf-8")
+        assert _unaccounted_bound_names(source) == []
+        assert _module_bound_names(source) >= set(_NON_MODEL_AINVOKE_RECEIVERS)
 
 
 def nodes_path() -> str:

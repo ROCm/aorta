@@ -229,6 +229,29 @@ def make_llm_sequence(*llms: MagicMock) -> Callable[..., MagicMock]:
     return _next_llm
 
 
+@pytest.fixture(autouse=True)
+def _no_sticky_escalation():
+    """Undo any auto-escalation, which is process-wide by design.
+
+    ``_EscalationState`` is deliberately process-wide: "keep it for the process"
+    is the point, and the whole test run is one process. Without this an
+    escalation in one test silently puts the next one on the native protocol.
+
+    In the directory conftest rather than beside the tests that provoke it, so
+    that the isolation is structural. No test outside ``test_act_node_tool_
+    modes.py`` drives the text loop into a dead end today -- checked by running
+    the suite with the state asserted clean after every test -- but "today" is
+    the whole of that guarantee, and the leak it would cause is a test in an
+    unrelated module silently running on the native protocol. Cheap to make
+    impossible; expensive to debug once it happens.
+    """
+    from aorta.chat.graph import nodes
+
+    nodes.reset_tool_mode_escalation()
+    yield
+    nodes.reset_tool_mode_escalation()
+
+
 @pytest.fixture()
 def fake_retriever():
     """Return a mock retriever that yields fixed documents.
