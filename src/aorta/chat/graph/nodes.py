@@ -1153,7 +1153,7 @@ async def _escalated_native_attempt(
     query from here on.
     """
     try:
-        outcome = await _run_native_loop(state, escalated=True)
+        outcome = await _run_native_loop(state, escalated=True, prior_trace=trace)
     except Exception as exc:
         followup = _record_escalation_failure()
         logger.warning(
@@ -1271,12 +1271,23 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
 
 
 async def _run_native_loop(
-    state: AgentState, escalated: bool = False
+    state: AgentState,
+    escalated: bool = False,
+    prior_trace: list[str] | None = None,
 ) -> _NativeOutcome:
     """:func:`_act_native`, plus the answer to "did native work?".
 
     Split out so the escalated retry can tell a rescue from a second dead end.
     Ordinary native queries go through the wrapper and discard the extra fact.
+
+    *prior_trace* is what already ran before this loop started -- the text
+    protocol's tool results, when this is the escalated retry. It is kept
+    separate from the loop's own ``trace`` rather than seeding it, because the
+    two answer different questions: the loop's trace decides whether *this*
+    protocol gathered anything worth synthesising, while the pair together
+    decide whether the query as a whole may be labelled "no tool ran". Seeding
+    would conflate them and buy a synthesis call off the back of a tool the
+    other protocol ran.
     """
     plain = _get_llm(temperature=0.1, streaming=False)
     llm = plain.bind_tools(list(TOOL_REGISTRY.values()))
@@ -1363,8 +1374,13 @@ async def _run_native_loop(
             " Escalating from the text protocol did not help, so the model is "
             "returning nothing on either." if escalated else "",
         )
+        # `trace` is provably empty on this branch, so this is `prior_trace`.
+        # Passing it matters: a text loop that ran a tool before dead-ending
+        # must not have its query labelled "I could not use my tools", which is
+        # what an empty trace tells `_abandoned_result` to do.
         return _NativeOutcome(
-            result=await _abandoned_result(state, trace), answered=False
+            result=await _abandoned_result(state, [*(prior_trace or []), *trace]),
+            answered=False,
         )
 
     # Reaching here means the loop never produced a tool-free reply, so the

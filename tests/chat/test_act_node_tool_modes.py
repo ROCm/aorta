@@ -995,6 +995,58 @@ class TestAnEndpointThatAnswersNothingOnNativeEither:
         assert "--enable-auto-tool-choice" not in caplog.text
 
     @pytest.mark.asyncio
+    async def test_a_text_loop_that_ran_a_tool_keeps_its_trace(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The label is about the query, not about the protocol that gave up last.
+
+        ``TestAnEndpointThatRefusesNative`` pins this for the raising path,
+        where the caller passes the text trace to ``_abandoned_result`` itself.
+        The silent path builds its result *inside* the native loop, whose own
+        trace is empty by construction -- so without the trace being threaded
+        down, a query that had already run a tool under ``text`` came back
+        labelled "I could not use my tools for this question".
+        """
+        from aorta.chat.graph.nodes import _DEGRADED_ANSWER_PREFIX
+
+        plain, _bound = self._silent_llm()
+        plain.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(content='ACTION: list_files(path=".")'),
+                _dead_end_reply(),
+                _dead_end_reply(),
+            ]
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+        ):
+            result = await act_node(_state())
+        assert result["tool_trace"]
+        assert _DEGRADED_ANSWER_PREFIX not in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_the_give_up_answer_costs_one_fallback_call_not_two(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Threading the trace must not become a second `_abandoned_result`.
+
+        The native loop has already built one by the time the caller sees the
+        outcome, so rebuilding it with the right trace would bill the retrieval
+        fallback twice on the query that has already paid the most.
+        """
+        plain, _bound = self._silent_llm()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch(
+                "aorta.chat.graph.nodes._fallback_retrieval_answer",
+                new=AsyncMock(return_value=""),
+            ) as fallback,
+        ):
+            await act_node(_state())
+        assert fallback.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_a_tool_call_commits_even_when_the_synthesis_is_empty(
         self, text_mode, tool_mode_not_chosen
     ):
