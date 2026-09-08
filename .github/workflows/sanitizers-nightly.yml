@@ -552,7 +552,12 @@ jobs:
               "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_tiny_load"
             hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/consan_gemm_f32.hsaco\"" \
               "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_gemm_load"
-            for c in consan-gemm consan-lds-dispatch consan-tiny; do
+            # Named once, because the vacuity check at the end of this payload
+            # has to know which cases were invoked in order to tell "produced
+            # nothing" from "was never asked to". Two lists, one per sanitizer,
+            # so each stays next to the invocations it describes.
+            CONSAN_CASES="consan-gemm consan-lds-dispatch consan-tiny"
+            for c in ${CONSAN_CASES}; do
               mkdir -p "${SANITIZER_OUT}/informational/${c}"
             done
             aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml \
@@ -568,7 +573,8 @@ jobs:
             # waitcheck-gemm under one "gemm" kernel heading. Each survey waitcheck
             # scan is a dedicated best-effort run publishing its OWN report -- the
             # gated Tab-1 waitcheck report is never reused here. Non-gating.
-            for c in waitcheck-gemm waitcheck-lds-dispatch waitcheck-tiny; do
+            WAITCHECK_CASES="waitcheck-gemm waitcheck-lds-dispatch waitcheck-tiny"
+            for c in ${WAITCHECK_CASES}; do
               mkdir -p "${SANITIZER_OUT}/informational/${c}"
             done
             # daily-waitcheck-gemm-object scans the same consan_gemm_f32.hsaco object
@@ -580,6 +586,63 @@ jobs:
               --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch" || true
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml \
               --output-dir "${SANITIZER_OUT}/informational/waitcheck-tiny" || true
+
+            # Every survey recipe above runs under `|| true`, because a non-gating
+            # row must not fail the job merely for reporting something. That is
+            # what let ROCm/aorta#450 sit unnoticed: rows ended `error` with zero
+            # findings on every run, and the baseline comparison in the gate job
+            # only covers the three GATED cases, so nothing ever looked at these
+            # reports at all.
+            #
+            # So look at them. --vacuous-only asserts the one thing that is always
+            # wrong regardless of what a row is expected to observe: a run that
+            # terminated without producing any signal. Cases where that is the
+            # intended outcome declare it in verdict_baselines.json (consan_tiny
+            # does). This CAN turn the survey job red, which is the point -- the
+            # artifact upload below is `if: always()`, so Tab 2 still publishes.
+            #
+            # --require closes the same hole one level up. `|| true` also swallows
+            # a recipe that dies BEFORE writing a report -- a bad input, a missing
+            # fixture, a startup failure -- and a report that does not exist cannot
+            # be judged vacuous. Naming the six invoked cases makes their absence
+            # an error, so an entirely empty survey fails here instead of passing
+            # silently. A job-level kill (cancellation, the runner cap in #370, the
+            # timeout-minutes ceiling) does not need excusing: it takes this whole
+            # payload down, so the line below never runs at all.
+            #
+            # --known-vacuous names the two rows that are ALREADY vacuous on the
+            # ROCm 10 objects this lane scans, so the check can be armed today
+            # without being red for reasons nobody can act on here. Measured on
+            # the real survey trees of runs 33755195031, 33872660689, 33965800908
+            # and 34032862308, both on the same 169,996,560-byte Tensile object:
+            #
+            #   consan-gemm     consan_strict_load_rejection, 0 findings. ConSan
+            #                   needs 1,721,958,400 B of patched image against a
+            #                   419,430,400 B ceiling (4.11x) and never instruments
+            #                   it. consan_policy does not change that -- see
+            #                   daily-consan-gemm.yaml and
+            #                   docs/sanitizers/consan-gemm-patched-image-growth-cap.md.
+            #   waitcheck-gemm  worklist_not_fully_checked, 0 findings. The
+            #                   rj_waitcheck CFG dataflow non-convergence of #453.
+            #
+            # This is NOT a blessing and is deliberately not spelled as an
+            # expected_error: it says these outcomes are wrong and being worked,
+            # not that they are acceptable. It is self-retiring -- the comparator
+            # FAILS if a listed case starts producing signal, so a fixed row cannot
+            # leave a stale suppression behind, and it fails if a listed case has no
+            # report at all. The other four rows are checked for real from tonight,
+            # which is the #450 regression path this whole change exists to close.
+            echo "[$(date +%T)] survey: rejecting vacuous outcomes …"
+            REQUIRE=""
+            for c in ${CONSAN_CASES} ${WAITCHECK_CASES}; do
+              REQUIRE="${REQUIRE} --require informational/${c}"
+            done
+            # shellcheck disable=SC2086  # REQUIRE is a deliberate argument list
+            python scripts/sanitizers/compare_verdict_baselines.py \
+              --vacuous-only ${REQUIRE} \
+              --known-vacuous informational/consan-gemm \
+              --known-vacuous informational/waitcheck-gemm \
+              "${SANITIZER_OUT}"
           '
 
       - name: Reclaim results ownership
