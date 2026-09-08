@@ -160,6 +160,11 @@ class FetchResult:
     #: it up front: these are the lines that explain a wait, and they used to be
     #: printed only once the wait had ended successfully.
     notes: list[str] = field(default_factory=list)
+    #: What this install replaced, for a refresh that went ahead without asking.
+    changes: list[str] = field(default_factory=list)
+    #: Set when the published asset was already installed, so nothing was
+    #: transferred and nothing was replaced.
+    up_to_date: bool = False
 
 
 def installed_version() -> str:
@@ -626,6 +631,92 @@ def describe_target(source: IndexSource, dest: str | Path) -> list[str]:
     return lines
 
 
+def _parse_manifest(text: str, source: IndexSource) -> manifest_mod.Manifest:
+    """Parse a downloaded manifest, or raise :class:`IndexFetchError`.
+
+    The schema check belongs here rather than after the install: a schema this
+    build cannot read must fail the fetch rather than land on disk and then be
+    rejected by the first load, which reports a successful fetch and leaves a
+    chat that no longer starts.
+    """
+    try:
+        manifest = manifest_mod.Manifest.from_dict(json.loads(text))
+        manifest_mod.ensure_supported_schema(manifest, f"the index at {source.index_url}")
+    except (ValueError, manifest_mod.ManifestError) as exc:
+        raise IndexFetchError(
+            f"the manifest at {source.manifest_url} is not usable: {exc}"
+        ) from exc
+    return manifest
+
+
+def _validate_against_provider(manifest: manifest_mod.Manifest) -> manifest_mod.ValidationReport:
+    """Check an incoming manifest against what this install would query with."""
+    provider = get_provider()
+    return manifest_mod.validate(
+        manifest,
+        embedding_model=provider.model_id(),
+        collection=provider.collection_name(),
+        embedding_identity=provider.vector_identity(),
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        installed_version=installed_version(),
+    )
+
+
+def _local_manifest(index_path: str | Path) -> manifest_mod.Manifest | None:
+    """The installed index's sidecar, or ``None`` when there is not a usable one.
+
+    Absent, unreadable and unparseable all collapse to ``None`` deliberately.
+    Every caller is deciding what to do *about* the local index, and none of
+    those decisions is improved by a traceback out of a sidecar that is already
+    broken -- the load path is where a bad manifest has to be fatal.
+    """
+    target = Path(index_path)
+    if not target.exists():
+        return None
+    try:
+        return manifest_mod.read_manifest(target)
+    except manifest_mod.ManifestError as exc:
+        logger.debug("No usable manifest beside %s: %s", target, exc)
+        return None
+
+
+def _refresh_notes(
+    local: manifest_mod.Manifest | None, incoming: manifest_mod.Manifest
+) -> list[str]:
+    """What a refresh is about to change, field by field.
+
+    A routine ``fetch`` over an older fetched index proceeds without asking --
+    it is the documented way to refresh, and demanding ``--force`` every time
+    would train people to always pass it -- so what it replaced is reported
+    instead.
+    """
+    if local is None:
+        return []
+    changes = []
+    for label, was, now in (
+        ("built_at", local.built_at, incoming.built_at),
+        ("aorta_sha", local.aorta_sha[:7], incoming.aorta_sha[:7]),
+        ("corpus_digest", local.corpus_digest[:12], incoming.corpus_digest[:12]),
+    ):
+        if was != now:
+            changes.append(f"{label}: {was or 'unknown'} -> {now or 'unknown'}")
+    return changes
+
+
+def _is_same_index(local: manifest_mod.Manifest | None, incoming: manifest_mod.Manifest) -> bool:
+    """Whether the installed index is byte-identical to the published one.
+
+    ``index_sha256`` is exact content identity, so this is the one comparison
+    that can skip the transfer outright. Both sides must actually carry one: a
+    manifest predating the field would otherwise compare equal on ``""`` and
+    skip a download it needed.
+    """
+    if local is None or not local.index_sha256 or not incoming.index_sha256:
+        return False
+    return local.index_sha256 == incoming.index_sha256
+
+
 def fetch_index(
     version: str | None = None,
     index_path: str | Path | None = None,
@@ -633,36 +724,58 @@ def fetch_index(
 ) -> FetchResult:
     """Download, verify, validate and install the published index.
 
-    Verification order matters: checksum first, so a corrupt download never
-    reaches the manifest parser, then manifest validation, so a mismatched index
-    never reaches the destination path. Nothing is installed until both pass.
+    The order of the checks is load-bearing, and two of them moved.
+
+    **Identity is checked on the manifest, before the asset is transferred.**
+    That ~1 KB sidecar already carries ``embedding_model``, ``collection`` and
+    ``embedding_identity``, so a mismatch is knowable the moment it arrives --
+    yet it used to be validated only after the full index transfer and its
+    checksum. A reporter with a misconfigured embedding provider therefore
+    downloaded ~20 MB that was guaranteed to be discarded. Fixing the
+    configuration stops that particular refusal; any later mismatch -- a model
+    change, an endpoint change -- hits the same wasted transfer.
+
+    **The asset is skipped entirely when the local sidecar already records the
+    published ``index_sha256``.** A refresh that would change nothing is the
+    common case, and it cost the whole download.
+
+    Checksum verification stays where it was, because it genuinely needs the
+    bytes. Nothing is installed until it and the manifest/checksum agreement
+    both pass.
     """
     dest = Path(index_path) if index_path else settings.index_file
     source = source or resolve_source(version)
-    provider = get_provider()
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # The text is kept, not re-serialised from the dataclass at install time:
+    # ``from_dict`` drops keys this version predates, and writing them back out
+    # would strip a newer builder's fields from the sidecar this machine keeps.
+    manifest_text = _download_text(source.manifest_url)
+    manifest = _parse_manifest(manifest_text, source)
+    report = _validate_against_provider(manifest)
+    report.raise_if_refused(source.index_url)
+
+    local = _local_manifest(dest)
+    if _is_same_index(local, manifest):
+        logger.info("Already up to date; the published asset was not downloaded.")
+        return FetchResult(
+            index_path=dest,
+            manifest=manifest,
+            source=source.describe(),
+            warnings=list(report.warnings),
+            notes=list(source.notes),
+            up_to_date=True,
+        )
+    changes = _refresh_notes(local, manifest)
 
     # Staged inside the destination directory so the final move is a rename on
     # one filesystem, and therefore atomic: a concurrent reader sees the old
     # index or the new one, never a half-written file.
     with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=dest.parent) as staging_dir:
         staged = Path(staging_dir) / ASSET_NAME
-        manifest_text = _download_text(source.manifest_url)
         checksum_line = _download_text(source.checksum_url)
         _download(source.index_url, staged)
         checksum = _verify_checksum(staged, checksum_line, source.checksum_url)
-
-        try:
-            manifest = manifest_mod.Manifest.from_dict(json.loads(manifest_text))
-            # Before ``_install_staged``, not after: a schema this build cannot
-            # read must fail the fetch rather than be written to disk and then
-            # rejected by the first load, which reports success and leaves a
-            # chat that no longer starts.
-            manifest_mod.ensure_supported_schema(manifest, f"the index at {source.index_url}")
-        except (ValueError, manifest_mod.ManifestError) as exc:
-            raise IndexFetchError(
-                f"the manifest at {source.manifest_url} is not usable: {exc}"
-            ) from exc
         if manifest.index_sha256 and manifest.index_sha256 != checksum:
             raise IndexFetchError(
                 "the manifest and the checksum file disagree about the index:\n"
@@ -670,17 +783,6 @@ def fetch_index(
                 f"  .sha256 says  {checksum}\n"
                 "The published set is inconsistent; nothing has been installed."
             )
-
-        report = manifest_mod.validate(
-            manifest,
-            embedding_model=provider.model_id(),
-            collection=provider.collection_name(),
-            embedding_identity=provider.vector_identity(),
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-            installed_version=installed_version(),
-        )
-        report.raise_if_refused(source.index_url)
 
         # Index first, sidecars after. Writing the sidecars first looked like
         # the fail-safe order -- and is, on a first install, where there is no
@@ -700,6 +802,7 @@ def fetch_index(
         source=source.describe(),
         warnings=[*report.warnings, *_carried_note(carried)],
         notes=list(source.notes),
+        changes=changes,
     )
 
 
@@ -743,16 +846,7 @@ def side_load(staged: str | Path, index_path: str | Path | None = None) -> Fetch
             "The staged copy is incomplete or corrupt."
         )
 
-    provider = get_provider()
-    report = manifest_mod.validate(
-        manifest,
-        embedding_model=provider.model_id(),
-        collection=provider.collection_name(),
-        embedding_identity=provider.vector_identity(),
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-        installed_version=installed_version(),
-    )
+    report = _validate_against_provider(manifest)
     report.raise_if_refused(origin)
 
     dest.parent.mkdir(parents=True, exist_ok=True)

@@ -1035,7 +1035,9 @@ def index_fetch(
                 {
                     "index": str(result.index_path),
                     "source": result.source,
+                    "up_to_date": result.up_to_date,
                     "notes": result.notes,
+                    "changes": result.changes,
                     "warnings": result.warnings,
                     "manifest": result.manifest.describe(),
                 },
@@ -1043,9 +1045,12 @@ def index_fetch(
             )
         )
         return
-    click.echo(f"Installed {result.index_path}")
+    verb = "Already up to date" if result.up_to_date else "Installed"
+    click.echo(f"{verb} {result.index_path}")
     click.echo(f"  source    {result.source}")
     click.echo(f"  built as  {result.manifest.describe()}")
+    for change in result.changes:
+        click.echo(f"  replaced  {change}")
     for warning in result.warnings:
         click.echo(f"warning: {warning}", err=True)
 

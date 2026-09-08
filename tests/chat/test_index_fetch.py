@@ -328,6 +328,132 @@ class TestTheTimeoutsAreSplit:
         index_ops._widen_read_timeout(io.BytesIO(b"body"))
 
 
+class TestIdentityIsCheckedBeforeTheAsset:
+    """The ~1 KB manifest answers "is this usable" before the ~20 MB transfer.
+
+    It was downloaded first and validated last, so a reporter whose embedding
+    provider was misconfigured paid for the whole asset and its checksum before
+    being told the result was unusable. Fixing that configuration stops this
+    particular refusal; a later model or endpoint change hits the same waste.
+    """
+
+    def test_a_mismatch_never_requests_the_asset(self, server, tmp_path: Path):
+        _reserialise(server, _manifest(embedding_model="other/model"))
+
+        with pytest.raises(manifest_mod.IndexMismatchError):
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert not any(url.endswith(ASSET_NAME) for url in server.requested), (
+            f"the index asset was transferred anyway: {server.requested}"
+        )
+
+    def test_a_future_schema_never_requests_the_asset(self, server, tmp_path: Path):
+        raw = json.loads(_manifest().to_json())
+        raw["schema_version"] = manifest_mod.SCHEMA_VERSION + 1
+        server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = json.dumps(raw).encode()
+
+        with pytest.raises(IndexFetchError, match="Upgrade aorta"):
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert not any(url.endswith(ASSET_NAME) for url in server.requested)
+
+    def test_a_clean_fetch_still_requests_all_three(self, server, tmp_path: Path):
+        """Failing fast must not turn into fetching less than it needs."""
+        fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert sum(url.endswith(ASSET_NAME) for url in server.requested) == 1
+        assert any(url.endswith(manifest_mod.CHECKSUM_SUFFIX) for url in server.requested)
+
+    def test_the_installed_sidecar_keeps_a_newer_builders_extra_keys(self, server, tmp_path: Path):
+        """Forward tolerance is the reason the downloaded text is what lands.
+
+        ``Manifest.from_dict`` drops keys this version predates, so
+        re-serialising the dataclass would quietly strip them from the sidecar
+        this machine then keeps.
+        """
+        raw = json.loads(_manifest().to_json())
+        raw["some_future_field"] = "keep me"
+        server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = json.dumps(raw).encode()
+        dest = tmp_path / "i.sqlite"
+
+        fetch_index(version="0.2.1", index_path=dest)
+
+        installed = json.loads(manifest_mod.manifest_path(dest).read_text(encoding="utf-8"))
+        assert installed["some_future_field"] == "keep me"
+
+
+class TestAlreadyUpToDate:
+    """A refresh that would change nothing cost the whole transfer."""
+
+    def test_a_matching_local_sidecar_skips_the_asset(self, server, tmp_path: Path):
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        server.requested.clear()
+
+        result = fetch_index(version="0.2.1", index_path=dest)
+
+        assert result.up_to_date is True
+        assert not any(url.endswith(ASSET_NAME) for url in server.requested)
+        # Only the manifest: the checksum file is the asset's, so it is not
+        # worth a request when the asset is not being fetched.
+        assert all(url.endswith(manifest_mod.MANIFEST_SUFFIX) for url in server.requested)
+        assert dest.read_bytes() == BODY
+
+    def test_a_differing_published_index_is_installed_and_says_what_changed(
+        self, server, tmp_path: Path
+    ):
+        import hashlib
+
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+
+        newer = BODY + b" plus a commit"
+        digest = hashlib.sha256(newer).hexdigest()
+        server.assets[ASSET_NAME] = newer
+        server.assets[ASSET_NAME + manifest_mod.CHECKSUM_SUFFIX] = (
+            f"{digest}  {ASSET_NAME}\n".encode()
+        )
+        _reserialise(
+            server,
+            _manifest(
+                index_sha256=digest,
+                aorta_sha="99beef0" + "0" * 33,
+                corpus_digest="def456",
+                built_at="2026-09-05T00:00:00+00:00",
+            ),
+        )
+
+        result = fetch_index(version="0.2.1", index_path=dest)
+
+        assert result.up_to_date is False
+        assert dest.read_bytes() == newer
+        reported = " ".join(result.changes)
+        assert "corpus_digest" in reported
+        assert "aorta_sha" in reported
+        assert "built_at" in reported
+
+    def test_a_local_index_with_no_sidecar_is_fetched_rather_than_assumed(
+        self, server, tmp_path: Path
+    ):
+        """An index nothing describes is not evidence that it is up to date."""
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(BODY)
+
+        assert fetch_index(version="0.2.1", index_path=dest).up_to_date is False
+
+    def test_a_manifest_predating_index_sha256_does_not_compare_equal_on_nothing(
+        self, server, tmp_path: Path
+    ):
+        """Two empty digests must not read as a match and skip a needed download."""
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"stale")
+        manifest_mod.write_manifest(dest, _manifest(index_sha256=""))
+        _reserialise(server, _manifest(index_sha256=""))
+
+        assert fetch_index(version="0.2.1", index_path=dest).up_to_date is False
+        assert dest.read_bytes() == BODY
+
+
 class TestFetchFailures:
     def test_a_missing_asset_names_the_alternatives(self, monkeypatch, tmp_path: Path):
         fake = _FakeServer({})
