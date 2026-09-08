@@ -128,6 +128,39 @@ class TestNoticeIsSessionLocal:
         assert one.getvalue().count("aorta chat: redacted") == 1
         assert two.getvalue().count("aorta chat: redacted") == 1
 
+    async def test_overlapping_sessions_are_each_told(self):
+        """Two sessions live at the same time, which is how Chainlit runs them.
+
+        The sequential case above already rejects a bare module-level flag. What
+        it does not reject is the shortcut #437 names -- resetting that global in
+        ``on_start`` -- which is only wrong once two sessions overlap. Each
+        session here is held inside its own binding until the other has emitted,
+        so a shared flag either steals one disclosure or hands out two.
+        """
+        import asyncio
+
+        _, summary = redaction.redact_text(CUSTOMER_TEXT)
+        both_emitted = asyncio.Event()
+        emitted = 0
+
+        async def session(stream: io.StringIO) -> None:
+            nonlocal emitted
+            with redaction.use_notice_state(redaction.NoticeState()) as state:
+                assert redaction.emit_notice_once(summary, stream=stream) is True
+                emitted += 1
+                if emitted == 2:
+                    both_emitted.set()
+                await both_emitted.wait()
+                # Still holding its own notice, after the other session's turn.
+                assert redaction.take_pending_notice(state) is not None
+
+        one, two = io.StringIO(), io.StringIO()
+        await asyncio.gather(session(one), session(two))
+
+        assert one.getvalue().count("aorta chat: redacted") == 1
+        assert two.getvalue().count("aorta chat: redacted") == 1
+        assert redaction.current_notice_state().emitted is False
+
     def test_one_session_is_still_told_only_once(self):
         _, summary = redaction.redact_text(CUSTOMER_TEXT)
         state = redaction.NoticeState()
