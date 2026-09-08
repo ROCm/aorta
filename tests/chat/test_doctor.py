@@ -20,6 +20,7 @@ import shlex
 from pathlib import Path
 
 import pytest
+from langchain_core.embeddings import Embeddings
 
 from aorta.chat import doctor
 from aorta.chat.config import settings
@@ -34,24 +35,113 @@ def _by_name(report, name: str):
     return found[0]
 
 
-def _fill_index(index: Path, collection: str, rows: int = 3) -> None:
-    """Write the one table the health probe and the contents check read.
+class FixedWidthEmbeddings(Embeddings):
+    """384 dimensions -- what the fixture manifest claims -- with no model.
 
-    A real sqlite file rather than filler bytes, because "healthy" now means
-    an index this install could query, and filler bytes are precisely the
-    clobbered index that has to read as unhealthy. Built with stdlib sqlite3
-    and no sqlite-vec: the chunk table is an ordinary table, which is the same
-    reason ``collection_chunk_count`` can count it without an embedding model.
+    The doctor never embeds anything, so the vectors only have to exist at the
+    width the store was registered at. Deterministic and offline for the same
+    reason as ``test_sqlite_vec_store``'s bag-of-words embedder.
+    """
+
+    def _embed(self, text: str) -> list[float]:
+        return [float(len(text))] * 384
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed(text)
+
+
+def _vec_connection(index: Path):
+    """A connection that can write ``vec0`` tables, for damaging a built store.
+
+    ``DROP``/``DELETE`` against the virtual table need the extension loaded;
+    the doctor deliberately reads without it, so the damage side has to bring
+    its own.
     """
     import sqlite3
 
+    import sqlite_vec
+
     conn = sqlite3.connect(index)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    return conn
+
+
+def _fill_index(index: Path, collection: str, rows: int = 3) -> None:
+    """Write a store retrieval could actually read, holding ``rows`` chunks.
+
+    Built by the real :class:`SqliteVecStore` rather than by hand-rolled DDL,
+    which is the whole point. "Healthy" means an index this install could
+    query, so a fixture that invents its own schema can only ever prove the
+    probe agrees with the fixture: the previous one wrote a lone chunk table
+    with a ``text`` column and no registry beside it, which the probe called
+    healthy and ``_get_vectorstore`` rejected outright as a missing
+    collection. Writing it with the real writer means the schema under test is
+    the schema retrieval expects.
+
+    ``rows=0`` empties the tables afterwards rather than skipping the build, so
+    "opens and holds nothing for this install" keeps a real store's schema
+    instead of becoming a second, weaker kind of damage.
+    """
+    from aorta.chat.rag.retriever import SqliteVecStore
+
+    store = SqliteVecStore(path=index, embedding=FixedWidthEmbeddings(), collection=collection)
     try:
-        conn.execute(f'CREATE TABLE "chunks_{collection}" (id INTEGER PRIMARY KEY, text TEXT)')
-        conn.executemany(
-            f'INSERT INTO "chunks_{collection}" (text) VALUES (?)',
-            [(f"chunk {n}",) for n in range(rows)],
-        )
+        store.add_texts([f"chunk {n}" for n in range(max(rows, 1))], provider="local")
+    finally:
+        store.close()
+
+    if rows == 0:
+        conn = _vec_connection(index)
+        try:
+            conn.execute(f'DELETE FROM "chunks_{collection}"')
+            conn.execute(f'DELETE FROM "vec_{collection}"')
+            conn.commit()
+        finally:
+            conn.close()
+
+
+#: Ways a partial copy or an interrupted build breaks the readable-collection
+#: contract while leaving the non-empty chunk table intact. Every one of these
+#: read as healthy until the probe checked more than the chunk count.
+STORE_DAMAGE = ("registry-table", "registry-row", "chunk-columns", "vec-table", "vector-rows")
+
+
+def _break_store(index: Path, collection: str, how: str) -> None:
+    """Damage one part of the readable-collection contract, leaving the rest."""
+    from aorta.chat.rag.retriever import _REGISTRY_TABLE
+
+    conn = _vec_connection(index)
+    try:
+        if how == "registry-table":
+            conn.execute(f'DROP TABLE "{_REGISTRY_TABLE}"')
+        elif how == "registry-row":
+            conn.execute(f'DELETE FROM "{_REGISTRY_TABLE}" WHERE collection = ?', (collection,))
+        elif how == "chunk-columns":
+            # The exact shape the old fixture built: same row count, no column
+            # retrieval can select.
+            rows = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()[0]
+            conn.execute(f'DROP TABLE "chunks_{collection}"')
+            conn.execute(
+                f'CREATE TABLE "chunks_{collection}" (id INTEGER PRIMARY KEY, text TEXT)'
+            )
+            conn.executemany(
+                f'INSERT INTO "chunks_{collection}" (text) VALUES (?)',
+                [(f"chunk {n}",) for n in range(rows)],
+            )
+        elif how == "vec-table":
+            conn.execute(f'DROP TABLE "vec_{collection}"')
+        elif how == "vector-rows":
+            conn.execute(
+                f'DELETE FROM "vec_{collection}" WHERE rowid = '
+                f'(SELECT MIN(rowid) FROM "vec_{collection}")'
+            )
+        else:  # pragma: no cover - guards the parametrise list against typos
+            raise AssertionError(f"unknown damage {how!r}")
         conn.commit()
     finally:
         conn.close()
@@ -417,6 +507,81 @@ class TestIndexChecks:
         assert check.status == FAIL
         assert "cannot read" in check.detail
         assert "aorta chat index build" in check.procedure
+
+    def test_the_healthy_fixture_is_a_store_retrieval_can_actually_read(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The probe and the fixture must not agree with each other and nobody else.
+
+        This is the assertion whose absence let the previous fixture stand. It
+        built a chunk table with a ``text`` column and no registry or vector
+        table beside it; the probe counted the rows, called the index healthy,
+        and ``_get_vectorstore`` rejected the same file outright as a missing
+        collection. Every test asserting ``healthy`` was therefore asserting it
+        of a store no query could answer from. Reading the fixture back through
+        the real class is what keeps "healthy" meaning queryable, and what will
+        fail if the store's schema moves under the probe.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+        from aorta.chat.rag.retriever import SqliteVecStore
+
+        index = _write_index(monkeypatch, tmp_path)
+        assert doctor._store_defect(index) == ""
+
+        store = SqliteVecStore(
+            path=index,
+            embedding=FixedWidthEmbeddings(),
+            collection=get_provider().collection_name(),
+        )
+        try:
+            assert store.collection_exists()
+            assert len(store.similarity_search("chunk", k=3)) == 3
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize("how", STORE_DAMAGE)
+    def test_a_partially_copied_store_is_not_reported_as_matching(
+        self, monkeypatch, tmp_path: Path, how
+    ):
+        """A non-empty chunk table is necessary for a query, not sufficient for one.
+
+        Each of these leaves the chunk table this probe used to be satisfied by
+        and removes something the read path also needs -- the registry, the row
+        in it, the columns retrieval selects, the vector table, or the vectors
+        themselves. All of them answer nothing, and all of them were reported
+        as a matching index.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path)
+        assert doctor._store_defect(index) == ""
+
+        _break_store(index, get_provider().collection_name(), how)
+        assert doctor._store_defect(index)
+
+        report = run_checks(backend=False)
+        assert _by_name(report, "index manifest").status == FAIL
+        assert "cannot read" in _by_name(report, "index manifest").detail
+        # And the other reader of the same helper moves with it.
+        assert _by_name(report, "embedding model cache").status != SKIP
+
+    @pytest.mark.parametrize("how", STORE_DAMAGE)
+    def test_the_damaged_states_are_ones_the_manifest_check_cannot_see(
+        self, monkeypatch, tmp_path: Path, how
+    ):
+        """Otherwise the test above would pass without the store probe existing.
+
+        The manifest is a sidecar: it is not re-read from the store, and
+        ``validate`` never hashes the ``.sqlite``. A legacy manifest claims no
+        chunk count either, so nothing in ``check_index`` contradicts any of
+        this damage -- which is exactly why the probe has to.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+        from aorta.chat.rag.index_ops import check_index
+
+        index = _write_index(monkeypatch, tmp_path)
+        _break_store(index, get_provider().collection_name(), how)
+        assert not check_index(index, strict=False).refusals
 
     @pytest.mark.parametrize("state", ["healthy", "unreadable", "empty"])
     def test_both_readers_of_index_health_agree(self, monkeypatch, tmp_path: Path, state):

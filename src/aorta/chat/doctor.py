@@ -250,12 +250,26 @@ def _store_defect(index_file: Path) -> str:
     Both readers of index health below go through this one function, because a
     report that says the index matches on one line and is unusable on another
     is worse than either answer on its own.
+
+    A non-empty chunk table is necessary but not sufficient, which is why the
+    schema check follows it -- see :func:`_collection_schema_defect`.
     """
     from aorta.chat.rag.embeddings.factory import get_provider
-    from aorta.chat.rag.retriever import collection_chunk_count
+
+    # The registry name comes from the module that writes it, imported above the
+    # ``except`` below so that a rename raises here -- a visible failed check --
+    # rather than being caught and reported as a defect in every index.
+    from aorta.chat.rag.retriever import _REGISTRY_TABLE, collection_chunk_count
 
     try:
-        chunks = collection_chunk_count(index_file, get_provider().collection_name())
+        collection = get_provider().collection_name()
+        chunks = collection_chunk_count(index_file, collection)
+        # ``None`` is no chunk table for this install's collection and ``0`` is
+        # an empty one -- an interrupted build, or a file indexed by another
+        # provider. Neither can answer a question.
+        if not chunks:
+            return f"no chunks for this install's collection in {index_file}"
+        return _collection_schema_defect(index_file, collection, _REGISTRY_TABLE, chunks)
     except Exception as exc:
         # Deliberately broad, for the same reason as ``_check_backend``: a
         # damaged index surfaces as IndexUnreadableError, sqlite3.Error or
@@ -263,12 +277,93 @@ def _store_defect(index_file: Path) -> str:
         # one of those has failed at its only job. The message is the hint.
         logger.debug("index store probe failed", exc_info=True)
         return str(exc)
-    # ``None`` is no chunk table for this install's collection and ``0`` is an
-    # empty one -- an interrupted build, or a file indexed by another provider.
-    # Neither can answer a question.
-    if not chunks:
-        return f"no chunks for this install's collection in {index_file}"
-    return ""
+
+
+def _collection_schema_defect(
+    index_file: Path, collection: str, registry_table: str, chunks: int
+) -> str:
+    """Which part of the readable-collection contract ``index_file`` fails, or "".
+
+    A non-empty ``chunks_<collection>`` table is one part of what the read path
+    needs, and on its own it is the weakest part. ``_get_vectorstore``
+    also requires the collection registry and a row in it for this install's
+    collection (``retriever.collection_exists``), and ``retriever._knn`` then
+    reads ``content`` and ``metadata`` off the chunk table and joins it against
+    ``vec_<collection>`` on ``c.id = m.rowid``. So a store holding nothing but
+    the chunk table -- a partial copy, or a build interrupted between the two
+    inserts -- passes a count and fails every query, which is the state this
+    function exists to name.
+
+    Row parity is checked as well, because the join is an inner one: chunks
+    with no vectors beside them are rows no retrieval can reach, and the query
+    returns empty rather than raising.
+
+    Raw read-only sqlite and no sqlite-vec load, for the same reason
+    ``collection_chunk_count`` uses it: this has to report on a broken install
+    without the extension that install may be missing, and without an
+    embedding provider it would have to download a model to instantiate.
+
+    ``collection`` reaches the table names unparameterised, which sqlite does
+    not allow to be bound. It is safe here for the reason it is safe there:
+    ``collection_chunk_count`` has already matched it against
+    ``retriever._SAFE_COLLECTION`` and returned ``None`` for anything else, so
+    a name that got this far has produced a row count.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(f"file:{index_file}?mode=ro", uri=True)
+    try:
+        tables = {
+            name
+            for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if registry_table not in tables:
+            return (
+                f"{index_file} holds chunks for this install's collection but no "
+                f"{registry_table} registry, so the query path reports a missing "
+                "collection"
+            )
+        registered = conn.execute(
+            f'SELECT dimension FROM "{registry_table}" WHERE collection = ?',
+            (collection,),
+        ).fetchone()
+        if registered is None or registered[0] is None:
+            return (
+                f"this install's collection is not registered in {registry_table} in "
+                f"{index_file}, so the query path reports a missing collection"
+            )
+
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("chunks_{collection}")')}
+        missing = [column for column in ("id", "content", "metadata") if column not in columns]
+        if missing:
+            return (
+                f"the chunk table for this install's collection in {index_file} is "
+                f"missing the {', '.join(missing)} column(s) that retrieval reads"
+            )
+
+        vectors = f"vec_{collection}"
+        if vectors not in tables:
+            return (
+                f"{index_file} has no {vectors} vector table beside its chunk table, "
+                "so there is nothing for a query to search"
+            )
+
+        # ``vec0`` keeps its rows in a shadow table, which is countable without
+        # loading the extension where the virtual table itself is not. Its
+        # absence is not reported as a defect: the vector table is already
+        # known to be there, and a future sqlite-vec layout would otherwise
+        # make every healthy index read as broken.
+        if f"{vectors}_rowids" in tables:
+            embedded = conn.execute(f'SELECT COUNT(*) FROM "{vectors}_rowids"').fetchone()[0]
+            if embedded != chunks:
+                return (
+                    f"{chunks} chunks but {embedded} vectors for this install's "
+                    f"collection in {index_file}; retrieval joins the two and can only "
+                    "reach the rows that have both"
+                )
+        return ""
+    finally:
+        conn.close()
 
 
 def _index_is_healthy() -> bool:
