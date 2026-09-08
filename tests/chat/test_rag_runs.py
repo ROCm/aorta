@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.embeddings import Embeddings
 
-from aorta.chat.config import configure, reset_settings
+from aorta.chat.config import configure, reset_settings, settings
 from aorta.chat.rag import runs as runs_rag
 from aorta.chat.rag.retriever import SqliteVecStore
 
@@ -212,6 +212,68 @@ class TestCollectionNaming:
             runs_rag, "get_provider", lambda: FakeProvider("aorta_remote_text_embedding_3_small")
         )
         name = runs_rag.run_collection_name()
+        assert re.fullmatch(r"[A-Za-z0-9_]+", name)
+        assert name.endswith(runs_rag.RUN_COLLECTION_SUFFIX)
+
+
+class TestTheRunCollectionSeparatesModelsByName:
+    """The name is the *only* thing keeping two models' run vectors apart.
+
+    Source retrieval has a second line of defence: the manifest sidecar records
+    the embedding model and refuses a mismatch before the first query. This
+    collection has no sidecar. ``_get_store`` opens ``run_collection_name()``
+    and queries whatever is under it, comparing nothing -- so two models that
+    landed on one name and happen to share a dimension read each other's
+    vectors and answer normally.
+
+    Every other test in this file substitutes ``FakeProvider``, which hard-codes
+    its collection, so none of them touch the real naming. These use the actual
+    factory: naming never builds an embedding model, so there is no download.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _remote_provider(self, monkeypatch):
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "")
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            # Slug identically: the punctuation is folded to the same run of _.
+            ("foo/bar", "foo-bar"),
+            # Slug identically for the first 63 characters.
+            ("m" * 70 + "-alpha", "m" * 70 + "-beta"),
+        ],
+    )
+    def test_models_that_slug_alike_get_different_run_collections(
+        self, monkeypatch, left: str, right: str
+    ):
+        monkeypatch.setattr(settings, "remote_embedding_model", left)
+        at_left = runs_rag.run_collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_model", right)
+
+        assert runs_rag.run_collection_name() != at_left
+
+    def test_switching_endpoint_switches_the_run_collection_too(self, monkeypatch):
+        """The endpoint is half a remote identity, and run data is per-user.
+
+        A model name means nothing without the API serving it, so pointing the
+        same model at a second gateway has to move this collection as well --
+        otherwise the previous gateway's run vectors answer the new one's
+        queries.
+        """
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://a.example/v1")
+        at_a = runs_rag.run_collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://b.example/v1")
+
+        assert runs_rag.run_collection_name() != at_a
+
+    def test_it_is_still_a_bare_identifier_after_the_suffix(self, monkeypatch):
+        """The suffix lands after the digest, on a name already at the cap."""
+        monkeypatch.setattr(settings, "remote_embedding_model", "q" * 200)
+        name = runs_rag.run_collection_name()
+
         assert re.fullmatch(r"[A-Za-z0-9_]+", name)
         assert name.endswith(runs_rag.RUN_COLLECTION_SUFFIX)
 
