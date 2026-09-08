@@ -324,11 +324,36 @@ class TestRemedyLines:
         assert "is not offered here" in "\n".join(manifest_mod.remedy_lines())
 
     def test_an_empty_provider_setting_is_treated_as_local(self, monkeypatch):
-        """It is the shipped default, and the one the published index is built with."""
+        """A setting that resolves to no provider falls back to the shipped default.
+
+        Which is also the one the published index is built with, so the fetch
+        remedy is the right guess when there is nothing to read.
+        """
         from aorta.chat.config import settings
 
         monkeypatch.setattr(settings, "embedding_provider", "")
         assert manifest_mod._configured_embedding_provider() == "local"
+
+    def test_every_alias_of_the_local_provider_still_gets_the_fetch_remedy(self, monkeypatch):
+        """``onnx`` and ``fastembed`` are spellings of ``local``, not remote providers.
+
+        Comparing ``settings.embedding_provider`` as a raw string handed an
+        ordinary local install the remote remedy: it withholds ``index fetch``,
+        the one command that fixes its index, and tells it to set the provider
+        it is already on. Discovered from the factory rather than listed here,
+        so a new alias is covered without editing this test.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import factory
+
+        aliases = [name for name, target in factory._ALIASES.items() if target == "local"]
+        assert aliases, "the factory no longer aliases anything to the local provider"
+        for alias in aliases:
+            monkeypatch.setattr(settings, "embedding_provider", alias)
+            assert manifest_mod._configured_embedding_provider() == "local", alias
+            lines = manifest_mod.remedy_lines()
+            assert lines[0].strip().startswith("aorta chat index fetch"), alias
+            assert "is not offered here" not in "\n".join(lines), alias
 
 
 class TestWarnings:

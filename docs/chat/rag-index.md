@@ -113,7 +113,7 @@ means taking over the build.
 
 A fetch downloads vectors, not the embedding model, so straight afterwards
 `doctor` reports the model cache as cold. With a valid index present that is
-reported as `[--] ... does not need to be yet`, because the weights download
+reported as `[ -- ] ... does not need to be yet`, because the weights download
 themselves on the first query. **Do not "pre-warm" with `aorta chat index
 build`**: its `--output` defaults to the index you just fetched and its corpus
 defaults to `src/aorta` alone, so it is an attempt to replace a code-and-prose

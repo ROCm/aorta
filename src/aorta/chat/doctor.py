@@ -88,15 +88,31 @@ _WARM_COMMAND = (
     'TextEmbedding("{model}", cache_dir="{cache}")\''
 )
 
-#: LLM providers that talk to a remote OpenAI-compatible endpoint. A local vLLM
-#: is excluded on purpose: ``text`` is the correct mode for a stock server,
-#: which needs ``--enable-auto-tool-choice`` and a ``--tool-call-parser`` before
-#: ``native`` works at all.
+#: LLM providers that talk to a remote OpenAI-compatible endpoint, as opposed
+#: to the local vLLM one. Which of the two decides where the served model's
+#: name is configured and what ``native`` costs to turn on. It does *not*
+#: decide whether ``text`` works: a reasoning model breaks it wherever it is
+#: served, so both flows are checked.
 _REMOTE_LLM_PROVIDERS = frozenset({"openai", "litellm"})
 
+#: What ``native`` needs beyond the setting, per flow. A stock vLLM rejects the
+#: ``tools`` parameter until it is started for it, so the local remedy is two
+#: server flags on top of the setting rather than the setting alone. These
+#: restate the ``Endpoint requirement`` and ``Local vLLM`` rows of the table in
+#: ``docs/chat/providers.md``.
+_REMOTE_NATIVE_NOTE = (
+    "It needs an endpoint that accepts the 'tools' parameter, which a remote\n"
+    "OpenAI-compatible gateway normally does."
+)
+_VLLM_NATIVE_NOTE = (
+    "It needs the vLLM server restarted with --enable-auto-tool-choice and a\n"
+    "--tool-call-parser; a stock server does not accept the 'tools' parameter."
+)
+
 #: Model names that mark a reasoning model. A heuristic -- a gateway can call a
-#: deployment anything -- so it only decides whether the tool-mode check warns
-#: or merely informs. Both branches name ``native`` and the symptom, because the
+#: deployment anything, and a vLLM server is launched under whatever name its
+#: operator gave it -- so it only decides whether the tool-mode check warns or
+#: merely informs. Both branches name ``native`` and the symptom, because the
 #: case this cannot recognise is exactly the one a user reaches after hitting it.
 _REASONING_MODEL_PATTERN = re.compile(r"gpt-oss|qwq|reasoner|reasoning|\b(?:o[1-4]|r1)\b")
 
@@ -375,6 +391,11 @@ def _check_tool_mode(report: Report) -> None:
     where the ``ACTION:`` line was expected, so every action-routed query spends
     its whole retry budget and answers nothing. Until this check existed the
     first signal of that was the failed query.
+
+    That holds for a locally served reasoning model as much as a remote one --
+    the channel is the model's, not the endpoint's -- so both flows are read.
+    What the provider changes is the remedy: turning ``native`` on costs a
+    setting remotely and a setting plus two server flags on vLLM.
     """
     from aorta.chat.config import settings
 
@@ -396,11 +417,18 @@ def _check_tool_mode(report: Report) -> None:
     if mode == "native":
         report.add("llm tool mode", OK, "native (the provider's function-calling API)")
         return
-    if provider not in _REMOTE_LLM_PROVIDERS:
+    model = native_note = ""
+    if provider in _REMOTE_LLM_PROVIDERS:
+        model, native_note = str(settings.remote_llm_model or ""), _REMOTE_NATIVE_NOTE
+    elif provider == "vllm":
+        model, native_note = str(settings.vllm_model or ""), _VLLM_NATIVE_NOTE
+    if not model:
+        # A provider no backend is registered for -- ``_check_backend`` reports
+        # that -- or one whose model setting is empty. Either way there is no
+        # name to read, and guessing which setting holds it would invent one.
         report.add("llm tool mode", OK, "text (ACTION: lines parsed out of the reply)")
         return
 
-    model = str(getattr(settings, "remote_llm_model", "") or "")
     if _REASONING_MODEL_PATTERN.search(model.lower()):
         report.add(
             "llm tool mode",
@@ -415,24 +443,22 @@ def _check_tool_mode(report: Report) -> None:
                 "until it gives\n"
                 "up and the question is answered with nothing.\n"
                 'Set llm_tool_mode = "native" in chat.toml, or '
-                "AORTA_CHAT_LLM_TOOL_MODE=native.\n"
-                "It needs an endpoint that accepts the 'tools' parameter, "
-                "which a remote\n"
-                "OpenAI-compatible gateway normally does."
+                "AORTA_CHAT_LLM_TOOL_MODE=native.\n" + native_note
             ),
         )
         return
     report.add(
         "llm tool mode",
         OK,
-        f"text, on remote {provider} ({model})",
+        f"text, on {provider} ({model})",
         hint=(
             "If an action-routed question comes back with no answer, the first "
             "thing\n"
             'to change is llm_tool_mode = "native". Reasoning models cannot '
             "write the\n"
-            "ACTION: lines text mode parses, and a gateway can call one "
-            "anything."
+            "ACTION: lines text mode parses, and a deployment can be served "
+            "under any\n"
+            "name.\n" + native_note
         ),
     )
 

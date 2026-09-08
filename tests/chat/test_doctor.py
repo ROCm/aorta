@@ -170,18 +170,27 @@ class TestEmbeddingModelCache:
 
     def test_the_pre_warm_command_is_the_one_the_procedure_uses(self, monkeypatch):
         """Two copies of an invocation drift; this is what stops them."""
-        from aorta.chat.rag.embeddings.fastembed_bge import PRE_SEED_PROCEDURE
+        from aorta.chat.rag.embeddings.fastembed_bge import (
+            PRE_SEED_PROCEDURE,
+            describe_model_state,
+        )
 
         monkeypatch.setattr(doctor, "_probe_huggingface", lambda: True)
         hint = _by_name(run_checks(backend=False), "embedding model cache").hint
         command = next(line.strip() for line in hint.splitlines() if "TextEmbedding" in line)
 
         # Same invocation, different cache_dir: the procedure seeds a machine
-        # that has egress, this one seeds the machine being diagnosed.
-        prefix = "python -c 'from fastembed import TextEmbedding; TextEmbedding(\""
-        assert command.startswith(prefix)
-        assert prefix in PRE_SEED_PROCEDURE.format(model=MODEL, cache="/tmp/cache")
+        # that has egress, this one seeds the machine being diagnosed. Both
+        # halves are pinned whole rather than by a shared prefix, because the
+        # prefix stops before ``cache_dir`` -- the argument the two differ on
+        # and the one a drift would drop.
+        state = describe_model_state()
+        assert command == doctor._WARM_COMMAND.format(
+            model=state["model"], cache=state["cache_dir"]
+        )
         assert MODEL in command
+        seeded = doctor._WARM_COMMAND.format(model=MODEL, cache="/tmp/aorta-model-cache")
+        assert seeded in PRE_SEED_PROCEDURE.format(model=MODEL, cache="/tmp/cache")
 
     def test_a_cold_cache_with_no_egress_fails_and_prints_the_procedure(self, monkeypatch):
         monkeypatch.setattr(doctor, "_probe_huggingface", lambda: False)
@@ -292,10 +301,38 @@ class TestToolMode:
         assert check.status == OK
         assert "native" in check.detail
 
-    def test_text_on_a_local_vllm_is_correct_and_says_nothing(self, monkeypatch):
-        """A stock vLLM needs extra server flags before native works at all."""
+    def test_text_on_a_local_vllm_is_ok_but_still_costs_the_native_flags(self, monkeypatch):
+        """A stock vLLM drives text mode, and needs two server flags for native."""
         monkeypatch.setattr(settings, "llm_tool_mode", "text")
         monkeypatch.setattr(settings, "llm_provider", "vllm")
+        monkeypatch.setattr(settings, "vllm_model", "Qwen/Qwen2.5-Coder-7B-Instruct")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == OK
+        assert "Qwen/Qwen2.5-Coder-7B-Instruct" in check.detail
+        assert "--enable-auto-tool-choice" in check.hint
+
+    def test_a_locally_served_reasoning_model_is_warned_about_too(self, monkeypatch):
+        """The reasoning channel belongs to the model, not to the endpoint.
+
+        Reading only ``remote_llm_model`` left gpt-oss on a local vLLM -- the
+        configuration ``docs/chat/providers.md`` measures at 0 parseable
+        actions in 8 rounds -- with no signal at all, on the provider that is
+        the shipped default.
+        """
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "vllm")
+        monkeypatch.setattr(settings, "vllm_model", "openai/gpt-oss-20b")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == WARN
+        assert 'llm_tool_mode = "native"' in check.hint
+        # Not the remote remedy: a stock vLLM has to be restarted for native.
+        assert "--enable-auto-tool-choice" in check.hint
+        assert "gateway" not in check.hint
+
+    def test_a_provider_with_no_model_setting_reads_no_name(self, monkeypatch):
+        """Guessing which setting holds it would invent one; the backend check reports it."""
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "not-a-provider")
         check = _by_name(run_checks(backend=False), "llm tool mode")
         assert check.status == OK
         assert not check.hint

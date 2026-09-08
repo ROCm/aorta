@@ -259,16 +259,25 @@ class ValidationReport:
 def _configured_embedding_provider() -> str:
     """The provider this install embeds with, for choosing a remedy.
 
-    Read lazily so this module stays importable without the chat settings, and
-    defaulted to ``local`` rather than to "unknown": that is the shipped default
-    and the one the published index is built with, so a configuration that
-    cannot be read is far likelier to be a local one than a remote one.
+    Asked of the factory rather than read off ``settings.embedding_provider``,
+    because that setting is a spelling, not the answer: ``onnx`` and
+    ``fastembed`` are documented aliases of ``local``, so comparing the raw
+    string would hand a perfectly ordinary local install the remote remedy --
+    withholding the one command that fixes it. ``doctor`` already asks the
+    built provider for its ``name``; this asks the same question the same way.
+
+    Imported lazily so this module stays importable without the chat extra, and
+    defaulted to ``local`` when the provider cannot be resolved at all: that is
+    the shipped default and the one the published index is built with, so an
+    unreadable configuration is far likelier to be a local one than a remote
+    one. Every caller has already built a provider successfully by the time it
+    gets here, so the fallback is a belt on top of braces.
     """
     try:
-        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.factory import get_provider
 
-        return str(settings.embedding_provider or "local").strip().lower() or "local"
-    except Exception:  # pragma: no cover - a settings object that will not load
+        return get_provider().name
+    except Exception:
         logger.debug("could not resolve the configured embedding provider", exc_info=True)
         return "local"
 
@@ -287,8 +296,9 @@ def remedy_lines(
     wording, from which the reasonable conclusion is that chat is broken.
 
     Args:
-        embedding_provider: Override for the configured provider. ``None``
-            reads it from the settings.
+        embedding_provider: Override for the configured provider, as one of
+            the factory's canonical names. ``None`` resolves it from the
+            configured provider.
         include_doctor: Whether to suggest ``aorta chat doctor``. Off for
             ``doctor``'s own report, which is already that output.
     """
