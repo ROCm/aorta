@@ -81,7 +81,7 @@ environment.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `llm_provider` | `vllm` | `vllm` (local server) / `openai` (any OpenAI-wire endpoint) / `litellm` (native Anthropic, Gemini, Bedrock). An unknown value raises, listing the accepted names. |
-| `embedding_provider` | `local` | `local` (a small model on CPU) / `remote` (an embeddings API). Independent of `llm_provider`. |
+| `embedding_provider` | `local` | `local` (a small model on CPU) / `remote` (an embeddings API). Independent of `llm_provider`, and every `config init` profile writes `local` — including the remote-chat ones, because the published index is built with the local model and cannot be read by any other. `remote` is a manual choice with consequences: see [configuring a remote embedding provider](#configuring-a-remote-embedding-provider-by-hand). |
 | `llm_tool_mode` | `text` | `text` parses `ACTION: tool(arg="v")` lines out of the reply; `native` uses the provider's function-calling API. Reasoning models need `native` — see [providers](providers.md#tool-calling-and-reasoning-models). |
 
 ### Local vLLM (`llm_provider = "vllm"`)
@@ -116,9 +116,18 @@ environment.
 | --- | --- | --- |
 | `embedding_model` | `BAAI/bge-small-en-v1.5` | Local model. |
 | `model_cache_path` | `$XDG_CACHE_HOME/aorta/chat/models` | Where the local model's ONNX weights are cached. `HF_HOME` overrides it, which is what [air-gapped pre-seeding](rag-index.md#air-gapped-nodes) uses. Explicit rather than `fastembed`'s own `/tmp/fastembed_cache`, which a reboot wipes and other users on a shared node can write. |
+
+The five `remote_embedding_*` settings below are read only when
+`embedding_provider = "remote"`, which no profile selects. Setting them without
+also setting `embedding_provider` changes nothing; setting them together with it
+is the procedure [below](#configuring-a-remote-embedding-provider-by-hand), and
+it obliges a local index rebuild.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
 | `remote_embedding_model` | `text-embedding-3-small` | Also decides the collection name, since dimensions differ per model. |
-| `remote_embedding_api_key` | *(empty)* | Separate from the chat key, so the two can use different providers. |
-| `remote_embedding_base_url` | *(empty)* | Empty means the provider default. |
+| `remote_embedding_api_key` | *(empty)* | Separate from the chat key, so the two can use different providers. Required: an empty value raises rather than falling back to the local model. |
+| `remote_embedding_base_url` | *(empty)* | Empty means the provider default, which for an OpenAI-compatible client is `api.openai.com`. Set it for anything else — a gateway header with an empty base URL sends your corpus to OpenAI. |
 | `remote_embedding_auth_header` / `remote_embedding_extra_headers` | *(empty)* | As on the chat side. Behind a gateway you normally set both or neither. |
 
 ### Corpus and index
@@ -153,6 +162,179 @@ directory cannot be pip-upgraded cleanly.
 | `allowed_commands` | `python,pytest,make,pip,grep,wc,head,tail,cat,ls,find` | Allowlist for `run_terminal_command`, applied per pipeline stage. Command chaining and redirection (`;`, `&`, backticks, `$(...)`, `>`, `<`) are refused, since the allowlist checks executables. Accepts `a,b,c` or a JSON list. |
 | `command_timeout` | `60` | Seconds before a `run_terminal_command` command is killed. |
 | `redact` | `true` | Rewrite filesystem paths and IP addresses out of outbound LLM requests. Does not cover the remote-embedding path. Read [redaction](redaction.md) before turning this off — and read it anyway for what it does **not** cover. |
+
+## Configuring a remote embedding provider by hand
+
+`embedding_provider = "remote"` is supported but selected by nothing: no
+`config init` profile writes it, and there is no flag or prompt for it. It is a
+deliberate, manual change, and this is the whole procedure.
+
+### When this is the right choice
+
+**One case, and it is narrow: a node that can reach an embeddings API but
+cannot reach Hugging Face.** The local embedder downloads ~65 MB of ONNX weights
+from Hugging Face on first use, so a host firewalled off from it — but allowed
+out to a corporate gateway — cannot embed locally at all. Remote embeddings are
+the way out of that, and the only reason the code path exists.
+
+Everything else that looks like a reason is not one:
+
+- **A remote chat model is not a reason.** The two selectors are independent.
+  Remote generation with local embeddings is the normal shape and the cheaper
+  one, because retrieval then costs nothing per query.
+- **Quality is not a reason worth the trade here.** Retrieval over one source
+  tree is not where a larger embedding model earns its price, and the published
+  index is only usable with the local model.
+- **An air-gapped node is not a reason** — it cannot reach the embeddings API
+  either. Pre-seed the model cache instead; see
+  [air-gapped nodes](rag-index.md#air-gapped-nodes).
+
+### What it costs you before you start
+
+Read these three before editing anything. Each of them is a consequence, not a
+risk to be managed.
+
+1. **The published index becomes unusable, permanently, for this install.** CI
+   builds the index asset with default settings, so its vectors are the local
+   model's. An index is only meaningful to the model that produced it, and the
+   manifest check refuses a mismatch rather than answering from it. So
+   `aorta chat index fetch` will refuse the download, and an already-fetched
+   index will refuse every query. You take over building the index yourself,
+   for as long as this setting is in place, on every AORTA upgrade.
+2. **Every query costs money, not just the build.** The one-off index build
+   embeds the whole corpus; after that each question sends one embedding call
+   for the query text, and each `search_code` tool call sends another. The build
+   is the large number — the public corpus is roughly 5 MB of text over ~360
+   files, so on the order of one to two million tokens — but the per-query calls
+   are the ones that never stop. Check your provider's own price list: at
+   `text-embedding-3-small`'s published rate the build is cents, and at a large
+   model's, or through a gateway that adds a markup, it is not.
+3. **Redaction does not cover this path.** `redact = true` rewrites paths and IP
+   addresses out of *LLM* requests. The embeddings request is a different
+   request and is sent verbatim. That matters most for the run-artifact
+   collection, which holds your own `matrix.json` and `env.json` and can carry
+   customer hostnames, filesystem layouts and environment variables — all of
+   which would be sent, unredacted, to the embeddings endpoint at
+   `index runs` time and never rewritten. [redaction](redaction.md) has the
+   full scope. If that corpus must not leave the machine, stop here.
+
+### The procedure
+
+**1. Set the selector and the five settings it turns on.** Six in total, of
+which four are required and two apply only behind a gateway:
+
+| Setting | | |
+| --- | --- | --- |
+| `embedding_provider` | required | The selector. Nothing below is read without it. |
+| `remote_embedding_model` | required | Has a default, but set it explicitly — it names the collection. |
+| `remote_embedding_base_url` | required in practice | Only omit it if you mean OpenAI's own API. |
+| `remote_embedding_api_key` | required | Empty raises at first use. |
+| `remote_embedding_auth_header` | gateway only | Header name instead of a bearer token. |
+| `remote_embedding_extra_headers` | gateway only | Any other headers the gateway wants. |
+
+In `~/.config/aorta/chat.toml`:
+
+```toml
+# The selector. Without this the five below are read by nothing.
+embedding_provider = "remote"
+
+# The model. Also decides the collection name, because dimensions differ per
+# model and two models' vectors cannot share a table.
+remote_embedding_model = "text-embedding-3-small"
+
+# The endpoint. Do not leave this empty unless you really mean OpenAI's own
+# API: empty resolves to api.openai.com, so an empty base URL plus a gateway
+# auth header sends your corpus to OpenAI with a header it does not read.
+remote_embedding_base_url = "https://gateway.example.com/openai/v1"
+
+# The key. Separate from remote_llm_api_key, so chat and embeddings can use
+# different providers. Empty raises at first use rather than silently falling
+# back to the local model.
+remote_embedding_api_key = "..."
+
+# The last two only behind a gateway that does not take a bearer token. Same
+# names and same meaning as the remote_llm_* pair; omit both against a provider
+# that takes an Authorization header, which is most of them.
+remote_embedding_auth_header = "Ocp-Apim-Subscription-Key"
+remote_embedding_extra_headers = { user = "alice", x-tenant = "acme" }
+```
+
+Or in the environment, which outranks the file:
+
+```bash
+export AORTA_CHAT_EMBEDDING_PROVIDER=remote
+export AORTA_CHAT_REMOTE_EMBEDDING_MODEL=text-embedding-3-small
+export AORTA_CHAT_REMOTE_EMBEDDING_BASE_URL=https://gateway.example.com/openai/v1
+export AORTA_CHAT_REMOTE_EMBEDDING_API_KEY=...
+export AORTA_CHAT_REMOTE_EMBEDDING_AUTH_HEADER=Ocp-Apim-Subscription-Key
+export AORTA_CHAT_REMOTE_EMBEDDING_EXTRA_HEADERS=user=alice,x-tenant=acme
+```
+
+`remote_embedding_api_key` and the values in `remote_embedding_extra_headers`
+are both treated as credentials: masked by `config show`, and enough on their
+own to make `config validate` fail a profile that is not `0600`.
+
+**2. Confirm what it resolved to, before spending anything.**
+
+```bash
+aorta chat config show
+```
+
+Check the endpoint is the one you meant. An empty or mistyped
+`remote_embedding_base_url` is the failure worth catching here, because the
+symptom is a `401` from a third party you did not choose rather than an error
+about your configuration.
+
+**3. Rebuild the index. This step is mandatory, not a refresh.**
+
+```bash
+aorta chat index build     # the source collection
+aorta chat index runs      # the run-artifact collection, if you use it
+```
+
+`index runs` is the one to think twice about: it is the command that sends your
+own `matrix.json` and `env.json` to the embeddings endpoint, and it re-sends
+them every time you rebuild. Skipping it leaves the run-artifact tools without
+an index they can read, which is a worse assistant but not an egress you did
+not choose.
+
+Not `index fetch` — that will refuse, correctly, because the published asset is
+the local model's. `index build` embeds everything under `aorta_path` through
+the provider you just configured, and writes it to a collection named after
+that provider and model, so the local collection already in the file is not
+overwritten.
+
+Know what you are giving up in coverage as well as in cost: `aorta_path`
+defaults to the installed `aorta` package, so a local build indexes the code
+but not `docs/` or `README.md`, which the published asset does carry. Point
+`aorta_path` at a source checkout if you want the prose too. See
+[the RAG index](rag-index.md#managing-it).
+
+**4. Verify.**
+
+```bash
+aorta chat doctor
+```
+
+The index check should pass, and the embedding line should name your endpoint
+and model rather than `<provider-default>`. A refusal here means the index and
+the configuration still disagree — usually step 3 was skipped, or was run before
+step 1 took effect.
+
+### Going back
+
+Remove or unset the six settings and re-fetch:
+
+```bash
+aorta chat index fetch
+```
+
+The two providers use different collection names and coexist in the one
+`.sqlite` file, so the local collection is still where it was. The re-fetch is
+not there to replace it — it is there to restore the manifest, which the remote
+`index build` rewrote to name the remote model, and which is checked before any
+query. `aorta chat index build` restores it just as well if you would rather not
+go back to the published asset.
 
 ## Example profile
 

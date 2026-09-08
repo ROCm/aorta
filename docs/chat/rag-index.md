@@ -26,8 +26,10 @@ not touch it. Retrieved chunks from it are also the reason
 > `matrix.json` and `env.json` text to the embeddings API so it can be turned
 > into vectors, and each later query is sent the same way. That path is not
 > covered by chat-message redaction, which applies to the LLM request rather
-> than the embeddings one. Keep `embedding_provider = "local"` — the default —
-> if this data must not leave the machine.
+> than the embeddings one. Keep `embedding_provider = "local"` — the default,
+> and what every `config init` profile writes — if this data must not leave the
+> machine. Turning it off is a manual change with a
+> [documented procedure and a documented cost](configuration.md#configuring-a-remote-embedding-provider-by-hand).
 
 Alongside the index, chat generates a **repo map** — a function and class index
 over the same tree, at `$XDG_CACHE_HOME/aorta/chat/repo_map.md`. The planner
@@ -100,6 +102,13 @@ a given AORTA revision, so building it locally is work someone already did. It
 resolves by installed version — a released wheel gets that release's asset, a
 `.dev` build gets the rolling `main` asset with a warning about the commit delta.
 
+It is the normal path for every chat provider, because the embedding provider is
+a separate choice and every `config init` profile leaves it local. The asset is
+built by CI under default settings, so `fetch` works exactly as long as your
+install still embeds with the local model — which is the reason
+[choosing a remote embedder](configuration.md#configuring-a-remote-embedding-provider-by-hand)
+means taking over the build.
+
 Building locally is the developer path and the air-gapped path. It takes a few
 minutes and runs on CPU.
 
@@ -135,6 +144,14 @@ The failure without this arrives as a Hugging Face connection error from inside
 the embedding library, which reads as a bug rather than as "you need to pre-seed
 a cache" — so if that is what you are looking at, this is the section you want.
 
-Alternatively set `embedding_provider = "remote"` if the node can reach an
-embeddings API but not Hugging Face; note that this changes the collection name
-and requires building the index against that provider.
+**A node that can reach an embeddings API but not Hugging Face** is the one
+case remote embeddings are genuinely for, and it is this one. It is not a
+drop-in switch: it changes the collection name, makes the published asset
+unusable so `index build` becomes mandatory on every upgrade, bills you per
+query as well as per build, and sends the corpus — including the run-artifact
+collection's `env.json` and `matrix.json` — to that API on a path redaction does
+not cover. The full procedure and the rest of the trade-off is
+[configuring a remote embedding provider by hand](configuration.md#configuring-a-remote-embedding-provider-by-hand).
+
+A genuinely air-gapped node cannot reach the embeddings API either, so for that
+one the answer is the pre-seeded model cache above, not this.

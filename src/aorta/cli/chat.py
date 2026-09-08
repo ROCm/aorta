@@ -806,6 +806,21 @@ def config_init(profile: str, force: bool, no_input: bool) -> None:
                 values[field] = answer
     written = config.write_profile(values)
     click.echo(f"Wrote {written} (mode {config.PROFILE_FILE_MODE:04o})")
+    # The wizard only ever asks about the chat model, so the embedding provider
+    # it picked is a decision the user did not make and previously could only
+    # find by reading the file -- and it is the one that decides whether the
+    # published index is usable.
+    embeddings = values.get("embedding_provider", "local")
+    if embeddings == "local":
+        click.echo(
+            "Embeddings: local, on this machine. 'aorta chat index fetch' "
+            "installs the published index unchanged."
+        )
+    else:
+        click.echo(
+            f"Embeddings: {embeddings}. The published index does not match, so "
+            "'aorta chat index build' is required before querying."
+        )
     click.echo("Review it with: aorta chat config show")
 
 

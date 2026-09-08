@@ -52,6 +52,104 @@ class TestProfileTemplates:
         assert config.validate_profile(chat_profile) == []
 
 
+def _unreachable_remote_embedding_fields(
+    template: dict[str, object], prompted: tuple[str, ...]
+) -> list[str]:
+    """Settings a remote-embedding template needs but neither sets nor asks for.
+
+    Empty for a template that does not select remote embeddings at all: the
+    fields are read by nothing then.
+    """
+    if template.get("embedding_provider") != "remote":
+        return []
+    collected = set(template) | set(prompted)
+    return sorted({"remote_embedding_base_url", "remote_embedding_api_key"} - collected)
+
+
+class TestNoTemplateOptsIntoRemoteEmbeddings:
+    """Four templates coupled the embedding provider to the chat provider.
+
+    Choosing a remote *chat* model also selected a remote *embedder*, and CI
+    publishes the index asset under default settings -- so ``index fetch``
+    refused the asset outright when ``config init`` ran first, and the manifest
+    refused every query when it ran second. There was no ordering of the two
+    documented commands that worked, on four of the five profiles.
+
+    The templates now all choose the local embedder. These pin the parts of that
+    which a later edit could quietly undo.
+    """
+
+    @pytest.mark.parametrize("name", sorted(config.PROFILE_TEMPLATES))
+    def test_the_embedding_choice_is_written_down(self, name):
+        """Explicit in the template, not inherited from the field default.
+
+        The profile file is what a user reads to find out what was decided for
+        them, so the decision belongs in it.
+        """
+        assert "embedding_provider" in config.PROFILE_TEMPLATES[name]
+
+    @pytest.mark.parametrize("name", sorted(config.PROFILE_TEMPLATES))
+    def test_every_template_matches_the_provider_the_published_index_uses(self, name):
+        """The published asset is built with defaults, so agreeing with the
+        default is exactly what makes ``index fetch`` usable.
+
+        Asserting against the field default rather than the literal ``"local"``
+        keeps this true if the default itself ever moves: what breaks fetch is
+        the two disagreeing, not the particular value.
+        """
+        default = config.Settings.model_fields["embedding_provider"].default
+        assert config.PROFILE_TEMPLATES[name]["embedding_provider"] == default
+
+    def test_no_template_selects_remote_embeddings_it_cannot_reach(self):
+        """The durable half of the guard, and what closes #443 and gap 1a.
+
+        Stated as a rule rather than as "they are all local" so it keeps
+        meaning if a later template deliberately picks remote: what must never
+        ship is a template that selects a remote embedder without an endpoint
+        and a key.
+        """
+        for name in sorted(config.PROFILE_TEMPLATES):
+            missing = _unreachable_remote_embedding_fields(
+                config.PROFILE_TEMPLATES[name], config.PROFILE_PROMPTS[name]
+            )
+            assert not missing, f"{name}: remote embeddings but no {missing}"
+
+    def test_the_rule_catches_the_shape_that_was_reported(self):
+        """Proves the guard above is not vacuously green while every template is local.
+
+        This is the ``azure-apim`` template as it shipped: an APIM subscription
+        header for embeddings, no base URL -- which resolves to
+        ``api.openai.com``, so the corpus was addressed to OpenAI with a header
+        it does not read -- and no key ever collected. It failed closed only
+        because of the unrelated missing-key check in ``remote_api.py``.
+        """
+        missing = _unreachable_remote_embedding_fields(
+            {
+                "llm_provider": "openai",
+                "remote_llm_auth_header": "Ocp-Apim-Subscription-Key",
+                "embedding_provider": "remote",
+                "remote_embedding_auth_header": "Ocp-Apim-Subscription-Key",
+            },
+            ("remote_llm_base_url", "remote_llm_model", "remote_llm_api_key"),
+        )
+        assert missing == ["remote_embedding_api_key", "remote_embedding_base_url"]
+
+    @pytest.mark.parametrize("name", sorted(config.PROFILE_TEMPLATES))
+    def test_a_local_template_carries_no_remote_embedding_settings(self, name):
+        """A leftover ``remote_embedding_*`` key is inert but reads as intent.
+
+        ``openai`` shipped ``remote_embedding_model`` and ``azure-apim`` a
+        ``remote_embedding_auth_header``, both unread once the provider is
+        local. Left in the written profile they suggest a remote embedder is
+        configured and working.
+        """
+        template = config.PROFILE_TEMPLATES[name]
+        if template.get("embedding_provider") != "local":
+            pytest.skip(f"{name} does not select local embeddings")
+        dead = [key for key in template if key.startswith("remote_embedding_")]
+        assert not dead, f"{name}: {sorted(dead)}"
+
+
 class TestConfigInit:
     def test_writes_a_parseable_profile(self, chat_profile):
         result = CliRunner().invoke(
@@ -135,6 +233,20 @@ class TestConfigInit:
         loaded = tomllib.loads(chat_profile.read_text(encoding="utf-8"))
         assert loaded["remote_llm_model"] == "gpt-4o"
         assert loaded["remote_llm_api_key"] == "sk-typed-at-the-prompt"
+
+    @pytest.mark.parametrize("name", sorted(config.PROFILE_TEMPLATES))
+    def test_it_says_what_it_decided_about_embeddings(self, name, chat_profile):
+        """The wizard asks about the chat model and nothing else.
+
+        The embedding provider is therefore chosen on the user's behalf, and it
+        is the setting that decides whether the published index can be used --
+        so leaving them to ``cat`` the file for it is how a first-time setup
+        ends in a refused query with no idea which command caused it.
+        """
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", name, "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "Embeddings: local" in result.output
+        assert "index fetch" in result.output
 
     def test_the_key_is_not_echoed_while_being_typed(self, chat_profile):
         result = CliRunner().invoke(

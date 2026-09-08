@@ -5,6 +5,13 @@ which model turns text into vectors (`embedding_provider`). Mixing them is
 normal — remote generation with local embeddings is the cheap default, because
 retrieval then costs nothing.
 
+Everything on this page is about `llm_provider`. `embedding_provider` is
+`local` for every profile `aorta chat config init` writes, including the remote
+ones, and the published index is only readable that way. Choosing a remote
+chat model is not a reason to change it; the narrow case that is, and what it
+costs, are in
+[configuring a remote embedding provider by hand](configuration.md#configuring-a-remote-embedding-provider-by-hand).
+
 ## Chat backends
 
 | `llm_provider` | Speaks | Use for | Extra |
@@ -202,7 +209,9 @@ several critic passes can push a single question past forty. Most action queries
 land in the 4–6 range in practice, because the act loop stops as soon as the
 model answers without a tool call and the critic usually accepts first time.
 With `embedding_provider = "remote"`, each retrieval and each `search_code` call
-adds one embedding call on top.
+adds one embedding call on top — which is why no profile selects it, and why
+[the procedure for choosing it](configuration.md#configuring-a-remote-embedding-provider-by-hand)
+leads with the cost.
 
 Against a metered endpoint that is real money, so the remote backends log the
 per-query call count at INFO, visible without `--verbose`:
@@ -224,7 +233,7 @@ Knobs that lower the bill, roughly in order of effect:
 | `llm_max_tokens` | Caps output tokens per call. |
 | `retriever_k` / `search_tool_k` | Fewer chunks means a smaller prompt, and prompt tokens dominate a long act loop. |
 | `llm_max_retries` | Lower it on an unreliable endpoint, so failures do not silently triple. |
-| `embedding_provider = "local"` | Keeps all retrieval free even when generation is remote. |
+| `embedding_provider = "local"` | Keeps all retrieval free even when generation is remote. Already the case unless you set it by hand. |
 | `remote_llm_model` | A smaller model in the same family is usually the cheapest change of all. |
 
 ## Troubleshooting

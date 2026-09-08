@@ -491,18 +491,29 @@ settings = _LazySettings()
 #: ``aorta/cli/chat.py`` hard-codes the same names in its ``click.Choice`` --
 #: decorators run at import time, so it cannot read this dict -- and
 #: ``tests/chat/test_config_wizard.py`` fails if the two drift apart.
+#:
+#: **Every template sets ``embedding_provider = "local"``, and the value is
+#: written out rather than left to the field default so the file records the
+#: decision.** Generation and retrieval are independent choices, and four of
+#: these templates used to couple them: picking a remote *chat* model also
+#: opted the user into a remote *embedder*, which made ``aorta chat index
+#: fetch`` structurally unusable. CI publishes the index asset under default
+#: settings, so a remote-embedding install refuses the published index at fetch
+#: time, or -- if ``config init`` runs second -- at query time, with no ordering
+#: of the two commands that works. Remote embeddings are still reachable by
+#: setting the fields by hand; ``docs/chat/configuration.md`` carries the
+#: procedure and the cost and egress it implies.
 PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
     "openai": {
         "llm_provider": "openai",
         "remote_llm_model": "gpt-4o-mini",
-        "embedding_provider": "remote",
-        "remote_embedding_model": "text-embedding-3-small",
+        "embedding_provider": "local",
     },
     "openai-compatible": {
         "llm_provider": "openai",
         "remote_llm_model": "",
         "remote_llm_base_url": "",
-        "embedding_provider": "remote",
+        "embedding_provider": "local",
     },
     "azure-apim": {
         "llm_provider": "openai",
@@ -512,15 +523,14 @@ PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
         # from Authorization; without this the gateway answers 401 to a request
         # that looks correct.
         "remote_llm_auth_header": "Ocp-Apim-Subscription-Key",
-        "embedding_provider": "remote",
-        "remote_embedding_auth_header": "Ocp-Apim-Subscription-Key",
+        "embedding_provider": "local",
     },
     "anthropic": {
         # Native Anthropic wire protocol, which the openai backend cannot
         # speak; litellm needs the chat-all extra.
         "llm_provider": "litellm",
         "remote_llm_model": "claude-sonnet-4-5",
-        "embedding_provider": "remote",
+        "embedding_provider": "local",
     },
     "local-vllm": {
         "llm_provider": "vllm",
@@ -532,6 +542,11 @@ PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
 
 #: Fields ``aorta chat config init`` asks about, per profile, in order. The
 #: wizard prompts for exactly these; anything else is taken from the template.
+#:
+#: No profile asks about embeddings, which is now consistent with every template
+#: choosing the local embedder: there is nothing left to collect. Prompting for
+#: a remote embedding endpoint and key would only be coherent alongside a
+#: template that selected one, and the reason none does is above.
 PROFILE_PROMPTS: dict[str, tuple[str, ...]] = {
     "openai": ("remote_llm_model", "remote_llm_api_key"),
     "openai-compatible": ("remote_llm_base_url", "remote_llm_model", "remote_llm_api_key"),
