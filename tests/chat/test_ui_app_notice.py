@@ -243,6 +243,18 @@ def _notices(browser: _Browser) -> list[str]:
     return [shown for shown in browser.sent if "aorta chat: redacted" in shown]
 
 
+def _the_notice(browser: _Browser) -> str:
+    """The one notice this session was shown.
+
+    Asserted rather than indexed: a session that was starved of its disclosure
+    is the failure these tests exist to catch, and ``_notices(x)[0]`` reports it
+    as a bare ``IndexError`` that names neither the session nor the promise.
+    """
+    shown = _notices(browser)
+    assert len(shown) == 1, f"expected exactly one notice, got {shown}"
+    return shown[0]
+
+
 class TestTwoSessionsInOneProcess:
     """Why the notice cannot be keyed on process state.
 
@@ -287,12 +299,18 @@ class TestTwoSessionsInOneProcess:
             async def node() -> None:
                 redaction.redact_for_send([HumanMessage(content=question)])
 
-            # A child task is how LangGraph runs a node, and the shape the
-            # binding in ``on_message`` has to survive.
-            await asyncio.create_task(node())
-            arrived += 1
-            if arrived == 2:
-                both_redacted.set()
+            try:
+                # A child task is how LangGraph runs a node, and the shape the
+                # binding in ``on_message`` has to survive.
+                await asyncio.create_task(node())
+            finally:
+                # In ``finally`` because ``on_message`` swallows a graph
+                # failure: without it, one session raising here would leave the
+                # other waiting on a rendezvous nobody can reach, and the test
+                # would hang instead of failing.
+                arrived += 1
+                if arrived == 2:
+                    both_redacted.set()
             await both_redacted.wait()
             return f"answered: {question}", [], {}
 
@@ -320,8 +338,8 @@ class TestTwoSessionsInOneProcess:
             self._session(app, bob, BOB_ASKS),
         )
 
-        assert "IPv4" not in _notices(alice)[0]
-        assert "IPv4" in _notices(bob)[0]
+        assert "IPv4" not in _the_notice(alice)
+        assert "IPv4" in _the_notice(bob)
 
     async def test_both_are_told_how_to_turn_it_off(self, app, monkeypatch):
         """Decision 16's second half, in the same words as the CLI line."""
@@ -334,8 +352,9 @@ class TestTwoSessionsInOneProcess:
         )
 
         for browser in (alice, bob):
-            assert "--no-redact" in _notices(browser)[0]
-            assert "redact = false" in _notices(browser)[0]
+            notice = _the_notice(browser)
+            assert "--no-redact" in notice
+            assert "redact = false" in notice
 
     async def test_each_session_is_told_once_across_its_own_turns(self, app, monkeypatch):
         """Once per session, not once per redacting turn, with sessions overlapping."""

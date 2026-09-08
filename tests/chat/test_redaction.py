@@ -132,27 +132,45 @@ class TestNoticeIsSessionLocal:
         """Two sessions live at the same time, which is how Chainlit runs them.
 
         The sequential case above already rejects a bare module-level flag. What
-        it does not reject is the shortcut #437 names -- resetting that global in
-        ``on_start`` -- which is only wrong once two sessions overlap. Each
-        session here is held inside its own binding until the other has emitted,
-        so a shared flag either steals one disclosure or hands out two.
+        it cannot see is a binding that is itself process-wide: a module-level
+        "current session" pointer, saved and restored around each block, answers
+        every sequential arrangement identically to a context variable and hands
+        one session the other's state the moment the two overlap. So each
+        session is held inside its own binding until the other has emitted *and*
+        looked -- the second rendezvous is what makes the lookup happen while a
+        second binding is live, which is the only time the two differ.
+
+        Both rendezvous are released in ``finally`` so a failing assertion fails
+        this test rather than parking its peer for the rest of the run.
         """
         import asyncio
 
         _, summary = redaction.redact_text(CUSTOMER_TEXT)
         both_emitted = asyncio.Event()
+        both_looked = asyncio.Event()
         emitted = 0
+        looked = 0
 
         async def session(stream: io.StringIO) -> None:
-            nonlocal emitted
+            nonlocal emitted, looked
             with redaction.use_notice_state(redaction.NoticeState()) as state:
-                assert redaction.emit_notice_once(summary, stream=stream) is True
-                emitted += 1
-                if emitted == 2:
-                    both_emitted.set()
+                try:
+                    assert redaction.emit_notice_once(summary, stream=stream) is True
+                finally:
+                    emitted += 1
+                    if emitted == 2:
+                        both_emitted.set()
                 await both_emitted.wait()
-                # Still holding its own notice, after the other session's turn.
-                assert redaction.take_pending_notice(state) is not None
+                try:
+                    # This session's own state, and its own undrained notice,
+                    # while the other session's binding is still in force.
+                    assert redaction.current_notice_state() is state
+                    assert redaction.take_pending_notice(state) is not None
+                finally:
+                    looked += 1
+                    if looked == 2:
+                        both_looked.set()
+                await both_looked.wait()
 
         one, two = io.StringIO(), io.StringIO()
         await asyncio.gather(session(one), session(two))

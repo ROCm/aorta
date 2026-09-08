@@ -172,9 +172,12 @@ class TestCollectionNamesAreUnique:
         cap too, by being the thing that got truncated. What has to hold is
         both at once: inside the cap *and* still ending in the whole digest of
         the identity. That is what fails if the suffix is appended without
-        reserving room for it, and it is checked against both prefixes because
-        the local one is three characters longer and only the remote one is
-        reached through a provider anywhere else in this file.
+        reserving room for it.
+
+        Both prefixes, because the local one is three characters longer and
+        every *length* assertion in this file goes through the remote provider
+        -- so room reserved for ``aorta_remote_`` and spent by
+        ``aorta_fastembed_`` was a name over the cap that nothing measured.
         """
         model = "q" * 200
         name = build_collection_name(prefix, model)

@@ -226,8 +226,9 @@ class TestTheRunCollectionSeparatesModelsByName:
     landed on one name and happen to share a dimension read each other's
     vectors and answer normally.
 
-    Every other test in this file substitutes ``FakeProvider``, which hard-codes
-    its collection, so none of them touch the real naming. These use the actual
+    Every other test in this file that reads a collection name substitutes
+    ``FakeProvider``, which hard-codes its own, so none of them touch the real
+    naming and a change to it could not fail them. These use the actual
     factory: naming never builds an embedding model, so there is no download.
     """
 
