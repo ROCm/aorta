@@ -53,6 +53,29 @@ CHECKSUM_SUFFIX = ".sha256"
 #: must not hold a second copy in memory on a node that is already tight.
 _HASH_BLOCK = 1024 * 1024
 
+#: How to name a parsed value's type in a message someone has to act on. JSON's
+#: vocabulary rather than Python's, because the thing being described is a file
+#: the user can open and edit.
+_TYPE_NAMES: dict[type, str] = {
+    str: "a string",
+    bool: "a boolean",
+    int: "a whole number",
+    float: "a fractional number",
+    list: "a list",
+    dict: "an object",
+    type(None): "null",
+}
+
+#: The same vocabulary for what a field wanted, keyed by the annotation
+#: :class:`Manifest` declares it with. ``from __future__ import annotations``
+#: makes every annotation a string, which is what makes this table checkable
+#: against the dataclass -- see the import-time guard below the class.
+_SHAPE_NAMES: dict[str, str] = {
+    "str": "a string",
+    "int": "a whole number",
+    "list[str]": "a list of strings",
+}
+
 
 class ManifestError(RuntimeError):
     """The manifest is missing, unreadable, or not a manifest."""
@@ -64,6 +87,18 @@ class IndexMismatchError(RuntimeError):
     Raised rather than logged. See the module docstring: the alternative to
     raising is a plausible wrong answer.
     """
+
+
+def _fits_shape(value: Any, shape: str) -> bool:
+    """Whether a parsed JSON value can fill a field declared as ``shape``."""
+    if shape == "str":
+        return isinstance(value, str)
+    if shape == "int":
+        # ``bool`` is an ``int`` subclass, so ``true`` in a count or dimension
+        # field would otherwise pass as the number 1 and produce a refusal
+        # naming a value nobody wrote.
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def manifest_path(index_path: str | Path) -> Path:
@@ -136,18 +171,57 @@ class Manifest:
     def from_dict(cls, raw: dict[str, Any]) -> Manifest:
         """Build from a parsed manifest, dropping keys this version predates.
 
-        Forward-tolerant by design: a newer CI job adding a field must not make
-        its index unreadable to an older client, since the two are published and
-        installed independently.
+        Forward-tolerant about *keys* by design: a newer CI job adding a field
+        must not make its index unreadable to an older client, since the two are
+        published and installed independently.
+
+        Strict about *types*, which is the opposite of the coercion
+        ``agent.llm.AgentStep.from_dict`` applies to untrusted model output, and
+        deliberately so. That one is filling in a field it can do without; this
+        one decides whether an index is trusted to answer questions, and a
+        sidecar coerced into a plausible shape is precisely the silently-wrong
+        answer this module exists to prevent. So a value of the wrong type is a
+        broken manifest, reported as one.
+
+        Every field here is declared ``str``, ``int`` or ``list[str]``, and
+        nothing downstream re-checks: ``describe`` slices ``aorta_sha``,
+        ``validate`` slices it twice more and calls ``startswith`` on it,
+        ``ensure_supported_schema`` compares ``schema_version``, and
+        ``index_ops`` walks ``corpus_roots``. Before this check, a sidecar
+        carrying ``"aorta_sha": 42`` reached ``build_index`` as ``TypeError:
+        'int' object is not subscriptable`` and one carrying ``{"sha": "abc"}``
+        as ``KeyError: slice(None, 7, None)`` -- neither of which any caller
+        handles, because callers handle :class:`ManifestError`. Checking the
+        declared types once, here at the only boundary parsed JSON crosses,
+        closes those and every future one: the alternative is a type guard at
+        each use site, and the one that gets forgotten is the one a user hits.
+
+        Raises:
+            ManifestError: If ``raw`` is not an object, is missing a required
+                field, or carries a field whose type is not the declared one.
         """
         if not isinstance(raw, dict):
             raise ManifestError(f"manifest is a {type(raw).__name__}, not an object")
-        known = {f.name for f in fields(cls)}
-        unknown = sorted(set(raw) - known)
+        known = {field_.name: field_.type for field_ in fields(cls)}
+        unknown = sorted(set(raw) - set(known))
         if unknown:
             logger.debug("Ignoring unknown manifest key(s): %s", ", ".join(unknown))
+        accepted = {key: value for key, value in raw.items() if key in known}
+
+        wrong = [
+            f"{key} is {_TYPE_NAMES.get(type(value), type(value).__name__)}, not "
+            f"{_SHAPE_NAMES[known[key]]}"
+            for key, value in sorted(accepted.items())
+            if not _fits_shape(value, known[key])
+        ]
+        if wrong:
+            raise ManifestError(
+                f"manifest field(s) are not the type the format declares: {'; '.join(wrong)}. "
+                f"Replace it with '{_refresh_command()}'."
+            )
+
         try:
-            return cls(**{key: value for key, value in raw.items() if key in known})
+            return cls(**accepted)
         except TypeError as exc:
             raise ManifestError(f"manifest is missing required field(s): {exc}") from exc
 
@@ -159,6 +233,18 @@ class Manifest:
             f"@ {self.dimensions}d, chunks {self.chunk_size}/{self.chunk_overlap}, "
             f"built {self.built_at or 'unknown'}"
         )
+
+
+# A field added in a shape ``_fits_shape`` does not know about would otherwise
+# skip validation silently, which is the failure mode the check above exists to
+# remove -- so it fails at import instead, where a test collection run finds it.
+_UNKNOWN_SHAPES = sorted({field_.type for field_ in fields(Manifest)} - set(_SHAPE_NAMES))
+if _UNKNOWN_SHAPES:  # pragma: no cover - a guard on this module's own edits
+    raise AssertionError(
+        f"Manifest declares field type(s) {_UNKNOWN_SHAPES} that _fits_shape does not "
+        "check; add them to _SHAPE_NAMES and _fits_shape or from_dict will accept "
+        "anything there"
+    )
 
 
 def now_stamp() -> str:
@@ -405,6 +491,15 @@ def validate(
     survived while the index under it did not -- an interrupted build, a
     truncated copy -- which the field checks above cannot see, because they
     only ever read the sidecar.
+
+    Deliberately schema-agnostic: this does not call
+    :func:`ensure_supported_schema`, because both paths that turn bytes into a
+    :class:`Manifest` already have -- ``read_manifest`` before returning one,
+    and ``index_ops._parse_manifest`` before the fetched asset is installed. A
+    manifest from a version this build cannot interpret therefore never reaches
+    here, and repeating the check would put the policy in two places for a
+    caller that cannot be reached without it. Field *types* are guaranteed by
+    :meth:`Manifest.from_dict`, which is why the slices below need no guard.
     """
     report = ValidationReport(manifest=manifest)
 

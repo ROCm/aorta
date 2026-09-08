@@ -14,6 +14,7 @@ standing between them and a plausible wrong answer.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from aorta.chat.rag.manifest import (
     Manifest,
     ManifestError,
     checksum_path,
+    ensure_supported_schema,
     manifest_path,
     read_manifest,
     sha256_file,
@@ -131,13 +133,143 @@ class TestReadFailures:
         That escaped every caller, all of which handle only ``ManifestError``,
         so a malformed sidecar surfaced as an unhandled crash instead of the
         refusal the reader is supposed to produce.
+
+        Refused earlier now, by the field-type check in ``from_dict`` -- which
+        is the point of moving it there, since ``schema_version`` was only the
+        first field of several to be compared or sliced without one. The
+        property under test is the same and is what this asserts: a malformed
+        sidecar is a ``ManifestError``, never a ``TypeError``.
         """
         raw = json.loads(_manifest().to_json())
         raw["schema_version"] = value
         manifest_path(index_file).write_text(json.dumps(raw))
 
-        with pytest.raises(ManifestError, match="non-integer schema version"):
+        with pytest.raises(ManifestError, match="not the type the format declares"):
             read_manifest(index_file)
+
+    @pytest.mark.parametrize("value", ["1", None, 1.5, [1], True])
+    def test_the_schema_guard_holds_for_a_manifest_that_skipped_the_parser(self, value):
+        """``ensure_supported_schema`` is exported, so it cannot lean on ``from_dict``.
+
+        Every path that turns bytes into a manifest goes through the parser, so
+        this is defence in depth rather than a live route -- but the comparison
+        is this function's to make safe, and a caller holding a hand-built
+        manifest is the one case the parser never saw.
+        """
+        manifest = replace(_manifest(), schema_version=value)
+        with pytest.raises(ManifestError, match="non-integer schema version"):
+            ensure_supported_schema(manifest, "the index under test")
+
+
+class TestFieldTypes:
+    """A sidecar is untrusted input, and nothing downstream re-checks its types.
+
+    ``describe`` slices ``aorta_sha``, ``validate`` slices it twice more and
+    calls ``startswith`` on it, and ``index_ops`` walks ``corpus_roots``. Each
+    of those assumed the declared type, so a hand-edited or truncated sidecar
+    reached the CLI as an exception no caller handles: ``"aorta_sha": 42`` as
+    ``TypeError: 'int' object is not subscriptable``, and ``{"sha": "abc"}`` as
+    ``KeyError: slice(None, 7, None)`` -- a slice being hashable since 3.12, so
+    the dict lookup succeeds in failing.
+
+    Checked once at the parser rather than at each use site, because the use
+    site that gets forgotten is the one a user hits.
+    """
+
+    #: One value of the wrong type per declared field shape, and per JSON type
+    #: a sidecar can carry. ``True`` is here because ``bool`` is an ``int``
+    #: subclass, so a count field would otherwise accept it as 1.
+    WRONG = (
+        ("aorta_sha", 42, "a whole number"),
+        ("aorta_sha", {"sha": "abc"}, "an object"),
+        ("aorta_sha", None, "null"),
+        ("aorta_sha", ["abc"], "a list"),
+        ("aorta_version", 2, "a whole number"),
+        ("embedding_model", ["m"], "a list"),
+        ("dimensions", "384", "a string"),
+        ("dimensions", 384.0, "a fractional number"),
+        ("chunk_count", True, "a boolean"),
+        ("file_count", None, "null"),
+        ("corpus_roots", "src/aorta", "a string"),
+        ("corpus_roots", [1, 2], "a list"),
+    )
+
+    @pytest.mark.parametrize(("field_name", "value", "described"), WRONG)
+    def test_a_field_of_the_wrong_type_is_a_manifest_error(self, field_name, value, described):
+        raw = json.loads(_manifest().to_json())
+        raw[field_name] = value
+        with pytest.raises(ManifestError) as exc:
+            Manifest.from_dict(raw)
+        assert field_name in str(exc.value)
+        assert described in str(exc.value)
+
+    def test_the_message_names_every_bad_field_not_just_the_first(self):
+        """Someone repairing a sidecar by hand should not need three attempts."""
+        raw = json.loads(_manifest().to_json())
+        raw.update({"aorta_sha": 42, "dimensions": "384", "corpus_roots": "src"})
+        with pytest.raises(ManifestError) as exc:
+            Manifest.from_dict(raw)
+        for name in ("aorta_sha", "dimensions", "corpus_roots"):
+            assert name in str(exc.value)
+
+    def test_it_names_the_command_that_replaces_the_manifest(self):
+        """A refusal the user cannot act on gets worked around."""
+        raw = json.loads(_manifest().to_json())
+        raw["aorta_sha"] = 42
+        with pytest.raises(ManifestError, match="aorta chat index"):
+            Manifest.from_dict(raw)
+
+    def test_a_read_surfaces_it_as_a_manifest_error_not_a_type_error(self, index_file: Path):
+        """The whole point: callers handle ``ManifestError`` and nothing else."""
+        raw = json.loads(_manifest().to_json())
+        raw["aorta_sha"] = 42
+        manifest_path(index_file).write_text(json.dumps(raw))
+        with pytest.raises(ManifestError):
+            read_manifest(index_file)
+
+    def test_the_types_a_manifest_does_declare_are_accepted(self, index_file: Path):
+        """Including an empty string and a zero, which are not "missing"."""
+        raw = json.loads(_manifest().to_json())
+        raw.update({"aorta_tag": "", "chunk_count": 0, "corpus_roots": []})
+        manifest_path(index_file).write_text(json.dumps(raw))
+        found = read_manifest(index_file)
+        assert found.aorta_tag == ""
+        assert found.chunk_count == 0
+        assert found.corpus_roots == []
+
+    def test_an_unknown_key_of_a_bad_type_is_still_only_ignored(self, index_file: Path):
+        """Forward tolerance is about keys; the type check must not undo it."""
+        raw = json.loads(_manifest().to_json())
+        raw["future_field"] = {"nested": [1, 2]}
+        manifest_path(index_file).write_text(json.dumps(raw))
+        assert read_manifest(index_file).embedding_model == MODEL
+
+    def test_every_declared_field_shape_is_one_the_check_knows(self):
+        """The import-time guard, asserted rather than left to fire on someone.
+
+        A field added in a shape ``_fits_shape`` does not handle would skip
+        validation silently, which is the hole the check exists to close.
+        """
+        from dataclasses import fields
+
+        declared = {field_.type for field_ in fields(Manifest)}
+        assert declared <= set(manifest_mod._SHAPE_NAMES), declared
+
+    def test_a_bad_type_reaches_describe_and_validate_only_as_a_refusal(self, index_file: Path):
+        """Both #465 reproductions, end to end through the reader."""
+        for value in (42, {"sha": "abc"}):
+            raw = json.loads(_manifest().to_json())
+            raw["aorta_sha"] = value
+            manifest_path(index_file).write_text(json.dumps(raw))
+            with pytest.raises(ManifestError):
+                manifest = read_manifest(index_file)
+                manifest.describe()
+                validate(
+                    manifest,
+                    embedding_model=MODEL,
+                    collection=COLLECTION,
+                    installed_sha="b" * 7,
+                )
 
     def test_an_unknown_extra_key_is_tolerated(self, index_file: Path):
         """A newer builder adding a field must not strand an older client.

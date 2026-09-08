@@ -312,11 +312,19 @@ class TestTheFetchedSchemaIsChecked:
 
     @pytest.mark.parametrize("value", ["1", None, 1.5, [1]])
     def test_a_non_integer_schema_is_an_index_fetch_error(self, server, tmp_path, value):
-        """Not a ``TypeError`` out of a comparison the caller never guarded."""
+        """Not a ``TypeError`` out of a comparison the caller never guarded.
+
+        The refusal now comes from ``Manifest.from_dict``'s field-type check
+        rather than from ``ensure_supported_schema``, because
+        ``schema_version`` was one of several fields being compared or sliced
+        on trust and the check moved to the boundary they all cross. Same
+        exception, same "installs nothing", earlier and better message -- so
+        the assertion is on the property rather than on either wording.
+        """
         self._serve_schema(server, value)
         dest = tmp_path / "i.sqlite"
 
-        with pytest.raises(IndexFetchError, match="non-integer schema version"):
+        with pytest.raises(IndexFetchError, match="is not usable"):
             fetch_index(version="0.2.1", index_path=dest)
 
         assert not dest.exists()

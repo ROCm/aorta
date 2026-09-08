@@ -126,9 +126,7 @@ def _break_store(index: Path, collection: str, how: str) -> None:
             # retrieval can select.
             rows = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()[0]
             conn.execute(f'DROP TABLE "chunks_{collection}"')
-            conn.execute(
-                f'CREATE TABLE "chunks_{collection}" (id INTEGER PRIMARY KEY, text TEXT)'
-            )
+            conn.execute(f'CREATE TABLE "chunks_{collection}" (id INTEGER PRIMARY KEY, text TEXT)')
             conn.executemany(
                 f'INSERT INTO "chunks_{collection}" (text) VALUES (?)',
                 [(f"chunk {n}",) for n in range(rows)],
@@ -240,6 +238,66 @@ class TestStructure:
         assert _by_name(report, "sqlite").status == FAIL
         # And the checks after it still ran.
         assert _by_name(report, "embedding provider")
+
+    def test_a_raising_store_probe_is_reported_and_the_run_continues(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Why ``_index_is_healthy``'s last line is outside its own guard.
+
+        Review asked for that line to be wrapped, on the grounds that the rest
+        of the function is defence in depth. The reason it is not: the guard
+        above it turns *a damaged index* into ``False``, and a raise out of
+        ``_store_defect`` is not that -- it means this module's imports moved,
+        which the probe deliberately lets escape rather than report as a defect
+        in every index. Swallowing it would put a quiet health verdict over an
+        index nobody checked, which is the defect shape this PR closes.
+
+        The concern behind the comment is real and is already answered one
+        level up: ``run_checks`` catches per check, so the raise becomes a
+        ``fail`` line naming the exception and every later check still runs.
+        Pinned here so the containment this argument rests on is a tested
+        property rather than an assertion in a docstring.
+        """
+        _write_index(monkeypatch, tmp_path)
+
+        def _explode(index_file):
+            raise ImportError("no module named 'aorta.chat.rag.retriever'")
+
+        monkeypatch.setattr(doctor, "_store_defect", _explode)
+        report = run_checks(backend=False)
+
+        failures = [check for check in report.checks if check.status == FAIL]
+        assert any("ImportError" in check.detail for check in failures), failures
+        # Loud, and contained: the report is still a whole report.
+        assert _by_name(report, "llm tool mode")
+        assert _by_name(report, "llm backend")
+
+    def test_a_raising_health_probe_is_not_softened_into_a_cold_cache_warning(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The same property on the ``_index_is_healthy`` path specifically.
+
+        This is the caller review's comment was about. With a cold cache,
+        ``_check_embedding_model`` asks ``_index_is_healthy`` whether to soften
+        its wording, so a raise from the last line escapes *that* check rather
+        than ``_check_index``. It has to stay a reported failure: wrapping the
+        line to return ``False`` would produce an ordinary cold-cache warning
+        and no trace of the exception anywhere in the report, which is a report
+        that has quietly stopped checking something.
+        """
+        _write_index(monkeypatch, tmp_path)
+
+        def _explode(index_file):
+            raise ImportError("no module named 'aorta.chat.rag.retriever'")
+
+        monkeypatch.setattr(doctor, "_store_defect", _explode)
+        report = run_checks(backend=False)
+
+        assert any(
+            check.status == FAIL and "ImportError" in check.detail for check in report.checks
+        ), report.checks
+        # It raised before it could add its line, which is the loud outcome.
+        assert not [check for check in report.checks if check.name == "embedding model cache"]
 
 
 class TestEmbeddingModelCache:
@@ -569,9 +627,7 @@ class TestIndexChecks:
             }
             assert f"vec_{collection}_rowids" in tables, sorted(tables)
             chunks = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()[0]
-            vectors = conn.execute(
-                f'SELECT COUNT(*) FROM "vec_{collection}_rowids"'
-            ).fetchone()[0]
+            vectors = conn.execute(f'SELECT COUNT(*) FROM "vec_{collection}_rowids"').fetchone()[0]
             assert vectors == chunks == 3
         finally:
             conn.close()
@@ -652,9 +708,14 @@ class TestToolMode:
 
     ``text`` is the shipped default and a reasoning model cannot drive it: it
     writes its working to a separate channel and returns empty content where the
-    ``ACTION:`` line should be, so the act loop re-prompts until it gives up.
-    The user-facing give-up message points here, so this check has to name both
-    the problem and the setting that fixes it.
+    ``ACTION:`` line should be, so every action-routed question spends billed
+    rounds on a reply the protocol cannot read. The user-facing give-up message
+    points here, so this check has to name both the problem and the setting that
+    fixes it.
+
+    What happens *after* the empty reply is deliberately not asserted as a
+    single outcome -- see
+    ``test_the_warning_names_the_cost_rather_than_predicting_one_outcome``.
     """
 
     def test_the_resolved_mode_is_always_reported(self, monkeypatch):
@@ -662,6 +723,52 @@ class TestToolMode:
         check = _by_name(run_checks(backend=False), "llm tool mode")
         assert check.status == OK
         assert "native" in check.detail
+
+    def test_native_on_a_stock_vllm_says_what_the_endpoint_has_to_accept(self, monkeypatch):
+        """Found by sweeping this check for the shape review flagged elsewhere in it.
+
+        ``native`` had the report's other advice-free green line, and it is the
+        worse of the two: it is the mode with an endpoint requirement, nothing
+        in the report tests that requirement -- ``_check_backend`` asks for
+        ``/health``, which a server that rejects ``tools`` answers normally --
+        and ``native`` on a stock local vLLM is a configuration that cannot
+        answer a single action-routed question.
+        """
+        monkeypatch.setattr(settings, "llm_tool_mode", "native")
+        monkeypatch.setattr(settings, "llm_provider", "vllm")
+        monkeypatch.setattr(settings, "vllm_model", "Qwen/Qwen2.5-Coder-7B-Instruct")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == OK
+        assert "/health" in check.hint
+        assert "--enable-auto-tool-choice" in check.hint
+
+    def test_native_on_a_remote_gateway_names_the_gateway_requirement_instead(self, monkeypatch):
+        """The remedy is the provider's, the same way it is in text mode."""
+        monkeypatch.setattr(settings, "llm_tool_mode", "native")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "remote_llm_model", "gpt-4o")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert "gateway" in check.hint
+        assert "--enable-auto-tool-choice" not in check.hint
+
+    def test_every_reported_tool_mode_carries_a_hint(self, monkeypatch):
+        """The invariant behind both fixes: no green tool-mode line without advice.
+
+        Asserted as a sweep rather than per branch, because a hint on three
+        branches out of five is how the gap got there in the first place.
+        """
+        monkeypatch.setattr(settings, "llm_provider", "vllm")
+        for mode, model in (
+            ("native", "Qwen/Qwen2.5-Coder-7B-Instruct"),
+            ("native", ""),
+            ("text", "Qwen/Qwen2.5-Coder-7B-Instruct"),
+            ("text", "openai/gpt-oss-20b"),
+            ("text", ""),
+        ):
+            monkeypatch.setattr(settings, "llm_tool_mode", mode)
+            monkeypatch.setattr(settings, "vllm_model", model)
+            check = _by_name(run_checks(backend=False), "llm tool mode")
+            assert check.hint, (mode, model)
 
     def test_text_on_a_local_vllm_is_ok_but_still_costs_the_native_flags(self, monkeypatch):
         """A stock vLLM drives text mode, and needs two server flags for native."""
@@ -697,7 +804,45 @@ class TestToolMode:
         monkeypatch.setattr(settings, "llm_provider", "not-a-provider")
         check = _by_name(run_checks(backend=False), "llm tool mode")
         assert check.status == OK
-        assert not check.hint
+        assert "no model name to check" in check.detail
+
+    def test_the_line_with_no_model_name_still_carries_the_fix(self, monkeypatch):
+        """It was the one green line in the report offering no route to a fix.
+
+        The user it belongs to is already misconfigured -- an empty model
+        setting, or a provider no backend is registered for -- and the tool-mode
+        line names the symptom they will hit first. The hint does not depend on
+        the model name, so there is nothing to withhold: every other branch of
+        this check carries the ``native`` pointer, and leaving this one silent
+        made the table's only advice-free cell the one that needed it.
+        """
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "not-a-provider")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert 'llm_tool_mode = "native"' in check.hint
+
+    def test_an_empty_model_setting_on_a_known_provider_gets_that_native_note(self, monkeypatch):
+        """The provider is known even when the model is not, so the cost is too."""
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "vllm")
+        monkeypatch.setattr(settings, "vllm_model", "")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+        assert check.status == OK
+        assert 'llm_tool_mode = "native"' in check.hint
+        assert "--enable-auto-tool-choice" in check.hint
+
+    def test_every_text_mode_branch_carries_the_native_pointer(self, monkeypatch):
+        """The property, swept across all three ``text`` outcomes at once.
+
+        A hint on two branches out of three is how the gap this closes got
+        there, so it is asserted as an invariant rather than per branch.
+        """
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        for model in ("", "prod-chat-deployment", "o3-mini"):
+            monkeypatch.setattr(settings, "remote_llm_model", model)
+            check = _by_name(run_checks(backend=False), "llm tool mode")
+            assert 'llm_tool_mode = "native"' in check.hint, model
 
     def test_text_with_a_reasoning_model_warns_and_names_the_setting(self, monkeypatch):
         monkeypatch.setattr(settings, "llm_tool_mode", "text")
@@ -709,6 +854,37 @@ class TestToolMode:
         assert 'llm_tool_mode = "native"' in check.hint
         assert "empty content" in check.hint
 
+    def test_the_warning_names_the_cost_rather_than_predicting_one_outcome(self, monkeypatch):
+        """The hint may not claim the question ends up unanswered.
+
+        It used to: "the act loop re-prompts until it gives up and the question
+        is answered with nothing". #464 makes that false -- it escalates to
+        ``native`` once on this exact signature, and adds a labelled
+        retrieval-only fallback when neither protocol answers -- so the same
+        ``text`` setting can now end in a good answer one round late, a degraded
+        answer, or nothing. Which one is not readable from
+        ``settings.llm_tool_mode``: the escalation only moves the built-in
+        default, never a mode the user set, and this check cannot tell those
+        apart.
+
+        What is true either way, and what the user can act on, is that the round
+        is spent and wasted. So the hint states the cost and gives the outcome
+        as a disjunction. Asserted here so a later tightening back to one
+        prediction fails rather than quietly re-contradicting #464, whichever
+        of the two lands first.
+        """
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "remote_llm_model", "o3-mini")
+        hint = _by_name(run_checks(backend=False), "llm tool mode").hint
+
+        assert "billed rounds" in hint
+        assert "late, degraded, or not at all" in hint
+        # The claims #464 falsifies. "gives up" and "answered with nothing"
+        # describe one of three outcomes as though it were the only one.
+        for overstatement in ("gives up", "answered with nothing", "re-prompts until"):
+            assert overstatement not in hint, overstatement
+
     @pytest.mark.parametrize("model", ["gpt-oss-120b", "o3-mini", "deepseek-r1", "Qwen/QwQ-32B"])
     def test_the_reasoning_models_it_recognises(self, monkeypatch, model):
         monkeypatch.setattr(settings, "llm_tool_mode", "text")
@@ -716,9 +892,41 @@ class TestToolMode:
         monkeypatch.setattr(settings, "remote_llm_model", model)
         assert _by_name(run_checks(backend=False), "llm tool mode").status == WARN
 
-    @pytest.mark.parametrize("model", ["gpt-4o-mini", "claude-sonnet-4", "llama-3.3-70b"])
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # ``gpt-4o`` and ``gpt-4o-mini`` are the pair worth pinning: they
+            # sit one character from ``o1``-``o4`` and are the most widely
+            # deployed non-reasoning models the pattern has to clear.
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-3.5-turbo-0125",
+            "claude-sonnet-4",
+            "llama-3.3-70b",
+            "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+            "Qwen/Qwen2.5-Coder-32B-Instruct",
+            "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "deepseek-ai/DeepSeek-V3",
+            "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF",
+            "tiiuae/Falcon3-10B-Instruct",
+            "01-ai/Yi-1.5-34B-Chat",
+            "ibm-granite/granite-3.1-8b-instruct",
+            "CohereForAI/c4ai-command-r-plus",
+            "command-r7b-12-2024",
+        ],
+    )
     def test_a_model_that_can_drive_text_mode_is_not_warned_about(self, monkeypatch, model):
-        """A warning on every correct setup is worth less than no warning."""
+        """A warning on every correct setup is worth less than no warning.
+
+        Review asked whether the pattern false-positives in real use, so the
+        list is real published names rather than invented ones -- the families
+        a gateway or a vLLM server actually serves. It clears all of them.
+
+        The shape it cannot clear is a bespoke deployment ending in a revision
+        suffix (``internal-llama-70b-r1``), which is why the pattern only ever
+        chooses the wording: see ``_REASONING_MODEL_PATTERN``.
+        """
         monkeypatch.setattr(settings, "llm_tool_mode", "text")
         monkeypatch.setattr(settings, "llm_provider", "openai")
         monkeypatch.setattr(settings, "remote_llm_model", model)

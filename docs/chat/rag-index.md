@@ -101,9 +101,9 @@ half-rebuilt one.
 a given AORTA revision, so building it locally is work someone already did. It
 resolves by installed version — a released wheel gets that release's asset, a
 `.dev` build gets the rolling `main` asset with a warning about the commit delta.
-It is only *offered* as a remedy under `embedding_provider = "local"`: the
-published asset is built with the local embedder, so a fetch under a remote one
-is refused before anything is installed. `aorta chat doctor` and the
+`aorta chat index fetch` is only *offered* as a remedy under
+`embedding_provider = "local"`: the published asset is built with the local
+embedder, so a fetch under a remote one is refused before anything is installed. `aorta chat doctor` and the
 manifest-validation messages read the configured provider before advising —
 for an absent index, a refused one and a stale one — and name `aorta chat index
 build` instead. The messages a *failing query* prints are not conditioned yet

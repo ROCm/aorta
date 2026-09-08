@@ -190,8 +190,11 @@ non-zero, and `content` is empty — and the logs say so:
 you spend a query on it when `text` is paired with a model whose name reads as a
 reasoning one — a locally served one as much as a remote one, since the channel
 is the model's rather than the endpoint's. A deployment can be served under any
-name, so for a name the check does not recognise it still names `native`, and
-what turning it on costs here, in the hint under the line it prints.
+name, so for a name the check does not recognise — or a provider with no model
+name to read — it still names `native`, and what turning it on costs here, in
+the hint under the line it prints. Under `native` the same line names what the
+endpoint has to accept, because nothing in that report tests it: the backend
+probe asks for `/health`, which a server that rejects `tools` answers normally.
 
 Both protocols run the same tools, retrieval and critic, and both are guarded
 the same way: an empty reply is never used as the answer, unproductive rounds

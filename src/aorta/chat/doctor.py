@@ -100,9 +100,44 @@ _VLLM_NATIVE_NOTE = (
 #: Model names that mark a reasoning model. A heuristic -- a gateway can call a
 #: deployment anything, and a vLLM server is launched under whatever name its
 #: operator gave it -- so it only decides whether the tool-mode check warns or
-#: merely informs. Both branches name ``native`` and the symptom, because the
+#: merely informs. Every branch names ``native`` and the symptom, because the
 #: case this cannot recognise is exactly the one a user reaches after hitting it.
+#:
+#: Measured against 13 real reasoning names and 31 ordinary ones, it separates
+#: them cleanly -- ``gpt-4o`` and ``gpt-4o-mini`` do not match, ``o4-mini`` and
+#: ``DeepSeek-R1`` do. What it cannot separate is a bespoke deployment whose
+#: name ends in a revision suffix: ``internal-llama-70b-r1`` matches. That is
+#: the reason this only ever chooses the wording, never withholds advice -- a
+#: false positive costs a warning whose remedy is the same one the ``OK``
+#: branch prints anyway.
 _REASONING_MODEL_PATTERN = re.compile(r"gpt-oss|qwq|reasoner|reasoning|\b(?:o[1-4]|r1)\b")
+
+#: The pointer every ``text``-mode line carries, whatever the check could work
+#: out about the model. ``native`` is what an action-routed question that comes
+#: back empty needs, and a deployment can be served under any name -- so the
+#: line that has no name to read is the one whose reader most needs the pointer,
+#: not the one that can be left green and silent. That user is already
+#: misconfigured, and ``text`` names the symptom they will actually hit.
+_TEXT_MODE_HINT = (
+    "If an action-routed question comes back with no answer, the first thing\n"
+    'to change is llm_tool_mode = "native". Reasoning models cannot write the\n'
+    "ACTION: lines text mode parses, and a deployment can be served under any\n"
+    "name.\n"
+)
+
+#: And the pointer every ``native`` line carries, found by sweeping this
+#: function for the same green-with-no-advice shape review found in the
+#: no-model-name branch. ``native`` is the mode with an endpoint requirement,
+#: and nothing in this report tests it: ``_check_backend`` asks the backend for
+#: ``/health``, which a server that rejects the ``tools`` parameter answers
+#: perfectly well. So this line read green over the one tool-mode setting that
+#: cannot work at all -- ``native`` on a stock local vLLM -- and the user who
+#: reaches it has already configured the failure.
+_NATIVE_MODE_HINT = (
+    "Nothing here confirms the endpoint accepts it: the backend probe asks\n"
+    "for /health, which a server that rejects the 'tools' parameter answers\n"
+    'normally. If action-routed questions fail, "text" is the mode to try.\n'
+)
 
 
 @dataclass
@@ -253,6 +288,21 @@ def _store_defect(index_file: Path) -> str:
 
     A non-empty chunk table is necessary but not sufficient, which is why the
     schema check follows it -- see :func:`_collection_schema_defect`.
+
+    **On #465, which fixes that suppression at the root.** It removes the
+    ``manifest.chunk_count`` gate, so ``check_index`` will refuse *a file that
+    cannot be opened as sqlite at all* on its own. This probe is kept anyway,
+    and not as belt-and-braces: measured against the seven clobbered states
+    this reports on, ``check_index`` refuses none of them today, and #465
+    changes exactly one of the seven. The other six -- no chunk table for this
+    install's collection, an empty one, a missing collection registry, an
+    unregistered collection, absent ``content``/``metadata`` columns, a missing
+    or short vector table -- are states ``check_index`` never looks at, because
+    it compares a sidecar against a row count and these are facts about the
+    schema underneath it. So there is no behaviour to make this conditional on:
+    after #465 the unopenable case short-circuits at the refusal check in both
+    callers and never reaches here, and the six that do reach here are why the
+    function exists. Merge order does not matter either way.
     """
     from aorta.chat.rag.embeddings.factory import get_provider
 
@@ -314,8 +364,7 @@ def _collection_schema_defect(
     conn = sqlite3.connect(f"file:{index_file}?mode=ro", uri=True)
     try:
         tables = {
-            name
-            for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         if registry_table not in tables:
             return (
@@ -383,6 +432,27 @@ def _index_is_healthy() -> bool:
     ``False`` costs a warning the user can ignore, while a spurious ``True``
     tells someone whose index is unusable that there is nothing to do, and
     withholds the remedy.
+
+    The ``_store_defect`` call on the last line is **deliberately not** inside
+    the guard above, and review has asked about it, so: the guard exists to
+    turn *a damaged index* into ``False``, which is a fact about the file. A
+    raise out of ``_store_defect`` is not that -- it means this module's own
+    imports moved, since the two it needs sit above its ``except`` precisely so
+    a rename cannot be reported as a defect in every index. Wrapping it here
+    would convert that bug into a quiet ``False``, and a quiet health probe
+    over an index nobody checked is the exact shape of the defect this whole
+    check exists to close.
+
+    Nor would wrapping it contain anything. ``run_checks`` already catches per
+    check and records the exception as a ``fail`` line, so one bad index cannot
+    abort the report -- pinned by
+    ``TestStructure.test_a_check_that_explodes_becomes_a_finding_not_a_traceback``
+    and, for this path specifically, by
+    ``test_a_raising_store_probe_is_reported_and_the_run_continues``. And
+    ``_check_index`` calls ``_store_defect`` unguarded in the same run, so the
+    same raise surfaces there regardless: a guard here could only make the two
+    readers of one helper disagree about one failure, which is the drift this
+    PR removed.
     """
     from aorta.chat.config import settings
     from aorta.chat.rag.index_ops import check_index
@@ -567,6 +637,16 @@ def _check_index(report: Report) -> None:
     report.add("index manifest", OK, result.manifest.describe())
 
 
+def _with_native_note(hint: str, native_note: str) -> str:
+    """``hint``, plus what ``native`` requires here where the provider is known.
+
+    ``native_note`` is empty for a provider no backend is registered for, and
+    the generic pointer is still worth printing there -- so the note is appended
+    rather than required.
+    """
+    return hint + native_note if native_note else hint.rstrip("\n")
+
+
 def _check_tool_mode(report: Report) -> None:
     """Which protocol the act loop will use to call tools, and whether it fits.
 
@@ -574,13 +654,25 @@ def _check_tool_mode(report: Report) -> None:
     only mode a stock local vLLM can drive. A reasoning model cannot drive it:
     it puts its working in a channel of its own and returns empty ``content``
     where the ``ACTION:`` line was expected, so every action-routed query spends
-    its whole retry budget and answers nothing. Until this check existed the
-    first signal of that was the failed query.
+    billed rounds on a reply this protocol cannot read. Until this check existed
+    the first signal of that was the failed query.
 
     That holds for a locally served reasoning model as much as a remote one --
     the channel is the model's, not the endpoint's -- so both flows are read.
     What the provider changes is the remedy: turning ``native`` on costs a
     setting remotely and a setting plus two server flags on vLLM.
+
+    The warning names the *cost* and gives the outcome as a disjunction --
+    late, degraded, or nothing -- rather than predicting one, and that is load
+    bearing rather than vague. What happens after the empty reply is not a
+    property of the configuration this check can read: #464 adds a one-shot
+    escalation to ``native`` on that exact signature, which only moves the
+    built-in default and not a mode the user set, plus a labelled
+    retrieval-only fallback when neither protocol answers. So the same ``text``
+    setting can end in a good answer one round late, a degraded answer, or
+    nothing at all, and ``settings.llm_tool_mode`` does not say which. Every
+    one of those is worse than not needing the round, which is the thing the
+    user can act on. Do not narrow this back to a single outcome.
     """
     from aorta.chat.config import settings
 
@@ -599,19 +691,35 @@ def _check_tool_mode(report: Report) -> None:
             ),
         )
         return
-    if mode == "native":
-        report.add("llm tool mode", OK, "native (the provider's function-calling API)")
-        return
     model = native_note = ""
     if provider in _REMOTE_LLM_PROVIDERS:
         model, native_note = str(settings.remote_llm_model or ""), _REMOTE_NATIVE_NOTE
     elif provider == "vllm":
         model, native_note = str(settings.vllm_model or ""), _VLLM_NATIVE_NOTE
+
+    if mode == "native":
+        # Resolved after the provider, not before it, so this line can say what
+        # the mode requires here. See :data:`_NATIVE_MODE_HINT`.
+        report.add(
+            "llm tool mode",
+            OK,
+            "native (the provider's function-calling API)",
+            hint=_with_native_note(_NATIVE_MODE_HINT, native_note),
+        )
+        return
     if not model:
         # A provider no backend is registered for -- ``_check_backend`` reports
         # that -- or one whose model setting is empty. Either way there is no
         # name to read, and guessing which setting holds it would invent one.
-        report.add("llm tool mode", OK, "text (ACTION: lines parsed out of the reply)")
+        # The *hint* does not depend on the name, though, so it is attached
+        # here too: this was the one green line in the report carrying no route
+        # to a fix, and it belongs to a user who is already misconfigured.
+        report.add(
+            "llm tool mode",
+            OK,
+            "text (ACTION: lines parsed out of the reply); no model name to check",
+            hint=_with_native_note(_TEXT_MODE_HINT, native_note),
+        )
         return
 
     if _REASONING_MODEL_PATTERN.search(model.lower()):
@@ -624,9 +732,11 @@ def _check_tool_mode(report: Report) -> None:
                 "for aorta\n"
                 "to parse. A reasoning model writes that in a channel of its "
                 "own and\n"
-                "returns empty content instead, so the act loop re-prompts "
-                "until it gives\n"
-                "up and the question is answered with nothing.\n"
+                "returns empty content instead, so every action-routed "
+                "question spends\n"
+                "billed rounds on a reply aorta cannot read. The answer then "
+                "comes back\n"
+                "late, degraded, or not at all.\n"
                 'Set llm_tool_mode = "native" in chat.toml, or '
                 "AORTA_CHAT_LLM_TOOL_MODE=native.\n" + native_note
             ),
@@ -636,15 +746,7 @@ def _check_tool_mode(report: Report) -> None:
         "llm tool mode",
         OK,
         f"text, on {provider} ({model})",
-        hint=(
-            "If an action-routed question comes back with no answer, the first "
-            "thing\n"
-            'to change is llm_tool_mode = "native". Reasoning models cannot '
-            "write the\n"
-            "ACTION: lines text mode parses, and a deployment can be served "
-            "under any\n"
-            "name.\n" + native_note
-        ),
+        hint=_with_native_note(_TEXT_MODE_HINT, native_note),
     )
 
 
