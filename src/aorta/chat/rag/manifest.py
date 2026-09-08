@@ -196,6 +196,16 @@ class Manifest:
         closes those and every future one: the alternative is a type guard at
         each use site, and the one that gets forgotten is the one a user hits.
 
+        No field is exempt, including the ones only ever *reported* --
+        ``built_at`` carrying a number refuses the manifest as surely as
+        ``dimensions`` does. That is not the usual asymmetry (a reported field
+        can survive being slightly wrong; a used one cannot) because the
+        subject here is not the field, it is the file. A sidecar whose types do
+        not match the format it declares is evidence the file did not arrive
+        intact, and this module's whole policy is that an index it cannot
+        vouch for must not answer questions -- see the module docstring. The
+        remedy is one command and the message names it.
+
         Raises:
             ManifestError: If ``raw`` is not an object, is missing a required
                 field, or carries a field whose type is not the declared one.
@@ -308,6 +318,13 @@ def ensure_supported_schema(manifest: Manifest, subject: str) -> None:
     A non-integer version is rejected explicitly rather than compared: ``>``
     against a string raises ``TypeError``, which escapes callers that handle
     only :class:`ManifestError`.
+
+    That check is defence in depth now rather than the first line of it.
+    :meth:`Manifest.from_dict` type-checks every declared field, so a *parsed*
+    manifest cannot reach here with a non-integer version, and both callers
+    parse. It is kept because this function is exported and the comparison is
+    its own to make safe: a caller holding a hand-built manifest is the one
+    case the parser never saw.
     """
     version = manifest.schema_version
     if isinstance(version, bool) or not isinstance(version, int):
