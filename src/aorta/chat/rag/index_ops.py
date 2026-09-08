@@ -23,6 +23,7 @@ a ``.devN+g<sha>`` version takes the rolling one and says how far off it is.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import logging
@@ -34,6 +35,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from aorta.chat.config import settings
 from aorta.chat.rag import corpus as corpus_mod
@@ -65,9 +67,26 @@ _RELEASE_VERSION = re.compile(r"\A\d+\.\d+\.\d+\Z")
 #: setuptools_scm's local segment, e.g. ``0.2.2.dev122+g45edc3d.d20260810``.
 _DEV_LOCAL = re.compile(r"\.dev(?P<distance>\d+)(?:\+g(?P<sha>[0-9a-f]{7,40}))?")
 
-#: How long a single HTTP request gets. The index is tens of megabytes, so this
-#: is generous, but an unbounded download inside a CLI command is a hang.
-_HTTP_TIMEOUT = 300
+#: Budget for connecting and for the response headers. ``urlopen`` returns as
+#: soon as the headers are in, so this covers everything up to the first byte
+#: of the body -- which is the only phase an unreachable or blackholed host ever
+#: reaches. One 300 s budget for both phases is what turned "this node cannot
+#: see the release host" into five silent minutes on a 1 KB sidecar.
+_CONNECT_TIMEOUT = 30
+
+#: Budget for reading the body, once a server has answered. Kept generous
+#: because the index is tens of megabytes and the link may be slow. It is a
+#: per-``recv`` timeout rather than a total, so a transfer that keeps flowing
+#: never approaches it.
+_READ_TIMEOUT = 300
+
+#: Read from the socket in blocks this size, so progress is reported against a
+#: transfer rather than after it.
+_DOWNLOAD_BLOCK = 256 * 1024
+
+#: How much has to arrive between progress lines. Small enough that a slow link
+#: still looks alive, large enough that a fast one does not scroll.
+_PROGRESS_STEP = 4 * 1024 * 1024
 
 #: Chunks embedded per write. Mirrors ``indexer._WRITE_BATCH``'s reasoning: a
 #: real tree splits into ~15,000 chunks and embedding them in one call holds
@@ -136,6 +155,11 @@ class FetchResult:
     manifest: manifest_mod.Manifest
     source: str
     warnings: list[str] = field(default_factory=list)
+    #: What was known *before* the first request -- which asset was resolved and
+    #: why. Separate from ``warnings`` because the caller has to be able to say
+    #: it up front: these are the lines that explain a wait, and they used to be
+    #: printed only once the wait had ended successfully.
+    notes: list[str] = field(default_factory=list)
 
 
 def installed_version() -> str:
@@ -422,13 +446,81 @@ def check_index(
 # ── fetching ──────────────────────────────────────────────────────────────
 
 
+def _widen_read_timeout(response: Any) -> None:
+    """Give the body read the longer budget, now that the headers have arrived.
+
+    The split the two constants describe is only expressible after the fact:
+    ``urlopen`` takes one timeout and uses it for the connect and for every
+    subsequent read, and reaching the socket is the only way to change it once
+    the response exists.
+
+    Best-effort on purpose. A stub response in a test has no socket to reach,
+    and a CPython that moves the attribute would otherwise turn a cosmetic
+    improvement into a failed download. Falling back leaves the body on the
+    connect budget, which is a per-``recv`` timeout and so is still ample for a
+    transfer that is actually flowing.
+    """
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is None:
+        return
+    with contextlib.suppress(OSError, AttributeError):
+        sock.settimeout(_READ_TIMEOUT)
+
+
+def _human_bytes(count: int) -> str:
+    return f"{count / (1024 * 1024):.1f} MB"
+
+
+def _progress_line(done: int, total: int) -> str:
+    """One transfer-progress line, with a percentage only when one is knowable."""
+    if total > 0:
+        return f"  {_human_bytes(done)} of {_human_bytes(total)} ({done * 100 // total}%)"
+    return f"  {_human_bytes(done)}"
+
+
+def _content_length(response: Any) -> int:
+    """``Content-Length`` as an int, or 0 when the server did not send a usable one."""
+    headers = getattr(response, "headers", None)
+    raw = headers.get("Content-Length") if headers is not None else None
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        # Chunked transfer encoding sends none at all, and a malformed one must
+        # cost a percentage rather than the download.
+        return 0
+
+
+def _copy_with_progress(response: Any, handle: Any, total: int) -> None:
+    """Stream the body across, saying how far it has got as it goes.
+
+    ``shutil.copyfileobj`` was doing this with no callback, so the one thing
+    the user could see about a tens-of-megabytes transfer was that it had
+    started.
+    """
+    done = 0
+    report_at = _PROGRESS_STEP
+    while True:
+        block = response.read(_DOWNLOAD_BLOCK)
+        if not block:
+            break
+        handle.write(block)
+        done += len(block)
+        if done >= report_at:
+            logger.info("%s", _progress_line(done, total))
+            report_at = done + _PROGRESS_STEP
+    logger.info("%s", _progress_line(done, total))
+
+
 def _download(url: str, target: Path) -> None:
     """Stream ``url`` to ``target``, or raise :class:`IndexFetchError`."""
     logger.info("Downloading %s", url)
     try:
-        with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT) as response:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=_CONNECT_TIMEOUT) as response:  # noqa: S310
+            _widen_read_timeout(response)
+            total = _content_length(response)
             with open(target, "wb") as handle:
-                shutil.copyfileobj(response, handle)
+                _copy_with_progress(response, handle, total)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise IndexFetchError(
@@ -469,9 +561,15 @@ def _download_text(url: str) -> str:
     ``IndexFetchError`` for the CLI to render it: this is the first thing
     ``aorta chat index fetch`` does on a node whose egress it knows nothing
     about.
+
+    It is also the first thing the user waits on, which is why it logs. Without
+    this line the only ``Downloading`` message in the module sat on the *third*
+    request, so a node that could not reach the release host produced no output
+    at all before it failed.
     """
+    logger.info("Fetching %s", url)
     try:
-        with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT) as response:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=_CONNECT_TIMEOUT) as response:  # noqa: S310
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         raise IndexFetchError(
@@ -503,6 +601,29 @@ def _verify_checksum(path: Path, expected_line: str, url: str) -> str:
             "The download is corrupt or was tampered with; it has not been installed."
         )
     return actual
+
+
+def describe_target(source: IndexSource, dest: str | Path) -> list[str]:
+    """The lines a caller should show *before* the first request.
+
+    Every one of these is known before any network I/O and used to be printed
+    only after the last request succeeded -- so a fetch that stalled, or that
+    refused on the manifest, said nothing about what it had been trying to do.
+    ``resolve_source`` even composes a note explaining the rolling asset on a
+    dev install, and that note reached the user through ``FetchResult`` alone.
+
+    Composed here rather than in the CLI so the wording is shared and testable,
+    but *shown* by the caller: only the caller knows whether it has a terminal,
+    a JSON stream or a log to write to. ``fetch_index`` therefore does not
+    print this itself, and logs each individual request instead.
+    """
+    lines = [
+        f"Fetching the published index ({source.describe()})",
+        f"  from {source.index_url}",
+        f"  into {dest}",
+    ]
+    lines.extend(f"  note: {note}" for note in source.notes)
+    return lines
 
 
 def fetch_index(
@@ -577,7 +698,8 @@ def fetch_index(
         index_path=dest,
         manifest=manifest,
         source=source.describe(),
-        warnings=[*source.notes, *report.warnings, *_carried_note(carried)],
+        warnings=[*report.warnings, *_carried_note(carried)],
+        notes=list(source.notes),
     )
 
 
@@ -669,6 +791,7 @@ __all__ = [
     "build_index",
     "check_index",
     "compute_digest",
+    "describe_target",
     "fetch_index",
     "resolve_source",
     "side_load",

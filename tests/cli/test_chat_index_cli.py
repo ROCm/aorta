@@ -91,6 +91,62 @@ class TestBuild:
         assert "Traceback" not in result.output
 
 
+class TestFetchSaysWhatItIsDoingFirst:
+    """The reported symptom: `index fetch` printed nothing for minutes.
+
+    Every ``click.echo`` in the command ran after ``fetch_index`` returned, so
+    the resolved tag, the URL and the destination -- all known before any
+    network I/O -- appeared on success only.
+    """
+
+    @staticmethod
+    def _unreachable(monkeypatch) -> None:
+        import urllib.error
+        import urllib.request
+
+        def _refuse(url, timeout=None):  # noqa: ARG001 - signature match
+            raise urllib.error.URLError("Network is unreachable")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+
+    def test_the_target_is_printed_even_when_the_fetch_fails(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        self._unreachable(monkeypatch)
+
+        result = runner.invoke(
+            chat,
+            ["index", "fetch", "--version", "0.2.1", "--output", str(tmp_path / "i.sqlite")],
+        )
+
+        assert result.exit_code != 0
+        assert "v0.2.1" in result.output
+        assert "aorta-chat-index.sqlite" in result.output
+        assert str(tmp_path / "i.sqlite") in result.output
+
+    def test_it_goes_to_stderr_so_json_mode_stays_parseable(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        """`--json` is advertised for scripting, so stdout must hold only the object."""
+        self._unreachable(monkeypatch)
+
+        result = runner.invoke(
+            chat,
+            [
+                "index",
+                "fetch",
+                "--version",
+                "0.2.1",
+                "--json",
+                "--output",
+                str(tmp_path / "i.sqlite"),
+            ],
+        )
+
+        assert "Fetching the published index" in result.stderr
+        assert "Fetching the published index" not in result.stdout
+
+
 class TestFetchErrors:
     def test_a_mismatch_refusal_reaches_the_user_intact(
         self, runner: CliRunner, tmp_path: Path, monkeypatch

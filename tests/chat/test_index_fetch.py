@@ -220,13 +220,112 @@ class TestFetch:
         fetch_index(version="0.2.1", index_path=dest)
         assert dest.read_bytes() == BODY
 
-    def test_the_source_and_warnings_are_reported_back(self, server, tmp_path: Path):
+    def test_the_source_and_notes_are_reported_back(self, server, tmp_path: Path):
+        """The dev-version note is a ``note``, not a ``warning``.
+
+        Nothing is wrong with a dev install taking the rolling asset, and the
+        note's real job is to be shown *before* the download rather than after
+        it -- which is what ``notes`` exists to make possible.
+        """
         result = fetch_index(
             index_path=tmp_path / "i.sqlite",
             source=resolve_source(installed="0.2.2.dev122+g45edc3d"),
         )
         assert ROLLING_TAG in result.source
-        assert any("122 commit" in warning for warning in result.warnings)
+        assert any("122 commit" in note for note in result.notes)
+
+
+class TestTheWaitIsExplainedBeforeItStarts:
+    """The reported symptom was no output at all, for minutes.
+
+    Three requests in series, and the only ``Downloading`` line sat on the
+    third; meanwhile everything the command echoed ran after the last one
+    returned. So a node that could not reach the release host produced nothing
+    whatsoever before it failed, and a fetch that was going to be refused on
+    the manifest still said nothing about which asset it had been reaching for.
+    """
+
+    def test_the_target_is_describable_without_touching_the_network(self, no_network):
+        source = resolve_source(installed="0.2.1")
+        lines = "\n".join(index_ops.describe_target(source, "/cache/index.sqlite"))
+
+        assert "v0.2.1" in lines
+        assert source.index_url in lines
+        assert "/cache/index.sqlite" in lines
+
+    def test_a_dev_installs_note_is_carried_up_front(self):
+        """It explains the rolling tag, so it is worth nothing after the fact."""
+        source = resolve_source(installed="0.2.2.dev122+g45edc3d")
+        lines = "\n".join(index_ops.describe_target(source, "/cache/i.sqlite"))
+
+        assert ROLLING_TAG in lines
+        assert "122 commit" in lines
+
+    def test_every_request_says_what_it_is_contacting(self, server, tmp_path: Path, caplog):
+        """Including the two sidecars, which had no logging at all."""
+        with caplog.at_level("INFO", logger=index_ops.__name__):
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        for suffix in (
+            manifest_mod.MANIFEST_SUFFIX,
+            manifest_mod.CHECKSUM_SUFFIX,
+        ):
+            assert ASSET_NAME + suffix in logged, f"no log line for the {suffix} request"
+
+    def test_the_asset_transfer_reports_progress(self, server, tmp_path: Path, caplog):
+        """``shutil.copyfileobj`` had no callback, so tens of megabytes were silent."""
+        with caplog.at_level("INFO", logger=index_ops.__name__):
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert any("MB" in record.getMessage() for record in caplog.records)
+
+
+class TestTheTimeoutsAreSplit:
+    """One 300 s budget for connect *and* read is five silent minutes per request.
+
+    A blackholed host only ever reaches the connect phase, so that phase is
+    what has to fail fast; the body then wants the generous budget, because the
+    index is tens of megabytes over a link that may be slow.
+    """
+
+    def test_the_connect_budget_is_much_shorter_than_the_read_budget(self):
+        assert index_ops._CONNECT_TIMEOUT < index_ops._READ_TIMEOUT
+
+    def test_a_sidecar_request_uses_the_connect_budget(self, server, tmp_path: Path, monkeypatch):
+        """A 1 KB sidecar that has not answered in 30 s is not going to."""
+        seen: list[float | None] = []
+        real = server.urlopen
+
+        def _urlopen(url, timeout=None):
+            seen.append(timeout)
+            return real(url, timeout=timeout)
+
+        monkeypatch.setattr(index_ops.urllib.request, "urlopen", _urlopen)
+        fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert seen and set(seen) == {index_ops._CONNECT_TIMEOUT}
+
+    def test_the_body_read_is_widened_once_the_headers_are_in(self):
+        """The split is only expressible after ``urlopen`` returns."""
+
+        class _Sock:
+            timeout = None
+
+            def settimeout(self, value):
+                self.timeout = value
+
+        class _Response:
+            def __init__(self, sock):
+                self.fp = type("Fp", (), {"raw": type("Raw", (), {"_sock": sock})()})()
+
+        sock = _Sock()
+        index_ops._widen_read_timeout(_Response(sock))
+        assert sock.timeout == index_ops._READ_TIMEOUT
+
+    def test_a_response_with_no_reachable_socket_is_left_alone(self):
+        """Best-effort: a stub response must not turn into a failed download."""
+        index_ops._widen_read_timeout(io.BytesIO(b"body"))
 
 
 class TestFetchFailures:

@@ -968,6 +968,21 @@ def index_build(
     click.echo(f"  digest      {manifest.corpus_digest}")
 
 
+def _echo_fetch_target(source: Any, output: str | None) -> None:
+    """Show the resolved asset and destination before anything is contacted.
+
+    On stderr, so ``--json`` still emits nothing but its object. Echoed rather
+    than logged because ``_index_logging`` configures the root logger through
+    ``basicConfig``, which is a no-op if something else configured it first --
+    and the defect being fixed here is a command that printed nothing at all,
+    so the one line that explains the wait should not depend on that.
+    """
+    ops = _load("rag.index_ops")
+    config = _load("config")
+    for line in ops.describe_target(source, output or config.settings.index_file):
+        click.echo(line, err=True)
+
+
 @index_group.command(name="fetch")
 @click.option(
     "--version",
@@ -1004,7 +1019,15 @@ def index_fetch(
     if from_path:
         result = _guard(lambda: ops.side_load(from_path, index_path=output))
     else:
-        result = _guard(lambda: ops.fetch_index(version=version, index_path=output))
+        # Resolved and echoed here, before the first request, then handed to
+        # `fetch_index` so it resolves once. Everything below runs after the
+        # download, which is why a fetch that stalled -- or that refused on the
+        # manifest -- used to print nothing at all: the tag, the URL and the
+        # destination were all known up front and shown only on success.
+        # `resolve_source` is pure, so this costs no network.
+        source = _guard(lambda: ops.resolve_source(version))
+        _echo_fetch_target(source, output)
+        result = _guard(lambda: ops.fetch_index(source=source, index_path=output))
 
     if as_json:
         click.echo(
@@ -1012,6 +1035,7 @@ def index_fetch(
                 {
                     "index": str(result.index_path),
                     "source": result.source,
+                    "notes": result.notes,
                     "warnings": result.warnings,
                     "manifest": result.manifest.describe(),
                 },
