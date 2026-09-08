@@ -18,8 +18,10 @@ whose command just failed.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import shlex
 import socket
 import sys
 from dataclasses import dataclass, field
@@ -73,21 +75,6 @@ _EXTRA_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
 #: Extras whose absence is not a problem. ``chat-cli`` is required; the rest are
 #: opt-in surfaces, so "not installed" is a fact rather than a finding.
 _REQUIRED_EXTRAS = frozenset({"chat-cli"})
-
-#: Downloading the embedding weights and nothing else -- which is what a
-#: "pre-warm" is. The same invocation ``fastembed_bge.PRE_SEED_PROCEDURE`` uses
-#: in its first step, quoted rather than imported because that procedure is a
-#: paragraph and this is a line; a test pins the two together.
-#:
-#: Deliberately *not* ``aorta chat index build``, which this check used to
-#: advise. That command's ``--output`` defaults to the index this install
-#: already reads and its corpus defaults to ``src/aorta`` alone, so as a
-#: pre-warm it overwrites a fetched index with one that has no ``docs/`` and no
-#: ``README.md`` in it -- and says nothing about having done either.
-_WARM_COMMAND = (
-    "python -c 'from fastembed import TextEmbedding; "
-    'TextEmbedding("{model}", cache_dir="{cache}")\''
-)
 
 #: LLM providers that talk to a remote OpenAI-compatible endpoint, as opposed
 #: to the local vLLM one. Which of the two decides where the served model's
@@ -208,6 +195,38 @@ def _check_sqlite(report: Report) -> None:
     report.add("sqlite", OK, f"{sqlite3.sqlite_version} (>= {floor}, extensions loadable)")
 
 
+def _warm_command(model: str, cache: str) -> str:
+    """Downloading the embedding weights and nothing else -- what a "pre-warm" is.
+
+    The same invocation ``fastembed_bge.PRE_SEED_PROCEDURE`` uses in its first
+    step, rebuilt rather than imported because that procedure is a paragraph and
+    this is a line; a test pins the two together.
+
+    Deliberately *not* ``aorta chat index build``, which this check used to
+    advise. That command's ``--output`` defaults to the index this install
+    already reads and its corpus defaults to ``src/aorta`` alone, so as a
+    pre-warm it overwrites a fetched index with one that has no ``docs/`` and no
+    ``README.md`` in it -- and says nothing about having done either.
+
+    Both values reach a shell and neither is this module's to trust: ``model``
+    is a configured setting, and ``cache`` follows ``HF_HOME``. Interpolated
+    raw, a path holding an apostrophe -- ``/home/o'brien/.cache`` -- closes the
+    surrounding single-quoted argument early, so the remedy printed to someone
+    whose setup is already broken is a command that will not parse.
+
+    ``json.dumps`` for the two Python string literals, then ``shlex.quote`` for
+    the shell argument, in that order, because the inner literals have to be
+    escaped before the outer quoting measures them. For a path that needs no
+    escaping the result is byte-identical to the hand-quoted form, which is what
+    lets the test pinning this against ``PRE_SEED_PROCEDURE`` compare text.
+    """
+    snippet = (
+        "from fastembed import TextEmbedding; "
+        f"TextEmbedding({json.dumps(model)}, cache_dir={json.dumps(cache)})"
+    )
+    return f"python -c {shlex.quote(snippet)}"
+
+
 def _probe_huggingface() -> bool:
     """Whether the HuggingFace CDN answers. A TCP connect, not a model download."""
     try:
@@ -316,7 +335,7 @@ def _check_embedding_model(report: Report) -> None:
         return
 
     if _probe_huggingface():
-        warm = _WARM_COMMAND.format(model=state["model"], cache=state["cache_dir"])
+        warm = _warm_command(state["model"], state["cache_dir"])
         if _index_is_healthy():
             # Not a warning. ``index fetch`` downloads somebody else's vectors
             # and never needs the local weights, so a correctly completed fetch

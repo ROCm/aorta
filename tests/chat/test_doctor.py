@@ -15,6 +15,8 @@ docs at that moment.
 
 from __future__ import annotations
 
+import ast
+import shlex
 from pathlib import Path
 
 import pytest
@@ -244,12 +246,40 @@ class TestEmbeddingModelCache:
         # prefix stops before ``cache_dir`` -- the argument the two differ on
         # and the one a drift would drop.
         state = describe_model_state()
-        assert command == doctor._WARM_COMMAND.format(
-            model=state["model"], cache=state["cache_dir"]
-        )
+        assert command == doctor._warm_command(state["model"], state["cache_dir"])
         assert MODEL in command
-        seeded = doctor._WARM_COMMAND.format(model=MODEL, cache="/tmp/aorta-model-cache")
+        seeded = doctor._warm_command(MODEL, "/tmp/aorta-model-cache")
         assert seeded in PRE_SEED_PROCEDURE.format(model=MODEL, cache="/tmp/cache")
+
+    def test_the_pre_warm_command_survives_a_quote_in_the_cache_path(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """A remedy that will not parse is the failure this whole check exists to avoid.
+
+        ``cache_dir`` follows ``HF_HOME`` and the model name is a setting, so
+        neither is safe to interpolate into a single-quoted shell argument: an
+        apostrophe in the path closed it early.
+        """
+        cache = tmp_path / "o'brien"
+        monkeypatch.setenv("HF_HOME", str(cache))
+        hint = _by_name(run_checks(backend=False), "embedding model cache").hint
+        command = next(line.strip() for line in hint.splitlines() if "TextEmbedding" in line)
+
+        # `shlex.split` raises on an unterminated quote, so this is the check.
+        argv = shlex.split(command)
+        assert argv[:2] == ["python", "-c"]
+        # And what the shell would hand python has to be python, with the path
+        # carried through whole rather than truncated at the apostrophe.
+        ast.parse(argv[2])
+        assert str(cache) in argv[2]
+
+    def test_a_quote_in_the_model_name_is_escaped_too(self):
+        """The other interpolated value, from the same untrusted place: settings."""
+        command = doctor._warm_command("evil/model\"'; rm -rf /", "/tmp/cache")
+        argv = shlex.split(command)
+        assert argv[:2] == ["python", "-c"]
+        ast.parse(argv[2])
+        assert "rm -rf" not in " ".join(argv[:2])
 
     def test_a_cold_cache_with_no_egress_fails_and_prints_the_procedure(self, monkeypatch):
         monkeypatch.setattr(doctor, "_probe_huggingface", lambda: False)
