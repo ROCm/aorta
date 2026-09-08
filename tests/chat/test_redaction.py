@@ -141,7 +141,9 @@ class TestNoticeIsSessionLocal:
         second binding is live, which is the only time the two differ.
 
         Both rendezvous are released in ``finally`` so a failing assertion fails
-        this test rather than parking its peer for the rest of the run.
+        this test rather than parking its peer for the rest of the run, and both
+        waits are bounded so a failure *before* the counter -- which never
+        reaches that ``finally`` -- fails it too instead of hanging the job.
         """
         import asyncio
 
@@ -150,6 +152,15 @@ class TestNoticeIsSessionLocal:
         both_looked = asyncio.Event()
         emitted = 0
         looked = 0
+        timeout = 5.0
+
+        async def meet(event: asyncio.Event, name: str) -> None:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise AssertionError(
+                    f"peer session never reached {name} within {timeout}s"
+                ) from None
 
         async def session(stream: io.StringIO) -> None:
             nonlocal emitted, looked
@@ -160,7 +171,7 @@ class TestNoticeIsSessionLocal:
                     emitted += 1
                     if emitted == 2:
                         both_emitted.set()
-                await both_emitted.wait()
+                await meet(both_emitted, "both_emitted")
                 try:
                     # This session's own state, and its own undrained notice,
                     # while the other session's binding is still in force.
@@ -170,7 +181,7 @@ class TestNoticeIsSessionLocal:
                     looked += 1
                     if looked == 2:
                         both_looked.set()
-                await both_looked.wait()
+                await meet(both_looked, "both_looked")
 
         one, two = io.StringIO(), io.StringIO()
         await asyncio.gather(session(one), session(two))

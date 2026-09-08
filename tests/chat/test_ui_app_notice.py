@@ -239,6 +239,30 @@ ALICE_ASKS = "the run under /home/alice/models/llama-70b failed"
 BOB_ASKS = "hosts 10.42.7.9 and 10.42.7.10 under /home/bob/runs/latest are down"
 
 
+#: Long enough that a loaded runner never trips it, short enough that a stuck
+#: rendezvous fails the job rather than running it to the CI platform limit.
+_RENDEZVOUS_TIMEOUT = 5.0
+
+
+async def _meet(event: asyncio.Event, name: str) -> None:
+    """Wait for the peer session, bounded.
+
+    The ``finally`` blocks around each rendezvous cover a peer that fails
+    *inside* the guarded region. They cannot cover one that fails before
+    reaching the counter -- ``on_start`` raising, or ``_install`` leaving
+    something unpatched -- and an unbounded ``Event.wait()`` turns that into a
+    hung run rather than a red one. ``pytest-timeout`` is installed but nothing
+    arms it, so this is the only thing standing between a starved rendezvous
+    and a job that burns a runner reporting nothing.
+    """
+    try:
+        await asyncio.wait_for(event.wait(), timeout=_RENDEZVOUS_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise AssertionError(
+            f"peer session never reached {name} within {_RENDEZVOUS_TIMEOUT}s"
+        ) from None
+
+
 def _notices(browser: _Browser) -> list[str]:
     return [shown for shown in browser.sent if "aorta chat: redacted" in shown]
 
@@ -306,12 +330,13 @@ class TestTwoSessionsInOneProcess:
             finally:
                 # In ``finally`` because ``on_message`` swallows a graph
                 # failure: without it, one session raising here would leave the
-                # other waiting on a rendezvous nobody can reach, and the test
-                # would hang instead of failing.
+                # other waiting on a rendezvous nobody can reach. ``_meet``
+                # bounds that wait, but only this releases the peer at once and
+                # reports the real assertion rather than a timeout.
                 arrived += 1
                 if arrived == 2:
                     both_redacted.set()
-            await both_redacted.wait()
+            await _meet(both_redacted, "both_redacted")
             return f"answered: {question}", [], {}
 
         return turn
@@ -380,11 +405,19 @@ class TestTwoSessionsInOneProcess:
         # emitted onto the process-wide state; what is asserted is that these
         # two sessions do not.
         redaction.reset_session_notice()
+        alice, bob = _Browser(), _Browser()
 
         await asyncio.gather(
-            self._session(app, _Browser(), ALICE_ASKS),
-            self._session(app, _Browser(), BOB_ASKS),
+            self._session(app, alice, ALICE_ASKS),
+            self._session(app, bob, BOB_ASKS),
         )
 
+        # The process-wide assertions below are satisfied by absence: two
+        # sessions that redacted nothing at all leave the same state behind as
+        # two that kept their disclosures to themselves. Pin the positive here
+        # too rather than lean on the sibling test that happens to establish it
+        # on the same fixtures.
+        assert len(_notices(alice)) == 1
+        assert len(_notices(bob)) == 1
         assert redaction.current_notice_state().emitted is False
         assert redaction.current_notice_state().pending is None
