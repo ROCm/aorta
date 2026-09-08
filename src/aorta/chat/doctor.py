@@ -618,6 +618,11 @@ def _check_embedding_model(report: Report) -> None:
 
     try:
         provider = get_provider()
+        if provider.name == "remote":
+            # Validate the configured remote embedding backend before reporting
+            # this row as healthy. Building the client checks the key/auth
+            # settings without touching the network.
+            provider.get_embeddings()
     except ValueError as exc:
         report.add("embedding provider", FAIL, str(exc))
         return

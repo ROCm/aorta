@@ -449,8 +449,16 @@ class TestEmbeddingModelCache:
 
     def test_a_remote_provider_needs_no_local_weights(self, monkeypatch):
         monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
         check = _by_name(run_checks(backend=False), "embedding model cache")
         assert check.status == SKIP
+
+    def test_a_remote_provider_without_a_key_fails_the_provider_check(self, monkeypatch):
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        check = _by_name(run_checks(backend=False), "embedding provider")
+        assert check.status == FAIL
+        assert "remote_embedding_api_key is not set" in check.detail
 
     def test_an_unknown_provider_is_reported_rather_than_raised(self, monkeypatch):
         monkeypatch.setattr(settings, "embedding_provider", "sbert")
@@ -723,6 +731,7 @@ class TestRemoteEmbeddingProfile:
 
     def _remote(self, monkeypatch) -> None:
         monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
         monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
         monkeypatch.setattr(settings, "remote_embedding_base_url", "")
 
