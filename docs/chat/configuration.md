@@ -117,11 +117,14 @@ environment.
 | `embedding_model` | `BAAI/bge-small-en-v1.5` | Local model. |
 | `model_cache_path` | `$XDG_CACHE_HOME/aorta/chat/models` | Where the local model's ONNX weights are cached. `HF_HOME` overrides it, which is what [air-gapped pre-seeding](rag-index.md#air-gapped-nodes) uses. Explicit rather than `fastembed`'s own `/tmp/fastembed_cache`, which a reboot wipes and other users on a shared node can write. |
 
-The five `remote_embedding_*` settings below are read only when
-`embedding_provider = "remote"`, which no profile selects. Setting them without
-also setting `embedding_provider` changes nothing; setting them together with it
-is the procedure [below](#configuring-a-remote-embedding-provider-by-hand), and
-it obliges a local index rebuild.
+The five `remote_embedding_*` settings below are read by the embedding path only
+when `embedding_provider = "remote"`, which no profile selects. Setting them
+without also setting `embedding_provider` changes nothing about how the index is
+built or queried — though `remote_embedding_api_key` and
+`remote_embedding_extra_headers` count as credentials for `config validate`'s
+mode check either way. Setting them together with the selector is the procedure
+[below](#configuring-a-remote-embedding-provider-by-hand), and it obliges a
+local index rebuild.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -194,13 +197,13 @@ Everything else that looks like a reason is not one:
 Read these three before editing anything. Each of them is a consequence, not a
 risk to be managed.
 
-1. **The published index becomes unusable, permanently, for this install.** CI
-   builds the index asset with default settings, so its vectors are the local
-   model's. An index is only meaningful to the model that produced it, and the
-   manifest check refuses a mismatch rather than answering from it. So
+1. **The published index becomes unusable for as long as this setting is in
+   place.** CI builds the index asset with default settings, so its vectors are
+   the local model's. An index is only meaningful to the model that produced it,
+   and the manifest check refuses a mismatch rather than answering from it. So
    `aorta chat index fetch` will refuse the download, and an already-fetched
-   index will refuse every query. You take over building the index yourself,
-   for as long as this setting is in place, on every AORTA upgrade.
+   index will refuse every query. You take over building the index yourself, on
+   every AORTA upgrade, until you [go back](#going-back).
 2. **Every query costs money, not just the build.** The one-off index build
    embeds the whole corpus; after that each question sends one embedding call
    for the query text, and each `search_code` tool call sends another. The build
@@ -225,7 +228,7 @@ which four are required and two apply only behind a gateway:
 
 | Setting | | |
 | --- | --- | --- |
-| `embedding_provider` | required | The selector. Nothing below is read without it. |
+| `embedding_provider` | required | The selector. Nothing below reaches an embeddings API without it. |
 | `remote_embedding_model` | required | Has a default, but set it explicitly — it names the collection. |
 | `remote_embedding_base_url` | required in practice | Only omit it if you mean OpenAI's own API. |
 | `remote_embedding_api_key` | required | Empty raises at first use. |
@@ -235,7 +238,7 @@ which four are required and two apply only behind a gateway:
 In `~/.config/aorta/chat.toml`:
 
 ```toml
-# The selector. Without this the five below are read by nothing.
+# The selector. Without this nothing below reaches an embeddings API.
 embedding_provider = "remote"
 
 # The model. Also decides the collection name, because dimensions differ per
@@ -316,10 +319,10 @@ but not `docs/` or `README.md`, which the published asset does carry. Point
 aorta chat doctor
 ```
 
-The index check should pass, and the embedding line should name your endpoint
-and model rather than `<provider-default>`. A refusal here means the index and
-the configuration still disagree — usually step 3 was skipped, or was run before
-step 1 took effect.
+The index check should pass, and the `embedding provider` line should name your
+endpoint and model rather than `provider default`. A refusal here means the
+index and the configuration still disagree — usually step 3 was skipped, or was
+run before step 1 took effect.
 
 ### Going back
 

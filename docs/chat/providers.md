@@ -209,9 +209,11 @@ several critic passes can push a single question past forty. Most action queries
 land in the 4–6 range in practice, because the act loop stops as soon as the
 model answers without a tool call and the critic usually accepts first time.
 With `embedding_provider = "remote"`, each retrieval and each `search_code` call
-adds one embedding call on top — which is why no profile selects it, and why
-[the procedure for choosing it](configuration.md#configuring-a-remote-embedding-provider-by-hand)
-leads with the cost.
+adds one embedding call on top. That recurring bill is the second reason no
+profile selects it; the first is that the published index is built with the
+local model, so a remote embedder makes `index fetch` unusable.
+[The procedure for choosing it](configuration.md#configuring-a-remote-embedding-provider-by-hand)
+covers both.
 
 Against a metered endpoint that is real money, so the remote backends log the
 per-query call count at INFO, visible without `--verbose`:
