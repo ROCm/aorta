@@ -39,6 +39,7 @@
 #   TS_GPU        HIP_VISIBLE_DEVICES    (default 0)
 #   TS_READY_SEC  readiness deadline     (default 2400)
 #   TS_GRAMMAR    --grammar-backend      (default xgrammar; see below)
+#   TS_SAMPLING   --sampling-backend     (default triton; see below)
 set -euo pipefail
 
 # The digest from recipes/tokenspeed/tokenspeed-serve-rollout.yaml, not the tag
@@ -64,6 +65,35 @@ READY_SEC="${TS_READY_SEC:-2400}"
 # /v1/completions and never asks for a response format. The two choices the
 # engine offers are `xgrammar` and `none`; there is no third.
 GRAMMAR="${TS_GRAMMAR:-xgrammar}"
+# Defaulted to `triton` here, against the engine's own default, for the same
+# class of reason as the grammar backend above -- and this one is worse, because
+# it fails silently.
+#
+#   tokenspeed/runtime/sampling/registry.py
+#     def _get_default_backend_name() -> str:
+#         if current_platform().is_nvidia:
+#             return "flashinfer"
+#         return "greedy"
+#
+# On this hardware `is_nvidia` is false, so the default resolves to `greedy`.
+# The greedy backend ignores `temperature`, `top_p`, `top_k` and `seed`
+# entirely: the request is accepted, HTTP 200 comes back, and every completion
+# is the argmax. Asking for temperature 1.2 and asking for temperature 0 return
+# the same tokens, and `n=8` in one request returns eight identical choices.
+#
+# Nothing warns. That makes it invisible to any check that reads status codes or
+# eyeballs one completion, and it is fatal to a GRPO rollout specifically: the
+# group's samples are all the same string, so the advantage is identically zero
+# whatever the reward says. The first end-to-end run's "zero within-group
+# spread on 9 of 9 groups" had this as a cause, not just a saturated reward.
+#
+# `--sampling-backend` accepts greedy | triton | triton_full | flashinfer |
+# flashinfer_full. flashinfer is CUDA-only, so `triton` is the portable choice
+# that honours sampling parameters on ROCm.
+#
+# Leave this at `greedy` only if you *want* argmax decoding -- which the serving
+# recipes reasonably do, since a benchmark wants reproducible output.
+SAMPLING="${TS_SAMPLING:-triton}"
 NAME="${TS_NAME:-ts-rollout-serve}"
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || echo 000; }
@@ -122,6 +152,7 @@ up() {
     "${IMAGE}" -c "exec tokenspeed serve '${MODEL}' \
       --host 127.0.0.1 --port ${PORT} --control-port ${CONTROL} \
       --grammar-backend ${GRAMMAR} \
+      --sampling-backend ${SAMPLING} \
       --gateway-startup-timeout ${READY_SEC}" \
     > "${LOG_DIR}/container-id.txt"
   echo "started ${NAME} ($(cut -c1-12 "${LOG_DIR}/container-id.txt"))"
@@ -158,6 +189,7 @@ up() {
       echo "OK: /health_generate after $(( $(date +%s) - t0 ))s"
       docker logs "${NAME}" > "${LOG_DIR}/server.log" 2>&1 || true
       models
+      backends
       return 0
     fi
     sleep 5
@@ -174,6 +206,26 @@ up() {
 models() {
   echo "--- advertised models (${PORT}) ---"
   curl -s --max-time 10 "http://127.0.0.1:${PORT}/v1/models" || echo "(no response)"
+  echo
+}
+
+# The two backends this script overrides, read back from the engine rather than
+# assumed to have applied. Both defaults are wrong for driving `aorta agent`,
+# and `sampling_backend` is the one that cannot be caught any other way: a
+# greedy engine answers every sampled request with HTTP 200 and the argmax, so
+# there is no failure to notice downstream -- only completions that are all
+# identical, which reads as a model property rather than a server setting.
+backends() {
+  local info greedy
+  info=$(curl -s --max-time 10 "http://127.0.0.1:${CONTROL}/get_server_info" || echo '{}')
+  echo "--- backends in effect (${CONTROL}) ---"
+  echo "${info}" | tr ',' '\n' | grep -E '"(sampling_backend|grammar_backend)"' \
+    || echo "(could not read /get_server_info)"
+  greedy=$(echo "${info}" | grep -c '"sampling_backend":"greedy"' || true)
+  if [ "${greedy}" != "0" ] && [ "${SAMPLING}" != "greedy" ]; then
+    echo "WARNING: asked for --sampling-backend ${SAMPLING} but the engine " \
+         "reports 'greedy'; sampling parameters will be silently ignored" >&2
+  fi
   echo
 }
 
@@ -194,9 +246,10 @@ case "${1:-up}" in
   up) up ;;
   hold) hold ;;
   models) models ;;
+  backends) backends ;;
   logs) docker logs "${@:2}" "${NAME}" ;;
   down)
     docker rm -f "${NAME}" >/dev/null 2>&1 && echo "removed ${NAME}" || echo "no ${NAME}"
     ;;
-  *) echo "usage: $0 {up|hold|models|logs|down}" >&2; exit 64 ;;
+  *) echo "usage: $0 {up|hold|models|backends|logs|down}" >&2; exit 64 ;;
 esac

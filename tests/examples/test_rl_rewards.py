@@ -1214,6 +1214,145 @@ def test_an_abstaining_one_name_constant_is_the_hard_case_for_criterion_one(
     )
 
 
+# --------------------------------------------------------------------------- #
+# run_e2e: the rollout's sampling parameters
+#
+# The temperature and the seed live in the rollout driver rather than in
+# `LiteLLMProposer`, and that placement is the point: the proposer is the
+# production path, and a diagnostic tool that returns a different answer each
+# time it is asked is worse, not better. These pin the placement and the
+# per-sample derivation, plus the two aggregate fields that tell a sampling
+# defect apart from a saturated reward.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def run_e2e():
+    return _load("run_e2e")
+
+
+def test_the_proposer_itself_still_sends_no_temperature(run_e2e):
+    """The load-bearing constraint: `aorta agent` must stay reproducible.
+
+    Sampling diversity is a property of how training data is collected. If it
+    leaks into the shipped proposer, every real triage becomes stochastic --
+    the same evidence stops yielding the same recommendation, and the nightly
+    `llm_determinism` entry starts measuring noise. Asserted against the
+    proposer's source rather than its behaviour, so it holds without a server.
+    """
+    import inspect
+
+    from aorta.agent.llm import LiteLLMProposer
+
+    source = inspect.getsource(LiteLLMProposer)
+    assert "temperature" not in source
+    assert "seed" not in source
+
+
+def test_each_sample_in_a_group_gets_its_own_seed(run_e2e):
+    """A single seed per run would leave the group identical, which is the bug."""
+    seeds = [run_e2e.sample_seed(7, "consan-racy", i) for i in range(5)]
+    assert len(set(seeds)) == 5
+
+
+def test_the_seed_is_reproducible_from_one_integer(run_e2e):
+    """Diversity that nobody can re-derive is not evidence."""
+    first = [run_e2e.sample_seed(7, "consan-racy", i) for i in range(5)]
+    again = [run_e2e.sample_seed(7, "consan-racy", i) for i in range(5)]
+    assert first == again
+    # And a different base gives a different rollout.
+    assert first != [run_e2e.sample_seed(8, "consan-racy", i) for i in range(5)]
+
+
+def test_seeds_do_not_collide_across_scenarios(run_e2e):
+    """Otherwise two groups would share draws and the corpus would be smaller."""
+    seeds = [
+        run_e2e.sample_seed(7, scenario, i)
+        for scenario in ("consan-racy", "consan-clean", "waitcheck", "waitcheck-tiny")
+        for i in range(5)
+    ]
+    assert len(set(seeds)) == len(seeds)
+    # Engines reject out-of-range seeds, so stay inside int32.
+    assert all(0 <= s < 2**31 for s in seeds)
+
+
+def test_the_seed_is_not_derived_from_the_salted_builtin_hash(run_e2e):
+    """`hash()` is salted per process, so a run would not replay tomorrow."""
+    import subprocess
+    import sys
+
+    code = (
+        f"import sys; sys.path.insert(0, {str(_EXAMPLES)!r});"
+        "from run_e2e import sample_seed;"
+        "print(sample_seed(7, 'consan-racy', 0))"
+    )
+    runs = {
+        subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        for _ in range(2)
+    }
+    assert len(runs) == 1, "seed changed across processes"
+
+
+def _proposal_rows(raws):
+    return [
+        {
+            "scenario_id": scenario,
+            "sample": index,
+            "raw": raw,
+            "reward": 1.0,
+            "tier": 5,
+            "failure_kind": "on_contract",
+            "consumer_outcome": "accepted",
+            "category_claimed": "unknown",
+            "mitigations_claimed": ["amd_log_level_4"],
+            "offered": ["hip_launch_blocking", "amd_log_level_4"],
+            "transport_error": "",
+        }
+        for scenario, group in raws.items()
+        for index, raw in enumerate(group)
+    ]
+
+
+def test_a_collapsed_group_is_reported_apart_from_a_degenerate_one(run_e2e):
+    """The distinction that decides whether the reward or the rollout is at fault.
+
+    Identical completions give zero spread under any reward, so a group that
+    collapsed to one completion is a sampling defect. Zero spread across
+    several distinct completions is the reward saturating. The first end-to-end
+    run could not tell these apart and attributed all nine groups to the
+    reward; both were true, and only one was fixable by grading.
+    """
+    collapsed = run_e2e.aggregate(_proposal_rows({"s": ["same"] * 5}), [])["proposal"]
+    assert collapsed["per_scenario"]["s"]["distinct_completions"] == 1
+    assert collapsed["collapsed_groups"] == 1
+    assert collapsed["degenerate_groups"] == 1
+
+    # Distinct completions that happen to score the same: degenerate, but the
+    # rollout did its job, so the reward is what needs work.
+    rows = _proposal_rows({"s": [f"different-{i}" for i in range(5)]})
+    saturated = run_e2e.aggregate(rows, [])["proposal"]
+    assert saturated["per_scenario"]["s"]["distinct_completions"] == 5
+    assert saturated["collapsed_groups"] == 0
+    assert saturated["degenerate_groups"] == 1
+
+
+def test_the_effective_n_does_not_count_a_completion_twice(run_e2e):
+    """45 draws that collapse to 9 completions are 9 observations, not 45."""
+    collapsed = run_e2e.aggregate(
+        _proposal_rows({f"s{g}": ["same"] * 5 for g in range(9)}), []
+    )["proposal"]
+    assert collapsed["n"] == 45
+    assert collapsed["effective_n"] == 9
+
+    sampled = run_e2e.aggregate(
+        _proposal_rows({f"s{g}": [f"r{g}-{i}" for i in range(5)] for g in range(9)}), []
+    )["proposal"]
+    assert sampled["n"] == 45
+    assert sampled["effective_n"] == 45
+
+
 def test_a_verdict_outside_the_vocabulary_is_rejected(triage_reward, tmp_path):
     """A corpus written by a newer builder fails loudly, not as a silent mismatch."""
     corpus = tmp_path / "triage.jsonl"

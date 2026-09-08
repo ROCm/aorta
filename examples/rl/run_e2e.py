@@ -129,13 +129,48 @@ class Recorded:
     usage: dict[str, Any] = field(default_factory=dict)
 
 
+def sample_seed(base: int, scenario: str, index: int) -> int:
+    """A per-sample seed that is distinct but reproducible.
+
+    Rollouts want both: GRPO needs the samples in a group to *differ*, and a
+    result nobody can re-derive is not evidence. Hashing the scenario id with
+    the sample index gives a value that varies across a group, does not repeat
+    across groups, and is a pure function of `--seed` -- so the whole run
+    replays from one integer.
+
+    `hashlib` rather than `hash()`, which is salted per process.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(f"{base}:{scenario}:{index}".encode()).digest()
+    # Positive and inside int32, which is the range engines accept.
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+
+
 class RecordingLiteLLM:
     """Wraps `litellm.completion` to record it, and to inject serving params.
 
-    Injection is deliberately narrow: a temperature, and the chat-template
-    switch that suppresses a reasoning trace. Neither touches the messages, the
-    model or the `response_format`, so the proposer's contract goes out
-    unaltered and the recorded request proves it.
+    Injection is deliberately narrow: a temperature, a per-request seed, and
+    the chat-template switch that suppresses a reasoning trace. None of them
+    touches the messages, the model or the `response_format`, so the proposer's
+    contract goes out unaltered and the recorded request proves it.
+
+    Why the temperature lives here and not in `LiteLLMProposer`
+    -----------------------------------------------------------
+    `LiteLLMProposer` is the *production* path: it is what `aorta agent` calls
+    to diagnose a real failure. For a diagnostic tool, reproducibility is a
+    feature -- the same evidence should yield the same recommendation, an
+    operator should be able to re-run a triage and get the same answer, and the
+    nightly matrix carries an `llm_determinism` entry, so this project already
+    treats determinism as something to measure. Making the shipped agent
+    stochastic to serve a training harness would be a real behaviour change to
+    the consumer, made invisibly and for the wrong reason.
+
+    Sampling diversity is a property of how *training data is collected*, not of
+    the consumer contract. So it is threaded through the rollout driver as an
+    explicit, off-by-default parameter, and the proposer is left exactly as it
+    ships. `--temperature` omitted means the engine default, which is what the
+    first end-to-end run measured.
     """
 
     def __init__(
@@ -155,6 +190,14 @@ class RecordingLiteLLM:
         self._max_tokens = max_tokens
         self._retries = retries
         self.calls: list[Recorded] = []
+        # Set by the driver immediately before each call, so one recorder can
+        # give every sample in a group its own seed. `None` sends none.
+        self.seed: int | None = None
+        # How the seed goes over the wire. `top_level` is the OpenAI-standard
+        # `seed=`; `sampling_seed` is the name TokenSpeed's SGLang-compat layer
+        # shims onto its own `seed`, reached through `extra_body`. Which one the
+        # engine actually honours is measured by `probe_seed.py`, not assumed.
+        self.seed_mode: str = "top_level"
 
     def install(self) -> None:
         self._litellm.completion = self._call  # type: ignore[assignment]
@@ -167,6 +210,13 @@ class RecordingLiteLLM:
             kwargs.setdefault("temperature", self._temperature)
         if self._max_tokens is not None:
             kwargs.setdefault("max_tokens", self._max_tokens)
+        if self.seed is not None:
+            if self.seed_mode == "top_level":
+                kwargs.setdefault("seed", self.seed)
+            else:
+                extra = dict(kwargs.get("extra_body") or {})
+                extra.setdefault(self.seed_mode, self.seed)
+                kwargs["extra_body"] = extra
         if self._no_think:
             extra = dict(kwargs.get("extra_body") or {})
             extra.setdefault("chat_template_kwargs", {"enable_thinking": False})
@@ -315,6 +365,7 @@ def drive_proposals(
     recorder: RecordingLiteLLM,
     candidates: list[str] | None = None,
     tried: list[str] | None = None,
+    seed: int | None = None,
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
     """Sample a group of real proposals per scenario, through the real proposer."""
@@ -328,6 +379,12 @@ def drive_proposals(
         scenario = row["scenario_id"]
         symptom, summaries = loop_state(row)
         for index in range(samples):
+            # Per sample, not per run: a single seed for the whole group would
+            # make the group's completions identical again, which is the defect
+            # this parameter exists to remove.
+            recorder.seed = (
+                None if seed is None else sample_seed(seed, scenario, index)
+            )
             before = len(recorder.calls)
             step: Any = None
             error = ""
@@ -390,6 +447,10 @@ def drive_proposals(
                         "stop_reason": step.stop_reason,
                     },
                     "offered": offered,
+                    # Recorded so a single completion can be replayed on its
+                    # own, and so a group's seeds can be checked for being
+                    # distinct rather than assumed to be.
+                    "seed": recorder.seed,
                 }
             )
             if verbose:
@@ -422,6 +483,7 @@ def drive_triage(
     recorder: RecordingLiteLLM,
     blind: bool = False,
     hide_status: bool = False,
+    seed: int | None = None,
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
     """Ask the model to triage each scenario, and score verdict + attribution.
@@ -475,6 +537,9 @@ def drive_triage(
                 "observed_execution_status"
             )
 
+        # One triage answer per scenario, so there is no group to diversify --
+        # the seed is here only to make the answer reproducible.
+        recorder.seed = None if seed is None else sample_seed(seed, scenario, 0)
         before = len(recorder.calls)
         error = ""
         try:
@@ -643,12 +708,23 @@ def aggregate(
 
     # Within-group spread is what decides trainability under GRPO: a group whose
     # samples all score the same contributes a zero advantage.
+    #
+    # `distinct_completions` is reported next to it because the two failure modes
+    # are different and only one is the reward's. A reward is a function of the
+    # completion and the loop state is constant inside a group, so a group whose
+    # completions are byte-identical has zero spread under *any* reward -- that
+    # is a sampling defect, and the first end-to-end run hit it on all 9 groups
+    # by decoding greedily. Zero spread with several distinct completions is the
+    # reward saturating. Without this field the two are indistinguishable.
     groups: dict[str, list[float]] = {}
+    raws: dict[str, list[str]] = {}
     for p in proposals:
         groups.setdefault(p["scenario_id"], []).append(p["reward"])
+        raws.setdefault(p["scenario_id"], []).append(p["raw"])
     per_scenario = {
         scenario: {
             "n": len(vals),
+            "distinct_completions": len(set(raws[scenario])),
             "mean": round(_mean(vals), 4),
             "min": round(min(vals), 4),
             "max": round(max(vals), 4),
@@ -658,6 +734,9 @@ def aggregate(
         for scenario, vals in sorted(groups.items())
     }
     degenerate_groups = sum(1 for v in per_scenario.values() if v["degenerate"])
+    collapsed_groups = sum(
+        1 for v in per_scenario.values() if v["distinct_completions"] == 1
+    )
 
     triage_rewards = [t["reward"] for t in triage]
     return {
@@ -693,6 +772,12 @@ def aggregate(
             "offered_count": n_offered,
             "per_scenario": per_scenario,
             "degenerate_groups": degenerate_groups,
+            "collapsed_groups": collapsed_groups,
+            "distinct_completions": len({p["raw"] for p in proposals}),
+            # What the samples are actually worth. 45 draws over 9 prompts that
+            # collapse to 9 completions is an effective n of 9, and quoting 45
+            # would be quoting the same observation five times.
+            "effective_n": len({(p["scenario_id"], p["raw"]) for p in proposals}),
             "groups": len(per_scenario),
             "transport_errors": sum(1 for p in proposals if p["transport_error"]),
         },
@@ -734,6 +819,10 @@ def print_report(agg: dict[str, Any], meta: dict[str, Any]) -> None:
     print(f"  parses as JSON     {prop['parse_rate']:.2%}")
     print(f"  degenerate groups  {prop['degenerate_groups']}/{prop['groups']} "
           "(zero within-group spread -> zero GRPO advantage)")
+    print(f"  collapsed groups   {prop.get('collapsed_groups')}/{prop['groups']} "
+          "(one distinct completion -> no reward can create spread)")
+    print(f"  distinct outputs   {prop.get('distinct_completions')}/{prop['n']}  "
+          f"effective n {prop.get('effective_n')}")
     print("  tier distribution")
     for key, count in prop["tier_distribution"].items():
         share = prop["tier_fractions"][key]
@@ -791,7 +880,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--temperature", type=float, default=None,
                         help="injected serving parameter; omit to use the "
                              "engine default and leave the proposer's call "
-                             "exactly as it ships")
+                             "exactly as it ships. Off by default on purpose: "
+                             "`LiteLLMProposer` is the production path and a "
+                             "diagnostic tool should be reproducible, so "
+                             "sampling belongs to the rollout, not the agent")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="base seed; each sample gets sha256(seed:scenario:"
+                             "index), so a group's completions differ from each "
+                             "other and the whole run replays from one integer")
+    parser.add_argument("--seed-mode", default="top_level",
+                        choices=["top_level", "sampling_seed", "seed"],
+                        help="how the seed reaches the engine: the OpenAI "
+                             "standard `seed=`, or an extra_body key -- "
+                             "`sampling_seed` is what TokenSpeed's SGLang-compat "
+                             "layer shims onto its own seed. Measure with "
+                             "probe_seed.py rather than guessing")
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--no-think", action="store_true",
                         help="suppress the reasoning trace via "
@@ -829,6 +932,7 @@ def main(argv: list[str] | None = None) -> int:
             None,
             [
                 "no-think" if args.no_think else "as-is",
+                None if args.temperature is None else f"t{args.temperature:g}",
                 "full-candidates" if args.full_candidates else None,
                 "triage-blind" if args.triage_blind else None,
                 "triage-hide-status" if args.triage_hide_status else None,
@@ -844,6 +948,8 @@ def main(argv: list[str] | None = None) -> int:
         "samples_per_scenario": args.samples,
         "scenarios": len(rows),
         "temperature_injected": args.temperature,
+        "seed_base": args.seed,
+        "seed_mode": args.seed_mode if args.seed is not None else None,
         "max_tokens_injected": args.max_tokens,
         "condition": condition,
         "node": socket.gethostname(),
@@ -866,6 +972,7 @@ def main(argv: list[str] | None = None) -> int:
         no_think=args.no_think,
         max_tokens=args.max_tokens,
     )
+    recorder.seed_mode = args.seed_mode
     recorder.install()
     try:
         proposals = drive_proposals(
@@ -874,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
             samples=args.samples,
             recorder=recorder,
             candidates=candidates,
+            seed=args.seed,
         )
         triage = (
             []
@@ -885,6 +993,7 @@ def main(argv: list[str] | None = None) -> int:
                 recorder=recorder,
                 blind=args.triage_blind,
                 hide_status=args.triage_hide_status,
+                seed=args.seed,
             )
         )
     finally:
