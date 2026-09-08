@@ -539,6 +539,43 @@ class TestIndexChecks:
         finally:
             store.close()
 
+    def test_the_vector_count_comes_from_a_table_sqlite_vec_still_writes(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Pin the one assumption the parity check makes about somebody else's schema.
+
+        Counting ``vec_<collection>`` itself needs the extension loaded, and
+        the probe deliberately reads without it, so the row count comes from
+        vec0's ``_rowids`` shadow table -- an ordinary table, and sqlite-vec's
+        layout rather than ours. The probe treats its absence as "cannot tell"
+        instead of as a defect, because a renamed shadow table would otherwise
+        make every healthy index report as unreadable. That fail-open is only
+        safe if a rename is loud somewhere, and this is where: it fails here,
+        at the assumption, rather than silently narrowing the check in the
+        field.
+        """
+        import sqlite3
+
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path)
+        collection = get_provider().collection_name()
+
+        conn = sqlite3.connect(f"file:{index}?mode=ro", uri=True)
+        try:
+            tables = {
+                name
+                for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            assert f"vec_{collection}_rowids" in tables, sorted(tables)
+            chunks = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()[0]
+            vectors = conn.execute(
+                f'SELECT COUNT(*) FROM "vec_{collection}_rowids"'
+            ).fetchone()[0]
+            assert vectors == chunks == 3
+        finally:
+            conn.close()
+
     @pytest.mark.parametrize("how", STORE_DAMAGE)
     def test_a_partially_copied_store_is_not_reported_as_matching(
         self, monkeypatch, tmp_path: Path, how

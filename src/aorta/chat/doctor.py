@@ -532,12 +532,14 @@ def _check_index(report: Report) -> None:
         )
         return
 
-    # After the refusals, which already cover this when the manifest claims a
-    # chunk count -- and more specifically, since they name the number. This is
-    # the case they miss: a manifest predating that field over a store that
-    # cannot be read. The query path refuses it regardless, so reporting it as
-    # a matching index would contradict both that path and the cold-cache line
-    # above, which gates on the same helper.
+    # After the refusals, which already cover an unopenable store when the
+    # manifest claims a chunk count -- and more specifically, since they name
+    # the number. Two cases get past them: a manifest predating that field over
+    # a store that cannot be read, and a store whose chunk count is right while
+    # the rest of the collection is not, which no manifest describes at all.
+    # The query path refuses both regardless, so reporting either as a matching
+    # index would contradict both that path and the cold-cache line above,
+    # which gates on the same helper.
     defect = _store_defect(index_file)
     if defect:
         report.add(
