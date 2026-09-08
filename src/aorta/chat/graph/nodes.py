@@ -775,16 +775,24 @@ class _EscalationState:
     the rollback that undoes it read and write one thing.
     """
 
-    #: Set once the dead-end signature is seen. What moves *later* queries
-    #: straight to native, through :func:`_resolved_tool_mode`.
+    #: Set once native has actually answered, never merely on deciding to try
+    #: it. What moves *later* queries straight to native, through
+    #: :func:`_resolved_tool_mode`.
     escalated: bool = False
-    #: Set when the endpoint refused the escalated native request. A stock
-    #: local vLLM without ``--enable-auto-tool-choice`` rejects any request
-    #: carrying ``tools``, and rediscovering that once a query would bill a
-    #: failure this process has already seen. An endpoint restarted with the
-    #: flag mid-process is not picked up; restarting chat is the way back.
-    native_rejected: bool = False
+    #: Escalated attempts that raised. Counted rather than latched because one
+    #: failure does not say which kind it was: a stock local vLLM without
+    #: ``--enable-auto-tool-choice`` refuses the protocol permanently, while a
+    #: timeout or a 503 refuses it for a minute.
+    native_failures: int = 0
 
+
+#: Failed escalated attempts before native is written off for the process.
+#: Two, not one: writing it off on a single failure lets a bad minute strand a
+#: long-lived ``aorta chat ui`` server on the protocol its model cannot drive,
+#: and the cost of being wrong the other way is one extra failed call across
+#: the whole process. An endpoint restarted with the flag is not picked up
+#: either way; restarting chat is the way back.
+_MAX_NATIVE_FAILURES = 2
 
 _escalation = _EscalationState()
 
@@ -792,7 +800,7 @@ _escalation = _EscalationState()
 def reset_tool_mode_escalation() -> None:
     """Forget what was learned about the protocol. For tests, which share one process."""
     _escalation.escalated = False
-    _escalation.native_rejected = False
+    _escalation.native_failures = 0
 
 
 def _tool_mode_is_explicit() -> bool:
@@ -831,40 +839,56 @@ def _resolved_tool_mode() -> str:
 
 
 def _escalate_to_native(response: Any) -> bool:
-    """Decide, and record, whether to retry this round in the native protocol.
+    """Whether to retry this round in the native protocol.
 
-    Returns True having switched the process over. Three things have to hold,
-    and each closes one way this could go wrong:
+    A decision and nothing else: it records no state and writes no log, so two
+    Chainlit sessions that dead-end at once both get their retry. Making this
+    the place the switch was thrown meant the second one read its own dead end
+    as somebody else's business -- it saw the flag already set, returned False,
+    and fell through to the degraded fallback without ever trying the protocol
+    that had just been chosen for it.
+
+    The switch is thrown in :func:`_commit_escalation` instead, once native has
+    answered. Three things have to hold here:
 
     * the failure has to look like the protocol rather than the query, or a
       truncation would silently change the user's configured protocol;
     * the user must not have chosen the protocol themselves;
-    * and the endpoint must not already have refused the native protocol, or
-      every query would pay for rediscovering a refusal.
-
-    What happens once per process is the *transition* and its log line, not the
-    retry -- which is why the flag is read after the gates rather than as one
-    of them. Two Chainlit sessions can both be inside the text loop when the
-    first flips it, and testing it first made the second read its own dead end
-    as somebody else's business: it returned False and fell through to the
-    degraded fallback without ever trying the protocol just chosen for it.
+    * and native must not already have failed :data:`_MAX_NATIVE_FAILURES`
+      times, or every query would pay to rediscover a refusal.
     """
-    if _tool_mode_is_explicit() or _escalation.native_rejected:
+    if _tool_mode_is_explicit():
         return False
-    if not _is_reasoning_dead_end(response):
+    if _escalation.native_failures >= _MAX_NATIVE_FAILURES:
         return False
-    first = not _escalation.escalated
+    return _is_reasoning_dead_end(response)
+
+
+def _commit_escalation(signature: str) -> None:
+    """Move the rest of the process to native, once native has actually answered.
+
+    Committed on success rather than on the decision to try, because an
+    endpoint that cannot serve the protocol must not be able to select it: a
+    switch thrown up front sent every later query into the same refusal, and
+    the refusal was the thing being recovered from.
+
+    Announced once. Later queries reach native through
+    :func:`_resolved_tool_mode` and are then ordinary native queries -- a
+    provider failure on one of those surfaces the way it does for a user who
+    configured native themselves, because by then the protocol is known to work
+    and the failure is not about the protocol.
+    """
+    if _escalation.escalated:
+        return
     _escalation.escalated = True
-    if first:
-        logger.warning(
-            "The model returned no answer and no tool call (%s), which is how a "
-            "reasoning model behaves on the 'text' tool protocol. Retrying this "
-            "query on native function calling, and using it for the rest of "
-            "this process. Set AORTA_CHAT_LLM_TOOL_MODE to choose the protocol "
-            "yourself; this process started on the 'text' protocol.",
-            _dead_end_signature(response),
-        )
-    return True
+    logger.warning(
+        "The model returned no answer and no tool call (%s), which is how a "
+        "reasoning model behaves on the 'text' tool protocol. Native function "
+        "calling answered it, so this process will use native from here. Set "
+        "AORTA_CHAT_LLM_TOOL_MODE to choose the protocol yourself; this "
+        "process started on the 'text' protocol.",
+        signature,
+    )
 
 
 @dataclass(frozen=True)
@@ -879,10 +903,13 @@ class _EscalateToNative:
     It carries the trace the abandoned loop accumulated because the label on a
     fallback answer depends on it: if the native retry cannot run at all, the
     query still has to land on :func:`_abandoned_result`, and a loop that ran a
-    tool before going quiet must not be told there that it used none.
+    tool before going quiet must not be told there that it used none. It
+    carries the observed signature for the same reason -- the announcement now
+    happens after the retry, and the evidence for it was seen before.
     """
 
     trace: tuple[str, ...] = ()
+    signature: str = ""
 
 #: Goes into the answer slot, so it names nothing internal: no environment
 #: variable, neither tool protocol, and no class of model. The user asked a
@@ -1050,7 +1077,9 @@ async def act_node(state: AgentState) -> dict[str, Any]:
     if mode == "text":
         result = await _act_text(state)
         if isinstance(result, _EscalateToNative):
-            return await _escalated_native_attempt(state, list(result.trace))
+            return await _escalated_native_attempt(
+                state, list(result.trace), result.signature
+            )
         return result
     raise ValueError(
         f"unknown llm_tool_mode: {settings.llm_tool_mode!r} "
@@ -1059,7 +1088,7 @@ async def act_node(state: AgentState) -> dict[str, Any]:
 
 
 async def _escalated_native_attempt(
-    state: AgentState, trace: list[str]
+    state: AgentState, trace: list[str], signature: str
 ) -> dict[str, Any]:
     """The native retry, and what happens when the endpoint will not serve it.
 
@@ -1069,13 +1098,9 @@ async def _escalated_native_attempt(
     ``--enable-auto-tool-choice`` refuses any request carrying ``tools``, and
     that user is precisely the one the escalation targets -- they never set
     ``llm_tool_mode``, so nothing marks their endpoint as text-only until a
-    native request comes back refused.
-
-    Unhandled, that refusal turned a poor answer into a traceback out of the
-    graph, and the sticky switch then did the same to every later query. So the
-    attempt is caught, the switch is rolled back, native is written off for the
-    rest of the process, and the query lands on the same fallback it would have
-    had if the escalation had never fired.
+    native request comes back refused. Unhandled, that refusal turned a poor
+    answer into a traceback out of the graph. Caught, the query lands on the
+    same fallback it would have had if the escalation had never fired.
 
     The catch is broad on purpose. Which exception a refused ``tools`` payload
     raises depends on the provider client, the gateway and the LangChain
@@ -1084,21 +1109,34 @@ async def _escalated_native_attempt(
     one that reaches the user as a traceback, which is the whole failure being
     fixed. ``Exception`` leaves ``CancelledError`` and ``KeyboardInterrupt``
     fatal, so an interrupted query is still interrupted.
+
+    Being unable to name the exception is also why the failure is *counted*
+    rather than read. The same broad catch sees a permanent refusal and a
+    timeout, and the log line says so instead of diagnosing on the caller's
+    behalf; :data:`_MAX_NATIVE_FAILURES` is what tells them apart, by whether
+    the failure repeats.
     """
     try:
-        return await _act_native(state, escalated=True)
+        result = await _act_native(state, escalated=True)
     except Exception as exc:
-        _escalation.escalated = False
-        _escalation.native_rejected = True
+        _escalation.native_failures += 1
+        exhausted = _escalation.native_failures >= _MAX_NATIVE_FAILURES
         logger.warning(
-            "The native tool protocol was refused by the endpoint (%s: %s), so "
-            "the automatic switch has been rolled back and will not be tried "
-            "again in this process. A local vLLM must be started with "
-            "--enable-auto-tool-choice to serve it.",
+            "The escalated native tool-calling request failed (%s: %s). This is "
+            "attempt %d of %d;%s Answering from retrieved context instead. If "
+            "it is a local vLLM, it must be started with "
+            "--enable-auto-tool-choice to serve this protocol.",
             type(exc).__name__,
             exc,
+            _escalation.native_failures,
+            _MAX_NATIVE_FAILURES,
+            " native will not be tried again in this process."
+            if exhausted
+            else " a later query may try again.",
         )
         return await _abandoned_result(state, trace)
+    _commit_escalation(signature)
+    return result
 
 
 def _act_messages(state: AgentState) -> list[Any]:
@@ -1344,7 +1382,9 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
                     # rather than done here so act_node issues the retry: this
                     # function's job is to drive one protocol, not to pick one.
                     if _escalate_to_native(response):
-                        return _EscalateToNative(tuple(tool_trace))
+                        return _EscalateToNative(
+                            tuple(tool_trace), _dead_end_signature(response)
+                        )
                     return await _abandoned_result(state, tool_trace)
                 messages.append(HumanMessage(content=_SEARCH_REPROMPT_MSG))
                 continue

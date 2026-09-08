@@ -187,26 +187,36 @@ non-zero, and `content` is empty — and the logs say so:
 `act_node ... produced no text despite N output tokens`.
 
 **AORTA now acts on that signature rather than only logging it.** On seeing it,
-the query is retried once through `native` and the protocol is kept for the rest
-of the process, with one log line saying so. The default stays `text`, because
-flipping it globally would break a stock local vLLM (see the endpoint row
-above) — this is detection, not a new default.
+the query is retried once through `native`; if that retry answers, the protocol
+is kept for the rest of the process and one log line says so. The default stays
+`text`, because flipping it globally would break a stock local vLLM (see the
+endpoint row above) — this is detection, not a new default.
 
-Three things follow from that:
+Four things follow from that:
 
 - **An explicit `llm_tool_mode` is never overridden**, whether it comes from
   the profile file or `AORTA_CHAT_LLM_TOOL_MODE`. If you set `text`
   deliberately, set it; the escalation only ever moves the built-in default.
-- **It is bounded.** The retry buys one native round, not a second loop, and it
-  happens once per process rather than once per query.
+- **It is bounded.** The retry buys one native round, not a second loop, and the
+  protocol moves once per process rather than once per query.
+- **The switch is thrown only once native has answered.** An endpoint that
+  refuses the protocol must not be able to select it, which is what throwing the
+  switch up front let it do: the refusal became the state for every later query.
+  A failed retry therefore changes nothing except a counter, and the query falls
+  back exactly as it would have if the escalation had never fired. Two such
+  failures write native off for the rest of the process — two rather than one
+  because a timeout and a permanent refusal arrive identically, and what tells
+  them apart is whether it happens again.
 - **The scope is the process, not the conversation.** Under `aorta chat` that is
   the same thing, but `aorta chat ui` serves many browser sessions from one
   server, and there the escalation is shared by all of them. That is deliberate:
   what was detected is a property of the *model* — it emits reasoning instead of
   an `ACTION:` line — so it is equally true for every session talking to that
   endpoint, and sharing it means only the first query in the process pays the
-  wasted round. Nothing about a conversation is carried across; the state is one
-  boolean about protocol support.
+  wasted round. Nothing about a conversation is carried across; the state is a
+  flag and a counter about protocol support. Sessions that dead-end at the same
+  moment each get their own retry — the shared state records the outcome, it
+  does not ration the attempt.
 
 One gap: the startup line comes from the CLI entry points, so `aorta chat` and
 `aorta chat ask` get it and `aorta chat ui` does not — its Chainlit welcome
@@ -306,8 +316,8 @@ Knobs that lower the bill, roughly in order of effect:
 | `404` on an `*.openai.azure.com` endpoint | Azure OpenAI needs the `litellm` backend, not `openai`. |
 | `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
 | `I wasn't able to answer that: something in my own configuration...` | The act loop produced no usable text. Which attempts it made first depends on `llm_tool_mode` and on whether a tool had already run, so read the warning logged beside this message — it names the step that gave up. `aorta chat doctor` covers the configuration faults that reach this message by other routes. |
-| `Retrying this query on native function calling` | Not an error. The model returned no answer and no tool call under `text`, and the line names the signature that was observed. Chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
-| `The native tool protocol was refused by the endpoint` | The escalation above tried native and the endpoint rejected it — a local vLLM needs `--enable-auto-tool-choice`. The switch is rolled back and not retried; set `llm_tool_mode = "text"` to skip the attempt entirely. |
+| `this process will use native from here` | Not an error. The model returned no answer and no tool call under `text` — the line names the signature that was observed — and native answered it, so chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
+| `The escalated native tool-calling request failed` | The retry above was tried and the request did not come back. If it is a local vLLM, it needs `--enable-auto-tool-choice`; otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
 | An answer prefixed `I could not use my tools for this question` | The act loop gave up and the answer came from retrieved context alone, so anything needing a live lookup is missing from it. Same underlying cause as the row above. |
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
 | `Waiting for vLLM at ...` when you meant to go remote | `llm_provider` is still `vllm`. Check the backend line printed at startup. |

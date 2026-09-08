@@ -721,10 +721,10 @@ class TestAutoEscalationToNative:
             patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
         ):
             await act_node(_state())
-            first = caplog.text.count("Retrying this query on native")
+            first = caplog.text.count("this process will use native from here")
             await act_node(_state())
         assert first == 1
-        assert caplog.text.count("Retrying this query on native") == 1
+        assert caplog.text.count("this process will use native from here") == 1
         assert "AORTA_CHAT_LLM_TOOL_MODE" in caplog.text
         # Names the protocol itself rather than sending the reader to the
         # startup banner, which `aorta chat ui` never prints (#468). Not
@@ -768,43 +768,45 @@ class TestAutoEscalationToNative:
 
 
 class TestConcurrentQueriesShareTheSwitch:
-    """One flag, two requests already in flight, and who is owed the retry.
+    """Two requests already in flight, and who is owed the retry.
 
     ``aorta chat ui`` serves many browser sessions from one process, so two
-    queries can be inside the text loop at once. Making the transition and the
-    retry share a single "have we escalated?" test meant the second one read
-    its own dead end as somebody else's business.
+    queries can be inside the text loop at once. Making the decision and the
+    state transition the same act meant the second one read its own dead end as
+    somebody else's business: it saw the switch already thrown, returned False,
+    and took the degraded fallback without trying the protocol just chosen for
+    it. The decision records nothing now, so the ordering cannot arise.
     """
 
     def test_a_second_dead_end_still_gets_the_retry(
         self, text_mode, tool_mode_not_chosen
     ):
-        """The flag suppresses the transition and its log line, not the retry.
+        """Called directly, because an event loop will not schedule this on demand.
 
-        Called directly rather than through two concurrent ``act_node`` runs
-        because the ordering under test is exactly the one an event loop will
-        not reproduce on demand: both requests past the guard, then one of them
-        setting it.
+        The interleaving under test is both requests past the gates and then one
+        of them committing -- which is not something two concurrent ``act_node``
+        runs can be made to reproduce reliably.
         """
         assert nodes._escalate_to_native(_dead_end_reply()) is True
+        nodes._commit_escalation("105 output tokens spent on empty content")
         assert nodes._escalate_to_native(_dead_end_reply()) is True
 
-    def test_the_second_one_is_not_announced_again(
+    def test_the_decision_records_nothing_by_itself(
         self, text_mode, tool_mode_not_chosen, caplog
     ):
+        """Deciding to try native is not the same as having moved to it."""
         with caplog.at_level("WARNING"):
-            nodes._escalate_to_native(_dead_end_reply())
-            nodes._escalate_to_native(_dead_end_reply())
-        assert caplog.text.count("Retrying this query on native") == 1
+            assert nodes._escalate_to_native(_dead_end_reply()) is True
+        assert nodes._resolved_tool_mode() == "text"
+        assert caplog.text == ""
 
     def test_an_explicit_protocol_still_comes_first(self, text_mode):
-        """Reordering the flag must not have reordered the gate that matters."""
+        """Restructuring the gates must not have dropped the one that matters."""
         assert nodes._escalate_to_native(_dead_end_reply()) is False
 
     def test_a_reply_without_the_signature_still_comes_first(
         self, text_mode, tool_mode_not_chosen
     ):
-        nodes._escalate_to_native(_dead_end_reply())
         assert nodes._escalate_to_native(AIMessage(content="")) is False
 
 
@@ -840,35 +842,57 @@ class TestAnEndpointThatRefusesNative:
         assert result["messages"][0].content == _NO_ANSWER_MSG
 
     @pytest.mark.asyncio
-    async def test_the_switch_is_rolled_back(self, text_mode, tool_mode_not_chosen):
-        """Left set, it sent every later query straight into the same refusal."""
+    async def test_the_switch_is_never_committed(self, text_mode, tool_mode_not_chosen):
+        """Thrown up front, it sent every later query into the same refusal."""
         plain, _bound = self._refusing_llm()
         with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
             await act_node(_state())
         assert nodes._resolved_tool_mode() == "text"
 
     @pytest.mark.asyncio
-    async def test_native_is_not_tried_again_in_this_process(
+    async def test_one_failure_does_not_strand_the_process(
         self, text_mode, tool_mode_not_chosen
     ):
-        """Rolling back alone would re-buy the refusal once per query."""
+        """A timeout and a permanent refusal raise the same way here.
+
+        The broad catch cannot tell them apart, so writing native off on the
+        first failure would let one bad minute keep a long-lived UI server on
+        the protocol its model cannot drive.
+        """
         plain, bound = self._refusing_llm()
         with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
             await act_node(_state())
-            await act_node(_state())
+        assert nodes._escalate_to_native(_dead_end_reply()) is True
         assert bound.ainvoke.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_the_reason_and_the_remedy_are_logged(
+    async def test_a_repeating_failure_writes_native_off(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """What tells a refusal from a blip is that it repeats."""
+        plain, bound = self._refusing_llm()
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            for _ in range(nodes._MAX_NATIVE_FAILURES + 2):
+                await act_node(_state())
+        assert bound.ainvoke.await_count == nodes._MAX_NATIVE_FAILURES
+
+    @pytest.mark.asyncio
+    async def test_the_failure_is_counted_out_loud_not_diagnosed(
         self, text_mode, tool_mode_not_chosen, caplog
     ):
+        """The log says which attempt this was rather than naming a cause.
+
+        Calling it a refusal on the strength of one broad ``except`` would be
+        the same overstatement the escalation warning was corrected for.
+        """
         plain, _bound = self._refusing_llm()
         with (
             caplog.at_level("WARNING"),
             patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
         ):
             await act_node(_state())
-        assert "refused by the endpoint" in caplog.text
+        assert f"attempt 1 of {nodes._MAX_NATIVE_FAILURES}" in caplog.text
+        assert "a later query may try again" in caplog.text
         assert "--enable-auto-tool-choice" in caplog.text
 
     @pytest.mark.asyncio
