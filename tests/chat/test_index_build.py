@@ -455,6 +455,45 @@ class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
         assert result.index_path == target
         assert index_ops.check_index(target, strict=True).refusals == []
 
+    def test_a_refused_index_stays_exempt_even_when_its_provenance_is_unreadable(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The exemption is checked *before* the unclassifiable refusal, on purpose.
+
+        It looks like a hole in the "unreadable provenance is refused" rule and
+        it is not. An unreadable ``corpus_roots`` means the index is either a
+        published one or a local one, and a *refused* index reaches the same
+        verdict down both branches: a refused published index is exempt by the
+        rule above, and a local index is never protected from ``build`` at all.
+        So proceeding is not a guess about which is on disk -- it is what both
+        possibilities agree on.
+
+        Reordering the two would also break the cross-PR interaction the
+        exemption exists for: ``doctor`` and the manifest refusal both name
+        ``aorta chat index build`` as the remedy, and a user whose sidecar is
+        *also* hand-edited would be refused, told to rebuild, refused again.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch, embedding_model="some/other-model")
+        path = index_ops.manifest_mod.manifest_path(target)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["corpus_roots"] = "src/aorta"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        assert index_ops.index_provenance(index_ops.manifest_mod.read_manifest(target)) == (
+            index_ops.PROVENANCE_INVALID
+        ), "the fixture must be unclassifiable as well as refused"
+        assert index_ops.check_index(target, strict=False).refusals
+
+        result = index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert result.index_path == target
+        assert index_ops.check_index(target, strict=True).refusals == []
+
     def test_an_unclassifiable_manifest_is_refused_rather_than_guessed(
         self, repo: Path, tmp_path, monkeypatch
     ):

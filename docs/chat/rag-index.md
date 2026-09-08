@@ -104,7 +104,8 @@ re-download the embedding weights.
 | `build` | built locally | rebuilt, as usual |
 | `build` (any corpus but the published one) | downloaded | refused; pass `--force` |
 | `build --public-only` | downloaded | rebuilt; it is the same corpus, so nothing is lost |
-| any of them | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
+| `fetch` or `--from` | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
+| `build` | a manifest whose `corpus_roots` cannot be read | refused, unless a row above already exempts it; pass `--force` |
 
 A refusal names what would be lost and the flag that proceeds anyway, following
 `config init --force` rather than prompting, so a script and a terminal behave
@@ -116,6 +117,16 @@ Which side built an index is read off its manifest's `corpus_roots`, so an index
 whose manifest records *no* roots — one built before the field existed — is not
 protected either way. One that records roots this build cannot read is a broken
 sidecar rather than an old one, and is refused rather than guessed at.
+
+The exemptions come first, which is why the `build` row above is qualified. An
+unreadable `corpus_roots` means the index is either a published one or a local
+one, and both of the `build` exemptions give the same answer down both branches:
+a `--public-only` build records the published corpus whichever it replaced, and
+an index this install would refuse is unusable whoever built it — while a local
+index is never protected from `build` in the first place. So proceeding there is
+not a guess about which one is on disk; it is what both possibilities agree on.
+`fetch` and `--from` carry no such exemption, so for them the refusal is
+unconditional.
 
 **Interrupting any of them is safe.** `build`, `fetch` and `--from` write the
 new index beside the old one and move it into place in a single step, then write

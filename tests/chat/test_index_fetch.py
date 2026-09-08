@@ -327,6 +327,48 @@ class TestTheTimeoutsAreSplit:
         """Best-effort: a stub response must not turn into a failed download."""
         index_ops._widen_read_timeout(io.BytesIO(b"body"))
 
+    def test_every_request_widens_its_body_read_not_only_the_asset(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """The sidecar reads were left on the connect budget.
+
+        ``urlopen``'s single timeout governs every subsequent read, so the two
+        sidecar bodies kept the 30 s connect budget while only the asset was
+        widened -- and the sidecars are the *first* requests the command makes,
+        so theirs is the failure a user reads as "fetch does not work here".
+        """
+        widened: dict[str, list[float]] = {}
+        real = server.urlopen
+
+        def _urlopen(url, timeout=None):
+            response = real(url, timeout=timeout)
+            calls: list[float] = []
+            widened[url] = calls
+            sock = type("Sock", (), {"settimeout": lambda _self, value: calls.append(value)})()
+            response.fp = type("Fp", (), {"raw": type("Raw", (), {"_sock": sock})()})()
+            return response
+
+        monkeypatch.setattr(index_ops.urllib.request, "urlopen", _urlopen)
+        fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert len(widened) == 3, "manifest, checksum and asset"
+        assert all(calls == [index_ops._READ_TIMEOUT] for calls in widened.values()), widened
+
+    def test_falling_back_to_the_shorter_budget_is_logged_not_silent(self, caplog):
+        """The attribute chain is a standard-library detail, so its loss must be visible.
+
+        ``response.fp.raw._sock`` is not API. The day it moves, the only
+        symptom would be downloads failing at 30 s again with nothing anywhere
+        saying the split had stopped applying.
+        """
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger=index_ops.logger.name):
+            index_ops._widen_read_timeout(io.BytesIO(b"body"))
+
+        assert "connect timeout" in caplog.text
+        assert str(index_ops._READ_TIMEOUT) in caplog.text
+
 
 class TestIdentityIsCheckedBeforeTheAsset:
     """The ~1 KB manifest answers "is this usable" before the ~20 MB transfer.
@@ -452,6 +494,51 @@ class TestAlreadyUpToDate:
 
         assert fetch_index(version="0.2.1", index_path=dest).up_to_date is False
         assert dest.read_bytes() == BODY
+
+    @pytest.mark.parametrize(
+        "value",
+        [None, 42, {"sha": "abc"}, ["abc"]],
+        ids=["null", "int", "object", "list"],
+    )
+    @pytest.mark.parametrize("field_name", ["aorta_sha", "corpus_digest", "built_at"])
+    def test_a_non_string_digest_is_reported_rather_than_raised(
+        self, server, tmp_path: Path, field_name, value
+    ):
+        """The ``corpus_roots`` hole, one field over.
+
+        ``Manifest.from_dict`` type-checks nothing, so a hand-written sidecar
+        can record ``null`` where a digest belongs. Truncating that for the
+        change report raised ``TypeError`` -- ``KeyError`` for a JSON object,
+        which subscripts by key -- out of the comparison whose entire job is to
+        report on a manifest that looks wrong, and past the CLI's error guard.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"stale")
+        raw = {**json.loads(_manifest(index_sha256="").to_json()), field_name: value}
+        manifest_mod.manifest_path(dest).write_text(json.dumps(raw), encoding="utf-8")
+
+        result = fetch_index(version="0.2.1", index_path=dest)
+
+        assert result.up_to_date is False
+        assert dest.read_bytes() == BODY
+        assert any(change.startswith(field_name) for change in result.changes), result.changes
+
+    def test_a_non_string_digest_does_not_break_the_comparison_either(
+        self, server, tmp_path: Path
+    ):
+        """``index status`` reads the same notes, so it had the same traceback."""
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"stale")
+        raw = {
+            **json.loads(_manifest(index_sha256="d" * 64).to_json()),
+            "aorta_sha": None,
+        }
+        manifest_mod.manifest_path(dest).write_text(json.dumps(raw), encoding="utf-8")
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_PUBLISHED_DIFFERS
+        assert any("aorta_sha" in difference for difference in comparison.differences)
 
 
 class TestFetchFailures:

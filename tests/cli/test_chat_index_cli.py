@@ -327,6 +327,53 @@ class TestStatus:
         # the rolling tag and the verdict would otherwise be ambiguous.
         assert "v0.2.1" in result.output
 
+    def test_the_table_names_the_embedding_identity_not_only_the_model(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        """The model name alone is not what has to match for two vectors to compare.
+
+        For a remote provider the identity carries the endpoint too, so two
+        rows reading the same ``model`` can still be two vector spaces that
+        share a name -- and the *incompatible* verdict could be printed over a
+        table showing no visible difference at all.
+        """
+        self._serve(
+            monkeypatch,
+            manifest_overrides={"embedding_identity": "https://gateway.internal/v1\nbge-small"},
+        )
+
+        result = runner.invoke(
+            chat, ["index", "status", "--version", "0.2.1", "--index", str(tmp_path / "absent")]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "identity" in result.output
+        assert "gateway.internal" in result.output
+
+    def test_a_multi_line_identity_does_not_break_the_columns(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        """``vector_identity`` is newline-joined, and this is a fixed-width table.
+
+        Printed as recorded it would put the model on its own unlabelled row
+        and misalign every row after it.
+        """
+        self._serve(
+            monkeypatch,
+            manifest_overrides={"embedding_identity": "https://gateway.internal/v1\nbge-small"},
+        )
+
+        result = runner.invoke(
+            chat, ["index", "status", "--version", "0.2.1", "--index", str(tmp_path / "absent")]
+        )
+
+        identity_rows = [
+            line for line in result.output.splitlines() if line.strip().startswith("identity")
+        ]
+        assert len(identity_rows) == 1, result.output
+        # Both halves on the one row, so nothing below it is pushed out of column.
+        assert "gateway.internal" in identity_rows[0] and "bge-small" in identity_rows[0]
+
     def test_the_json_form_is_machine_readable(
         self, runner: CliRunner, tmp_path: Path, monkeypatch
     ):

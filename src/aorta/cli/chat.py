@@ -1085,8 +1085,15 @@ def index_fetch(
 #: wall-clock from whoever built the index, so a locally-built one can carry a
 #: later timestamp while indexing *older* source. ``corpus_digest`` and
 #: ``aorta_sha`` are the honest answer to "which source".
+#:
+#: ``embedding_identity`` sits next to ``model`` because it is what makes the
+#: model name meaningful: for a remote provider it carries the endpoint too, so
+#: two rows reading the same ``model`` can still be two vector spaces that
+#: share a name. Without it the *incompatible* verdict could be printed over a
+#: table showing no visible difference at all.
 _STATUS_ROWS = (
     ("model", "embedding_model"),
+    ("identity", "embedding_identity"),
     ("dimensions", "dimensions"),
     ("aorta", "aorta_version"),
     ("aorta_sha", "aorta_sha"),
@@ -1097,14 +1104,27 @@ _STATUS_ROWS = (
 )
 
 
+def _status_cell(value: object) -> str:
+    """One table cell: always a single line, so no field can break the columns.
+
+    ``embedding_identity`` is newline-joined -- endpoint, then model -- so
+    printing it as recorded would put half of it on an unlabelled row and
+    misalign every row after it. Collapsing here rather than at the one field
+    that needs it today keeps the table's shape a property of the table.
+    """
+    return " / ".join(part for part in str(value or "").split("\n") if part) or "-"
+
+
 def _echo_status_table(local: dict, published: dict) -> None:
     """Print both manifests as two columns, so a difference is visible."""
     click.echo(f"  {'':<13}{'local':<44}published")
     for label, key in _STATUS_ROWS:
-        left = str(local.get(key, "") or "-")
-        right = str(published.get(key, "") or "-")
+        left = _status_cell(local.get(key))
+        right = _status_cell(published.get(key))
         # Truncated for width only. The digests differ in their leading
-        # characters when they differ at all, and --json carries them in full.
+        # characters when they differ at all, and --json carries them in full;
+        # a truncated identity can only hide what the `model` and `dimensions`
+        # rows above it already show separately.
         click.echo(f"  {label:<13}{left[:42]:<44}{right[:42]}")
 
 

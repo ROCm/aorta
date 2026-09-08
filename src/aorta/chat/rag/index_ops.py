@@ -23,7 +23,6 @@ a ``.devN+g<sha>`` version takes the rolling one and says how far off it is.
 
 from __future__ import annotations
 
-import contextlib
 import http.client
 import json
 import logging
@@ -387,10 +386,15 @@ def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
         raise _unclassifiable_error(dest, local.corpus_roots, command)
     if provenance != PROVENANCE_LOCAL:
         return
+    # Formatted from the validated reader rather than the raw attribute. The
+    # branch above is what makes this a list of strings, and rendering the
+    # field the guard just classified through a second, unchecked path is the
+    # shape of the bug that validation exists to close.
+    roots = _corpus_roots(local) or []
     raise IndexOverwriteError(
         f"the index at {dest} was built on this machine, not downloaded.\n"
         f"  built as  {local.describe()}\n"
-        f"  corpus    {', '.join(local.corpus_roots)}\n"
+        f"  corpus    {', '.join(roots)}\n"
         "Replacing it with the published index discards a build the network "
         "cannot give back -- the tree it indexed may have moved, and rebuilding "
         "needs the embedding weights again.\n"
@@ -442,6 +446,14 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
         # Ahead of both refusals, so a refused index is exempt whether or not
         # its manifest is readable; either refusal would otherwise compose two
         # individually-correct behaviours into a dead end.
+        #
+        # Ahead of the unreadable-provenance refusal specifically, which looks
+        # like a hole and is not: an unreadable manifest is either a published
+        # index or a local one, and a *refused* index reaches the same verdict
+        # down both branches -- a refused published index is exempt by the rule
+        # above, and a local index is never protected from `build` at all (the
+        # early return above). So returning here is not a guess about which one
+        # is on disk; it is the answer both possibilities give.
         logger.info(
             "The index at %s is refused by this install's embedding provider, "
             "so rebuilding it loses nothing.",
@@ -450,11 +462,12 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
         return
     if provenance == PROVENANCE_INVALID:
         raise _unclassifiable_error(target, local.corpus_roots, "aorta chat index build")
+    roots = _corpus_roots(local) or []
     raise IndexOverwriteError(
         f"the index at {target} covers the published corpus, and this build "
         "would not.\n"
         f"  there now  {local.describe()}\n"
-        f"             corpus {', '.join(local.corpus_roots)}\n"
+        f"             corpus {', '.join(roots)}\n"
         f"  building   corpus {corpus.describe()}\n"
         "That replaces it with an index over a different corpus -- the two are "
         "above -- and one with no public-tree provenance, since only a "
@@ -709,13 +722,34 @@ def _widen_read_timeout(response: Any) -> None:
     improvement into a failed download. Falling back leaves the body on the
     connect budget, which is a per-``recv`` timeout and so is still ample for a
     transfer that is actually flowing.
+
+    The fallback is logged rather than silent. Reaching through
+    ``response.fp.raw._sock`` is an implementation detail of the standard
+    library, so the day it moves the only visible symptom would be downloads
+    failing at 30 seconds again -- with nothing anywhere saying the split had
+    stopped applying. Debug level: it is diagnostic for whoever is already
+    looking at a timeout, and ``-v`` is what that person passes.
     """
     raw = getattr(getattr(response, "fp", None), "raw", None)
     sock = getattr(raw, "_sock", None)
     if sock is None:
+        logger.debug(
+            "No socket behind the response, so the body keeps the %ss connect "
+            "timeout rather than the %ss read timeout.",
+            _CONNECT_TIMEOUT,
+            _READ_TIMEOUT,
+        )
         return
-    with contextlib.suppress(OSError, AttributeError):
+    try:
         sock.settimeout(_READ_TIMEOUT)
+    except (OSError, AttributeError) as exc:
+        logger.debug(
+            "Could not widen the read timeout to %ss (%s); the body keeps the %ss "
+            "connect timeout.",
+            _READ_TIMEOUT,
+            exc,
+            _CONNECT_TIMEOUT,
+        )
 
 
 def _human_bytes(count: int) -> str:
@@ -820,6 +854,14 @@ def _download_text(url: str) -> str:
     logger.info("Fetching %s", url)
     try:
         with urllib.request.urlopen(url, timeout=_CONNECT_TIMEOUT) as response:  # noqa: S310
+            # Widened for the same reason the asset transfer is, and it was
+            # missing here: ``urlopen``'s single timeout also governs every
+            # read, so a sidecar served slowly by a loaded release host failed
+            # on the connect budget rather than the read budget the two
+            # constants advertise. A kilobyte rarely needs it -- but this is
+            # the *first* request the command makes, so it is the one whose
+            # failure a user reads as "fetch does not work here".
+            _widen_read_timeout(response)
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         raise IndexFetchError(
@@ -908,6 +950,23 @@ def _validate_against_provider(manifest: manifest_mod.Manifest) -> manifest_mod.
     )
 
 
+def _manifest_text(value: object) -> str:
+    """A manifest field as text, whatever type it actually holds.
+
+    The same hole as :func:`_corpus_roots`, one field over.
+    ``Manifest.from_dict`` type-checks nothing, so a hand-written sidecar can
+    record ``null`` where a digest belongs -- and truncating that raised
+    ``TypeError`` (``KeyError`` for a JSON object, which subscripts by key)
+    straight out of the comparison whose entire job is to report on a manifest
+    that looks wrong. Rendered before it is truncated, which is what
+    ``index status``'s table already does with the same values.
+
+    ``None`` becomes empty rather than ``"None"`` so the callers' own wording
+    for a missing field still fires.
+    """
+    return "" if value is None else str(value)
+
+
 def _refresh_notes(
     local: manifest_mod.Manifest | None, incoming: manifest_mod.Manifest
 ) -> list[str]:
@@ -922,9 +981,13 @@ def _refresh_notes(
         return []
     changes = []
     for label, was, now in (
-        ("built_at", local.built_at, incoming.built_at),
-        ("aorta_sha", local.aorta_sha[:7], incoming.aorta_sha[:7]),
-        ("corpus_digest", local.corpus_digest[:12], incoming.corpus_digest[:12]),
+        ("built_at", _manifest_text(local.built_at), _manifest_text(incoming.built_at)),
+        ("aorta_sha", _manifest_text(local.aorta_sha)[:7], _manifest_text(incoming.aorta_sha)[:7]),
+        (
+            "corpus_digest",
+            _manifest_text(local.corpus_digest)[:12],
+            _manifest_text(incoming.corpus_digest)[:12],
+        ),
     ):
         if was != now:
             changes.append(f"{label}: {was or 'unknown'} -> {now or 'unknown'}")
