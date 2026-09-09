@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -639,15 +640,17 @@ _IDENTITY_OBJECT_FIELDS = (
 def _identity_compatible(row: dict[str, Any], result: dict[str, Any]) -> bool:
     """Whether a result identity can describe this worklist row (pure).
 
-    Only *omitted* fields are wildcards. Every code-object field is optional on the
-    wire, so a result may carry a sparser view of the row it came from -- but a field
-    that is populated and disagrees describes a different object, and treating it as a
-    match would attach one object's reason to another object's row.
+    Only *omitted* fields are wildcards -- omitted, not null. Every code-object field
+    is optional on the wire, so a result may carry a sparser view of the row it came
+    from, but a field it does serialize is a claim: ``entry_offset: null`` says this
+    was a whole-object scan and cannot describe an exact-entry selection, and a
+    disagreeing digest describes a different object entirely. Treating either as a
+    match would attach one selection's reason to another selection's row.
     """
     if row.get("name") != result.get("name") or row.get("target") != result.get("target"):
         return False
     return all(
-        result.get(field) is None or result.get(field) == row.get(field)
+        field not in result or result.get(field) == row.get(field)
         for field in _IDENTITY_OBJECT_FIELDS
     )
 
@@ -696,6 +699,14 @@ def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
     single row: each got the other's verdict and reasons, and their findings were
     summed onto both, double-counting against the case total. Joining on every
     serialized identity field keeps them separate; the name stays display text.
+
+    The key also records *which* optional fields the identity carries, because an
+    omitted field and an explicit null are different claims: a whole-object selection
+    states ``entry_offset: null``, while a result that simply did not serialize the
+    field says nothing about it. Reading them as equal collapsed an exact-entry result
+    that omitted its offset onto the whole-object result for the same object, before
+    either had been reconciled with a selection -- merging two scans of different
+    scopes and letting the merged verdict reach the deduped siblings of one of them.
     """
     return (
         identity.get("target"),
@@ -704,6 +715,7 @@ def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
         identity.get("code_object_index"),
         identity.get("entry_offset"),
         identity.get("name"),
+        *(field in identity for field in _IDENTITY_OBJECT_FIELDS),
     )
 
 
@@ -776,6 +788,20 @@ def _middle_clip_name(name: str) -> str:
     return f"{clean[:head]}\u2026{clean[head - _LABEL_LIMIT + 1:]}"
 
 
+def _hashed_clip_name(name: str) -> str:
+    """A clipped kernel name with a digest of the whole one (pure).
+
+    The last resort. Two names can agree on both ends and differ only in the middle the
+    budget elides, and if they also share a code object no identity field can separate
+    them either. A digest of the full name always can, at the cost of a label nobody
+    can read back to a symbol -- which is why nothing reaches for it until every
+    readable discriminator has tied.
+    """
+    clean = " ".join(name.split())
+    digest = hashlib.sha256(clean.encode("utf-8")).hexdigest()[:8]
+    return f"{_middle_clip_name(clean)} ~{digest}"
+
+
 # The qualifier widens one field at a time, cheapest first. Everything past the short
 # digest exists for a collision the tier before it cannot resolve, so a label only pays
 # for the ambiguity it actually has.
@@ -795,11 +821,11 @@ def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
     ``_LABEL_LIMIT``), so two distinct names agreeing on their first characters render
     as one string and are as ambiguous to a reader as a genuinely repeated name. When
     the qualifiers tie as well -- two long names in the same code object -- the names
-    are re-rendered keeping their tails, which is the only thing left that differs. The
-    last tier can still tie, in which case there is nothing to disambiguate with.
+    are re-rendered keeping their tails, and then, if even those agree, carrying a
+    digest of the whole name, which cannot tie for names that differ at all.
     """
     labels: list[str] = []
-    for render in (_clip_name, _middle_clip_name):
+    for render in (_clip_name, _middle_clip_name, _hashed_clip_name):
         display = [render(str(name)) for name, _ in items]
         counts: dict[str, int] = {}
         for shown in display:

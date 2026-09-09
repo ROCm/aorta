@@ -1003,7 +1003,12 @@ def test_an_exact_entry_result_missing_its_offset_cannot_cover_a_sibling():
 
     case = gen.summarize_case(report, "warn")
     entry_row, object_row, gated = case["kernels"]
-    assert entry_row.get("verdict") == "pass"
+    # the result claims whole-object scope, which cannot describe an exact-entry
+    # selection, so it attributes to no row and the entry row falls back to what the
+    # object scan says — a clean verdict inherited from an unattributable result would
+    # be a guess, and the guess that hides a failure
+    assert entry_row.get("verdict") == "error"
+    assert "same code object as gemm_object" in entry_row.get("detail", "")
     assert object_row.get("verdict") == "error"
     # the gated row inherits the scan that actually covered its object
     assert gated.get("verdict") == "error"
@@ -1242,6 +1247,88 @@ def test_two_long_names_in_one_object_keep_their_distinguishing_tails():
     assert len(set(labels)) == 2
     assert labels[0].endswith("_AAA") and labels[1].endswith("_BBB")
     assert all(len(label) <= 64 for label in labels)
+
+
+def test_an_omitted_offset_does_not_merge_two_selections_of_one_object():
+    # An exact-entry and a whole-object selection over one object are both valid
+    # (their stable_key scopes differ). If the exact result omits its optional
+    # entry_offset, the two results serialize to the same fields — collapsing them
+    # before either is reconciled with a selection merges scans of different scopes,
+    # and the merged verdict then reaches the object scan's deduped siblings.
+    sha = "beefaaa1"
+
+    def _identity(offset: int | None) -> dict:
+        return {
+            "name": "gemm", "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(0x100), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(None), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                {
+                    # the exact-entry scan, serialized without its offset
+                    "identity": {
+                        "name": "gemm", "target": "gfx950",
+                        "code_object": "/a/b/sol.hsaco", "code_object_sha256": sha,
+                        "code_object_index": 0,
+                    },
+                    "state": "error", "verdict": "error", "findings": [],
+                    "reason": "waitcheck_backend_exit_2: refused the entry",
+                    "returncode": 2,
+                },
+                {
+                    "identity": _identity(None), "state": "ran", "verdict": "pass",
+                    "findings": [], "reason": None, "returncode": 0,
+                },
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    exact_row, object_row = case["kernels"]
+    # the object scan keeps its own clean verdict rather than the merger of both
+    assert object_row.get("verdict") == "pass"
+    assert object_row.get("detail") == ""
+    # and the ambiguous result is not silently placed on either row
+    assert "refused the entry" not in exact_row.get("detail", "")
+    reasons = case.get("kernel_reasons") or []
+    assert [e.get("reason") for e in reasons] == [
+        "waitcheck_backend_exit_2: refused the entry"
+    ]
+
+
+def test_two_long_names_differing_only_in_the_elided_middle_are_told_apart():
+    # Last resort. Two names can agree on both ends and differ only in the middle the
+    # budget elides, and if they share a code object no identity field separates them
+    # either — so the labels tied and the two reasons became unattributable.
+    head, tail = "gemm_" + "K" * 60, "L" * 60 + "_end"
+    identity_a = {
+        "name": f"{head}_AAA_{tail}", "target": "gfx950",
+        "code_object": "/a/b/sol.hsaco", "code_object_sha256": "beefaaa1",
+        "code_object_index": 0, "entry_offset": None,
+    }
+    identity_b = dict(identity_a, name=f"{head}_BBB_{tail}")
+
+    labels = gen._display_labels([
+        (identity_a["name"], identity_a), (identity_b["name"], identity_b)
+    ])
+    assert len(set(labels)) == 2
 
 
 def test_an_unattributed_reason_is_not_labelled_like_a_visible_row():
