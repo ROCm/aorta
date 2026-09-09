@@ -628,6 +628,30 @@ def _worse_verdict(current: Any, candidate: Any) -> Any:
     return candidate if ranked > _VERDICT_RANK.get(str(current).strip().lower(), -1) else current
 
 
+_IDENTITY_OBJECT_FIELDS = (
+    "code_object",
+    "code_object_sha256",
+    "code_object_index",
+    "entry_offset",
+)
+
+
+def _identity_compatible(row: dict[str, Any], result: dict[str, Any]) -> bool:
+    """Whether a result identity can describe this worklist row (pure).
+
+    Only *omitted* fields are wildcards. Every code-object field is optional on the
+    wire, so a result may carry a sparser view of the row it came from -- but a field
+    that is populated and disagrees describes a different object, and treating it as a
+    match would attach one object's reason to another object's row.
+    """
+    if row.get("name") != result.get("name") or row.get("target") != result.get("target"):
+        return False
+    return all(
+        result.get(field) is None or result.get(field) == row.get(field)
+        for field in _IDENTITY_OBJECT_FIELDS
+    )
+
+
 def _with_sanitizer(previous: dict[str, Any] | None, sanitizer: str) -> list[str]:
     """The sanitizers that have contributed a result for one kernel, in order (pure)."""
     seen = list(previous["sanitizers"]) if previous else []
@@ -754,14 +778,18 @@ def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
     counts: dict[Any, int] = {}
     for name, _ in items:
         counts[name] = counts.get(name, 0) + 1
-    labels = [str(name) for name, _ in items]
+    # The *name* is what gets budgeted, before the qualifier is appended. Clamping the
+    # assembled label instead right-truncates the qualifier away, so two rows sharing a
+    # long name would render the same prefix and lose the disambiguation this exists for.
+    display = [_clean_msg(str(name), _LABEL_LIMIT) for name, _ in items]
+    labels = list(display)
     for widening in _QUALIFIER_WIDENINGS:
         labels = [
-            f"{name} ({qualifier})"
+            f"{shown} ({qualifier})"
             if counts[name] > 1
             and (qualifier := _identity_qualifier(identity, **widening))
-            else str(name)
-            for name, identity in items
+            else shown
+            for shown, (name, identity) in zip(display, items, strict=True)
         ]
         if len(set(labels)) == len(labels):
             break
@@ -1019,17 +1047,22 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     # dashboard exists to surface. Falling back to ``(name, target)`` is safe only when
     # it can mean one thing: one worklist row and one unclaimed result.
     claimed = {_identity_key(entry.get("identity", {})) for entry in kernel_entries}
-    unclaimed: dict[tuple[Any, Any], list[tuple[Any, ...]]] = {}
-    for key, reduced in kr_by_identity.items():
-        if key in claimed:
-            continue
-        sparse = reduced["identity"]
-        unclaimed.setdefault((sparse.get("name"), sparse.get("target")), []).append(key)
-    rows_by_name_target: dict[tuple[Any, Any], int] = {}
-    for entry in kernel_entries:
-        row_identity = entry.get("identity", {})
-        row_key = (row_identity.get("name"), row_identity.get("target"))
-        rows_by_name_target[row_key] = rows_by_name_target.get(row_key, 0) + 1
+    unclaimed = [key for key in kr_by_identity if key not in claimed]
+    # An unmatched result is only a candidate for the rows it *cannot contradict*, and
+    # only where it can mean one of them: a populated field that disagrees describes a
+    # different object rather than a sparser view of this one, and attributing it here
+    # would put another object's reason on this row and then stamp this row's identity
+    # onto it -- a manifest that names the wrong object is worse than one that names none.
+    fallback_by_row: dict[tuple[Any, ...], list[tuple[Any, ...]]] = {}
+    for key in unclaimed:
+        sparse = kr_by_identity[key]["identity"]
+        rows = [
+            _identity_key(entry.get("identity", {}))
+            for entry in kernel_entries
+            if _identity_compatible(entry.get("identity", {}), sparse)
+        ]
+        if len(rows) == 1:
+            fallback_by_row.setdefault(rows[0], []).append(key)
 
     # Resolve every row to its result *before* anything is attributed from one. Scan
     # scope is a property of the selection, not of whichever fields a result happened
@@ -1042,9 +1075,8 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         identity = entry.get("identity", {})
         row_key = _identity_key(identity)
         result = kr_by_identity.get(row_key)
-        loose_key = (identity.get("name"), identity.get("target"))
-        candidates = unclaimed.get(loose_key, ())
-        if len(candidates) == 1 and rows_by_name_target.get(loose_key) == 1:
+        candidates = fallback_by_row.get(row_key, ())
+        if len(candidates) == 1:
             # A sparse result is this kernel's result, so it belongs *with* an exact
             # one rather than instead of it: one check can serialize the full identity
             # while another serializes only ``{name, target}``, and keeping just the
@@ -1109,8 +1141,8 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             covering = matched[covering_key]
             verdict = covering["verdict"]
             findings = 0
-            covering_label = _clean_msg(
-                label_by_key.get(covering_key, str(covering["name"])), _LABEL_LIMIT
+            covering_label = label_by_key.get(
+                covering_key, _clean_msg(str(covering["name"]), _LABEL_LIMIT)
             )
             detail = f"same code object as {covering_label}; scanned once"
             if covering["reason"]:
@@ -3743,13 +3775,11 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     # answer for an errored case.
     kernel_reasons = row.get("kernel_reasons") or []
     if kernel_reasons:
-        # The label is budgeted too. Kernel names are unbounded -- a mangled template
-        # instantiation runs to hundreds of characters -- so budgeting only the rollup
-        # still let the *label* spend the allowance before its reason began, leaving a
-        # callout that names a kernel and no cause.
-        detail = "; ".join(
-            f"{_clean_msg(str(e['label']), _LABEL_LIMIT)}: {e['reason']}" for e in kernel_reasons
-        )
+        # Labels arrive with their name already budgeted (``_display_labels``), which
+        # is what stops an unbounded kernel name from spending the allowance before its
+        # reason begins -- while keeping the identity qualifier a right-truncation here
+        # would have cut off.
+        detail = "; ".join(f"{e['label']}: {e['reason']}" for e in kernel_reasons)
         # Budget the rollup down first. Clamping only the concatenation let a long
         # rollup spend the whole allowance and truncate the kernel reasons off the
         # end -- and a rollup is not always short: ConSan builds
