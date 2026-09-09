@@ -686,7 +686,14 @@ def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
     :func:`aorta.chat.rag.manifest.validate` refuses on the model name and on
     the embedding identity, which for the local provider is the model name
     again -- so a local install on a hand-set ``embedding_model`` is refused
-    exactly like a remote one.
+    exactly like a remote one. Chunk parameters are deliberately *not* part of
+    that decision: ``validate`` reports them as warnings and ``fetch_index``
+    gates on refusals only, so ``AORTA_CHAT_CHUNK_SIZE`` does not stop a fetch.
+
+    The rule every arm below follows: name a command only when the resolved
+    settings let it succeed, and otherwise name the blocker instead. An unknown
+    ``embedding_provider`` and a remote provider with no key both fail before
+    any index command can run, so neither arm offers one.
     """
     try:
         current = get_settings()
@@ -711,6 +718,22 @@ def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
             f"provider this aorta knows "
             f"({', '.join(sorted(EMBEDDING_PROVIDER_FLOWS))}). Indexing and "
             "querying will both fail until it is corrected."
+        ]
+    elif flow == "remote" and not current.remote_embedding_api_key.strip():
+        # Naming 'index build' here would be the same defect one case over:
+        # RemoteApiProvider.get_embeddings() raises on an empty key before it
+        # sends anything, so the command is known to fail from the settings
+        # alone. And this is the likely state on the override path rather than a
+        # corner of it -- the profile config init has just written is a local
+        # one and carries no remote key, so an exported
+        # AORTA_CHAT_EMBEDDING_PROVIDER=remote arrives here with nothing to
+        # authenticate with.
+        lines = [
+            f"Embeddings: {current.embedding_provider}, via "
+            f"{current.remote_embedding_model}, but "
+            f"{ENV_PREFIX}REMOTE_EMBEDDING_API_KEY is not set. Indexing and "
+            "querying will both fail until it is, so set it (or put "
+            "remote_embedding_api_key in the profile) before either."
         ]
     elif flow == "remote":
         lines = [

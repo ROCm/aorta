@@ -286,12 +286,18 @@ class TestConfigInit:
         deliberately picks remote -- the case
         ``test_no_template_selects_remote_embeddings_it_cannot_reach`` is
         written to keep allowing.
+
+        The key is set because ``index build`` is only the right advice once it
+        can run; without one the message names the missing key instead, which is
+        ``test_a_remote_provider_with_no_key_is_not_sent_to_index_build``.
         """
         monkeypatch.setitem(
             config.PROFILE_TEMPLATES,
             "openai",
             {**config.PROFILE_TEMPLATES["openai"], "embedding_provider": "remote"},
         )
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_EMBEDDING_API_KEY", "sk-test")
+        config.reset_settings()
         result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
         assert result.exit_code == 0, result.output
         assert "Embeddings: remote" in result.output
@@ -308,13 +314,47 @@ class TestConfigInit:
         which then refuses the published asset -- advice their own environment
         does not let them follow, which is the failure this command was changed
         to stop rather than to reproduce.
+
+        A key is exported alongside the provider so this stays a test about
+        *which* command is named. Without one the arm below fires instead, and
+        the reason it is a separate test is that the keyless combination is the
+        common one here, not an edge: the profile just written is local and
+        carries no remote key.
         """
         monkeypatch.setenv("AORTA_CHAT_EMBEDDING_PROVIDER", "remote")
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_EMBEDDING_API_KEY", "sk-test")
         config.reset_settings()
         result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
         assert result.exit_code == 0, result.output
         assert "Embeddings: remote" in result.output
         assert "index build" in result.output
+        assert "index fetch" not in result.output
+
+    def test_a_remote_provider_with_no_key_is_not_sent_to_index_build(
+        self, monkeypatch, chat_profile
+    ):
+        """``index build`` cannot run without a key, so it must not be named.
+
+        ``RemoteApiProvider.get_embeddings()`` raises on an empty
+        ``remote_embedding_api_key`` before it sends anything, so the command is
+        known to fail from the settings alone -- the same class of unfollowable
+        advice this whole path exists to remove, one case over.
+
+        This is the *reachable* combination rather than a constructed one: the
+        profile ``config init`` has just written is local and carries no remote
+        key, so exporting the provider alone lands here. Both sibling tests
+        above had to be given a key once this arm existed, which is how reachable
+        it is.
+        """
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_PROVIDER", "remote")
+        monkeypatch.delenv("AORTA_CHAT_REMOTE_EMBEDDING_API_KEY", raising=False)
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "Embeddings: remote" in result.output
+        assert "AORTA_CHAT_REMOTE_EMBEDDING_API_KEY" in result.output
+        # Neither index command is offered, because neither can succeed yet.
+        assert "index build" not in result.output
         assert "index fetch" not in result.output
 
     def test_it_says_where_the_override_came_from(self, monkeypatch, chat_profile):
@@ -344,6 +384,29 @@ class TestConfigInit:
         assert "bge-large-en-v1.5" in result.output
         assert "index build" in result.output
         assert "index fetch" not in result.output
+
+    @pytest.mark.parametrize(
+        ("variable", "value"),
+        [("AORTA_CHAT_CHUNK_SIZE", "1024"), ("AORTA_CHAT_CHUNK_OVERLAP", "999")],
+    )
+    def test_chunk_drift_does_not_withdraw_the_fetch(
+        self, monkeypatch, chat_profile, variable, value
+    ):
+        """Chunk parameters are not part of the compatibility decision.
+
+        ``manifest.validate`` reports them as warnings, not refusals, and
+        ``fetch_index`` gates on ``raise_if_refused`` alone -- verified by
+        driving ``fetch_index`` against a published manifest built at other chunk
+        values, which installs and warns. So a fetch stays followable here, and
+        withdrawing it would send a reader to ``index build`` -- a full local
+        re-embed -- to avoid a warning about span sizes.
+        """
+        monkeypatch.setenv(variable, value)
+        config.reset_settings()
+        result = CliRunner().invoke(chat, ["config", "init", "--profile", "openai", "--no-input"])
+        assert result.exit_code == 0, result.output
+        assert "index fetch" in result.output
+        assert "index build" not in result.output
 
     @pytest.mark.parametrize(
         "spelling",
