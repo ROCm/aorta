@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -54,6 +55,55 @@ def quoted_search_roots() -> str:
     decides whether their directory name is safe to write.
     """
     return " ".join(shlex.quote(root) for root in search_roots()) or "~"
+
+
+#: Assignments whose *name* says the value is a credential. Matched on the name
+#: rather than the value, because a token looks like any other opaque string.
+_SECRET_ASSIGNMENT = re.compile(
+    r"""(?ix)
+    \b[A-Z0-9_]*
+    (TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API[_-]?KEY|ACCESS[_-]?KEY|
+     PRIVATE[_-]?KEY|SESSION|COOKIE|BEARER|AUTH)
+    [A-Z0-9_]*
+    \s*=
+    """,
+)
+
+
+def launch_script_summary(roots: str, limit: int) -> str:
+    """A probe that reports how jobs are submitted, not what the scripts contain.
+
+    This used to be ``find ... | xargs head -25``, which read the first 25 lines
+    of up to eight shell scripts under the user's home directory and put them in
+    an LLM prompt bound for whatever LITELLM_API_BASE points at. The first lines
+    of a personal ``.sh`` are where ``export ..._API_KEY=`` lives, so the part
+    that got sent was the part worth keeping.
+
+    What the planner actually needs from these files is the #SBATCH directives:
+    the partition, the time limit, the gres. So that is all this returns, with
+    the filename for context.
+    """
+    return (
+        rf"find {roots} -maxdepth 4 \( -name '*.sbatch' -o -name '*.slurm' -o -name '*.sh' \) "
+        rf"2>/dev/null | head -{limit} | while IFS= read -r f; do "
+        r'echo "== $f"; '
+        r"""grep -hE '^[[:space:]]*#(SBATCH|PBS)' "$f" 2>/dev/null | head -20; """
+        "done"
+    )
+
+
+def scrub_secrets(text: str) -> str:
+    """Drop lines that assign something named like a credential.
+
+    The probe above should not produce any, being limited to directive lines.
+    This is the second gate: a directive line is not supposed to carry a
+    secret, but "supposed to" is not a property of somebody else's file, and
+    the cost of being wrong is a credential in a third party's logs.
+    """
+    kept = [
+        line for line in text.splitlines() if not _SECRET_ASSIGNMENT.search(line)
+    ]
+    return "\n".join(kept)
 
 
 def run_probe(host: str, cmd: str, timeout: int = 15) -> str:

@@ -7,7 +7,13 @@ from typing import Any
 import dspy
 import yaml
 
-from aorta.cia.launch.cluster import quoted_search_roots, run_probe, venv_activate_path
+from aorta.cia.launch.cluster import (
+    launch_script_summary,
+    quoted_search_roots,
+    run_probe,
+    scrub_secrets,
+    venv_activate_path,
+)
 from aorta.cia.llm import ensure_configured
 
 
@@ -121,11 +127,8 @@ def check_partitions(host: str) -> dict[str, Any]:
 def read_existing_launch_scripts(host: str, node: str) -> str:
     """Read existing launch scripts on the shared filesystem to learn local patterns."""
     roots = quoted_search_roots()
-    out = run_probe(host, (
-        rf"find {roots} -maxdepth 4 \( -name '*.sbatch' -o -name '*.slurm' -o -name '*.sh' \) "
-        "2>/dev/null | head -5 | xargs head -30 2>/dev/null"
-    ))
-    return out[:1500]
+    out = run_probe(host, launch_script_summary(roots, limit=5))
+    return scrub_secrets(out)[:1500]
 
 
 def estimate_runtime(recipe: str, gpu_count: int) -> str:
