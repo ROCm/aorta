@@ -101,16 +101,24 @@ half-rebuilt one.
 a given AORTA revision, so building it locally is work someone already did. It
 resolves by installed version — a released wheel gets that release's asset, a
 `.dev` build gets the rolling `main` asset with a warning about the commit delta.
-`aorta chat index fetch` is only *offered* as a remedy when this install could
-actually install what it downloads, which takes two conditions rather than one.
-CI publishes a single asset, built with the local embedder and the default
-`embedding_model`, and `fetch_index` validates its manifest against this
-install's provider identity before writing anything — so the fetch is withheld
-both under a remote `embedding_provider` and under a customised
-`embedding_model`, each of which it would refuse. `aorta chat doctor` and the
-manifest-validation messages check both before advising — for an absent index,
-a refused one and a stale one — and name `aorta chat index build` instead,
-which embeds with whatever this install is configured for.
+It is the normal path for every chat provider, because the embedding provider
+is a separate choice and every `config init` profile leaves it local. The asset
+is built by CI under default settings, and `fetch_index` validates its manifest
+against this install's provider identity before writing anything — the
+comparison is the model name and the collection identity, not only the flow. So
+`fetch` works exactly as long as your install still embeds with the default
+local model: a hand-set `embedding_model` is refused just as a remote provider
+is, before anything is installed. That is the reason [choosing a remote
+embedder](configuration.md#configuring-a-remote-embedding-provider-by-hand)
+means taking over the build.
+
+Because both of those are knowable up front, `aorta chat index fetch` is only
+*offered* as a remedy when this install could actually install what it
+downloads — a fetch that would be refused is not proposed in the first place.
+`aorta chat doctor` and the manifest-validation messages check both conditions
+before advising, for an absent index, a refused one and a stale one, and name
+`aorta chat index build` instead, which embeds with whatever this install is
+configured for.
 
 A third condition withholds *both* index commands rather than choosing
 between them: an `embedding_provider` that names a provider AORTA does not
@@ -134,9 +142,10 @@ refresh command, not `fetch`.
 
 Withholding the fetch is only half of it, because a remote embedder is often
 not a decision anyone made — a profile for a remote LLM is where the setting
-usually comes from, and nothing rewrites a `chat.toml` that already exists, so
-it stays until the profile is edited or regenerated whatever the current
-template writes. So `aorta chat doctor` also warns when the
+usually comes from, and no template selects a remote embedder any more.
+Nothing rewrites a `chat.toml` that already exists, though, so a profile
+written by an older install still carries it until it is edited or
+regenerated. So `aorta chat doctor` also warns when the
 configured provider is remote *and* there is no index this install can query,
 and names the edit: `embedding_provider = "local"`, the
 `AORTA_CHAT_EMBEDDING_PROVIDER=local` spelling for one session, or `aorta chat
@@ -161,15 +170,6 @@ with the local embedder, and the build is refused because the provider cannot
 be constructed — so the list leads with the switch to local, which is the only
 remedy that runs, and then says why the other two are missing rather than going
 quiet about them. Set the key and the build comes back.
-
-It is the normal path for every chat provider, because the embedding provider is
-a separate choice and every `config init` profile leaves it local. The asset is
-built by CI under default settings, so `fetch` works exactly as long as your
-install still embeds with the default local model — a hand-set
-`embedding_model` is refused just as a remote provider is, because the manifest
-check compares the model name and not only the flow. That is the reason
-[choosing a remote embedder](configuration.md#configuring-a-remote-embedding-provider-by-hand)
-means taking over the build.
 
 A fetch downloads vectors, not the embedding model, so straight afterwards
 `doctor` reports the model cache as cold. With an index present that this
