@@ -1335,6 +1335,32 @@ class TestABackendThatFallsOverPartWayThroughNative:
         assert _DEGRADED_ANSWER_PREFIX not in result["messages"][0].content
 
     @pytest.mark.asyncio
+    async def test_the_log_does_not_promise_an_answer_it_cannot_give(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """The results are kept, and this path still has no answer to give.
+
+        The failed call *is* the one that would have synthesised them, so the
+        turn ends on the give-up notice with the results recorded beside it.
+        An earlier version of this log line said "Answering from what was
+        gathered", which was not what the code did -- ``_abandoned_result``
+        returns the notice for any non-empty trace. Synthesising from partial
+        results is worth doing and is tracked in #475; the line must not claim
+        it in the meantime.
+        """
+        plain, _bound = self._llm_that_breaks_after_one_tool_call()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await act_node(_state())
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+        assert result["tool_trace"], "the gathered results must still be recorded"
+        assert "no answer to give" in caplog.text
+        assert "Answering from what was gathered" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_it_does_not_count_against_the_native_failure_budget(
         self, text_mode, tool_mode_not_chosen
     ):

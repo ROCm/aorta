@@ -199,8 +199,15 @@ Four things follow from that:
 - **An explicit `llm_tool_mode` is never overridden**, whether it comes from
   the profile file or `AORTA_CHAT_LLM_TOOL_MODE`. If you set `text`
   deliberately, set it; the escalation only ever moves the built-in default.
-- **It is bounded.** The retry buys one native round, not a second loop, and the
-  protocol moves once per process rather than once per query.
+- **The wasted spend is bounded; the retry itself is not capped to one call.**
+  What is bounded is the cost of *failure*: the escalated retry tolerates a
+  single empty reply rather than the usual two, so a model that is silent on
+  `native` as well costs exactly one extra call. A retry that is *working* —
+  calling tools and getting results — is not truncated; it runs the ordinary act
+  loop under the ordinary round budget, because cutting a productive loop off at
+  one round would spend the call and throw away the answer it was about to
+  reach. So the worst case is the normal budget, not double it, and the protocol
+  moves once per process rather than once per query.
 - **The switch is thrown only once native has answered.** An endpoint that
   refuses the protocol must not be able to select it, which is what throwing the
   switch up front let it do: the refusal became the state for every later query.

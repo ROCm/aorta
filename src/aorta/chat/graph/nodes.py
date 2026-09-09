@@ -1190,11 +1190,15 @@ async def _escalated_native_attempt(
                 "call(s) and then failed (%s: %s). Structured tool calling "
                 "works on this endpoint, so the protocol moves to native "
                 "anyway and this does not count against the %d-failure budget. "
-                "Answering from what was gathered.",
+                "The %d gathered tool result(s) are recorded on the turn, but "
+                "the call that would have turned them into an answer is the one "
+                "that failed, so this query still has no answer to give. "
+                "Retrying the question will now go straight to native.",
                 len(failure.trace),
                 type(failure.cause).__name__,
                 failure.cause,
                 _MAX_NATIVE_FAILURES,
+                len(whole_trace),
             )
             return await _abandoned_result(state, whole_trace)
         followup = _record_escalation_failure()
