@@ -9,8 +9,10 @@ so the masking is tested as a contract, not as formatting.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -739,3 +741,126 @@ class TestConfigValidate:
         rendered = str(caught.value)
         assert "extra header #2 is missing '='" in rendered
         assert "sk-SECRET" not in rendered.split("input_value=")[0]
+
+
+def _fenced_commands(text: str) -> list[str]:
+    """``aorta ...`` lines inside shell code fences, in order.
+
+    Fences are paired by toggling on *any* ``` line rather than by matching a
+    language, because pairing only ``` ```bash ``` openers desynchronises on the
+    first ``` ```toml ``` block and silently drops most of the page -- the first
+    draft of this helper checked 4 of the 9 commands and passed.
+    """
+    commands: list[str] = []
+    inside, language = False, ""
+    for line in text.splitlines():
+        if line.startswith("```"):
+            inside, language = (False, "") if inside else (True, line[3:].strip())
+            continue
+        if inside and language in ("bash", "sh", "console", ""):
+            stripped = line.split("#")[0].strip()
+            if stripped.startswith("aorta "):
+                commands.append(stripped)
+    return commands
+
+
+#: The pages this PR owns. A fenced command is an instruction, so it is held to
+#: the strict reading: it must exist and it must parse as printed.
+_DOC_PAGES = ("docs/chat/configuration.md", "docs/chat/providers.md")
+
+
+class TestEveryCommandTheseDocsPrintCanRun:
+    """A command in a fenced block is something a reader will paste.
+
+    Six findings in this batch were advice naming a command that could not run
+    in the state that printed it, and the round that prompted this one asked for
+    ``index fetch --force`` -- a flag that is correct only *after* a sibling PR
+    lands and would be rejected by Click until then. Prose can be checked by a
+    reader; a flag that does not exist yet cannot, so it is asked of Click's own
+    parser here.
+
+    Deliberately narrow. The equivalent gate over *report* text is #463's
+    ``TestEveryCommandTheReportNamesCanRun``, which owns the extractor for
+    commands named in prose; duplicating that here would leave two copies to
+    diverge. This checks the fenced instructions on the two pages this PR owns.
+    """
+
+    def _commands(self) -> list[tuple[str, str]]:
+        root = Path(__file__).resolve().parents[2]
+        found = []
+        for page in _DOC_PAGES:
+            text = (root / page).read_text(encoding="utf-8")
+            found += [(page, command) for command in _fenced_commands(text)]
+        return found
+
+    def test_the_extractor_still_finds_the_commands(self):
+        """Without this the sweep below passes by finding nothing to check.
+
+        The count is the load-bearing part: the fence-pairing bug this helper
+        documents made the sweep pass while reading a quarter of the page.
+        """
+        commands = self._commands()
+        assert len(commands) >= 9, f"only {len(commands)} fenced commands; the extractor has broken"
+
+    def test_every_fenced_command_parses_as_printed(self):
+        from click import Context
+
+        from aorta.cli import main as cli
+
+        for page, command in self._commands():
+            tokens = command.split()
+            assert tokens[0] == "aorta"
+            remaining = tokens[1:]
+            node, parent = cli, None
+            with contextlib.ExitStack() as stack:
+                # Descend while the next token names a subcommand of this group.
+                # Splitting on "looks like an option" instead would drop an
+                # option's *value* and turn a valid line into a parse error.
+                while remaining and hasattr(node, "get_command"):
+                    ctx = stack.enter_context(Context(node, info_name=command, parent=parent))
+                    resolved = node.get_command(ctx, remaining[0])
+                    if resolved is None:
+                        raise AssertionError(
+                            f"{page}: '{command}' -- {remaining[0]!r} is not a command"
+                        )
+                    node, parent = resolved, ctx
+                    remaining = remaining[1:]
+                assert not hasattr(node, "get_command"), (
+                    f"{page}: '{command}' names a group, which prints help rather "
+                    "than doing anything"
+                )
+                # Parses and validates required options without running the
+                # callback, so an unknown flag or a missing required option fails
+                # here exactly as it would for a reader who pasted the line.
+                node.make_context(command, remaining, parent=parent)
+
+    def test_the_sweep_would_reject_a_flag_that_does_not_exist(self):
+        """Keeps the strict tier honest: `--force` on `index fetch` is #465's.
+
+        Documenting it before that lands would print a line Click rejects, which
+        is the trap the round that prompted this test invited.
+        """
+        from click import Context, NoSuchOption
+
+        from aorta.cli import main as cli
+
+        with Context(cli) as root_ctx:
+            chat_group = cli.get_command(root_ctx, "chat")
+            with Context(chat_group, parent=root_ctx) as chat_ctx:
+                index_group = chat_group.get_command(chat_ctx, "index")
+                with Context(index_group, parent=chat_ctx) as index_ctx:
+                    fetch = index_group.get_command(index_ctx, "fetch")
+                    with pytest.raises(NoSuchOption):
+                        fetch.make_context("fetch", ["--force"], parent=index_ctx)
+
+    def test_the_docs_do_not_promise_the_force_flag_yet(self):
+        """The finding itself, pinned where it was raised.
+
+        The going-back procedure is refused by #465's guard because step 3 built
+        the index locally. The fix describes that refusal and lets it name its
+        own flag, rather than printing a flag this Click does not accept.
+        """
+        root = Path(__file__).resolve().parents[2]
+        text = (root / "docs/chat/configuration.md").read_text(encoding="utf-8")
+        assert "index fetch --force" not in text
+        assert "the refusal names the flag" in text

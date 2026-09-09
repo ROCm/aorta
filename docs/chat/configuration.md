@@ -208,14 +208,16 @@ risk to be managed.
    place.** CI builds the index asset with default settings, so its vectors are
    the local model's. An index is only meaningful to the model that produced it,
    and the manifest check refuses a mismatch rather than answering from it. So
-   `aorta chat index fetch` refuses to *install* what it downloaded — the
-   manifest is validated after the asset has been transferred and checksummed,
-   so you pay for the download and then get the refusal — and an already-fetched
-   index will refuse every query. You take over building the index yourself, on
-   every AORTA upgrade, until you [go back](#going-back).
+   `aorta chat index fetch` will not leave you with a usable index — it refuses
+   the published asset rather than installing it — and an already-fetched index
+   will refuse every query. You take over building the index yourself, on every
+   AORTA upgrade, until you [go back](#going-back).
 2. **Every query costs money, not just the build.** The one-off index build
-   embeds the whole corpus; after that each question sends one embedding call
-   for the query text, and each `search_code` tool call sends another. The build
+   embeds the whole corpus; after that every question embeds the query text to
+   retrieve source, and retrieval also searches the run-artifact collection on
+   every question — so once you have run `index runs`, the floor is two
+   embedding calls per question, not one. Each `search_code` or
+   `search_run_artifacts` tool call adds another on top. The build
    is the large number — the public corpus is roughly 5 MB of text over ~360
    files, so on the order of one to two million tokens — but the per-query calls
    are the ones that never stop. Check your provider's own price list: at
@@ -317,8 +319,8 @@ them every time you rebuild. Skipping it leaves the run-artifact tools without
 an index they can read, which is a worse assistant but not an egress you did
 not choose.
 
-Not `index fetch` — it downloads the asset and then refuses to install it,
-correctly, because the published asset is the local model's. `index build`
+Not `index fetch` — it refuses the published asset rather than installing it,
+correctly, because that asset is the local model's. `index build`
 embeds everything under `aorta_path` through the provider you just configured,
 and writes it to a collection named after that provider and model, so the local
 collection already in the file is not overwritten.
@@ -354,6 +356,12 @@ Remove or unset the six settings and re-fetch:
 ```bash
 aorta chat index fetch
 ```
+
+The index this replaces is the one step 3 built locally, and that is the point:
+going back means giving up the local build for the published asset. If the
+command declines for that reason — a downloaded asset can always be downloaded
+again, where a local build may not be reproducible — the refusal names the flag
+that overrides it, and overriding is the right answer here.
 
 That is the whole way back **only if `embedding_model` is still at its default**.
 It is not one of the six, and it is the one other setting the published asset is
