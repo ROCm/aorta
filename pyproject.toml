@@ -126,6 +126,10 @@ hw-queue-profiling = [
 # docs/plans/cia-agents-port.md, finding F2.
 cia = [
     "dspy-ai>=2.5; python_version >= '3.11'",
+    # Used to point TLS verification at a bundle litellm's price-map fetch can
+    # verify against. It arrived transitively through litellm, which is not a
+    # promise litellm makes.
+    "certifi",
 ]
 
 agent = [

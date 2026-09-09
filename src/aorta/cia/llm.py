@@ -3,14 +3,10 @@ from __future__ import annotations
 import logging
 import os
 
-import certifi
-
 import dspy
 
-# LiteLLM fetches a remote price map on import and fails on corporate TLS.
-# Point it at the certifi bundle so imports are clean.
-os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+#: Where the CA bundle is named, for callers who want to look.
+_CA_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +26,34 @@ nothing in it to say the reasoning step had been truncated on the way.
 _configured: bool = False
 
 
+def _use_certifi_bundle() -> None:
+    """Point TLS verification at certifi, for this process, when asked to.
+
+    LiteLLM fetches a remote price map and can fail on a corporate TLS
+    interception proxy whose CA the certifi bundle knows and the system store
+    does not. Certifi fixes that site and breaks the opposite one, where the
+    corporate CA is in the system store and not in certifi.
+
+    So three things. It runs from here rather than at import, because importing
+    a module should not change TLS verification for everything else in the
+    process -- including unrelated aorta code and the chat provider layer,
+    which never asked. It defers to SSL_CERT_FILE or REQUESTS_CA_BUNDLE if
+    either is already set, because that is somebody having decided. And
+    CIA_SSL_USE_CERTIFI=0 turns it off for the site it would otherwise break.
+    """
+    if os.environ.get("CIA_SSL_USE_CERTIFI", "1") == "0":
+        return
+    if any(os.environ.get(var) for var in _CA_ENV_VARS):
+        return
+    try:
+        import certifi
+    except ImportError:
+        log.debug("certifi is not installed; leaving TLS verification alone")
+        return
+    for var in _CA_ENV_VARS:
+        os.environ[var] = certifi.where()
+
+
 def build_lm(
     model: str | None = None,
     api_base: str | None = None,
@@ -46,6 +70,7 @@ def build_lm(
     what this did -- let a module name the model it needed, receive a different
     one, and have no way to find out.
     """
+    _use_certifi_bundle()
     return dspy.LM(
         model=f"openai/{model or os.environ.get('LITELLM_MODEL', DEFAULT_MODEL)}",
         api_base=api_base or os.environ.get("LITELLM_API_BASE", "http://localhost:4000"),
