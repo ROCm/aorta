@@ -1880,6 +1880,10 @@ class TestEveryCommandTheReportNamesCanRun:
         ("remote", "sk-test", "native", "gpt-4o", DEFAULT_LOCAL_MODEL),
         ("local", "", "sideways", "gpt-4o", DEFAULT_LOCAL_MODEL),
         ("local", "", "text", "gpt-4o", "BAAI/bge-base-en-v1.5"),
+        # Whitespace-padded default. Reads as the published model and is not
+        # one: every identity the fetch is validated against is built from
+        # this string verbatim.
+        ("local", "", "text", "gpt-4o", "  BAAI/bge-small-en-v1.5  "),
     )
 
     def _texts(self, monkeypatch, tmp_path: Path) -> list[str]:

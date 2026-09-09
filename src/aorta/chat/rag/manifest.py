@@ -438,8 +438,15 @@ def _custom_local_model() -> str:
     from aorta.chat.config import settings
     from aorta.chat.rag.embeddings import fastembed_bge
 
-    configured = (settings.embedding_model or "").strip()
-    return "" if configured in ("", fastembed_bge.DEFAULT_MODEL) else configured
+    # Compared unstripped, and that is the point. ``model_id()``,
+    # ``collection_name()`` and ``vector_identity()`` all read
+    # ``settings.embedding_model`` verbatim, so "  BAAI/bge-small-en-v1.5  " is
+    # a *different* model as far as ``fetch_index`` is concerned -- it refuses
+    # all three of embedding model, collection and identity. Stripping here
+    # would call that value the published default and offer the fetch it
+    # refuses, which is the exact defect this function exists to prevent.
+    configured = settings.embedding_model or fastembed_bge.DEFAULT_MODEL
+    return "" if configured == fastembed_bge.DEFAULT_MODEL else configured
 
 
 def _refresh_advice(embedding_provider: str | None = None) -> str:

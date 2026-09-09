@@ -595,6 +595,44 @@ class TestACustomisedLocalModel:
         assert manifest_mod._refresh_advice() == "'aorta chat index fetch'"
         assert manifest_mod.remedy_lines()[0].strip().startswith("aorta chat index fetch")
 
+    def test_a_whitespace_padded_default_is_not_the_default(self, monkeypatch):
+        """Reads as the published model; is not one, anywhere it matters.
+
+        ``model_id()``, ``collection_name()`` and ``vector_identity()`` all
+        read ``settings.embedding_model`` verbatim, so ``fetch_index``
+        validates against the padded string and refuses on all three. An
+        earlier version of the predicate stripped before comparing and called
+        this the default -- offering the fetch it refuses, which is the defect
+        the predicate exists to prevent.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        padded = f"  {MODEL}  "
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        publisher = get_provider()
+        published = _manifest(
+            embedding_model=publisher.model_id(),
+            collection=publisher.collection_name(),
+            embedding_identity=publisher.vector_identity(),
+            embedding_provider="local",
+        )
+
+        monkeypatch.setattr(settings, "embedding_model", padded)
+        provider = get_provider()
+        assert provider.model_id() == padded
+        report = validate(
+            published,
+            embedding_model=provider.model_id(),
+            collection=provider.collection_name(),
+            embedding_identity=provider.vector_identity(),
+        )
+        assert report.refusals, "the padded model can read the published asset after all"
+
+        assert manifest_mod._custom_local_model() == padded
+        assert manifest_mod._refresh_command() == "aorta chat index build"
+
     def test_an_empty_model_setting_is_treated_as_the_default(self, monkeypatch):
         """Falling back to the shipped default is what the provider itself does."""
         from aorta.chat.config import settings
