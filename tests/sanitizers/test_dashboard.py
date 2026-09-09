@@ -541,6 +541,79 @@ def test_two_reasons_for_one_kernel_are_labelled_by_sanitizer():
     assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings")
 
 
+def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
+    # A name is not an identity: KernelWorklist only rejects duplicate stable_key, and
+    # that key carries the digest rather than pinning the name, so one symbol name
+    # reached through two code objects is a valid worklist. Joining results to rows by
+    # name merged the two scans -- each row took the other's verdict and reason, and
+    # their findings were summed onto both, double-counting against the case total.
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "gemm_shared_symbol", "target": "gfx950",
+            "code_object": f"/a/b/sol_{sha}.hsaco", "code_object_sha256": sha,
+            "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _finding(sha: str) -> dict:
+        return {
+            "sanitizer": "waitcheck", "severity": "warning", "code": "wait_hazard",
+            "message": f"sol_{sha}.hsaco: missing s_waitcnt", "kernel_name": None,
+            "code_object": f"/a/b/sol_{sha}.hsaco", "entry_offset": None, "metadata": {},
+        }
+
+    clean_sha, bad_sha = "beefaaa1", "beefbbb2"
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(clean_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(bad_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None,
+            "findings": [_finding(clean_sha)],
+            "kernel_results": [
+                {
+                    "identity": _identity(clean_sha), "state": "ran", "verdict": "warn",
+                    "findings": [_finding(clean_sha)], "reason": None, "returncode": 4,
+                },
+                {
+                    "identity": _identity(bad_sha), "state": "error", "verdict": "error",
+                    "findings": [], "returncode": 2,
+                    "reason": "waitcheck_backend_exit_2: refused the second object",
+                },
+            ],
+            "coverage": [],
+            "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    clean, bad = case["kernels"]
+
+    # each row keeps its own object's result rather than the merger of both
+    assert clean.get("sha") == clean_sha and bad.get("sha") == bad_sha
+    assert clean.get("verdict") == "warn"
+    assert clean.get("findings") == 1
+    assert clean.get("detail") == ""
+    assert bad.get("verdict") == "error"
+    assert bad.get("findings") == 0
+    assert "refused the second object" in bad.get("detail", "")
+
+    # and the findings column still sums to the case total rather than doubling it
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings") == 1
+    assert case.get("kernel_reasons") == [
+        ("gemm_shared_symbol", "waitcheck_backend_exit_2: refused the second object")
+    ]
+
+
 def test_a_multiline_backend_reason_stays_on_one_markdown_row():
     # A Waitcheck backend reason quotes up to 300 characters of stderr tail, which is
     # genuinely multi-line. Copied through unchanged it ended the table row mid-table

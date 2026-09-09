@@ -628,6 +628,28 @@ def _worse_verdict(current: Any, candidate: Any) -> Any:
     return candidate if ranked > _VERDICT_RANK.get(str(current).strip().lower(), -1) else current
 
 
+def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
+    """The join key from a kernel result to its worklist row (pure).
+
+    A kernel *name* is not an identity. ``KernelWorklist`` only rejects duplicate
+    ``KernelIdentity.stable_key``, and that key carries the digest (scan mode) or the
+    entry offset (exact mode) rather than pinning the name -- so two entries may share
+    a symbol name while addressing different code objects, or different entries of one
+    object, and both are valid. Joining on the name merged those distinct scans onto a
+    single row: each got the other's verdict and reasons, and their findings were
+    summed onto both, double-counting against the case total. Joining on every
+    serialized identity field keeps them separate; the name stays display text.
+    """
+    return (
+        identity.get("target"),
+        identity.get("code_object"),
+        identity.get("code_object_sha256"),
+        identity.get("code_object_index"),
+        identity.get("entry_offset"),
+        identity.get("name"),
+    )
+
+
 def _kernel_reason_text(reasons: Sequence[tuple[str, str]]) -> str:
     """One kernel's fail-closed reasons, for a one-line display context (pure).
 
@@ -745,20 +767,22 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             backend = {"name": _basename(raw.get("path")), "sha": _short(raw.get("sha256"), 12)}
             break
 
-    kr_by_name: dict[str, dict[str, Any]] = {}
+    # Keyed by full identity, not by name -- see ``_identity_key``.
+    kr_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
     # A whole-code-object scan is deduped by (sha256, index), so the kernels that
     # share an object with an earlier selection carry no kernel_result of their own.
-    # Map each scanned object to the kernel whose result covered it, so those rows can
-    # be attributed to that scan instead of rendering as an em dash (see the kernels
-    # loop). Storing the name rather than the result keeps the attribution pointed at
-    # the fully-accumulated ``kr_by_name`` entry once every check has been folded in.
-    kr_by_object: dict[tuple[str, Any], str] = {}
+    # Map each scanned object to the identity whose result covered it, so those rows
+    # can be attributed to that scan instead of rendering as an em dash (see the
+    # kernels loop). Storing the key rather than the result keeps the attribution
+    # pointed at the fully-accumulated entry once every check has been folded in.
+    kr_by_object: dict[tuple[str, Any], tuple[Any, ...]] = {}
     findings_by_name: dict[str | None, int] = {}
     for check in checks:
         sanitizer = str(check.get("sanitizer") or "")
         for result in check.get("kernel_results", []):
             identity = result.get("identity") or {}
             name = identity.get("name")
+            key = _identity_key(identity)
             # A report can hold more than one check over the same worklist -- the
             # shipped waitcheck+consan survey recipes select a single kernel and scan
             # it with both -- so this kernel may already carry a result from an
@@ -770,7 +794,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             # least clean of them, ranked as ``models._VERDICT_RANK`` ranks the
             # report's own rollup, so the badge can never read cleaner than the
             # Detail column beside it.
-            previous = kr_by_name.get(name)
+            previous = kr_by_identity.get(key)
             reasons: list[tuple[str, str]] = list(previous["reasons"]) if previous else []
             # The fail-closed detail. ``CheckResult.reason`` only ever carries the
             # rollup (``worklist_not_fully_checked``); the per-kernel reason is the
@@ -788,8 +812,10 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 "reasons": reasons,
                 "reason": _kernel_reason_text(reasons),
                 "returncode": result.get("returncode"),
+                # Display text only; the join above is on the full identity.
+                "name": name,
             }
-            kr_by_name[name] = reduced
+            kr_by_identity[key] = reduced
             # Only a Waitcheck whole-object scan is ever deduped, so only such a scan
             # may stand in for a kernel that has no result of its own. The identity
             # has to be a whole-object one -- real object, real digest, no entry
@@ -809,7 +835,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 and identity.get("entry_offset") is None
             ):
                 kr_by_object.setdefault(
-                    (str(result_sha), identity.get("code_object_index")), str(name)
+                    (str(result_sha), identity.get("code_object_index")), key
                 )
         for finding in check.get("findings", []):
             key = finding.get("kernel_name")
@@ -821,14 +847,14 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     for entry in kernel_entries:
         identity = entry.get("identity", {})
         name = identity.get("name")
-        result = kr_by_name.get(name)
+        result = kr_by_identity.get(_identity_key(identity))
         entry_sha = identity.get("code_object_sha256")
         detail = ""
         if result is not None:
             verdict, findings = result["verdict"], result["findings"]
             detail = str(result["reason"] or "")
         elif entry_sha and (
-            covered_by := kr_by_object.get(
+            covering_key := kr_by_object.get(
                 (str(entry_sha), identity.get("code_object_index"))
             )
         ) is not None:
@@ -837,10 +863,10 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             # covers this kernel too -- reporting an em dash here read as "not checked"
             # and hid a gated kernel whose object had failed. Findings stay on the
             # covering row so the per-kernel column still sums to the case total.
-            covering = kr_by_name[covered_by]
+            covering = kr_by_identity[covering_key]
             verdict = covering["verdict"]
             findings = 0
-            detail = f"same code object as {covered_by}; scanned once"
+            detail = f"same code object as {covering['name']}; scanned once"
             if covering["reason"]:
                 detail = f"{detail} \u2014 {covering['reason']}"
         else:
@@ -880,8 +906,8 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     # Only the kernels that carry their own fail-closed reason; a deduped row's
     # detail restates its covering scan's reason, which would double it up here.
     kernel_reasons = [
-        (str(name), str(result["reason"]))
-        for name, result in kr_by_name.items()
+        (str(result["name"]), str(result["reason"]))
+        for result in kr_by_identity.values()
         if result["reason"]
     ]
     observation = _observation_text(
