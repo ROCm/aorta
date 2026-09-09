@@ -491,6 +491,27 @@ def _loads_or_none(value: object) -> object:
         return None
 
 
+def _decodes_as_content(value: bytes) -> bool:
+    """Whether ``Document`` would accept these bytes as page content.
+
+    Only blob rows reach here -- the query selects on
+    ``typeof(content) = 'blob'``, and sqlite3 hands blobs back as ``bytes`` --
+    so the only question left is whether they decode. ``Document`` coerces
+    bytes through UTF-8, so ones that do not raise on the first hit.
+
+    Narrow on purpose. An earlier version dispatched on ``str`` and on "not
+    bytes" as well, and mutation testing showed both branches were unreachable
+    from the one caller: inverting the ``str`` answer changed no test. A guard
+    no caller can exercise is not defence, it is a claim about the callers that
+    nothing checks.
+    """
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def _collection_schema_defect(
     index_file: Path, collection: str, registry_table: str, chunks: int, dimensions: int
 ) -> str:
@@ -596,6 +617,18 @@ def _collection_schema_defect(
             f'SELECT COUNT(*) FROM "chunks_{collection}" '
             "WHERE typeof(content) NOT IN ('text', 'blob')"
         ).fetchone()[0]
+        # A BLOB counts as content only if it decodes. ``Document`` coerces
+        # bytes through UTF-8, so ``x'FF'`` raises there exactly as a NULL
+        # does, while ``typeof`` reports the same 'blob' for both it and a
+        # perfectly readable one. SQLite has no UTF-8 predicate to ask in SQL,
+        # so the decode happens here -- streamed off the cursor, and over blob
+        # rows alone, of which a store aorta wrote has none.
+        bad_content += sum(
+            not _decodes_as_content(value)
+            for (value,) in conn.execute(
+                f"SELECT content FROM \"chunks_{collection}\" WHERE typeof(content) = 'blob'"
+            )
+        )
         if bad_content:
             return (
                 f"{bad_content} chunk row(s) for this install's collection in "

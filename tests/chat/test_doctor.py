@@ -138,7 +138,16 @@ STRUCTURAL_DAMAGE = (
 #:
 #: An empty tuple is a claim, not a gap, and needs the reason with it.
 COLUMN_DAMAGE = {
-    "content": ("content-null", "content-not-text"),
+    # ``content-not-utf8`` is the value-contract gap review found *after* the
+    # columns were derived, and it marks the limit of what deriving buys. The
+    # derivation closes the column dimension: no column ``_knn`` selects can go
+    # unswept. Getting one column's contract right is still judgement, and this
+    # one was wrong because it was measured with a single blob that happened to
+    # be ASCII -- ``Document`` coerces bytes through UTF-8, so x'FF' raises
+    # there exactly as a NULL does. If a third value-contract gap turns up, the
+    # answer is a value matrix swept across every column rather than a fourth
+    # state here.
+    "content": ("content-null", "content-not-text", "content-not-utf8"),
     "metadata": ("metadata-not-json", "metadata-not-an-object"),
     # No value state, because none is reachable: ``vec0`` validates on write.
     # Measured against the extension rather than assumed -- a text value, a
@@ -234,7 +243,15 @@ def _break_store(index: Path, collection: str, how: str) -> None:
                 f'CREATE TABLE "chunks_{collection}" '
                 "(id INTEGER PRIMARY KEY, content, metadata TEXT NOT NULL)"
             )
-            value = None if how.endswith("null") else 123
+            if how.endswith("null"):
+                value = None
+            elif how.endswith("not-utf8"):
+                # A blob that is not decodable text. Stored as a blob so
+                # ``typeof`` reports one, which is precisely the case the
+                # type check waves through.
+                value = b"\xff\xfe chunk"
+            else:
+                value = 123
             conn.executemany(
                 f'INSERT INTO "chunks_{collection}" (id, content, metadata) VALUES (?, ?, ?)',
                 [(id_, value, metadata) for id_, metadata in rows],
@@ -1208,7 +1225,7 @@ class TestStoreProbeAgreesWithTheReadPath:
         """
         from aorta.chat.rag.embeddings.factory import get_provider
 
-        for how in ("content-null", "content-not-text"):
+        for how in ("content-null", "content-not-text", "content-not-utf8"):
             (tmp_path / how).mkdir()
             index = _write_index(monkeypatch, tmp_path / how)
             _break_store(index, get_provider().collection_name(), how)
@@ -1217,27 +1234,45 @@ class TestStoreProbeAgreesWithTheReadPath:
             assert "no text in the content column" in defect, how
             assert defect.split()[0].isdigit(), how
 
-    def test_a_blob_in_the_content_column_is_not_a_defect(self, monkeypatch, tmp_path: Path):
-        """The line between "not text" and "unreadable", measured not guessed.
+    def test_a_decodable_blob_is_not_a_defect_and_an_undecodable_one_is(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The boundary inside one SQLite type, which ``typeof`` cannot see.
 
-        ``Document`` decodes a BLOB and accepts it, so flagging one would fail
-        a store that retrieves perfectly well -- the over-warning this probe
-        was written to replace. This is why the check asks ``typeof`` for the
-        two types that survive rather than testing for ``text``.
+        Both of these store a BLOB, so ``typeof`` says ``blob`` for each and
+        the type test alone cannot separate them -- but ``Document`` coerces
+        bytes through UTF-8, so one retrieves and one raises. Pinning the two
+        together is the point: flagging every blob would fail a store that
+        works, which is the over-warning this probe replaced, and waving every
+        blob through is the gap review found in the first version of the check.
         """
         from aorta.chat.rag.embeddings.factory import get_provider
 
-        index = _write_index(monkeypatch, tmp_path)
         collection = get_provider().collection_name()
-        conn = _vec_connection(index)
-        try:
-            conn.execute(f'UPDATE "chunks_{collection}" SET content = CAST(content AS BLOB)')
-            conn.commit()
-        finally:
-            conn.close()
+        for label, value, expect_defect in (
+            ("decodable", None, False),
+            ("undecodable", b"\xff\xfe chunk", True),
+        ):
+            (tmp_path / label).mkdir()
+            index = _write_index(monkeypatch, tmp_path / label)
+            conn = _vec_connection(index)
+            try:
+                if value is None:
+                    conn.execute(
+                        f'UPDATE "chunks_{collection}" SET content = CAST(content AS BLOB)'
+                    )
+                else:
+                    conn.execute(f'UPDATE "chunks_{collection}" SET content = ?', (value,))
+                conn.commit()
+                stored = conn.execute(
+                    f'SELECT DISTINCT typeof(content) FROM "chunks_{collection}"'
+                ).fetchall()
+            finally:
+                conn.close()
+            assert stored == [("blob",)], (label, stored)
 
-        assert _probe(index) == ""
-        assert not _read_path_answers(index)
+            assert bool(_probe(index)) is expect_defect, label
+            assert bool(_read_path_answers(index)) is expect_defect, label
 
     def test_the_metadata_check_falls_back_rather_than_passing(self, monkeypatch, tmp_path: Path):
         """A SQLite without JSON1 must not turn the check into a no-op.

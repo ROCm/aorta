@@ -763,7 +763,8 @@ def validate(
     Deliberately schema-agnostic: this does not call
     :func:`ensure_supported_schema`, because both paths that turn bytes into a
     :class:`Manifest` already have -- ``read_manifest`` before returning one,
-    and ``index_ops._parse_manifest`` before the fetched asset is installed. A
+    and ``index_ops.fetch_index`` inline, before the staged asset is installed
+    rather than after (see the comment at its ``from_dict`` call). A
     manifest from a version this build cannot interpret therefore never reaches
     here, and repeating the check would put the policy in two places for a
     caller that cannot be reached without it. Field *types* are guaranteed by
