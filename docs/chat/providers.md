@@ -194,7 +194,7 @@ is kept for the rest of the process and one log line says so. The default stays
 `text`, because flipping it globally would break a stock local vLLM (see the
 endpoint row in the table above) — this is detection, not a new default.
 
-Four things follow from that:
+Five things follow from that:
 
 - **An explicit `llm_tool_mode` is never overridden**, whether it comes from
   the profile file or `AORTA_CHAT_LLM_TOOL_MODE`. If you set `text`
@@ -225,6 +225,13 @@ Four things follow from that:
   two failures — otherwise two transient 503s after working tool calls would
   strand the process on `text` for good. Only a failure with no tool call
   behind it counts, which is the shape a refused `tools` payload actually has.
+  The same applies when the retry's calls were *all* duplicates of ones the
+  text loop had already run: the duplicate guard below answers them from the
+  recorded results, so nothing new is executed and the retry can end with no
+  fresh results and no prose. It emitted structured `tool_calls` to get there,
+  which is the whole question being asked, so it moves the protocol and spends
+  no failure. The log for it says the calls were repeats rather than claiming
+  the query was answered, because on this path it was not.
   The budget also counts *probes*, not requests in flight: two `ui` sessions
   that both fail inside the same outage spend one failure between them, because
   neither was a second probe — nothing was tried in between, so the pair says
@@ -383,11 +390,11 @@ Knobs that lower the bill, roughly in order of effect:
 | `Incorrect API key provided: unused` from `platform.openai.com` | `remote_llm_auth_header` is set but `remote_llm_base_url` is empty, so the request went to OpenAI. The preflight line says `at the provider default endpoint` when this is wrong. |
 | `404` on an `*.openai.azure.com` endpoint | Azure OpenAI needs the `litellm` backend, not `openai`. |
 | `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
-| `I wasn't able to answer that: something in my own configuration...` | The act loop produced no usable text. Which attempts it made first depends on `llm_tool_mode` and on whether a tool had already run, so read the warning logged beside this message — it names the step that gave up. `aorta chat doctor` covers the configuration faults that reach this message by other routes. |
-| `this process will use native from here` | Not an error. The model returned no answer and no tool call under `text` — the line names the signature that was observed — and native answered it, so chat switched protocol for the rest of this process. Set `llm_tool_mode` yourself to pin it either way. |
+| `I wasn't able to answer that, and I've logged why...` | The act loop produced no usable text. Which attempts it made first depends on `llm_tool_mode` and on whether a tool had already run, so read the warning logged beside this message — it names the step that gave up. `aorta chat doctor` covers the configuration faults that reach this message by other routes. |
+| `this process will use native from here` | Not an error. The model returned no answer and no tool call under `text` — the line names the signature that was observed — and native then proved the protocol works, so chat switched for the rest of this process. The same line is logged whether native *answered* the query or only *drove structured tool calls* without answering it — the clause before the comma says which, and only the first means this query got a reply. Set `llm_tool_mode` yourself to pin it either way. |
 | `The escalated native tool-calling request failed ... without making a tool call` | The retry was tried and the request did not come back, having called nothing. If it is a local vLLM, it needs both `--enable-auto-tool-choice` and a matching `--tool-call-parser` (see the endpoint row in the table above); otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
 | `The escalated native tool-calling request failed before it could call anything` | The same outcome, one step earlier: the backend could not even be built or the tool schemas could not be bound, so no request was made. Counts as an attempt in the same way. Read the exception named on the line — this is a backend or configuration fault, not a protocol one. |
-| `... drove N tool call(s) and then failed` | Structured tool calling *works* on this endpoint and the backend fell over afterwards. So the protocol **does** move to `native`, and this deliberately does not count against the two-failure budget — otherwise two transient errors after working tool calls would strand the process on `text`. The answer is built from whatever those calls gathered. |
+| `... drove structured tool calls and then failed` | Structured tool calling *works* on this endpoint and the backend fell over afterwards. So the protocol **does** move to `native`, and this deliberately does not count against the two-failure budget — otherwise two transient errors after working tool calls would strand the process on `text`. What those calls gathered is recorded on the turn, but the request that would have turned it into an answer is the one that failed, so this query still gets the give-up notice — synthesising a reply from partial results is [#475](https://github.com/ROCm/aorta/issues/475). |
 | `The escalated native tool-calling request returned no answer and no tool call either` | The retry reached the endpoint and the model was as silent on `native` as it was on `text`, so the protocol is not what it is failing on. `text` stays in force, and this counts as one of the two attempts above. Nothing here is a configuration fault; the model cannot drive either protocol for this query. |
 | An answer prefixed `I could not use my tools for this question` | The act loop gave up and the answer came from retrieved context alone, so anything needing a live lookup is missing from it. Same underlying cause as the row above. |
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |

@@ -1582,6 +1582,147 @@ class TestTheRetryDoesNotRunATextProtocolToolASecondTime:
         assert _call_signature("f", {"a": 1}) != _call_signature("f", {"a": 2})
 
 
+class TestADuplicateOnlyRetryStillCountsAsAWorkingProtocol:
+    """Deduplicating the retry must not make it look like a failed probe.
+
+    The duplicate guard above created this: before it, every structured call
+    native made appended a result, so ``trace`` was a faithful proxy for "the
+    model emitted ``tool_calls``". After it, a retry whose calls all repeat the
+    text round's leaves ``trace`` empty while having demonstrated exactly the
+    thing the escalation exists to test. The give-up branch then read the proxy
+    and reported ``answered=False``.
+
+    Measured on that code: one duplicate call plus a silent follow-up left
+    ``escalated=False`` and ``native_failures=1``, and logged "returned no
+    answer and no tool call either" about a round that made one. Two such
+    queries would have written native off for the process. The signal is
+    ``tool_called``, which the loop already keeps and which the docstring on
+    ``_NativeOutcome.answered`` already described -- the code had drifted from
+    it, not the other way round.
+    """
+
+    @staticmethod
+    def _native_repeats_then(*replies):
+        """Text runs a tool then dead-ends; native repeats it, then ``replies``."""
+        rounds = {"n": 0}
+
+        async def text_reply(_messages, **_kw):
+            rounds["n"] += 1
+            if rounds["n"] == 1:
+                return AIMessage(content='ACTION: list_files(path="src")')
+            return _dead_end_reply()
+
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=text_reply)
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="", tool_calls=[_tool_call("list_files", {"path": "src"})]
+                ),
+                *replies,
+            ]
+        )
+        plain.bind_tools = MagicMock(return_value=bound)
+        return plain
+
+    async def _run(self, *replies):
+        with (
+            patch(
+                "aorta.chat.graph.nodes._get_llm",
+                return_value=self._native_repeats_then(*replies),
+            ),
+            patch(
+                "aorta.chat.graph.nodes._execute_tool",
+                AsyncMock(return_value="a.py"),
+            ),
+        ):
+            return await act_node(_state())
+
+    @pytest.mark.asyncio
+    async def test_a_duplicate_call_proves_the_protocol(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        await self._run(AIMessage(content=""), AIMessage(content=""))
+        assert nodes._escalation.escalated is True
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_spend_a_failure(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        await self._run(AIMessage(content=""), AIMessage(content=""))
+        assert nodes._escalation.native_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_the_log_does_not_claim_no_tool_call_was_made(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        with caplog.at_level(logging.WARNING):
+            await self._run(AIMessage(content=""), AIMessage(content=""))
+        give_up = [
+            r for r in caplog.messages if "abandoned" in r and "native mode" in r
+        ]
+        assert give_up, caplog.messages
+        # It made one. Saying otherwise sends the reader to the vLLM tool-parser
+        # flags for an endpoint whose tool calling demonstrably works.
+        assert "no tool call" not in give_up[0]
+        assert "repeated one the text protocol had already made" in give_up[0]
+
+    @pytest.mark.asyncio
+    async def test_the_announcement_does_not_claim_the_query_was_answered(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        with caplog.at_level(logging.WARNING):
+            result = await self._run(AIMessage(content=""), AIMessage(content=""))
+        switch = [r for r in caplog.messages if "will use native from here" in r]
+        assert switch, caplog.messages
+        # The user got the give-up notice, so "answered it" would be false.
+        # It rides on `messages`; `_abandoned_result` blanks `command_output`
+        # by design, so that field is not the one to read here.
+        assert "wasn't able to answer that" in result["messages"][-1].content
+        assert "answered it" not in switch[0]
+        assert "emitted structured tool calls" in switch[0]
+
+    @pytest.mark.asyncio
+    async def test_a_retry_that_answers_still_says_so(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """The negative: the new wording must not swallow the ordinary case."""
+        with caplog.at_level(logging.WARNING):
+            await self._run(AIMessage(content="Here are the files."))
+        switch = [r for r in caplog.messages if "will use native from here" in r]
+        assert switch and "answered it" in switch[0]
+
+    @pytest.mark.asyncio
+    async def test_a_silent_retry_with_no_tool_call_still_counts(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The guard this must not disarm: genuine silence is still a failure."""
+        rounds = {"n": 0}
+
+        async def text_reply(_messages, **_kw):
+            rounds["n"] += 1
+            if rounds["n"] == 1:
+                return AIMessage(content='ACTION: list_files(path="src")')
+            return _dead_end_reply()
+
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=text_reply)
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        plain.bind_tools = MagicMock(return_value=bound)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch(
+                "aorta.chat.graph.nodes._execute_tool",
+                AsyncMock(return_value="a.py"),
+            ),
+        ):
+            await act_node(_state())
+        assert nodes._escalation.escalated is False
+        assert nodes._escalation.native_failures == 1
+
+
 class TestABackendThatFallsOverPartWayThroughNative:
     """A failure *after* native worked is not a failure of native.
 

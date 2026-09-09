@@ -901,6 +901,16 @@ _CALLED_TOOLS = (
     "Native function calling drove real tool calls before the backend failed, "
     "so the protocol works even though this query got no answer"
 )
+#: The third way native proves itself without answering: every structured call
+#: it made repeated one the text protocol had already run, so the duplicate
+#: guard answered them from the recorded results and the loop had nothing new
+#: to synthesise from. No backend failure happened, which is why this cannot
+#: borrow :data:`_CALLED_TOOLS`.
+_CALLED_TOOLS_QUIET = (
+    "Native function calling emitted structured tool calls -- all of them "
+    "repeats of calls the text protocol had already run -- and then returned "
+    "no text, so the protocol works even though this query got no answer"
+)
 
 
 def _commit_escalation(signature: str, evidence: str = _ANSWERED) -> None:
@@ -1280,19 +1290,25 @@ async def _escalated_native_attempt(
             # proof: the question the escalation asks has been answered yes.
             _commit_escalation(signature, _CALLED_TOOLS)
             logger.warning(
-                "The escalated native tool-calling request drove %d tool "
-                "call(s) and then failed (%s: %s). Structured tool calling "
+                "The escalated native tool-calling request drove structured "
+                "tool calls and then failed (%s: %s). Structured tool calling "
                 "works on this endpoint, so the protocol moves to native "
                 "anyway and this does not count against the %d-failure budget. "
-                "The %d gathered tool result(s) are recorded on the turn, but "
-                "the call that would have turned them into an answer is the one "
-                "that failed, so this query still has no answer to give. "
-                "Retrying the question will now go straight to native.",
-                len(failure.trace),
+                "%s, but the call that would have turned them into an answer is "
+                "the one that failed, so this query still has no answer to "
+                "give. Retrying the question will now go straight to native.",
                 type(failure.cause).__name__,
                 failure.cause,
                 _MAX_NATIVE_FAILURES,
-                len(whole_trace),
+                # Not `len(failure.trace)`: that counts results newly executed
+                # by this loop, and a call the duplicate guard answered from the
+                # text protocol's recorded result appends none. Reporting it
+                # would have logged "drove 0 tool call(s)" one clause before
+                # committing native because a call proved the protocol works.
+                f"The {len(whole_trace)} tool result(s) gathered for this "
+                f"question are recorded on the turn"
+                if whole_trace
+                else "Every call repeated one already answered above",
             )
             return await _abandoned_result(state, whole_trace)
         followup = _record_escalation_failure(probe)
@@ -1344,7 +1360,7 @@ async def _escalated_native_attempt(
             followup,
         )
         return outcome.result
-    _commit_escalation(signature)
+    _commit_escalation(signature, outcome.evidence)
     return outcome.result
 
 
@@ -1431,6 +1447,13 @@ class _NativeOutcome:
     #: neither -- which is the same model behaviour that started the escalation,
     #: now observed on the protocol that was supposed to fix it.
     answered: bool
+    #: Which of those two it was, for the announcement to quote. Kept beside the
+    #: flag rather than re-derived at the commit site, because by then the
+    #: distinction is gone: a loop that answered and one whose calls were all
+    #: duplicates both arrive as ``answered=True``, and announcing "answered it"
+    #: for the second tells the operator the query succeeded when it returned
+    #: the give-up notice. Ignored when :attr:`answered` is false.
+    evidence: str = _ANSWERED
 
 
 class _NativeLoopError(Exception):
@@ -1671,11 +1694,20 @@ async def _run_native_loop(
     # nothing to synthesise from and would only be billed for saying so again.
     if gave_up and not trace:
         logger.warning(
-            "Act loop abandoned after %d round(s) in native mode with no tool "
-            "call and no text.%s",
+            "Act loop abandoned after %d round(s) in native mode with no text "
+            "and no %s.%s",
             unproductive,
+            "tool result" if tool_called else "tool call",
             " Escalating from the text protocol did not help, so the model is "
-            "returning nothing on either." if escalated else "",
+            "returning nothing on either."
+            if escalated and not tool_called
+            else (
+                " Structured tool calling worked -- every call repeated one the "
+                "text protocol had already made, so the duplicate guard "
+                "answered them from the recorded results."
+                if tool_called
+                else ""
+            ),
         )
         # `trace` is provably empty on this branch, so this is `prior_trace`.
         # Passing it matters: a text loop that ran a tool before dead-ending
@@ -1683,7 +1715,15 @@ async def _run_native_loop(
         # what an empty trace tells `_abandoned_result` to do.
         return _NativeOutcome(
             result=await _abandoned_result(state, whole_trace()),
-            answered=False,
+            # Not `False`: an empty `trace` stopped meaning "made no tool call"
+            # once the duplicate guard began answering repeats from the recorded
+            # result instead of re-running them. A native round whose every call
+            # duplicated a text-protocol call emits structured `tool_calls`,
+            # appends nothing, and had proved the protocol works -- reporting it
+            # as a failed probe spent the failure budget on a working endpoint
+            # and could disable escalation for the process.
+            answered=tool_called,
+            evidence=_CALLED_TOOLS_QUIET,
         )
 
     # Reaching here means the loop never produced a tool-free reply, and there
@@ -1739,10 +1779,17 @@ async def _run_native_loop(
         },
         # A tool call is proof the protocol works even when the synthesis that
         # followed it came back empty: the model drove `tools` successfully, and
-        # what failed after that is not the protocol. Read off `trace`, not
-        # `whole_trace()`, so the other protocol's work cannot answer for this
-        # one -- that is the distinction the two exist to keep.
-        answered=bool(trace) or synthesised,
+        # what failed after that is not the protocol.
+        #
+        # `tool_called` rather than `bool(trace)`, because those stopped being
+        # the same question once the duplicate guard started answering repeats
+        # from the recorded result: a round whose every call duplicated a
+        # text-protocol call emits structured `tool_calls` and appends nothing.
+        # It is still this loop's own flag, set only inside it, so the property
+        # `trace` was chosen for holds -- the other protocol's work cannot
+        # answer for this one.
+        answered=tool_called or synthesised,
+        evidence=_ANSWERED if synthesised else _CALLED_TOOLS_QUIET,
     )
 
 

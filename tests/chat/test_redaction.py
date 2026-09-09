@@ -742,11 +742,15 @@ class TestGraphChokepoint:
     def test_the_allowlist_cannot_be_used_to_smuggle_a_model_out(self):
         """The narrowing above is only safe while those names hold no model.
 
-        The gate is about messages leaving for a provider, so awaiting a
-        retriever or a tool is not egress -- both stay on this machine, and both
-        are awaited to keep the event loop free (issue #444). But an allowlist
-        by receiver name is only as good as what those names are bound to, so
-        this pins that neither is ever assigned from ``_get_llm``.
+        The gate is about messages leaving for a *chat model*, so awaiting a
+        retriever or a tool is outside it -- not because nothing leaves the
+        machine on those paths, but because what does is not a model call.
+        Under ``embedding_provider = "remote"`` the retriever does send the raw
+        query to an embeddings API; that traffic wants its own guard, and this
+        one would not be it. Both are awaited to keep the event loop free
+        (issue #444). An allowlist by receiver name is only as good as what
+        those names are bound to, so this pins that neither is ever assigned
+        from ``_get_llm``.
         """
         source = Path(nodes_path()).read_text(encoding="utf-8")
         assert _smuggled_model_bindings(source) == []
