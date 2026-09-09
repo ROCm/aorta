@@ -6,7 +6,12 @@ from typing import Any
 
 import dspy
 
-from aorta.cia.launch.cluster import quoted_search_roots, run_probe
+from aorta.cia.launch.cluster import (
+    launch_script_summary,
+    quoted_search_roots,
+    run_probe,
+    scrub_secrets,
+)
 from aorta.cia.llm import ensure_configured
 
 
@@ -119,12 +124,11 @@ def read_cluster_configs(host: str) -> str:
     """Read existing job scripts and scheduler config to learn how jobs run here."""
     roots = quoted_search_roots()
     out = run_probe(host, (
-        rf"find {roots} -maxdepth 4 \( -name '*.sbatch' -o -name '*.slurm' -o -name '*.sh' \) "
-        "2>/dev/null | head -8 | xargs head -25 2>/dev/null; "
+        launch_script_summary(roots, limit=8) + "; "
         "echo '--scheduler config--'; "
         "scontrol show config 2>/dev/null | grep -iE 'ClusterName|SchedulerType|MaxJobCount'"
     ))
-    return out[:1500]
+    return scrub_secrets(out)[:1500]
 
 
 # ---------------------------------------------------------------------------
