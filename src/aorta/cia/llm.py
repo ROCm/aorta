@@ -3,7 +3,15 @@ from __future__ import annotations
 import logging
 import os
 
-import dspy
+try:
+    import dspy
+except ImportError as exc:  # pragma: no cover - only without the extra
+    raise ImportError(
+        "The Cluster Intelligence Agents need DSPy, which comes with the [cia] "
+        "extra: pip install 'amd-aorta[cia]'. (The extra installs on every "
+        "Python this package supports; if it appeared to install and left "
+        "nothing behind, say so -- that is a packaging bug, not a missing step.)"
+    ) from exc
 
 #: Where the CA bundle is named, for callers who want to look.
 _CA_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
