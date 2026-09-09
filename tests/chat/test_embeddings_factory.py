@@ -14,7 +14,12 @@ from __future__ import annotations
 import pytest
 
 from aorta.chat.config import settings
-from aorta.chat.rag.embeddings.base import model_slug
+from aorta.chat.rag.embeddings.base import (
+    MAX_COLLECTION_NAME,
+    build_collection_name,
+    identity_digest,
+    model_slug,
+)
 from aorta.chat.rag.embeddings.factory import collection_name, get_embeddings, get_provider
 from aorta.chat.rag.embeddings.fastembed_bge import (
     LOCAL_COLLECTION_PREFIX,
@@ -158,6 +163,27 @@ class TestCollectionNamesAreUnique:
 
         assert len(name) <= 63
         assert _SAFE_COLLECTION.match(name)
+
+    @pytest.mark.parametrize("prefix", [LOCAL_COLLECTION_PREFIX, REMOTE_COLLECTION_PREFIX])
+    def test_the_digest_survives_the_cap_under_every_shipped_prefix(self, prefix: str):
+        """Truncation has to stay cosmetic: the slug is cut, never the digest.
+
+        Length alone proves nothing here -- the pre-digest name was inside the
+        cap too, by being the thing that got truncated. What has to hold is
+        both at once: inside the cap *and* still ending in the whole digest of
+        the identity. That is what fails if the suffix is appended without
+        reserving room for it.
+
+        Both prefixes, because the local one is three characters longer and
+        every *length* assertion in this file goes through the remote provider
+        -- so room reserved for ``aorta_remote_`` and spent by
+        ``aorta_fastembed_`` was a name over the cap that nothing measured.
+        """
+        model = "q" * 200
+        name = build_collection_name(prefix, model)
+
+        assert len(name) <= MAX_COLLECTION_NAME
+        assert name.endswith("_" + identity_digest(model))
 
     def test_the_name_is_stable_across_calls(self, monkeypatch):
         """A digest that moved would orphan the collection it named yesterday."""
