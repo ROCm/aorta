@@ -16,6 +16,7 @@ re-uploading tens of megabytes on a night when nothing indexable changed.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -693,6 +694,125 @@ class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
         # What is always true of a corpus reaching this branch, and both sides.
         assert "no public-tree provenance" in message
         assert str(repo) in message
+
+    def test_a_mistyped_output_over_someone_elses_file_is_refused(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The gap under the guard rather than in it: no manifest, no opinion.
+
+        Both guards used to open with "read the sidecar; if there is not one,
+        return", which made a path that exists with nothing beside it
+        indistinguishable from a path that does not exist -- so
+        ``--output ~/notes.txt`` reached ``replace()`` unopposed while the
+        strictly better-informed case of a sidecar that reads but classifies
+        badly was refused.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "notes.txt"
+        target.write_text("a year of notes", encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        assert "no manifest beside it" in message
+        assert "typo" in message
+        assert "--force" in message
+        assert target.read_text(encoding="utf-8") == "a year of notes", "the file must survive"
+
+    def test_force_builds_over_a_manifest_less_destination(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The escape the refusal names has to work, or it is not an escape."""
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "notes.txt"
+        target.write_text("a year of notes", encoding="utf-8")
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target, force=True)
+        assert index_ops.check_index(target, strict=True).refusals == []
+
+    def test_a_published_build_over_a_manifest_less_destination_still_proceeds(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """``nightly.yml`` and ``release.yml`` run the same command repeatedly.
+
+        Their second run lands on an ``index-out/`` that a restored cache, or
+        the previous run in the same job, has already populated -- and an
+        interrupted first run leaves the index there with no sidecar. The
+        ``--public-only`` exemption is ahead of this refusal for that reason,
+        and a guard that tripped here would stop the published index updating
+        at all.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "index-out" / "aorta-chat-index.sqlite"
+        target.parent.mkdir()
+        target.write_bytes(b"an interrupted first run left this behind")
+
+        assert index_ops.build_index(published_corpus(repo), index_path=target)
+
+    def test_the_remedy_names_the_index_that_was_refused(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """A remedy that acts on a different index is worse than none at all.
+
+        Both lines default ``--output`` to the cache and their corpus to the
+        installed package, so a refusal raised over an explicit ``--path`` and
+        ``--output`` printed a bare ``aorta chat index build --force`` -- which
+        rebuilds the *user's real* index, over a corpus they did not name, and
+        leaves the one they were refused exactly as it was. Pasting the advice
+        did damage and did not resolve the refusal.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "cache" / "default.sqlite"))
+        target = tmp_path / "elsewhere" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        for line in message.splitlines():
+            if not line.strip().startswith("aorta chat index"):
+                continue
+            assert str(target) in line, f"remedy targets the wrong index: {line!r}"
+        assert f"--output {shlex.quote(str(target))}" in message
+        assert f"--path {shlex.quote(str(repo))}" in message
+        assert "aorta chat index build --force\n" not in message
+
+    def test_the_remedy_stays_short_when_the_defaults_are_what_ran(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The flags are carried because they differ, not as decoration.
+
+        A refusal over the configured cache is the common one, and spelling
+        out the two flags a bare command already resolves to would make every
+        such message longer for no reader.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        monkeypatch.setattr(settings, "index_path", str(target))
+        monkeypatch.setattr(settings, "aorta_path", str(repo))
+        self._install_published(target, monkeypatch)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        assert "--output" not in message
+        assert "--path" not in message
+        assert "aorta chat index build --force" in message
 
     def test_a_local_build_over_a_local_build_needs_nothing(
         self, repo: Path, tmp_path, monkeypatch

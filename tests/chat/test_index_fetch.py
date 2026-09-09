@@ -16,6 +16,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import shlex
 import urllib.error
 from pathlib import Path
 
@@ -40,7 +41,38 @@ MODEL = "BAAI/bge-small-en-v1.5"
 # identity, and a fixture that hardcoded it would make every manifest here
 # refuse for the wrong reason the next time the identity gains a component.
 COLLECTION = build_collection_name(LOCAL_COLLECTION_PREFIX, MODEL)
-BODY = b"pretend this is a 48 MB sqlite-vec index" * 16
+#: Rows in the published asset's chunk table, and therefore in its manifest.
+CHUNKS = 3
+
+
+def _published_asset(chunks: int = CHUNKS) -> bytes:
+    """The published index, as a real sqlite store rather than filler bytes.
+
+    ``fetch`` now opens the file before deciding a refresh would change nothing,
+    so an asset of opaque bytes would make every install here look damaged and
+    the skip unreachable. Only the chunk table is built: nothing in this module
+    queries vectors, and ``collection_chunk_count`` -- the reader behind that
+    decision -- counts the table with raw sqlite and no embedding provider.
+    """
+    import sqlite3
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as staging:
+        path = Path(staging) / ASSET_NAME
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(f'CREATE TABLE "chunks_{COLLECTION}" (id INTEGER PRIMARY KEY, text TEXT)')
+            conn.executemany(
+                f'INSERT INTO "chunks_{COLLECTION}" (text) VALUES (?)',
+                [(f"chunk {n}",) for n in range(chunks)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return path.read_bytes()
+
+
+BODY = _published_asset()
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +98,7 @@ def _manifest(**overrides) -> manifest_mod.Manifest:
         "chunk_size": 512,
         "chunk_overlap": 50,
         "index_sha256": hashlib.sha256(BODY).hexdigest(),
+        "chunk_count": CHUNKS,
         "built_at": "2026-09-01T00:00:00+00:00",
         "corpus_digest": "abc123",
     }
@@ -217,6 +250,9 @@ class TestFetch:
     def test_it_replaces_an_existing_index(self, server, tmp_path: Path):
         dest = tmp_path / "index.sqlite"
         dest.write_bytes(b"stale")
+        # An older *fetched* index, sidecar included -- which is what every
+        # install path leaves behind, and what a routine refresh runs over.
+        manifest_mod.write_manifest(dest, _manifest(index_sha256="", corpus_roots=["docs"]))
         fetch_index(version="0.2.1", index_path=dest)
         assert dest.read_bytes() == BODY
 
@@ -474,14 +510,79 @@ class TestAlreadyUpToDate:
         assert "aorta_sha" in reported
         assert "built_at" in reported
 
-    def test_a_local_index_with_no_sidecar_is_fetched_rather_than_assumed(
+    def test_a_matching_sidecar_over_a_damaged_store_is_not_up_to_date(
         self, server, tmp_path: Path
     ):
-        """An index nothing describes is not evidence that it is up to date."""
+        """The sidecar says which index was installed, not that it still is one.
+
+        ``check_index`` was already changed on this branch to open the store
+        rather than take the manifest's word for the contents. Deciding a
+        refresh on the manifest alone contradicted that from the other side:
+        the one command that would repair a damaged index reported it as
+        already current and did nothing.
+        """
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        # The sidecars are left exactly as the install wrote them; only the
+        # store is damaged, which is the pairing the shortcut used to trust.
+        dest.write_bytes(b"not a database any more")
+        server.requested.clear()
+
+        result = fetch_index(version="0.2.1", index_path=dest)
+
+        assert result.up_to_date is False
+        assert any(url.endswith(ASSET_NAME) for url in server.requested)
+        assert dest.read_bytes() == BODY, "the damaged store must be repaired"
+        assert index_ops.check_index(dest, strict=True).refusals == []
+
+    def test_a_matching_sidecar_over_a_store_missing_its_chunks_is_not_up_to_date(
+        self, server, tmp_path: Path
+    ):
+        """The other half of the same reader: readable, but not what is claimed.
+
+        A store that opens fine and holds a different number of chunks than the
+        manifest describes is the interrupted-install pairing, and it is
+        exactly what ``check_index`` was taught to catch.
+        """
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        dest.write_bytes(_published_asset(chunks=CHUNKS + 2))
+        server.requested.clear()
+
+        assert fetch_index(version="0.2.1", index_path=dest).up_to_date is False
+        assert any(url.endswith(ASSET_NAME) for url in server.requested)
+
+    def test_a_local_index_with_no_sidecar_is_refused_rather_than_assumed(
+        self, server, tmp_path: Path
+    ):
+        """An index nothing describes is not evidence that it is up to date.
+
+        It is not evidence that it is safe to replace either, which is why this
+        is a refusal rather than a silent re-fetch: the same file could be a
+        local build whose sidecar was lost, and nothing here can tell.
+        """
         dest = tmp_path / "i.sqlite"
         dest.write_bytes(BODY)
 
-        assert fetch_index(version="0.2.1", index_path=dest).up_to_date is False
+        with pytest.raises(index_ops.IndexOverwriteError, match="no manifest beside it"):
+            fetch_index(version="0.2.1", index_path=dest)
+
+    def test_forcing_over_a_sidecar_less_index_installs_rather_than_skips(
+        self, server, tmp_path: Path
+    ):
+        """``--force`` is the escape the refusal names, and it must transfer.
+
+        Reporting *up to date* here would be the original defect wearing a
+        flag: there is no sidecar to have matched anything.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(BODY)
+
+        result = fetch_index(version="0.2.1", index_path=dest, force=True)
+
+        assert result.up_to_date is False
+        assert any(url.endswith(ASSET_NAME) for url in server.requested)
+        assert manifest_mod.read_manifest(dest).collection == COLLECTION
 
     def test_a_manifest_predating_index_sha256_does_not_compare_equal_on_nothing(
         self, server, tmp_path: Path
@@ -501,48 +602,52 @@ class TestAlreadyUpToDate:
         ids=["null", "int", "object", "list"],
     )
     @pytest.mark.parametrize("field_name", ["aorta_sha", "corpus_digest", "built_at"])
-    def test_a_non_string_digest_is_reported_rather_than_raised(
-        self, server, tmp_path: Path, field_name, value
-    ):
-        """The ``corpus_roots`` hole, one field over.
+    def test_a_non_string_digest_is_rendered_rather_than_raised(self, field_name, value):
+        """The ``corpus_roots`` hole, one field over, pinned at the renderer.
 
-        ``Manifest.from_dict`` type-checks nothing, so a hand-written sidecar
-        can record ``null`` where a digest belongs. Truncating that for the
-        change report raised ``TypeError`` -- ``KeyError`` for a JSON object,
-        which subscripts by key -- out of the comparison whose entire job is to
-        report on a manifest that looks wrong, and past the CLI's error guard.
+        Truncating a field that is not a string raised ``TypeError`` --
+        ``KeyError`` for a JSON object, which subscripts by key -- out of the
+        comparison whose entire job is to report on a manifest that looks
+        wrong, and past the CLI's error guard. Both ``fetch``'s change report
+        and ``index status``'s differences come from this one function, so
+        pinning it here covers both.
+
+        Driven with constructed manifests rather than a sidecar on disk,
+        deliberately. Whether ``Manifest.from_dict`` *admits* a null digest is
+        the parser's question, and PR #463 is tightening it to refuse one; what
+        this test is about is the renderer downstream surviving a field it did
+        not expect, whichever way the parser lands. Routed through the parser,
+        it would silently change verdict on a merge it has no conflict with.
 
         ``built_at`` is the control rather than a regression case: it was never
         truncated, so it survived all four values before this fix and is here
         to pin that rendering did not break the field that already worked.
         """
-        dest = tmp_path / "i.sqlite"
-        dest.write_bytes(b"stale")
-        raw = {**json.loads(_manifest(index_sha256="").to_json()), field_name: value}
-        manifest_mod.manifest_path(dest).write_text(json.dumps(raw), encoding="utf-8")
+        changes = index_ops._refresh_notes(_manifest(**{field_name: value}), _manifest())
 
-        result = fetch_index(version="0.2.1", index_path=dest)
+        assert any(change.startswith(field_name) for change in changes), changes
 
-        assert result.up_to_date is False
-        assert dest.read_bytes() == BODY
-        assert any(change.startswith(field_name) for change in result.changes), result.changes
-
-    def test_a_non_string_digest_does_not_break_the_comparison_either(
+    def test_an_empty_digest_is_reported_as_unknown_rather_than_as_nothing(
         self, server, tmp_path: Path
     ):
-        """``index status`` reads the same notes, so it had the same traceback."""
+        """``index status`` reads the same notes, so it had the same traceback.
+
+        Empty rather than non-string, because that is the shape that reaches
+        this path through a real sidecar both before and after #463's parser
+        change -- and it is the case the renderer's ``None`` handling exists
+        for: blank becomes the caller's own word for a missing field, not the
+        string ``"None"``.
+        """
         dest = tmp_path / "i.sqlite"
         dest.write_bytes(b"stale")
-        raw = {
-            **json.loads(_manifest(index_sha256="d" * 64).to_json()),
-            "aorta_sha": None,
-        }
-        manifest_mod.manifest_path(dest).write_text(json.dumps(raw), encoding="utf-8")
+        manifest_mod.write_manifest(dest, _manifest(index_sha256="d" * 64, aorta_sha=""))
 
         comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
 
         assert comparison.verdict == index_ops.VERDICT_PUBLISHED_DIFFERS
-        assert any("aorta_sha" in difference for difference in comparison.differences)
+        reported = " ".join(comparison.differences)
+        assert "aorta_sha: unknown ->" in reported, comparison.differences
+        assert "None" not in reported
 
 
 class TestFetchFailures:
@@ -657,20 +762,96 @@ class TestTheFetchedSchemaIsChecked:
     def test_a_non_integer_schema_is_an_index_fetch_error(self, server, tmp_path, value):
         """Not a ``TypeError`` out of a comparison the caller never guarded.
 
-        The refusal now comes from ``Manifest.from_dict``'s field-type check
-        rather than from ``ensure_supported_schema``, because
-        ``schema_version`` was one of several fields being compared or sliced
-        on trust and the check moved to the boundary they all cross. Same
-        exception, same "installs nothing", earlier and better message -- so
-        the assertion is on the property rather than on either wording.
+        Matched on this module's own wrapper rather than on the sentence
+        ``manifest.py`` raises underneath it. Which of the two layers refuses a
+        non-integer ``schema_version`` -- the field type check or the supported
+        -schema check -- is that module's business, and PR #463 is moving it
+        from the second to the first. What ``fetch`` owes the caller either way
+        is an ``IndexFetchError`` that names the manifest it could not use, and
+        no partial install.
         """
         self._serve_schema(server, value)
         dest = tmp_path / "i.sqlite"
 
-        with pytest.raises(IndexFetchError, match="is not usable"):
+        with pytest.raises(IndexFetchError) as exc:
             fetch_index(version="0.2.1", index_path=dest)
 
+        message = str(exc.value)
+        assert "is not usable" in message
+        assert "schema" in message
+        assert ASSET_NAME + manifest_mod.MANIFEST_SUFFIX in message
         assert not dest.exists()
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("embedding_identity", 42),
+            ("embedding_model", None),
+            ("collection", ["c"]),
+            ("corpus_digest", 7),
+            ("corpus_roots", "src/aorta"),
+            ("dimensions", "384"),
+            ("chunk_count", True),
+        ],
+    )
+    def test_a_published_field_of_the_wrong_type_is_refused_not_raised(
+        self, server, tmp_path: Path, field, value
+    ):
+        """The tolerance for a wrong-typed field stops at the network boundary.
+
+        A *local* sidecar that records nonsense must stay readable, because the
+        reports whose job is to say what is wrong with it have to be able to
+        read it -- so ``from_dict`` type-checks nothing and this module's
+        readers absorb it. A *downloaded* one has nowhere better to fail than
+        here, and not everything it reaches is in this module: ``validate``
+        calls ``.split()`` on ``embedding_identity``, so a published manifest
+        carrying ``42`` there came out of the CLI as an ``AttributeError``
+        traceback rather than as the refusal a bad manifest is supposed to be.
+
+        Parametrised across the types rather than pinned to that one field,
+        because the hole was the missing check and not the field that exposed
+        it.
+        """
+        raw = json.loads(
+            server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX].decode("utf-8")
+        )
+        raw[field] = value
+        server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = json.dumps(raw).encode()
+        dest = tmp_path / "i.sqlite"
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        message = str(exc.value)
+        assert "is not usable" in message
+        assert field in message
+        assert not dest.exists(), "a manifest this build cannot read must install nothing"
+
+    def test_the_404_options_also_name_the_destination_that_was_asked_for(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """The fourth site with the same defect, found by sweeping for it.
+
+        Copilot named three refusals whose remedy dropped a non-default
+        ``--output``. This one is the same class one layer down: a missing
+        asset offers three ordinary invocations, and an ordinary invocation
+        installs to the cache -- so a reader who had asked for a different path
+        gets three lines that all act somewhere else.
+        """
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "cache.sqlite"))
+        del server.assets[ASSET_NAME]
+        dest = tmp_path / "elsewhere.sqlite"
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        flag = f"--output {shlex.quote(str(dest))}"
+        options = [
+            line for line in str(exc.value).splitlines() if "aorta chat index" in line
+        ]
+        assert len(options) == 3, options
+        for line in options:
+            assert flag in line, f"option acts on the wrong index: {line!r}"
 
     def test_an_older_schema_is_still_accepted(self, server, tmp_path: Path):
         """Forward tolerance runs one way only; an older sidecar still parses."""
@@ -912,6 +1093,34 @@ class TestFetchWillNotSilentlyDiscardALocalBuild:
         assert server.requested == [], "it should refuse before any request"
         assert fetch_index(version="0.2.1", index_path=dest, force=True).index_path == dest
 
+    def test_a_truncated_sidecar_is_refused_rather_than_read_as_absence(
+        self, server, tmp_path: Path
+    ):
+        """Unreadable and absent used to be the same answer, and they are not.
+
+        A half-written sidecar makes the index beside it unclassifiable, which
+        is the state the guard above already refuses when the *value* is
+        unreadable. Collapsing it into "there is nothing here" refused the
+        better-informed case and waved through the worse one.
+        """
+        dest = tmp_path / "i.sqlite"
+        self._install_local_build(dest)
+        manifest_mod.manifest_path(dest).write_text('{"aorta_version": "0.2', encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert "no manifest beside it" in str(exc.value)
+        assert dest.read_bytes() == b"an index built here"
+        assert server.requested == [], "it should refuse before any request"
+
+    def test_a_first_install_is_still_a_first_install(self, server, tmp_path: Path):
+        """The whole point of the distinction: a path that does not exist."""
+        dest = tmp_path / "nested" / "i.sqlite"
+
+        assert fetch_index(version="0.2.1", index_path=dest).index_path == dest
+        assert dest.read_bytes() == BODY
+
     def test_side_load_carries_the_same_guard(self, tmp_path: Path):
         """Or `--from` becomes the way around it by accident."""
         staging = tmp_path / "usb"
@@ -927,6 +1136,78 @@ class TestFetchWillNotSilentlyDiscardALocalBuild:
             side_load(origin, index_path=dest)
 
         assert side_load(origin, index_path=dest, force=True).index_path == dest
+
+    def test_side_load_also_refuses_a_manifest_less_destination(self, tmp_path: Path):
+        """Both guards read the destination the same way, so both had the hole."""
+        staging = tmp_path / "usb"
+        staging.mkdir()
+        origin = staging / ASSET_NAME
+        origin.write_bytes(BODY)
+        manifest_mod.write_manifest(origin, _manifest())
+
+        dest = tmp_path / "notes.txt"
+        dest.write_text("a year of notes", encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError, match="no manifest beside it"):
+            side_load(origin, index_path=dest)
+
+        assert dest.read_text(encoding="utf-8") == "a year of notes"
+        assert side_load(origin, index_path=dest, force=True).index_path == dest
+
+    def test_the_remedy_names_the_index_that_was_refused(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """``fetch --force`` without ``--output`` fetches over a different index.
+
+        The refused index stays refused and the cache -- which the user did not
+        mention and may well have wanted -- is replaced instead. The flag is
+        carried only when it differs from what the bare command resolves to, so
+        the ordinary refusal over the cache keeps its short line.
+        """
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "cache.sqlite"))
+        dest = tmp_path / "elsewhere" / "i.sqlite"
+        dest.parent.mkdir()
+        self._install_local_build(dest)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        message = str(exc.value)
+        assert f"aorta chat index fetch --output {shlex.quote(str(dest))} --force" in message
+
+        monkeypatch.setattr(settings, "index_path", str(dest))
+        with pytest.raises(index_ops.IndexOverwriteError) as plain:
+            fetch_index(version="0.2.1", index_path=dest)
+        assert "--output" not in str(plain.value)
+
+    def test_the_side_load_remedy_keeps_both_the_source_and_the_destination(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """``--from`` survived the refusal; the destination beside it did not.
+
+        Pasting the advertised line therefore side-loaded the staged file over
+        the configured cache -- an install the user never asked for, from a
+        refusal about a different path entirely.
+        """
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "cache.sqlite"))
+        staging = tmp_path / "usb"
+        staging.mkdir()
+        origin = staging / ASSET_NAME
+        origin.write_bytes(BODY)
+        manifest_mod.write_manifest(origin, _manifest())
+
+        dest = tmp_path / "elsewhere" / "i.sqlite"
+        dest.parent.mkdir()
+        self._install_local_build(dest)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            side_load(origin, index_path=dest)
+
+        remedy = (
+            f"aorta chat index fetch --from {shlex.quote(str(origin))} "
+            f"--output {shlex.quote(str(dest))} --force"
+        )
+        assert remedy in str(exc.value)
 
 
 class TestCompareIndex:
@@ -1001,6 +1282,27 @@ class TestCompareIndex:
         assert comparison.verdict == index_ops.VERDICT_NO_LOCAL_INDEX
         assert comparison.local is None
         assert comparison.published is not None
+        assert comparison.local_error == ""
+
+    def test_an_unreadable_sidecar_is_not_reported_as_no_local_index(
+        self, server, tmp_path: Path
+    ):
+        """The verdict said nothing had been installed, over a file sitting there.
+
+        Both states read the manifest and got ``None``, so ``index status``
+        told the one person looking at it the opposite of what was wrong.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(BODY)
+        manifest_mod.manifest_path(dest).write_text('{"aorta_version": "0.2', encoding="utf-8")
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_UNREADABLE_LOCAL_INDEX
+        assert comparison.local_error, "the cause must be reported, not only the state"
+        payload = index_ops.comparison_to_dict(comparison)
+        assert payload["local"]["error"] == comparison.local_error
+        assert payload["up_to_date"] is False
 
     def test_a_differing_published_index_lists_the_fields(self, server, tmp_path: Path):
         dest = tmp_path / "i.sqlite"
@@ -1162,7 +1464,10 @@ class TestSideLoad:
         suggested = next(
             line for line in str(exc.value).splitlines() if "--from" in line
         ).split(":", 1)[1]
-        # The whole point: it parses, and comes back as the path we passed in.
+        # The whole point: it parses, and both paths come back as the ones we
+        # passed in. ``--output`` is here because the destination is not the
+        # configured cache -- a remedy that dropped it would side-load over an
+        # index the user never named while leaving this refusal standing.
         assert shlex.split(suggested) == [
             "aorta",
             "chat",
@@ -1170,6 +1475,8 @@ class TestSideLoad:
             "fetch",
             "--from",
             str(origin.resolve()),
+            "--output",
+            str(dest),
             "--force",
         ]
 

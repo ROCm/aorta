@@ -1116,16 +1116,29 @@ def _status_cell(value: object) -> str:
 
 
 def _echo_status_table(local: dict, published: dict) -> None:
-    """Print both manifests as two columns, so a difference is visible."""
+    """Print both manifests as two columns, so a difference is visible.
+
+    A row whose two values differ only past the column width is repeated
+    underneath in full. Truncating for width is fine until it makes a row that
+    exists to show a difference show agreement instead -- and ``identity`` is
+    where that bites, because a remote one is ``remote / <endpoint> / <model>``
+    and two endpoints on the same provider share far more than 42 characters
+    while the ``model`` and ``dimensions`` rows above stay identical. Digests
+    can collide on a prefix too, just far less often.
+    """
     click.echo(f"  {'':<13}{'local':<44}published")
+    hidden = []
     for label, key in _STATUS_ROWS:
         left = _status_cell(local.get(key))
         right = _status_cell(published.get(key))
-        # Truncated for width only. The digests differ in their leading
-        # characters when they differ at all, and --json carries them in full;
-        # a truncated identity can only hide what the `model` and `dimensions`
-        # rows above it already show separately.
+        if left != right and left[:42] == right[:42]:
+            hidden.append((label, left, right))
         click.echo(f"  {label:<13}{left[:42]:<44}{right[:42]}")
+    for label, left, right in hidden:
+        click.echo("")
+        click.echo(f"  {label} differs past the column width:")
+        click.echo(f"    local      {left}")
+        click.echo(f"    published  {right}")
 
 
 @index_group.command(name="status")
@@ -1144,10 +1157,12 @@ def index_status(version: str | None, index_path: str | None, as_json: bool, ver
     This is the comparison nightly.yml already does in bash to decide whether
     to republish.
 
-    A missing or unreadable published manifest is reported as 'no baseline',
-    never as 'up to date', and is the only verdict that exits non-zero -- an
-    absent *local* index is a normal answer for someone who has not installed
-    one yet.
+    Two verdicts exit non-zero, and both mean the same thing: no comparison was
+    made. 'no baseline' is a published manifest that could not be read, never
+    reported as 'up to date'; 'unreadable local index' is a file sitting at the
+    index path with no manifest this build can read, which is also what the
+    first query would refuse. An *absent* local index exits zero -- that is a
+    normal answer for someone who has not installed one yet.
     """
     _index_logging(verbose)
     ops = _load("rag.index_ops")
@@ -1170,11 +1185,14 @@ def index_status(version: str | None, index_path: str | None, as_json: bool, ver
             click.echo("")
             for difference in comparison.differences:
                 click.echo(f"  differs    {difference}")
+        if comparison.local_error:
+            click.echo("")
+            click.echo(f"warning: {comparison.local_error}", err=True)
         if comparison.baseline_error:
             click.echo("")
             click.echo(f"warning: {comparison.baseline_error}", err=True)
 
-    if comparison.verdict == ops.VERDICT_NO_BASELINE:
+    if comparison.verdict in (ops.VERDICT_NO_BASELINE, ops.VERDICT_UNREADABLE_LOCAL_INDEX):
         raise click.exceptions.Exit(1)
 
 

@@ -23,6 +23,7 @@ a ``.devN+g<sha>`` version takes the rolling one and says how far off it is.
 
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import json
 import logging
@@ -323,22 +324,91 @@ def corpus_provenance(corpus: corpus_mod.Corpus) -> str:
     return _roots_provenance(corpus.roots_label or corpus.subpaths)
 
 
+def _read_destination(index_path: str | Path) -> tuple[manifest_mod.Manifest | None, str]:
+    """The sidecar at a write target, and why it could not be read.
+
+    Three states rather than two. ``(None, "")`` is nothing there at all;
+    ``(None, reason)`` is a path that exists with no manifest this build can
+    read; ``(manifest, "")`` is an index that can be classified.
+
+    :func:`_local_manifest` collapses the first two, which is right for the
+    readers that only want a manifest and wrong for the write guards, where
+    "there is nothing to overwrite" and "there is something unidentifiable to
+    overwrite" are opposite verdicts.
+    """
+    target = Path(index_path)
+    if not target.exists():
+        return None, ""
+    try:
+        return manifest_mod.read_manifest(target), ""
+    except manifest_mod.ManifestError as exc:
+        logger.debug("No usable manifest beside %s: %s", target, exc)
+        return None, str(exc)
+
+
 def _local_manifest(index_path: str | Path) -> manifest_mod.Manifest | None:
     """The installed index's sidecar, or ``None`` when there is not a usable one.
 
     Absent, unreadable and unparseable all collapse to ``None`` deliberately.
-    Every caller is deciding what to do *about* the local index, and none of
-    those decisions is improved by a traceback out of a sidecar that is already
-    broken -- the load path is where a bad manifest has to be fatal.
+    Every caller here is *reporting* on the local index, and none of those
+    reports is improved by a traceback out of a sidecar that is already broken
+    -- the load path is where a bad manifest has to be fatal. The write guards
+    use :func:`_read_destination` instead, because for them the collapse is the
+    bug rather than the convenience.
     """
-    target = Path(index_path)
-    if not target.exists():
-        return None
+    return _read_destination(index_path)[0]
+
+
+def _unusable_reasons(target: Path) -> list[str]:
+    """Why this install cannot use the index at ``target``; empty when it can.
+
+    One reader for "is what is on disk actually usable", shared by the build
+    guard and by ``fetch``'s up-to-date shortcut, so a rebuild that is exempted
+    and a refresh that is skipped cannot disagree about the same file.
+    :func:`check_index` opens the store, so this is the question the first
+    query asks rather than a second opinion derived from the manifest.
+
+    Never raises. Both callers have just read the manifest themselves, but they
+    read it separately, and a helper whose whole job is to answer "should this
+    be installed again" must not turn a sidecar that changed in between into a
+    traceback out of the answer.
+    """
     try:
-        return manifest_mod.read_manifest(target)
+        return list(check_index(target, strict=False).refusals)
     except manifest_mod.ManifestError as exc:
-        logger.debug("No usable manifest beside %s: %s", target, exc)
-        return None
+        return [str(exc)]
+
+
+def _pasteable(command: str, dest: Path, corpus: corpus_mod.Corpus | None = None) -> str:
+    """A refusal's remedy, carrying the flags that chose the index it is about.
+
+    A remedy is only advice if pasting it acts on the index that was refused.
+    These commands default ``--output`` to the configured cache and their
+    corpus to the installed package, so a refusal raised over
+    ``--output /tmp/scratch.sqlite`` printed a bare ``... --force`` that named
+    a *different* index -- the user's real one, which they had not asked about
+    and which the paste would then overwrite while leaving the refusal
+    standing.
+
+    Only the flags that differ from what the bare command would resolve are
+    appended, so the common refusal stays the short line it was.
+    """
+    return command + _target_flags(dest, corpus)
+
+
+def _target_flags(dest: Path, corpus: corpus_mod.Corpus | None = None) -> str:
+    """The flags naming this destination, or ``""`` when they are the defaults.
+
+    Separate from :func:`_pasteable` because the 404 remedy prints three
+    commands in an aligned block and needs the suffix rather than each whole
+    line.
+    """
+    parts = []
+    if corpus is not None and corpus.base != settings.aorta_root:
+        parts.append(f"--path {shlex.quote(str(corpus.base))}")
+    if dest != settings.index_file:
+        parts.append(f"--output {shlex.quote(str(dest))}")
+    return "".join(f" {part}" for part in parts)
 
 
 def _unclassifiable_error(target: Path, roots: object, command: str) -> IndexOverwriteError:
@@ -360,6 +430,28 @@ def _unclassifiable_error(target: Path, roots: object, command: str) -> IndexOve
     )
 
 
+def _unidentifiable_error(target: Path, reason: str, command: str) -> IndexOverwriteError:
+    """The refusal for an existing destination with no manifest to read.
+
+    Every write path here produces its sidecars, so a path that exists without
+    one is not an index this tool finished installing. It is a mistyped
+    ``--output``, a file something else owns, or an index whose sidecars were
+    lost -- and the first two are the ones an overwrite cannot give back.
+
+    Names both, because the caller is the only one who can tell them apart, and
+    the escape is one flag rather than a second diagnosis.
+    """
+    return IndexOverwriteError(
+        f"there is already a file at {target}, and no manifest beside it that "
+        f"this install can read ({reason}).\n"
+        "A first install writes to a path that does not exist yet. This one "
+        "exists, so something is there to lose, and without a manifest there "
+        "is no way to tell an index from a file this tool never wrote.\n"
+        "If the path is a typo, correcting it is the fix.\n"
+        f"If it is an index whose sidecars were lost, replacing it is safe:  {command} --force"
+    )
+
+
 def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
     """Stop an incoming index from silently discarding one built on this machine.
 
@@ -376,15 +468,27 @@ def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
     every pre-field install's routine refresh. A manifest recording roots that
     cannot be read is refused -- that is a broken sidecar, not an old one, and
     it is the one case where guessing could discard the unrecoverable side.
+
+    A destination with *no* readable manifest is refused on the same reasoning,
+    one step earlier. Absent and unreadable used to collapse into "nothing
+    there", so a mistyped ``--index`` at an existing file, or an index whose
+    sidecar had been truncated, was overwritten without a word -- while the
+    strictly better-informed case of a sidecar that reads but classifies badly
+    was refused.
     """
     if force:
         return
-    local = _local_manifest(dest)
+    # Carries a non-default --output into every remedy below, so the line the
+    # user pastes acts on the index they were refused rather than on the cache.
+    remedy = _pasteable(command, dest)
+    local, unreadable = _read_destination(dest)
+    if unreadable:
+        raise _unidentifiable_error(dest, unreadable, remedy)
     if local is None:
         return
     provenance = index_provenance(local)
     if provenance == PROVENANCE_INVALID:
-        raise _unclassifiable_error(dest, local.corpus_roots, command)
+        raise _unclassifiable_error(dest, local.corpus_roots, remedy)
     if provenance != PROVENANCE_LOCAL:
         return
     # Formatted from the validated reader rather than the raw attribute. The
@@ -399,7 +503,7 @@ def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
         "Replacing it with the published index discards a build the network "
         "cannot give back -- the tree it indexed may have moved, and rebuilding "
         "needs the embedding weights again.\n"
-        f"Pass --force to overwrite it:  {command} --force"
+        f"Pass --force to overwrite it:  {remedy} --force"
     )
 
 
@@ -442,7 +546,12 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
       build and every local-over-local rebuild.
 
     A destination whose ``corpus_roots`` is present but unreadable is refused
-    instead, once the exemptions above have not applied.
+    instead, once the exemptions above have not applied. So is a destination
+    that exists with no readable manifest at all -- a mistyped ``--output``
+    reached ``replace()`` unopposed, because "no manifest" and "no file" were
+    the same answer here. That one is refused *before* the unusable-index
+    exemption: the exemption's premise is that an index is what is there, and
+    the whole point of this case is that nothing establishes that.
 
     A *stale* index needs no exemption and deliberately does not get one.
     Source drift is a warning rather than a refusal, so it does not reach the
@@ -458,13 +567,27 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
     """
     if force or corpus_provenance(corpus) == PROVENANCE_PUBLISHED:
         return
-    local = _local_manifest(target)
+    # Both remedies below name a destination, and the build one also names a
+    # corpus: this command defaults them to the cache and the installed
+    # package, so a refusal over an explicit --path/--output that printed the
+    # bare form sent the user at an index that was never in question.
+    rebuild = _pasteable("aorta chat index build", target, corpus)
+    refresh = _pasteable("aorta chat index fetch", target)
+    local, unreadable = _read_destination(target)
+    if unreadable:
+        # Ahead of the unusable-index exemption below, and deliberately not
+        # folded into it. That exemption says "there is an index here and this
+        # install cannot query it, so rebuilding loses nothing" -- it presumes
+        # an index is what is there. An unreadable manifest is the case where
+        # that presumption is exactly what is missing, and a mistyped --output
+        # would otherwise be exempted by being unreadable enough.
+        raise _unidentifiable_error(target, unreadable, rebuild)
     if local is None:
         return
     provenance = index_provenance(local)
     if provenance not in (PROVENANCE_PUBLISHED, PROVENANCE_INVALID):
         return
-    unusable = check_index(target, strict=False).refusals
+    unusable = _unusable_reasons(target)
     if unusable:
         # Ahead of both refusals, so an unusable index is exempt whether or not
         # its manifest is readable; either refusal would otherwise compose two
@@ -485,7 +608,7 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
         )
         return
     if provenance == PROVENANCE_INVALID:
-        raise _unclassifiable_error(target, local.corpus_roots, "aorta chat index build")
+        raise _unclassifiable_error(target, local.corpus_roots, rebuild)
     roots = _corpus_roots(local) or []
     raise IndexOverwriteError(
         f"the index at {target} covers the published corpus, and this build "
@@ -498,8 +621,8 @@ def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool
         "--public-only build records the published root set. The default build "
         "corpus is the installed package alone, so it typically drops 'docs/' "
         "and 'README.md' as well.\n"
-        "Refresh the published one instead:  aorta chat index fetch\n"
-        "Or pass --force to build over it:   aorta chat index build --force"
+        f"Refresh the published one instead:  {refresh}\n"
+        f"Or pass --force to build over it:   {rebuild} --force"
     )
 
 
@@ -835,8 +958,14 @@ def _copy_with_progress(response: Any, handle: Any, total: int) -> None:
     logger.info("%s", _progress_line(done, total))
 
 
-def _download(url: str, target: Path) -> None:
-    """Stream ``url`` to ``target``, or raise :class:`IndexFetchError`."""
+def _download(url: str, target: Path, dest: Path | None = None) -> None:
+    """Stream ``url`` to ``target``, or raise :class:`IndexFetchError`.
+
+    ``target`` is the staging path; ``dest`` is where the install would land,
+    and is carried only so the 404 remedy below can name it. The three lines it
+    offers are ordinary invocations, so they resolve ``--output`` to the
+    configured cache -- which is not where this fetch was going.
+    """
     logger.info("Downloading %s", url)
     try:
         with urllib.request.urlopen(url, timeout=_CONNECT_TIMEOUT) as response:  # noqa: S310
@@ -846,14 +975,17 @@ def _download(url: str, target: Path) -> None:
                 _copy_with_progress(response, handle, total)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
+            # Labels lead so the block stays aligned whether or not the flags
+            # are appended; the commands themselves are then variable-length.
+            here = "" if dest is None else _target_flags(dest)
             raise IndexFetchError(
                 f"no published index at {url} (HTTP 404).\n"
                 "That release may predate the published index, or the asset may "
                 "not have been built yet. Options:\n"
-                "  aorta chat index fetch --version <X.Y.Z>   pick another release\n"
-                f"  aorta chat index fetch --version {ROLLING_TAG}   take the rolling "
-                "main asset\n"
-                "  aorta chat index build                     build locally instead"
+                f"  pick another release        aorta chat index fetch --version <X.Y.Z>{here}\n"
+                f"  take the rolling main asset aorta chat index fetch "
+                f"--version {ROLLING_TAG}{here}\n"
+                f"  build locally instead       aorta chat index build{here}"
             ) from exc
         raise IndexFetchError(f"could not download {url}: HTTP {exc.code} {exc.reason}") from exc
     except urllib.error.URLError as exc:
@@ -960,19 +1092,65 @@ def describe_target(source: IndexSource, dest: str | Path) -> list[str]:
 def _parse_manifest(text: str, source: IndexSource) -> manifest_mod.Manifest:
     """Parse a downloaded manifest, or raise :class:`IndexFetchError`.
 
-    The schema check belongs here rather than after the install: a schema this
-    build cannot read must fail the fetch rather than land on disk and then be
-    rejected by the first load, which reports a successful fetch and leaves a
-    chat that no longer starts.
+    The schema and field-type checks belong here rather than after the install:
+    a manifest this build cannot read must fail the fetch rather than land on
+    disk and then be rejected by the first load, which reports a successful
+    fetch and leaves a chat that no longer starts.
     """
     try:
         manifest = manifest_mod.Manifest.from_dict(json.loads(text))
+        _ensure_field_types(manifest)
         manifest_mod.ensure_supported_schema(manifest, f"the index at {source.index_url}")
     except (ValueError, manifest_mod.ManifestError) as exc:
         raise IndexFetchError(
             f"the manifest at {source.manifest_url} is not usable: {exc}"
         ) from exc
     return manifest
+
+
+#: What each declared annotation on :class:`~aorta.chat.rag.manifest.Manifest`
+#: actually has to be. Read from the dataclass rather than listed field by
+#: field, so a field added upstream is covered without a matching edit here.
+_ANNOTATION_TYPES: dict[str, type | tuple[type, ...]] = {
+    "str": str,
+    "int": int,
+    "list[str]": list,
+}
+
+
+def _ensure_field_types(manifest: manifest_mod.Manifest) -> None:
+    """Reject a downloaded manifest whose fields are not the types they claim.
+
+    ``Manifest.from_dict`` deliberately does not type-check: a *local* sidecar
+    that is wrong should still be readable, because refusing to parse it would
+    take away the reports whose whole job is to say what is wrong with it. The
+    tolerant readers here (:func:`_corpus_roots`, :func:`_manifest_text`) exist
+    for exactly that.
+
+    A *downloaded* manifest is the other case. It is untrusted input arriving
+    over the network, nothing later in the fetch is written to tolerate it, and
+    the readers it reaches are not all here -- ``validate`` calls ``.split()``
+    on ``embedding_identity``, so a published manifest carrying ``42`` there
+    raised ``AttributeError`` past the ``IndexFetchError`` handling and out of
+    the CLI as a traceback, rather than the refusal a bad manifest is supposed
+    to produce.
+
+    So the tolerance stops at the network boundary, which is the one place
+    there is somewhere better to put the failure: this is the funnel that
+    already turns "the published manifest is not usable" into a refusal naming
+    its URL.
+    """
+    for field_def in dataclasses.fields(manifest):
+        expected = _ANNOTATION_TYPES.get(str(field_def.type))
+        if expected is None:
+            continue
+        value = getattr(manifest, field_def.name)
+        # bool is an int subclass, and a manifest recording `chunk_count: true`
+        # is malformed in exactly the way this is here to catch.
+        if not isinstance(value, expected) or isinstance(value, bool):
+            raise manifest_mod.ManifestError(
+                f"{field_def.name} is a {type(value).__name__}, not {field_def.type}"
+            )
 
 
 def _validate_against_provider(manifest: manifest_mod.Manifest) -> manifest_mod.ValidationReport:
@@ -1074,8 +1252,11 @@ def fetch_index(
     change, an endpoint change -- hits the same wasted transfer.
 
     **The asset is skipped entirely when the local sidecar already records the
-    published ``index_sha256``.** A refresh that would change nothing is the
-    common case, and it cost the whole download.
+    published ``index_sha256`` and the store it describes is usable.** A
+    refresh that would change nothing is the common case, and it cost the whole
+    download. Both halves are needed: the sidecar establishes that the right
+    index was installed, and only opening the store establishes that it still
+    is one.
 
     Checksum verification stays where it was, because it genuinely needs the
     bytes. Nothing is installed until it and the manifest/checksum agreement
@@ -1102,17 +1283,45 @@ def fetch_index(
 
     local = _local_manifest(dest)
     if not force and _is_same_index(local, manifest):
-        # At debug, because ``up_to_date`` is on the result and the caller
-        # renders it -- the CLI would otherwise print the same sentence twice.
-        logger.debug("%s already holds the published index; skipping the asset.", dest)
-        return FetchResult(
-            index_path=dest,
-            manifest=manifest,
-            source=source.describe(),
-            warnings=list(report.warnings),
-            notes=list(source.notes),
-            up_to_date=True,
-        )
+        # Matching ``index_sha256`` proves the *sidecar* is the published one.
+        # It says nothing about the file beside it, which is written in place
+        # by run indexing and can be damaged by anything else on the machine --
+        # so a truncated store under an untouched manifest took this shortcut
+        # and was told it was already up to date, by the one command that would
+        # have repaired it.
+        #
+        # Asked through the same reader the build guard uses, which opens the
+        # store. This PR already stopped ``check_index`` trusting the manifest
+        # about the contents; a refresh that decided on the manifest alone
+        # would have contradicted that from the other side.
+        #
+        # Deliberately the load path's notion of usable, not a schema probe:
+        # this catches a store nothing can open and a row count the manifest
+        # disagrees with, and not the several ways a store can open, count
+        # correctly and still be the wrong shape underneath (``doctor``
+        # enumerates those). Matching the reader the *first query* uses is the
+        # property that matters here -- "already up to date" must not mean
+        # something the next query would refuse.
+        unusable = _unusable_reasons(dest)
+        if unusable:
+            logger.info(
+                "%s records the published index but this install cannot use it "
+                "(%s); fetching the asset again.",
+                dest,
+                "; ".join(unusable),
+            )
+        else:
+            # At debug, because ``up_to_date`` is on the result and the caller
+            # renders it -- the CLI would otherwise print the same sentence twice.
+            logger.debug("%s already holds the published index; skipping the asset.", dest)
+            return FetchResult(
+                index_path=dest,
+                manifest=manifest,
+                source=source.describe(),
+                warnings=list(report.warnings),
+                notes=list(source.notes),
+                up_to_date=True,
+            )
     changes = _refresh_notes(local, manifest)
 
     # Staged inside the destination directory so the final move is a rename on
@@ -1121,7 +1330,7 @@ def fetch_index(
     with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=dest.parent) as staging_dir:
         staged = Path(staging_dir) / ASSET_NAME
         checksum_line = _download_text(source.checksum_url)
-        _download(source.index_url, staged)
+        _download(source.index_url, staged, dest)
         checksum = _verify_checksum(staged, checksum_line, source.checksum_url)
         if manifest.index_sha256 and manifest.index_sha256 != checksum:
             raise IndexFetchError(
@@ -1166,6 +1375,7 @@ VERDICT_PUBLISHED_DIFFERS = "published_differs"
 VERDICT_LOCALLY_BUILT = "locally_built"
 VERDICT_INCOMPATIBLE = "incompatible"
 VERDICT_NO_LOCAL_INDEX = "no_local_index"
+VERDICT_UNREADABLE_LOCAL_INDEX = "unreadable_local_index"
 VERDICT_NO_BASELINE = "no_baseline"
 
 _VERDICT_SUMMARY = {
@@ -1178,6 +1388,13 @@ _VERDICT_SUMMARY = {
         "the published index is not usable by this install's embedding provider"
     ),
     VERDICT_NO_LOCAL_INDEX: "no local index; nothing has been installed yet",
+    # Split out of ``no_local_index`` rather than reported as it: "nothing has
+    # been installed yet" over a file that is sitting right there tells the one
+    # person looking at this command the opposite of what is wrong.
+    VERDICT_UNREADABLE_LOCAL_INDEX: (
+        "a local index is installed, but no manifest beside it can be read, so "
+        "it cannot be compared -- or loaded"
+    ),
     VERDICT_NO_BASELINE: "no published baseline to compare against",
 }
 
@@ -1198,6 +1415,10 @@ class IndexComparison:
     verdict: str
     #: Why the published manifest could not be read, when it could not be.
     baseline_error: str = ""
+    #: Why the *local* manifest could not be read, when a local index is there
+    #: and it could not be. Reported for the same reason ``baseline_error`` is:
+    #: the verdict names the state, and only this names the cause.
+    local_error: str = ""
     #: Field-by-field differences, when both sides are readable.
     differences: list[str] = field(default_factory=list)
     provenance: str = PROVENANCE_UNKNOWN
@@ -1274,7 +1495,7 @@ def compare_index(
     """
     dest = Path(index_path) if index_path else settings.index_file
     source = source or resolve_source(version)
-    local = _local_manifest(dest)
+    local, unreadable = _read_destination(dest)
 
     published: manifest_mod.Manifest | None = None
     baseline_error = ""
@@ -1289,6 +1510,8 @@ def compare_index(
         # Checked before the content comparison: an index this install cannot
         # query is not made usable by being newer.
         verdict = VERDICT_INCOMPATIBLE
+    elif unreadable:
+        verdict = VERDICT_UNREADABLE_LOCAL_INDEX
     elif local is None:
         verdict = VERDICT_NO_LOCAL_INDEX
     elif _is_same_index(local, published):
@@ -1309,6 +1532,7 @@ def compare_index(
         published=published,
         verdict=verdict,
         baseline_error=baseline_error,
+        local_error=unreadable,
         differences=_refresh_notes(local, published) if published is not None else [],
         provenance=index_provenance(local) if local is not None else PROVENANCE_UNKNOWN,
     )
@@ -1329,6 +1553,7 @@ def comparison_to_dict(comparison: IndexComparison) -> dict[str, Any]:
         "local": {
             "index_path": str(comparison.index_path),
             "provenance": comparison.provenance,
+            "error": comparison.local_error,
             **_side(comparison.local),
         },
         "published": _side(comparison.published),
@@ -1433,6 +1658,7 @@ __all__ = [
     "VERDICT_NO_BASELINE",
     "VERDICT_NO_LOCAL_INDEX",
     "VERDICT_PUBLISHED_DIFFERS",
+    "VERDICT_UNREADABLE_LOCAL_INDEX",
     "VERDICT_UP_TO_DATE",
     "BuildResult",
     "FetchResult",

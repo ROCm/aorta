@@ -827,10 +827,13 @@ class TestEveryCommandTheseDocsPrintCanRun:
                 node.make_context(command, remaining, parent=parent)
 
     def test_the_sweep_would_reject_a_flag_that_does_not_exist(self):
-        """Keeps the strict tier honest: `--force` on `index fetch` is #465's.
+        """Keeps the strict tier honest: without this the sweep above is vacuous.
 
-        Documenting it before that lands would print a line Click rejects, which
-        is the trap the round that prompted this test invited.
+        Originally asked with ``--force`` on ``index fetch``, the flag #465 was
+        about to add. That made the control expire the moment #465 landed, which
+        is the wrong failure -- it says nothing about whether the sweep still
+        rejects anything. A flag no one will ever add keeps the control about
+        the parser rather than about the schedule.
         """
         from click import Context, NoSuchOption
 
@@ -843,7 +846,7 @@ class TestEveryCommandTheseDocsPrintCanRun:
                 with Context(index_group, parent=chat_ctx) as index_ctx:
                     fetch = index_group.get_command(index_ctx, "fetch")
                     with pytest.raises(NoSuchOption):
-                        fetch.make_context("fetch", ["--force"], parent=index_ctx)
+                        fetch.make_context("fetch", ["--not-a-real-flag"], parent=index_ctx)
 
     def test_the_docs_do_not_promise_the_force_flag_yet(self):
         """The finding itself, pinned where it was raised.

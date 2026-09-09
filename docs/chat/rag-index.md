@@ -89,6 +89,12 @@ read is reported as *no baseline* rather than as *up to date*, and the verdict
 names which asset it compared against, because a `.dev` install resolves to the
 rolling `main` tag rather than to a release.
 
+Two verdicts exit non-zero, and both mean no comparison was made: *no baseline*,
+and *unreadable local index* — a file at the index path with no manifest this
+build can read, which is also what the first query would refuse. An **absent**
+local index exits zero; that is a normal answer for someone who has not
+installed one yet.
+
 ### What replaces what
 
 Overwriting is guarded, and deliberately not symmetrically. A fetched index
@@ -107,10 +113,20 @@ re-download the embedding weights.
 | `build` | downloaded, but not usable by this install | rebuilt; it cannot answer anything, so nothing is lost |
 | `fetch` or `--from` | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
 | `build` | a manifest whose `corpus_roots` cannot be read | refused, unless a row above already exempts it; pass `--force` |
+| any of them | *not an index at all* — a path that exists with no manifest beside it | refused; pass `--force` |
+
+`fetch` also opens the store before deciding a refresh would change nothing.
+A matching `index_sha256` says the right index was installed, not that the file
+is still one, so a damaged store under an untouched sidecar is re-fetched rather
+than reported as *already up to date* — by the one command that would repair it.
 
 A refusal names what would be lost and the flag that proceeds anyway, following
 `config init --force` rather than prompting, so a script and a terminal behave
-identically. An index the running configuration cannot *use* is never protected:
+identically. The command it prints carries any non-default `--path` and
+`--output` the refused invocation used, so pasting it acts on the index in
+question rather than on the cache; over the default paths it prints the short
+form, because there the two are the same index. An index the running
+configuration cannot *use* is never protected:
 rebuilding one you cannot query loses nothing, and `doctor` tells you to rebuild
 it. "Cannot use" is the same question the first query asks, store included — an
 embedding-model or identity mismatch, a manifest that disagrees with the
@@ -121,6 +137,14 @@ Which side built an index is read off its manifest's `corpus_roots`, so an index
 whose manifest records *no* roots — one built before the field existed — is not
 protected either way. One that records roots this build cannot read is a broken
 sidecar rather than an old one, and is refused rather than guessed at.
+
+No manifest *at all* is the last row, and it is about the destination rather
+than about provenance. Every write path here leaves its sidecars, so a path that
+exists without them is not an index this tool finished installing: it is a
+mistyped `--output`, a file something else owns, or an index whose sidecars were
+lost. Only the first two are unrecoverable, and nothing on disk tells them
+apart, so all three are refused. A path that does *not* exist is a first
+install and is always permitted — that distinction is the whole rule.
 
 The exemptions come first, which is why the `build` row above is qualified. An
 unreadable `corpus_roots` means the index is either a published one or a local

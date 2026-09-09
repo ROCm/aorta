@@ -109,6 +109,11 @@ jobs:
             'tests/chat/*'
             'tests/cli/test_chat.py'
             'tests/cli/test_chat_boundaries.py'
+            # Both are skipif-gated on langchain_core, so the required CPU gate
+            # collects them and skips 32 of their tests. This job is the only
+            # one with the extra, so it is the only place they ever execute.
+            'tests/cli/test_chat_index_cli.py'
+            'tests/cli/test_chat_index_workflows.py'
             # TestRealProviderResolution resolves the provider layer for real,
             # so it needs the extra and only runs here.
             'tests/agent/test_llm_providers.py'
@@ -265,9 +270,16 @@ jobs:
       # unmocked resolution. That group skips itself on the required CPU gate,
       # which installs no chat extra, so without this line it would be gated
       # everywhere and run nowhere.
+      #
+      # test_chat_index_cli.py and test_chat_index_workflows.py are here for
+      # exactly that reason. Both are skipif-gated on langchain_core, so the
+      # required CPU gate collects them and skips every test that needs the
+      # extra -- 32 of the 61 between them. This is an allow-list, not a
+      # directory, so a file absent from it runs in no job at all.
       - name: Run the chat test suite
         run: |
           pytest tests/chat tests/cli/test_chat.py tests/cli/test_chat_boundaries.py \
+            tests/cli/test_chat_index_cli.py tests/cli/test_chat_index_workflows.py \
             tests/agent/test_llm_providers.py \
             -m "not gpu and not rocm" -n auto
 

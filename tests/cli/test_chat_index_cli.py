@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from aorta.cli import main
 from aorta.cli.chat import chat
 
 _CHAT_AVAILABLE = importlib.util.find_spec("langchain_core") is not None
@@ -32,8 +33,17 @@ def runner() -> CliRunner:
 
 
 class TestRegistration:
+    """Driven through ``aorta``, not through the ``chat`` group object.
+
+    Every other test in this file invokes the subgroup directly, which is fine
+    for the behaviour of one command and blind to how it is reached: anything
+    about the registration itself, or about top-level option handling, is
+    invisible from inside the group. Registration is exactly what this class
+    asserts, so it goes through the real root command.
+    """
+
     def test_the_index_group_lists_its_subcommands(self, runner: CliRunner):
-        result = runner.invoke(chat, ["index", "--help"])
+        result = runner.invoke(main, ["chat", "index", "--help"])
         assert result.exit_code == 0, result.output
         for subcommand in ("build", "fetch", "digest", "eval", "runs"):
             assert subcommand in result.output
@@ -44,7 +54,7 @@ class TestRegistration:
         So the run-artifact collection that ``search_run_artifacts`` and the
         tool prompts both advertise could not be built by any documented route.
         """
-        result = runner.invoke(chat, ["index", "runs", "--help"])
+        result = runner.invoke(main, ["chat", "index", "runs", "--help"])
         assert result.exit_code == 0, result.output
         # Whitespace-normalised: Click rewraps the docstring to the terminal
         # width, so a phrase can land across two lines.
@@ -53,13 +63,20 @@ class TestRegistration:
         assert "never part of a published index" in help_text
 
     def test_doctor_is_registered(self, runner: CliRunner):
-        result = runner.invoke(chat, ["doctor", "--help"])
+        result = runner.invoke(main, ["chat", "doctor", "--help"])
         assert result.exit_code == 0, result.output
 
     def test_the_chat_help_lists_index_and_doctor(self, runner: CliRunner):
-        result = runner.invoke(chat, ["--help"])
+        result = runner.invoke(main, ["chat", "--help"])
+        assert result.exit_code == 0, result.output
         assert "index" in result.output
         assert "doctor" in result.output
+
+    def test_index_status_is_reachable_from_the_root_command(self, runner: CliRunner):
+        """The newest subcommand, asserted where a registration slip would show."""
+        result = runner.invoke(main, ["chat", "index", "status", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--json" in result.output
 
     def test_fetch_documents_both_resolution_and_side_loading(self, runner: CliRunner):
         result = runner.invoke(chat, ["index", "fetch", "--help"])
@@ -196,6 +213,26 @@ class TestFetchErrors:
         )
         assert result.exit_code != 0
         assert "no manifest beside" in result.output
+
+    def test_an_overwrite_refusal_names_the_flag_that_proceeds(
+        self, runner: CliRunner, tmp_path: Path
+    ):
+        """A refusal a user cannot act on is a traceback with better manners.
+
+        The destination exists and has no manifest, so nothing can say whether
+        it is an index -- and this is the one refusal reachable by a plain typo,
+        which is the case that most needs the escape spelled out.
+        """
+        target = tmp_path / "notes.txt"
+        target.write_text("a year of notes", encoding="utf-8")
+
+        result = runner.invoke(chat, ["index", "build", "--output", str(target)])
+
+        assert result.exit_code != 0
+        assert "no manifest beside it" in result.output
+        assert "--force" in result.output
+        assert "Traceback" not in result.output
+        assert target.read_text(encoding="utf-8") == "a year of notes"
 
 
 class TestDoctorOutput:
@@ -445,6 +482,59 @@ class TestStatus:
         assert result.exit_code == 1
         assert "no published baseline" in result.output
         assert "up to date" not in result.output
+
+    def test_an_unreadable_local_index_exits_non_zero_and_says_it_is_there(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        """The other verdict that means "no comparison was made".
+
+        It used to report "no local index; nothing has been installed yet" over
+        a file sitting at the path it just named -- and exit zero, so a health
+        check scripted on this command called a broken index fine.
+        """
+        from aorta.chat.rag import manifest as manifest_mod
+
+        self._serve(monkeypatch)
+        index = tmp_path / "i.sqlite"
+        index.write_bytes(b"an index of some kind")
+        manifest_mod.manifest_path(index).write_text('{"aorta_version": "0.2', encoding="utf-8")
+
+        result = runner.invoke(
+            chat, ["index", "status", "--version", "0.2.1", "--index", str(index)]
+        )
+
+        assert result.exit_code == 1
+        assert "nothing has been installed yet" not in result.output
+        assert "no manifest beside it can be read" in result.output
+        assert "Traceback" not in result.output
+
+    def test_a_difference_past_the_column_width_is_still_shown(self, capsys):
+        """Otherwise the row that exists to show a difference shows agreement.
+
+        Truncating to 42 characters is fine for a digest, which differs in its
+        first few when it differs at all. It is not fine for a remote identity:
+        ``remote / <endpoint> / <model>`` puts the discriminating part last, so
+        two different endpoints on the same provider render as the same cell
+        while ``model`` and ``dimensions`` above them stay identical -- the
+        exact case the identity row was added for.
+
+        Driven through the renderer rather than a served manifest, because what
+        is pinned here is the table's own shape.
+        """
+        from aorta.cli.chat import _echo_status_table
+
+        shared = "remote / https://embeddings.internal.example/v1/api/"
+        local = {"embedding_identity": shared + "east", "embedding_model": "e5-large"}
+        published = {"embedding_identity": shared + "west", "embedding_model": "e5-large"}
+
+        _echo_status_table(local, published)
+        text = capsys.readouterr().out
+
+        assert shared + "east" in text
+        assert shared + "west" in text
+        assert "identity differs past the column width" in text
+        # A row that agrees is not repeated; the table stays a table.
+        assert "model differs past the column width" not in text
 
     def test_an_unreachable_host_is_a_sentence_not_a_traceback(
         self, runner: CliRunner, tmp_path: Path, monkeypatch
