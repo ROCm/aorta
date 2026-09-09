@@ -90,6 +90,10 @@ def poll_jobs(
     watcher = LogWatcher()
     jobs_root = Path(jobs_root)
     rounds = 0
+    #: Jobs that have already alerted. Autopsy is expensive and its verdict is
+    #: about the failure, not about the bytes that arrived after it, so a job
+    #: is diagnosed once per session however much more it goes on to write.
+    alerted: set[str] = set()
 
     print(f"[watch] polling {jobs_root} every {interval}s")
 
@@ -98,6 +102,8 @@ def poll_jobs(
         active = scan_active_jobs(jobs_root)
 
         for job in active:
+            if job.job_id in alerted:
+                continue
             job_dir = jobs_root / job.job_id
             events_path = job_dir / "events.jsonl"
             job_context = (
@@ -203,7 +209,12 @@ def poll_jobs(
                 from aorta.cia.watch.trigger import trigger_autopsy
                 bundle = write_bundle(job, job_dir, evidence or new_content[:4000], signal)
                 trigger_autopsy(bundle, job, jobs_root)
-                break  # one alert per job per session
+                # continue, not break: break left the whole round, so a job that
+                # alerted every round starved every job listed after it. And the
+                # set above is what actually makes this once per job -- the
+                # comment here used to claim that on its own.
+                alerted.add(job.job_id)
+                continue
 
         time.sleep(interval)
 
