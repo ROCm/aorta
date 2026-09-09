@@ -658,7 +658,9 @@ def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
 _DETAIL_LIMIT = 300
 
 
-def _identity_qualifier(identity: dict[str, Any], *, index: bool = False) -> str:
+def _identity_qualifier(
+    identity: dict[str, Any], *, index: bool = False, full: bool = False
+) -> str:
     """The shortest identity fragment that tells two same-named kernels apart (pure).
 
     Prefers the code-object digest, falling back to the object's basename, and appends
@@ -673,10 +675,16 @@ def _identity_qualifier(identity: dict[str, Any], *, index: bool = False) -> str
     field this renders by default. It is off by default because selection stamps an
     index on every identity carrying a code object and it is 0 on nearly all of them,
     so rendering it always would pad the labels that are already unique.
+
+    ``full`` spends the whole digest rather than a 10-character prefix. Two objects
+    sharing a prefix *and* an index is the one collision the widened qualifier cannot
+    otherwise resolve; it is remote, which is why the prefix is what gets rendered
+    until a label actually ties.
     """
-    parts = _short(identity.get("code_object_sha256"), 10) or _basename(
-        identity.get("code_object")
-    )
+    digest = identity.get("code_object_sha256")
+    parts = (
+        str(digest) if full and digest else _short(digest, 10)
+    ) or _basename(identity.get("code_object"))
     object_index = identity.get("code_object_index")
     if index and isinstance(object_index, int):
         parts = f"{parts}#{object_index}" if parts else f"#{object_index}"
@@ -684,6 +692,41 @@ def _identity_qualifier(identity: dict[str, Any], *, index: bool = False) -> str
     if isinstance(offset, int):
         parts = f"{parts}+0x{offset:x}" if parts else f"0x{offset:x}"
     return parts
+
+
+# The qualifier widens one field at a time, cheapest first. Everything past the short
+# digest exists for a collision the tier before it cannot resolve, so a label only pays
+# for the ambiguity it actually has.
+_QUALIFIER_WIDENINGS: tuple[dict[str, bool], ...] = (
+    {},
+    {"index": True},
+    {"index": True, "full": True},
+)
+
+
+def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
+    """Labels for ``(name, identity)`` pairs, qualified only where a name repeats (pure).
+
+    Stops at the first widening that separates the colliding labels, so a unique name
+    renders bare and the common collisions do not pay for the rare ones. The widest
+    tier can still tie -- two identities with nothing to tell them apart -- in which
+    case there is nothing further to disambiguate with.
+    """
+    counts: dict[Any, int] = {}
+    for name, _ in items:
+        counts[name] = counts.get(name, 0) + 1
+    labels = [str(name) for name, _ in items]
+    for widening in _QUALIFIER_WIDENINGS:
+        labels = [
+            f"{name} ({qualifier})"
+            if counts[name] > 1
+            and (qualifier := _identity_qualifier(identity, **widening))
+            else str(name)
+            for name, identity in items
+        ]
+        if len(set(labels)) == len(labels):
+            break
+    return labels
 
 
 def _kernel_reason_entries(results: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -695,28 +738,13 @@ def _kernel_reason_entries(results: Sequence[dict[str, Any]]) -> list[dict[str, 
     records the identity fields, so ``env.json`` can attribute a failure without
     reopening ``sanitizer_report.json``.
 
-    ``label`` is qualified with that identity only where the name is actually
-    ambiguous among the failing kernels, and only as far as it takes to separate the
-    colliding labels -- the digest first, then the code-object index, which is the one
-    field that separates two objects bundled into a single file. Appending either
-    unconditionally would pad every one-line observation for the overwhelmingly common
-    unique-name case, where the name already identifies the kernel.
+    The identity fields are recorded *unabridged*. ``label`` is display copy and is
+    abbreviated (see ``_display_labels``); this projection is what makes ``env.json``
+    diagnosable, and a basename plus a digest prefix can tie where the full path and
+    digest do not -- which would put the ambiguity straight back into the manifest.
     """
     failing = [result for result in results if result["reason"]]
-    seen: dict[Any, int] = {}
-    for result in failing:
-        seen[result["name"]] = seen.get(result["name"], 0) + 1
-    labels = [str(result["name"]) for result in failing]
-    for widen in (False, True):
-        labels = [
-            f"{result['name']} ({qualifier})"
-            if seen[result["name"]] > 1
-            and (qualifier := _identity_qualifier(result["identity"], index=widen))
-            else str(result["name"])
-            for result in failing
-        ]
-        if len(set(labels)) == len(labels):
-            break
+    labels = _display_labels([(result["name"], result["identity"]) for result in failing])
     entries: list[dict[str, Any]] = []
     for label, result in zip(labels, failing, strict=True):
         identity = result["identity"]
@@ -724,8 +752,8 @@ def _kernel_reason_entries(results: Sequence[dict[str, Any]]) -> list[dict[str, 
             "kernel": str(result["name"]),
             "label": label,
             "reason": str(result["reason"]),
-            "code_object": _basename(identity.get("code_object")),
-            "sha": _short(identity.get("code_object_sha256"), 10),
+            "code_object": identity.get("code_object"),
+            "code_object_sha256": identity.get("code_object_sha256"),
             "code_object_index": identity.get("code_object_index"),
             "entry_offset": identity.get("entry_offset"),
         })
@@ -860,6 +888,13 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     # pointed at the fully-accumulated entry once every check has been folded in.
     kr_by_object: dict[tuple[str, Any], tuple[Any, ...]] = {}
     findings_by_name: dict[str | None, int] = {}
+    # Findings from a check that produced no kernel results at all. The combined hook's
+    # mandatory Waitcheck preflight is relabelled out of the ConSan run with its
+    # findings kept and its kernel results dropped (``consan._relabel``), and
+    # ``run_sanitizers`` appends it as a third check -- so its hazards count toward the
+    # case total with no per-kernel result to carry them. A row that has a result of
+    # its own has to pick up the ones naming it, or the column undercounts the case.
+    unattributed_by_name: dict[str | None, int] = {}
     for check in checks:
         sanitizer = str(check.get("sanitizer") or "")
         for result in check.get("kernel_results", []):
@@ -923,20 +958,31 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 kr_by_object.setdefault(
                     (str(result_sha), identity.get("code_object_index")), key
                 )
+        resultless = not check.get("kernel_results")
         for finding in check.get("findings", []):
             key = finding.get("kernel_name")
             findings_by_name[key] = findings_by_name.get(key, 0) + 1
+            if resultless:
+                unattributed_by_name[key] = unattributed_by_name.get(key, 0) + 1
 
     worklist = report.get("worklist", {})
     kernel_entries = worklist.get("kernels", [])
-    # A deduped row's Detail names the scan that covered it. Where two rows share that
-    # name the bare name cannot say which of them did the covering, so the same
-    # qualifier the reason labels use is appended -- and only there.
-    entry_names: dict[Any, int] = {}
-    for entry in kernel_entries:
-        entry_name = entry.get("identity", {}).get("name")
-        entry_names[entry_name] = entry_names.get(entry_name, 0) + 1
+    # A deduped row's Detail names the scan that covered it, and a bare name cannot say
+    # which row that was when two rows share one. Labelled against the whole worklist,
+    # so the qualifier appears only where the name actually repeats.
+    label_by_key = {
+        _identity_key(entry.get("identity", {})): label
+        for entry, label in zip(
+            kernel_entries,
+            _display_labels([
+                (entry.get("identity", {}).get("name"), entry.get("identity", {}))
+                for entry in kernel_entries
+            ]),
+            strict=True,
+        )
+    }
     kernels: list[dict[str, Any]] = []
+    credited: set[Any] = set()
     for entry in kernel_entries:
         identity = entry.get("identity", {})
         name = identity.get("name")
@@ -945,6 +991,15 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         detail = ""
         if result is not None:
             verdict, findings = result["verdict"], result["findings"]
+            # Credited to the first row of that name only: two rows can share one, and
+            # a resultless finding names a kernel rather than an identity, so crediting
+            # both would double-count it against the case total. A process-scope
+            # finding (no kernel name) is attributable only to a lone kernel.
+            if name not in credited:
+                credited.add(name)
+                findings += unattributed_by_name.get(name, 0)
+                if len(kernel_entries) == 1:
+                    findings += unattributed_by_name.get(None, 0)
             detail = str(result["reason"] or "")
         elif entry_sha and (
             covering_key := kr_by_object.get(
@@ -959,11 +1014,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             covering = kr_by_identity[covering_key]
             verdict = covering["verdict"]
             findings = 0
-            covering_label = str(covering["name"])
-            if entry_names.get(covering["name"], 0) > 1 and (
-                qualifier := _identity_qualifier(covering["identity"], index=True)
-            ):
-                covering_label = f"{covering_label} ({qualifier})"
+            covering_label = label_by_key.get(covering_key, str(covering["name"]))
             detail = f"same code object as {covering_label}; scanned once"
             if covering["reason"]:
                 detail = f"{detail} \u2014 {covering['reason']}"
@@ -2567,7 +2618,7 @@ def build_case_env(
                     "kernel": entry["kernel"],
                     "reason": entry["reason"],
                     "code_object": entry["code_object"],
-                    "sha": entry["sha"],
+                    "code_object_sha256": entry["code_object_sha256"],
                     "code_object_index": entry["code_object_index"],
                     "entry_offset": entry["entry_offset"],
                 }
