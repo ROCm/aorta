@@ -106,9 +106,7 @@ class TestShellToolIsOptIn:
         assert "run_terminal_command" in registry
         assert registry["run_terminal_command"].source_package == "aorta"
 
-    def test_the_default_registry_is_the_builtins_exactly(
-        self, fake_chat_tool_eps, monkeypatch
-    ):
+    def test_the_default_registry_is_the_builtins_exactly(self, fake_chat_tool_eps, monkeypatch):
         from aorta.chat.config import settings
 
         monkeypatch.setattr(settings, "enable_shell_tool", False)

@@ -55,7 +55,7 @@ class TestRetrieveNode:
 
 
 class TestRunArtifactsReachTheToolFreeBranch:
-    """"Why did this sweep fail?" is specific, so the router calls it a question.
+    """ "Why did this sweep fail?" is specific, so the router calls it a question.
 
     That branch has no tools, and retrieval only ever queried the source
     collection -- so the PR's headline use case was answerable only from source
@@ -67,8 +67,10 @@ class TestRunArtifactsReachTheToolFreeBranch:
         from langchain_core.documents import Document
 
         return [
-            Document(page_content=text, metadata={"source": "run_nan/matrix.json",
-                                                  "artifact_kind": "matrix"})
+            Document(
+                page_content=text,
+                metadata={"source": "run_nan/matrix.json", "artifact_kind": "matrix"},
+            )
             for text in contents
         ]
 
@@ -170,10 +172,12 @@ class TestActNode:
     @pytest.mark.asyncio
     async def test_single_tool_call_then_answer(self):
         """LLM calls a tool, gets result, then answers."""
-        fake = make_fake_llm([
-            'Let me check. ACTION: list_files(path=".")',
-            "The root directory has: src/, config.yaml, README.md",
-        ])
+        fake = make_fake_llm(
+            [
+                'Let me check. ACTION: list_files(path=".")',
+                "The root directory has: src/, config.yaml, README.md",
+            ]
+        )
         mock_tool_result = "src/\nconfig.yaml\nREADME.md"
 
         with (
@@ -282,8 +286,7 @@ class TestCriticNode:
     async def test_detects_nonzero_exit_code(self):
         """Critic detects command failure from exit code in tool results."""
         failure_msg = HumanMessage(
-            content="TOOL RESULT from run_terminal_command:\n"
-            "Exit code: 1\nError: file not found"
+            content="TOOL RESULT from run_terminal_command:\nExit code: 1\nError: file not found"
         )
         fake = make_fake_llm(["Root cause: missing file. Fix: create it."])
 
@@ -306,9 +309,7 @@ class TestCriticNode:
     @pytest.mark.asyncio
     async def test_valid_response_passes(self):
         """Critic returns no feedback when response is VALID."""
-        tool_msg = HumanMessage(
-            content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml"
-        )
+        tool_msg = HumanMessage(content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml")
         fake = make_fake_llm(["VALID"])
 
         with (
@@ -329,12 +330,10 @@ class TestCriticNode:
     @pytest.mark.asyncio
     async def test_invalid_response_triggers_feedback(self):
         """Critic rejects hallucinated commands."""
-        tool_msg = HumanMessage(
-            content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml"
+        tool_msg = HumanMessage(content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml")
+        fake = make_fake_llm(
+            ["The response references run_experiment.sh which was not found by any tool."]
         )
-        fake = make_fake_llm([
-            "The response references run_experiment.sh which was not found by any tool."
-        ])
 
         with (
             patch("aorta.chat.graph.nodes.settings") as mock_s,

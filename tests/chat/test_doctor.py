@@ -558,6 +558,10 @@ class TestIndexChecks:
 
         monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
         monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        # A key as well, or the remedy answers a different question: with an
+        # empty one the build is the impossible command and the block leads
+        # with the switch back to local instead.
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
         check = _by_name(run_checks(backend=False), "chat index")
         assert check.status == FAIL
         commands = [line for line in check.hint.splitlines() if line.startswith("  aorta")]
@@ -618,6 +622,7 @@ class TestIndexChecks:
         # real remote provider needs an endpoint and a key, which is a different
         # check's problem.
         monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
         check = _by_name(run_checks(backend=False), "index manifest")
         commands = [line for line in check.procedure.splitlines() if line.startswith("  aorta")]
         assert commands == ["  aorta chat index build     embed the corpus with the configured"]
@@ -1566,3 +1571,183 @@ class TestBackendCheck:
         monkeypatch.setattr(factory, "get_backend", lambda *a, **k: _Recording())
         run_checks(backend=True)
         assert budgets and budgets[0] is not None and budgets[0] <= 10
+
+
+# The placeholders the report's commands are allowed to contain, and a real
+# value for each. A new one makes the sweep below fail rather than skip: the
+# point is that every command is parsed, so an unregistered placeholder has to
+# be a deliberate decision by whoever added it.
+_PLACEHOLDERS = {"<name>": "openai"}
+
+
+def _commands_named_in(text: str) -> list[tuple[list[str], list[str], bool]]:
+    """Every ``aorta chat ...`` invocation in ``text``, as ``(path, args, offered)``.
+
+    The report prints commands with their explanation on the same line, so
+    tokens are consumed greedily through the command path and then only while
+    they are options or an option's value. Prose does not start with ``--``,
+    which is where each command ends.
+
+    ``offered`` distinguishes the two ways the report names a command, because
+    they carry different promises. A command that begins its own line is being
+    offered to be typed, so it has to run exactly as printed. A command quoted
+    inside a sentence may be referring to a mechanism rather than proposing it
+    -- the migration procedure explains what ``'aorta chat config init'`` did
+    to profiles in the past -- so it must name something real, but need not
+    carry every option a run would need.
+    """
+    import re
+
+    from aorta.cli.chat import chat as chat_group
+
+    found = []
+    for match in re.finditer(r"aorta chat ([^\n']*)", text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        offered = text[line_start : match.start()].strip() == ""
+        tokens = match.group(1).split()
+        command, path = chat_group, []
+        while tokens and not tokens[0].startswith("-"):
+            nxt = command.get_command(None, tokens[0]) if hasattr(command, "get_command") else None
+            if nxt is None:
+                break
+            path.append(tokens.pop(0))
+            command = nxt
+        if not path:
+            continue
+        args = []
+        params = {opt: p for p in getattr(command, "params", []) for opt in p.opts}
+        while tokens and tokens[0].startswith("--"):
+            option = tokens.pop(0)
+            args.append(option)
+            param = params.get(option)
+            if param is not None and not getattr(param, "is_flag", False) and tokens:
+                raw = tokens.pop(0)
+                args.append(_PLACEHOLDERS.get(raw, raw))
+        found.append((path, args, offered))
+    return found
+
+
+def _resolve(path: list[str]):
+    """The Click command at ``path``, and the group holding it."""
+    from aorta.cli.chat import chat as chat_group
+
+    command, parent = chat_group, None
+    for part in path:
+        parent = command
+        command = command.get_command(None, part)
+    return command, parent
+
+
+class TestEveryCommandTheReportNamesCanRun:
+    """The closed-set answer to "is this advice followable?".
+
+    Three separate findings in this area were each a command that could not run
+    in the state that printed it: ``index fetch`` offered to a remote embedder,
+    ``index build`` offered on an empty ``remote_embedding_api_key``, and
+    ``config init --force`` printed without the ``--profile`` Click requires.
+    Each was found by hand, one review round apart, and a fourth would have
+    been found the same way one round later. So the question is asked here of
+    every arm at once instead, and asked of Click's own parser -- the code that
+    would reject the line -- rather than of a reader's judgement.
+    """
+
+    def _texts(self, monkeypatch, tmp_path: Path) -> list[str]:
+        """Every hint and procedure the report can produce, across resolved states.
+
+        Driven rather than read off the source, so advice composed by f-string
+        is included, and swept across the settings that select different arms:
+        the embedding provider, the embedding key, and the tool mode each fork
+        the wording, and the arms that differ are exactly the ones at issue.
+        """
+        from aorta.chat.rag import manifest as manifest_mod
+
+        texts = []
+        for provider, key, mode, model in (
+            ("local", "", "text", "gpt-4o"),
+            ("remote", "", "native", "gpt-oss-120b"),
+            ("remote", "sk-test", "native", "gpt-4o"),
+            ("local", "", "sideways", "gpt-4o"),
+        ):
+            monkeypatch.setattr(
+                manifest_mod, "_configured_embedding_provider", lambda p=provider: p
+            )
+            monkeypatch.setattr(settings, "embedding_provider", provider)
+            monkeypatch.setattr(settings, "remote_embedding_api_key", key)
+            monkeypatch.setattr(settings, "llm_tool_mode", mode)
+            monkeypatch.setattr(settings, "vllm_model", model)
+            monkeypatch.setattr(settings, "remote_llm_model", model)
+            monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
+            for check in run_checks(backend=False).checks:
+                texts += [check.hint, check.procedure, check.detail]
+            texts += manifest_mod.remedy_lines()
+            texts.append(manifest_mod._refresh_advice())
+        return [t for t in texts if t]
+
+    def test_every_offered_command_parses_as_printed(self, monkeypatch, tmp_path: Path):
+        from click import Context
+
+        offered_seen = 0
+        for text in self._texts(monkeypatch, tmp_path):
+            for path, args, offered in _commands_named_in(text):
+                command, parent = _resolve(path)
+                assert command is not None, path
+                if not offered:
+                    continue
+                offered_seen += 1
+                # A group prints help rather than doing the thing, so offering
+                # one is advice that does not act -- and it is what a command
+                # name broken across a line wrap looks like to the extractor.
+                assert not hasattr(command, "get_command"), f"{path} is a group, not a command"
+                with Context(parent) as ctx:
+                    # Parses and validates required options without running the
+                    # callback: a missing required option raises here, which is
+                    # what a user typing the printed line would get.
+                    command.make_context(" ".join(path), list(args), parent=ctx)
+        assert offered_seen > 8, f"only {offered_seen} offered commands; the extractor has broken"
+
+    def test_a_quoted_mention_may_omit_options_but_must_name_something_real(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The weaker promise, still checked -- a renamed command breaks both tiers."""
+        from click import Context, MissingParameter
+
+        quoted = 0
+        for text in self._texts(monkeypatch, tmp_path):
+            for path, args, offered in _commands_named_in(text):
+                if offered:
+                    continue
+                command, parent = _resolve(path)
+                assert command is not None, path
+                quoted += 1
+                if hasattr(command, "get_command"):
+                    continue  # A bare group named in prose is a noun, not advice.
+                try:
+                    with Context(parent) as ctx:
+                        command.make_context(" ".join(path), list(args), parent=ctx)
+                except MissingParameter:
+                    pass  # Allowed here, and only here.
+        assert quoted, "no quoted mentions found; the extractor has broken"
+
+    def test_the_sweep_would_catch_a_missing_required_option(self):
+        """Without this the sweep could pass by never finding a failure to catch.
+
+        ``config init`` requires ``--profile``, and the migration procedure
+        offered it without one until this round. Pinning the rejection keeps
+        the strict tier honest about what it rules out.
+        """
+        from click import Context, UsageError
+
+        config, _ = _resolve(["config"])
+        init, _ = _resolve(["config", "init"])
+        with Context(config) as ctx, pytest.raises(UsageError):
+            init.make_context("init", ["--force"], parent=ctx)
+
+    def test_the_migration_procedure_offers_the_profile_option(self):
+        """The finding itself, pinned where it was printed."""
+        offered = [
+            args
+            for path, args, is_offered in _commands_named_in(doctor._REMOTE_EMBEDDING_MIGRATION)
+            if path == ["config", "init"] and is_offered
+        ]
+        assert offered, "the migration procedure no longer offers 'config init'"
+        assert all("--profile" in args for args in offered)

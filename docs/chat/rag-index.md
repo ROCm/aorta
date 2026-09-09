@@ -116,16 +116,27 @@ remote LLM used to set `embedding_provider = "remote"`, and nothing rewrites a
 configured provider is remote *and* there is no index this install can query,
 and names the edit: `embedding_provider = "local"`, the
 `AORTA_CHAT_EMBEDDING_PROVIDER=local` spelling for one session, or `aorta chat
-config init --force` to rewrite the profile from the current template. It stays
+config init --force --profile <name>` to rewrite the profile from the current
+template — `--profile` is required and `chat.toml` does not record which one
+wrote it, so that last option needs a name you remember. It stays
 quiet for a remote embedder with an index built to match, which is a correct
 setup that should not be told to change.
 
 Those profiles are usually also missing `remote_embedding_api_key` — no profile
 template prompts for it, and it does not fall back to the key the chat model
 uses — so `doctor` will not tell them to build the index locally either. Every
-chunk of the corpus goes through the embeddings API, so with no key that build
-fails on the first one. Switching to local embeddings is the remedy that needs
-neither a key nor a rebuild.
+chunk of the corpus goes through the embeddings API, and `RemoteApiProvider`
+raises on an empty key before it sends anything, so with no key that build
+fails on the first chunk. Switching to local embeddings is the remedy that
+needs neither a key nor a rebuild.
+
+That is knowable from settings alone, with no network call, so the remedy lists
+act on it: with `embedding_provider = "remote"` and no key, **neither** index
+command is offered. The fetch is refused because the published asset is built
+with the local embedder, and the build is refused because the provider cannot
+be constructed — so the list leads with the switch to local, which is the only
+remedy that runs, and then says why the other two are missing rather than going
+quiet about them. Set the key and the build comes back.
 
 It is the normal path for every chat provider, because the embedding provider is
 a separate choice and every `config init` profile leaves it local. The asset is

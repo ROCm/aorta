@@ -227,7 +227,7 @@ class Manifest:
         if wrong:
             raise ManifestError(
                 f"manifest field(s) are not the type the format declares: {'; '.join(wrong)}. "
-                f"Replace it with '{_refresh_command()}'."
+                f"Replace it with {_refresh_advice()}."
             )
 
         try:
@@ -297,7 +297,7 @@ def read_manifest(index_path: str | Path) -> Manifest:
             "An index without one cannot be checked against this install's "
             "embedding model, which is the check that stops a silently "
             "mismatched index answering from the wrong vectors. Replace it "
-            f"with '{_refresh_command()}'."
+            f"with {_refresh_advice()}."
         ) from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestError(f"could not read the manifest at {path}: {exc}") from exc
@@ -331,7 +331,7 @@ def ensure_supported_schema(manifest: Manifest, subject: str) -> None:
         raise ManifestError(
             f"the manifest for {subject} carries a non-integer schema version "
             f"({version!r}), so it is malformed and cannot be interpreted. "
-            f"Replace it with '{_refresh_command()}'."
+            f"Replace it with {_refresh_advice()}."
         )
     if version > SCHEMA_VERSION:
         raise ManifestError(
@@ -384,6 +384,61 @@ def _configured_embedding_provider() -> str:
         return "local"
 
 
+def _remote_embedder_error() -> str:
+    """Why a remote embedding build would fail before it started, or "".
+
+    Every remedy below that names ``aorta chat index build`` under a remote
+    provider is naming a command that sends each chunk of the corpus through an
+    embeddings API -- and ``RemoteApiProvider.get_embeddings`` raises on an
+    empty ``remote_embedding_api_key`` before it sends anything. No profile
+    template has ever prompted for that key and it does not fall back to the
+    chat one, so the install being advised is very often the install that
+    cannot take the advice. Offering it anyway is the same defect as offering
+    ``index fetch`` to a remote embedder, one layer further in.
+
+    Asked of the provider rather than read off ``settings`` so it cannot drift
+    from the precondition the command will actually hit, and constructed
+    directly rather than through the factory: a caller may be asking about
+    ``remote`` while the configured provider is local, and instantiating *that*
+    one would download a model to answer a question about wording. Building the
+    client is offline either way.
+    """
+    try:
+        # Imported inside the try, not above it: ``remote_api`` pulls in the
+        # OpenAI client, and an install missing the chat-cli extra would
+        # otherwise take a refusal message down with an ImportError.
+        from aorta.chat.rag.embeddings.remote_api import RemoteApiProvider
+
+        RemoteApiProvider().get_embeddings()
+    except Exception as exc:
+        # Broad on purpose: the question is whether the client can be built at
+        # all, and every way it cannot is a build that fails on chunk one.
+        return str(exc)
+    return ""
+
+
+def _refresh_advice(embedding_provider: str | None = None) -> str:
+    """:func:`_refresh_command`, quoted, with any precondition it depends on.
+
+    The quoting lives here rather than at the four call sites so the
+    precondition cannot be dropped by one of them: a bare ``'{command}'`` in an
+    f-string reads as a command that runs, and for a keyless remote install it
+    is not.
+    """
+    command = _refresh_command(embedding_provider)
+    provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
+    if provider == "local" or not _remote_embedder_error():
+        return f"'{command}'"
+    return (
+        # Names the blocker and points at the full remedy rather than inlining
+        # it. These are one-line slots inside a warning, and spelling out the
+        # switch to local here would put ``index fetch`` back into a remote
+        # install's messages -- the thing this predicate exists to keep out.
+        f"'{command}', which cannot run until remote_embedding_api_key is set "
+        "-- 'aorta chat doctor' names the alternative"
+    )
+
+
 def _refresh_command(embedding_provider: str | None = None) -> str:
     """The single command that gets this install a current index, named inline.
 
@@ -391,6 +446,10 @@ def _refresh_command(embedding_provider: str | None = None) -> str:
     lines on it; this is for the sentence that only has room for one command.
     Conditional on the same fact, so the two cannot disagree about whether a
     fetch is worth suggesting.
+
+    Callers want :func:`_refresh_advice`, which quotes this and adds any
+    precondition the command depends on. This returns the bare command, so
+    that a message can say which one it means without asserting it can run.
     """
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
     return "aorta chat index fetch" if provider == "local" else "aorta chat index build"
@@ -408,6 +467,12 @@ def remedy_lines(
     index matching this install" does not exist for a remote one and never
     will. Offering it first sends the user to a refusal with different wording,
     from which the reasonable conclusion is that chat is broken.
+
+    Conditional on ``remote_embedding_api_key`` for the same reason one layer
+    in: a remote provider that cannot build a client cannot run ``index build``
+    either, so an install with neither key nor index is offered no index
+    command at all, and led to the switch back to local instead. Both
+    conditions are about the difference between advice and a dead end.
 
     Worded for an index that is absent as much as for one that is refused,
     because both states want the same list and a remedy that is only correct
@@ -428,6 +493,34 @@ def remedy_lines(
             "  aorta chat index fetch     download the index matching this install",
             "  aorta chat index build     build one locally with the configured provider",
             *(doctor_line if include_doctor else []),
+        ]
+
+    unavailable = _remote_embedder_error()
+    if unavailable:
+        # Leading with ``index build`` here would name the one command this
+        # install is guaranteed to fail: the provider raises before the first
+        # chunk is sent. So the order flips -- the setting change is the only
+        # remedy that runs, and the build is listed as what becomes possible
+        # rather than as what to do now.
+        # The provider's first sentence, not its whole message: the rest of it
+        # is remedies of its own, and repeating them would put the user in
+        # front of two differently-worded lists for one problem.
+        blocker = unavailable.split(". ")[0].rstrip(".")
+        return [
+            '  embedding_provider = "local"',
+            "                             in chat.toml, or the environment variable",
+            "                             AORTA_CHAT_EMBEDDING_PROVIDER=local for a",
+            # Kept on one line: a command name broken across a wrap cannot be
+            # copied out of the report in one go.
+            "                             single session, after which",
+            "                             'aorta chat index fetch' works",
+            *(doctor_line if include_doctor else []),
+            "",
+            "Neither index command is offered as-is. The published index is built with",
+            "the local embedder, so no published asset can match a remote one -- and",
+            "'aorta chat index build' would embed the corpus through the embeddings",
+            "API, which this install cannot reach:",
+            f"  {blocker}.",
         ]
 
     return [
@@ -593,12 +686,12 @@ def validate(
             f"source drift: index was built from aorta {manifest.aorta_version}"
             f"{f' ({manifest.aorta_sha[:7]})' if manifest.aorta_sha else ''}, this "
             f"install is {installed_version}. Answers may cite code that has "
-            f"since changed; refresh with '{_refresh_command()}'"
+            f"since changed; refresh with {_refresh_advice()}"
         )
     elif installed_sha and manifest.aorta_sha and not manifest.aorta_sha.startswith(installed_sha):
         report.warnings.append(
             f"source drift: index was built at {manifest.aorta_sha[:7]}, this "
-            f"install reports {installed_sha}. Refresh with '{_refresh_command()}'"
+            f"install reports {installed_sha}. Refresh with {_refresh_advice()}"
         )
 
     return report

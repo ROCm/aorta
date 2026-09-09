@@ -52,9 +52,7 @@ def _connector(loads_extensions: bool):
 
     def _connect(_target):
         if loads_extensions:
-            return SimpleNamespace(
-                enable_load_extension=lambda _flag: None, close=lambda: None
-            )
+            return SimpleNamespace(enable_load_extension=lambda _flag: None, close=lambda: None)
         return SimpleNamespace(close=lambda: None)
 
     return _connect
@@ -155,9 +153,7 @@ class TestEnsureModernSqlite:
         """Nothing is gained, and the precise message is about to be raised."""
         monkeypatch.setattr(sqlite_compat, "sqlite3", _sqlite_without_extensions())
         before = sys.modules["sqlite3"]
-        monkeypatch.setitem(
-            sys.modules, "pysqlite3", _fake_pysqlite3(loads_extensions=False)
-        )
+        monkeypatch.setitem(sys.modules, "pysqlite3", _fake_pysqlite3(loads_extensions=False))
         ensure_modern_sqlite()
         assert sys.modules["sqlite3"] is before
 

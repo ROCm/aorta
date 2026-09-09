@@ -14,6 +14,7 @@ standing between them and a plausible wrong answer.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,6 +34,20 @@ from aorta.chat.rag.manifest import (
     validate,
     write_manifest,
 )
+
+
+def _with_a_usable_remote_embedder(monkeypatch):
+    """Make the remote provider buildable, so a test can reach the keyed arm.
+
+    ``remote_embedding_api_key`` defaults to empty and no profile template has
+    ever prompted for it, so a bare ``remedy_lines("remote")`` now describes an
+    install that cannot embed anything. The tests below are about the provider
+    dimension rather than the key one, and this separates the two.
+    """
+    from aorta.chat.config import settings
+
+    monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
+
 
 MODEL = "BAAI/bge-small-en-v1.5"
 COLLECTION = "aorta_fastembed_baai_bge_small_en_v1_5"
@@ -426,6 +441,7 @@ class TestRefusalText:
         wording, from which the reasonable conclusion is that chat is broken.
         """
         monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        _with_a_usable_remote_embedder(monkeypatch)
         text = self._refusal()
         commands = [line for line in text.splitlines() if line.startswith("  aorta")]
         assert not any("index fetch" in line for line in commands)
@@ -439,8 +455,9 @@ class TestRemedyLines:
         lines = manifest_mod.remedy_lines("local")
         assert lines[0].strip().startswith("aorta chat index fetch")
 
-    def test_a_remote_provider_explains_the_absence_rather_than_hiding_it(self):
+    def test_a_remote_provider_explains_the_absence_rather_than_hiding_it(self, monkeypatch):
         """Otherwise the user goes looking for the command the docs mention."""
+        _with_a_usable_remote_embedder(monkeypatch)
         text = "\n".join(manifest_mod.remedy_lines("remote"))
         assert "is not offered here" in text
         assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in text
@@ -453,6 +470,7 @@ class TestRemedyLines:
         from aorta.chat.config import settings
 
         monkeypatch.setattr(settings, "embedding_provider", "remote")
+        _with_a_usable_remote_embedder(monkeypatch)
         assert "is not offered here" in "\n".join(manifest_mod.remedy_lines())
 
     def test_an_empty_provider_setting_is_treated_as_local(self, monkeypatch):
@@ -486,6 +504,114 @@ class TestRemedyLines:
             lines = manifest_mod.remedy_lines()
             assert lines[0].strip().startswith("aorta chat index fetch"), alias
             assert "is not offered here" not in "\n".join(lines), alias
+
+
+class TestAKeylessRemoteEmbedder:
+    """The arm for an install whose remote provider cannot embed anything.
+
+    ``remote_embedding_api_key`` defaults to empty, no profile template has
+    ever prompted for it, and it does not fall back to the chat key -- so this
+    is not an exotic state, it is the default state of every profile that
+    carries ``embedding_provider = "remote"``. Leading such an install with
+    ``index build`` names the one command it is guaranteed to fail.
+    """
+
+    def test_the_predicate_agrees_with_the_provider(self, monkeypatch):
+        """Asked of the provider, not re-derived from settings, so it cannot drift.
+
+        The oracle is the code the command would run:
+        ``RemoteApiProvider.get_embeddings`` raises on an empty key before it
+        sends anything, which is what makes the failure knowable offline.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.remote_api import RemoteApiProvider
+
+        for key in ("", "sk-test"):
+            monkeypatch.setattr(settings, "remote_embedding_api_key", key)
+            try:
+                RemoteApiProvider().get_embeddings()
+            except Exception as exc:
+                oracle = str(exc)
+            else:
+                oracle = ""
+            assert manifest_mod._remote_embedder_error() == oracle, key
+        # And that the empty key is the state that fails, not both or neither.
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        assert "remote_embedding_api_key" in manifest_mod._remote_embedder_error()
+
+    def test_an_unimportable_client_does_not_take_the_message_down(self, monkeypatch):
+        """The remedy runs on installs missing the chat-cli extra.
+
+        ``remote_api`` pulls in the OpenAI client, and this predicate is
+        consulted while composing a refusal -- so an import at function scope
+        outside the ``try`` would replace "your index does not match" with an
+        ImportError traceback, on the install least able to interpret it.
+        """
+        import builtins
+
+        real_import = builtins.__import__
+
+        def refuse(name, *args, **kwargs):
+            if "remote_api" in name or name.split(".")[0] in ("openai", "langchain_openai"):
+                raise ModuleNotFoundError(name)
+            return real_import(name, *args, **kwargs)
+
+        for module in [m for m in list(sys.modules) if "remote_api" in m]:
+            monkeypatch.delitem(sys.modules, module)
+        monkeypatch.setattr(builtins, "__import__", refuse)
+        assert manifest_mod._remote_embedder_error()
+        assert manifest_mod.remedy_lines("remote")[0].strip().startswith("embedding_provider")
+
+    def test_it_is_not_led_with_a_build_it_cannot_run(self):
+        """The finding: the remote arm offered ``index build`` unconditionally."""
+        lines = manifest_mod.remedy_lines("remote")
+        offered = [line for line in lines if line.startswith("  aorta")]
+        assert not any("index build" in line for line in offered)
+        assert not any("index fetch" in line for line in offered)
+
+    def test_it_leads_with_the_only_remedy_that_runs(self):
+        lines = manifest_mod.remedy_lines("remote")
+        assert lines[0].strip().startswith('embedding_provider = "local"')
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in "\n".join(lines)
+
+    def test_it_says_why_rather_than_going_quiet(self, monkeypatch):
+        """Withholding both commands without a reason reads as chat being broken."""
+        text = "\n".join(manifest_mod.remedy_lines("remote"))
+        assert "Neither index command is offered" in text
+        assert "remote_embedding_api_key" in text
+
+    def test_a_keyed_remote_provider_still_gets_the_build(self, monkeypatch):
+        """The other side of the fork, so this cannot become a blanket refusal."""
+        _with_a_usable_remote_embedder(monkeypatch)
+        offered = [line for line in manifest_mod.remedy_lines("remote") if line.startswith("  ao")]
+        assert any("index build" in line for line in offered)
+
+    def test_a_local_provider_is_unaffected_by_the_key(self, monkeypatch):
+        """The local embedder does not read it, so it must not change the advice."""
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        assert manifest_mod.remedy_lines("local")[0].strip().startswith("aorta chat index fetch")
+
+    def test_the_inline_form_names_the_blocker(self):
+        advice = manifest_mod._refresh_advice("remote")
+        assert "aorta chat index build" in advice
+        assert "remote_embedding_api_key" in advice
+
+    def test_the_inline_form_still_keeps_fetch_out_of_a_remote_message(self):
+        """Naming the switch to local here would undo the older fix.
+
+        ``index fetch`` is withheld from a remote install because the published
+        asset cannot match it; spelling the whole alternative out in a one-line
+        warning slot would put the command back in front of the user who
+        cannot use it. The slot names the blocker and points at ``doctor``.
+        """
+        assert "index fetch" not in manifest_mod._refresh_advice("remote")
+
+    def test_the_keyed_inline_form_is_just_the_command(self, monkeypatch):
+        _with_a_usable_remote_embedder(monkeypatch)
+        assert manifest_mod._refresh_advice("remote") == "'aorta chat index build'"
+        assert manifest_mod._refresh_advice("local") == "'aorta chat index fetch'"
 
 
 class TestRefreshCommand:

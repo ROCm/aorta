@@ -91,7 +91,7 @@ def fake_aorta_dir(tmp_path: Path) -> Path:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "src" / "main.py").write_text(
-        "def main():\n    print('hello')\n\n" "class App:\n    def run(self):\n        pass\n",
+        "def main():\n    print('hello')\n\nclass App:\n    def run(self):\n        pass\n",
         encoding="utf-8",
     )
     (tmp_path / "config.yaml").write_text("key: value\n", encoding="utf-8")
