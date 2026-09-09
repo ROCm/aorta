@@ -16,6 +16,7 @@ docs at that moment.
 from __future__ import annotations
 
 import ast
+import re
 import shlex
 from contextlib import suppress
 from pathlib import Path
@@ -106,15 +107,13 @@ def _fill_index(index: Path, collection: str, rows: int = 3) -> None:
             conn.close()
 
 
-#: Ways a partial copy or an interrupted build breaks the readable-collection
-#: contract while leaving the non-empty chunk table intact. Every one of these
-#: read as healthy until the probe checked more than the chunk count.
-#: Every way the store under a matching manifest can stop answering. Adding to
-#: this list extends both the probe's per-state tests *and*
-#: ``TestStoreProbeAgreesWithTheReadPath``, which is the point: the probe models
-#: the read path rather than asking it (see ``doctor._store_defect``), so the
-#: only thing keeping the model honest is a list that both sides read.
-STORE_DAMAGE = (
+#: Ways a partial copy or an interrupted build breaks the *structure* the
+#: readable-collection contract needs, while leaving the non-empty chunk table
+#: intact. Every one of these read as healthy until the probe checked more than
+#: the chunk count. These are about tables, rows and the registry, so they are
+#: not derivable from the read path's column list -- unlike the value states
+#: below, which are.
+STRUCTURAL_DAMAGE = (
     "registry-table",
     "registry-row",
     "chunk-columns",
@@ -123,9 +122,95 @@ STORE_DAMAGE = (
     "vector-rowids",
     "registry-width",
     "registry-width-text",
-    "metadata-not-json",
-    "metadata-not-an-object",
 )
+
+#: What each column ``_knn`` selects has to hold for a query to survive it, as
+#: the damage states that violate it.
+#:
+#: Hand-maintaining the state list is what failed twice. Review found the
+#: ``metadata`` states missing in one round and the ``content`` states missing
+#: in the next -- adjacent columns of the same ``SELECT``, the same omission
+#: both times, because the list was written beside the read path rather than
+#: taken from it. A third round of adding a state would buy the same fix a
+#: third time. So the states are keyed by column and the columns come from
+#: ``_read_path_columns()``: an oracle that is right by construction rather
+#: than by having enumerated enough.
+#:
+#: An empty tuple is a claim, not a gap, and needs the reason with it.
+COLUMN_DAMAGE = {
+    "content": ("content-null", "content-not-text"),
+    "metadata": ("metadata-not-json", "metadata-not-an-object"),
+    # No value state, because none is reachable: ``vec0`` validates on write.
+    # Measured against the extension rather than assumed -- a text value, a
+    # short blob and an integer are each refused with "invalid"/"Dimension
+    # mismatch", and a NULL is a silent no-op that leaves the stored vector
+    # in place. So this column cannot hold a value ``_deserialise`` chokes on,
+    # and the ways it does defeat a query -- no vector table, missing rows,
+    # rowids that do not line up -- are the structural states above.
+    "embedding": (),
+}
+
+
+def _read_path_columns() -> tuple[str, ...]:
+    """The columns the read path selects, read out of the query it runs.
+
+    Taken from ``_knn``'s own SQL so the two cannot drift: a column added to
+    that ``SELECT`` arrives here without anyone updating a list. Reading the
+    source rather than an exported constant keeps this inside the test --
+    ``retriever`` is not this PR's to change, and a constant it did not ask for
+    would be a second thing to keep in step.
+
+    Reading source with a regex is only safe because it fails closed. It wants
+    the outer ``SELECT``, and matches it rather than the KNN subquery because
+    that one is indented inside its string literal. If a reformat ever changed
+    that, the match either fails the identifier assertion below or yields
+    ``rowid``/``distance``, which ``COLUMN_DAMAGE`` does not describe -- so
+    ``_derive_store_damage`` raises. Every way this can misread the query is
+    therefore loud; none of them silently sweeps the wrong set.
+    """
+    import inspect
+
+    from aorta.chat.rag import retriever
+
+    source = inspect.getsource(retriever.SqliteVecStore._knn)
+    match = re.search(r'"SELECT (.+?) FROM', source)
+    assert match, (
+        "could not find the read path's SELECT in _knn -- this oracle derives "
+        "its damage states from that query and cannot vouch for anything without it"
+    )
+    columns = tuple(part.strip().split(".")[-1] for part in match.group(1).split(","))
+    assert all(column.isidentifier() for column in columns), columns
+    return columns
+
+
+def _derive_store_damage() -> tuple[str, ...]:
+    """``STRUCTURAL_DAMAGE`` plus a value state per column the read path reads.
+
+    Fails closed. A column ``COLUMN_DAMAGE`` has never heard of is one this
+    oracle has no states for, so it raises here rather than sweeping the ones
+    it happens to know and reporting agreement it did not establish -- the
+    failure mode being fixed, where the probe and the oracle agreed with each
+    other while both ignored a column every query reads.
+    """
+    columns = _read_path_columns()
+    undescribed = [column for column in columns if column not in COLUMN_DAMAGE]
+    if undescribed:
+        raise AssertionError(
+            f"_knn now selects {', '.join(undescribed)}, which COLUMN_DAMAGE does "
+            "not describe. Add the damage states for it -- or an empty tuple with "
+            "the reason none is reachable -- because an undescribed column is one "
+            "this oracle cannot vouch for, and every test below would otherwise "
+            "pass without covering it."
+        )
+    return STRUCTURAL_DAMAGE + tuple(state for column in columns for state in COLUMN_DAMAGE[column])
+
+
+#: Every way the store under a matching manifest can stop answering. Both the
+#: probe's per-state tests and ``TestStoreProbeAgreesWithTheReadPath`` read
+#: this, which is the point: the probe models the read path rather than asking
+#: it (see ``doctor._store_defect``), so the only thing keeping the model
+#: honest is a set neither side gets to curate.
+STORE_DAMAGE = _derive_store_damage()
 
 
 def _break_store(index: Path, collection: str, how: str) -> None:
@@ -134,6 +219,28 @@ def _break_store(index: Path, collection: str, how: str) -> None:
 
     conn = _vec_connection(index)
     try:
+        if how.startswith("content-"):
+            # ``content TEXT NOT NULL`` means a store aorta wrote cannot reach
+            # these, so the state is the one the finding described: a store
+            # carried in by hand, or rebuilt by another tool, whose column is
+            # nullable and untyped. Recreated rather than updated in place for
+            # both reasons -- NOT NULL would refuse the NULL, and TEXT affinity
+            # would quietly convert the integer to '123' and hide the state.
+            # Ids and metadata are carried over so the join and the vectors
+            # still line up: only the value ``Document`` is handed is wrong.
+            rows = conn.execute(f'SELECT id, metadata FROM "chunks_{collection}"').fetchall()
+            conn.execute(f'DROP TABLE "chunks_{collection}"')
+            conn.execute(
+                f'CREATE TABLE "chunks_{collection}" '
+                "(id INTEGER PRIMARY KEY, content, metadata TEXT NOT NULL)"
+            )
+            value = None if how.endswith("null") else 123
+            conn.executemany(
+                f'INSERT INTO "chunks_{collection}" (id, content, metadata) VALUES (?, ?, ?)',
+                [(id_, value, metadata) for id_, metadata in rows],
+            )
+            conn.commit()
+            return
         if how.startswith("metadata-"):
             # The chunk rows are all present and the vectors match them; only
             # what ``_knn`` hands to ``json.loads`` is wrong. ``Document``
@@ -944,6 +1051,18 @@ class TestStoreProbeAgreesWithTheReadPath:
 
     This is not decoration. Writing it is what turned up the non-integer
     registry width, which no review round had named.
+
+    **And then it missed twice, in the same place, which is why the states are
+    derived now.** The mechanism above was never wrong; its *input set* was.
+    Review found no ``metadata`` state in one round and no ``content`` state in
+    the next -- two columns of one ``SELECT``, the same omission both times,
+    because the list of states was maintained beside the read path instead of
+    taken from it. An oracle whose completeness rests on a hand-written list
+    inherits that list's blind spots and reports agreement anyway, which is the
+    worst failure available to a thing whose whole job is catching the probe
+    out. So ``STORE_DAMAGE`` is now ``STRUCTURAL_DAMAGE`` plus a state per
+    column ``_knn`` selects, and a column nobody has described raises rather
+    than being skipped: see ``_derive_store_damage``.
     """
 
     @pytest.mark.parametrize("how", STORE_DAMAGE)
@@ -973,6 +1092,56 @@ class TestStoreProbeAgreesWithTheReadPath:
                 f"{how} leaves retrieval working, so this test asserts nothing about it; "
                 "add it to the strictness test's expected list if that is intended"
             )
+
+    def test_every_column_the_read_path_reads_has_its_damage_described(self):
+        """The property that replaces remembering: no undescribed column.
+
+        ``_derive_store_damage`` raises on a column ``COLUMN_DAMAGE`` has never
+        heard of, so a column added to ``_knn``'s ``SELECT`` cannot arrive
+        without states. That guard runs at import, which makes it loud but not
+        legible -- this states the contract so it reads as intended rather than
+        as an accident, and covers the direction the guard cannot: a described
+        column the read path has stopped selecting, whose states would go on
+        being swept while proving nothing.
+        """
+        columns = set(_read_path_columns())
+        assert columns, "the read path selects nothing, which cannot be right"
+        assert columns == set(COLUMN_DAMAGE), (
+            f"the read path selects {sorted(columns)} and COLUMN_DAMAGE describes "
+            f"{sorted(COLUMN_DAMAGE)}; the two have to be the same set, since a "
+            "column missing here is unswept and one left over here is swept for "
+            "nothing"
+        )
+        assert set(_derive_store_damage()) >= set(STRUCTURAL_DAMAGE)
+
+    def test_the_columns_the_probe_requires_are_the_columns_the_read_path_reads(self):
+        """The probe's own required-column list, held to the same source.
+
+        ``_collection_schema_defect`` checks that ``id``, ``content`` and
+        ``metadata`` exist. That list is hand-written too, and is the next one
+        that would drift for exactly the reasons the state list did -- so pin
+        it against the read path rather than against itself. ``id`` is expected
+        to be absent from the ``SELECT``: it is the join key
+        (``c.id = m.rowid``), read by the query without being selected by it,
+        so its presence in the probe's list is correct and this test says why
+        instead of tripping over it.
+        """
+        import inspect
+
+        source = inspect.getsource(doctor._collection_schema_defect)
+        required = re.search(r"for column in \((.+?)\) if column not in columns", source)
+        assert required, "could not find the probe's required-column list"
+        listed = {name.strip().strip("\"'") for name in required.group(1).split(",")}
+
+        selected = set(_read_path_columns())
+        assert listed >= selected - {"embedding"}, (
+            f"the read path selects {sorted(selected)} off the chunk table but the "
+            f"probe only requires {sorted(listed)} to exist"
+        )
+        assert listed - selected == {"id"}, (
+            f"the probe requires {sorted(listed - selected)} which the read path does "
+            "not select; only the join key id is expected to be in that position"
+        )
 
     def test_a_healthy_store_satisfies_both(self, monkeypatch, tmp_path: Path):
         """The other end: neither side may be vacuously strict."""
@@ -1026,6 +1195,49 @@ class TestStoreProbeAgreesWithTheReadPath:
             # Counted, not just detected: one bad row out of many is still a
             # query that raises, and which row is chosen by the query vector.
             assert defect.split()[0].isdigit(), how
+
+    def test_content_that_is_not_text_is_caught(self, monkeypatch, tmp_path: Path):
+        """The metadata finding's neighbour, one column over in the same SELECT.
+
+        ``_knn`` hands ``content`` to ``Document(page_content=...)``, which
+        requires a string, so a NULL or a number raises there exactly as bad
+        metadata does one argument later. This is the state that showed the
+        damage table was the problem rather than any one missing check: the
+        metadata round had just been closed, and the same omission was sitting
+        in the adjacent column.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        for how in ("content-null", "content-not-text"):
+            (tmp_path / how).mkdir()
+            index = _write_index(monkeypatch, tmp_path / how)
+            _break_store(index, get_provider().collection_name(), how)
+
+            defect = _probe(index)
+            assert "no text in the content column" in defect, how
+            assert defect.split()[0].isdigit(), how
+
+    def test_a_blob_in_the_content_column_is_not_a_defect(self, monkeypatch, tmp_path: Path):
+        """The line between "not text" and "unreadable", measured not guessed.
+
+        ``Document`` decodes a BLOB and accepts it, so flagging one would fail
+        a store that retrieves perfectly well -- the over-warning this probe
+        was written to replace. This is why the check asks ``typeof`` for the
+        two types that survive rather than testing for ``text``.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path)
+        collection = get_provider().collection_name()
+        conn = _vec_connection(index)
+        try:
+            conn.execute(f'UPDATE "chunks_{collection}" SET content = CAST(content AS BLOB)')
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert _probe(index) == ""
+        assert not _read_path_answers(index)
 
     def test_the_metadata_check_falls_back_rather_than_passing(self, monkeypatch, tmp_path: Path):
         """A SQLite without JSON1 must not turn the check into a no-op.

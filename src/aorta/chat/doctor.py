@@ -414,9 +414,16 @@ def _store_defect(index_file: Path, dimensions: int) -> str:
     and fails if any of them answers differently from this function. A test can
     pay all three prices above, because it controls the environment a user's
     machine does not. That test is what found the non-integer width -- the
-    review named the mismatched one -- so the set is closed by construction
-    rather than by having thought hard enough, and a new state added to
-    ``STORE_DAMAGE`` extends the contract without anyone remembering to.
+    review named the mismatched one.
+
+    That oracle then missed twice itself, on ``metadata`` and then on
+    ``content``, and both times because its list of states was hand-written
+    beside the read path rather than taken from it. So the value states are now
+    derived from the columns ``_knn`` selects, and a column nothing describes
+    raises rather than going unswept. The practical consequence for anyone
+    editing *this* function: the set it is measured against is closed by
+    construction, so a column added to the read path fails the oracle until
+    this probe has something to say about it.
 
     The agreement required is one-directional: no state where retrieval fails
     may read as healthy here. The reverse is allowed and one case uses it --
@@ -433,9 +440,9 @@ def _store_defect(index_file: Path, dimensions: int) -> str:
     the rest are facts about the schema underneath the sidecar: no chunk table
     for this install's collection, an empty one, a missing collection registry,
     an unregistered collection, absent ``content``/``metadata`` columns,
-    metadata values that are not JSON objects, a missing or short vector table,
-    and a registry width that is either not a number or not the one the index
-    was built at. ``check_index`` never looks at any of them, because it
+    content that is not text and metadata that is not a JSON object, a missing
+    or short vector table, and a registry width that is either not a number or
+    not the one the index was built at. ``check_index`` never looks at any of them, because it
     compares a sidecar against a row count. So there is no behaviour to make
     this conditional on: after #465 the unopenable case short-circuits at the
     refusal check in both callers and never reaches here, and the states that
@@ -576,7 +583,26 @@ def _collection_schema_defect(
                 f"missing the {', '.join(missing)} column(s) that retrieval reads"
             )
 
-        # The column existing is not the same as the read path surviving it.
+        # The column existing is not the same as the read path surviving it,
+        # and that holds for every column ``_knn`` selects rather than for the
+        # one a review happened to name. ``content`` goes straight into
+        # ``Document(page_content=...)``, which requires a string: a NULL, an
+        # integer and a real each raise there. A BLOB does not -- it is decoded
+        # and accepted -- so the defect is the stored type and not "is it
+        # text", which is why this asks ``typeof`` rather than a cast. A store
+        # aorta wrote cannot reach this (the column is ``TEXT NOT NULL``); one
+        # carried in by hand or built by another tool can.
+        bad_content = conn.execute(
+            f'SELECT COUNT(*) FROM "chunks_{collection}" '
+            "WHERE typeof(content) NOT IN ('text', 'blob')"
+        ).fetchone()[0]
+        if bad_content:
+            return (
+                f"{bad_content} chunk row(s) for this install's collection in "
+                f"{index_file} hold no text in the content column; retrieval builds "
+                "a document out of it for every hit and raises on the first one"
+            )
+
         # ``_knn`` calls ``json.loads`` on every metadata value it selects and
         # hands the result to ``Document(metadata=...)``, which needs a mapping
         # -- so a NULL, a non-JSON string and a valid non-object JSON value are

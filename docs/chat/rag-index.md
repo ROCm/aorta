@@ -182,7 +182,8 @@ A fetch downloads vectors, not the embedding model, so straight afterwards
 `doctor` reports the model cache as cold. With an index present that this
 install could query — one that opens, matches the manifest, and holds a
 collection retrieval can actually read: chunks for this provider, the
-collection registered, and a vector for each chunk beside it — that is
+collection registered, a vector for each chunk beside it, and values in those
+chunks a document can be built out of — that is
 reported as `[ -- ] ... does not need to be yet`,
 because the weights download themselves on the first query. An index that fails
 any of those stays a warning: there is then nothing for the softer wording to
