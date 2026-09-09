@@ -66,11 +66,38 @@ def scan_sanitizer(report_json: str) -> dict:
         return {"error": str(e)}
 
 
+def resolve_in_bundle(uri: str, bundle_root: str) -> Path | None:
+    """*uri* as a path inside *bundle_root*, or None if it points outside.
+
+    The uri arrives from the evidence list and from the model's own tool call,
+    and both used to be joined to the bundle root and read. Two ways out of the
+    bundle: ``../../../etc/passwd`` walks out of it, and an absolute path skips
+    it entirely, because ``Path(root) / "/etc/passwd"`` discards the root. What
+    came back went into the router's context and could be quoted into the
+    rationale, which is written to the report and sent to a model.
+
+    Resolving both sides also settles symlinks, so a link inside the bundle
+    that points out of it is outside.
+    """
+    if not uri:
+        return None
+    try:
+        root = Path(bundle_root).resolve()
+        candidate = (root / uri).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if candidate != root and not candidate.is_relative_to(root):
+        return None
+    return candidate
+
+
 def read_evidence_file(uri: str, bundle_root: str) -> str:
     """Read a specific evidence file from the bundle by its URI.
     Returns up to 200 lines of the file content."""
     try:
-        p = Path(bundle_root) / uri
+        p = resolve_in_bundle(uri, bundle_root)
+        if p is None:
+            return f"[refused: {uri} is outside the bundle]"
         if not p.is_file():
             return f"[file not found: {uri}]"
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
