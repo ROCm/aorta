@@ -205,11 +205,17 @@ def test_summarize_keeps_the_per_kernel_failure_reason():
     assert "failed to parse input executable or code object" in errored.get("detail", "")
 
     assert case.get("kernel_reasons") == [
-        (
-            "gemm_NT_M256_N4096_K1024",
-            "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+        {
+            "kernel": "gemm_NT_M256_N4096_K1024",
+            # a unique name needs no identity qualifier
+            "label": "gemm_NT_M256_N4096_K1024",
+            "reason": "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
             "failed to parse input executable or code object",
-        )
+            "code_object": "sol_126578.hsaco",
+            "sha": "57c5d8efa4",
+            "code_object_index": 0,
+            "entry_offset": None,
+        }
     ]
     # a clean kernel carries no detail to explain
     assert case["kernels"][2].get("verdict") == "warn"
@@ -347,6 +353,8 @@ def test_case_env_records_kernel_reasons_beside_the_rollup():
 
     observed = env.get("observed") or {}
     assert observed.get("reason") == "worklist_not_fully_checked"
+    # the identity travels with the reason, so the manifest can say which object
+    # failed without reopening sanitizer_report.json
     assert observed.get("kernel_reasons") == [
         {
             "kernel": "gemm_NT_M256_N4096_K1024",
@@ -354,8 +362,14 @@ def test_case_env_records_kernel_reasons_beside_the_rollup():
                 "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
                 "failed to parse input executable or code object"
             ),
+            "code_object": "sol_126578.hsaco",
+            "sha": "57c5d8efa4",
+            "code_object_index": 0,
+            "entry_offset": None,
         }
     ]
+    # "label" is a display concern and stays out of the manifest
+    assert "label" not in (observed.get("kernel_reasons") or [{}])[0]
 
 
 def _mixed_scope_waitcheck_report(*, exact_first: bool) -> dict:
@@ -514,13 +528,13 @@ def test_a_later_check_cannot_erase_an_earlier_checks_reason():
     assert "failed to parse input executable or code object" in kernel.get("detail", "")
     # and the badge cannot read cleaner than the detail beside it
     assert kernel.get("verdict") == "error"
-    assert case.get("kernel_reasons") == [
-        (
-            "tiny_vecadd",
-            "waitcheck_backend_exit_2: /a/b/vecadd.hsaco: "
-            "failed to parse input executable or code object",
-        )
-    ]
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("kernel") == "tiny_vecadd"
+    assert reasons[0].get("reason") == (
+        "waitcheck_backend_exit_2: /a/b/vecadd.hsaco: "
+        "failed to parse input executable or code object"
+    )
     assert "tiny_vecadd: waitcheck_backend_exit_2" in case.get("observation", "")
 
 
@@ -609,9 +623,125 @@ def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
 
     # and the findings column still sums to the case total rather than doubling it
     assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings") == 1
-    assert case.get("kernel_reasons") == [
-        ("gemm_shared_symbol", "waitcheck_backend_exit_2: refused the second object")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("kernel") == "gemm_shared_symbol"
+    assert reasons[0].get("sha") == bad_sha
+    assert reasons[0].get("reason") == "waitcheck_backend_exit_2: refused the second object"
+    # only one of the two failed, so the name is unambiguous and stays unqualified
+    assert reasons[0].get("label") == "gemm_shared_symbol"
+
+
+def test_two_failing_kernels_sharing_a_name_are_told_apart():
+    # When both objects behind one symbol name fail, a bare-name label produces two
+    # indistinguishable reasons, and env.json cannot say which object failed without
+    # reopening the report. The label is qualified with the identity where — and only
+    # where — the name is actually ambiguous.
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "gemm_shared_symbol", "target": "gfx950",
+            "code_object": f"/a/b/sol_{sha}.hsaco", "code_object_sha256": sha,
+            "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _result(sha: str, why: str) -> dict:
+        return {
+            "identity": _identity(sha), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    first, second = "beefaaa1", "beefbbb2"
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(first), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(second), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(first, "waitcheck_backend_exit_2: refused the first object"),
+                _result(second, "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 2
+
+    # both keep the bare kernel name as data, but their labels are distinguishable
+    assert [e.get("kernel") for e in reasons] == ["gemm_shared_symbol"] * 2
+    labels = [e.get("label") for e in reasons]
+    assert labels == [f"gemm_shared_symbol ({first})", f"gemm_shared_symbol ({second})"]
+    assert len(set(labels)) == 2
+
+    # and the one-liner carries both, each attributable to its own object
+    observation = case.get("observation", "")
+    assert f"gemm_shared_symbol ({first}): waitcheck_backend_exit_2" in observation
+    assert f"gemm_shared_symbol ({second}): waitcheck_timeout" in observation
+
+    # the manifest records the identity for each, so neither needs the raw report
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+    recorded = (env.get("observed") or {}).get("kernel_reasons") or []
+    assert [e.get("sha") for e in recorded] == [first, second]
+    assert [e.get("code_object") for e in recorded] == [
+        f"sol_{first}.hsaco", f"sol_{second}.hsaco"
     ]
+
+
+def test_a_long_rollup_cannot_truncate_the_kernel_reasons_away():
+    # The callout is one line and length-capped. Clamping only the concatenated
+    # string let a long check-level rollup spend the whole budget, so the per-kernel
+    # reasons were cut off the end — the callout kept the part that says nothing and
+    # dropped the part it exists to show. A rollup is not always short: ConSan builds
+    # `waitcheck_analysis_failed: <parser output>` out of tool text.
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["reason"] = "waitcheck_analysis_failed: " + "backend noise " * 40
+    case = gen.summarize_case(report, "warn")
+
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert text.startswith("waitcheck_analysis_failed:")
+    # the rollup is budgeted down so the kernel reason still lands
+    assert "gemm_NT_M256_N4096_K1024" in text
+    assert "waitcheck_backend_exit_2" in text
+    assert len(text) <= 240
+
+
+def test_a_long_reason_stays_within_the_detail_budget_on_both_rows():
+    # A backend reason quotes up to 300 characters of stderr tail, so a Detail cell
+    # can be pushed over its budget -- especially the deduped row, which spends part
+    # of it naming the scan that covered it. Neither row may exceed the cap, and the
+    # deduped row must still name its covering scan rather than being cut back to
+    # bare prefix.
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["kernel_results"][0]["reason"] = (
+        "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+        + "failed to parse segment; " * 12
+    )
+    case = gen.summarize_case(report, "warn")
+    covering, deduped = case["kernels"][0], case["kernels"][1]
+
+    assert len(covering.get("detail", "")) <= gen._DETAIL_LIMIT
+    assert len(deduped.get("detail", "")) <= gen._DETAIL_LIMIT
+    assert "same code object as gemm_NT_M256_N4096_K1024" in deduped.get("detail", "")
+    # the covering row carries the reason furthest, and is the row the cell points at
+    assert "waitcheck_backend_exit_2" in covering.get("detail", "")
+    assert "waitcheck_backend_exit_2" in deduped.get("detail", "")
 
 
 def test_a_multiline_backend_reason_stays_on_one_markdown_row():
@@ -629,7 +759,7 @@ def test_a_multiline_backend_reason_stays_on_one_markdown_row():
         assert "\n" not in row.get("detail", "")
         assert "failed to parse input executable or code object" in row.get("detail", "")
     assert "\n" not in case.get("observation", "")
-    assert all("\n" not in reason for _kernel, reason in case.get("kernel_reasons") or [])
+    assert all("\n" not in e["reason"] for e in case.get("kernel_reasons") or [])
     assert "\n" not in gen._survey_message_parts(case)[1]
 
     # the rendered table keeps one line per kernel and no stray continuation

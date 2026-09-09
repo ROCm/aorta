@@ -650,6 +650,67 @@ def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+# The per-kernel Detail cell's budget, applied to the kernel's own reason and again to
+# the whole cell. A deduped row spends part of it on the "same code object as ..."
+# prefix, so it carries its inherited reason less far than the covering row does;
+# that is inherent to a fixed-width cell with a prefix, and the cell names the
+# covering row, which carries the same reason in full.
+_DETAIL_LIMIT = 300
+
+
+def _identity_qualifier(identity: dict[str, Any]) -> str:
+    """The shortest identity fragment that tells two same-named kernels apart (pure).
+
+    Prefers the code-object digest, falling back to the object's basename, and appends
+    the entry offset when the identity pins one -- the same fields ``stable_key`` uses
+    to keep those selections distinct. Empty when the identity carries none of them,
+    in which case there is nothing to disambiguate with.
+    """
+    parts = _short(identity.get("code_object_sha256"), 10) or _basename(
+        identity.get("code_object")
+    )
+    offset = identity.get("entry_offset")
+    if isinstance(offset, int):
+        parts = f"{parts}+0x{offset:x}" if parts else f"0x{offset:x}"
+    return parts
+
+
+def _kernel_reason_entries(results: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The failing kernels' reasons, each carrying the identity behind it (pure).
+
+    A kernel name is not unique (see ``_identity_key``), so a bare name cannot say
+    *which* object failed when two selections share a symbol name -- and if both fail,
+    two identically-labelled reasons are indistinguishable. Every entry therefore
+    records the identity fields, so ``env.json`` can attribute a failure without
+    reopening ``sanitizer_report.json``.
+
+    ``label`` is qualified with that identity only where the name is actually
+    ambiguous among the failing kernels. Appending a digest unconditionally would pad
+    every one-line observation for the overwhelmingly common unique-name case, where
+    the name already identifies the kernel.
+    """
+    failing = [result for result in results if result["reason"]]
+    seen: dict[Any, int] = {}
+    for result in failing:
+        seen[result["name"]] = seen.get(result["name"], 0) + 1
+    entries: list[dict[str, Any]] = []
+    for result in failing:
+        identity = result["identity"]
+        label = str(result["name"])
+        if seen[result["name"]] > 1 and (qualifier := _identity_qualifier(identity)):
+            label = f"{label} ({qualifier})"
+        entries.append({
+            "kernel": str(result["name"]),
+            "label": label,
+            "reason": str(result["reason"]),
+            "code_object": _basename(identity.get("code_object")),
+            "sha": _short(identity.get("code_object_sha256"), 10),
+            "code_object_index": identity.get("code_object_index"),
+            "entry_offset": identity.get("entry_offset"),
+        })
+    return entries
+
+
 def _kernel_reason_text(reasons: Sequence[tuple[str, str]]) -> str:
     """One kernel's fail-closed reasons, for a one-line display context (pure).
 
@@ -694,7 +755,7 @@ def _observation_text(
     finding_groups: list[dict[str, Any]],
     *,
     present: bool = True,
-    kernel_reasons: Sequence[tuple[str, str]] = (),
+    kernel_reasons: Sequence[dict[str, Any]] = (),
 ) -> str:
     """A one-line human summary of what a case observed.
 
@@ -702,8 +763,9 @@ def _observation_text(
     highlight into a compact string surfaced on both tabs (guardrail and survey).
     Observational only -- it never encodes a pass/fail health signal.
 
-    ``kernel_reasons`` are the ``(kernel, reason)`` pairs of the kernels that did
-    not come back clean. A check-level reason is a rollup -- Waitcheck reports
+    ``kernel_reasons`` are the ``_kernel_reason_entries`` of the kernels that did not
+    come back clean, rendered from each entry's identity-qualified ``label`` and its
+    ``reason``. A check-level reason is a rollup -- Waitcheck reports
     ``worklist_not_fully_checked`` whenever any kernel is unhealthy -- which names
     the failure but not its cause, so the observation would otherwise be a dead end
     for the reader who has only this line. Appending the per-kernel reasons makes
@@ -721,7 +783,7 @@ def _observation_text(
         parts.append(f"reason {reason}")
     if kernel_reasons:
         parts.append(
-            ", ".join(f"{kernel}: {reason}" for kernel, reason in kernel_reasons)
+            ", ".join(f"{e['label']}: {e['reason']}" for e in kernel_reasons)
         )
     if findings:
         top = finding_groups[0]["code"] if finding_groups else None
@@ -800,7 +862,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             # rollup (``worklist_not_fully_checked``); the per-kernel reason is the
             # only field that says what actually went wrong, so it must survive into
             # the row the renderers read.
-            if reason := _clean_msg(str(result.get("reason") or ""), 300):
+            if reason := _clean_msg(str(result.get("reason") or ""), _DETAIL_LIMIT):
                 reasons.append((sanitizer, reason))
             reduced = {
                 "verdict": _worse_verdict(
@@ -814,6 +876,9 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 "returncode": result.get("returncode"),
                 # Display text only; the join above is on the full identity.
                 "name": name,
+                # Kept so a reason can name *which* object failed when two selected
+                # kernels share a symbol name (see ``_kernel_reason_entries``).
+                "identity": identity,
             }
             kr_by_identity[key] = reduced
             # Only a Waitcheck whole-object scan is ever deduped, so only such a scan
@@ -885,7 +950,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             "offset": identity.get("entry_offset"),
             "verdict": verdict,
             "findings": findings,
-            "detail": _clean_msg(detail, 300) if detail else "",
+            "detail": _clean_msg(detail, _DETAIL_LIMIT) if detail else "",
         })
 
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -905,11 +970,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     primary = _primary_checks(checks)
     # Only the kernels that carry their own fail-closed reason; a deduped row's
     # detail restates its covering scan's reason, which would double it up here.
-    kernel_reasons = [
-        (str(result["name"]), str(result["reason"]))
-        for result in kr_by_identity.values()
-        if result["reason"]
-    ]
+    kernel_reasons = _kernel_reason_entries(list(kr_by_identity.values()))
     observation = _observation_text(
         primary, findings_total, finding_groups, kernel_reasons=kernel_reasons
     )
@@ -2465,11 +2526,19 @@ def build_case_env(
             "execution": summary.get("execution"),
             "reason": (summary.get("primary") or {}).get("reason"),
             # ``reason`` above is the check-level rollup, so on its own it cannot say
-            # which kernel failed or why. Record the per-kernel reasons beside it so
+            # which kernel failed or why. Record the per-kernel reasons beside it,
+            # each with the identity fields that tell two same-named kernels apart, so
             # this manifest is diagnosable without re-reading sanitizer_report.json.
             "kernel_reasons": [
-                {"kernel": kernel, "reason": why}
-                for kernel, why in (summary.get("kernel_reasons") or [])
+                {
+                    "kernel": entry["kernel"],
+                    "reason": entry["reason"],
+                    "code_object": entry["code_object"],
+                    "sha": entry["sha"],
+                    "code_object_index": entry["code_object_index"],
+                    "entry_offset": entry["entry_offset"],
+                }
+                for entry in (summary.get("kernel_reasons") or [])
             ],
             "findings": summary.get("findings", 0),
         },
@@ -3465,6 +3534,14 @@ def _survey_howto_html(entry: dict[str, Any]) -> str:
     )
 
 
+# The inline survey callout is one line, so its text is length-capped. When a
+# check-level rollup and the per-kernel reasons behind it share that line, the rollup
+# is capped separately at the smaller figure, which guarantees the reasons the rest of
+# the budget rather than letting a long rollup truncate them away.
+_MSG_LIMIT = 240
+_MSG_ROLLUP_LIMIT = 80
+
+
 def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     """Pick the inline survey message as an ``(label, text)`` pair (pure).
 
@@ -3478,21 +3555,25 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     """
     verdict = str(row.get("verdict") or "").strip().lower()
     reason = (row.get("primary") or {}).get("reason")
-    reason_text = _clean_msg(str(reason), 240) if reason else ""
+    reason_text = _clean_msg(str(reason), _MSG_LIMIT) if reason else ""
     # Qualify a rollup reason with the kernel reasons behind it. ``primary.reason``
     # alone ("worklist_not_fully_checked") tells the reader a kernel was not checked
     # but never which one or why, which is the whole question this callout exists to
     # answer for an errored case.
     kernel_reasons = row.get("kernel_reasons") or []
-    if reason_text and kernel_reasons:
-        detail = "; ".join(f"{kernel}: {why}" for kernel, why in kernel_reasons)
-        reason_text = _clean_msg(f"{reason_text} \u2014 {detail}", 240)
-    elif not reason_text and kernel_reasons:
+    if kernel_reasons:
+        detail = "; ".join(f"{e['label']}: {e['reason']}" for e in kernel_reasons)
+        # Budget the rollup down first. Clamping only the concatenation let a long
+        # rollup spend the whole allowance and truncate the kernel reasons off the
+        # end -- and a rollup is not always short: ConSan builds
+        # ``waitcheck_analysis_failed: <parser output>`` out of tool text. The
+        # kernel reasons are the payload here, so they keep the larger share.
+        rollup = _clean_msg(str(reason), _MSG_ROLLUP_LIMIT) if reason else ""
         reason_text = _clean_msg(
-            "; ".join(f"{kernel}: {why}" for kernel, why in kernel_reasons), 240
+            f"{rollup} \u2014 {detail}" if rollup else detail, _MSG_LIMIT
         )
     groups = row.get("finding_groups") or []
-    example = _clean_msg(str(groups[0].get("example", "")), 240) if groups else ""
+    example = _clean_msg(str(groups[0].get("example", "")), _MSG_LIMIT) if groups else ""
     if verdict == "error" and reason_text:
         return "Reason", reason_text
     if example:
