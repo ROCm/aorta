@@ -322,3 +322,68 @@ class TestRetrieverCaches:
         retriever.reset_caches()
         assert retriever._vectorstore_cache is None
         assert retriever._retriever_cache is None
+
+
+class TestTheModelIsLoadedOnceUnderConcurrency:
+    """Retrieval is no longer confined to one thread, so the lazy init is raced.
+
+    ``VectorStore``'s async default runs the synchronous search through
+    ``run_in_executor``, which is how the act loop stopped blocking the event
+    loop (issue #444). The consequence is that two Chainlit sessions whose
+    *first* queries overlap reach ``_get_model`` on different threads, and
+    before the lock both would see ``None`` and both load an ONNX model -- one
+    of which is discarded, having already spent the memory and the latency.
+    """
+
+    def test_eight_threads_load_one_model(self, monkeypatch):
+        import threading
+
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        loads = []
+        ready = threading.Barrier(8)
+
+        def slow_load(model_name, _cache_dir):
+            loads.append(model_name)
+            # Hold the window open so a missing lock is reliably observed
+            # rather than depending on scheduler luck.
+            threading.Event().wait(0.05)
+            return object()
+
+        monkeypatch.setattr(fastembed_bge, "_text_embedding", slow_load)
+        monkeypatch.setattr(fastembed_bge, "model_cache_dir", lambda: None)
+        provider = fastembed_bge.FastembedBgeEmbeddings(model_name="m")
+
+        def race():
+            ready.wait()
+            provider._get_model()
+
+        threads = [threading.Thread(target=race) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(loads) == 1, f"model loaded {len(loads)}x under 8 threads"
+
+    def test_the_cached_model_is_returned_without_taking_the_lock(self, monkeypatch):
+        """Double-checked on purpose: this runs on every embed.
+
+        Locking unconditionally would serialise concurrent embedding once the
+        model exists, which is the common case and not the one being fixed.
+        """
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        provider = fastembed_bge.FastembedBgeEmbeddings(model_name="m")
+        sentinel = object()
+        provider._model = sentinel
+
+        class Explodes:
+            def __enter__(self):
+                raise AssertionError("the lock was taken on the cached path")
+
+            def __exit__(self, *_):
+                return False
+
+        provider._model_lock = Explodes()
+        assert provider._get_model() is sentinel
