@@ -901,11 +901,20 @@ _CALLED_TOOLS = (
     "Native function calling drove real tool calls before the backend failed, "
     "so the protocol works even though this query got no answer"
 )
-#: The third way native proves itself without answering: every structured call
-#: it made repeated one the text protocol had already run, so the duplicate
-#: guard answered them from the recorded results and the loop had nothing new
-#: to synthesise from. No backend failure happened, which is why this cannot
-#: borrow :data:`_CALLED_TOOLS`.
+#: Native drove tool calls, nothing failed, and the summarising call still came
+#: back empty. Distinct from :data:`_CALLED_TOOLS`, which says "before the
+#: backend failed" -- no backend failure happened on this path.
+_CALLED_TOOLS_NO_SYNTHESIS = (
+    "Native function calling drove real tool calls and then returned no text "
+    "to summarise them, so the protocol works even though this query got no "
+    "answer"
+)
+#: The same outcome reached without executing anything: every structured call
+#: repeated one the text protocol had already run, so the duplicate guard
+#: answered them from the recorded results. Kept apart from
+#: :data:`_CALLED_TOOLS_NO_SYNTHESIS` because "all of them repeats" is a claim
+#: about what native did, and it is false the moment one call was fresh --
+#: which is the ordinary shape of the empty-synthesis path, not a rare one.
 _CALLED_TOOLS_QUIET = (
     "Native function calling emitted structured tool calls -- all of them "
     "repeats of calls the text protocol had already run -- and then returned "
@@ -1789,7 +1798,15 @@ async def _run_native_loop(
         # `trace` was chosen for holds -- the other protocol's work cannot
         # answer for this one.
         answered=tool_called or synthesised,
-        evidence=_ANSWERED if synthesised else _CALLED_TOOLS_QUIET,
+        # Three outcomes reach here, and the announcement must not merge them:
+        # prose, fresh tool results the synthesis call failed to summarise, and
+        # a round whose every call the duplicate guard answered. `trace` is what
+        # separates the last two -- it is empty only when nothing new ran.
+        evidence=(
+            _ANSWERED
+            if synthesised
+            else (_CALLED_TOOLS_NO_SYNTHESIS if trace else _CALLED_TOOLS_QUIET)
+        ),
     )
 
 

@@ -1694,6 +1694,55 @@ class TestADuplicateOnlyRetryStillCountsAsAWorkingProtocol:
         assert switch and "answered it" in switch[0]
 
     @pytest.mark.asyncio
+    async def test_a_fresh_call_is_not_described_as_a_repeat(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """"All of them repeats" is a claim, and it is false when one was fresh.
+
+        This is the ordinary shape of the empty-synthesis path, not a rare one:
+        native asks for something the text round never ran, it executes, and the
+        call that would have summarised it comes back empty. Reusing the
+        duplicate-only wording here told the operator the retry did nothing new
+        when it had just executed a tool.
+        """
+        rounds = {"n": 0}
+
+        async def text_reply(_messages, **_kw):
+            rounds["n"] += 1
+            if rounds["n"] == 1:
+                return AIMessage(content='ACTION: list_files(path="src")')
+            return _dead_end_reply()
+
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=text_reply)
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[_tool_call("read_file", {"path": "other.py"})],
+                ),
+                AIMessage(content=""),
+            ]
+        )
+        plain.bind_tools = MagicMock(return_value=bound)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch(
+                "aorta.chat.graph.nodes._execute_tool",
+                AsyncMock(return_value="contents"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            await act_node(_state())
+        switch = [r for r in caplog.messages if "will use native from here" in r]
+        assert switch, caplog.messages
+        assert "repeats of calls" not in switch[0]
+        assert "no text to summarise them" in switch[0]
+        # Still not "answered it": the user got the give-up notice.
+        assert "answered it" not in switch[0]
+
+    @pytest.mark.asyncio
     async def test_a_silent_retry_with_no_tool_call_still_counts(
         self, text_mode, tool_mode_not_chosen
     ):
