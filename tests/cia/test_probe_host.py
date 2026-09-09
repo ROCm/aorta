@@ -35,6 +35,22 @@ def _job(**overrides) -> JobRecord:
     return JobRecord(**{**fields, **overrides})
 
 
+class _Launched(Exception):
+    """Raised once the sweep is issued, to stop before the four-hour wait loop."""
+
+
+def _capture_host(monkeypatch) -> list[str]:
+    """Record which host the probe connects to, and go no further."""
+    seen: list[str] = []
+
+    def fake_ssh(node, cmd, **kwargs):
+        seen.append(node)
+        raise _Launched
+
+    monkeypatch.setattr(probe, "_ssh", fake_ssh)
+    return seen
+
+
 class TestTheHeadNode:
     def test_no_address_is_shipped_as_a_default(self):
         default = inspect.signature(probe.run_aorta_probe).parameters["head_node"].default
@@ -55,23 +71,23 @@ class TestTheHeadNode:
 
     def test_the_job_can_carry_its_own(self, tmp_path, monkeypatch):
         """A job launched through a head node remembers which one."""
-        seen: list[str] = []
-        monkeypatch.setattr(probe, "_ssh", lambda node, cmd, **k: seen.append(node))
+        seen = _capture_host(monkeypatch)
 
-        job = _job(head_node="from.the.job")
-        probe.run_aorta_probe(tmp_path, job)
+        job = _job(head_node="from.the.job", recipe_path="/jobs/r.yaml")
+        with pytest.raises(_Launched):
+            probe.run_aorta_probe(tmp_path, job)
 
-        assert seen and seen[0] == "from.the.job"
+        assert seen[0] == "from.the.job"
 
     def test_an_explicit_argument_beats_both(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CIA_SSH_HOST", "from.the.env")
-        seen: list[str] = []
-        monkeypatch.setattr(probe, "_ssh", lambda node, cmd, **k: seen.append(node))
+        seen = _capture_host(monkeypatch)
 
-        job = _job(head_node="from.the.job")
-        probe.run_aorta_probe(tmp_path, job, head_node="from.the.caller")
+        job = _job(head_node="from.the.job", recipe_path="/jobs/r.yaml")
+        with pytest.raises(_Launched):
+            probe.run_aorta_probe(tmp_path, job, head_node="from.the.caller")
 
-        assert seen and seen[0] == "from.the.caller"
+        assert seen[0] == "from.the.caller"
 
 
 class TestTheLogin:
