@@ -1110,6 +1110,57 @@ class TestStoreProbeAgreesWithTheReadPath:
                 "add it to the strictness test's expected list if that is intended"
             )
 
+    def test_an_env_var_offered_as_a_remedy_is_offered_in_a_form_that_works(self):
+        """A bare assignment does not reach the process the user runs next.
+
+        ``AORTA_CHAT_EMBEDDING_PROVIDER=local`` on its own line sets an
+        unexported shell variable, so the ``aorta`` invoked afterwards does not
+        see it -- a remedy someone can paste and have nothing happen, which is
+        the same defect as a command that cannot run in a smaller package. Two
+        spellings do work: ``export VAR=value`` for a session, and
+        ``VAR=value aorta ...`` for one command.
+
+        Asserted over every string constant in both modules rather than the
+        branches anyone thought to render, because the wrong spelling appeared
+        in four places at once and the substring assertions elsewhere in this
+        file pass either way -- they were what let it through.
+        """
+        import inspect
+
+        from aorta.chat.rag import manifest as manifest_mod
+
+        offered = re.compile(r"(?:^|(?<=[\s(]))(AORTA_CHAT_[A-Z_]+=\S*)")
+        bad = []
+        for module in (doctor, manifest_mod):
+            tree = ast.parse(inspect.getsource(module))
+            docstrings = {
+                node.body[0].value
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef))
+                and node.body
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+            }
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                # Prose about the rule is not an offer of a command; only the
+                # strings a user is shown have to obey it.
+                if node in docstrings:
+                    continue
+                for match in offered.finditer(node.value):
+                    before = node.value[: match.start()]
+                    after = node.value[match.end() :]
+                    exported = before.rstrip().endswith("export")
+                    prefixed = after.lstrip().startswith("aorta ")
+                    if not exported and not prefixed:
+                        bad.append(f"{module.__name__}:{node.lineno} {match.group(1)}")
+
+        assert not bad, (
+            "these offer an environment variable in a form that does not reach the "
+            f"next aorta process; prefix with 'export': {bad}"
+        )
+
     def test_every_column_the_read_path_reads_has_its_damage_described(self):
         """The property that replaces remembering: no undescribed column.
 

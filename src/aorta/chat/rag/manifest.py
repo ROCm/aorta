@@ -611,9 +611,10 @@ def remedy_lines(
             # how a typo in one setting turned into two dead commands.
             return [
                 '  embedding_provider = "local"',
-                "                             in chat.toml, or the environment variable",
-                "                             AORTA_CHAT_EMBEDDING_PROVIDER=local for a",
-                "                             single session",
+                "                             in chat.toml, or, for one shell session,",
+                # ``export`` rather than a bare assignment, which would not
+                # reach the aorta process run after it.
+                "                             export AORTA_CHAT_EMBEDDING_PROVIDER=local",
                 *(doctor_line if include_doctor else []),
                 "",
                 "No index command is offered, because neither can start:",
@@ -666,11 +667,11 @@ def remedy_lines(
         blocker = unavailable.split(". ")[0].rstrip(".")
         return [
             '  embedding_provider = "local"',
-            "                             in chat.toml, or the environment variable",
-            "                             AORTA_CHAT_EMBEDDING_PROVIDER=local for a",
+            "                             in chat.toml, or, for one shell session,",
+            "                             export AORTA_CHAT_EMBEDDING_PROVIDER=local,"
             # Kept on one line: a command name broken across a wrap cannot be
             # copied out of the report in one go.
-            "                             single session, after which",
+            "                             after which",
             "                             'aorta chat index fetch' works",
             *(doctor_line if include_doctor else []),
             "",
@@ -690,9 +691,9 @@ def remedy_lines(
         "'aorta chat index fetch' is not offered here: the published index is built",
         "with the local embedder, so no published asset can match a remote one, and",
         f"fetching it under embedding_provider = {provider!r} would be refused in",
-        'turn. Set embedding_provider = "local" (or the environment variable',
-        "AORTA_CHAT_EMBEDDING_PROVIDER=local) and the fetch works, at no cost in",
-        "embedding API calls.",
+        'turn. Set embedding_provider = "local" (or',
+        "export AORTA_CHAT_EMBEDDING_PROVIDER=local) and the fetch works, at no",
+        "cost in embedding API calls.",
     ]
 
 

@@ -137,17 +137,21 @@ _REMOTE_EMBEDDING_MIGRATION = (
     "until it is edited or regenerated.\n"
     "\n"
     "Three ways to change it, cheapest first:\n"
-    '  embedding_provider = "local"         edit chat.toml, keeping the rest\n'
-    "  AORTA_CHAT_EMBEDDING_PROVIDER=local  for a single session\n"
+    '  embedding_provider = "local"                edit chat.toml, keeping the rest\n'
+    # ``export``, not a bare assignment: the promise is a session, and an
+    # unexported shell variable does not reach the aorta process the user runs
+    # next. A line someone can paste and have nothing happen is the same defect
+    # as a command that cannot run, in a smaller package.
+    "  export AORTA_CHAT_EMBEDDING_PROVIDER=local  for this shell session\n"
     "  aorta chat config init --force --profile <name>\n"
-    "                                       rewrite the profile from the\n"
-    "                                       current template; --profile is\n"
-    "                                       required and chat.toml does not\n"
-    "                                       record which one wrote it, so the\n"
-    "                                       wrong name changes the chat\n"
-    "                                       provider too. It also discards\n"
-    "                                       hand edits and asks for the API\n"
-    "                                       key again\n"
+    "                                              rewrite the profile from the\n"
+    "                                              current template; --profile is\n"
+    "                                              required and chat.toml does not\n"
+    "                                              record which one wrote it, so the\n"
+    "                                              wrong name changes the chat\n"
+    "                                              provider too. It also discards\n"
+    "                                              hand edits and asks for the API\n"
+    "                                              key again\n"
     "Local embedding runs on CPU, makes no API calls, and downloads ~65 MB of\n"
     "weights once. It does not change which LLM you talk to -- only how the\n"
     "corpus and your questions are turned into vectors."
@@ -1188,8 +1192,10 @@ def _check_tool_mode(report: Report) -> None:
                 "self-hosted,\n"
                 "they are wasted either way. The answer then comes back\n"
                 "late, degraded, or not at all.\n"
-                'Set llm_tool_mode = "native" in chat.toml, or '
-                "AORTA_CHAT_LLM_TOOL_MODE=native.\n" + native_note
+                'Set llm_tool_mode = "native" in chat.toml, or\n'
+                # ``export`` kept in the same literal as the variable, which is
+                # also what lets the property test see the pair.
+                "export AORTA_CHAT_LLM_TOOL_MODE=native.\n" + native_note
             ),
         )
         return

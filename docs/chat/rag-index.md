@@ -138,8 +138,11 @@ the index commands become available again once it does.
 Two things that deliberately do *not* withhold it. `chunk_size` and
 `chunk_overlap` drift is a warning, not a refusal, and `fetch_index` installs
 through it, so a fetch is still the right advice there. And the messages a
-*failing query* prints are not conditioned yet and can still name the fetch;
-on a remote provider or a customised model, read them as `build`.
+*failing query* prints are not conditioned yet and can still name the fetch.
+On a customised local model, read them as `build`. On a remote provider, do not
+substitute either command blindly — whether `build` can run at all depends on
+whether `remote_embedding_api_key` is set (see below), so run `aorta chat
+doctor`, which conditions its remedy on that.
 
 Note that a fetch *replaces* whatever index is at the configured path. Nothing
 in the manifest records which corpus an index was built from, so neither
@@ -155,7 +158,8 @@ written by an older install still carries it until it is edited or
 regenerated. So `aorta chat doctor` also warns when the
 configured provider is remote *and* there is no index this install can query,
 and names the edit: `embedding_provider = "local"`, the
-`AORTA_CHAT_EMBEDDING_PROVIDER=local` spelling for one session, or `aorta chat
+`export AORTA_CHAT_EMBEDDING_PROVIDER=local` spelling for one shell
+session, or `aorta chat
 config init --force --profile <name>` to rewrite the profile from the current
 template — `--profile` is required and `chat.toml` does not record which one
 wrote it, so that last option needs a name you remember. It stays
