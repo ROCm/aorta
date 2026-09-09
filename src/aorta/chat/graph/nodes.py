@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from langchain_core.messages import (
@@ -55,6 +56,11 @@ RULES:
 10. When multiple files are relevant, list ALL of them with file paths.
 11. A run artifact that reports a field as "unknown" or "NOT RECORDED" did not \
    record it. That is not zero and not a pass -- say the run did not record it.
+12. When the user pastes a kernel, an assembly listing or a workload together with a \
+   symptom, run the matching diagnostic tool on it before you answer, however clearly \
+   you think you can see the bug by reading it. Reading produces a guess, and a guess \
+   that happens to be right is indistinguishable, to the person reading your answer, \
+   from one that is not. Only say a thing was observed if a tool observed it.
 
 RETRIEVED CONTEXT:
 {context}
@@ -92,11 +98,18 @@ ROUTER_PROMPT = """\
 Classify the user's latest message into one of two categories:
 - "question": a simple, specific question that can be answered with retrieved context \
   alone (e.g. "What does function X do?", "How is class Y structured?")
-- "action": requires using tools to search, list, read files, run commands, or find \
-  multiple items (e.g. "Find all functions that ...", "Search for ...", "List all ...", \
-  "How do I run ...", "Show me the files in ...")
+- "action": requires using tools to search, list, read files, run commands, find \
+  multiple items, or diagnose a workload on the cluster (e.g. "Find all functions that ...", \
+  "Search for ...", "List all ...", "How do I run ...", "Show me the files in ...")
 
 If the message asks to find, search, list, or enumerate multiple items, classify as action.
+
+If the message carries pasted source, assembly, a log or a stack trace along with a symptom \
+-- wrong or non-deterministic results, a crash, a hang, a loss that stops being a number -- \
+classify as action, whether or not it names a tool. Answering it means compiling that code \
+and running it under a sanitizer on a GPU, which no amount of retrieved context substitutes \
+for: retrieved context can only produce a guess that reads like a diagnosis.
+
 If in doubt, classify as action.
 
 Reply with ONLY the single word: question or action
@@ -180,29 +193,41 @@ def _summary_line(tool: BaseTool) -> str:
     return lines[0].strip() if lines else "no description"
 
 
-def _plugin_tool_help(tools: dict[str, ChatTool]) -> str:
-    """Advertise plugin-contributed tools, or return "" when there are none.
+def _undocumented_tool_help(tools: dict[str, ChatTool], documented_in: str) -> str:
+    """Describe the registered tools *documented_in* does not already cover.
 
-    The hand-written lists above cover the built-ins; a tool discovered from the
-    ``aorta.chat_tools`` entry-point group has to describe itself. Only the text
-    protocol needs this -- ``bind_tools()`` sends every tool's real schema, so
-    the native protocol offers plugin tools whether or not the prompt says so.
+    The ACTION: protocol can only reach a tool the prompt lists, so anything
+    missing here is invisible to it however well it is registered -- the model
+    answers from its own knowledge instead, plausibly, without ever running
+    anything. ``bind_tools()`` sends every tool's real schema, so the native
+    protocol is unaffected either way.
 
-    Returns the empty string when nothing is installed, so both prompts stay
+    This used to select by origin: everything from outside the ``aorta``
+    package, on the assumption that aorta's own tools were all hand-written
+    into the lists above. Tools added to the package later were then documented
+    nowhere and reachable only through the native protocol. Selecting by what
+    the prompt actually says keeps that from depending on where a tool lives.
+
+    Returns the empty string when nothing is missing, so both prompts stay
     byte-identical to what a user with no plugins had before.
     """
-    extra = [entry for entry in tools.values() if entry.source_package != "aorta"]
-    if not extra:
+    missing = [e for e in tools.values() if f"{e.name}(" not in documented_in]
+    if not missing:
         return ""
+
+    already = len(re.findall(r"^\d+\.", documented_in, re.MULTILINE))
     lines = [
-        f"{index}. {entry.name}(...) - {_summary_line(entry.tool)} "
-        f"[from {entry.source_package}]"
-        # Counted from the built-ins actually registered, not from
-        # BUILTIN_CHAT_TOOLS, whose length stopped saying how many the prompt
-        # listed once the shell tool became conditional.
-        for index, entry in enumerate(extra, start=len(enabled_builtins()) + 1)
+        f"{index}. {entry.name}(...) - {_summary_line(entry.tool)}"
+        # The origin is worth naming for a third party's tool and noise for
+        # one of ours.
+        + (f" [from {entry.source_package}]" if entry.source_package != "aorta" else "")
+        # Counted from the numbered entries the prompt actually shows, which is
+        # what len(enabled_builtins()) was reaching for: the conditional shell
+        # tool is described in an unnumbered bullet, so counting the registry
+        # would leave a gap in the sequence the model reads.
+        for index, entry in enumerate(missing, start=already + 1)
     ]
-    return "\nAdditional tools contributed by installed plugins:\n\n" + "\n".join(lines) + "\n"
+    return "\nAdditional tools:\n\n" + "\n".join(lines) + "\n"
 
 
 #: Appended to the prompts only when the shell tool is registered. Keeping it
@@ -229,20 +254,50 @@ def _shell_tool_help(fragment: str) -> str:
     return fragment if settings.enable_shell_tool else ""
 
 
-TOOL_DESCRIPTIONS = (
-    _BUILTIN_TOOL_DESCRIPTIONS
-    + _shell_tool_help(_SHELL_TOOL_ACT_HELP)
-    + _plugin_tool_help(CHAT_TOOLS)
+def _tool_help(documented: str) -> str:
+    """*documented* plus a description of anything registered it leaves out.
+
+    Composed rather than concatenated because the two questions are the same
+    one: a tool is missing from the prompt if the prompt does not describe it,
+    whoever shipped it and whether or not it is switched on. Passing the
+    already-composed text means the conditional shell tool, described in its
+    own bullet above, is not then listed a second time as undescribed.
+    """
+    return documented + _undocumented_tool_help(CHAT_TOOLS, documented)
+
+
+TOOL_DESCRIPTIONS = _tool_help(
+    _BUILTIN_TOOL_DESCRIPTIONS + _shell_tool_help(_SHELL_TOOL_ACT_HELP)
 )
-PLAN_PROMPT = (
-    _BUILTIN_PLAN_PROMPT
-    + _shell_tool_help(_SHELL_TOOL_PLAN_HELP)
-    + _plugin_tool_help(CHAT_TOOLS)
+PLAN_PROMPT = _tool_help(
+    _BUILTIN_PLAN_PROMPT + _shell_tool_help(_SHELL_TOOL_PLAN_HELP)
 )
 
 
 def _get_llm(**kwargs):
     return get_chat_llm(**kwargs)
+
+
+def _system_first(messages: list[Any]) -> list[Any]:
+    """Collapse the system messages into a single leading one.
+
+    Some providers reject a conversation whose system message is anywhere but
+    the front -- AMD's on-prem gateway answers ``System message must be at the
+    beginning`` and refuses the call, which takes out every model served from
+    it. The act nodes add a second system message ahead of the history to force
+    a behaviour for one turn: fine for the providers that allow it, fatal for
+    the ones that do not.
+
+    Merging preserves the order the instructions were added in, so the forcing
+    message still reads as an amendment to the standing prompt.
+    """
+    system = [m for m in messages if isinstance(m, SystemMessage)]
+    if not system or (len(system) == 1 and messages[0] is system[0]):
+        return messages
+
+    bodies = [str(m.content).strip() for m in system]
+    merged = SystemMessage(content="\n\n".join(b for b in bodies if b))
+    return [merged, *(m for m in messages if not isinstance(m, SystemMessage))]
 
 
 async def _send(llm: Any, messages: list[Any]) -> Any:
@@ -252,7 +307,7 @@ async def _send(llm: Any, messages: list[Any]) -> Any:
     the gate cannot be bypassed by a node added later. It takes the already-
     bound model, so the tool-calling path is covered too.
     """
-    return await llm.ainvoke(redact_for_send(messages))
+    return await llm.ainvoke(_system_first(redact_for_send(messages)))
 
 
 def _build_system_message(context: str = "") -> SystemMessage:
