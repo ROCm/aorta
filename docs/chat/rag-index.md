@@ -120,6 +120,13 @@ config init --force` to rewrite the profile from the current template. It stays
 quiet for a remote embedder with an index built to match, which is a correct
 setup that should not be told to change.
 
+Those profiles are usually also missing `remote_embedding_api_key` — no profile
+template prompts for it, and it does not fall back to the key the chat model
+uses — so `doctor` will not tell them to build the index locally either. Every
+chunk of the corpus goes through the embeddings API, so with no key that build
+fails on the first one. Switching to local embeddings is the remedy that needs
+neither a key nor a rebuild.
+
 It is the normal path for every chat provider, because the embedding provider is
 a separate choice and every `config init` profile leaves it local. The asset is
 built by CI under default settings, so `fetch` works exactly as long as your

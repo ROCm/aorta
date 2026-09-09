@@ -591,6 +591,44 @@ class TestWarnings:
         assert report.refusals == []
         assert any("chunk size" in line for line in report.warnings)
 
+    def test_chunk_overlap_drift_warns_on_its_own(self):
+        """The sibling branch, which had no test where ``chunk_size`` did.
+
+        Both are optional arguments compared independently, so the size test
+        passing said nothing about the overlap one: a typo in either the field
+        name or the comparison would have gone unnoticed on this branch. It
+        warns rather than refuses for the same reason as the size -- the
+        vectors are still this provider's, so the index answers, and the spans
+        merely have different edges than a rebuild would give them.
+        """
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            chunk_overlap=128,
+        )
+        assert report.refusals == []
+        assert any("chunk overlap" in line for line in report.warnings)
+        # And is not the size warning wearing the wrong label.
+        assert not any("chunk size" in line for line in report.warnings)
+
+    def test_both_chunk_warnings_can_be_raised_at_once(self):
+        """A rebuild after changing both settings should say so twice.
+
+        Written because the two branches are adjacent and an ``elif`` between
+        them would silently drop the second, which no single-setting test can
+        see.
+        """
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            chunk_size=1024,
+            chunk_overlap=128,
+        )
+        assert any("chunk size" in line for line in report.warnings)
+        assert any("chunk overlap" in line for line in report.warnings)
+
     def test_a_sha_delta_warns_when_the_version_string_matches(self):
         """A dev install and the rolling asset can share a version and differ."""
         report = validate(

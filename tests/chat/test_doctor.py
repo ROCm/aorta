@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import shlex
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,20 @@ def _fill_index(index: Path, collection: str, rows: int = 3) -> None:
 #: Ways a partial copy or an interrupted build breaks the readable-collection
 #: contract while leaving the non-empty chunk table intact. Every one of these
 #: read as healthy until the probe checked more than the chunk count.
-STORE_DAMAGE = ("registry-table", "registry-row", "chunk-columns", "vec-table", "vector-rows")
+#: Every way the store under a matching manifest can stop answering. Adding to
+#: this list extends both the probe's per-state tests *and*
+#: ``TestStoreProbeAgreesWithTheReadPath``, which is the point: the probe models
+#: the read path rather than asking it (see ``doctor._store_defect``), so the
+#: only thing keeping the model honest is a list that both sides read.
+STORE_DAMAGE = (
+    "registry-table",
+    "registry-row",
+    "chunk-columns",
+    "vec-table",
+    "vector-rows",
+    "registry-width",
+    "registry-width-text",
+)
 
 
 def _break_store(index: Path, collection: str, how: str) -> None:
@@ -117,6 +131,18 @@ def _break_store(index: Path, collection: str, how: str) -> None:
 
     conn = _vec_connection(index)
     try:
+        if how.startswith("registry-width"):
+            # Everything else stays intact: the collection is registered, the
+            # columns and vector table are there and the rows match. Only the
+            # width `_knn` compares the query vector against is wrong, which is
+            # enough to refuse every search.
+            width = "'wide'" if how.endswith("text") else "999"
+            conn.execute(
+                f'UPDATE "{_REGISTRY_TABLE}" SET dimension = {width} WHERE collection = ?',
+                (collection,),
+            )
+            conn.commit()
+            return
         if how == "registry-table":
             conn.execute(f'DROP TABLE "{_REGISTRY_TABLE}"')
         elif how == "registry-row":
@@ -179,6 +205,47 @@ def _write_index(
     values.update(overrides)
     manifest_mod.write_manifest(index, manifest_mod.Manifest(**values))
     return index
+
+
+def _probe(index: Path) -> str:
+    """``_store_defect`` with the width its callers pass it.
+
+    Read back off the manifest rather than written as a literal, so this cannot
+    quietly stop matching the fixture -- and so it is the same number
+    production passes, which is the whole subject of the width check.
+    """
+    from aorta.chat.rag import manifest as manifest_mod
+
+    return doctor._store_defect(index, manifest_mod.read_manifest(index).dimensions)
+
+
+def _read_path_answers(index: Path) -> str:
+    """Whether a real retrieval can answer out of ``index``, and why not if it cannot.
+
+    The oracle for ``TestStoreProbeAgreesWithTheReadPath``. Deliberately the
+    genuine article -- ``SqliteVecStore.similarity_search``, sqlite-vec loaded,
+    the real join -- because a hand-rolled approximation of the read path is
+    exactly what ``_store_defect`` already is, and a second one would only
+    prove the two approximations agree with each other.
+
+    Returns "" when a query comes back with rows, and the failure otherwise. An
+    empty result counts as answering: the read path did not refuse the index,
+    and the probe being stricter about that is a documented one-way asymmetry.
+    """
+    from aorta.chat.rag.embeddings.factory import get_provider
+    from aorta.chat.rag.retriever import SqliteVecStore
+
+    store = SqliteVecStore(
+        path=index, embedding=FixedWidthEmbeddings(), collection=get_provider().collection_name()
+    )
+    try:
+        store.similarity_search("chunk", k=3)
+        return ""
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    finally:
+        with suppress(Exception):
+            store.close()
 
 
 @pytest.fixture(autouse=True)
@@ -260,7 +327,7 @@ class TestStructure:
         """
         _write_index(monkeypatch, tmp_path)
 
-        def _explode(index_file):
+        def _explode(index_file, dimensions):
             raise ImportError("no module named 'aorta.chat.rag.retriever'")
 
         monkeypatch.setattr(doctor, "_store_defect", _explode)
@@ -287,7 +354,7 @@ class TestStructure:
         """
         _write_index(monkeypatch, tmp_path)
 
-        def _explode(index_file):
+        def _explode(index_file, dimensions):
             raise ImportError("no module named 'aorta.chat.rag.retriever'")
 
         monkeypatch.setattr(doctor, "_store_defect", _explode)
@@ -592,7 +659,7 @@ class TestIndexChecks:
         from aorta.chat.rag.retriever import SqliteVecStore
 
         index = _write_index(monkeypatch, tmp_path)
-        assert doctor._store_defect(index) == ""
+        assert _probe(index) == ""
 
         store = SqliteVecStore(
             path=index,
@@ -655,10 +722,10 @@ class TestIndexChecks:
         from aorta.chat.rag.embeddings.factory import get_provider
 
         index = _write_index(monkeypatch, tmp_path)
-        assert doctor._store_defect(index) == ""
+        assert _probe(index) == ""
 
         _break_store(index, get_provider().collection_name(), how)
-        assert doctor._store_defect(index)
+        assert _probe(index)
 
         report = run_checks(backend=False)
         assert _by_name(report, "index manifest").status == FAIL
@@ -709,6 +776,210 @@ class TestIndexChecks:
         check = _by_name(run_checks(backend=False), "index manifest")
         assert check.status == WARN
         assert any("source drift" in line for line in check.hint.splitlines())
+
+
+class TestNativeModeOnAReasoningModel:
+    """The one mode-and-model pair where the fallback advice is the dead end.
+
+    ``_NATIVE_MODE_HINT`` ends by naming ``text`` as the mode to try if the
+    endpoint turns out to reject tools. For a reasoning model that is the
+    failure the ``text`` branch of this same check warns about, so following it
+    walks straight into what the check exists to prevent -- and the module has
+    the model name on this path already.
+    """
+
+    def _native(self, monkeypatch, model: str) -> None:
+        monkeypatch.setattr(settings, "llm_tool_mode", "native")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "remote_llm_model", model)
+
+    @pytest.mark.parametrize("model", ["gpt-oss-120b", "DeepSeek-R1", "o3-mini", "QwQ-32B"])
+    def test_a_reasoning_model_is_not_sent_to_text(self, monkeypatch, model):
+        """The assertion the review asked for, over the detector's own vocabulary."""
+        self._native(monkeypatch, model)
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+
+        assert check.status == OK
+        assert '"text" is the mode to try' not in check.hint
+        assert 'cannot drive "text" mode' in check.hint
+
+    @pytest.mark.parametrize("model", ["gpt-4o-mini", "claude-sonnet-4-5", "llama-3.3-70b"])
+    def test_an_ordinary_model_keeps_the_fallback(self, monkeypatch, model):
+        """The advice is right for everything else, so it must not be dropped wholesale."""
+        self._native(monkeypatch, model)
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+
+        assert '"text" is the mode to try' in check.hint
+
+    def test_the_two_branches_do_not_contradict_each_other(self, monkeypatch):
+        """Read the same model through both modes; neither may recommend the other.
+
+        This is the property under the finding. Whichever mode a reasoning
+        model is configured in, the report must not route it to the one that
+        cannot parse its replies.
+        """
+        self._native(monkeypatch, "gpt-oss-120b")
+        native = _by_name(run_checks(backend=False), "llm tool mode")
+
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        text = _by_name(run_checks(backend=False), "llm tool mode")
+
+        assert text.status == WARN
+        assert '"text" is the mode to try' not in native.hint
+        # The text branch may still point at native, which is the working one.
+        assert "native" in text.hint
+
+    def test_the_endpoint_note_survives_the_reasoning_wording(self, monkeypatch):
+        """The provider-specific note is appended to both, not just the default one.
+
+        ``native`` on a stock vLLM needs two server flags, and that is more
+        relevant for a reasoning model, not less -- the endpoint is the only
+        thing left to fix.
+        """
+        monkeypatch.setattr(settings, "llm_tool_mode", "native")
+        monkeypatch.setattr(settings, "llm_provider", "vllm")
+        monkeypatch.setattr(settings, "vllm_model", "deepseek-r1-distill-qwen-32b")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+
+        assert "--enable-auto-tool-choice" in check.hint
+        assert 'cannot drive "text" mode' in check.hint
+
+    def test_a_native_line_with_no_model_name_keeps_the_general_advice(self, monkeypatch):
+        """No name is not evidence of a reasoning model, and must not be read as one."""
+        monkeypatch.setattr(settings, "llm_tool_mode", "native")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "remote_llm_model", "")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+
+        assert '"text" is the mode to try' in check.hint
+
+
+class TestStoreProbeAgreesWithTheReadPath:
+    """Hold ``_store_defect`` to the thing it models, instead of to a checklist.
+
+    Three review rounds found the same shape in that probe: a condition the
+    read path enforces and the probe did not -- the chunk table, then the rest
+    of the collection contract, then the width inside the registry. Patching
+    the third one is not a fix for that pattern, because the pattern is that
+    the probe *derives* queryability from conditions someone thought of while
+    the read path *is* queryability.
+
+    Asking the read path in production is not available at a doctor's price
+    (sqlite-vec must be loaded, the connection is read-write, and a real query
+    needs a real query vector -- see ``doctor._store_defect``). A test has none
+    of those constraints, so the oracle lives here: for every state in
+    ``STORE_DAMAGE``, run a genuine ``similarity_search`` and require the probe
+    to have already said so.
+
+    This is not decoration. Writing it is what turned up the non-integer
+    registry width, which no review round had named.
+    """
+
+    @pytest.mark.parametrize("how", STORE_DAMAGE)
+    def test_no_state_that_defeats_a_query_reads_as_healthy(self, monkeypatch, tmp_path: Path, how):
+        """The direction that matters: a false ``healthy`` withholds the remedy.
+
+        Getting this wrong tells someone whose index cannot answer that there
+        is nothing to do, which is worse than the over-warning this probe
+        replaced -- that at least erred noisily.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path)
+        _break_store(index, get_provider().collection_name(), how)
+
+        failure = _read_path_answers(index)
+        defect = _probe(index)
+        if failure:
+            assert defect, (
+                f"retrieval refuses a {how} store with {failure!r}, and the probe called it healthy"
+            )
+        else:
+            # Not skipped: a new damage state that leaves queries working is a
+            # claim about the read path, and it should have to be made out loud
+            # here rather than passing this test by not exercising it.
+            assert how == "vector-rows", (
+                f"{how} leaves retrieval working, so this test asserts nothing about it; "
+                "add it to the strictness test's expected list if that is intended"
+            )
+
+    def test_a_healthy_store_satisfies_both(self, monkeypatch, tmp_path: Path):
+        """The other end: neither side may be vacuously strict."""
+        index = _write_index(monkeypatch, tmp_path)
+        assert _read_path_answers(index) == ""
+        assert _probe(index) == ""
+
+    def test_the_only_state_the_probe_is_stricter_about_is_row_parity(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The one deliberate disagreement, pinned so it stays the only one.
+
+        A chunk with no vector beside it is unreachable through an inner join,
+        but the rows that do have vectors still answer -- so retrieval does not
+        refuse the index and the probe does. That is the safe direction (a
+        warning over a half-built index) and it is why the agreement above is
+        one-way rather than an equality. Enumerated here so that a second
+        divergence has to be argued for rather than absorbed.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        stricter = []
+        for how in STORE_DAMAGE:
+            (tmp_path / how).mkdir()
+            index = _write_index(monkeypatch, tmp_path / how)
+            _break_store(index, get_provider().collection_name(), how)
+            if not _read_path_answers(index) and _probe(index):
+                stricter.append(how)
+
+        assert stricter == ["vector-rows"]
+
+    def test_the_registry_width_is_checked_against_the_manifest(self, monkeypatch, tmp_path: Path):
+        """The reported case: 999 in the registry over a 384-dimension index.
+
+        Every other part of the contract holds -- registered collection, the
+        columns, the vector table, matching row counts -- so this is the state
+        that reaches the end of the probe and used to come back clean.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path)
+        _break_store(index, get_provider().collection_name(), "registry-width")
+
+        defect = _probe(index)
+        assert "999" in defect and "384" in defect
+        # And the real reason, in the report's own words rather than sqlite's.
+        assert "refuses every 384-dimension search" in defect
+
+    def test_a_width_that_is_not_a_number_is_caught_too(self, monkeypatch, tmp_path: Path):
+        """Found by the oracle above, not by review.
+
+        ``_knn`` coerces the registry value with ``int()`` before it compares
+        anything, so a width of ``'wide'`` raises just as surely as a
+        mismatched one -- and a check written only for the reported case would
+        have been the fourth round of this.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path)
+        _break_store(index, get_provider().collection_name(), "registry-width-text")
+
+        assert "not a number" in _probe(index)
+
+    def test_an_unknown_manifest_width_still_checks_what_it_can(self, monkeypatch, tmp_path: Path):
+        """``0`` means "the manifest does not say", which is not "anything goes".
+
+        The comparison is skipped, because there is nothing to compare against.
+        The coercion is not, because ``_knn`` performs it either way.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        collection = get_provider().collection_name()
+        index = _write_index(monkeypatch, tmp_path)
+
+        _break_store(index, collection, "registry-width")
+        assert doctor._store_defect(index, 0) == ""
+        _break_store(index, collection, "registry-width-text")
+        assert doctor._store_defect(index, 0)
 
 
 class TestRemoteEmbeddingProfile:
@@ -854,6 +1125,67 @@ class TestRemoteEmbeddingProfile:
         # What each row uniquely carries.
         assert "write_profile runs" not in index.hint
         assert 'embedding_provider = "local"' in profile.hint
+
+    def test_a_keyless_remote_profile_still_gets_the_migration_advice(self, monkeypatch):
+        """The population this whole check was written for, and the one it nearly lost.
+
+        No profile template has ever prompted for ``remote_embedding_api_key``
+        and it defaults to empty with no fallback to the chat key, so a
+        pre-#462 remote profile is keyless almost by definition. Reporting the
+        provider failure and returning -- which is what the first version of
+        the buildability check did -- silenced this row for exactly them, and
+        left them reading "set the key" over a problem the key does not fix.
+        """
+        self._remote(monkeypatch)
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        report = run_checks(backend=False)
+
+        assert _by_name(report, "embedding provider").status == FAIL
+        profile = _by_name(report, "embedding profile")
+        assert profile.status == WARN
+        assert 'embedding_provider = "local"' in profile.procedure
+
+    def test_a_keyless_profile_is_not_told_to_build_the_index_locally(self, monkeypatch):
+        """The remedy the missing key guarantees will fail.
+
+        Review raised the same gap from #462's side. Every chunk of the corpus
+        goes through the embeddings API, so with no key ``index build`` fails
+        on the first one -- it is the worst possible thing to recommend here,
+        because it looks like work and is not.
+        """
+        self._remote(monkeypatch)
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
+
+        assert "keep it and build the index" not in procedure
+        assert "would fail on the first chunk" in procedure
+        # And says why the key was never there, so "not set" does not read as
+        # something the user did.
+        assert "no profile template" in procedure
+
+    def test_a_keyed_remote_profile_is_still_told_it_can_build(self, monkeypatch):
+        """The other branch: with a key, building locally is a real option."""
+        self._remote(monkeypatch)
+        report = run_checks(backend=False)
+
+        assert _by_name(report, "embedding provider").status == OK
+        procedure = _by_name(report, "embedding profile").procedure
+        assert "keep it and build the index" in procedure
+        assert "would fail on the first chunk" not in procedure
+
+    def test_the_two_closing_paragraphs_are_mutually_exclusive(self, monkeypatch):
+        """One tail or the other, never both and never neither.
+
+        They give opposite advice about the same command, so a change that
+        concatenated them would be worse than either alone.
+        """
+        for key in ("sk-test", ""):
+            self._remote(monkeypatch)
+            monkeypatch.setattr(settings, "remote_embedding_api_key", key)
+            procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
+            builds = "keep it and build the index" in procedure
+            needs_key = "would fail on the first chunk" in procedure
+            assert builds != needs_key, (key, procedure)
 
     def test_a_raising_index_probe_leaves_the_provider_row_alone(self, monkeypatch, tmp_path: Path):
         """Measured, not assumed: letting it escape put two rows under one name.

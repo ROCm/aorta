@@ -144,10 +144,29 @@ _REMOTE_EMBEDDING_MIGRATION = (
     "                                       key again\n"
     "Local embedding runs on CPU, makes no API calls, and downloads ~65 MB of\n"
     "weights once. It does not change which LLM you talk to -- only how the\n"
-    "corpus and your questions are turned into vectors.\n"
-    "\n"
-    "If the remote embedder *was* deliberate, keep it and build the index\n"
+    "corpus and your questions are turned into vectors."
+)
+
+#: Closes the block when the remote client builds, so keeping it is a real
+#: option. Named separately from the tail below because which of the two is
+#: true decides whether "build locally instead" is advice or a dead end.
+_REMOTE_KEEPING_IT_WORKS = (
+    "\n\nIf the remote embedder *was* deliberate, keep it and build the index\n"
     "locally; the index checks below say what this install currently needs."
+)
+
+#: And when it does not build. Review raised the same gap from #462's side --
+#: that recommending ``index build`` on an empty ``remote_embedding_api_key``
+#: is guaranteed to fail -- and this is the half of it that belongs here: the
+#: paragraph above must not offer a local build to an install whose provider
+#: row has just failed. Worth stating that nothing asked for the key, because
+#: the natural reading of "not set" is that the user cleared it.
+_REMOTE_KEEPING_IT_NEEDS_A_KEY = (
+    "\n\nKeeping the remote embedder means setting remote_embedding_api_key\n"
+    "first. The provider row above could not build a client without it, so\n"
+    "'aorta chat index build' would fail on the first chunk rather than\n"
+    "slowly -- and nothing has asked you for that key: no profile template\n"
+    "prompts for it, and it does not fall back to the one the chat model uses."
 )
 
 #: Model names that mark a reasoning model. A heuristic -- a gateway can call a
@@ -190,6 +209,23 @@ _NATIVE_MODE_HINT = (
     "Nothing here confirms the endpoint accepts it: the backend probe asks\n"
     "for /health, which a server that rejects the 'tools' parameter answers\n"
     'normally. If action-routed questions fail, "text" is the mode to try.\n'
+)
+
+#: The same warning for a model that has no such fallback. Review found the
+#: line above being printed over a reasoning model, where it is not merely
+#: unhelpful but points at the dead end this check was added to prevent: the
+#: ``text`` branch two screens down warns that a reasoning model cannot write
+#: the ``ACTION:`` lines that mode parses, so sending one there on the way out
+#: of a failing ``native`` walks it into the failure the other branch exists to
+#: describe. The module knows which it is -- ``model`` is resolved before the
+#: mode is branched on -- so the only reason it said it was that nobody asked
+#: the question on this path.
+_NATIVE_REASONING_HINT = (
+    "Nothing here confirms the endpoint accepts it: the backend probe asks\n"
+    "for /health, which a server that rejects the 'tools' parameter answers\n"
+    "normally. This model has no second option if it does not -- a reasoning\n"
+    'model cannot drive "text" mode, which is why that mode warns about it,\n'
+    "so the endpoint is the thing to fix rather than the setting.\n"
 )
 
 
@@ -325,8 +361,12 @@ def _probe_huggingface() -> bool:
         return False
 
 
-def _store_defect(index_file: Path) -> str:
+def _store_defect(index_file: Path, dimensions: int) -> str:
     """Why this install's collection cannot be read out of ``index_file``, or "".
+
+    ``dimensions`` is the width the manifest records, which both callers
+    already hold from the ``check_index`` they just ran, so it costs no extra
+    read. Pass ``0`` for "not known", which skips only the width comparison.
 
     The half ``check_index`` does not report. It escalates an unopenable index
     to a refusal only when the manifest claims a chunk count to contradict, and
@@ -342,20 +382,56 @@ def _store_defect(index_file: Path) -> str:
     A non-empty chunk table is necessary but not sufficient, which is why the
     schema check follows it -- see :func:`_collection_schema_defect`.
 
+    **Why this models the read path instead of asking it, and what stops that
+    modelling drifting.** Three rounds of review have now found the same shape
+    here -- the chunks table was necessary-not-sufficient, then the rest of the
+    seven-part contract, then the registry width inside it -- so the question
+    is not which condition to add next but whether a *derived* answer is the
+    right kind of answer at all. It is, at this price, and the reasons are
+    properties of the read path rather than preferences:
+
+    * ``SqliteVecStore._connection`` calls ``ensure_loadable_extensions``. This
+      probe has to report on the install that is *missing* sqlite-vec, and the
+      report already has a ``sqlite`` row saying so. Routing it through the
+      store would restate one environment fault as a defect in every index --
+      the mislabelling caught in ``_check_remote_embedding_profile``, where a
+      raising probe put two ``embedding provider`` rows in one report.
+    * That same method connects read-write. A doctor must not be the thing that
+      writes a journal beside a user's already-damaged index; this reads
+      ``mode=ro``.
+    * A true end-to-end query also needs a query vector, which locally means
+      downloading the model and remotely means a billed API call.
+
+    The first two are unavoidable, so the modelling stays. What changes is that
+    it is no longer trusted to be complete: ``TestStoreProbeAgreesWithTheReadPath``
+    runs a real ``similarity_search`` against every state in ``STORE_DAMAGE``
+    and fails if any of them answers differently from this function. A test can
+    pay all three prices above, because it controls the environment a user's
+    machine does not. That test is what found the non-integer width -- the
+    review named the mismatched one -- so the set is closed by construction
+    rather than by having thought hard enough, and a new state added to
+    ``STORE_DAMAGE`` extends the contract without anyone remembering to.
+
+    The agreement required is one-directional: no state where retrieval fails
+    may read as healthy here. The reverse is allowed and one case uses it --
+    see the row-parity check in :func:`_collection_schema_defect`.
+
     **On #465, which fixes that suppression at the root.** It removes the
     ``manifest.chunk_count`` gate, so ``check_index`` will refuse *a file that
     cannot be opened as sqlite at all* on its own. This probe is kept anyway,
-    and not as belt-and-braces: measured against the seven clobbered states
-    this reports on, ``check_index`` refuses none of them today, and #465
-    changes exactly one of the seven. The other six -- no chunk table for this
+    and not as belt-and-braces: measured against the nine clobbered states this
+    reports on, ``check_index`` refuses none of them today, and #465 changes
+    exactly one of the nine. The other eight -- no chunk table for this
     install's collection, an empty one, a missing collection registry, an
     unregistered collection, absent ``content``/``metadata`` columns, a missing
-    or short vector table -- are states ``check_index`` never looks at, because
-    it compares a sidecar against a row count and these are facts about the
-    schema underneath it. So there is no behaviour to make this conditional on:
-    after #465 the unopenable case short-circuits at the refusal check in both
-    callers and never reaches here, and the six that do reach here are why the
-    function exists. Merge order does not matter either way.
+    or short vector table, and a registry width that is either not a number or
+    not the one the index was built at -- are states ``check_index`` never
+    looks at, because it compares a sidecar against a row count and these are
+    facts about the schema underneath it. So there is no behaviour to make this
+    conditional on: after #465 the unopenable case short-circuits at the
+    refusal check in both callers and never reaches here, and the eight that do
+    reach here are why the function exists. Merge order does not matter either
+    way.
     """
     from aorta.chat.rag.embeddings.factory import get_provider
 
@@ -372,7 +448,9 @@ def _store_defect(index_file: Path) -> str:
         # provider. Neither can answer a question.
         if not chunks:
             return f"no chunks for this install's collection in {index_file}"
-        return _collection_schema_defect(index_file, collection, _REGISTRY_TABLE, chunks)
+        return _collection_schema_defect(
+            index_file, collection, _REGISTRY_TABLE, chunks, dimensions
+        )
     except Exception as exc:
         # Deliberately broad, for the same reason as ``_check_backend``: a
         # damaged index surfaces as IndexUnreadableError, sqlite3.Error or
@@ -383,7 +461,7 @@ def _store_defect(index_file: Path) -> str:
 
 
 def _collection_schema_defect(
-    index_file: Path, collection: str, registry_table: str, chunks: int
+    index_file: Path, collection: str, registry_table: str, chunks: int, dimensions: int
 ) -> str:
     """Which part of the readable-collection contract ``index_file`` fails, or "".
 
@@ -397,9 +475,18 @@ def _collection_schema_defect(
     inserts -- passes a count and fails every query, which is the state this
     function exists to name.
 
+    The registry row is read for its *width* and not merely for its presence,
+    because ``_knn`` reads that number before it reads any table and refuses
+    the search if it does not match the vector the provider just produced. A
+    store can satisfy every structural part of this contract and still answer
+    nothing on that one integer.
+
     Row parity is checked as well, because the join is an inner one: chunks
     with no vectors beside them are rows no retrieval can reach, and the query
-    returns empty rather than raising.
+    returns empty rather than raising. This is the one place the function is
+    deliberately stricter than the read path -- the rows that do have vectors
+    still answer -- which is why ``TestStoreProbeAgreesWithTheReadPath``
+    requires one-way agreement and names this state as the only exception.
 
     Raw read-only sqlite and no sqlite-vec load, for the same reason
     ``collection_chunk_count`` uses it: this has to report on a broken install
@@ -429,10 +516,32 @@ def _collection_schema_defect(
             f'SELECT dimension FROM "{registry_table}" WHERE collection = ?',
             (collection,),
         ).fetchone()
-        if registered is None or registered[0] is None:
+        if registered is None:
             return (
                 f"this install's collection is not registered in {registry_table} in "
                 f"{index_file}, so the query path reports a missing collection"
+            )
+
+        # The registry width is not merely a field that should be populated: it
+        # is the number ``retriever.SqliteVecStore._knn`` coerces with ``int()``
+        # and compares against the width of the vector the provider just
+        # produced, before it touches a table. So a width that is not a number,
+        # or is a number the index was not built at, fails every search while
+        # every other part of the contract here still holds -- registry, chunk
+        # columns, vector table and row parity all intact.
+        try:
+            width = int(registered[0])
+        except (TypeError, ValueError):
+            return (
+                f"this install's collection is registered in {index_file} with a "
+                f"dimension of {registered[0]!r}, which is not a number; the query "
+                "path reads it before every search and cannot"
+            )
+        if dimensions > 0 and width != dimensions:
+            return (
+                f"this install's collection is registered at {width} dimensions in "
+                f"{index_file} but the manifest records {dimensions}; the query path "
+                f"compares the two and refuses every {dimensions}-dimension search"
             )
 
         columns = {row[1] for row in conn.execute(f'PRAGMA table_info("chunks_{collection}")')}
@@ -528,18 +637,24 @@ def _index_is_healthy() -> bool:
     if not index_file.exists():
         return False
     try:
-        if check_index(index_file, strict=False).refusals:
+        result = check_index(index_file, strict=False)
+        if result.refusals:
             return False
     except Exception:
         # Unreadable, unparseable, no manifest: all mean the same thing here,
         # which is that there is nothing worth protecting from a rebuild.
         logger.debug("index health probe failed", exc_info=True)
         return False
-    return not _store_defect(index_file)
+    return not _store_defect(index_file, result.manifest.dimensions)
 
 
-def _check_remote_embedding_profile(report: Report) -> None:
+def _check_remote_embedding_profile(report: Report, *, usable: bool) -> None:
     """Whether a remote embedding profile is one this install can answer from.
+
+    ``usable`` says whether the remote client could be built at all, which only
+    changes the closing paragraph: an install with no embedding key cannot be
+    told to build the index locally instead, because that is the one remedy its
+    missing key guarantees will fail.
 
     The migration gap raised on #462. That PR flips the profile templates to
     local embeddings, but ``config.write_profile`` runs only on ``config
@@ -608,7 +723,8 @@ def _check_remote_embedding_profile(report: Report) -> None:
             "'aorta chat index fetch' is not offered as an index remedy.\n"
             'Setting embedding_provider = "local" brings it back; see below.'
         ),
-        procedure=_REMOTE_EMBEDDING_MIGRATION,
+        procedure=_REMOTE_EMBEDDING_MIGRATION
+        + (_REMOTE_KEEPING_IT_WORKS if usable else _REMOTE_KEEPING_IT_NEEDS_A_KEY),
     )
 
 
@@ -618,22 +734,39 @@ def _check_embedding_model(report: Report) -> None:
 
     try:
         provider = get_provider()
-        if provider.name == "remote":
-            # Validate the configured remote embedding backend before reporting
-            # this row as healthy. Building the client checks the key/auth
-            # settings without touching the network.
-            provider.get_embeddings()
     except ValueError as exc:
         report.add("embedding provider", FAIL, str(exc))
         return
-    report.add("embedding provider", OK, provider.describe())
 
     if provider.name != "local":
+        # Building the client validates the key and the auth headers without
+        # touching the network, and a query cannot run without it, so a remote
+        # provider that cannot be built is reported rather than described.
+        try:
+            provider.get_embeddings()
+        except ValueError as exc:
+            usable = False
+            report.add("embedding provider", FAIL, str(exc))
+        else:
+            usable = True
+            report.add("embedding provider", OK, provider.describe())
+
         # A remote embedder needs a key and an endpoint, not a cache; the
         # provider reports its own configuration problems when built.
         report.add("embedding model cache", SKIP, "remote provider; no local weights needed")
-        _check_remote_embedding_profile(report)
+
+        # Runs either way, and that is the whole point. Returning early on the
+        # failure -- which is what the first version of this check did -- lost
+        # the migration advice for precisely the install it was written for: no
+        # profile template has ever prompted for ``remote_embedding_api_key``,
+        # and it defaults to empty with no fallback to the chat key, so the
+        # pre-#462 remote profiles this warning exists to rescue are keyless
+        # almost by definition. They would have been told to buy an embeddings
+        # subscription, when their actual problem is a stale template.
+        _check_remote_embedding_profile(report, usable=usable)
         return
+
+    report.add("embedding provider", OK, provider.describe())
 
     from aorta.chat.rag.embeddings import fastembed_bge
 
@@ -757,7 +890,7 @@ def _check_index(report: Report) -> None:
     # The query path refuses both regardless, so reporting either as a matching
     # index would contradict both that path and the cold-cache line above,
     # which gates on the same helper.
-    defect = _store_defect(index_file)
+    defect = _store_defect(index_file, result.manifest.dimensions)
     if defect:
         report.add(
             "index manifest",
@@ -847,11 +980,21 @@ def _check_tool_mode(report: Report) -> None:
     if mode == "native":
         # Resolved after the provider, not before it, so this line can say what
         # the mode requires here. See :data:`_NATIVE_MODE_HINT`.
+        #
+        # The model is read on this path too, and not only on the ``text`` one:
+        # the advice to fall back to ``text`` is wrong for exactly the models
+        # the ``text`` branch refuses to recommend, and the name is already in
+        # hand. See :data:`_NATIVE_REASONING_HINT`.
+        reasoning = bool(model) and bool(_REASONING_MODEL_PATTERN.search(model.lower()))
         report.add(
             "llm tool mode",
             OK,
-            "native (the provider's function-calling API)",
-            hint=_with_native_note(_NATIVE_MODE_HINT, native_note),
+            f"native (the provider's function-calling API), {model} is a reasoning model"
+            if reasoning
+            else "native (the provider's function-calling API)",
+            hint=_with_native_note(
+                _NATIVE_REASONING_HINT if reasoning else _NATIVE_MODE_HINT, native_note
+            ),
         )
         return
     if not model:
