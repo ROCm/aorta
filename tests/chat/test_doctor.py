@@ -120,6 +120,7 @@ STORE_DAMAGE = (
     "chunk-columns",
     "vec-table",
     "vector-rows",
+    "vector-rowids",
     "registry-width",
     "registry-width-text",
 )
@@ -163,6 +164,13 @@ def _break_store(index: Path, collection: str, how: str) -> None:
             conn.execute(
                 f'DELETE FROM "vec_{collection}" WHERE rowid = '
                 f'(SELECT MIN(rowid) FROM "vec_{collection}")'
+            )
+        elif how == "vector-rowids":
+            moved = conn.execute(f'SELECT rowid, embedding FROM "vec_{collection}"').fetchall()
+            conn.execute(f'DELETE FROM "vec_{collection}"')
+            conn.executemany(
+                f'INSERT INTO "vec_{collection}" (rowid, embedding) VALUES (?, ?)',
+                [(rowid + 10_000, embedding) for rowid, embedding in moved],
             )
         else:  # pragma: no cover - guards the parametrise list against typos
             raise AssertionError(f"unknown damage {how!r}")
@@ -903,7 +911,7 @@ class TestStoreProbeAgreesWithTheReadPath:
             # Not skipped: a new damage state that leaves queries working is a
             # claim about the read path, and it should have to be made out loud
             # here rather than passing this test by not exercising it.
-            assert how == "vector-rows", (
+            assert how in {"vector-rows", "vector-rowids"}, (
                 f"{how} leaves retrieval working, so this test asserts nothing about it; "
                 "add it to the strictness test's expected list if that is intended"
             )
@@ -936,7 +944,7 @@ class TestStoreProbeAgreesWithTheReadPath:
             if not _read_path_answers(index) and _probe(index):
                 stricter.append(how)
 
-        assert stricter == ["vector-rows"]
+        assert stricter == ["vector-rows", "vector-rowids"]
 
     def test_the_registry_width_is_checked_against_the_manifest(self, monkeypatch, tmp_path: Path):
         """The reported case: 999 in the registry over a 384-dimension index.
@@ -985,6 +993,13 @@ class TestStoreProbeAgreesWithTheReadPath:
         assert doctor._store_defect(index, 0) == ""
         _break_store(index, collection, "registry-width-text")
         assert doctor._store_defect(index, 0)
+
+    def test_row_id_alignment_is_checked_not_just_row_count(self, monkeypatch, tmp_path: Path):
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path)
+        _break_store(index, get_provider().collection_name(), "vector-rowids")
+        assert "row IDs disagree" in _probe(index)
 
 
 class TestRemoteEmbeddingProfile:

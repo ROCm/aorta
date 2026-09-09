@@ -620,8 +620,24 @@ class TestRefreshCommand:
     def test_a_local_provider_is_told_to_fetch(self):
         assert manifest_mod._refresh_command("local") == "aorta chat index fetch"
 
-    def test_a_remote_provider_is_told_to_build(self):
+    def test_a_remote_provider_with_a_key_is_told_to_build(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
         assert manifest_mod._refresh_command("remote") == "aorta chat index build"
+
+    def test_a_keyless_remote_provider_gets_the_local_fetch_escape_hatch(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        assert (
+            manifest_mod._refresh_command("remote")
+            == "AORTA_CHAT_EMBEDDING_PROVIDER=local aorta chat index fetch"
+        )
 
     def test_it_agrees_with_the_block_form(self):
         """Two independent answers to "is a fetch worth suggesting" would drift.
@@ -697,6 +713,26 @@ class TestWarnings:
         assert drift
         assert not any("index fetch" in line for line in drift)
         assert any("aorta chat index build" in line for line in drift)
+
+    def test_the_drift_warning_uses_the_local_fetch_escape_hatch_for_keyless_remote(
+        self, monkeypatch
+    ):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            installed_version="0.3.0",
+        )
+        drift = [line for line in report.warnings if "source drift" in line]
+        assert drift
+        assert any(
+            "AORTA_CHAT_EMBEDDING_PROVIDER=local aorta chat index fetch" in line for line in drift
+        )
 
     def test_an_identical_version_does_not_warn(self):
         report = validate(

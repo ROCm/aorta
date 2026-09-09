@@ -570,13 +570,44 @@ def _collection_schema_defect(
         # known to be there, and a future sqlite-vec layout would otherwise
         # make every healthy index read as broken.
         if f"{vectors}_rowids" in tables:
-            embedded = conn.execute(f'SELECT COUNT(*) FROM "{vectors}_rowids"').fetchone()[0]
+            rowids = f"{vectors}_rowids"
+            embedded = conn.execute(f'SELECT COUNT(*) FROM "{rowids}"').fetchone()[0]
             if embedded != chunks:
                 return (
                     f"{chunks} chunks but {embedded} vectors for this install's "
                     f"collection in {index_file}; retrieval joins the two and can only "
                     "reach the rows that have both"
                 )
+            rowid_columns = [name for _, name, *_ in conn.execute(f'PRAGMA table_info("{rowids}")')]
+            rowid_column = (
+                "rowid"
+                if "rowid" in rowid_columns
+                else (
+                    "id"
+                    if "id" in rowid_columns
+                    else (rowid_columns[0] if rowid_columns else "")
+                )
+            )
+            if rowid_column:
+                quoted = rowid_column.replace('"', '""')
+                missing_vector = conn.execute(
+                    f'SELECT 1 FROM "chunks_{collection}" c LEFT JOIN "{rowids}" r '
+                    f'ON c.id = r."{quoted}" WHERE r."{quoted}" IS NULL LIMIT 1'
+                ).fetchone()
+                if missing_vector:
+                    return (
+                        f"chunk and vector row IDs disagree for this install's collection "
+                        f"in {index_file}; retrieval joins by row ID and misses unmatched rows"
+                    )
+                missing_chunk = conn.execute(
+                    f'SELECT 1 FROM "{rowids}" r LEFT JOIN "chunks_{collection}" c '
+                    f'ON c.id = r."{quoted}" WHERE c.id IS NULL LIMIT 1'
+                ).fetchone()
+                if missing_chunk:
+                    return (
+                        f"vector and chunk row IDs disagree for this install's collection "
+                        f"in {index_file}; retrieval joins by row ID and misses unmatched rows"
+                    )
         return ""
     finally:
         conn.close()

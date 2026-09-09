@@ -452,7 +452,28 @@ def _refresh_command(embedding_provider: str | None = None) -> str:
     that a message can say which one it means without asserting it can run.
     """
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
-    return "aorta chat index fetch" if provider == "local" else "aorta chat index build"
+    if provider == "local":
+        return "aorta chat index fetch"
+    if _configured_remote_provider_usable():
+        return "aorta chat index build"
+    return "AORTA_CHAT_EMBEDDING_PROVIDER=local aorta chat index fetch"
+
+
+def _configured_remote_provider_usable() -> bool:
+    """Whether the configured remote embedding provider can build embeddings."""
+    try:
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        provider = get_provider()
+        if provider.name == "local":
+            return True
+        provider.get_embeddings()
+        return True
+    except ValueError:
+        return False
+    except Exception:
+        logger.debug("could not verify remote embedding provider usability", exc_info=True)
+        return True
 
 
 def remedy_lines(
