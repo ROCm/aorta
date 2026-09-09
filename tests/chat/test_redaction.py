@@ -595,6 +595,69 @@ def _unaccounted_bound_names(source: str) -> list[str]:
     )
 
 
+#: The function that hands out a chat model. Smuggling one past ``_send`` means
+#: getting its return value onto an allowlisted receiver name, so this is the
+#: root the scan below chases.
+_MODEL_PRODUCER = "_get_llm"
+
+
+def _model_producer_aliases(source: str) -> frozenset[str]:
+    """Names in *source* that are ``_get_llm`` under another name.
+
+    A guard that matched the callee spelling at the binding site read
+    ``retriever = _get_llm()`` correctly and ``get_retriever = _get_llm`` /
+    ``retriever = get_retriever()`` not at all -- the model still lands on an
+    allowlisted receiver, one line later, with the gate none the wiser.
+
+    So the root is chased to a fixpoint: any name bound to a *bare* reference
+    to a known producer (``Name`` or ``Attribute``, not a call) is itself a
+    producer, and the pass repeats until nothing new appears. Two hops and
+    ``nodes._get_llm`` are covered by construction rather than by being listed.
+
+    This is deliberately not general dataflow. A model smuggled through a
+    container, a class attribute or a function's return value would not be
+    found, and cannot be by a scan of this kind. What makes that acceptable is
+    that this is the *second* line of defence: the runtime chokepoint test in
+    :class:`TestGraphChokepoint` asserts every model call actually observed
+    goes through ``_send``, and this scan exists to stop a *future* edit
+    quietly re-earning an allowlist exemption it no longer deserves. The
+    honest claim is "harder to do by accident", not "impossible".
+    """
+    aliases = {_MODEL_PRODUCER}
+    tree = ast.parse(source)
+    while True:
+        grown = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                value = node.value
+                if value is None or not isinstance(value, (ast.Name, ast.Attribute)):
+                    # A *call* produces a model instance, not another alias for
+                    # the producer, so it is the binding scan's business.
+                    continue
+                if ast.unparse(value).split(".")[-1] not in aliases:
+                    continue
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                for target in targets:
+                    for sub in ast.walk(target):
+                        if isinstance(sub, ast.Name) and sub.id not in aliases:
+                            aliases.add(sub.id)
+                            grown = True
+        if not grown:
+            return frozenset(aliases)
+
+
+def _calls_a_model_producer(assigned: str, aliases: frozenset[str]) -> bool:
+    """Whether the bound expression *assigned* reaches a model producer.
+
+    Substring rather than a parse of the callee, and over-reporting on purpose:
+    a tuple unpack hides which element lands on which name, and for a guard the
+    safe direction is to complain about a binding it cannot fully attribute.
+    """
+    return any(alias in assigned for alias in aliases)
+
+
 def _smuggled_model_bindings(source: str) -> list[str]:
     """Complaints about allowlisted receiver names in *source* bound to a model.
 
@@ -603,6 +666,7 @@ def _smuggled_model_bindings(source: str) -> list[str]:
     syntax for an old one -- both come out as a message rather than a pass.
     """
     complaints = []
+    aliases = _model_producer_aliases(source)
     for name, assigned, lineno in _receiver_bindings(source):
         if assigned is None:
             complaints.append(
@@ -610,10 +674,7 @@ def _smuggled_model_bindings(source: str) -> list[str]:
                 "and is bound by a form this guard cannot read, so it cannot "
                 "show that no chat model reaches it"
             )
-        elif "_get_llm" in assigned:
-            # The whole bound expression, not just the part that lands on this
-            # name: a tuple unpack hides which element is which, and over-
-            # reporting there is the safe direction for a guard.
+        elif _calls_a_model_producer(assigned, aliases):
             complaints.append(
                 f"line {lineno}: '{name}' is allowlisted out of the _send gate "
                 f"but is assigned a chat model: {assigned}"
@@ -740,6 +801,43 @@ class TestGraphChokepoint:
     def test_every_binding_form_is_seen_by_the_guard(self, binding):
         """One syntax for "bind this name" is not the same as all of them."""
         assert _smuggled_model_bindings(binding), binding
+
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            # Matching the callee's spelling at the binding site read the direct
+            # form and none of these: the producer arrives under a different
+            # name, and the model lands on the allowlisted receiver one line
+            # later with the gate none the wiser.
+            'get_retriever = _get_llm\nretriever = get_retriever()',
+            "f = nodes._get_llm\nretriever = f()",
+            "a = _get_llm\nb = a\nretriever = b()",
+            # Order must not matter: the closure is computed over the whole
+            # module before any binding is judged.
+            "retriever = g()\ng = _get_llm",
+            "h: Any = _get_llm\nretriever = h()",
+            "(w := _get_llm)\nretriever = w()",
+        ],
+    )
+    def test_renaming_the_producer_does_not_hide_it(self, binding):
+        """An alias of ``_get_llm`` is ``_get_llm`` for the guard's purposes."""
+        assert _smuggled_model_bindings(binding), binding
+
+    @pytest.mark.parametrize(
+        "binding",
+        [
+            # The cost of the alias closure is false positives, so these pin
+            # the other direction: a real producer that was never aliased to
+            # `_get_llm` must not start being reported.
+            "retriever = get_retriever()",
+            "tool_fn = TOOL_REGISTRY.get(name)",
+            "from x import get_retriever\nretriever = get_retriever()",
+            "def get_retriever():\n    pass\nretriever = get_retriever()",
+        ],
+    )
+    def test_an_unaliased_producer_is_not_reported(self, binding):
+        """A guard that cried wolf on ordinary code would be edited around."""
+        assert not _smuggled_model_bindings(binding), binding
 
     @pytest.mark.parametrize(
         "binding",

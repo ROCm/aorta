@@ -1281,6 +1281,81 @@ class TestWastedCallGuards:
         assert result["messages"][0].content == _NO_ANSWER_MSG
 
 
+class TestTheSignatureCountsWhicheverRoundItAppearedOn:
+    """The dead end is a property of the loop, not of its last round.
+
+    The decision was made on whatever response happened to hit the
+    unproductive-round cap. A model that returned reasoning and 105 output
+    tokens in round 1 and a plain empty reply in round 2 had dead-ended just as
+    clearly, but reading only round 2 found no signature and abandoned the
+    query -- no retry, no answer.
+    """
+
+    @staticmethod
+    def _plain_empty_reply():
+        """Empty, but with none of the reasoning-model tells."""
+        return AIMessage(
+            content="",
+            usage_metadata={
+                "input_tokens": 10,
+                "output_tokens": 0,
+                "total_tokens": 10,
+            },
+            response_metadata={"finish_reason": "stop"},
+        )
+
+    def _rig(self, rounds):
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=rounds)
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(return_value=AIMessage(content="Native answer."))
+        plain.bind_tools = MagicMock(return_value=bound)
+        return plain, bound
+
+    @pytest.mark.asyncio
+    async def test_a_signature_on_an_earlier_round_still_escalates(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        plain, bound = self._rig([_dead_end_reply(), self._plain_empty_reply()])
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            result = await act_node(_state())
+        assert bound.ainvoke.await_count >= 1, "the retry was never attempted"
+        assert result["messages"][0].content == "Native answer."
+
+    @pytest.mark.asyncio
+    async def test_the_announcement_names_the_round_that_showed_it(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """The evidence in the log must be the round that carried it."""
+        plain, _bound = self._rig([_dead_end_reply(), self._plain_empty_reply()])
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            caplog.at_level(logging.WARNING),
+        ):
+            await act_node(_state())
+        # Both rounds get their own empty-content line, and round 2's honestly
+        # reports 0 tokens -- so this has to read the *announcement*, which
+        # quotes the signature the escalation acted on.
+        announcement = next(
+            line
+            for line in caplog.text.splitlines()
+            if "no answer and no tool call" in line
+        )
+        assert "105 output tokens" in announcement, announcement
+
+    @pytest.mark.asyncio
+    async def test_rounds_that_never_showed_it_do_not_escalate(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Not "escalate whenever the loop gave up" -- the signature is required."""
+        plain, bound = self._rig(
+            [self._plain_empty_reply(), self._plain_empty_reply()]
+        )
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            await act_node(_state())
+        assert bound.ainvoke.await_count == 0
+
+
 class TestOneOutageDoesNotSpendTheWholeFailureBudget:
     """The budget counts probes that learned something, not requests in flight.
 

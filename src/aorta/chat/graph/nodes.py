@@ -1792,6 +1792,9 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
 
     tool_trace: list[str] = []
     tool_calls_made: list[tuple[str, dict, str]] = []
+    # The earliest response in this loop that carried the reasoning dead-end
+    # signature, which is not necessarily the one that hits the round cap.
+    dead_end_evidence: Any = None
     unproductive = 0
 
     for round_num in range(max_rounds):
@@ -1806,6 +1809,14 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
             if not text:
                 unproductive += 1
                 _log_empty_content(response, f"act_node round {round_num + 1}")
+                # Kept because the decision below is made on the round that
+                # happens to hit the cap, and the signature does not have to be
+                # on that one. A model that returned reasoning and 105 tokens
+                # in round 1 and a plain empty reply in round 2 has dead-ended
+                # just as clearly, but reading only round 2 saw nothing to act
+                # on and abandoned the query.
+                if dead_end_evidence is None and _is_reasoning_dead_end(response):
+                    dead_end_evidence = response
                 if unproductive >= _MAX_UNPRODUCTIVE_ROUNDS:
                     logger.warning(
                         "Act loop abandoned after %d rounds with no tool call and "
@@ -1816,10 +1827,13 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
                     # The one place the protocol gets to change. Signalled
                     # rather than done here so act_node issues the retry: this
                     # function's job is to drive one protocol, not to pick one.
-                    if _escalate_to_native(response):
+                    # The earliest round that showed the signature is the
+                    # evidence, falling back to this one.
+                    evidence = dead_end_evidence or response
+                    if _escalate_to_native(evidence):
                         return _EscalateToNative(
                             tuple(tool_trace),
-                            _dead_end_signature(response),
+                            _dead_end_signature(evidence),
                             tuple(tool_calls_made),
                         )
                     return await _abandoned_result(state, tool_trace)
