@@ -32,7 +32,7 @@ class JobRecord:
     scheduler: str = ""             # discovered: slurm | kubernetes | bare_metal
     launcher: str = ""              # discovered: torchrun | primus | aorta_direct | sbatch
     scheduler_job_id: str = ""      # native job ID (Slurm JobId, K8s pod name) for log discovery
-    head_node: str = ""             # SSH host for scheduler queries (e.g. 149.28.124.225)
+    head_node: str = ""             # SSH host for scheduler queries; see CIA_SSH_HOST
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

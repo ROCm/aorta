@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
+from aorta.cia.launch.cluster import ssh_user
 from aorta.cia.launch.job import JobRecord
 
 # How long to wait for the production sweep (4 h)
@@ -12,20 +14,38 @@ PROBE_TIMEOUT_SEC = 4 * 3600
 POLL_INTERVAL_SEC = 30
 
 
+def default_head_node() -> str:
+    """The host scheduler queries are issued from, or "" when none is set.
+
+    No address is shipped. One site's head node was the default here, which
+    made every other site's installation quietly wrong -- and put that site's
+    address in a public repository.
+    """
+    return os.environ.get("CIA_SSH_HOST", "")
+
+
 def _ssh(node: str, cmd: str, background: bool = False) -> subprocess.CompletedProcess | None:
     full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15",
-                f"root@{node}", cmd + (" &" if background else "")]
+                f"{ssh_user()}@{node}", cmd + (" &" if background else "")]
     if background:
         subprocess.Popen(full_cmd)
         return None
     return subprocess.run(full_cmd, capture_output=True, text=True, timeout=60)
 
 
-def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "149.28.124.225") -> Path | None:
+def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "") -> Path | None:
     """SSH to job node, run production Aorta sweep, wait for matrix.json.
+
+    *head_node* falls back to the job's own and then to CIA_SSH_HOST. With
+    none of the three set there is nowhere to send the query, so this
+    returns None rather than guessing at an address.
 
     Returns path to matrix.json in the bundle on success, None on timeout.
     """
+    head_node = head_node or job.head_node or default_head_node()
+    if not head_node:
+        print("[probe] no head node configured (set CIA_SSH_HOST); skipping probe")
+        return None
     aorta_output = job.aorta_output or str(bundle_root / "aorta_run")
     matrix_remote = Path(aorta_output) / "matrix.json"
 
@@ -79,7 +99,7 @@ def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "149.28.
     dest.parent.mkdir(parents=True, exist_ok=True)
     copy_cmd = (
         f"scp -o StrictHostKeyChecking=no "
-        f"root@{job.node}:{matrix_remote} {dest}"
+        f"{ssh_user()}@{job.node}:{matrix_remote} {dest}"
     )
     r = subprocess.run(copy_cmd, shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
