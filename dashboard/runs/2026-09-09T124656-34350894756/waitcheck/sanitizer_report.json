@@ -1,0 +1,940 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "path": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck",
+        "sha256": "a70945fb1135a436c13c83ed96a6cff3655784138f4db3d20ef7315ade0a8968"
+      },
+      "coverage": [],
+      "findings": [
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0x4a4: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x48c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x4a4: s_load_dword s45, s[0:1], 0x88"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc58: missing s_waitcnt vmcnt(62) before use of v132",
+          "metadata": {
+            "context_1": "producer .text+0xd0d0: buffer_load_dword v132, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc58: v_add_f32_e32 v9, v9, v132"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc60: missing s_waitcnt vmcnt(62) before use of v133",
+          "metadata": {
+            "context_1": "producer .text+0xd0e0: buffer_load_dword v133, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc60: v_add_f32_e32 v10, v10, v133"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc68: missing s_waitcnt vmcnt(62) before use of v134",
+          "metadata": {
+            "context_1": "producer .text+0xd0f0: buffer_load_dword v134, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc68: v_add_f32_e32 v11, v11, v134"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc70: missing s_waitcnt vmcnt(62) before use of v135",
+          "metadata": {
+            "context_1": "producer .text+0xd100: buffer_load_dword v135, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc70: v_add_f32_e32 v12, v12, v135"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc78: missing s_waitcnt vmcnt(62) before use of v136",
+          "metadata": {
+            "context_1": "producer .text+0xd110: buffer_load_dword v136, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc78: v_add_f32_e32 v13, v13, v136"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc80: missing s_waitcnt vmcnt(62) before use of v137",
+          "metadata": {
+            "context_1": "producer .text+0xd120: buffer_load_dword v137, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc80: v_add_f32_e32 v14, v14, v137"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc88: missing s_waitcnt vmcnt(62) before use of v138",
+          "metadata": {
+            "context_1": "producer .text+0xd130: buffer_load_dword v138, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc88: v_add_f32_e32 v15, v15, v138"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc90: missing s_waitcnt vmcnt(62) before use of v139",
+          "metadata": {
+            "context_1": "producer .text+0xd140: buffer_load_dword v139, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc90: v_add_f32_e32 v16, v16, v139"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc98: missing s_waitcnt vmcnt(62) before use of v140",
+          "metadata": {
+            "context_1": "producer .text+0xd150: buffer_load_dword v140, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdc98: v_add_f32_e32 v17, v17, v140"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdca0: missing s_waitcnt vmcnt(62) before use of v141",
+          "metadata": {
+            "context_1": "producer .text+0xd160: buffer_load_dword v141, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdca0: v_add_f32_e32 v18, v18, v141"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdca8: missing s_waitcnt vmcnt(62) before use of v142",
+          "metadata": {
+            "context_1": "producer .text+0xd170: buffer_load_dword v142, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdca8: v_add_f32_e32 v19, v19, v142"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcb0: missing s_waitcnt vmcnt(62) before use of v143",
+          "metadata": {
+            "context_1": "producer .text+0xd180: buffer_load_dword v143, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcb0: v_add_f32_e32 v20, v20, v143"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcb8: missing s_waitcnt vmcnt(62) before use of v144",
+          "metadata": {
+            "context_1": "producer .text+0xd190: buffer_load_dword v144, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcb8: v_add_f32_e32 v21, v21, v144"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcc0: missing s_waitcnt vmcnt(62) before use of v145",
+          "metadata": {
+            "context_1": "producer .text+0xd1a0: buffer_load_dword v145, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcc0: v_add_f32_e32 v22, v22, v145"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcc8: missing s_waitcnt vmcnt(62) before use of v146",
+          "metadata": {
+            "context_1": "producer .text+0xd1b0: buffer_load_dword v146, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcc8: v_add_f32_e32 v23, v23, v146"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcd0: missing s_waitcnt vmcnt(62) before use of v147",
+          "metadata": {
+            "context_1": "producer .text+0xd1c0: buffer_load_dword v147, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcd0: v_add_f32_e32 v24, v24, v147"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcd8: missing s_waitcnt vmcnt(62) before use of v148",
+          "metadata": {
+            "context_1": "producer .text+0xd1d0: buffer_load_dword v148, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcd8: v_add_f32_e32 v25, v25, v148"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdce0: missing s_waitcnt vmcnt(62) before use of v149",
+          "metadata": {
+            "context_1": "producer .text+0xd1e0: buffer_load_dword v149, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdce0: v_add_f32_e32 v26, v26, v149"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdce8: missing s_waitcnt vmcnt(62) before use of v150",
+          "metadata": {
+            "context_1": "producer .text+0xd1f0: buffer_load_dword v150, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdce8: v_add_f32_e32 v27, v27, v150"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcf0: missing s_waitcnt vmcnt(62) before use of v151",
+          "metadata": {
+            "context_1": "producer .text+0xd200: buffer_load_dword v151, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcf0: v_add_f32_e32 v28, v28, v151"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcf8: missing s_waitcnt vmcnt(62) before use of v152",
+          "metadata": {
+            "context_1": "producer .text+0xd210: buffer_load_dword v152, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdcf8: v_add_f32_e32 v29, v29, v152"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd00: missing s_waitcnt vmcnt(62) before use of v153",
+          "metadata": {
+            "context_1": "producer .text+0xd220: buffer_load_dword v153, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd00: v_add_f32_e32 v30, v30, v153"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd08: missing s_waitcnt vmcnt(62) before use of v154",
+          "metadata": {
+            "context_1": "producer .text+0xd230: buffer_load_dword v154, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd08: v_add_f32_e32 v31, v31, v154"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd10: missing s_waitcnt vmcnt(62) before use of v155",
+          "metadata": {
+            "context_1": "producer .text+0xd240: buffer_load_dword v155, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd10: v_add_f32_e32 v32, v32, v155"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd18: missing s_waitcnt vmcnt(62) before use of v156",
+          "metadata": {
+            "context_1": "producer .text+0xd250: buffer_load_dword v156, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd18: v_add_f32_e32 v33, v33, v156"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd20: missing s_waitcnt vmcnt(62) before use of v157",
+          "metadata": {
+            "context_1": "producer .text+0xd260: buffer_load_dword v157, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd20: v_add_f32_e32 v34, v34, v157"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd28: missing s_waitcnt vmcnt(62) before use of v158",
+          "metadata": {
+            "context_1": "producer .text+0xd270: buffer_load_dword v158, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd28: v_add_f32_e32 v35, v35, v158"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd30: missing s_waitcnt vmcnt(62) before use of v159",
+          "metadata": {
+            "context_1": "producer .text+0xd280: buffer_load_dword v159, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd30: v_add_f32_e32 v36, v36, v159"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd38: missing s_waitcnt vmcnt(62) before use of v160",
+          "metadata": {
+            "context_1": "producer .text+0xd290: buffer_load_dword v160, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd38: v_add_f32_e32 v37, v37, v160"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd40: missing s_waitcnt vmcnt(62) before use of v161",
+          "metadata": {
+            "context_1": "producer .text+0xd2a0: buffer_load_dword v161, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd40: v_add_f32_e32 v38, v38, v161"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd48: missing s_waitcnt vmcnt(62) before use of v162",
+          "metadata": {
+            "context_1": "producer .text+0xd2b0: buffer_load_dword v162, v8, s[52:55], s62 offen",
+            "context_2": "consumer .text+0xdd48: v_add_f32_e32 v39, v39, v162"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        }
+      ],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+            "entry_offset": null,
+            "name": "gemm_NT_M256_N4096_K1024",
+            "target": "gfx950"
+          },
+          "reason": "waitcheck_diagnostics_error: Waitcheck output did not contain an analysis summary",
+          "returncode": 2,
+          "state": "error",
+          "verdict": "error"
+        },
+        {
+          "findings": [
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0x4a4: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x48c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x4a4: s_load_dword s45, s[0:1], 0x88"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc58: missing s_waitcnt vmcnt(62) before use of v132",
+              "metadata": {
+                "context_1": "producer .text+0xd0d0: buffer_load_dword v132, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc58: v_add_f32_e32 v9, v9, v132"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc60: missing s_waitcnt vmcnt(62) before use of v133",
+              "metadata": {
+                "context_1": "producer .text+0xd0e0: buffer_load_dword v133, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc60: v_add_f32_e32 v10, v10, v133"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc68: missing s_waitcnt vmcnt(62) before use of v134",
+              "metadata": {
+                "context_1": "producer .text+0xd0f0: buffer_load_dword v134, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc68: v_add_f32_e32 v11, v11, v134"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc70: missing s_waitcnt vmcnt(62) before use of v135",
+              "metadata": {
+                "context_1": "producer .text+0xd100: buffer_load_dword v135, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc70: v_add_f32_e32 v12, v12, v135"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc78: missing s_waitcnt vmcnt(62) before use of v136",
+              "metadata": {
+                "context_1": "producer .text+0xd110: buffer_load_dword v136, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc78: v_add_f32_e32 v13, v13, v136"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc80: missing s_waitcnt vmcnt(62) before use of v137",
+              "metadata": {
+                "context_1": "producer .text+0xd120: buffer_load_dword v137, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc80: v_add_f32_e32 v14, v14, v137"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc88: missing s_waitcnt vmcnt(62) before use of v138",
+              "metadata": {
+                "context_1": "producer .text+0xd130: buffer_load_dword v138, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc88: v_add_f32_e32 v15, v15, v138"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc90: missing s_waitcnt vmcnt(62) before use of v139",
+              "metadata": {
+                "context_1": "producer .text+0xd140: buffer_load_dword v139, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc90: v_add_f32_e32 v16, v16, v139"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdc98: missing s_waitcnt vmcnt(62) before use of v140",
+              "metadata": {
+                "context_1": "producer .text+0xd150: buffer_load_dword v140, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdc98: v_add_f32_e32 v17, v17, v140"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdca0: missing s_waitcnt vmcnt(62) before use of v141",
+              "metadata": {
+                "context_1": "producer .text+0xd160: buffer_load_dword v141, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdca0: v_add_f32_e32 v18, v18, v141"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdca8: missing s_waitcnt vmcnt(62) before use of v142",
+              "metadata": {
+                "context_1": "producer .text+0xd170: buffer_load_dword v142, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdca8: v_add_f32_e32 v19, v19, v142"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcb0: missing s_waitcnt vmcnt(62) before use of v143",
+              "metadata": {
+                "context_1": "producer .text+0xd180: buffer_load_dword v143, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcb0: v_add_f32_e32 v20, v20, v143"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcb8: missing s_waitcnt vmcnt(62) before use of v144",
+              "metadata": {
+                "context_1": "producer .text+0xd190: buffer_load_dword v144, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcb8: v_add_f32_e32 v21, v21, v144"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcc0: missing s_waitcnt vmcnt(62) before use of v145",
+              "metadata": {
+                "context_1": "producer .text+0xd1a0: buffer_load_dword v145, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcc0: v_add_f32_e32 v22, v22, v145"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcc8: missing s_waitcnt vmcnt(62) before use of v146",
+              "metadata": {
+                "context_1": "producer .text+0xd1b0: buffer_load_dword v146, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcc8: v_add_f32_e32 v23, v23, v146"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcd0: missing s_waitcnt vmcnt(62) before use of v147",
+              "metadata": {
+                "context_1": "producer .text+0xd1c0: buffer_load_dword v147, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcd0: v_add_f32_e32 v24, v24, v147"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcd8: missing s_waitcnt vmcnt(62) before use of v148",
+              "metadata": {
+                "context_1": "producer .text+0xd1d0: buffer_load_dword v148, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcd8: v_add_f32_e32 v25, v25, v148"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdce0: missing s_waitcnt vmcnt(62) before use of v149",
+              "metadata": {
+                "context_1": "producer .text+0xd1e0: buffer_load_dword v149, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdce0: v_add_f32_e32 v26, v26, v149"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdce8: missing s_waitcnt vmcnt(62) before use of v150",
+              "metadata": {
+                "context_1": "producer .text+0xd1f0: buffer_load_dword v150, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdce8: v_add_f32_e32 v27, v27, v150"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcf0: missing s_waitcnt vmcnt(62) before use of v151",
+              "metadata": {
+                "context_1": "producer .text+0xd200: buffer_load_dword v151, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcf0: v_add_f32_e32 v28, v28, v151"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdcf8: missing s_waitcnt vmcnt(62) before use of v152",
+              "metadata": {
+                "context_1": "producer .text+0xd210: buffer_load_dword v152, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdcf8: v_add_f32_e32 v29, v29, v152"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd00: missing s_waitcnt vmcnt(62) before use of v153",
+              "metadata": {
+                "context_1": "producer .text+0xd220: buffer_load_dword v153, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd00: v_add_f32_e32 v30, v30, v153"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd08: missing s_waitcnt vmcnt(62) before use of v154",
+              "metadata": {
+                "context_1": "producer .text+0xd230: buffer_load_dword v154, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd08: v_add_f32_e32 v31, v31, v154"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd10: missing s_waitcnt vmcnt(62) before use of v155",
+              "metadata": {
+                "context_1": "producer .text+0xd240: buffer_load_dword v155, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd10: v_add_f32_e32 v32, v32, v155"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd18: missing s_waitcnt vmcnt(62) before use of v156",
+              "metadata": {
+                "context_1": "producer .text+0xd250: buffer_load_dword v156, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd18: v_add_f32_e32 v33, v33, v156"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd20: missing s_waitcnt vmcnt(62) before use of v157",
+              "metadata": {
+                "context_1": "producer .text+0xd260: buffer_load_dword v157, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd20: v_add_f32_e32 v34, v34, v157"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd28: missing s_waitcnt vmcnt(62) before use of v158",
+              "metadata": {
+                "context_1": "producer .text+0xd270: buffer_load_dword v158, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd28: v_add_f32_e32 v35, v35, v158"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd30: missing s_waitcnt vmcnt(62) before use of v159",
+              "metadata": {
+                "context_1": "producer .text+0xd280: buffer_load_dword v159, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd30: v_add_f32_e32 v36, v36, v159"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd38: missing s_waitcnt vmcnt(62) before use of v160",
+              "metadata": {
+                "context_1": "producer .text+0xd290: buffer_load_dword v160, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd38: v_add_f32_e32 v37, v37, v160"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd40: missing s_waitcnt vmcnt(62) before use of v161",
+              "metadata": {
+                "context_1": "producer .text+0xd2a0: buffer_load_dword v161, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd40: v_add_f32_e32 v38, v38, v161"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco:gfx950[0]:.text+0xdd48: missing s_waitcnt vmcnt(62) before use of v162",
+              "metadata": {
+                "context_1": "producer .text+0xd2b0: buffer_load_dword v162, v8, s[52:55], s62 offen",
+                "context_2": "consumer .text+0xdd48: v_add_f32_e32 v39, v39, v162"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            }
+          ],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "aeb46fded14817c99369dad49e083efac47a71ce14921549f29027d37fb9a091",
+            "entry_offset": null,
+            "name": "gemm_TT_M64_N64_K1280",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 4,
+          "state": "ran",
+          "verdict": "warn"
+        }
+      ],
+      "reason": "worklist_not_fully_checked",
+      "returncode": null,
+      "sanitizer": "waitcheck",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 3,
+    "kernels": [
+      {
+        "dispatch_count": 479,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+          "entry_offset": null,
+          "name": "gemm_NT_M256_N4096_K1024",
+          "target": "gfx950"
+        },
+        "sources": [
+          "gemm_csv"
+        ],
+        "total_time_ms": 0.0
+      },
+      {
+        "dispatch_count": 471,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_175415.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+          "entry_offset": null,
+          "name": "gemm_NT_M128_N4096_K1280",
+          "target": "gfx950"
+        },
+        "sources": [
+          "gemm_csv"
+        ],
+        "total_time_ms": 0.0
+      },
+      {
+        "dispatch_count": 440,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_137678.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "aeb46fded14817c99369dad49e083efac47a71ce14921549f29027d37fb9a091",
+          "entry_offset": null,
+          "name": "gemm_TT_M64_N64_K1280",
+          "target": "gfx950"
+        },
+        "sources": [
+          "gemm_csv"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 3
+  }
+}
