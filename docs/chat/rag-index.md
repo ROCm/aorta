@@ -104,13 +104,20 @@ resolves by installed version — a released wheel gets that release's asset, a
 It is the normal path for every chat provider, because the embedding provider
 is a separate choice and every `config init` profile leaves it local. The asset
 is built by CI under default settings, and `fetch_index` validates its manifest
-against this install's provider identity before writing anything — the
-comparison is the model name and the collection identity, not only the flow. So
-`fetch` works exactly as long as your install still embeds with the default
-local model: a hand-set `embedding_model` is refused just as a remote provider
-is, before anything is installed. That is the reason [choosing a remote
+against this install's provider identity before replacing the index you already
+have — the comparison is the model name and the collection identity, not only
+the flow. So `fetch` works exactly as long as your install still embeds with
+the default local model: a hand-set `embedding_model` is refused just as a
+remote provider is, before anything is installed. That is the reason [choosing a
+remote
 embedder](configuration.md#configuring-a-remote-embedding-provider-by-hand)
 means taking over the build.
+
+What is protected is the destination, not the transfer. A fetch downloads the
+asset into a staging directory beside the destination first and validates the
+manifest after, so a refused fetch has still spent the download — it just
+leaves the index you had untouched, because installing is a rename of the
+staged file and it never happens. Expect the bandwidth, not a fail-fast.
 
 Because both of those are knowable up front, `aorta chat index fetch` is only
 *offered* as a remedy when this install could actually install what it

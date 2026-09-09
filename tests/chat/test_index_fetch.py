@@ -268,6 +268,33 @@ class TestFetchFailures:
         assert not dest.exists()
         assert not manifest_mod.manifest_path(dest).exists()
 
+    def test_a_refused_fetch_leaves_an_index_that_was_already_there(self, server, tmp_path: Path):
+        """The promise on a destination that is not empty.
+
+        The test above fetches onto a fresh path, so it pins that nothing is
+        created. What ``rag-index.md`` promises is the stronger claim a reader
+        is actually deciding on -- that a refusal costs them the download and
+        nothing else -- and that is the mirror of
+        ``test_it_replaces_an_existing_index``: the staging directory sits
+        beside the destination and installing is a rename, so a refusal raised
+        before ``_install_staged`` must leave both files exactly as they were.
+        """
+        _reserialise(server, _manifest(embedding_model="other/model"))
+        dest = tmp_path / "index.sqlite"
+        dest.write_bytes(b"the index the user already had")
+        existing = manifest_mod.manifest_path(dest)
+        existing.write_text('{"schema_version": 1}', encoding="utf-8")
+
+        with pytest.raises(manifest_mod.IndexMismatchError):
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert dest.read_bytes() == b"the index the user already had"
+        assert existing.read_text(encoding="utf-8") == '{"schema_version": 1}'
+        assert sorted(p.name for p in dest.parent.iterdir()) == [
+            "index.sqlite",
+            "index.sqlite.manifest.json",
+        ], "a refused fetch should not leave staging behind either"
+
     def test_an_unreachable_host_points_at_side_loading(self, monkeypatch, tmp_path: Path):
         """The air-gapped user's next move, in the error they actually get."""
 
