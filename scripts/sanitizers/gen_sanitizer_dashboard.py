@@ -757,6 +757,25 @@ def _identity_qualifier(
     return parts
 
 
+def _clip_name(name: str) -> str:
+    """A kernel name budgeted for a length-capped line (pure)."""
+    return _clean_msg(name, _LABEL_LIMIT)
+
+
+def _middle_clip_name(name: str) -> str:
+    """The same budget spent on both ends of a kernel name (pure).
+
+    Two mangled instantiations of one template can share hundreds of leading characters
+    and differ only in a suffix, so a head-only budget renders them identically. Keeping
+    a tail costs readability, which is why it is the fallback rather than the default.
+    """
+    clean = " ".join(name.split())
+    if len(clean) <= _LABEL_LIMIT:
+        return clean
+    head = (_LABEL_LIMIT * 2) // 3
+    return f"{clean[:head]}\u2026{clean[head - _LABEL_LIMIT + 1:]}"
+
+
 # The qualifier widens one field at a time, cheapest first. Everything past the short
 # digest exists for a collision the tier before it cannot resolve, so a label only pays
 # for the ambiguity it actually has.
@@ -771,28 +790,30 @@ def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
     """Labels for ``(name, identity)`` pairs, qualified only where a name repeats (pure).
 
     Stops at the first widening that separates the colliding labels, so a unique name
-    renders bare and the common collisions do not pay for the rare ones. The widest
-    tier can still tie -- two identities with nothing to tell them apart -- in which
-    case there is nothing further to disambiguate with.
+    renders bare and the common collisions do not pay for the rare ones. Collisions are
+    counted on the *rendered* names rather than the originals: names are budgeted (see
+    ``_LABEL_LIMIT``), so two distinct names agreeing on their first characters render
+    as one string and are as ambiguous to a reader as a genuinely repeated name. When
+    the qualifiers tie as well -- two long names in the same code object -- the names
+    are re-rendered keeping their tails, which is the only thing left that differs. The
+    last tier can still tie, in which case there is nothing to disambiguate with.
     """
-    counts: dict[Any, int] = {}
-    for name, _ in items:
-        counts[name] = counts.get(name, 0) + 1
-    # The *name* is what gets budgeted, before the qualifier is appended. Clamping the
-    # assembled label instead right-truncates the qualifier away, so two rows sharing a
-    # long name would render the same prefix and lose the disambiguation this exists for.
-    display = [_clean_msg(str(name), _LABEL_LIMIT) for name, _ in items]
-    labels = list(display)
-    for widening in _QUALIFIER_WIDENINGS:
-        labels = [
-            f"{shown} ({qualifier})"
-            if counts[name] > 1
-            and (qualifier := _identity_qualifier(identity, **widening))
-            else shown
-            for shown, (name, identity) in zip(display, items, strict=True)
-        ]
-        if len(set(labels)) == len(labels):
-            break
+    labels: list[str] = []
+    for render in (_clip_name, _middle_clip_name):
+        display = [render(str(name)) for name, _ in items]
+        counts: dict[str, int] = {}
+        for shown in display:
+            counts[shown] = counts.get(shown, 0) + 1
+        for widening in _QUALIFIER_WIDENINGS:
+            labels = [
+                f"{shown} ({qualifier})"
+                if counts[shown] > 1
+                and (qualifier := _identity_qualifier(identity, **widening))
+                else shown
+                for shown, (_, identity) in zip(display, items, strict=True)
+            ]
+            if len(set(labels)) == len(labels):
+                return labels
     return labels
 
 
@@ -1025,20 +1046,6 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
 
     worklist = report.get("worklist", {})
     kernel_entries = worklist.get("kernels", [])
-    # A deduped row's Detail names the scan that covered it, and a bare name cannot say
-    # which row that was when two rows share one. Labelled against the whole worklist,
-    # so the qualifier appears only where the name actually repeats.
-    label_by_key = {
-        _identity_key(entry.get("identity", {})): label
-        for entry, label in zip(
-            kernel_entries,
-            _display_labels([
-                (entry.get("identity", {}).get("name"), entry.get("identity", {}))
-                for entry in kernel_entries
-            ]),
-            strict=True,
-        )
-    }
     # A result's identity can be sparser than the worklist row it describes: every
     # code-object field is optional on the wire (``KernelIdentity.from_dict``), and
     # reports whose results carry only ``{name, target}`` exist. The full-identity join
@@ -1107,6 +1114,25 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 kr_by_object.setdefault(
                     (str(row_sha), identity.get("code_object_index")), row_key
                 )
+
+    # A deduped row's Detail names the scan that covered it, and a reason names the
+    # kernel behind it, so both need a label that says *which* one. Built over the rows
+    # and the results no row claimed: an unattributed reason rendering a bare name that
+    # matches a visible row reads as an accusation against that row, when the object it
+    # actually came from is not on the page at all.
+    labelled: list[tuple[Any, dict[str, Any]]] = [
+        (entry.get("identity", {}).get("name"), entry.get("identity", {}))
+        for entry in kernel_entries
+    ]
+    labelled += [
+        (reduced["name"], reduced["identity"])
+        for key, reduced in kr_by_identity.items()
+        if key not in matched
+    ]
+    label_by_key = {
+        _identity_key(identity): label
+        for (_, identity), label in zip(labelled, _display_labels(labelled), strict=True)
+    }
 
     kernels: list[dict[str, Any]] = []
     credited: set[Any] = set()

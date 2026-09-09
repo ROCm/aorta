@@ -1173,6 +1173,117 @@ def test_a_long_shared_kernel_name_keeps_its_identity_qualifier():
     assert f"({first})" in text
 
 
+def test_two_long_names_agreeing_on_their_head_are_still_told_apart():
+    # Collisions have to be counted on the *rendered* names. Two distinct names that
+    # agree on their first characters each look unique before the budget is applied,
+    # then render as one string — as ambiguous to a reader as a repeated name, and
+    # without even the qualifier a repeated name would have earned.
+    shared = "gemm_" + "N" * 300
+    first, second = f"{shared}_AAA", f"{shared}_BBB"
+
+    def _identity(name: str, sha: str) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": f"/a/b/sol_{sha}.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _row(name: str, sha: str) -> dict:
+        return {"identity": _identity(name, sha), "total_time_ms": 0.0,
+                "dispatch_count": 9, "sources": ["gemm_csv"]}
+
+    def _result(name: str, sha: str, why: str) -> dict:
+        return {
+            "identity": _identity(name, sha), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [_row(first, "beefaaa1"), _row(second, "beefbbb2")],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(first, "beefaaa1", "waitcheck_backend_exit_2: refused the first"),
+                _result(second, "beefbbb2", "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    labels = [e.get("label", "") for e in (case.get("kernel_reasons") or [])]
+    assert len(labels) == 2
+    assert len(set(labels)) == 2
+
+
+def test_two_long_names_in_one_object_keep_their_distinguishing_tails():
+    # When the rendered names tie and the identities tie too — two long names in the
+    # same code object — no qualifier can separate them, so the only thing left is the
+    # part of the name the head budget cut off.
+    identity_a = {
+        "name": "gemm_" + "N" * 300 + "_AAA", "target": "gfx950",
+        "code_object": "/a/b/sol.hsaco", "code_object_sha256": "beefaaa1",
+        "code_object_index": 0, "entry_offset": None,
+    }
+    identity_b = dict(identity_a, name="gemm_" + "N" * 300 + "_BBB")
+
+    labels = gen._display_labels([("a", identity_a), ("b", identity_b)])
+    assert labels == ["a", "b"]  # short names need none of this
+
+    labels = gen._display_labels([
+        (identity_a["name"], identity_a), (identity_b["name"], identity_b)
+    ])
+    assert len(set(labels)) == 2
+    assert labels[0].endswith("_AAA") and labels[1].endswith("_BBB")
+    assert all(len(label) <= 64 for label in labels)
+
+
+def test_an_unattributed_reason_is_not_labelled_like_a_visible_row():
+    # A reason no row claimed still renders on the page. Given a bare name that matches
+    # a visible row, it reads as an accusation against that row — while the object it
+    # came from is not on the page at all, and only env.json says so.
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "gemm", "target": "gfx950", "code_object": f"/a/b/sol_{sha}.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    listed, other = "beefaaa1", "beefbbb2"
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": _identity(listed), "total_time_ms": 0.0,
+                         "dispatch_count": 9, "sources": ["gemm_csv"]}],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [{
+                "identity": _identity(other), "state": "error", "verdict": "error",
+                "findings": [], "returncode": 2,
+                "reason": "waitcheck_backend_exit_2: refused the other object",
+            }],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    # qualified against the row it would otherwise be mistaken for
+    assert reasons[0].get("label") == f"gemm ({other})"
+    assert f"gemm ({other}): waitcheck_backend_exit_2" in case.get("observation", "")
+
+
 def test_a_long_kernel_name_cannot_truncate_its_own_reason_away():
     # Kernel names are unbounded — a mangled template instantiation runs to hundreds of
     # characters. Budgeting only the rollup still let the label spend the rest of the
