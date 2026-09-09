@@ -130,10 +130,11 @@ _REMOTE_EMBEDDING_MIGRATION = (
     # and procedure as separate fields, so a pronoun here points at nothing
     # for a reader who has only the one.
     "A remote embedding provider is very likely not a choice anyone made here.\n"
-    "A profile for a remote LLM is where the setting usually comes from, and\n"
-    "nothing rewrites a chat.toml that already exists -- write_profile runs only\n"
-    "on 'config init' -- so it stays until the profile is edited or regenerated,\n"
-    "whatever the current template writes.\n"
+    "A profile for a remote LLM is where the setting usually comes from, and no\n"
+    "profile template selects a remote embedder any more. Nothing rewrites a\n"
+    "chat.toml that already exists, though -- write_profile runs only on 'config\n"
+    "init' -- so a profile written by an older install still carries it, and will\n"
+    "until it is edited or regenerated.\n"
     "\n"
     "Three ways to change it, cheapest first:\n"
     '  embedding_provider = "local"         edit chat.toml, keeping the rest\n'

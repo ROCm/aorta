@@ -1164,19 +1164,19 @@ class TestRemoteEmbeddingProfile:
         ``remedy_lines`` can name the setting; only this can say where it came
         from and that nothing on any normal path will rewrite it.
 
-        Deliberately merge-order-neutral, and asserted as such. An earlier
-        wording said a profile "created before the templates changed" carries
-        it, which reads as though the templates had already changed; it was
-        written while they had not.
+        This wording was merge-order-neutral while #462 was unmerged: it said
+        the setting persists "whatever the current template writes", claiming
+        nothing about which way they read, because either tense would have been
+        wrong in one of the two trees a reader might have checked out. #462 is
+        now an ancestor of this branch, so the hedge has nothing left to
+        protect against and the definite statement is the more useful one --
+        pinned by ``test_the_claim_about_the_templates_matches_the_templates``.
 
-        Both readings are now simultaneously true, which is the argument for
-        neutrality rather than against it. #462 flipped the templates to local
-        and has since merged, so ``origin/main`` writes no remote template --
-        while this branch is not rebased on it, so the base under this test
-        still writes four. Either tense would therefore be wrong in one of the
-        two trees a reader might have checked out. The text makes no claim
-        about either: the setting persists whatever the current template
-        writes.
+        What survives the hedge is the part that was never about merge order:
+        an existing ``chat.toml`` is not rewritten, so a profile written by an
+        older install still carries the setting however the templates read
+        today. That is the population this row exists for, and it grew rather
+        than shrank when the templates changed.
         """
         self._remote(monkeypatch)
         procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
@@ -1184,29 +1184,41 @@ class TestRemoteEmbeddingProfile:
         assert "where the setting usually comes from" in procedure
         assert "write_profile runs" in procedure
         assert "edited or regenerated" in procedure
-        for merge_order_claim in ("templates changed", "used to set", "no longer"):
-            assert merge_order_claim not in procedure, merge_order_claim
+        assert "written by an older install" in procedure
 
-    def test_the_wording_holds_whichever_way_the_templates_currently_read(self, monkeypatch):
-        """The tree it has to be true in, checked rather than assumed.
+    def test_the_claim_about_the_templates_matches_the_templates(self, monkeypatch):
+        """The fact the old wording got wrong, read rather than asserted.
 
-        The templates are the fact the old wording got wrong, so read them
-        instead of asserting them. This passes on a base that writes four
-        remote templates and on one that writes none, which is the property
-        being pinned -- not the count, which is a sibling PR's business.
+        The procedure now states as fact that no template selects a remote
+        embedder, which is only safe while it is true, and the templates are a
+        sibling PR's to change. So read them and hold the sentence to what they
+        say, in both directions: dropping the claim fails this too, because a
+        tree where it is true should say so.
+
+        The read has to reach the assertion to be worth anything. The version
+        of this test written before the rebase computed the same list and spent
+        it on the failure message, asserting only ``"current template" in
+        procedure`` -- which the ``config init --force ... from the current
+        template`` remedy line satisfies by itself. It passed against a
+        procedure claiming every template still wrote ``remote``, on a tree
+        where none did, which is the whole fact it was named for. A fixture or
+        a read that does not feed an assertion is decoration.
         """
         from aorta.chat import config as config_mod
 
-        remote = [
+        remote = sorted(
             name
             for name, template in config_mod.PROFILE_TEMPLATES.items()
             if template.get("embedding_provider") == "remote"
-        ]
+        )
         self._remote(monkeypatch)
         procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
-        assert "current template" in procedure, (
-            "the procedure should defer to whatever the template says rather than "
-            f"assert it, and right now {len(remote)} template(s) write 'remote'"
+        flattened = " ".join(procedure.split())
+
+        claims_none_do = "no profile template selects a remote embedder any more" in flattened
+        assert claims_none_do == (not remote), (
+            f"the procedure claims no template selects a remote embedder: "
+            f"{claims_none_do}; templates that actually do: {remote or 'none'}"
         )
 
     def test_it_does_not_fire_on_a_remote_profile_with_an_index_to_match(
