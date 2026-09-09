@@ -166,7 +166,12 @@ def _quiet_mode() -> None:
 
     # Keep backend readiness, remote call counts, and agent routing/act
     # messages visible.
-    for useful in ("aorta.chat.session", "aorta.chat.inference", "aorta.chat.graph.nodes"):
+    for useful in (
+        "aorta.cli.chat",
+        "aorta.chat.session",
+        "aorta.chat.inference",
+        "aorta.chat.graph.nodes",
+    ):
         logging.getLogger(useful).setLevel(logging.INFO)
 
 

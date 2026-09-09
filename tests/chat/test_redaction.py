@@ -625,24 +625,57 @@ def _model_producer_aliases(source: str) -> frozenset[str]:
     """
     aliases = {_MODEL_PRODUCER}
     tree = ast.parse(source)
+
+    def alias_source(value: ast.AST) -> str | None:
+        if isinstance(value, (ast.Name, ast.Attribute)):
+            rendered = ast.unparse(value).split(".")[-1]
+            if rendered in aliases:
+                return rendered
+        return None
+
+    def target_names(target: ast.AST) -> list[str]:
+        return [sub.id for sub in ast.walk(target) if isinstance(sub, ast.Name)]
+
+    def bound_alias_names(target: ast.AST, value: ast.AST) -> list[str]:
+        matched = alias_source(value)
+        if isinstance(target, ast.Name):
+            return [target.id] if matched else []
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if (
+                isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)
+                and not any(
+                    isinstance(item, ast.Starred) for item in [*target.elts, *value.elts]
+                )
+            ):
+                names: list[str] = []
+                for subtarget, subvalue in zip(target.elts, value.elts, strict=False):
+                    names.extend(bound_alias_names(subtarget, subvalue))
+                return names
+            names = target_names(target)
+            if names and any(alias_source(subvalue) for subvalue in ast.walk(value)):
+                return names
+        return []
+
     while True:
         grown = False
         for node in ast.walk(tree):
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
                 value = node.value
-                if value is None or not isinstance(value, (ast.Name, ast.Attribute)):
+                if value is None:
                     # A *call* produces a model instance, not another alias for
                     # the producer, so it is the binding scan's business.
                     continue
                 if ast.unparse(value).split(".")[-1] not in aliases:
-                    continue
+                    if not isinstance(value, (ast.Tuple, ast.List)):
+                        continue
                 targets = (
                     node.targets if isinstance(node, ast.Assign) else [node.target]
                 )
                 for target in targets:
-                    for sub in ast.walk(target):
-                        if isinstance(sub, ast.Name) and sub.id not in aliases:
-                            aliases.add(sub.id)
+                    for name in bound_alias_names(target, value):
+                        if name not in aliases:
+                            aliases.add(name)
                             grown = True
         if not grown:
             return frozenset(aliases)
@@ -816,6 +849,8 @@ class TestGraphChokepoint:
             'get_retriever = _get_llm\nretriever = get_retriever()',
             "f = nodes._get_llm\nretriever = f()",
             "a = _get_llm\nb = a\nretriever = b()",
+            "get_retriever, unused = (_get_llm, None)\nretriever = get_retriever()",
+            "prefix, *rest = (_get_llm, 1, 2)\nretriever = prefix()",
             # Order must not matter: the closure is computed over the whole
             # module before any binding is judged.
             "retriever = g()\ng = _get_llm",

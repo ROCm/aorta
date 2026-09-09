@@ -8,6 +8,7 @@ rather than a traceback. Nothing here invokes the agent.
 from __future__ import annotations
 
 import importlib.util
+import logging
 
 import pytest
 from click.testing import CliRunner
@@ -82,6 +83,14 @@ def test_an_old_interpreter_is_refused_by_version_rather_than_by_extra(pin_pytho
     assert result.exit_code != 0
     assert "Python 3.11 or newer" in result.output
     assert "amd-aorta[chat-cli]" not in result.output
+
+
+def test_quiet_mode_keeps_cli_info_visible() -> None:
+    from aorta.cli import chat as cli
+
+    logging.getLogger("aorta.cli.chat").setLevel(logging.NOTSET)
+    cli._setup_logging(verbose=False)
+    assert logging.getLogger("aorta.cli.chat").getEffectiveLevel() == logging.INFO
 
 
 @pytest.mark.skipif(

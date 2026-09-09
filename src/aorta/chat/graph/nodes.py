@@ -802,6 +802,11 @@ class _EscalationState:
     #: that began at or before this was already in flight then, so it belongs to
     #: the same wave and must not be billed again.
     counted_watermark: int = 0
+    #: ``probes_begun`` as it stood when native was proved to work. Any probe
+    #: that began at or before this is older than that proof, so a later failure
+    #: from it must not spend the failure budget or announce that text stayed in
+    #: force.
+    successful_watermark: int = 0
 
 
 #: Failed escalated attempts before native is written off for the process.
@@ -945,6 +950,7 @@ def _commit_escalation(signature: str, evidence: str = _ANSWERED) -> None:
     if _escalation.escalated:
         return
     _escalation.escalated = True
+    _escalation.successful_watermark = _escalation.probes_begun
     logger.warning(
         "The model returned no answer and no tool call (%s), which is how a "
         "reasoning model behaves on the 'text' tool protocol. %s, so this "
@@ -985,6 +991,11 @@ def _record_escalation_failure(probe: int) -> str:
     concurrent sessions, one transient 503, and every later query in the
     process denied its retry.
 
+    A failure also stops being evidence once another probe in the same wave has
+    already committed native. In that case the process is already on native, so
+    incrementing the budget would write off a proven protocol and the caller
+    would log the opposite of the state later queries now observe.
+
     So a failure counts only if its probe began *after* the last counted one
     was recorded. The watermark moves to :attr:`_EscalationState.probes_begun`
     rather than to this probe's own number, which is what absorbs the rest of
@@ -997,6 +1008,8 @@ def _record_escalation_failure(probe: int) -> str:
     exclusion: these are plain integer reads and writes between ``await``
     points on one event loop.
     """
+    if probe <= _escalation.successful_watermark:
+        return " native is already in force from a concurrent successful probe."
     if probe > _escalation.counted_watermark:
         _escalation.native_failures += 1
         _escalation.counted_watermark = _escalation.probes_begun
@@ -1321,6 +1334,17 @@ async def _escalated_native_attempt(
             )
             return await _abandoned_result(state, whole_trace)
         followup = _record_escalation_failure(probe)
+        if _escalation.escalated:
+            logger.warning(
+                "The escalated native tool-calling request failed (%s: %s) without "
+                "making a tool call, but another concurrent retry has already "
+                "proved native works on this endpoint;%s Answering from retrieved "
+                "context instead.",
+                type(failure.cause).__name__,
+                failure.cause,
+                followup,
+            )
+            return await _abandoned_result(state, whole_trace)
         logger.warning(
             "The escalated native tool-calling request failed (%s: %s) without "
             "making a tool call. This is attempt %d of %d;%s Answering from "
@@ -1341,6 +1365,17 @@ async def _escalated_native_attempt(
         # Those raise plainly, and letting them through would put the traceback
         # back on the query this whole path exists to keep an answer on.
         followup = _record_escalation_failure(probe)
+        if _escalation.escalated:
+            logger.warning(
+                "The escalated native tool-calling request failed before it could "
+                "call anything (%s: %s), but another concurrent retry has "
+                "already proved native works on this endpoint;%s Answering from "
+                "retrieved context instead.",
+                type(exc).__name__,
+                exc,
+                followup,
+            )
+            return await _abandoned_result(state, trace)
         logger.warning(
             "The escalated native tool-calling request failed before it could "
             "call anything (%s: %s). This is attempt %d of %d;%s Answering "
@@ -1360,6 +1395,14 @@ async def _escalated_native_attempt(
         # protocol that has never answered would then be selected for every
         # later query on the strength of an attempt that failed.
         followup = _record_escalation_failure(probe)
+        if _escalation.escalated:
+            logger.warning(
+                "The escalated native tool-calling request returned no answer and "
+                "no tool call either, but another concurrent retry has already "
+                "proved native works on this endpoint;%s",
+                followup,
+            )
+            return outcome.result
         logger.warning(
             "The escalated native tool-calling request returned no answer and "
             "no tool call either, so the 'text' protocol stays in force. This "

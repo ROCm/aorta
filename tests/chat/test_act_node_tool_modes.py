@@ -1445,6 +1445,7 @@ class TestOneOutageDoesNotSpendTheWholeFailureBudget:
         nodes._escalation.native_failures = 7
         nodes._escalation.probes_begun = 7
         nodes._escalation.counted_watermark = 7
+        nodes._escalation.successful_watermark = 7
         nodes.reset_tool_mode_escalation()
         assert nodes._escalation == nodes._EscalationState()
         # And the reset must cover fields added after it was written.
@@ -1453,7 +1454,67 @@ class TestOneOutageDoesNotSpendTheWholeFailureBudget:
             "native_failures",
             "probes_begun",
             "counted_watermark",
+            "successful_watermark",
         }
+
+
+class TestMixedConcurrentProbeOutcomes:
+    """A later failure must not write off native after a concurrent success."""
+
+    @pytest.mark.asyncio
+    async def test_a_concurrent_success_absorbs_a_slower_failure(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        calls = {"n": 0}
+
+        async def mixed(*_a, **_kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await asyncio.sleep(0.01)
+                raise RuntimeError("503 transient")
+            return AIMessage(content="Native answer.")
+
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=mixed)
+        plain.bind_tools = MagicMock(return_value=bound)
+
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            slow_failure, success = await asyncio.gather(act_node(_state()), act_node(_state()))
+
+        assert nodes._escalation.escalated is True
+        assert nodes._escalation.native_failures == 0
+        assert success["messages"][0].content == "Native answer."
+        assert slow_failure["messages"][0].content == _NO_ANSWER_MSG
+
+    @pytest.mark.asyncio
+    async def test_the_log_does_not_claim_text_stayed_in_force(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        calls = {"n": 0}
+
+        async def mixed(*_a, **_kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await asyncio.sleep(0.01)
+                raise RuntimeError("503 transient")
+            return AIMessage(content="Native answer.")
+
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=mixed)
+        plain.bind_tools = MagicMock(return_value=bound)
+
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            caplog.at_level(logging.WARNING),
+        ):
+            await asyncio.gather(act_node(_state()), act_node(_state()))
+
+        assert "text' protocol stays in force" not in caplog.text
+        assert "native is already in force from a concurrent successful probe" in caplog.text
 
 
 class TestTheRetryDoesNotRunATextProtocolToolASecondTime:
