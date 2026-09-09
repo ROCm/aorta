@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 import dspy
 
-from aorta.cia.launch.cluster import run_probe, search_roots
+from aorta.cia.launch.cluster import quoted_search_roots, run_probe
 from aorta.cia.llm import ensure_configured
 
 
@@ -61,7 +62,10 @@ def check_gpu_arch(host: str, node: str) -> dict[str, Any]:
     are the only reliable source; rocm-smi is a fallback for when this process
     is already running on the target node.
     """
-    out = run_probe(host, f"sinfo -N -n {node} --noheader -o '%G %f' 2>/dev/null | head -3")
+    # node is a ReAct tool argument, so the model chooses it and it reaches a
+    # shell: "n1; curl ..." would otherwise run. run_probe composes pipelines,
+    # so it cannot take an argv list; quoting is what keeps this one argument.
+    out = run_probe(host, f"sinfo -N -n {shlex.quote(node)} --noheader -o '%G %f' 2>/dev/null | head -3")
     if not out.strip() or "ERROR" in out:
         out = run_probe(host, "rocm-smi --showproductname 2>/dev/null | grep -E 'Card Series|Card Model'")
 
@@ -78,7 +82,7 @@ def check_gpu_arch(host: str, node: str) -> dict[str, Any]:
 
 def read_cluster_configs(host: str) -> str:
     """Read existing job scripts and scheduler config to learn how jobs run here."""
-    roots = " ".join(search_roots()) or "~"
+    roots = quoted_search_roots()
     out = run_probe(host, (
         rf"find {roots} -maxdepth 4 \( -name '*.sbatch' -o -name '*.slurm' -o -name '*.sh' \) "
         "2>/dev/null | head -8 | xargs head -25 2>/dev/null; "
