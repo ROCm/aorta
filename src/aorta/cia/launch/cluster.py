@@ -20,7 +20,8 @@ def sbatch_available() -> bool:
     return shutil.which("sbatch") is not None
 
 
-def _ssh_user() -> str:
+def ssh_user() -> str:
+    """The account cluster SSH runs as: CIA_SSH_USER, else the caller's own."""
     return os.environ.get("CIA_SSH_USER") or os.environ.get("USER") or "root"
 
 
@@ -59,7 +60,7 @@ def run_probe(host: str, cmd: str, timeout: int = 15) -> str:
         else:
             r = subprocess.run(
                 ["ssh", "-o", "StrictHostKeyChecking=no", "-o", f"ConnectTimeout={timeout}",
-                 f"{_ssh_user()}@{host}", cmd],
+                 f"{ssh_user()}@{host}", cmd],
                 capture_output=True, text=True, timeout=timeout + 5,
             )
         return (r.stdout + r.stderr).strip()

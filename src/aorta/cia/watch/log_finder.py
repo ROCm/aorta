@@ -8,6 +8,7 @@ from typing import Any
 
 import dspy
 
+from aorta.cia.launch.cluster import ssh_user
 from aorta.cia.llm import ensure_configured
 
 # Extensions considered log files by default
@@ -38,7 +39,7 @@ def query_scheduler_logs(scheduler: str, scheduler_job_id: str, head_node: str =
     def _run(cmd: str) -> str:
         try:
             if head_node:
-                user = os.environ.get("CIA_SSH_USER") or os.environ.get("USER") or "root"
+                user = ssh_user()
                 r = subprocess.run(
                     ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
                      f"{user}@{head_node}", cmd],

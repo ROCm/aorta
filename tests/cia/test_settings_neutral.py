@@ -16,7 +16,11 @@ import re
 
 import pytest
 
-_CIA = "src/aorta/cia"
+#: Everything that ships and can carry a site's assumptions. The chat tools
+#: reach the same cluster as the agents and are written the same way, so
+#: guarding only the agents leaves half the surface unguarded; the directory is
+#: absent until the PR that adds those tools, and skipped until then.
+_GUARDED = ("src/aorta/cia", "src/aorta/chat/tools")
 
 #: Shapes that mean "somebody's machine", not "anybody's machine".
 _SITE_SHAPED = (
@@ -27,6 +31,21 @@ _SITE_SHAPED = (
     (re.compile(r"/home/"), "an absolute path under /home"),
     # cv350-rck-g03 and the like.
     (re.compile(r"\b[a-z]{2,}\d{2,}-[a-z]{2,}\d?-[a-z]\d{2}"), "a cluster hostname"),
+    # A bare address. The hostname shape above needs hyphens, so a literal IP
+    # walked straight past it -- one sat in a shipped default and another in a
+    # comment, in a public repository. The lookbehind keeps version strings
+    # (rocm-7.0.2.2) from reading as addresses, and the lookahead lets through
+    # the ones that mean the same thing on every machine.
+    (
+        re.compile(
+            r"(?<![\w.-])(?!127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.255)"
+            r"\d{1,3}(?:\.\d{1,3}){3}(?![\w.])"
+        ),
+        "an IP address",
+    ),
+    # chi2878: a hostname with no hyphens to give it away. Four digits rather
+    # than two so that an architecture (gfx950, mi355x) is not one of these.
+    (re.compile(r"\b[a-z]{2,}\d{4,}\b"), "a bare cluster hostname"),
     # Which partition is hardcoded matters less than that one is: an installed
     # default no account can submit to fails the same way whatever it is named.
     (re.compile(r"--partition=[A-Za-z]"), "a hardcoded Slurm partition"),
@@ -39,7 +58,10 @@ _UNIVERSAL = re.compile(r"^/(dev|proc|sys|tmp|etc|usr|bin|opt)/")
 
 def _source_files(repo_root):
     return sorted(
-        p for p in (repo_root / _CIA).rglob("*.py") if "__pycache__" not in p.parts
+        p
+        for directory in _GUARDED
+        for p in (repo_root / directory).rglob("*.py")
+        if "__pycache__" not in p.parts
     )
 
 
