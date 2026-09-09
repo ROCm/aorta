@@ -43,9 +43,11 @@ _SITE_SHAPED = (
         ),
         "an IP address",
     ),
-    # chi2878: a hostname with no hyphens to give it away. Four digits rather
-    # than two so that an architecture (gfx950, mi355x) is not one of these.
-    (re.compile(r"\b[a-z]{2,}\d{4,}\b"), "a bare cluster hostname"),
+    # A toolchain pinned to one installed version. /opt/rocm is everywhere;
+    # /opt/rocm-7.0.2.2 is one machine's, and a default naming it fails on any
+    # box with a different patch release -- by looking for a compiler that is
+    # not there, which reads as "no ROCm" rather than "wrong path".
+    (re.compile(r"/opt/[a-z]+-\d+(?:\.\d+)+"), "a version-pinned toolchain path"),
     # Which partition is hardcoded matters less than that one is: an installed
     # default no account can submit to fails the same way whatever it is named.
     (re.compile(r"--partition=[A-Za-z]"), "a hardcoded Slurm partition"),
@@ -54,6 +56,25 @@ _SITE_SHAPED = (
 
 #: Paths that are the same everywhere, so naming them is not an assumption.
 _UNIVERSAL = re.compile(r"^/(dev|proc|sys|tmp|etc|usr|bin|opt)/")
+
+#: A hostname with no hyphens to give it away, like chi2878.
+_BARE_HOSTNAME = re.compile(r"\b[a-z]{2,}\d{3,}\b")
+
+#: Hardware names shaped exactly like that and meaning the opposite: gfx950 is
+#: an architecture, and every MI355X in the world is an MI355X. Removed from
+#: the line before asking about hostnames, which is what lets the pattern above
+#: want three digits rather than four -- chi287 is a node, gfx950 is not.
+_HARDWARE_TOKEN = re.compile(r"\b(?:gfx\d+[a-z]*|mi\d+[a-z]*|sm_?\d+|navi\d+)\b", re.I)
+
+
+def _offences(line: str) -> list[str]:
+    """What is site-specific about *line*, if anything."""
+    if _UNIVERSAL.search(line):
+        return []
+    found = [what for pattern, what in _SITE_SHAPED if pattern.search(line)]
+    if _BARE_HOSTNAME.search(_HARDWARE_TOKEN.sub(" ", line)):
+        found.append("a bare cluster hostname")
+    return found
 
 
 def _source_files(repo_root):
@@ -70,11 +91,8 @@ def test_no_site_specific_value_is_hardcoded(repo_root):
     for path in _source_files(repo_root):
         rel = path.relative_to(repo_root)
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if _UNIVERSAL.search(line):
-                continue
-            for pattern, what in _SITE_SHAPED:
-                if pattern.search(line):
-                    offenders.append(f"{rel}:{lineno}: {what}: {line.strip()[:70]}")
+            for what in _offences(line):
+                offenders.append(f"{rel}:{lineno}: {what}: {line.strip()[:70]}")
     assert not offenders, (
         "site-specific values in shipped code:\n  " + "\n  ".join(offenders)
         + "\n\nMake it configurable with a neutral default instead."
