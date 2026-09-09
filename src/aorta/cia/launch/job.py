@@ -33,6 +33,12 @@ class JobRecord:
     launcher: str = ""              # discovered: torchrun | primus | aorta_direct | sbatch
     scheduler_job_id: str = ""      # native job ID (Slurm JobId, K8s pod name) for log discovery
     head_node: str = ""             # SSH host for scheduler queries; see CIA_SSH_HOST
+    #: The recipe file a re-run would use, when the launcher wrote one.
+    #: ``recipe`` above is a label for a reader; this is a path for a tool.
+    #: Empty means the job did not come from a recipe file, so a sweep that
+    #: needs one has nothing to run rather than something to guess at.
+    recipe_path: str = ""
+    sidecar_path: str = ""          # mitigations sidecar, for recipes that accept one
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
