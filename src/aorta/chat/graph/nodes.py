@@ -64,10 +64,10 @@ RULES:
    you think you can see the bug by reading it. Reading produces a guess, and a guess \
    that happens to be right is indistinguishable, to the person reading your answer, \
    from one that is not. Only say a thing was observed if a tool observed it.
+13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
 
 RETRIEVED CONTEXT:
 {context}
-12. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
 """
 
 #: answer_node has no tool-execution loop, so its prompt must not offer tools.
