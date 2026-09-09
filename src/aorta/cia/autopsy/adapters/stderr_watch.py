@@ -7,14 +7,37 @@ from typing import Any
 
 from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext
 
-NAN_PATTERNS = [
-    re.compile(r"\bloss=nan\b", re.I),
-    re.compile(r"\bloss.*\bnan\b", re.I),
-    re.compile(r"non-?finite", re.I),
-    re.compile(r"NaN detected", re.I),
-    re.compile(r"residual.*nan", re.I),
-    re.compile(r"numeric_silent", re.I),
-]
+#: A quantity assigned or compared to a value that is not a number, written the
+#: way a training loop writes it: the name, the operator, then the value.
+#:
+#: Anchoring on the value is the point. The pattern here was ``loss.*nan``,
+#: which reads "checking loss for nan" as a run that has gone non-finite.
+ASSIGNED_NONFINITE = re.compile(
+    r"\b\w*(?:loss|grad|gradient|norm|residual|logit|score|activation)\w*\s*"
+    r"(?:[=:]|\bis\b|\bbecame\b|\bwent\b|\bdiverged\s+to\b)\s*"
+    r"[-+]?(?:nan|inf|infinity)\b",
+    re.I,
+)
+
+#: Statements that a run *has* gone non-finite, as against statements about
+#: whether it might. "NaN detection enabled" is the second kind.
+DECLARED_NONFINITE = re.compile(
+    r"\bnan\s+detected\b"
+    r"|\bdetected\s+nan\b"
+    r"|\bnon-?finite\s+(?:loss|gradient|grad|value|activation)s?\b"
+    r"|\bloss\s+(?:is|became|went)\s+non-?finite\b",
+    re.I,
+)
+
+#: What turns either of the above into a report that nothing is wrong. "no
+#: non-finite values found" is a clean run saying so.
+NEGATED = re.compile(
+    r"\b(?:no|not|without|never|zero)\b[^.\n]{0,24}\b(?:nan|non-?finite)\b",
+    re.I,
+)
+
+#: Kept for callers that import it; the scan uses the three above.
+NAN_PATTERNS = [ASSIGNED_NONFINITE, DECLARED_NONFINITE]
 
 
 @dataclass(frozen=True)
@@ -27,7 +50,9 @@ class StderrScan:
 def scan_stderr_text(text: str) -> StderrScan:
     hits: list[tuple[int, str]] = []
     for i, line in enumerate(text.splitlines(), start=1):
-        if any(p.search(line) for p in NAN_PATTERNS):
+        if NEGATED.search(line):
+            continue
+        if ASSIGNED_NONFINITE.search(line) or DECLARED_NONFINITE.search(line):
             hits.append((i, line.strip()))
     return StderrScan(
         alert=bool(hits),
@@ -68,8 +93,9 @@ class StderrWatchAdapter:
                 {
                     "tool": "aorta sweep run",
                     "reason": (
-                        "Watchdog saw NaN/non-finite in training log — run "
-                        "Residual-NaN-Repro matrix to isolate TF32 vs deterministic."
+                        "Watchdog saw a non-finite value in the training log — "
+                        "re-run this job's own recipe to see whether it "
+                        "reproduces and under which settings."
                     ),
                     "overhead_class": "medium",
                 }
