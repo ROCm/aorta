@@ -7,7 +7,7 @@ from typing import Any
 import dspy
 
 from aorta.agent.llm import AUTOPSY_CATEGORIES
-from aorta.cia.llm import ensure_configured
+from aorta.cia.llm import build_lm
 
 
 # ---------------------------------------------------------------------------
@@ -160,13 +160,27 @@ class TriageDecision(dspy.Signature):
 
 
 class TriageRouter(dspy.Module):
+    #: Autopsy weighs several signals against each other and writes the
+    #: rationale a reader acts on, which is the longest reasoning in the
+    #: pipeline; it runs once per failure where Watch polls throughout. The
+    #: ReAct trajectory below has to fit its tool calls *and* its answer inside
+    #: this, and a reasoning model bills its reasoning against it too.
+    #:
+    #: A budget is all this module pins. It used to name a model as well, which
+    #: made the choice of model a property of the code rather than of the
+    #: deployment. The operator configures one through the environment and the
+    #: agents follow it.
+    MAX_TOKENS = 8192
+
     def __init__(self):
-        ensure_configured(model="claude-sonnet-4-6", max_tokens=2048)
         self.react = dspy.ReAct(
             TriageDecision,
             tools=[classify_matrix, scan_stderr, scan_sanitizer, read_evidence_file, list_signals],
             max_iters=6,
         )
+        # Bound to this module rather than configured globally: whichever agent
+        # reached DSPy first would otherwise decide what Autopsy reasons with.
+        self.react.set_lm(build_lm(max_tokens=self.MAX_TOKENS))
 
     def forward(self, evidence: list[dict[str, Any]], bundle_root: str, job_context: str) -> dspy.Prediction:
         prediction = self.react(
