@@ -703,6 +703,128 @@ def test_two_failing_kernels_sharing_a_name_are_told_apart():
     ]
 
 
+def test_two_failing_kernels_bundled_in_one_object_are_told_apart():
+    # A digest identifies the *file*, not a code object: a bundle carries several
+    # objects under one digest, which is why Waitcheck dedups on
+    # (code_object_sha256, code_object_index) and why stable_key carries the index.
+    # Two same-named selections in one bundle therefore share every field the digest
+    # qualifier renders, so both labels came out identical and the observation could
+    # not say which of the two failed. The qualifier widens to the index — but only
+    # for the collision it has to resolve.
+    sha = "beefaaa1"
+
+    def _identity(index: int) -> dict:
+        return {
+            "name": "gemm_shared_symbol", "target": "gfx950",
+            "code_object": "/a/b/bundle.hsaco", "code_object_sha256": sha,
+            "code_object_index": index, "entry_offset": None,
+        }
+
+    def _result(index: int, why: str) -> dict:
+        return {
+            "identity": _identity(index), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(0), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(1), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(0, "waitcheck_backend_exit_2: refused the first object"),
+                _result(1, "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 2
+
+    labels = [e.get("label") for e in reasons]
+    assert labels == [
+        f"gemm_shared_symbol ({sha}#0)", f"gemm_shared_symbol ({sha}#1)"
+    ]
+    assert len(set(labels)) == 2
+    observation = case.get("observation", "")
+    assert f"gemm_shared_symbol ({sha}#0): waitcheck_backend_exit_2" in observation
+    assert f"gemm_shared_symbol ({sha}#1): waitcheck_timeout" in observation
+    # the index was already in the manifest; it is the display label that lost it
+    assert [e.get("code_object_index") for e in reasons] == [0, 1]
+
+
+def test_a_deduped_row_names_which_of_two_same_named_scans_covered_it():
+    # The same defect one renderer over: a deduped row's Detail names its covering
+    # scan by bare name, so where two worklist rows share that name the cell does not
+    # say which of them was scanned. Qualified only when the name actually repeats.
+    covering_sha, other_sha = "beefaaa1", "beefbbb2"
+
+    def _identity(name: str, sha: str) -> dict:
+        return {
+            "name": name, "target": "gfx950",
+            "code_object": f"/a/b/sol_{sha}.hsaco", "code_object_sha256": sha,
+            "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _result(name: str, sha: str, why: str | None) -> dict:
+        return {
+            "identity": _identity(name, sha), "state": "error" if why else "ran",
+            "verdict": "error" if why else "pass", "findings": [], "reason": why,
+            "returncode": 2 if why else 0,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                {"identity": _identity("gemm", covering_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                # deduped onto the row above: same object, no result of its own
+                {"identity": _identity("gemm_gated", covering_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 7, "sources": ["gemm_csv"]},
+                # a second, unrelated object publishing the same symbol name
+                {"identity": _identity("gemm", other_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 5, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result("gemm", covering_sha, "waitcheck_backend_exit_2: refused it"),
+                _result("gemm", other_sha, None),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    covering, deduped, other = case["kernels"]
+    assert deduped.get("verdict") == "error"
+    # the cell says which "gemm" was scanned, not merely that some "gemm" was
+    assert f"same code object as gemm ({covering_sha}#0)" in deduped.get("detail", "")
+    assert "refused it" in deduped.get("detail", "")
+    # and the rows that carry their own result are untouched by the qualification
+    assert covering.get("name") == other.get("name") == "gemm"
+    assert other.get("detail") == ""
+
+
 def test_a_long_rollup_cannot_truncate_the_kernel_reasons_away():
     # The callout is one line and length-capped. Clamping only the concatenated
     # string let a long check-level rollup spend the whole budget, so the per-kernel

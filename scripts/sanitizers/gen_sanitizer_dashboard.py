@@ -658,17 +658,28 @@ def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
 _DETAIL_LIMIT = 300
 
 
-def _identity_qualifier(identity: dict[str, Any]) -> str:
+def _identity_qualifier(identity: dict[str, Any], *, index: bool = False) -> str:
     """The shortest identity fragment that tells two same-named kernels apart (pure).
 
     Prefers the code-object digest, falling back to the object's basename, and appends
     the entry offset when the identity pins one -- the same fields ``stable_key`` uses
     to keep those selections distinct. Empty when the identity carries none of them,
     in which case there is nothing to disambiguate with.
+
+    ``index`` widens the qualifier with the code-object index. A digest is the *file's*
+    digest, not an object's: a bundle holds several code objects under one digest, and
+    Waitcheck's own dedup key is ``(code_object_sha256, code_object_index)`` rather
+    than the digest alone -- so two same-named selections in one bundle share every
+    field this renders by default. It is off by default because selection stamps an
+    index on every identity carrying a code object and it is 0 on nearly all of them,
+    so rendering it always would pad the labels that are already unique.
     """
     parts = _short(identity.get("code_object_sha256"), 10) or _basename(
         identity.get("code_object")
     )
+    object_index = identity.get("code_object_index")
+    if index and isinstance(object_index, int):
+        parts = f"{parts}#{object_index}" if parts else f"#{object_index}"
     offset = identity.get("entry_offset")
     if isinstance(offset, int):
         parts = f"{parts}+0x{offset:x}" if parts else f"0x{offset:x}"
@@ -685,20 +696,30 @@ def _kernel_reason_entries(results: Sequence[dict[str, Any]]) -> list[dict[str, 
     reopening ``sanitizer_report.json``.
 
     ``label`` is qualified with that identity only where the name is actually
-    ambiguous among the failing kernels. Appending a digest unconditionally would pad
-    every one-line observation for the overwhelmingly common unique-name case, where
-    the name already identifies the kernel.
+    ambiguous among the failing kernels, and only as far as it takes to separate the
+    colliding labels -- the digest first, then the code-object index, which is the one
+    field that separates two objects bundled into a single file. Appending either
+    unconditionally would pad every one-line observation for the overwhelmingly common
+    unique-name case, where the name already identifies the kernel.
     """
     failing = [result for result in results if result["reason"]]
     seen: dict[Any, int] = {}
     for result in failing:
         seen[result["name"]] = seen.get(result["name"], 0) + 1
+    labels = [str(result["name"]) for result in failing]
+    for widen in (False, True):
+        labels = [
+            f"{result['name']} ({qualifier})"
+            if seen[result["name"]] > 1
+            and (qualifier := _identity_qualifier(result["identity"], index=widen))
+            else str(result["name"])
+            for result in failing
+        ]
+        if len(set(labels)) == len(labels):
+            break
     entries: list[dict[str, Any]] = []
-    for result in failing:
+    for label, result in zip(labels, failing, strict=True):
         identity = result["identity"]
-        label = str(result["name"])
-        if seen[result["name"]] > 1 and (qualifier := _identity_qualifier(identity)):
-            label = f"{label} ({qualifier})"
         entries.append({
             "kernel": str(result["name"]),
             "label": label,
@@ -908,6 +929,13 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
 
     worklist = report.get("worklist", {})
     kernel_entries = worklist.get("kernels", [])
+    # A deduped row's Detail names the scan that covered it. Where two rows share that
+    # name the bare name cannot say which of them did the covering, so the same
+    # qualifier the reason labels use is appended -- and only there.
+    entry_names: dict[Any, int] = {}
+    for entry in kernel_entries:
+        entry_name = entry.get("identity", {}).get("name")
+        entry_names[entry_name] = entry_names.get(entry_name, 0) + 1
     kernels: list[dict[str, Any]] = []
     for entry in kernel_entries:
         identity = entry.get("identity", {})
@@ -931,7 +959,12 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             covering = kr_by_identity[covering_key]
             verdict = covering["verdict"]
             findings = 0
-            detail = f"same code object as {covering['name']}; scanned once"
+            covering_label = str(covering["name"])
+            if entry_names.get(covering["name"], 0) > 1 and (
+                qualifier := _identity_qualifier(covering["identity"], index=True)
+            ):
+                covering_label = f"{covering_label} ({qualifier})"
+            detail = f"same code object as {covering_label}; scanned once"
             if covering["reason"]:
                 detail = f"{detail} \u2014 {covering['reason']}"
         else:
