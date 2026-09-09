@@ -29,7 +29,18 @@ from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_sou
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ARCH = os.environ.get("CIA_GPU_ARCH", "gfx950")
 # The assembler lives with ROCm on the compute nodes, not on the login node.
-_ROCM_LLVM = os.environ.get("ROCM_LLVM_BIN", "/opt/rocm-7.0.2.2/lib/llvm/bin")
+#
+# The default used to name one machine's installed patch release, which is
+# absent on a box running any other -- and its absence reads as "no ROCm here"
+# rather than "wrong path". ROCM_PATH is the variable ROCm's own scripts set,
+# and /opt/rocm is the unversioned symlink its packages install, so between
+# them they name the toolchain wherever it happens to be.
+#
+# (The version that was here is in the commit that removed it. Writing it out
+# again would trip the guard that found it, which scans comments because that
+# is where one of these was last time.)
+_ROCM_ROOT = os.environ.get("ROCM_PATH", "/opt/rocm")
+_ROCM_LLVM = os.environ.get("ROCM_LLVM_BIN", f"{_ROCM_ROOT}/lib/llvm/bin")
 
 # Recipes the demo knows how to run, so the model picks from a validated set
 # instead of inventing a path that does not exist on disk.
