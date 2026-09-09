@@ -29,7 +29,11 @@ from pathlib import Path
 import yaml
 
 from aorta.cia.autopsy.orchestrator import run_autopsy
-from aorta.cia.launch.cluster import submit_sbatch
+# Through the seam, not around it: launch() exists so a scheduler-less backend
+# is a branch in one place rather than an edit at every call site, and the only
+# production submitter calling submit_sbatch directly is how that stops being
+# true. An unused abstraction rots.
+from aorta.cia.launch import launch
 from aorta.cia.watch.poll import poll_jobs
 from aorta.cia.launch.job import (
     JobRecord, _utc_now, new_job_id, read_job_json, update_job_status, write_job_json,
@@ -438,7 +442,7 @@ def run_triage(argv: list[str] | None = None) -> dict:
     saved = os.environ.get("CIA_TOLERATE_NONZERO")
     os.environ["CIA_TOLERATE_NONZERO"] = "1"
     try:
-        slurm_id, err = submit_sbatch(
+        slurm_id, err = launch(
             command=command,
             job_name=job_id,
             log_path=log_path,
