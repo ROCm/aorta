@@ -44,6 +44,18 @@ def search_roots() -> list[str]:
     return [home] if Path(home).is_dir() else []
 
 
+def quoted_search_roots() -> str:
+    """The search roots as one shell-safe argument list.
+
+    These are interpolated into ``find`` commands that run through a shell, so
+    a root containing a space arrives as two paths and a root containing a
+    semicolon arrives as a second command. They come from CIA_SEARCH_ROOTS,
+    which is the operator's to set -- but a probe should not be the thing that
+    decides whether their directory name is safe to write.
+    """
+    return " ".join(shlex.quote(root) for root in search_roots()) or "~"
+
+
 def run_probe(host: str, cmd: str, timeout: int = 15) -> str:
     """Run a read-only probe command and return stdout+stderr. Never raises.
 

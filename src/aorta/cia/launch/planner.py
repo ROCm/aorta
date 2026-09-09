@@ -7,7 +7,7 @@ from typing import Any
 import dspy
 import yaml
 
-from aorta.cia.launch.cluster import run_probe, search_roots, venv_activate_path
+from aorta.cia.launch.cluster import quoted_search_roots, run_probe, venv_activate_path
 from aorta.cia.llm import ensure_configured
 
 
@@ -68,7 +68,7 @@ def check_aorta_install(host: str, recipe: str = "") -> dict[str, Any]:
     sidecar sitting beside the recipe wins over any generic example — pairing a
     recipe with the wrong sidecar fails at load time with UnknownEnvironmentError.
     """
-    roots = " ".join(search_roots()) or "~"
+    roots = quoted_search_roots()
     cli = run_probe(host, "command -v aorta 2>/dev/null || echo NOT_FOUND")
     available = bool(cli.strip()) and "NOT_FOUND" not in cli and "ERROR" not in cli
     if not available:
@@ -120,7 +120,7 @@ def check_partitions(host: str) -> dict[str, Any]:
 
 def read_existing_launch_scripts(host: str, node: str) -> str:
     """Read existing launch scripts on the shared filesystem to learn local patterns."""
-    roots = " ".join(search_roots()) or "~"
+    roots = quoted_search_roots()
     out = run_probe(host, (
         rf"find {roots} -maxdepth 4 \( -name '*.sbatch' -o -name '*.slurm' -o -name '*.sh' \) "
         "2>/dev/null | head -5 | xargs head -30 2>/dev/null"
