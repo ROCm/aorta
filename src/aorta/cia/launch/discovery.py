@@ -55,6 +55,42 @@ def list_nodes(host: str) -> dict[str, Any]:
     return {"output": out[:1200]}
 
 
+#: Board names that name an architecture unambiguously. Only boards whose
+#: mapping is settled belong here: a board absent from this table reads as
+#: unknown, which the planner can act on, rather than as the nearest guess.
+_BOARD_ARCH = (
+    (re.compile(r"\bMI2[15]\d", re.IGNORECASE), "gfx90a"),   # MI210, MI250, MI250X
+    (re.compile(r"\bMI3[02]\d", re.IGNORECASE), "gfx942"),   # MI300X/A, MI325X
+    (re.compile(r"\bMI3[56]\d", re.IGNORECASE), "gfx950"),   # MI350X, MI355X
+)
+
+
+def parse_gpu_arch(probe_output: str) -> str:
+    """The architecture *probe_output* states, or "" when it states none.
+
+    This used to answer ``gfx90a`` for an MI25x and ``gfx942`` for everything
+    else -- including an empty probe, an ERROR, a Navi card, and the MI355X
+    this is developed against, which is ``gfx950``. Being wrong was half the
+    problem; the other half was that the planner could not tell a reading from
+    a default, so a guess arrived with the same authority as a fact and
+    uncertain_fields had nothing to carry.
+
+    An explicit gfx token wins, because a cluster that publishes one is stating
+    the answer. A board name is read only through the table above. Anything
+    else is "": on the cluster this was written against, sinfo reports gres
+    ``(null)`` and features ``xgmi36,pod1``, which names no architecture at all.
+    """
+    explicit = re.search(r"\bgfx[0-9a-f]{3,}\b", probe_output, re.IGNORECASE)
+    if explicit:
+        return explicit.group(0).lower()
+
+    for pattern, arch in _BOARD_ARCH:
+        if pattern.search(probe_output):
+            return arch
+
+    return ""
+
+
 def check_gpu_arch(host: str, node: str) -> dict[str, Any]:
     """Get GPU arch and count for node, preferring scheduler gres over rocm-smi.
 
@@ -76,8 +112,7 @@ def check_gpu_arch(host: str, node: str) -> dict[str, Any]:
     elif "Card Series" in out:
         count = out.count("Card Series")
 
-    arch = "gfx90a" if re.search(r"MI25\d", out, re.IGNORECASE) else "gfx942"
-    return {"arch": arch, "count": count, "output": out[:400]}
+    return {"arch": parse_gpu_arch(out), "count": count, "output": out[:400]}
 
 
 def read_cluster_configs(host: str) -> str:
@@ -122,7 +157,7 @@ class ClusterProfile(dspy.Signature):
     scheduler: str = dspy.OutputField(desc="slurm | kubernetes | bare_metal | spur | unknown")
     launcher: str = dspy.OutputField(desc="sbatch | aorta_direct | torchrun | primus | kubectl | unknown")
     target_node: str = dspy.OutputField(desc="Best node to run the job on, or empty to let the scheduler pick")
-    gpu_arch: str = dspy.OutputField(desc="ROCm GPU arch string e.g. gfx942")
+    gpu_arch: str = dspy.OutputField(desc="ROCm GPU arch string e.g. gfx942, or empty if the probe did not report one -- then list gpu_arch in uncertain_fields")
     gpu_count: int = dspy.OutputField(desc="Number of GPUs on target node")
     confidence: float = dspy.OutputField(desc="0.0-1.0 overall confidence in the plan")
     uncertain_fields: list[str] = dspy.OutputField(desc="Fields the user should confirm if confidence < 0.8")
