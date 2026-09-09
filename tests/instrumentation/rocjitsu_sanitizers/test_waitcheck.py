@@ -243,6 +243,72 @@ def test_waitcheck_backend_error_never_passes(tmp_path: Path) -> None:
     assert result.verdict is Verdict.ERROR
     assert "worklist_not_fully_checked" in str(result.reason)
     assert result.kernel_results[0].returncode == 2
+    # The rollup above names no cause, so the kernel reason has to carry the
+    # backend's own words rather than a generic parse complaint.
+    assert result.kernel_results[0].reason == "waitcheck_backend_exit_2: analysis failed"
+
+
+def test_waitcheck_unexpected_exit_reports_stderr_not_the_missing_summary(
+    tmp_path: Path,
+) -> None:
+    # rj_waitcheck refuses an input it cannot decode with exit 2, an explanation on
+    # stderr, and no analysis summary. Parsing before checking the exit code turned
+    # that explanation into "did not contain an analysis summary" -- the symptom of
+    # the refusal rather than the refusal -- and the stderr never reached the report.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "kernel.hsaco"
+    artifact.write_bytes(b"\x7fELF")
+    message = f"{artifact}: failed to parse input executable or code object"
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 2, "", message)
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+    )
+
+    kernel = result.kernel_results[0]
+    assert kernel.state is ExecutionState.ERROR
+    assert kernel.reason == f"waitcheck_backend_exit_2: {message}"
+    assert "analysis summary" not in str(kernel.reason)
+
+
+def test_waitcheck_expected_exit_still_reports_a_parse_failure(tmp_path: Path) -> None:
+    # The reorder above must not swallow a genuine identity/format mismatch: a clean
+    # or hazard exit whose output cannot be parsed is still a diagnostics error.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "kernel.hsaco"
+    artifact.write_bytes(b"\x7fELF")
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 0, "nothing that looks like a summary", "")
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+    )
+
+    kernel = result.kernel_results[0]
+    assert kernel.state is ExecutionState.ERROR
+    assert str(kernel.reason).startswith("waitcheck_diagnostics_error:")
+    assert "did not contain an analysis summary" in str(kernel.reason)
 
 
 def test_waitcheck_timeout_never_passes(tmp_path: Path) -> None:

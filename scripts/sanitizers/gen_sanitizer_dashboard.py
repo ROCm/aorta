@@ -75,6 +75,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from html import escape as _esc
 from pathlib import Path
@@ -623,12 +624,20 @@ def _observation_text(
     finding_groups: list[dict[str, Any]],
     *,
     present: bool = True,
+    kernel_reasons: Sequence[tuple[str, str]] = (),
 ) -> str:
     """A one-line human summary of what a case observed.
 
     Combines the primary sanitizer + verdict + fail-closed reason + a finding
     highlight into a compact string surfaced on both tabs (guardrail and survey).
     Observational only -- it never encodes a pass/fail health signal.
+
+    ``kernel_reasons`` are the ``(kernel, reason)`` pairs of the kernels that did
+    not come back clean. A check-level reason is a rollup -- Waitcheck reports
+    ``worklist_not_fully_checked`` whenever any kernel is unhealthy -- which names
+    the failure but not its cause, so the observation would otherwise be a dead end
+    for the reader who has only this line. Appending the per-kernel reasons makes
+    the one-liner say what actually broke.
     """
     if not present:
         return "report missing"
@@ -637,6 +646,10 @@ def _observation_text(
     parts = [head]
     if primary.get("reason"):
         parts.append(f"reason {primary['reason']}")
+    if kernel_reasons:
+        parts.append(
+            ", ".join(f"{kernel}: {reason}" for kernel, reason in kernel_reasons)
+        )
     if findings:
         top = finding_groups[0]["code"] if finding_groups else None
         parts.append(f"{findings} finding(s)" + (f" ({top})" if top else ""))
@@ -667,6 +680,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             "kernels": [], "finding_groups": [],
             "primary": {"sanitizer": None, "verdict": None, "reason": None, "preflight": None},
             "observation": "report missing",
+            "kernel_reasons": [],
         }
     checks = report.get("checks", [])
     findings_total = sum(len(c.get("findings", [])) for c in checks)
@@ -681,14 +695,33 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             break
 
     kr_by_name: dict[str, dict[str, Any]] = {}
+    # A whole-code-object scan is deduped by (sha256, index), so the kernels that
+    # share an object with an earlier selection carry no kernel_result of their own.
+    # Index the results by object too, so those rows can be attributed to the scan
+    # that covered them instead of rendering as an em dash (see the kernels loop).
+    kr_by_object: dict[tuple[str | None, Any], dict[str, Any]] = {}
     findings_by_name: dict[str | None, int] = {}
     for check in checks:
         for result in check.get("kernel_results", []):
-            name = (result.get("identity") or {}).get("name")
-            kr_by_name[name] = {
+            identity = result.get("identity") or {}
+            name = identity.get("name")
+            reduced = {
                 "verdict": result.get("verdict"),
                 "findings": len(result.get("findings", [])),
+                # The fail-closed detail. ``CheckResult.reason`` only ever carries the
+                # rollup (``worklist_not_fully_checked``); the per-kernel reason is the
+                # only field that says what actually went wrong, so it must survive
+                # into the row the renderers read.
+                "state": result.get("state"),
+                "reason": result.get("reason"),
+                "returncode": result.get("returncode"),
+                "covering_kernel": name,
             }
+            kr_by_name[name] = reduced
+            kr_by_object.setdefault(
+                (identity.get("code_object_sha256"), identity.get("code_object_index")),
+                reduced,
+            )
         for finding in check.get("findings", []):
             key = finding.get("kernel_name")
             findings_by_name[key] = findings_by_name.get(key, 0) + 1
@@ -700,8 +733,26 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         identity = entry.get("identity", {})
         name = identity.get("name")
         result = kr_by_name.get(name)
+        detail = ""
         if result is not None:
             verdict, findings = result["verdict"], result["findings"]
+            detail = str(result["reason"] or "")
+        elif (
+            covering := kr_by_object.get(
+                (identity.get("code_object_sha256"), identity.get("code_object_index"))
+            )
+        ) is not None:
+            # Deduped: this kernel's object WAS scanned, under the name of the first
+            # selection that resolved to it. The scan is object-scope, so its verdict
+            # covers this kernel too -- reporting an em dash here read as "not checked"
+            # and hid a gated kernel whose object had failed. Findings stay on the
+            # covering row so the per-kernel column still sums to the case total.
+            verdict = covering["verdict"]
+            findings = 0
+            covered_by = covering["covering_kernel"]
+            detail = f"same code object as {covered_by}; scanned once"
+            if covering["reason"]:
+                detail = f"{detail} \u2014 {covering['reason']}"
         else:
             findings = findings_by_name.get(name, 0)
             # dynamic ConSan attributes race findings at process scope (kernel_name
@@ -718,6 +769,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             "offset": identity.get("entry_offset"),
             "verdict": verdict,
             "findings": findings,
+            "detail": _clean_msg(detail, 300) if detail else "",
         })
 
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -735,7 +787,16 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
 
     verdict = report.get("overall_verdict")
     primary = _primary_checks(checks)
-    observation = _observation_text(primary, findings_total, finding_groups)
+    # Only the kernels that carry their own fail-closed reason; a deduped row's
+    # detail restates its covering scan's reason, which would double it up here.
+    kernel_reasons = [
+        (str(result["covering_kernel"]), str(result["reason"]))
+        for result in kr_by_name.values()
+        if result["reason"]
+    ]
+    observation = _observation_text(
+        primary, findings_total, finding_groups, kernel_reasons=kernel_reasons
+    )
     return {
         "present": True, "verdict": verdict, "execution": report.get("execution_status"),
         "findings": findings_total, "coverage": coverage, "backend": backend,
@@ -747,6 +808,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         },
         "kernels": kernels, "finding_groups": finding_groups,
         "primary": primary, "observation": observation,
+        "kernel_reasons": kernel_reasons,
     }
 
 
@@ -2286,6 +2348,13 @@ def build_case_env(
             "verdict": summary.get("verdict"),
             "execution": summary.get("execution"),
             "reason": (summary.get("primary") or {}).get("reason"),
+            # ``reason`` above is the check-level rollup, so on its own it cannot say
+            # which kernel failed or why. Record the per-kernel reasons beside it so
+            # this manifest is diagnosable without re-reading sanitizer_report.json.
+            "kernel_reasons": [
+                {"kernel": kernel, "reason": why}
+                for kernel, why in (summary.get("kernel_reasons") or [])
+            ],
             "findings": summary.get("findings", 0),
         },
         "inputs": inputs,
@@ -2963,6 +3032,12 @@ def _kernel_tables_html(
     Both tabs render the same tinted ``_verdict_html`` badge per kernel; verdict
     colour is descriptive on either tab (see ``_verdict_html``).
 
+    The **Detail** column carries the row's ``detail``: the kernel's own fail-closed
+    reason, or -- for a kernel whose object was deduped into an earlier scan -- the
+    scan that covered it. Without it an errored kernel row showed a badge and a zero
+    finding count with nothing anywhere on the page saying why, since the check-level
+    reason is only the ``worklist_not_fully_checked`` rollup.
+
     Numeric columns right-align the ``th`` as well as the ``td`` so each value
     sits directly under its own header rather than drifting to the far edge.
     """
@@ -2975,10 +3050,11 @@ def _kernel_tables_html(
             f"<td class=num>{_esc(str(k['findings']))}</td>"
             f"<td class=mono>{_esc(k['code_object']) or '&mdash;'}</td>"
             f"<td class=mono>{_esc(k['sha']) or '&mdash;'}</td>"
+            f"<td class='mono wrap-any'>{_esc(k.get('detail') or '') or '&mdash;'}</td>"
             f"<td>{link}</td></tr>"
             for k in row["kernels"]
         )
-        or '<tr><td class=empty colspan=7>no kernels selected</td></tr>'
+        or '<tr><td class=empty colspan=8>no kernels selected</td></tr>'
     )
     frows = (
         "".join(
@@ -2993,7 +3069,7 @@ def _kernel_tables_html(
         '<p class="cap">Kernels</p><div class="table-wrap"><table>'
         "<thead><tr><th>Kernel</th><th class=num>Dispatch</th>"
         "<th>Observed</th><th class=num>Findings</th>"
-        f"<th>Code object</th><th>SHA-256</th><th>Report</th></tr></thead>"
+        f"<th>Code object</th><th>SHA-256</th><th>Detail</th><th>Report</th></tr></thead>"
         f"<tbody>{krows}</tbody></table></div>"
         '<p class="cap">Findings</p><div class="table-wrap"><table>'
         "<thead><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th class=num>Count</th>"
@@ -3287,6 +3363,18 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     verdict = str(row.get("verdict") or "").strip().lower()
     reason = (row.get("primary") or {}).get("reason")
     reason_text = _clean_msg(str(reason), 240) if reason else ""
+    # Qualify a rollup reason with the kernel reasons behind it. ``primary.reason``
+    # alone ("worklist_not_fully_checked") tells the reader a kernel was not checked
+    # but never which one or why, which is the whole question this callout exists to
+    # answer for an errored case.
+    kernel_reasons = row.get("kernel_reasons") or []
+    if reason_text and kernel_reasons:
+        detail = "; ".join(f"{kernel}: {why}" for kernel, why in kernel_reasons)
+        reason_text = _clean_msg(f"{reason_text} \u2014 {detail}", 240)
+    elif not reason_text and kernel_reasons:
+        reason_text = _clean_msg(
+            "; ".join(f"{kernel}: {why}" for kernel, why in kernel_reasons), 240
+        )
     groups = row.get("finding_groups") or []
     example = _clean_msg(str(groups[0].get("example", "")), 240) if groups else ""
     if verdict == "error" and reason_text:
@@ -3973,13 +4061,15 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
             continue
         lines += [
             "",
-            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |",
-            "|---|--:|---|--:|---|---|",
+            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object "
+            "| SHA-256 | Detail |",
+            "|---|--:|---|--:|---|---|---|",
         ]
         for k in r["kernels"]:
+            detail = (k.get("detail") or "").replace("|", "\\|")
             lines.append(
                 f"| `{k['name']}` | {k['dispatch']} | `{k['verdict']}` | {k['findings']} | "
-                f"`{k['code_object'] or _DASH}` | `{k['sha'] or _DASH}` |"
+                f"`{k['code_object'] or _DASH}` | `{k['sha'] or _DASH}` | {detail or _DASH} |"
             )
         lines += ["", "</details>", ""]
     return lines
@@ -4064,15 +4154,17 @@ def build_summary_md(
         )
         lines += [
             "",
-            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |",
-            "|---|--:|---|--:|---|---|",
+            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object "
+            "| SHA-256 | Detail |",
+            "|---|--:|---|--:|---|---|---|",
         ]
         for k in r["kernels"]:
             code_object = k["code_object"] or _DASH
             sha = k["sha"] or _DASH
+            detail = (k.get("detail") or "").replace("|", "\\|")
             lines.append(
                 f"| `{k['name']}` | {k['dispatch']} | `{k['verdict']}` | {k['findings']} | "
-                f"`{code_object}` | `{sha}` |"
+                f"`{code_object}` | `{sha}` | {detail or _DASH} |"
             )
         if r["finding_groups"]:
             lines += [

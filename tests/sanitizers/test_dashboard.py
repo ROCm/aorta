@@ -119,6 +119,174 @@ def test_summarize_waitcheck_reports_per_kernel_detail():
     assert case["finding_groups"][0]["example"].startswith("sol_1.hsaco:")
 
 
+def _waitcheck_daily_topology_report() -> dict:
+    """The real daily GEMM topology, with the shared object failing to scan.
+
+    Two NT shapes resolve to one code object (Waitcheck scans it once and reports it
+    under the first name) and one TT shape resolves to its own. The NT scan errors,
+    so the check rolls up to ``worklist_not_fully_checked`` while the TT scan still
+    produces findings -- the shape a real gate hit, where the only statement of the
+    actual cause is the errored kernel's own ``reason``.
+    """
+    nt_sha, tt_sha = "57c5d8efa4beef01", "aeb46fded1beef02"
+    finding = {
+        "sanitizer": "waitcheck", "severity": "warning", "code": "wait_hazard",
+        "message": "/a/b/sol_137678.hsaco:gfx950[0]:.text+0x4a4: missing s_waitcnt lgkmcnt(0)",
+        "kernel_name": None, "code_object": "/a/b/sol_137678.hsaco",
+        "entry_offset": None, "metadata": {},
+    }
+
+    def _entry(name: str, obj: str, sha: str, count: int) -> dict:
+        return {
+            "identity": {
+                "name": name, "target": "gfx950", "code_object": f"/a/b/{obj}",
+                "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+            },
+            "total_time_ms": 0.0, "dispatch_count": count, "sources": ["gemm_csv"],
+        }
+
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                _entry("gemm_NT_M256_N4096_K1024", "sol_126578.hsaco", nt_sha, 479),
+                _entry("gemm_NT_M128_N4096_K1280", "sol_175415.hsaco", nt_sha, 471),
+                _entry("gemm_TT_M64_N64_K1280", "sol_137678.hsaco", tt_sha, 440),
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None,
+            "findings": [finding],
+            "kernel_results": [
+                {
+                    "identity": {
+                        "name": "gemm_NT_M256_N4096_K1024", "target": "gfx950",
+                        "code_object": "/a/b/sol_126578.hsaco",
+                        "code_object_sha256": nt_sha, "code_object_index": 0,
+                    },
+                    "state": "error", "verdict": "error", "findings": [],
+                    "reason": (
+                        "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+                        "failed to parse input executable or code object"
+                    ),
+                    "returncode": 2,
+                },
+                {
+                    "identity": {
+                        "name": "gemm_TT_M64_N64_K1280", "target": "gfx950",
+                        "code_object": "/a/b/sol_137678.hsaco",
+                        "code_object_sha256": tt_sha, "code_object_index": 0,
+                    },
+                    "state": "ran", "verdict": "warn", "findings": [finding],
+                    "reason": None, "returncode": 4,
+                },
+            ],
+            "coverage": [],
+            "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+        }],
+    }
+
+
+def test_summarize_keeps_the_per_kernel_failure_reason():
+    # The check-level reason is only the rollup, so dropping the per-kernel reason
+    # left the page with no statement anywhere of why a kernel errored.
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+
+    assert case["verdict"] == "error" and case["match"] is False
+    assert (case["primary"] or {})["reason"] == "worklist_not_fully_checked"
+
+    errored = case["kernels"][0]
+    assert errored["name"] == "gemm_NT_M256_N4096_K1024"
+    assert errored["verdict"] == "error"
+    assert "failed to parse input executable or code object" in errored["detail"]
+
+    assert case["kernel_reasons"] == [
+        (
+            "gemm_NT_M256_N4096_K1024",
+            "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+            "failed to parse input executable or code object",
+        )
+    ]
+    # a clean kernel carries no detail to explain
+    assert case["kernels"][2]["verdict"] == "warn"
+    assert case["kernels"][2]["detail"] == ""
+
+
+def test_summarize_attributes_a_deduped_kernel_to_the_scan_that_covered_it():
+    # Waitcheck scans one object once, so the second NT shape has no kernel_result.
+    # Rendering it as an em dash read as "not checked" and hid that a *gated* kernel
+    # sat behind an object whose scan had failed.
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+    deduped = case["kernels"][1]
+
+    assert deduped["name"] == "gemm_NT_M128_N4096_K1280"
+    assert deduped["verdict"] == "error"
+    assert "same code object as gemm_NT_M256_N4096_K1024" in deduped["detail"]
+    assert "failed to parse input executable or code object" in deduped["detail"]
+    # findings stay on the covering row, so the column still sums to the case total
+    assert deduped["findings"] == 0
+    assert sum(k["findings"] for k in case["kernels"]) == case["findings"]
+    # the covering scan is reported once, not once per kernel that shares its object
+    assert len(case["kernel_reasons"]) == 1
+
+
+def test_observation_and_inline_message_name_the_cause_behind_a_rollup():
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+
+    # the one-liner still leads with the rollup, but no longer stops there
+    assert "reason worklist_not_fully_checked" in case["observation"]
+    assert "gemm_NT_M256_N4096_K1024: waitcheck_backend_exit_2" in case["observation"]
+    assert "32 finding(s)" not in case["observation"]  # only one finding in the fixture
+
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert text.startswith("worklist_not_fully_checked")
+    assert "gemm_NT_M256_N4096_K1024" in text
+
+
+def test_kernel_tables_render_the_reason_on_both_twins():
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+
+    html = gen._kernel_tables_html(case, report_rel=None)
+    assert "<th>Detail</th>" in html
+    assert "failed to parse input executable or code object" in html
+
+    rows = {
+        "waitcheck": case,
+        "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    md = gen.build_summary_md(
+        [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": False}]
+    )
+    assert "| SHA-256 | Detail |" in md
+    assert "failed to parse input executable or code object" in md
+
+
+def test_case_env_records_kernel_reasons_beside_the_rollup():
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+
+    assert env["observed"]["reason"] == "worklist_not_fully_checked"
+    assert env["observed"]["kernel_reasons"] == [
+        {
+            "kernel": "gemm_NT_M256_N4096_K1024",
+            "reason": (
+                "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+                "failed to parse input executable or code object"
+            ),
+        }
+    ]
+
+
 def test_summarize_consan_credits_process_findings_to_single_kernel():
     case = gen.summarize_case(_consan_racy_report(), "fail")
 
@@ -2206,9 +2374,9 @@ def test_kernel_tables_html_links_each_row_to_report():
     assert "javascript:alert(1)" not in unsafe
     assert ">report</a>" not in unsafe
 
-    # empty-kernel case spans the full (now 7-column) row
+    # empty-kernel case spans the full (now 8-column) row
     empty = gen._kernel_tables_html({**row, "kernels": []}, report_rel=rel)
-    assert "colspan=7>no kernels selected" in empty
+    assert "colspan=8>no kernels selected" in empty
 
 
 def test_build_html_kernel_rows_link_reports_on_both_tabs(tmp_path):
