@@ -43,6 +43,10 @@ def built(monkeypatch):
     monkeypatch.setattr(llm_mod, "_configured", False)
     for var in ("LITELLM_MODEL", "LITELLM_API_BASE", "LITELLM_API_KEY"):
         monkeypatch.delenv(var, raising=False)
+    # These tests are about which argument wins, not about where the endpoint
+    # comes from -- that is tests/cia/test_shared_provider.py. Pin the resolved
+    # provider so the chat settings on the developer's machine cannot decide it.
+    monkeypatch.setattr(llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", ""))
     return calls
 
 
@@ -53,12 +57,15 @@ class TestExplicitArgumentsWin:
         build_lm(model="claude-sonnet-4-6")
         assert built[0]["model"] == "openai/claude-sonnet-4-6"
 
-    def test_the_environment_still_supplies_a_model_when_none_is_named(self, built, monkeypatch):
-        monkeypatch.setenv("LITELLM_MODEL", "qwen3-35b")
+    def test_the_configuration_supplies_a_model_when_none_is_named(self, built, monkeypatch):
+        monkeypatch.setattr(
+            llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "qwen3-35b")
+        )
         build_lm()
         assert built[0]["model"] == "openai/qwen3-35b"
 
     def test_a_default_model_applies_when_neither_is_given(self, built):
+        """The configuration names no model and the caller names none."""
         build_lm()
         assert built[0]["model"] == f"openai/{DEFAULT_MODEL}"
 
@@ -117,7 +124,9 @@ class TestTheRouterKeepsItsOwnSettings:
 
     def test_the_router_follows_the_model_the_operator_configured(self, built, monkeypatch):
         """Pinning a model in code would override the deployment's choice."""
-        monkeypatch.setenv("LITELLM_MODEL", "qwen3-35b")
+        monkeypatch.setattr(
+            llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "qwen3-35b")
+        )
         router_mod, bound = self._bind(monkeypatch)
 
         router_mod.TriageRouter()

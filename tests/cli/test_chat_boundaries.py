@@ -30,6 +30,22 @@ If a third importer ever wants to join, that is the signal that the provider
 layer belongs in core rather than under ``aorta.chat``, and this list should be
 replaced by that move instead of being extended again.
 
+**A third importer joined, and the move has not happened yet.**
+``aorta/cia/llm.py`` reads the chat settings so that configuring chat
+configures Watch and Autopsy too. Before it did, the agents had their own
+LITELLM_* surface defaulting to ``http://localhost:4000``, so a user who had
+configured chat against a real provider had agents quietly addressing a proxy
+that was not running -- one configuration surface in the docs and two in the
+code.
+
+This entry is the debt, recorded rather than hidden. It buys the same terms as
+the second: the import is deferred inside ``chat_provider()``, ``import
+aorta.cia`` stays free of langchain, and only settings are read -- never the
+provider layer, so the agents still run on a base install. What it does not buy
+is the move this docstring asks for, which is now overdue and wants its own
+change: ``aorta/chat/config.py`` is the piece that belongs in core, and both
+front doors plus the agents should read it from there.
+
 These live under ``tests/cli/`` rather than ``tests/chat/`` on purpose: they are
 pure AST and stdlib, so they must run on a base install, where ``tests/chat/``
 is skipped for want of the chat extra.
@@ -52,9 +68,12 @@ _AGENT_LLM = _SRC / "aorta" / "agent" / "llm.py"
 
 #: The only modules allowed to import ``aorta.chat``, and each one's reason.
 #: See the module docstring before adding a third.
+_CIA_LLM = _SRC / "aorta" / "cia" / "llm.py"
+
 _SANCTIONED_IMPORTERS = {
     _CLI_CHAT: "the Click entry for `aorta chat`",
     _AGENT_LLM: "Decision 7a: the agent proposer on the shared provider layer",
+    _CIA_LLM: "the agents read the same provider settings as chat, not their own",
 }
 
 #: Third-party packages ``aorta/cli/chat.py`` may import at module scope.
