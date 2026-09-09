@@ -552,6 +552,53 @@ class TestEmbeddingModelCache:
         assert check.status == FAIL
         assert "unknown embedding provider" in check.detail
 
+    def test_the_unknown_provider_row_carries_a_route_to_a_fix(self, monkeypatch):
+        """It was a FAIL with an empty hint -- the complaint this PR started from.
+
+        This row already caught the factory's ``ValueError`` rather than
+        letting the name resolve to local, so it was the caller that had the
+        distinction right. What it did not have was a remedy, and there was one
+        available once ``remedy_lines`` learned the state.
+        """
+        monkeypatch.setattr(settings, "embedding_provider", "sbert")
+        check = _by_name(run_checks(backend=False), "embedding provider")
+        assert check.hint, "a FAIL naming a misconfigured setting with nothing to do about it"
+        assert 'embedding_provider = "local"' in check.hint
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in check.hint
+
+    def test_the_two_rows_do_not_disagree_about_the_remedy(self, monkeypatch, tmp_path: Path):
+        """One text, so a future edit cannot move one row and not the other.
+
+        Both rows fire together for this install -- the provider is unknown
+        *and* there is no index -- and a reader seeing two different remedies
+        for one typo would reasonably conclude they need both.
+        """
+        monkeypatch.setattr(settings, "embedding_provider", "sbert")
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
+        report = run_checks(backend=False)
+        provider_row = _by_name(report, "embedding provider")
+        index_row = _by_name(report, "chat index")
+
+        assert provider_row.status == FAIL and index_row.status == FAIL
+        assert provider_row.hint == index_row.hint
+
+    def test_neither_row_offers_a_command_that_dies_on_the_same_setting(
+        self, monkeypatch, tmp_path
+    ):
+        """The finding itself: two commands offered, both fatal on resolution."""
+        monkeypatch.setattr(settings, "embedding_provider", "sbert")
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
+        report = run_checks(backend=False)
+
+        for name in ("embedding provider", "chat index"):
+            row = _by_name(report, name)
+            for text in (row.hint, row.procedure, row.detail):
+                for path, _, offered in _commands_named_in(text or ""):
+                    assert not (offered and path[:1] == ["index"]), (
+                        f"{name} offers 'aorta chat {' '.join(path)}', which cannot "
+                        "resolve the provider it needs"
+                    )
+
 
 class TestIndexChecks:
     def test_an_absent_index_fails_with_both_ways_to_get_one(self, monkeypatch, tmp_path: Path):
@@ -1119,11 +1166,17 @@ class TestRemoteEmbeddingProfile:
 
         Deliberately merge-order-neutral, and asserted as such. An earlier
         wording said a profile "created before the templates changed" carries
-        it -- which reads as though the templates have already changed. In this
-        tree they have not: four remote-LLM templates still write
-        ``embedding_provider = "remote"``, and the PR that changes them is a
-        separate one. Either tense is a claim about merge order, so the text
-        makes none: the setting persists whatever the current template writes.
+        it, which reads as though the templates had already changed; it was
+        written while they had not.
+
+        Both readings are now simultaneously true, which is the argument for
+        neutrality rather than against it. #462 flipped the templates to local
+        and has since merged, so ``origin/main`` writes no remote template --
+        while this branch is not rebased on it, so the base under this test
+        still writes four. Either tense would therefore be wrong in one of the
+        two trees a reader might have checked out. The text makes no claim
+        about either: the setting persists whatever the current template
+        writes.
         """
         self._remote(monkeypatch)
         procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
@@ -1137,8 +1190,10 @@ class TestRemoteEmbeddingProfile:
     def test_the_wording_holds_whichever_way_the_templates_currently_read(self, monkeypatch):
         """The tree it has to be true in, checked rather than assumed.
 
-        The templates are the fact the old wording got wrong, so read them:
-        whatever they say today, the procedure must not describe them.
+        The templates are the fact the old wording got wrong, so read them
+        instead of asserting them. This passes on a base that writes four
+        remote templates and on one that writes none, which is the property
+        being pinned -- not the count, which is a sibling PR's business.
         """
         from aorta.chat import config as config_mod
 
@@ -1752,7 +1807,13 @@ def _fetch_would_be_accepted() -> bool:
         settings.embedding_model = resolved_model
         settings.embedding_provider = resolved_provider
 
-    provider = get_provider()
+    try:
+        provider = get_provider()
+    except Exception:
+        # ``fetch_index`` resolves the provider before it reads anything, so a
+        # provider that cannot be built is a fetch that cannot run. Failing
+        # closed here rather than raising keeps the tier's verdict a verdict.
+        return False
     report = manifest_mod.validate(
         published,
         embedding_model=provider.model_id(),
@@ -1772,6 +1833,12 @@ def _build_would_start() -> bool:
     """
     from aorta.chat.rag import manifest as manifest_mod
 
+    # Asked before the provider is classified, because
+    # ``_configured_embedding_provider`` answers "local" for a name it could
+    # not resolve -- which would score an unbuildable provider as a build that
+    # starts, the exact reading this state exists to reject.
+    if manifest_mod._unknown_embedding_provider():
+        return False
     if manifest_mod._configured_embedding_provider() == "local":
         return True
     return not manifest_mod._remote_embedder_error()
@@ -1853,14 +1920,15 @@ def _resolve(path: list[str]):
 class TestEveryCommandTheReportNamesCanRun:
     """The closed-set answer to "is this advice followable?".
 
-    Four separate findings in this area were each a command that could not run
+    Five separate findings in this area were each a command that could not run
     in the state that printed it: ``index fetch`` offered to a remote embedder,
     ``index build`` offered on an empty ``remote_embedding_api_key``, ``config
-    init --force`` printed without the ``--profile`` Click requires, and
-    ``index fetch`` offered under a customised ``embedding_model``. Each was
-    found by hand, one review round apart. So the question is asked here of
-    every arm at once instead, and asked of the code that would reject the
-    line rather than of a reader's judgement.
+    init --force`` printed without the ``--profile`` Click requires, ``index
+    fetch`` offered under a customised ``embedding_model``, and *both* index
+    commands offered under an ``embedding_provider`` the factory does not have.
+    Every one was found by hand, one review round apart. So the question is
+    asked here of every arm at once instead, and asked of the code that would
+    reject the line rather than of a reader's judgement.
 
     Two tiers, because there are two ways a command fails. Click's parser
     rejects a line that is not a valid invocation -- the ``--profile`` case.
@@ -1884,6 +1952,10 @@ class TestEveryCommandTheReportNamesCanRun:
         # one: every identity the fetch is validated against is built from
         # this string verbatim.
         ("local", "", "text", "gpt-4o", "  BAAI/bge-small-en-v1.5  "),
+        # A provider aorta does not have. Neither index command can start, so
+        # this is the state that proves the tier can reject *both* oracles
+        # rather than only choosing between them.
+        ("sbert", "", "text", "gpt-4o", DEFAULT_LOCAL_MODEL),
     )
 
     def _texts(self, monkeypatch, tmp_path: Path) -> list[str]:
@@ -1898,9 +1970,13 @@ class TestEveryCommandTheReportNamesCanRun:
 
         texts = []
         for provider, key, mode, model, embedding_model in self.STATES:
-            monkeypatch.setattr(
-                manifest_mod, "_configured_embedding_provider", lambda p=provider: p
-            )
+            # ``_configured_embedding_provider`` is deliberately *not* stubbed.
+            # It used to be, for determinism, and that stub is what hid the
+            # unresolvable-provider arm: it answered "sbert" where the real
+            # resolver answers "local", so the sweep scored a state that
+            # cannot occur -- a remote provider named sbert -- and never saw
+            # the local arm the setting actually reaches. The resolver is one
+            # of the things under test here, so it runs.
             monkeypatch.setattr(settings, "embedding_provider", provider)
             monkeypatch.setattr(settings, "remote_embedding_api_key", key)
             monkeypatch.setattr(settings, "llm_tool_mode", mode)
@@ -1994,9 +2070,13 @@ class TestEveryCommandTheReportNamesCanRun:
         from aorta.chat.rag import manifest as manifest_mod
 
         for provider, key, mode, model, embedding_model in self.STATES:
-            monkeypatch.setattr(
-                manifest_mod, "_configured_embedding_provider", lambda p=provider: p
-            )
+            # ``_configured_embedding_provider`` is deliberately *not* stubbed.
+            # It used to be, for determinism, and that stub is what hid the
+            # unresolvable-provider arm: it answered "sbert" where the real
+            # resolver answers "local", so the sweep scored a state that
+            # cannot occur -- a remote provider named sbert -- and never saw
+            # the local arm the setting actually reaches. The resolver is one
+            # of the things under test here, so it runs.
             monkeypatch.setattr(settings, "embedding_provider", provider)
             monkeypatch.setattr(settings, "remote_embedding_api_key", key)
             monkeypatch.setattr(settings, "llm_tool_mode", mode)
@@ -2014,6 +2094,22 @@ class TestEveryCommandTheReportNamesCanRun:
                 for path, args, offered in _commands_named_in(text or ""):
                     if offered and tuple(path) in _OUTCOME_ORACLES:
                         yield path, args, offered
+
+    def test_both_oracles_refuse_an_unresolvable_provider(self, monkeypatch):
+        """The oracles' own contract, pinned where the sweep cannot pin it.
+
+        In the sweep both are only reached through an arm that offers the
+        command, and the fetch oracle happens to be scored first -- so the
+        build oracle's guard would go unexercised by any mutation of the
+        production code. It is not redundant: ``_configured_embedding_provider``
+        answers "local" for a name it could not resolve, so without the guard
+        the build oracle would score an unbuildable provider as a build that
+        starts, and a future arm that offers ``index build`` alone would pass
+        unchecked.
+        """
+        monkeypatch.setattr(settings, "embedding_provider", "sbert")
+        assert not _fetch_would_be_accepted()
+        assert not _build_would_start()
 
     def test_every_index_command_the_report_offers_has_an_oracle(self, monkeypatch, tmp_path: Path):
         """Completeness, so the tier above cannot be satisfied by checking nothing.

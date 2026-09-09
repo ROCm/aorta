@@ -372,8 +372,16 @@ def _configured_embedding_provider() -> str:
     defaulted to ``local`` when the provider cannot be resolved at all: that is
     the shipped default and the one the published index is built with, so an
     unreadable configuration is far likelier to be a local one than a remote
-    one. Every caller has already built a provider successfully by the time it
-    gets here, so the fallback is a belt on top of braces.
+    one.
+
+    That fallback used to cover two states and reason about only one of them.
+    A name the factory does not have is a *configuration error* -- deterministic,
+    and the value is right there in the message -- and resolving it to ``local``
+    made the advice arms offer index commands that die resolving the same
+    setting. :func:`_unknown_embedding_provider` now answers that case before
+    any caller reaches here, so what is left for this fallback is what its
+    reasoning was always about: an environment that cannot construct a provider
+    it can name.
     """
     try:
         from aorta.chat.rag.embeddings.factory import get_provider
@@ -417,6 +425,34 @@ def _remote_embedder_error() -> str:
     return ""
 
 
+def _unknown_embedding_provider() -> str:
+    """The factory's complaint about ``embedding_provider``, or "".
+
+    The third of these predicates, and the one furthest out: before asking
+    whether a *provider* can embed, ask whether the setting names a provider at
+    all. ``get_provider`` raises ``ValueError`` listing the registered names,
+    which is a better message than anything reworded here, so it is returned
+    verbatim.
+
+    ``ValueError`` alone, deliberately. That is the exception the factory
+    raises for a name it does not have, and the one
+    :func:`~aorta.chat.doctor._check_embedding_model` already catches to report
+    the same state. Anything else -- a missing extra, a provider whose
+    constructor fails here -- is not a claim that the *name* is wrong, and is
+    left to :func:`_configured_embedding_provider`'s fallback, whose reasoning
+    still holds for it.
+    """
+    try:
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        get_provider()
+    except ValueError as exc:
+        return str(exc)
+    except Exception:
+        logger.debug("could not resolve the embedding provider", exc_info=True)
+    return ""
+
+
 def _custom_local_model() -> str:
     """The configured local model when it is not the published one, else "".
 
@@ -457,6 +493,16 @@ def _refresh_advice(embedding_provider: str | None = None) -> str:
     f-string reads as a command that runs, and for a keyless remote install it
     is not.
     """
+    if embedding_provider is None and _unknown_embedding_provider():
+        # ``_refresh_command`` is not consulted here at all. It answers "which
+        # of the two index commands suits this provider", and for a provider
+        # aorta does not have there is no answer -- returning one and then
+        # disowning it in the same sentence is how these slots went wrong
+        # before.
+        return (
+            "no index command can run until embedding_provider names a provider "
+            "aorta has -- 'aorta chat doctor' lists them"
+        )
     command = _refresh_command(embedding_provider)
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
     if provider == "local":
@@ -491,6 +537,12 @@ def _refresh_command(embedding_provider: str | None = None) -> str:
     Callers want :func:`_refresh_advice`, which quotes this and adds any
     precondition the command depends on. This returns the bare command, so
     that a message can say which one it means without asserting it can run.
+
+    Not asked at all when ``embedding_provider`` names a provider that does not
+    exist: the question this answers is *which of the two index commands suits
+    this provider*, and for that state the answer is neither.
+    ``_refresh_advice`` short-circuits before it rather than taking a command
+    from here and disowning it in the same sentence.
     """
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
     if provider != "local" or _custom_local_model():
@@ -521,8 +573,18 @@ def remedy_lines(
     install that queries with any other one has ``fetch_index`` refuse it --
     the fetch is withheld there too, and the build named instead. Not
     conditional on the chunk settings, whose drift ``validate`` warns about and
-    ``fetch_index`` installs through. Every one of these is about the same
-    thing: the difference between advice and a dead end.
+    ``fetch_index`` installs through.
+
+    Conditional on ``embedding_provider`` naming a provider that *exists*,
+    which is the one condition that withholds both commands rather than
+    choosing between them: ``fetch_index`` and the build each resolve the
+    provider first, so a name the factory does not have fails both
+    identically. That state is answered before the provider is resolved at
+    all, because resolving it is what used to turn a typo into two dead
+    commands.
+
+    Every one of these is about the same thing: the difference between advice
+    and a dead end.
 
     Worded for an index that is absent as much as for one that is refused,
     because both states want the same list and a remedy that is only correct
@@ -535,8 +597,37 @@ def remedy_lines(
         include_doctor: Whether to suggest ``aorta chat doctor``. Off for
             ``doctor``'s own report, which is already that output.
     """
-    provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
     doctor_line = ["  aorta chat doctor          show what the two sides currently disagree on"]
+
+    # Asked before the provider is resolved, and only when the caller did not
+    # name one: an explicit argument means "assume this provider", and reading
+    # the setting underneath it would answer a question nobody asked.
+    if embedding_provider is None:
+        unknown = _unknown_embedding_provider()
+        if unknown:
+            # Neither index command is offered because neither can start:
+            # ``fetch_index`` and the build both resolve the provider before
+            # anything else and both raise this same error. Offering them was
+            # how a typo in one setting turned into two dead commands.
+            return [
+                '  embedding_provider = "local"',
+                "                             in chat.toml, or the environment variable",
+                "                             AORTA_CHAT_EMBEDDING_PROVIDER=local for a",
+                "                             single session",
+                *(doctor_line if include_doctor else []),
+                "",
+                "No index command is offered, because neither can start:",
+                # On its own line: the factory's message carries the offending
+                # value and the valid set, so its length is not ours to wrap.
+                f"  {unknown}",
+                "Both 'aorta chat index fetch' and 'aorta chat index build' resolve",
+                "the provider before anything else and fail with that same error. So",
+                "this is a configuration error rather than a missing index -- naming a",
+                "provider aorta has is the only remedy that runs, and both index",
+                "commands become available again once it does.",
+            ]
+
+    provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
 
     if provider == "local":
         custom = _custom_local_model()

@@ -112,6 +112,14 @@ manifest-validation messages check both before advising — for an absent index,
 a refused one and a stale one — and name `aorta chat index build` instead,
 which embeds with whatever this install is configured for.
 
+A third condition withholds *both* index commands rather than choosing
+between them: an `embedding_provider` that names a provider AORTA does not
+have. `fetch` and `build` each resolve the provider before doing anything
+else, so a typo in that one setting makes both fail identically. `doctor`
+reports it as a configuration error on the `embedding provider` row and gives
+the same remedy on both rows — set `embedding_provider` to a name that exists;
+the index commands become available again once it does.
+
 Two things that deliberately do *not* withhold it. `chunk_size` and
 `chunk_overlap` drift is a warning, not a refusal, and `fetch_index` installs
 through it, so a fetch is still the right advice there. And the messages a

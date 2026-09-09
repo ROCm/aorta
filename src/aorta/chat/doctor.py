@@ -816,12 +816,25 @@ def _check_remote_embedding_profile(report: Report, *, usable: bool) -> None:
 
 def _check_embedding_model(report: Report) -> None:
     """Whether queries can be embedded at all, and what to do when they cannot."""
+    from aorta.chat.rag import manifest as manifest_mod
     from aorta.chat.rag.embeddings.factory import get_provider
 
     try:
         provider = get_provider()
     except ValueError as exc:
-        report.add("embedding provider", FAIL, str(exc))
+        # This row already made the distinction ``manifest`` was missing -- it
+        # catches the factory's ``ValueError`` rather than letting an unknown
+        # name resolve to local. What it did not have was a route to a fix: a
+        # FAIL with an empty hint, which is the same complaint this PR started
+        # from one row over. The remedy comes from ``remedy_lines`` rather than
+        # being written here, so this row and the index row cannot disagree
+        # about what to do -- they are now the same text.
+        report.add(
+            "embedding provider",
+            FAIL,
+            str(exc),
+            hint="\n".join(manifest_mod.remedy_lines(include_doctor=False)),
+        )
         return
 
     if provider.name != "local":

@@ -519,6 +519,106 @@ class TestRemedyLines:
             assert "is not offered here" not in "\n".join(lines), alias
 
 
+class TestAProviderAortaDoesNotHave:
+    """A typo in ``embedding_provider`` is a configuration error, not a local install.
+
+    ``_configured_embedding_provider`` resolves an unknown name to ``local``,
+    which is a sound guess for an environment that cannot *construct* a
+    provider it can name -- and was being applied to a name the factory
+    rejects, where the value is right there in the message. The advice arms
+    then offered both index commands, and both die resolving the same setting.
+    """
+
+    TYPO = "sbert"
+
+    def _typo(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", self.TYPO)
+
+    def test_neither_index_command_can_actually_run(self, monkeypatch):
+        """The measurement the arm is conditioned on, kept executable.
+
+        Not "the provider is unusable" in the abstract: both commands resolve
+        the provider before doing anything else, so both raise this before the
+        first byte.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        self._typo(monkeypatch)
+        with pytest.raises(ValueError, match="unknown embedding provider"):
+            get_provider()
+
+    def test_the_predicate_returns_the_factorys_own_message(self, monkeypatch):
+        self._typo(monkeypatch)
+        complaint = manifest_mod._unknown_embedding_provider()
+        assert self.TYPO in complaint
+        # The valid set, so the reader does not have to go and find it.
+        assert "local" in complaint and "remote" in complaint
+
+    def test_a_provider_that_resolves_is_not_reported_as_unknown(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        for name in ("local", "remote", "onnx", "fastembed"):
+            monkeypatch.setattr(settings, "embedding_provider", name)
+            assert manifest_mod._unknown_embedding_provider() == "", name
+
+    def test_neither_index_command_is_offered(self, monkeypatch):
+        self._typo(monkeypatch)
+        offered = [line for line in manifest_mod.remedy_lines() if line.startswith("  aorta")]
+        assert not any("index" in line for line in offered)
+        # ``doctor`` still is: it runs, and it is where the row that names the
+        # bad value lives.
+        assert any("aorta chat doctor" in line for line in offered)
+
+    def test_it_reads_as_a_configuration_error(self, monkeypatch):
+        self._typo(monkeypatch)
+        text = "\n".join(manifest_mod.remedy_lines())
+        assert "configuration error rather than a missing index" in text
+        assert self.TYPO in text
+        assert 'embedding_provider = "local"' in text
+
+    def test_the_inline_form_does_not_name_a_command_as_runnable(self, monkeypatch):
+        """The one-line slots get prose, not a command they would have to disown."""
+        self._typo(monkeypatch)
+        advice = manifest_mod._refresh_advice()
+        assert "no index command can run" in advice
+        assert "index fetch" not in advice
+        assert "index build" not in advice
+
+    def test_an_explicit_provider_argument_still_wins(self, monkeypatch):
+        """Callers that name a provider are answered about that provider.
+
+        Reading the setting underneath an explicit argument would answer a
+        question nobody asked -- and the validation messages pass the provider
+        recorded in the *manifest*, which is not this install's setting.
+        """
+        self._typo(monkeypatch)
+        assert manifest_mod.remedy_lines("local")[0].strip().startswith("aorta chat index fetch")
+        assert manifest_mod._refresh_command("local") == "aorta chat index fetch"
+        assert manifest_mod._refresh_advice("local") == "'aorta chat index fetch'"
+
+    def test_an_unbuildable_but_known_provider_still_gets_the_old_fallback(self, monkeypatch):
+        """The half of the fallback whose reasoning always held, left alone.
+
+        A name the factory *has* but cannot construct here -- a missing extra,
+        say -- is not a claim that the setting is wrong. That still resolves to
+        local, which is the shipped default and the one the published index is
+        built with.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import factory
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+
+        def explode():
+            raise ImportError("no fastembed here")
+
+        monkeypatch.setattr(factory, "get_provider", explode)
+        assert manifest_mod._unknown_embedding_provider() == ""
+        assert manifest_mod._configured_embedding_provider() == "local"
+
+
 class TestACustomisedLocalModel:
     """The local half of the same defect, one setting over.
 
