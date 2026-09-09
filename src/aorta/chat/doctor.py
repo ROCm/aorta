@@ -130,10 +130,10 @@ _REMOTE_EMBEDDING_MIGRATION = (
     # and procedure as separate fields, so a pronoun here points at nothing
     # for a reader who has only the one.
     "A remote embedding provider is very likely not a choice anyone made here.\n"
-    "Every 'aorta chat config init' profile for a remote LLM used to set\n"
-    'embedding_provider = "remote", and nothing rewrites a chat.toml that\n'
-    "already exists -- write_profile runs only on 'config init' -- so a profile\n"
-    "created before the templates changed still carries it.\n"
+    "A profile for a remote LLM is where the setting usually comes from, and\n"
+    "nothing rewrites a chat.toml that already exists -- write_profile runs only\n"
+    "on 'config init' -- so it stays until the profile is edited or regenerated,\n"
+    "whatever the current template writes.\n"
     "\n"
     "Three ways to change it, cheapest first:\n"
     '  embedding_provider = "local"         edit chat.toml, keeping the rest\n'
@@ -424,19 +424,22 @@ def _store_defect(index_file: Path, dimensions: int) -> str:
     **On #465, which fixes that suppression at the root.** It removes the
     ``manifest.chunk_count`` gate, so ``check_index`` will refuse *a file that
     cannot be opened as sqlite at all* on its own. This probe is kept anyway,
-    and not as belt-and-braces: measured against the nine clobbered states this
-    reports on, ``check_index`` refuses none of them today, and #465 changes
-    exactly one of the nine. The other eight -- no chunk table for this
-    install's collection, an empty one, a missing collection registry, an
-    unregistered collection, absent ``content``/``metadata`` columns, a missing
-    or short vector table, and a registry width that is either not a number or
-    not the one the index was built at -- are states ``check_index`` never
-    looks at, because it compares a sidecar against a row count and these are
-    facts about the schema underneath it. So there is no behaviour to make this
-    conditional on: after #465 the unopenable case short-circuits at the
-    refusal check in both callers and never reaches here, and the eight that do
-    reach here are why the function exists. Merge order does not matter either
-    way.
+    and not as belt-and-braces: measured against every state in
+    ``STORE_DAMAGE`` -- the closed set the oracle enumerates, rather than a
+    count maintained by hand here, which is what this paragraph used to carry
+    and drifted twice -- ``check_index`` refuses none of them today, and #465
+    changes exactly one, the file that cannot be opened as sqlite at all. All
+    the rest are facts about the schema underneath the sidecar: no chunk table
+    for this install's collection, an empty one, a missing collection registry,
+    an unregistered collection, absent ``content``/``metadata`` columns,
+    metadata values that are not JSON objects, a missing or short vector table,
+    and a registry width that is either not a number or not the one the index
+    was built at. ``check_index`` never looks at any of them, because it
+    compares a sidecar against a row count. So there is no behaviour to make
+    this conditional on: after #465 the unopenable case short-circuits at the
+    refusal check in both callers and never reaches here, and the states that
+    do reach here are why the function exists. Merge order does not matter
+    either way.
     """
     from aorta.chat.rag.embeddings.factory import get_provider
 
@@ -463,6 +466,21 @@ def _store_defect(index_file: Path, dimensions: int) -> str:
         # one of those has failed at its only job. The message is the hint.
         logger.debug("index store probe failed", exc_info=True)
         return str(exc)
+
+
+def _loads_or_none(value: object) -> object:
+    """``json.loads`` that answers "not an object" instead of raising.
+
+    Only used by the JSON1-less branch of the metadata check, where the
+    question is whether the read path would survive the value, and every way
+    of not surviving it has the same answer.
+    """
+    if not isinstance(value, (str, bytes)):
+        return None
+    try:
+        return json.loads(value)
+    except ValueError:
+        return None
 
 
 def _collection_schema_defect(
@@ -557,6 +575,40 @@ def _collection_schema_defect(
                 f"missing the {', '.join(missing)} column(s) that retrieval reads"
             )
 
+        # The column existing is not the same as the read path surviving it.
+        # ``_knn`` calls ``json.loads`` on every metadata value it selects and
+        # hands the result to ``Document(metadata=...)``, which needs a mapping
+        # -- so a NULL, a non-JSON string and a valid non-object JSON value are
+        # each enough to make every matching retrieval raise while the chunk
+        # count, the columns and the vectors all look right. Asked in SQL, and
+        # of the whole column rather than a sample: one bad row is one query
+        # that raises, and the row that raises is chosen by the query vector.
+        try:
+            # One CASE rather than a chain of ORs: ``json_type`` raises
+            # "malformed JSON" on a value ``json_valid`` rejects, so the guard
+            # has to be one SQLite promises not to evaluate past. CASE is;
+            # OR's evaluation order is an implementation detail.
+            bad_metadata = conn.execute(
+                f'SELECT COUNT(*) FROM "chunks_{collection}" WHERE '
+                "CASE WHEN metadata IS NOT NULL AND json_valid(metadata) "
+                "THEN json_type(metadata) ELSE 'null' END <> 'object'"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            # A build without JSON1. Counted in Python instead of skipped: the
+            # question the read path asks does not go away because this SQLite
+            # cannot answer it in SQL. Streamed off the cursor rather than
+            # fetched, so a large index costs no more memory than one row.
+            bad_metadata = sum(
+                not isinstance(_loads_or_none(value), dict)
+                for (value,) in conn.execute(f'SELECT metadata FROM "chunks_{collection}"')
+            )
+        if bad_metadata:
+            return (
+                f"{bad_metadata} chunk row(s) for this install's collection in "
+                f"{index_file} carry metadata that is not a JSON object; retrieval "
+                "parses it into a document for every hit and raises on the first one"
+            )
+
         vectors = f"vec_{collection}"
         if vectors not in tables:
             return (
@@ -583,9 +635,7 @@ def _collection_schema_defect(
                 "rowid"
                 if "rowid" in rowid_columns
                 else (
-                    "id"
-                    if "id" in rowid_columns
-                    else (rowid_columns[0] if rowid_columns else "")
+                    "id" if "id" in rowid_columns else (rowid_columns[0] if rowid_columns else "")
                 )
             )
             if rowid_column:
@@ -970,7 +1020,8 @@ def _check_tool_mode(report: Report) -> None:
     only mode a stock local vLLM can drive. A reasoning model cannot drive it:
     it puts its working in a channel of its own and returns empty ``content``
     where the ``ACTION:`` line was expected, so every action-routed query spends
-    billed rounds on a reply this protocol cannot read. Until this check existed
+    inference rounds on a reply this protocol cannot read -- billed for a remote
+    provider, self-hosted capacity for a local one, wasted in both. Until this check existed
     the first signal of that was the failed query.
 
     That holds for a locally served reasoning model as much as a remote one --
@@ -1060,8 +1111,9 @@ def _check_tool_mode(report: Report) -> None:
                 "own and\n"
                 "returns empty content instead, so every action-routed "
                 "question spends\n"
-                "billed rounds on a reply aorta cannot read. The answer then "
-                "comes back\n"
+                "inference rounds on a reply aorta cannot read -- billed or "
+                "self-hosted,\n"
+                "they are wasted either way. The answer then comes back\n"
                 "late, degraded, or not at all.\n"
                 'Set llm_tool_mode = "native" in chat.toml, or '
                 "AORTA_CHAT_LLM_TOOL_MODE=native.\n" + native_note

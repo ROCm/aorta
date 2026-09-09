@@ -123,6 +123,8 @@ STORE_DAMAGE = (
     "vector-rowids",
     "registry-width",
     "registry-width-text",
+    "metadata-not-json",
+    "metadata-not-an-object",
 )
 
 
@@ -132,6 +134,15 @@ def _break_store(index: Path, collection: str, how: str) -> None:
 
     conn = _vec_connection(index)
     try:
+        if how.startswith("metadata-"):
+            # The chunk rows are all present and the vectors match them; only
+            # what ``_knn`` hands to ``json.loads`` is wrong. ``Document``
+            # additionally needs a mapping, so valid non-object JSON is its own
+            # state rather than a variation of the first.
+            value = "not json at all" if how.endswith("not-json") else "123"
+            conn.execute(f'UPDATE "chunks_{collection}" SET metadata = ?', (value,))
+            conn.commit()
+            return
         if how.startswith("registry-width"):
             # Everything else stays intact: the collection is registered, the
             # columns and vector table are there and the rows match. Only the
@@ -946,6 +957,57 @@ class TestStoreProbeAgreesWithTheReadPath:
 
         assert stricter == ["vector-rows", "vector-rowids"]
 
+    def test_metadata_that_is_not_a_json_object_is_caught(self, monkeypatch, tmp_path: Path):
+        """The reported case: the column exists, its values defeat the read path.
+
+        ``_knn`` calls ``json.loads`` on every metadata value it selects and
+        hands the result to ``Document(metadata=...)``. The chunk count, the
+        columns, the registry width and the vectors all still look right, so
+        this reached the end of the probe and came back clean -- and the cache
+        row then said "Nothing to do" for an index where every matching
+        retrieval raises.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        for how in ("metadata-not-json", "metadata-not-an-object"):
+            (tmp_path / how).mkdir()
+            index = _write_index(monkeypatch, tmp_path / how)
+            _break_store(index, get_provider().collection_name(), how)
+
+            defect = _probe(index)
+            assert "not a JSON object" in defect, how
+            # Counted, not just detected: one bad row out of many is still a
+            # query that raises, and which row is chosen by the query vector.
+            assert defect.split()[0].isdigit(), how
+
+    def test_the_metadata_check_falls_back_rather_than_passing(self, monkeypatch, tmp_path: Path):
+        """A SQLite without JSON1 must not turn the check into a no-op.
+
+        The predicate is duplicated in Python for that build, so the two are
+        pinned against each other here: same verdict for every value the SQL
+        branch classifies.
+        """
+        conn = _vec_connection(_write_index(monkeypatch, tmp_path))
+        try:
+            for value, is_object in (
+                ('{"source": "a.py"}', True),
+                ("not json at all", False),
+                ("123", False),
+                ('"a string"', False),
+                ("[]", False),
+                (None, False),
+            ):
+                sql = conn.execute(
+                    "SELECT CASE WHEN metadata IS NOT NULL AND json_valid(metadata) "
+                    "THEN json_type(metadata) ELSE 'null' END = 'object' "
+                    "FROM (SELECT ? AS metadata)",
+                    (value,),
+                ).fetchone()[0]
+                python = isinstance(doctor._loads_or_none(value), dict)
+                assert bool(sql) == python == is_object, value
+        finally:
+            conn.close()
+
     def test_the_registry_width_is_checked_against_the_manifest(self, monkeypatch, tmp_path: Path):
         """The reported case: 999 in the registry over a 384-dimension index.
 
@@ -1052,15 +1114,45 @@ class TestRemoteEmbeddingProfile:
         """Migration advice, not a scolding: the template wrote it, not the user.
 
         This is the sentence that makes the check worth a row of its own.
-        ``remedy_lines`` can name the setting; only this can say that a profile
-        written before the templates changed still carries it and that nothing
-        on any normal path will rewrite it.
+        ``remedy_lines`` can name the setting; only this can say where it came
+        from and that nothing on any normal path will rewrite it.
+
+        Deliberately merge-order-neutral, and asserted as such. An earlier
+        wording said a profile "created before the templates changed" carries
+        it -- which reads as though the templates have already changed. In this
+        tree they have not: four remote-LLM templates still write
+        ``embedding_provider = "remote"``, and the PR that changes them is a
+        separate one. Either tense is a claim about merge order, so the text
+        makes none: the setting persists whatever the current template writes.
         """
         self._remote(monkeypatch)
         procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
 
-        assert "templates changed" in procedure
+        assert "where the setting usually comes from" in procedure
         assert "write_profile runs" in procedure
+        assert "edited or regenerated" in procedure
+        for merge_order_claim in ("templates changed", "used to set", "no longer"):
+            assert merge_order_claim not in procedure, merge_order_claim
+
+    def test_the_wording_holds_whichever_way_the_templates_currently_read(self, monkeypatch):
+        """The tree it has to be true in, checked rather than assumed.
+
+        The templates are the fact the old wording got wrong, so read them:
+        whatever they say today, the procedure must not describe them.
+        """
+        from aorta.chat import config as config_mod
+
+        remote = [
+            name
+            for name, template in config_mod.PROFILE_TEMPLATES.items()
+            if template.get("embedding_provider") == "remote"
+        ]
+        self._remote(monkeypatch)
+        procedure = _by_name(run_checks(backend=False), "embedding profile").procedure
+        assert "current template" in procedure, (
+            "the procedure should defer to whatever the template says rather than "
+            f"assert it, and right now {len(remote)} template(s) write 'remote'"
+        )
 
     def test_it_does_not_fire_on_a_remote_profile_with_an_index_to_match(
         self, monkeypatch, tmp_path: Path
@@ -1398,6 +1490,23 @@ class TestToolMode:
         assert 'llm_tool_mode = "native"' in check.hint
         assert "empty content" in check.hint
 
+    def test_the_cost_is_not_described_as_billed_on_a_self_hosted_model(self, monkeypatch):
+        """The same branch fires for a locally served reasoning model.
+
+        Its own docstring says so -- the channel is the model's, not the
+        endpoint's -- so a stock vLLM serving ``DeepSeek-R1`` reaches this
+        warning, and there is nobody billing it. "billed rounds" made the
+        newly added local-vLLM diagnosis read as somebody else's problem.
+        """
+        monkeypatch.setattr(settings, "llm_tool_mode", "text")
+        monkeypatch.setattr(settings, "llm_provider", "vllm")
+        monkeypatch.setattr(settings, "vllm_model", "deepseek-ai/DeepSeek-R1")
+        check = _by_name(run_checks(backend=False), "llm tool mode")
+
+        assert check.status == WARN
+        assert "inference rounds" in check.hint
+        assert "billed rounds" not in check.hint
+
     def test_the_warning_names_the_cost_rather_than_predicting_one_outcome(self, monkeypatch):
         """The hint may not claim the question ends up unanswered.
 
@@ -1422,7 +1531,8 @@ class TestToolMode:
         monkeypatch.setattr(settings, "remote_llm_model", "o3-mini")
         hint = _by_name(run_checks(backend=False), "llm tool mode").hint
 
-        assert "billed rounds" in hint
+        assert "inference rounds" in hint
+        assert "wasted" in hint
         assert "late, degraded, or not at all" in hint
         # The claims #464 falsifies. "gives up" and "answered with nothing"
         # describe one of three outcomes as though it were the only one.
@@ -1588,6 +1698,93 @@ class TestBackendCheck:
         assert budgets and budgets[0] is not None and budgets[0] <= 10
 
 
+#: The model CI publishes the one index asset with. An install that queries
+#: with anything else cannot read it, which is what makes the fetch remedy
+#: conditional on more than the provider.
+DEFAULT_LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
+
+
+def _fetch_would_be_accepted() -> bool:
+    """Whether ``aorta chat index fetch`` would install, given resolved settings.
+
+    Runs the comparison ``fetch_index`` runs -- ``validate`` of the published
+    manifest against this install's provider identity, then the refusal gate --
+    rather than asserting anything about it. Offline: no asset is downloaded,
+    the published manifest is described from the default-model provider, and
+    ``validate`` only reads fields.
+
+    Note what is deliberately *not* consulted: ``chunk_size`` and
+    ``chunk_overlap``. Drift in those is a warning in ``validate`` and
+    ``fetch_index`` installs through it (`manifest.py:376`), so treating them
+    as blocking here would make this oracle demand that a working fetch be
+    withheld.
+    """
+    from aorta.chat.config import settings
+    from aorta.chat.rag import manifest as manifest_mod
+    from aorta.chat.rag.embeddings.factory import get_provider
+
+    resolved_model = settings.embedding_model
+    resolved_provider = settings.embedding_provider
+    try:
+        settings.embedding_model = DEFAULT_LOCAL_MODEL
+        settings.embedding_provider = "local"
+        publisher = get_provider()
+        published = manifest_mod.Manifest.from_dict(
+            {
+                "schema_version": manifest_mod.SCHEMA_VERSION,
+                "embedding_model": publisher.model_id(),
+                "embedding_provider": "local",
+                "embedding_identity": publisher.vector_identity(),
+                "collection": publisher.collection_name(),
+                "index_sha256": "0" * 64,
+                "dimensions": 384,
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+                "aorta_version": "0.2.1",
+                "aorta_sha": "",
+                "chunks": 10,
+            }
+        )
+    finally:
+        # Restored from what was actually set, not from a module-level record
+        # of it: this runs inside a monkeypatched state and a second source of
+        # truth for it is one that can disagree.
+        settings.embedding_model = resolved_model
+        settings.embedding_provider = resolved_provider
+
+    provider = get_provider()
+    report = manifest_mod.validate(
+        published,
+        embedding_model=provider.model_id(),
+        collection=provider.collection_name(),
+        embedding_identity=provider.vector_identity(),
+    )
+    return not report.refusals
+
+
+def _build_would_start() -> bool:
+    """Whether ``aorta chat index build`` would get past its provider, offline.
+
+    A local build always can -- the weights download if absent, and a missing
+    ``fastembed`` is reported by the extras row with a command that does run. A
+    remote build cannot until its client builds, which is the precondition
+    ``RemoteApiProvider.get_embeddings`` enforces before sending anything.
+    """
+    from aorta.chat.rag import manifest as manifest_mod
+
+    if manifest_mod._configured_embedding_provider() == "local":
+        return True
+    return not manifest_mod._remote_embedder_error()
+
+
+#: What each index command's outcome is asked of. Keyed by the command path the
+#: extractor produces, so an arm that starts offering a third index command
+#: fails the completeness assertion below rather than going unchecked.
+_OUTCOME_ORACLES = {
+    ("index", "fetch"): _fetch_would_be_accepted,
+    ("index", "build"): _build_would_start,
+}
+
 # The placeholders the report's commands are allowed to contain, and a real
 # value for each. A new one makes the sweep below fail rather than skip: the
 # point is that every command is parsed, so an unregistered placeholder has to
@@ -1656,15 +1853,34 @@ def _resolve(path: list[str]):
 class TestEveryCommandTheReportNamesCanRun:
     """The closed-set answer to "is this advice followable?".
 
-    Three separate findings in this area were each a command that could not run
+    Four separate findings in this area were each a command that could not run
     in the state that printed it: ``index fetch`` offered to a remote embedder,
-    ``index build`` offered on an empty ``remote_embedding_api_key``, and
-    ``config init --force`` printed without the ``--profile`` Click requires.
-    Each was found by hand, one review round apart, and a fourth would have
-    been found the same way one round later. So the question is asked here of
-    every arm at once instead, and asked of Click's own parser -- the code that
-    would reject the line -- rather than of a reader's judgement.
+    ``index build`` offered on an empty ``remote_embedding_api_key``, ``config
+    init --force`` printed without the ``--profile`` Click requires, and
+    ``index fetch`` offered under a customised ``embedding_model``. Each was
+    found by hand, one review round apart. So the question is asked here of
+    every arm at once instead, and asked of the code that would reject the
+    line rather than of a reader's judgement.
+
+    Two tiers, because there are two ways a command fails. Click's parser
+    rejects a line that is not a valid invocation -- the ``--profile`` case.
+    It cannot reject one that parses and is then refused at runtime, which is
+    the fourth case and was invisible to the first version of this sweep. That
+    is what ``test_every_offered_index_command_would_be_accepted`` is for.
     """
+
+    #: The resolved states the sweep runs under. Each entry forks at least one
+    #: arm. ``embedding_model`` is here because leaving it out is what let a
+    #: real finding through: the parser tier can never reject ``index fetch``,
+    #: so a state whose only defect is that the fetch would be *refused* is
+    #: invisible without both the state and the outcome tier below.
+    STATES = (
+        ("local", "", "text", "gpt-4o", DEFAULT_LOCAL_MODEL),
+        ("remote", "", "native", "gpt-oss-120b", DEFAULT_LOCAL_MODEL),
+        ("remote", "sk-test", "native", "gpt-4o", DEFAULT_LOCAL_MODEL),
+        ("local", "", "sideways", "gpt-4o", DEFAULT_LOCAL_MODEL),
+        ("local", "", "text", "gpt-4o", "BAAI/bge-base-en-v1.5"),
+    )
 
     def _texts(self, monkeypatch, tmp_path: Path) -> list[str]:
         """Every hint and procedure the report can produce, across resolved states.
@@ -1677,12 +1893,7 @@ class TestEveryCommandTheReportNamesCanRun:
         from aorta.chat.rag import manifest as manifest_mod
 
         texts = []
-        for provider, key, mode, model in (
-            ("local", "", "text", "gpt-4o"),
-            ("remote", "", "native", "gpt-oss-120b"),
-            ("remote", "sk-test", "native", "gpt-4o"),
-            ("local", "", "sideways", "gpt-4o"),
-        ):
+        for provider, key, mode, model, embedding_model in self.STATES:
             monkeypatch.setattr(
                 manifest_mod, "_configured_embedding_provider", lambda p=provider: p
             )
@@ -1691,6 +1902,7 @@ class TestEveryCommandTheReportNamesCanRun:
             monkeypatch.setattr(settings, "llm_tool_mode", mode)
             monkeypatch.setattr(settings, "vllm_model", model)
             monkeypatch.setattr(settings, "remote_llm_model", model)
+            monkeypatch.setattr(settings, "embedding_model", embedding_model)
             monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
             for check in run_checks(backend=False).checks:
                 texts += [check.hint, check.procedure, check.detail]
@@ -1742,6 +1954,78 @@ class TestEveryCommandTheReportNamesCanRun:
                 except MissingParameter:
                     pass  # Allowed here, and only here.
         assert quoted, "no quoted mentions found; the extractor has broken"
+
+    def test_every_offered_index_command_would_be_accepted(self, monkeypatch, tmp_path: Path):
+        """The tier the parser cannot provide, and the hole a real finding fell through.
+
+        Parsing answers "is this a command", not "will it work". ``aorta chat
+        index fetch`` parses in every state, so the sweep's first tier could
+        never have rejected it -- and a customised ``embedding_model`` makes
+        ``fetch_index`` refuse the published asset on the embedding model, the
+        collection and the embedding identity. That arm was offered anyway
+        until this round, and no amount of extra parsing would have found it.
+
+        So each index command the report *offers* is also asked of the code
+        that would run it, per resolved state. This is the same question the
+        third column of the enumeration asks, made mechanical.
+        """
+        for path, args, offered in self._offered_index_commands(monkeypatch, tmp_path):
+            assert not args, f"{path} offered with unexpected options {args}"
+            assert offered
+            oracle = _OUTCOME_ORACLES[tuple(path)]
+            assert oracle(), (
+                f"the report offers 'aorta chat {' '.join(path)}' in a state where it "
+                f"cannot succeed (embedding_provider={settings.embedding_provider!r}, "
+                f"embedding_model={settings.embedding_model!r}, "
+                f"key={'set' if settings.remote_embedding_api_key else 'empty'})"
+            )
+
+    def _offered_index_commands(self, monkeypatch, tmp_path: Path):
+        """Offered commands that have an outcome oracle, with the state still applied.
+
+        Yields inside the state loop rather than collecting first, because the
+        oracles read ``settings`` and a collected list would be scored against
+        whichever state happened to be last.
+        """
+        from aorta.chat.rag import manifest as manifest_mod
+
+        for provider, key, mode, model, embedding_model in self.STATES:
+            monkeypatch.setattr(
+                manifest_mod, "_configured_embedding_provider", lambda p=provider: p
+            )
+            monkeypatch.setattr(settings, "embedding_provider", provider)
+            monkeypatch.setattr(settings, "remote_embedding_api_key", key)
+            monkeypatch.setattr(settings, "llm_tool_mode", mode)
+            monkeypatch.setattr(settings, "vllm_model", model)
+            monkeypatch.setattr(settings, "remote_llm_model", model)
+            monkeypatch.setattr(settings, "embedding_model", embedding_model)
+            monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
+
+            texts = []
+            for check in run_checks(backend=False).checks:
+                texts += [check.hint, check.procedure, check.detail]
+            texts += manifest_mod.remedy_lines()
+            texts.append(manifest_mod._refresh_advice())
+            for text in texts:
+                for path, args, offered in _commands_named_in(text or ""):
+                    if offered and tuple(path) in _OUTCOME_ORACLES:
+                        yield path, args, offered
+
+    def test_every_index_command_the_report_offers_has_an_oracle(self, monkeypatch, tmp_path: Path):
+        """Completeness, so the tier above cannot be satisfied by checking nothing.
+
+        An arm that starts offering a third index command -- ``index eval``,
+        say -- must fail here rather than pass unexamined.
+        """
+        offered = set()
+        for text in self._texts(monkeypatch, tmp_path):
+            for path, _, is_offered in _commands_named_in(text):
+                if is_offered and path[:1] == ["index"]:
+                    offered.add(tuple(path))
+        assert offered, "no index commands offered anywhere; the extractor has broken"
+        assert offered <= set(_OUTCOME_ORACLES), (
+            f"no outcome oracle for {offered - set(_OUTCOME_ORACLES)}"
+        )
 
     def test_the_sweep_would_catch_a_missing_required_option(self):
         """Without this the sweep could pass by never finding a failure to catch.

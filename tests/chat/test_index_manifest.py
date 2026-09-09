@@ -451,6 +451,19 @@ class TestRefusalText:
 class TestRemedyLines:
     """Which commands a mismatch is resolved by depends on the embedding provider."""
 
+    def test_the_fetch_line_says_it_replaces_the_current_index(self):
+        """It overwrites the index at the configured path, and used to read as a download.
+
+        ``fetch_index`` installs over ``settings.index_file``, and nothing in
+        the manifest records which corpus an index was built from -- so an
+        index built over a different ``aorta_path`` is indistinguishable from a
+        published one here, and cannot be detected and spared. What is left is
+        to stop the line reading as a pure addition, so the reader with such an
+        index can choose ``build`` on the next line instead.
+        """
+        line = manifest_mod.remedy_lines("local")[0]
+        assert "replace" in line
+
     def test_a_local_provider_leads_with_fetch(self):
         lines = manifest_mod.remedy_lines("local")
         assert lines[0].strip().startswith("aorta chat index fetch")
@@ -504,6 +517,118 @@ class TestRemedyLines:
             lines = manifest_mod.remedy_lines()
             assert lines[0].strip().startswith("aorta chat index fetch"), alias
             assert "is not offered here" not in "\n".join(lines), alias
+
+
+class TestACustomisedLocalModel:
+    """The local half of the same defect, one setting over.
+
+    ``embedding_model`` is configurable, but CI publishes exactly one asset and
+    builds it with the default. ``fetch_index`` validates the published
+    manifest against this install's provider identity and refuses, so the
+    fetch remedy was an impossible command for every customised local install
+    -- a state the parser tier of the command sweep can never reject, because
+    ``aorta chat index fetch`` parses perfectly well.
+    """
+
+    CUSTOM = "BAAI/bge-base-en-v1.5"
+
+    def _customise(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", self.CUSTOM)
+
+    def test_the_published_asset_is_refused_by_a_customised_model(self, monkeypatch):
+        """The measurement the remedy is conditioned on, kept executable.
+
+        Runs the comparison ``fetch_index`` runs. Three refusals, not one: the
+        collection name and the vector identity both carry the model.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        publisher = get_provider()
+        published = _manifest(
+            embedding_model=publisher.model_id(),
+            collection=publisher.collection_name(),
+            embedding_identity=publisher.vector_identity(),
+            embedding_provider="local",
+        )
+
+        monkeypatch.setattr(settings, "embedding_model", self.CUSTOM)
+        provider = get_provider()
+        report = validate(
+            published,
+            embedding_model=provider.model_id(),
+            collection=provider.collection_name(),
+            embedding_identity=provider.vector_identity(),
+        )
+        assert len(report.refusals) == 3
+
+    def test_the_fetch_is_not_offered(self, monkeypatch):
+        self._customise(monkeypatch)
+        offered = [line for line in manifest_mod.remedy_lines() if line.startswith("  aorta")]
+        assert not any("index fetch" in line for line in offered)
+        assert any("index build" in line for line in offered)
+
+    def test_it_says_why_and_how_to_get_the_fetch_back(self, monkeypatch):
+        self._customise(monkeypatch)
+        text = "\n".join(manifest_mod.remedy_lines())
+        assert "is not offered here" in text
+        assert self.CUSTOM in text
+        assert "back to the default" in text
+
+    def test_the_inline_form_names_the_reason(self, monkeypatch):
+        self._customise(monkeypatch)
+        assert manifest_mod._refresh_command() == "aorta chat index build"
+        advice = manifest_mod._refresh_advice()
+        assert "index build" in advice
+        assert self.CUSTOM in advice
+
+    def test_the_default_model_is_unaffected(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        assert manifest_mod._refresh_advice() == "'aorta chat index fetch'"
+        assert manifest_mod.remedy_lines()[0].strip().startswith("aorta chat index fetch")
+
+    def test_an_empty_model_setting_is_treated_as_the_default(self, monkeypatch):
+        """Falling back to the shipped default is what the provider itself does."""
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", "")
+        assert manifest_mod._custom_local_model() == ""
+
+    def test_chunk_drift_does_not_withhold_the_fetch(self, monkeypatch):
+        """`manifest.py`'s chunk leniency is deliberate; the remedy must respect it.
+
+        ``chunk_size``/``chunk_overlap`` drift is a warning and ``fetch_index``
+        installs through it, so conditioning the remedy on those settings would
+        withhold a fetch that works. Asserted both ways: the settings differ
+        from the published manifest's, ``validate`` still refuses nothing, and
+        the fetch is still offered.
+        """
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        monkeypatch.setattr(settings, "chunk_size", 1024)
+        monkeypatch.setattr(settings, "chunk_overlap", 99)
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            chunk_size=1024,
+            chunk_overlap=99,
+        )
+        assert report.refusals == []
+        assert report.warnings
+        assert manifest_mod._custom_local_model() == ""
+        assert manifest_mod.remedy_lines()[0].strip().startswith("aorta chat index fetch")
 
 
 class TestAKeylessRemoteEmbedder:

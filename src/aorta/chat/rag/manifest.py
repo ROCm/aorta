@@ -417,6 +417,31 @@ def _remote_embedder_error() -> str:
     return ""
 
 
+def _custom_local_model() -> str:
+    """The configured local model when it is not the published one, else "".
+
+    The local half of :func:`_remote_embedder_error`, and the same defect one
+    setting over. ``embedding_model`` is configurable, but CI publishes exactly
+    one asset and builds it with ``fastembed_bge.DEFAULT_MODEL`` -- so
+    ``fetch_index`` validates the published manifest against this install's
+    provider identity and refuses on all three of embedding model, collection
+    and embedding identity when they differ. Offering the fetch to such an
+    install names a command whose only possible outcome is a refusal.
+
+    Deliberately reads the model rather than the chunk settings.
+    ``chunk_size``/``chunk_overlap`` drift is a *warning* in ``validate`` and
+    ``fetch_index`` installs through it, so conditioning on those would
+    withhold a fetch that works.
+    """
+    # Imported lazily for the same reason as its neighbours: this module stays
+    # importable without the chat extra.
+    from aorta.chat.config import settings
+    from aorta.chat.rag.embeddings import fastembed_bge
+
+    configured = (settings.embedding_model or "").strip()
+    return "" if configured in ("", fastembed_bge.DEFAULT_MODEL) else configured
+
+
 def _refresh_advice(embedding_provider: str | None = None) -> str:
     """:func:`_refresh_command`, quoted, with any precondition it depends on.
 
@@ -427,7 +452,15 @@ def _refresh_advice(embedding_provider: str | None = None) -> str:
     """
     command = _refresh_command(embedding_provider)
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
-    if provider == "local" or not _remote_embedder_error():
+    if provider == "local":
+        custom = _custom_local_model()
+        if not custom:
+            return f"'{command}'"
+        return (
+            f"'{command}' -- the published index is built with the default "
+            f"embedding_model, so it cannot be read by {custom}"
+        )
+    if not _remote_embedder_error():
         return f"'{command}'"
     return (
         # Names the blocker and points at the full remedy rather than inlining
@@ -444,15 +477,18 @@ def _refresh_command(embedding_provider: str | None = None) -> str:
 
     ``remedy_lines`` is the block form, for the places that can spend several
     lines on it; this is for the sentence that only has room for one command.
-    Conditional on the same fact, so the two cannot disagree about whether a
-    fetch is worth suggesting.
+    Conditional on the same two facts -- the provider and, for a local one, the
+    model -- so the two cannot disagree about whether a fetch is worth
+    suggesting.
 
     Callers want :func:`_refresh_advice`, which quotes this and adds any
     precondition the command depends on. This returns the bare command, so
     that a message can say which one it means without asserting it can run.
     """
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
-    return "aorta chat index fetch" if provider == "local" else "aorta chat index build"
+    if provider != "local" or _custom_local_model():
+        return "aorta chat index build"
+    return "aorta chat index fetch"
 
 
 def remedy_lines(
@@ -471,8 +507,15 @@ def remedy_lines(
     Conditional on ``remote_embedding_api_key`` for the same reason one layer
     in: a remote provider that cannot build a client cannot run ``index build``
     either, so an install with neither key nor index is offered no index
-    command at all, and led to the switch back to local instead. Both
-    conditions are about the difference between advice and a dead end.
+    command at all, and led to the switch back to local instead.
+
+    Conditional on ``embedding_model`` for the mirror image of the first
+    reason. CI publishes one asset built with the default model, so a local
+    install that queries with any other one has ``fetch_index`` refuse it --
+    the fetch is withheld there too, and the build named instead. Not
+    conditional on the chunk settings, whose drift ``validate`` warns about and
+    ``fetch_index`` installs through. Every one of these is about the same
+    thing: the difference between advice and a dead end.
 
     Worded for an index that is absent as much as for one that is refused,
     because both states want the same list and a remedy that is only correct
@@ -489,10 +532,27 @@ def remedy_lines(
     doctor_line = ["  aorta chat doctor          show what the two sides currently disagree on"]
 
     if provider == "local":
+        custom = _custom_local_model()
+        if not custom:
+            return [
+                "  aorta chat index fetch     replace this install's index with the\n"
+                "                             published one, built for this version",
+                "  aorta chat index build     build one locally with the configured provider",
+                *(doctor_line if include_doctor else []),
+            ]
+        # Same shape as the remote arm: withhold the command that can only
+        # refuse, and say why, because a list that silently drops the
+        # documented first remedy reads as a list that forgot it.
         return [
-            "  aorta chat index fetch     download the index matching this install",
             "  aorta chat index build     build one locally with the configured provider",
             *(doctor_line if include_doctor else []),
+            "",
+            "'aorta chat index fetch' is not offered here: CI publishes one asset",
+            "and builds it with the default embedding_model, so fetching it under",
+            f"embedding_model = {custom!r}",
+            "is refused on the embedding model, the collection and the embedding",
+            "identity alike. Building with the configured model is the remedy;",
+            "setting embedding_model back to the default makes the fetch work again.",
         ]
 
     unavailable = _remote_embedder_error()

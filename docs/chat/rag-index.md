@@ -101,18 +101,34 @@ half-rebuilt one.
 a given AORTA revision, so building it locally is work someone already did. It
 resolves by installed version — a released wheel gets that release's asset, a
 `.dev` build gets the rolling `main` asset with a warning about the commit delta.
-`aorta chat index fetch` is only *offered* as a remedy under
-`embedding_provider = "local"`: the published asset is built with the local
-embedder, so a fetch under a remote one is refused before anything is installed. `aorta chat doctor` and the
-manifest-validation messages read the configured provider before advising —
-for an absent index, a refused one and a stale one — and name `aorta chat index
-build` instead. The messages a *failing query* prints are not conditioned yet
-and can still name the fetch; on a remote provider, read them as `build`.
+`aorta chat index fetch` is only *offered* as a remedy when this install could
+actually install what it downloads, which takes two conditions rather than one.
+CI publishes a single asset, built with the local embedder and the default
+`embedding_model`, and `fetch_index` validates its manifest against this
+install's provider identity before writing anything — so the fetch is withheld
+both under a remote `embedding_provider` and under a customised
+`embedding_model`, each of which it would refuse. `aorta chat doctor` and the
+manifest-validation messages check both before advising — for an absent index,
+a refused one and a stale one — and name `aorta chat index build` instead,
+which embeds with whatever this install is configured for.
+
+Two things that deliberately do *not* withhold it. `chunk_size` and
+`chunk_overlap` drift is a warning, not a refusal, and `fetch_index` installs
+through it, so a fetch is still the right advice there. And the messages a
+*failing query* prints are not conditioned yet and can still name the fetch;
+on a remote provider or a customised model, read them as `build`.
+
+Note that a fetch *replaces* whatever index is at the configured path. Nothing
+in the manifest records which corpus an index was built from, so neither
+`doctor` nor the validation messages can tell a published index from one you
+built over a different `aorta_path` — if you have one of those, `build` is your
+refresh command, not `fetch`.
 
 Withholding the fetch is only half of it, because a remote embedder is often
-not a decision anyone made — every `aorta chat config init` profile for a
-remote LLM used to set `embedding_provider = "remote"`, and nothing rewrites a
-`chat.toml` that already exists. So `aorta chat doctor` also warns when the
+not a decision anyone made — a profile for a remote LLM is where the setting
+usually comes from, and nothing rewrites a `chat.toml` that already exists, so
+it stays until the profile is edited or regenerated whatever the current
+template writes. So `aorta chat doctor` also warns when the
 configured provider is remote *and* there is no index this install can query,
 and names the edit: `embedding_provider = "local"`, the
 `AORTA_CHAT_EMBEDDING_PROVIDER=local` spelling for one session, or `aorta chat
