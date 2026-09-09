@@ -26,7 +26,8 @@ PROBE = """
 import json, os, sys
 from aorta.cia import llm as m
 built = {}
-m.dspy.LM = lambda **kw: built.update(kw) or object()
+# build_lm returns a RedactingLM, so that is what has to be intercepted.
+m.RedactingLM = lambda **kw: built.update(kw) or object()
 try:
     m.build_lm()
     print(json.dumps({"base": built.get("api_base"), "model": built.get("model"),

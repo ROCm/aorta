@@ -38,7 +38,7 @@ def built(monkeypatch):
             calls.append(kwargs)
             self.kwargs = kwargs
 
-    monkeypatch.setattr(llm_mod.dspy, "LM", FakeLM)
+    monkeypatch.setattr(llm_mod, "RedactingLM", FakeLM)
     monkeypatch.setattr(llm_mod.dspy, "configure", lambda **_: None)
     monkeypatch.setattr(llm_mod, "_configured", False)
     for var in ("LITELLM_MODEL", "LITELLM_API_BASE", "LITELLM_API_KEY"):

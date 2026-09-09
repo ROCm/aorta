@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 try:
     import dspy
@@ -122,6 +123,84 @@ def _legacy_env() -> tuple[str, str, str] | None:
     )
 
 
+def redact(text: str) -> str:
+    """*text* with filesystem paths and addresses rewritten, per Decision 16.
+
+    ``docs/chat/redaction.md`` exists because a remote provider receives
+    retrieved chunks and tool output. The agents send more of that than chat
+    does: Watch ships log tails, Launch discovery ships the heads of scripts
+    found under a home directory, and Autopsy ships bundle evidence.
+
+    Returns *text* unchanged when the chat settings are unavailable, which is
+    the only honest thing to do -- but that is also why the gate below is not
+    the only protection: the probes were narrowed to stop collecting what
+    should not be sent in the first place.
+    """
+    try:
+        from aorta.chat.redaction import redact_text
+    except Exception:  # pragma: no cover - depends on what is installed
+        return text
+    scrubbed, _summary = redact_text(text)
+    return scrubbed
+
+
+def _redact_messages(messages: Any) -> Any:
+    """Redact the content of DSPy's dict-shaped messages.
+
+    ``redact_messages`` in the chat package reads ``message.content`` and calls
+    ``.copy(update=...)``, which is LangChain's shape; DSPy passes plain dicts,
+    so that function would hand them back untouched.
+    """
+    if not isinstance(messages, list):
+        return messages
+    out = []
+    for message in messages:
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            out.append({**message, "content": redact(message["content"])})
+        else:
+            out.append(message)
+    return out
+
+
+class RedactingLM(dspy.LM):
+    """A DSPy LM that redacts on the way out.
+
+    The gate is here, on the object every agent is given, for the reason
+    ``_send`` gives in ``chat/graph/nodes.py``: a module added later cannot
+    bypass what it does not have to remember to call. Watch, Autopsy, Launch
+    discovery and the log finder each build their own prompts and none of them
+    goes through the chat graph, so a gate at any one of them would be a
+    convention rather than a guarantee.
+
+    All four entry points are covered because DSPy has four, and which one a
+    module reaches is not this module's business to track.
+    """
+
+    @staticmethod
+    def _clean(items: tuple, prompt: str | None, messages: Any) -> tuple:
+        return (
+            tuple(redact(i) if isinstance(i, str) else i for i in items),
+            redact(prompt) if isinstance(prompt, str) else prompt,
+            _redact_messages(messages),
+        )
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        _, prompt, messages = self._clean((), prompt, messages)
+        return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    async def aforward(self, prompt=None, messages=None, **kwargs):
+        _, prompt, messages = self._clean((), prompt, messages)
+        return await super().aforward(prompt=prompt, messages=messages, **kwargs)
+
+    def __call__(self, *items, prompt=None, messages=None, **kwargs):
+        items, prompt, messages = self._clean(items, prompt, messages)
+        return super().__call__(*items, prompt=prompt, messages=messages, **kwargs)
+
+    async def acall(self, *items, prompt=None, messages=None, **kwargs):
+        items, prompt, messages = self._clean(items, prompt, messages)
+        return await super().acall(*items, prompt=prompt, messages=messages, **kwargs)
+
+
 def build_lm(
     model: str | None = None,
     api_base: str | None = None,
@@ -159,7 +238,7 @@ def build_lm(
     settings_base, settings_key, settings_model = resolved or ("", "", "")
 
     _use_certifi_bundle()
-    return dspy.LM(
+    return RedactingLM(
         model=f"openai/{model or settings_model or DEFAULT_MODEL}",
         api_base=(api_base or settings_base) or None,
         api_key=api_key or settings_key or "EMPTY",
