@@ -41,6 +41,30 @@ def should_alert(healthy: bool, confidence: float, threshold: float) -> bool:
     return not healthy and confidence >= threshold
 
 
+def elapsed_seconds(launched_at: str) -> int | None:
+    """Seconds since *launched_at*, or None when it cannot be read.
+
+    This field used to be ``int(time.time())`` -- the Unix epoch, about 1.7
+    billion. The model was told on every poll that the job had been running for
+    fifty-four years, which is not merely wrong but backwards: the whole use of
+    the number is telling "still starting up" from "stalled", and a constant
+    1.7e9 says neither while looking like it says something.
+
+    None rather than 0 when the timestamp is unreadable, so the caller can
+    leave the field out. A job that has been running for no time at all and a
+    job whose launch time is unknown are different things.
+    """
+    if not launched_at:
+        return None
+    try:
+        started = datetime.fromisoformat(launched_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+
+
 def poll_jobs(
     jobs_root: Path,
     *,
@@ -133,7 +157,9 @@ def poll_jobs(
 
             new_content = "\n\n".join(new_parts)
             total_bytes = sum(cursors.values())
-            job_ctx = f"{job_context} elapsed_sec={int(time.time())} total_bytes_seen={total_bytes}"
+            elapsed = elapsed_seconds(job.launched_at)
+            elapsed_ctx = f" elapsed_sec={elapsed}" if elapsed is not None else ""
+            job_ctx = f"{job_context}{elapsed_ctx} total_bytes_seen={total_bytes}"
 
             # LLM assessment — every poll with new content
             try:
