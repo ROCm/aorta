@@ -5,6 +5,13 @@ which model turns text into vectors (`embedding_provider`). Mixing them is
 normal — remote generation with local embeddings is the cheap default, because
 retrieval then costs nothing.
 
+Everything on this page is about `llm_provider`. `embedding_provider` is
+`local` for every profile `aorta chat config init` writes, including the remote
+ones, and the published index is only readable that way. Choosing a remote
+chat model is not a reason to change it; the narrow case that is, and what it
+costs, are in
+[configuring a remote embedding provider by hand](configuration.md#configuring-a-remote-embedding-provider-by-hand).
+
 ## Chat backends
 
 | `llm_provider` | Speaks | Use for | Extra |
@@ -202,7 +209,11 @@ several critic passes can push a single question past forty. Most action queries
 land in the 4–6 range in practice, because the act loop stops as soon as the
 model answers without a tool call and the critic usually accepts first time.
 With `embedding_provider = "remote"`, each retrieval and each `search_code` call
-adds one embedding call on top.
+adds one embedding call on top. That recurring bill is the second reason no
+profile selects it; the first is that the published index is built with the
+local model, so a remote embedder makes `index fetch` unusable.
+[The procedure for choosing it](configuration.md#configuring-a-remote-embedding-provider-by-hand)
+covers both.
 
 Against a metered endpoint that is real money, so the remote backends log the
 per-query call count at INFO, visible without `--verbose`:
@@ -224,7 +235,7 @@ Knobs that lower the bill, roughly in order of effect:
 | `llm_max_tokens` | Caps output tokens per call. |
 | `retriever_k` / `search_tool_k` | Fewer chunks means a smaller prompt, and prompt tokens dominate a long act loop. |
 | `llm_max_retries` | Lower it on an unreliable endpoint, so failures do not silently triple. |
-| `embedding_provider = "local"` | Keeps all retrieval free even when generation is remote. |
+| `embedding_provider = "local"` | Keeps all retrieval free even when generation is remote. Already the case unless you set it by hand. |
 | `remote_llm_model` | A smaller model in the same family is usually the cheapest change of all. |
 
 ## Troubleshooting
@@ -243,4 +254,4 @@ Knobs that lower the bill, roughly in order of effect:
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
 | `Waiting for vLLM at ...` when you meant to go remote | `llm_provider` is still `vllm`. Check the backend line printed at startup. |
 | The call-count line never appears | Expected on `llm_provider = "vllm"`; only the remote backends attach the counter. |
-| `extra header 'user' is missing '='` | `remote_llm_extra_headers` takes `name=value` pairs or a JSON object. |
+| `extra header #N is missing '='` | `remote_llm_extra_headers` takes `name=value` pairs or a JSON object. `#N` is the position in the comma-separated list, counted from 1 — the entry itself is not quoted back, because a header value may be a credential. |

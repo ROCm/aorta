@@ -806,6 +806,13 @@ def config_init(profile: str, force: bool, no_input: bool) -> None:
                 values[field] = answer
     written = config.write_profile(values)
     click.echo(f"Wrote {written} (mode {config.PROFILE_FILE_MODE:04o})")
+    # The wizard only ever asks about the chat model, so the embedding provider
+    # it picked is a decision the user did not make and previously could only
+    # find by reading the file -- and it is the one that decides whether the
+    # published index is usable. Reported from the merged settings, not from
+    # the template: AORTA_CHAT_* outranks the file that was just written.
+    for line in config.describe_embeddings(values):
+        click.echo(line)
     click.echo("Review it with: aorta chat config show")
 
 

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import tomllib
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -332,12 +332,18 @@ class Settings(BaseSettings):
                     'either user=alice,x-tenant=amd or {"user": "alice"}.'
                 ) from exc
         headers: dict[str, str] = {}
-        for pair in text.split(","):
+        # Positional, not quoted: whatever is in a header map may be a
+        # credential (SECRET_MAPPING_FIELDS), and this message is rendered by
+        # every consumer of the resulting ValidationError -- including two
+        # handlers in ``cli/chat.py`` that print ``str(exc)`` and catch this
+        # because pydantic's ValidationError is a ValueError. The position is
+        # what the user counts commas to find anyway.
+        for position, pair in enumerate(text.split(","), start=1):
             if not pair.strip():
                 continue
             if "=" not in pair:
                 raise ValueError(
-                    f"extra header {pair.strip()!r} is missing '='. Use "
+                    f"extra header #{position} is missing '='. Use "
                     'either user=alice,x-tenant=amd or {"user": "alice"}.'
                 )
             name, _, header_value = pair.partition("=")
@@ -491,18 +497,29 @@ settings = _LazySettings()
 #: ``aorta/cli/chat.py`` hard-codes the same names in its ``click.Choice`` --
 #: decorators run at import time, so it cannot read this dict -- and
 #: ``tests/chat/test_config_wizard.py`` fails if the two drift apart.
+#:
+#: **Every template sets ``embedding_provider = "local"``, and the value is
+#: written out rather than left to the field default so the file records the
+#: decision.** Generation and retrieval are independent choices, and four of
+#: these templates used to couple them: picking a remote *chat* model also
+#: opted the user into a remote *embedder*, which made ``aorta chat index
+#: fetch`` structurally unusable. CI publishes the index asset under default
+#: settings, so a remote-embedding install refuses the published index at fetch
+#: time, or -- if ``config init`` runs second -- at query time, with no ordering
+#: of the two commands that works. Remote embeddings are still reachable by
+#: setting the fields by hand; ``docs/chat/configuration.md`` carries the
+#: procedure and the cost and egress it implies.
 PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
     "openai": {
         "llm_provider": "openai",
         "remote_llm_model": "gpt-4o-mini",
-        "embedding_provider": "remote",
-        "remote_embedding_model": "text-embedding-3-small",
+        "embedding_provider": "local",
     },
     "openai-compatible": {
         "llm_provider": "openai",
         "remote_llm_model": "",
         "remote_llm_base_url": "",
-        "embedding_provider": "remote",
+        "embedding_provider": "local",
     },
     "azure-apim": {
         "llm_provider": "openai",
@@ -512,15 +529,14 @@ PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
         # from Authorization; without this the gateway answers 401 to a request
         # that looks correct.
         "remote_llm_auth_header": "Ocp-Apim-Subscription-Key",
-        "embedding_provider": "remote",
-        "remote_embedding_auth_header": "Ocp-Apim-Subscription-Key",
+        "embedding_provider": "local",
     },
     "anthropic": {
         # Native Anthropic wire protocol, which the openai backend cannot
         # speak; litellm needs the chat-all extra.
         "llm_provider": "litellm",
         "remote_llm_model": "claude-sonnet-4-5",
-        "embedding_provider": "remote",
+        "embedding_provider": "local",
     },
     "local-vllm": {
         "llm_provider": "vllm",
@@ -532,6 +548,11 @@ PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
 
 #: Fields ``aorta chat config init`` asks about, per profile, in order. The
 #: wizard prompts for exactly these; anything else is taken from the template.
+#:
+#: No profile asks about embeddings, which is now consistent with every template
+#: choosing the local embedder: there is nothing left to collect. Prompting for
+#: a remote embedding endpoint and key would only be coherent alongside a
+#: template that selected one, and the reason none does is above.
 PROFILE_PROMPTS: dict[str, tuple[str, ...]] = {
     "openai": ("remote_llm_model", "remote_llm_api_key"),
     "openai-compatible": ("remote_llm_base_url", "remote_llm_model", "remote_llm_api_key"),
@@ -609,6 +630,147 @@ def write_profile(values: dict[str, Any], path: Path | None = None) -> Path:
     return path
 
 
+#: How ``rag/embeddings/factory.py`` resolves ``embedding_provider``: accepted
+#: spelling to the flow it selects. Repeated here rather than imported, because
+#: that module pulls in langchain_core and both provider modules and ``aorta
+#: chat config init`` has no other reason to load them -- the same arrangement
+#: as ``_CONFIG_PROFILES`` in ``cli/chat.py``, and
+#: ``tests/chat/test_config_wizard.py`` fails if the two drift apart.
+EMBEDDING_PROVIDER_FLOWS: dict[str, str] = {
+    "local": "local",
+    "onnx": "local",
+    "fastembed": "local",
+    "remote": "remote",
+}
+
+
+def _unresolvable_settings_reason(exc: Exception) -> str:
+    """Why the settings would not load, named without quoting any value.
+
+    ``str(ValidationError)`` carries pydantic's ``input_value``, so interpolating
+    it would print the very gateway key that :data:`SECRET_MAPPING_FIELDS` masks
+    in ``config show``, keeps out of ``aorta bundle``, and mode-checks on disk.
+    The validators in this module are written not to echo a rejected value
+    either, but that is their own discipline and does not cover ``input_value``,
+    which pydantic appends whatever the message says.
+
+    A field name is enough to act on and cannot itself be a credential, so only
+    names are reported. The rejected value is withheld whatever field it arrived
+    in, rather than only for the fields named secret: an ``api-key`` in a
+    ``remote_llm_base_url`` query string is as much a leak as one in an extra
+    header, and a rule keyed on field names would fail open on the field nobody
+    classified.
+
+    Used by :func:`describe_embeddings` and :func:`validate_profile` -- the echo
+    printed after a key is typed in, and the command that echo points at.
+    """
+    if isinstance(exc, ValidationError):
+        fields = sorted({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
+        if fields:
+            return f"aorta rejected {', '.join(fields)}"
+    return f"the settings could not be loaded ({type(exc).__name__})"
+
+
+def describe_embeddings(profile_values: dict[str, Any]) -> list[str]:
+    """What this install will embed with, and which index command follows.
+
+    Read from the merged settings rather than from *profile_values*, because
+    ``AORTA_CHAT_*`` outranks the file ``config init`` has just written. A user
+    with ``AORTA_CHAT_EMBEDDING_PROVIDER=remote`` exported would otherwise be
+    told local embeddings were configured and sent to ``index fetch``, which
+    then refuses the published asset -- advice the environment does not let
+    them follow, which is the shape of failure this whole path exists to stop.
+
+    ``index fetch`` is promised only when the provider *and* the model agree
+    with the defaults CI publishes the asset under.
+    :func:`aorta.chat.rag.manifest.validate` refuses on the model name and on
+    the embedding identity, which for the local provider is the model name
+    again -- so a local install on a hand-set ``embedding_model`` is refused
+    exactly like a remote one. Chunk parameters are deliberately *not* part of
+    that decision: ``validate`` reports them as warnings and ``fetch_index``
+    gates on refusals only, so ``AORTA_CHAT_CHUNK_SIZE`` does not stop a fetch.
+
+    The rule every arm below follows: name a command only when the resolved
+    settings let it succeed, and otherwise name the blocker instead. An unknown
+    ``embedding_provider`` and a remote provider with no key both fail before
+    any index command can run, so neither arm offers one.
+    """
+    try:
+        current = get_settings()
+    except Exception as exc:  # pydantic ValidationError, a field validator, ConfigFileError
+        # The profile is already on disk at this point, so an unrelated bad
+        # AORTA_CHAT_* value must not turn a successful write into a traceback.
+        # Rendered without the rejected value, which can be a credential: see
+        # _unresolvable_settings_reason.
+        return [
+            f"Embeddings: cannot be resolved -- {_unresolvable_settings_reason(exc)}",
+            "Sort the environment out first: aorta chat config validate",
+        ]
+
+    default_model = Settings.model_fields["embedding_model"].default
+    flow = EMBEDDING_PROVIDER_FLOWS.get(current.embedding_provider.strip().lower())
+    if flow is None:
+        # Naming a command here would be the same defect one layer down: the
+        # factory raises on an unrecognised name, so neither build nor fetch
+        # can run until this is corrected.
+        lines = [
+            f"Embeddings: {current.embedding_provider!r} is not an embedding "
+            f"provider this aorta knows "
+            f"({', '.join(sorted(EMBEDDING_PROVIDER_FLOWS))}). Indexing and "
+            "querying will both fail until it is corrected."
+        ]
+    elif flow == "remote" and not current.remote_embedding_api_key.strip():
+        # Naming 'index build' here would be the same defect one case over:
+        # RemoteApiProvider.get_embeddings() raises on an empty key before it
+        # sends anything, so the command is known to fail from the settings
+        # alone. And this is the likely state on the override path rather than a
+        # corner of it -- the profile config init has just written is a local
+        # one and carries no remote key, so an exported
+        # AORTA_CHAT_EMBEDDING_PROVIDER=remote arrives here with nothing to
+        # authenticate with.
+        lines = [
+            f"Embeddings: {current.embedding_provider}, via "
+            f"{current.remote_embedding_model}, but "
+            f"{ENV_PREFIX}REMOTE_EMBEDDING_API_KEY is not set. Indexing and "
+            "querying will both fail until it is, so set it (or put "
+            "remote_embedding_api_key in the profile) before either."
+        ]
+    elif flow == "remote":
+        lines = [
+            f"Embeddings: {current.embedding_provider}, via "
+            f"{current.remote_embedding_model}. The published index is built "
+            "with the local model, so 'aorta chat index build' is required "
+            "before querying."
+        ]
+    elif current.embedding_model != default_model:
+        lines = [
+            f"Embeddings: local, on this machine ({current.embedding_model}). "
+            f"The published index is built with {default_model}, so 'aorta "
+            "chat index build' is required before querying."
+        ]
+    else:
+        lines = [
+            "Embeddings: local, on this machine. 'aorta chat index fetch' "
+            "installs the published index unchanged."
+        ]
+
+    # Name the environment variable, not only its effect: the line above
+    # otherwise contradicts the file the user was just told was written, with
+    # nothing on screen to say which of the two wins.
+    overridden = [
+        f"{ENV_PREFIX}{field.upper()}"
+        for field in ("embedding_provider", "embedding_model")
+        if getattr(current, field)
+        != profile_values.get(field, Settings.model_fields[field].default)
+    ]
+    if overridden:
+        lines.append(
+            f"That is {' and '.join(overridden)} from the environment, which "
+            "outranks the profile just written."
+        )
+    return lines
+
+
 def mask(value: str) -> str:
     """Render a credential as its length and last four characters.
 
@@ -650,9 +812,11 @@ def effective_settings(reveal: bool = False) -> dict[str, Any]:
 def validate_profile(path: Path | None = None) -> list[str]:
     """Return the problems with the on-disk profile; empty means healthy.
 
-    Reports unreadable/malformed files, keys that no longer exist, values that
-    fail validation, and a profile holding a credential at a permissive mode --
-    the last being a real finding on a shared node, not a style note.
+    Reports unreadable/malformed files, keys that no longer exist, the *names* of
+    fields whose values fail validation, and a profile holding a credential at a
+    permissive mode -- the last being a real finding on a shared node, not a
+    style note. Names and not values, because a rejected value may itself be a
+    credential: see :func:`_unresolvable_settings_reason`.
 
     "Credential" is :data:`SECRET_FIELDS` plus a non-empty
     :data:`SECRET_MAPPING_FIELDS` map, so a profile whose only secret is a
@@ -675,7 +839,10 @@ def validate_profile(path: Path | None = None) -> list[str]:
     try:
         Settings()
     except Exception as exc:  # pydantic ValidationError, or a field validator
-        problems.append(f"{path}: {exc}")
+        # Field names only, for the reason _unresolvable_settings_reason gives:
+        # this is the command ``config init`` sends a user to after their key was
+        # rejected, so it is the last place that may echo the key back.
+        problems.append(f"{path}: {_unresolvable_settings_reason(exc)}")
 
     # SECRET_MAPPING_FIELDS counts too: a profile whose only credential sits in
     # an extra header is exactly as sensitive as one with remote_llm_api_key
@@ -692,6 +859,7 @@ def validate_profile(path: Path | None = None) -> list[str]:
 
 
 __all__ = [
+    "EMBEDDING_PROVIDER_FLOWS",
     "ENV_PREFIX",
     "PROFILE_FILE_MODE",
     "PROFILE_PROMPTS",
@@ -702,6 +870,7 @@ __all__ = [
     "Settings",
     "apply_cli_overrides",
     "configure",
+    "describe_embeddings",
     "effective_settings",
     "get_settings",
     "mask",
