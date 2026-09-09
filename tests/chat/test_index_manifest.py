@@ -598,6 +598,48 @@ class TestAKeylessRemoteEmbedder:
         assert "aorta chat index build" in advice
         assert "remote_embedding_api_key" in advice
 
+    def test_the_inline_form_does_not_offer_a_one_shot_env_var_fetch(self):
+        """The remedy that runs, succeeds, and leaves the install just as broken.
+
+        ``AORTA_CHAT_EMBEDDING_PROVIDER=local aorta chat index fetch`` is a
+        tempting single command for this state -- it needs no key and it
+        installs an index. But the variable is gone by the next query, which
+        resolves the remote provider again and validates the *published*
+        manifest against it. Driving that comparison gives two refusals,
+        embedding model and collection, because the asset was built by the
+        local embedder. So the command reports success and changes nothing a
+        user can see except their belief that it is fixed. The switch has to
+        be persistent, which makes it a settings change, not a command.
+        """
+        advice = manifest_mod._refresh_advice("remote")
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER" not in advice
+
+    def test_the_published_asset_is_still_refused_after_such_a_fetch(self):
+        """The measurement behind the test above, kept executable."""
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        published = _manifest(
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            embedding_provider="local",
+        )
+        settings.remote_embedding_api_key = "sk-test"
+        settings.embedding_provider = "remote"
+        try:
+            provider = get_provider()
+            report = validate(
+                published,
+                embedding_model=provider.model_id(),
+                collection=provider.collection_name(),
+            )
+        finally:
+            settings.embedding_provider = "local"
+            settings.remote_embedding_api_key = ""
+        assert len(report.refusals) == 2
+        assert any("embedding model" in line for line in report.refusals)
+        assert any("collection" in line for line in report.refusals)
+
     def test_the_inline_form_still_keeps_fetch_out_of_a_remote_message(self):
         """Naming the switch to local here would undo the older fix.
 
@@ -628,16 +670,24 @@ class TestRefreshCommand:
         monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
         assert manifest_mod._refresh_command("remote") == "aorta chat index build"
 
-    def test_a_keyless_remote_provider_gets_the_local_fetch_escape_hatch(self, monkeypatch):
+    def test_a_keyless_remote_provider_does_not_get_a_one_shot_env_var(self, monkeypatch):
+        """This slot stays a bare command; the precondition goes in the advice.
+
+        A one-shot ``AORTA_CHAT_EMBEDDING_PROVIDER=local`` prefix would make
+        this the only arm whose "command" is a shell line rather than a
+        command, and it would not work:
+        ``TestAKeylessRemoteEmbedder.test_the_published_asset_is_still_refused
+        _after_such_a_fetch`` drives the comparison the next query makes and
+        gets two refusals. :func:`_refresh_advice` carries the condition
+        instead, which keeps one honest sentence in place of two commands that
+        disagree.
+        """
         from aorta.chat.config import settings
 
         monkeypatch.setattr(settings, "embedding_provider", "remote")
         monkeypatch.setattr(settings, "remote_embedding_api_key", "")
-        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
-        assert (
-            manifest_mod._refresh_command("remote")
-            == "AORTA_CHAT_EMBEDDING_PROVIDER=local aorta chat index fetch"
-        )
+        assert manifest_mod._refresh_command("remote") == "aorta chat index build"
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER" not in manifest_mod._refresh_advice("remote")
 
     def test_it_agrees_with_the_block_form(self):
         """Two independent answers to "is a fetch worth suggesting" would drift.
@@ -714,14 +764,19 @@ class TestWarnings:
         assert not any("index fetch" in line for line in drift)
         assert any("aorta chat index build" in line for line in drift)
 
-    def test_the_drift_warning_uses_the_local_fetch_escape_hatch_for_keyless_remote(
-        self, monkeypatch
-    ):
+    def test_the_drift_warning_names_the_blocker_for_a_keyless_remote(self, monkeypatch):
+        """The index still works here, so the warning must not read as fatal.
+
+        Drift is the mildest thing this module says, and a keyless remote
+        install cannot act on either index command. Naming the build and the
+        one setting that unblocks it says both, in the one line the warning
+        has -- where a prefixed shell command would say something that does
+        not survive the next query.
+        """
         from aorta.chat.config import settings
 
         monkeypatch.setattr(settings, "embedding_provider", "remote")
         monkeypatch.setattr(settings, "remote_embedding_api_key", "")
-        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
         report = validate(
             _manifest(),
             embedding_model=MODEL,
@@ -730,9 +785,8 @@ class TestWarnings:
         )
         drift = [line for line in report.warnings if "source drift" in line]
         assert drift
-        assert any(
-            "AORTA_CHAT_EMBEDDING_PROVIDER=local aorta chat index fetch" in line for line in drift
-        )
+        assert all("remote_embedding_api_key is set" in line for line in drift)
+        assert not any("AORTA_CHAT_EMBEDDING_PROVIDER" in line for line in drift)
 
     def test_an_identical_version_does_not_warn(self):
         report = validate(
