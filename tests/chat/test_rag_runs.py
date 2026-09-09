@@ -24,7 +24,7 @@ from langchain_core.embeddings import Embeddings
 
 from aorta.chat.config import configure, reset_settings, settings
 from aorta.chat.rag import runs as runs_rag
-from aorta.chat.rag.embeddings.base import MAX_COLLECTION_NAME
+from aorta.chat.rag.embeddings.base import MAX_COLLECTION_NAME, identity_digest
 from aorta.chat.rag.retriever import SqliteVecStore
 
 VOCABULARY = ["nan", "loss", "rocm", "tf32", "hang", "memory", "triton"]
@@ -316,6 +316,11 @@ class TestTheRunCollectionSeparatesModelsByName:
         deleting it would lose the only statement of what the cap means for this
         collection. Strict so that fixing #476 turns this into a failure that
         has to be acknowledged, instead of a silent xpass.
+
+        This is only half the contract. The other half -- that the fix must not
+        buy those characters back out of the digest -- is
+        ``test_the_whole_digest_reaches_the_run_name`` below, which is kept
+        outside this ``xfail`` so it cannot be masked by it.
         """
         monkeypatch.setattr(settings, "remote_embedding_model", model)
         name = runs_rag.run_collection_name()
@@ -323,6 +328,50 @@ class TestTheRunCollectionSeparatesModelsByName:
         assert len(name) <= MAX_COLLECTION_NAME, (
             f"{len(name)} characters, cap is {MAX_COLLECTION_NAME}: {name}"
         )
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # Short: nothing is under truncation pressure, so this leg fails
+            # only if the digest stops being appended at all.
+            "text-embedding-3-small",
+            # Past the threshold, where fixing #476 has to take characters from
+            # somewhere. These are the legs that say where it must not take them.
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "q" * 200,
+        ],
+    )
+    def test_the_whole_digest_reaches_the_run_name(self, monkeypatch, model: str):
+        """The cap and the complete digest have to hold *at once*.
+
+        ``test_the_digest_survives_the_cap_under_every_shipped_prefix`` states
+        that pair for the collection ``build_collection_name`` returns. Only
+        half of it was ever carried through to the composed run name, and the
+        half left off is the load-bearing one: the shortest way to satisfy the
+        cap is to cut characters off the end, and the end is the digest.
+
+        A #476 fix along the lines of ``base[:58] + "_runs"`` measures 63, so it
+        would clear the cap while keeping three of the eight digest characters.
+        What #422 shipped is collision *resistance*, not injectivity -- eight
+        hex characters are 32 bits, and #447 is open precisely because that is
+        searchable. Truncating to three leaves 12 bits: 4096 buckets, with the
+        birthday point around 80 distinct model ids, which a model zoo reaches
+        by accident rather than by search. So the cost of taking the characters
+        from here is not a new class of bug, it is #447 made ordinary.
+
+        **Deliberately not folded into the xfail above.** ``xfail`` swallows a
+        failure, so a digest-truncating fix would clear the cap, leave that test
+        still failing, and be reported as an expected failure -- exactly the
+        silence this is meant to break. Kept separate, it passes today and turns
+        red the moment the tail is shortened, whether or not the ``xfail``
+        marker has been removed yet.
+        """
+        monkeypatch.setattr(settings, "remote_embedding_model", model)
+        digest = identity_digest(runs_rag.get_provider().vector_identity())
+        name = runs_rag.run_collection_name()
+
+        tail = f"_{digest}{runs_rag.RUN_COLLECTION_SUFFIX}"
+        assert name.endswith(tail), f"expected the name to end in {tail!r}, got {name!r}"
 
 
 class TestIndexing:
