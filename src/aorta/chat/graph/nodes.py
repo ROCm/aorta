@@ -1043,9 +1043,9 @@ class _EscalateToNative:
 #: (no answer, and the reason is recorded next to it) and points at both places
 #: the specifics actually live.
 _NO_ANSWER_MSG = (
-    "I wasn't able to answer that, and I've logged why. Check the warning "
-    "logged with this reply for the specific reason, or run `aorta chat "
-    "doctor` to rule out a configuration problem."
+    "I wasn't able to answer that -- check the warning logged with this reply "
+    "for the specific reason, or run `aorta chat doctor` to rule out a "
+    "configuration problem."
 )
 
 #: Prefixed to a fallback answer, and the labelling is not decoration. Silently

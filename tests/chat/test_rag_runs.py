@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -676,3 +677,79 @@ class TestMissingCollection:
         from aorta.chat.tools.artifacts import search_run_artifacts
 
         assert search_run_artifacts.invoke({"query": "x", "k": 0}).startswith("Error:")
+
+
+class TestTheRunStoreIsOpenedOnceUnderConcurrency:
+    """One store per process, even when the first two queries overlap.
+
+    ``_store_cache`` was safe while every reader was on the event loop, which
+    serialised them by construction. ``retrieve_node`` now reaches it through
+    ``asyncio.to_thread``, so two sessions whose first run-artifact query
+    overlaps genuinely run ``_get_store`` on two worker threads.
+
+    Measured before the lock, at 8 threads: 8 sqlite connections opened, 7 of
+    them dropped by a later assignment without being closed, and 8 embedding
+    models loaded -- the per-instance lock in ``FastembedBgeEmbeddings`` does
+    not cover this, because each store builds its own provider.
+    """
+
+    @staticmethod
+    def _race(monkeypatch, tmp_path, threads=8):
+        index = tmp_path / "index.sqlite"
+        index.write_text("x")
+        opened = []
+
+        class SlowStore:
+            def __init__(self, **_kw):
+                opened.append(self)
+                # Widen the window a real cold open would have anyway.
+                threading.Event().wait(0.02)
+
+            def collection_exists(self):
+                return True
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(runs_rag, "SqliteVecStore", SlowStore)
+        monkeypatch.setattr(runs_rag, "get_provider", lambda: SimpleNamespace(
+            get_embeddings=lambda: object()
+        ))
+        monkeypatch.setattr(runs_rag, "run_collection_name", lambda: "c")
+        monkeypatch.setattr(
+            runs_rag,
+            "settings",
+            SimpleNamespace(index_file=index, runs_root=tmp_path),
+        )
+        monkeypatch.setattr(runs_rag, "_store_cache", None)
+
+        ready = threading.Barrier(threads)
+        got = []
+
+        def go():
+            ready.wait(timeout=5)
+            got.append(runs_rag._get_store())
+
+        workers = [threading.Thread(target=go) for _ in range(threads)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=10)
+        return opened, got
+
+    def test_eight_racing_threads_open_one_connection(self, monkeypatch, tmp_path):
+        opened, _got = self._race(monkeypatch, tmp_path)
+        assert len(opened) == 1
+
+    def test_every_thread_gets_that_same_store(self, monkeypatch, tmp_path):
+        opened, got = self._race(monkeypatch, tmp_path)
+        # The point of the re-check under the lock: the waiters must adopt the
+        # winner's store, not open their own once the lock frees.
+        assert len(got) == 8
+        assert {id(s) for s in got} == {id(opened[0])}
+
+    def test_the_cached_read_does_not_take_the_lock(self, monkeypatch, tmp_path):
+        """Otherwise every later search serialises behind one mutex forever."""
+        _opened, got = self._race(monkeypatch, tmp_path, threads=2)
+        with runs_rag._store_lock:
+            assert runs_rag._get_store() is got[0]

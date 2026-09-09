@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -216,20 +217,50 @@ def index_run_artifacts(runs_path: str | Path | None = None) -> SqliteVecStore:
 
 
 _store_cache: SqliteVecStore | None = None
+#: Guards the *construction* of the store above, not access to it.
+#:
+#: The cache was safe while every reader was on the event loop, which serialised
+#: them by construction. ``retrieve_node`` now reaches this through
+#: ``asyncio.to_thread``, so two sessions whose first run-artifact query overlaps
+#: genuinely run this function on two worker threads. Both saw ``None``, both
+#: built a store, and the second assignment dropped the first without closing
+#: it: measured at 8 threads, 8 sqlite connections opened, 7 leaked, and 8
+#: embedding models loaded -- the per-instance lock in ``FastembedBgeEmbeddings``
+#: does not help, because each store builds its own provider.
+#:
+#: Held only across a miss. A lock around the whole function would serialise
+#: every run-artifact search behind one mutex for the life of the process to
+#: close a window that shuts after the first call.
+_store_lock = threading.Lock()
 
 
 def reset_caches() -> None:
     """Drop the cached run store. Paired with the retriever's own reset."""
     global _store_cache
-    if _store_cache is not None:
-        _store_cache.close()
-    _store_cache = None
+    with _store_lock:
+        if _store_cache is not None:
+            _store_cache.close()
+        _store_cache = None
 
 
 def _get_store() -> SqliteVecStore:
-    global _store_cache
+    # Unlocked fast path: the name is only ever bound to a fully built, verified
+    # store (the failure branches below raise or close before assigning), so a
+    # reader either sees `None` or something usable -- never a half-built store.
     if _store_cache is not None:
         return _store_cache
+
+    with _store_lock:
+        # Re-checked under the lock: the thread that waited here while another
+        # built the store must use that one rather than open a second.
+        if _store_cache is not None:
+            return _store_cache
+        return _build_store()
+
+
+def _build_store() -> SqliteVecStore:
+    """Open and verify the run store. Caller must hold :data:`_store_lock`."""
+    global _store_cache
 
     index_file = settings.index_file
     if not index_file.exists():
