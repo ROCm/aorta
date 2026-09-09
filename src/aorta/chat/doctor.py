@@ -680,6 +680,37 @@ def _collection_schema_defect(
                 "so there is nothing for a query to search"
             )
 
+        # A table of that *name* is not a vector index. An ordinary table
+        # called ``vec_<collection>`` satisfies the check above, and the read
+        # path's ``embedding MATCH ?`` then raises ``OperationalError`` on it --
+        # so the name test alone reported a store as queryable that answers
+        # nothing.
+        #
+        # Asked as "is it virtual", not "is it vec0", on purpose -- and this is
+        # a judgement rather than a tested property, so it is worth being plain
+        # about: requiring the ``vec0`` module name passes the whole suite too,
+        # because nothing today builds a vector table any other way. It is
+        # written loose to match the decision in the next comment, where the
+        # shadow table's absence is deliberately not a defect so that a future
+        # sqlite-vec layout cannot make every healthy index read as broken. The
+        # same reasoning applies to the module name, which is sqlite-vec's to
+        # change. What this has to separate is an ordinary table from a virtual
+        # one, and an ordinary table can never answer ``MATCH`` whatever
+        # implements it.
+        #
+        # ``fetchone()`` cannot be None: the name came from the ``tables`` read
+        # above, which is this same catalogue. ``or ""`` covers a NULL ``sql``
+        # only so the comparison is total.
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (vectors,)
+        ).fetchone()[0]
+        if not (sql or "").upper().startswith("CREATE VIRTUAL TABLE"):
+            return (
+                f"{vectors} in {index_file} is an ordinary table, not a vector "
+                "index; retrieval matches the query vector against it and every "
+                "search fails on the table itself"
+            )
+
         # ``vec0`` keeps its rows in a shadow table, which is countable without
         # loading the extension where the virtual table itself is not. Its
         # absence is not reported as a defect: the vector table is already

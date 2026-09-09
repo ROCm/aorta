@@ -118,6 +118,7 @@ STRUCTURAL_DAMAGE = (
     "registry-row",
     "chunk-columns",
     "vec-table",
+    "vec-table-not-virtual",
     "vector-rows",
     "vector-rowids",
     "registry-width",
@@ -295,6 +296,20 @@ def _break_store(index: Path, collection: str, how: str) -> None:
             )
         elif how == "vec-table":
             conn.execute(f'DROP TABLE "vec_{collection}"')
+        elif how == "vec-table-not-virtual":
+            # An ordinary table wearing the vector table's name, which is what
+            # a hand-rebuilt store leaves behind. Same name, same columns, same
+            # row count -- so every name-and-count check passes and the read
+            # path's ``embedding MATCH ?`` raises on the table itself.
+            rows = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()[0]
+            conn.execute(f'DROP TABLE "vec_{collection}"')
+            conn.execute(
+                f'CREATE TABLE "vec_{collection}" (rowid INTEGER PRIMARY KEY, embedding BLOB)'
+            )
+            conn.executemany(
+                f'INSERT INTO "vec_{collection}" (rowid, embedding) VALUES (?, ?)',
+                [(n + 1, b"\x00" * 4) for n in range(rows)],
+            )
         elif how == "vector-rows":
             conn.execute(
                 f'DELETE FROM "vec_{collection}" WHERE rowid = '
