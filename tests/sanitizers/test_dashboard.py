@@ -248,6 +248,54 @@ def test_observation_and_inline_message_name_the_cause_behind_a_rollup():
     assert "gemm_NT_M256_N4096_K1024" in text
 
 
+def test_digestless_kernels_are_never_attributed_to_each_other():
+    # The other collision direction: ConSan identities carry no code object and no
+    # SHA-256, so keying attribution on (sha, index) alone collapses every one of
+    # them onto (None, None) and lets an unrelated sibling's verdict and reason be
+    # reported as "the same code object" -- an object that does not exist. Only a
+    # real digest can have been deduped, so only a real digest may be attributed.
+    def _entry(name: str) -> dict:
+        return {
+            "identity": {
+                "name": name, "target": "gfx950", "code_object": None,
+                "code_object_sha256": None, "code_object_index": None,
+                "entry_offset": None,
+            },
+            "total_time_ms": 0.0, "dispatch_count": 1, "sources": ["consan_repro"],
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [_entry("kern_A"), _entry("kern_B")],
+        },
+        "checks": [{
+            "sanitizer": "consan", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [{
+                "identity": {
+                    "name": "kern_A", "target": "gfx950", "code_object": None,
+                    "code_object_sha256": None, "code_object_index": None,
+                },
+                "state": "error", "verdict": "error", "findings": [],
+                "reason": "consan_hook_not_found", "returncode": None,
+            }],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "pass")
+    covered, uncovered = case["kernels"]
+    assert covered.get("detail") == "consan_hook_not_found"
+    # kern_B ran nothing and shares no object, so it keeps the em dash and stays silent
+    assert uncovered.get("verdict") == "\u2014"
+    assert uncovered.get("detail") == ""
+    assert "same code object" not in uncovered.get("detail", "")
+
+
 def test_kernel_tables_render_the_reason_on_both_twins():
     case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
 
@@ -265,6 +313,27 @@ def test_kernel_tables_render_the_reason_on_both_twins():
     )
     assert "| SHA-256 | Detail |" in md
     assert "failed to parse input executable or code object" in md
+
+
+def test_survey_md_twin_also_renders_the_reason():
+    # Three renderers consume row["kernels"]: the shared HTML table (both tabs) and
+    # a Markdown twin per tab. The survey twin is a separate function, so a column
+    # added to the other two silently skips it -- sweep every renderer, not just
+    # the one the guardrail tab uses.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [{
+            "name": "gemm-waitcheck", "label": "daily GEMM \u00b7 waitcheck",
+            "report": _waitcheck_daily_topology_report(),
+        }]}
+    )
+    md = "\n".join(gen._survey_section_md(entries))
+
+    assert "| SHA-256 | Detail |" in md
+    assert "failed to parse input executable or code object" in md
+    assert "same code object as gemm_NT_M256_N4096_K1024" in md
+    # a clean kernel's cell degrades to an em dash rather than an empty column
+    assert "| `93f09ae670` | \u2014 |" not in md  # sha is the fixture's TT digest below
+    assert "| `aeb46fded1` | \u2014 |" in md
 
 
 def test_case_env_records_kernel_reasons_beside_the_rollup():

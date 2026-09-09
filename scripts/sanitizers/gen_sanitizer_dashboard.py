@@ -8,7 +8,8 @@ emits, into ``--out-dir``:
   tabs (a pure CSS ``:checked`` radio toggle -- switching needs no network):
   **Expected behavior (guardrails)** -- the baseline-checked regression gate:
   baseline-health banner, latest per-recipe table, **per-kernel detail** (code
-  object / SHA-256 / dispatch count / observed sanitizer verdict / finding count),
+  object / SHA-256 / dispatch count / observed sanitizer verdict / finding count /
+  the kernel's fail-closed reason, em dash when it has none),
   and a cross-run history/trend table; and **Workload survey (observed-only)** --
   kernels drawn from multiple workloads (including aorta-internal-sourced kernels
   supplied via ``--survey`` and the caller-supplied ConSan cases from
@@ -699,7 +700,15 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     # share an object with an earlier selection carry no kernel_result of their own.
     # Index the results by object too, so those rows can be attributed to the scan
     # that covered them instead of rendering as an em dash (see the kernels loop).
-    kr_by_object: dict[tuple[str | None, Any], dict[str, Any]] = {}
+    #
+    # Keyed only for identities that carry a real digest. Waitcheck dedups a
+    # ``code_object_scan``, which requires both a code object and its SHA-256, so a
+    # digest-less identity was never deduped and has nothing to be attributed to.
+    # Admitting one would make every ConSan kernel (code_object and sha both null)
+    # share the ``(None, None)`` key and let an unrelated sibling's verdict and
+    # reason be reported as "the same code object" -- an attribution to an object
+    # that does not exist.
+    kr_by_object: dict[tuple[str, Any], dict[str, Any]] = {}
     findings_by_name: dict[str | None, int] = {}
     for check in checks:
         for result in check.get("kernel_results", []):
@@ -718,10 +727,11 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 "covering_kernel": name,
             }
             kr_by_name[name] = reduced
-            kr_by_object.setdefault(
-                (identity.get("code_object_sha256"), identity.get("code_object_index")),
-                reduced,
-            )
+            result_sha = identity.get("code_object_sha256")
+            if result_sha:
+                kr_by_object.setdefault(
+                    (str(result_sha), identity.get("code_object_index")), reduced
+                )
         for finding in check.get("findings", []):
             key = finding.get("kernel_name")
             findings_by_name[key] = findings_by_name.get(key, 0) + 1
@@ -733,13 +743,14 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         identity = entry.get("identity", {})
         name = identity.get("name")
         result = kr_by_name.get(name)
+        entry_sha = identity.get("code_object_sha256")
         detail = ""
         if result is not None:
             verdict, findings = result["verdict"], result["findings"]
             detail = str(result["reason"] or "")
-        elif (
+        elif entry_sha and (
             covering := kr_by_object.get(
-                (identity.get("code_object_sha256"), identity.get("code_object_index"))
+                (str(entry_sha), identity.get("code_object_index"))
             )
         ) is not None:
             # Deduped: this kernel's object WAS scanned, under the name of the first
