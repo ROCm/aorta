@@ -711,6 +711,37 @@ def _collection_schema_defect(
                 "search fails on the table itself"
             )
 
+        # The width the vector table was *declared* at, which is not the one
+        # the registry records and not the one anything above compares. A
+        # store whose vec table was rebuilt at another width keeps its
+        # registry row, its manifest, its row parity and its virtual
+        # definition -- so every check so far passes -- and ``vec0`` then
+        # refuses the query with "Dimension mismatch for query vector",
+        # because ``_knn`` validates the query against the *registry* and
+        # discovers the table's own width only by matching against it.
+        #
+        # Read out of the DDL because there is nowhere else to read it from
+        # without loading the extension. Fail *open* if it does not parse: an
+        # unrecognised layout means this check has nothing to say, and saying
+        # "broken" instead is how a future sqlite-vec release would make every
+        # healthy index read as damaged. Silence on the unknown, a defect only
+        # on a width that is present and wrong.
+        #
+        # Untested, like the module-name looseness above and for the same
+        # reason: failing closed on an unparseable width passes the whole suite,
+        # because no layout that fails to parse exists to test against. Both
+        # choices trade a state nobody can construct today for not breaking
+        # every healthy index tomorrow, and both are judgement rather than
+        # measurement. Said out loud so neither reads as verified.
+        declared = re.search(r"\[\s*(\d+)\s*\]", sql or "")
+        if declared and dimensions > 0 and int(declared.group(1)) != dimensions:
+            return (
+                f"the {vectors} table in {index_file} holds "
+                f"{int(declared.group(1))}-dimension vectors but the manifest records "
+                f"{dimensions}; the query path matches a {dimensions}-dimension vector "
+                "against it and every search is refused"
+            )
+
         # ``vec0`` keeps its rows in a shadow table, which is countable without
         # loading the extension where the virtual table itself is not. Its
         # absence is not reported as a defect: the vector table is already

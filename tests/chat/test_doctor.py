@@ -119,6 +119,7 @@ STRUCTURAL_DAMAGE = (
     "chunk-columns",
     "vec-table",
     "vec-table-not-virtual",
+    "vec-table-width",
     "vector-rows",
     "vector-rowids",
     "registry-width",
@@ -296,6 +297,19 @@ def _break_store(index: Path, collection: str, how: str) -> None:
             )
         elif how == "vec-table":
             conn.execute(f'DROP TABLE "vec_{collection}"')
+        elif how == "vec-table-width":
+            # Rebuilt at another width, with vectors that fit it. Registry row,
+            # manifest, row parity and the virtual definition all survive, so
+            # every other check passes -- and vec0 refuses the query, because
+            # `_knn` validates the query vector against the registry and meets
+            # the table's own width only when it matches against it.
+            rows = conn.execute(f'SELECT COUNT(*) FROM "chunks_{collection}"').fetchone()[0]
+            conn.execute(f'DROP TABLE "vec_{collection}"')
+            conn.execute(f'CREATE VIRTUAL TABLE "vec_{collection}" USING vec0(embedding float[9])')
+            conn.executemany(
+                f'INSERT INTO "vec_{collection}" (rowid, embedding) VALUES (?, ?)',
+                [(n + 1, b"\x00" * 36) for n in range(rows)],
+            )
         elif how == "vec-table-not-virtual":
             # An ordinary table wearing the vector table's name, which is what
             # a hand-rebuilt store leaves behind. Same name, same columns, same
