@@ -555,12 +555,13 @@ def test_two_reasons_for_one_kernel_are_labelled_by_sanitizer():
     assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings")
 
 
-def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
-    # A name is not an identity: KernelWorklist only rejects duplicate stable_key, and
-    # that key carries the digest rather than pinning the name, so one symbol name
-    # reached through two code objects is a valid worklist. Joining results to rows by
-    # name merged the two scans -- each row took the other's verdict and reason, and
-    # their findings were summed onto both, double-counting against the case total.
+def _report_with_two_objects_sharing_a_name() -> dict:
+    """One symbol name reached through two code objects: a clean scan and a failed one.
+
+    A valid worklist -- KernelWorklist only rejects duplicate stable_key, and that key
+    carries the digest rather than pinning the name.
+    """
+
     def _identity(sha: str) -> dict:
         return {
             "name": "gemm_shared_symbol", "target": "gfx950",
@@ -576,7 +577,7 @@ def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
         }
 
     clean_sha, bad_sha = "beefaaa1", "beefbbb2"
-    report = {
+    return {
         "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
         "overall_verdict": "error", "execution_status": "error",
         "worklist": {
@@ -609,6 +610,14 @@ def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
         }],
     }
 
+
+def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
+    # Joining results to rows by name merged the two scans -- each row took the other's
+    # verdict and reason, and their findings were summed onto both, double-counting
+    # against the case total.
+    report = _report_with_two_objects_sharing_a_name()
+    clean_sha, bad_sha = "beefaaa1", "beefbbb2"
+
     case = gen.summarize_case(report, "warn")
     clean, bad = case["kernels"]
 
@@ -628,8 +637,9 @@ def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
     assert reasons[0].get("kernel") == "gemm_shared_symbol"
     assert reasons[0].get("code_object_sha256") == bad_sha
     assert reasons[0].get("reason") == "waitcheck_backend_exit_2: refused the second object"
-    # only one of the two failed, so the name is unambiguous and stays unqualified
-    assert reasons[0].get("label") == "gemm_shared_symbol"
+    # only one of the two failed, but both are on the page: what makes the name
+    # ambiguous is what the reader can see, not which rows happen to carry a reason
+    assert reasons[0].get("label") == f"gemm_shared_symbol ({bad_sha})"
 
 
 def test_two_failing_kernels_sharing_a_name_are_told_apart():
@@ -880,6 +890,66 @@ def test_two_failing_kernels_sharing_a_digest_prefix_are_told_apart():
     # field a bundled collision needs
     assert labels == [f"same ({first}#0)", f"same ({second}#0)"]
     assert len(set(labels)) == 2
+
+
+def test_a_lone_failure_is_qualified_against_a_clean_same_named_sibling():
+    # Ambiguity is a property of the page, not of the failing subset: qualifying only
+    # where two *failing* rows share a name left a single failure labelled bare while
+    # a clean row of the same name sat beside it, so the observation could not say
+    # which of the two the reason belonged to.
+    report = _report_with_two_objects_sharing_a_name()
+    case = gen.summarize_case(report, "warn")
+
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("label") == "gemm_shared_symbol (beefbbb2)"
+    assert "gemm_shared_symbol (beefbbb2): waitcheck_backend_exit_2" in case.get(
+        "observation", ""
+    )
+
+
+def test_a_result_identity_missing_object_fields_still_reaches_its_row():
+    # Every code-object field is optional on the wire, and reports whose kernel
+    # results carry only {name, target} exist (see `_waitcheck_report`). Joining on
+    # the full identity dropped those results outright — the row rendered a verdict
+    # with an empty Detail, losing the one field this PR exists to surface.
+    report = _waitcheck_report()
+    result = report["checks"][0]["kernel_results"][0]
+    result["state"] = "error"
+    result["verdict"] = "error"
+    result["reason"] = "waitcheck_backend_exit_2: refused input"
+    result["returncode"] = 2
+
+    case = gen.summarize_case(report, "warn")
+    row = case["kernels"][0]
+    assert row.get("verdict") == "error"
+    assert "refused input" in row.get("detail", "")
+
+    # and the manifest names the object, taken from the worklist row the result matched
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("code_object") == "/a/b/sol_1.hsaco"
+    assert reasons[0].get("code_object_sha256") == "93f09ae670abcdef"
+
+
+def test_a_sparse_result_is_not_guessed_onto_one_of_two_same_named_rows():
+    # The fallback is only safe where it can mean one thing. Two rows sharing a name
+    # and a target must not have a name-matched result attributed to either of them.
+    report = _report_with_two_objects_sharing_a_name()
+    for result in report["checks"][0]["kernel_results"]:
+        result["identity"] = {"name": "gemm_shared_symbol", "target": "gfx950"}
+
+    case = gen.summarize_case(report, "warn")
+    # no row claims it: attributing it to either would be a guess
+    assert [k.get("detail") for k in case["kernels"]] == ["", ""]
+
+    # but the reason is not lost — it surfaces unattributed rather than silently, with
+    # a null object saying plainly that the report did not pin one
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("reason") == "waitcheck_backend_exit_2: refused the second object"
+    assert reasons[0].get("code_object") is None
+    assert "waitcheck_backend_exit_2" in case.get("observation", "")
 
 
 def test_preflight_findings_still_land_in_the_kernel_column():

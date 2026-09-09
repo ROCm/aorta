@@ -76,7 +76,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from html import escape as _esc
 from pathlib import Path
@@ -729,7 +729,9 @@ def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
     return labels
 
 
-def _kernel_reason_entries(results: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+def _kernel_reason_entries(
+    results: Sequence[dict[str, Any]], labels_by_key: Mapping[tuple[Any, ...], str]
+) -> list[dict[str, Any]]:
     """The failing kernels' reasons, each carrying the identity behind it (pure).
 
     A kernel name is not unique (see ``_identity_key``), so a bare name cannot say
@@ -742,12 +744,19 @@ def _kernel_reason_entries(results: Sequence[dict[str, Any]]) -> list[dict[str, 
     abbreviated (see ``_display_labels``); this projection is what makes ``env.json``
     diagnosable, and a basename plus a digest prefix can tie where the full path and
     digest do not -- which would put the ambiguity straight back into the manifest.
+
+    ``labels_by_key`` is built over the whole worklist rather than over the failing
+    results, because what makes a name ambiguous is what the *page* shows: one failure
+    beside a clean same-named sibling still leaves a reader unable to say which of the
+    two rows the reason belongs to. A result with no worklist row behind it has nothing
+    to be ambiguous against and keeps its bare name.
     """
-    failing = [result for result in results if result["reason"]]
-    labels = _display_labels([(result["name"], result["identity"]) for result in failing])
     entries: list[dict[str, Any]] = []
-    for label, result in zip(labels, failing, strict=True):
+    for result in results:
+        if not result["reason"]:
+            continue
         identity = result["identity"]
+        label = labels_by_key.get(_identity_key(identity), str(result["name"]))
         entries.append({
             "kernel": str(result["name"]),
             "label": label,
@@ -981,12 +990,41 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             strict=True,
         )
     }
+    # A result's identity can be sparser than the worklist row it describes: every
+    # code-object field is optional on the wire (``KernelIdentity.from_dict``), and
+    # reports whose results carry only ``{name, target}`` exist. The full-identity join
+    # is what keeps two same-named selections apart, so it stays first -- but where it
+    # finds nothing, dropping the result would lose exactly the per-kernel reason this
+    # dashboard exists to surface. Falling back to ``(name, target)`` is safe only when
+    # it can mean one thing: one worklist row and one unclaimed result.
+    claimed = {_identity_key(entry.get("identity", {})) for entry in kernel_entries}
+    unclaimed: dict[tuple[Any, Any], list[tuple[Any, ...]]] = {}
+    for key, reduced in kr_by_identity.items():
+        if key in claimed:
+            continue
+        sparse = reduced["identity"]
+        unclaimed.setdefault((sparse.get("name"), sparse.get("target")), []).append(key)
+    rows_by_name_target: dict[tuple[Any, Any], int] = {}
+    for entry in kernel_entries:
+        row_identity = entry.get("identity", {})
+        row_key = (row_identity.get("name"), row_identity.get("target"))
+        rows_by_name_target[row_key] = rows_by_name_target.get(row_key, 0) + 1
+
     kernels: list[dict[str, Any]] = []
     credited: set[Any] = set()
     for entry in kernel_entries:
         identity = entry.get("identity", {})
         name = identity.get("name")
         result = kr_by_identity.get(_identity_key(identity))
+        if result is None:
+            loose_key = (name, identity.get("target"))
+            candidates = unclaimed.get(loose_key, ())
+            if len(candidates) == 1 and rows_by_name_target.get(loose_key) == 1:
+                result = kr_by_identity[candidates[0]]
+                # The row's identity is the fuller one and describes the same kernel,
+                # so the manifest and the labels can name the object the result did
+                # not. Nothing else reads the sparse identity once it is matched.
+                result["identity"] = identity
         entry_sha = identity.get("code_object_sha256")
         detail = ""
         if result is not None:
@@ -1054,7 +1092,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     primary = _primary_checks(checks)
     # Only the kernels that carry their own fail-closed reason; a deduped row's
     # detail restates its covering scan's reason, which would double it up here.
-    kernel_reasons = _kernel_reason_entries(list(kr_by_identity.values()))
+    kernel_reasons = _kernel_reason_entries(list(kr_by_identity.values()), label_by_key)
     observation = _observation_text(
         primary, findings_total, finding_groups, kernel_reasons=kernel_reasons
     )
