@@ -196,15 +196,15 @@ def test_summarize_keeps_the_per_kernel_failure_reason():
     # left the page with no statement anywhere of why a kernel errored.
     case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
 
-    assert case["verdict"] == "error" and case["match"] is False
-    assert (case["primary"] or {})["reason"] == "worklist_not_fully_checked"
+    assert case.get("verdict") == "error" and case.get("match") is False
+    assert (case.get("primary") or {}).get("reason") == "worklist_not_fully_checked"
 
     errored = case["kernels"][0]
-    assert errored["name"] == "gemm_NT_M256_N4096_K1024"
-    assert errored["verdict"] == "error"
-    assert "failed to parse input executable or code object" in errored["detail"]
+    assert errored.get("name") == "gemm_NT_M256_N4096_K1024"
+    assert errored.get("verdict") == "error"
+    assert "failed to parse input executable or code object" in errored.get("detail", "")
 
-    assert case["kernel_reasons"] == [
+    assert case.get("kernel_reasons") == [
         (
             "gemm_NT_M256_N4096_K1024",
             "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
@@ -212,8 +212,8 @@ def test_summarize_keeps_the_per_kernel_failure_reason():
         )
     ]
     # a clean kernel carries no detail to explain
-    assert case["kernels"][2]["verdict"] == "warn"
-    assert case["kernels"][2]["detail"] == ""
+    assert case["kernels"][2].get("verdict") == "warn"
+    assert case["kernels"][2].get("detail") == ""
 
 
 def test_summarize_attributes_a_deduped_kernel_to_the_scan_that_covered_it():
@@ -223,24 +223,25 @@ def test_summarize_attributes_a_deduped_kernel_to_the_scan_that_covered_it():
     case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
     deduped = case["kernels"][1]
 
-    assert deduped["name"] == "gemm_NT_M128_N4096_K1280"
-    assert deduped["verdict"] == "error"
-    assert "same code object as gemm_NT_M256_N4096_K1024" in deduped["detail"]
-    assert "failed to parse input executable or code object" in deduped["detail"]
+    assert deduped.get("name") == "gemm_NT_M128_N4096_K1280"
+    assert deduped.get("verdict") == "error"
+    assert "same code object as gemm_NT_M256_N4096_K1024" in deduped.get("detail", "")
+    assert "failed to parse input executable or code object" in deduped.get("detail", "")
     # findings stay on the covering row, so the column still sums to the case total
-    assert deduped["findings"] == 0
-    assert sum(k["findings"] for k in case["kernels"]) == case["findings"]
+    assert deduped.get("findings") == 0
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings")
     # the covering scan is reported once, not once per kernel that shares its object
-    assert len(case["kernel_reasons"]) == 1
+    assert len(case.get("kernel_reasons") or []) == 1
 
 
 def test_observation_and_inline_message_name_the_cause_behind_a_rollup():
     case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
 
     # the one-liner still leads with the rollup, but no longer stops there
-    assert "reason worklist_not_fully_checked" in case["observation"]
-    assert "gemm_NT_M256_N4096_K1024: waitcheck_backend_exit_2" in case["observation"]
-    assert "32 finding(s)" not in case["observation"]  # only one finding in the fixture
+    observation = case.get("observation", "")
+    assert "reason worklist_not_fully_checked" in observation
+    assert "gemm_NT_M256_N4096_K1024: waitcheck_backend_exit_2" in observation
+    assert "32 finding(s)" not in observation  # only one finding in the fixture
 
     label, text = gen._survey_message_parts(case)
     assert label == "Reason"
@@ -344,8 +345,9 @@ def test_case_env_records_kernel_reasons_beside_the_rollup():
         summary=case, report=None, built_refs=[], inputs=[],
     )
 
-    assert env["observed"]["reason"] == "worklist_not_fully_checked"
-    assert env["observed"]["kernel_reasons"] == [
+    observed = env.get("observed") or {}
+    assert observed.get("reason") == "worklist_not_fully_checked"
+    assert observed.get("kernel_reasons") == [
         {
             "kernel": "gemm_NT_M256_N4096_K1024",
             "reason": (
