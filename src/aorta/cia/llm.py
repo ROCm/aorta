@@ -62,6 +62,66 @@ def _use_certifi_bundle() -> None:
         os.environ[var] = certifi.where()
 
 
+class ProviderNotConfigured(RuntimeError):
+    """No endpoint was configured, and guessing at one is worse than saying so."""
+
+
+def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str] | None:
+    """(base_url, api_key, model) from the chat configuration, or None.
+
+    The rest of this package reaches a model through ``get_chat_llm()``,
+    selected by ``llm_provider`` and configured in ``~/.config/aorta/chat.toml``
+    or ``AORTA_CHAT_*`` (docs/chat/providers.md, docs/chat/configuration.md).
+    The agents read those same settings, so that configuring chat configures
+    them: a user who has run ``aorta chat config init --profile openai`` should
+    not then have a Watch and an Autopsy quietly talking somewhere else.
+
+    Only the settings are read, not the provider layer. ``aorta.chat.config``
+    imports pydantic and stdlib and nothing from the chat extras, so this keeps
+    the agents runnable on a base install -- and when that module is absent,
+    because those extras are not installed, this returns None rather than
+    failing the import.
+
+    With *configured_only*, None also means "nothing here was actually set".
+    Every field has a default, so answering with one would silently outrank a
+    deployment that had configured the agents some other way.
+    """
+    try:
+        from aorta.chat.config import settings
+    except Exception:  # pragma: no cover - depends on what is installed
+        log.debug("aorta.chat.config is not importable; not reading chat settings")
+        return None
+
+    if getattr(settings, "llm_provider", "") == "vllm":
+        fields = ("vllm_base_url", "vllm_api_key", "vllm_model")
+    else:
+        # An empty remote base URL means "the provider's own endpoint", which
+        # is a decision rather than a gap.
+        fields = ("remote_llm_base_url", "remote_llm_api_key", "remote_llm_model")
+
+    if configured_only and not ({*fields, "llm_provider"} & settings.model_fields_set):
+        return None
+    return tuple(getattr(settings, f) for f in fields)  # type: ignore[return-value]
+
+
+def _legacy_env() -> tuple[str, str, str] | None:
+    """The LITELLM_* variables, which predate reading the chat settings."""
+    base = os.environ.get("LITELLM_API_BASE")
+    if not base:
+        return None
+    log.warning(
+        "Reading LITELLM_API_BASE/KEY/MODEL. These predate the agents taking "
+        "their configuration from the same place as the rest of aorta chat; "
+        "set AORTA_CHAT_* or ~/.config/aorta/chat.toml and one setting will do "
+        "for both."
+    )
+    return (
+        base,
+        os.environ.get("LITELLM_API_KEY", ""),
+        os.environ.get("LITELLM_MODEL", DEFAULT_MODEL),
+    )
+
+
 def build_lm(
     model: str | None = None,
     api_base: str | None = None,
@@ -74,15 +134,35 @@ def build_lm(
     others to configure a shared one; see ``ensure_configured`` for what the
     race costs.
 
-    An explicit argument wins over the environment. The reverse -- which is
-    what this did -- let a module name the model it needed, receive a different
-    one, and have no way to find out.
+    Where the endpoint comes from, in order: an explicit argument, then the
+    chat settings, then the LITELLM_* variables that predate them. An explicit
+    argument wins over all of it -- the reverse, which is what this did, let a
+    module name the model it needed, receive a different one, and have no way
+    to find out.
+
+    There is no default of this package's own. It used to fall back to
+    http://localhost:4000 with the key "dummy", so a user whose chat was
+    configured against a real provider had a Watch and an Autopsy silently
+    addressing a proxy that was not running, and read the resulting quiet as
+    nothing being wrong.
     """
+    # Configured chat first, then a deployment still on the old variables, then
+    # chat's own defaults -- so an unconfigured agent fails exactly the way an
+    # unconfigured chat does, rather than in a second way at a second address.
+    resolved = chat_provider() or _legacy_env() or chat_provider(configured_only=False)
+    if resolved is None and not api_base:
+        raise ProviderNotConfigured(
+            "The agents reach a model through the same configuration as the "
+            "rest of aorta chat, and none is available. Run `aorta chat config "
+            "init`, or set AORTA_CHAT_VLLM_BASE_URL."
+        )
+    settings_base, settings_key, settings_model = resolved or ("", "", "")
+
     _use_certifi_bundle()
     return dspy.LM(
-        model=f"openai/{model or os.environ.get('LITELLM_MODEL', DEFAULT_MODEL)}",
-        api_base=api_base or os.environ.get("LITELLM_API_BASE", "http://localhost:4000"),
-        api_key=api_key or os.environ.get("LITELLM_API_KEY", "dummy"),
+        model=f"openai/{model or settings_model or DEFAULT_MODEL}",
+        api_base=(api_base or settings_base) or None,
+        api_key=api_key or settings_key or "EMPTY",
         max_tokens=max_tokens,
         cache=False,
     )
