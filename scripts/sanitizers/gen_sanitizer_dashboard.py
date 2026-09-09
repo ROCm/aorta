@@ -587,13 +587,60 @@ def format_instant(value: Any) -> str:
 
 
 def _clean_msg(message: str, limit: int = 160) -> str:
-    """Collapse a leading absolute path to its basename and clamp length."""
-    text = (message or "").strip()
+    """Collapse a leading absolute path to its basename and clamp length.
+
+    Internal whitespace collapses to single spaces first. Every caller renders into
+    a one-line context -- a Markdown table cell or a single-line callout -- and the
+    backend messages this carries are genuinely multi-line: a Waitcheck reason quotes
+    up to 300 characters of ``stderr`` tail, and a finding message is the tool's own
+    diagnostic. Either would end the table row mid-table and split the rest of the
+    cells into a stray paragraph. Only this display copy is normalized; the raw
+    ``sanitizer_report.json`` keeps the message as the backend emitted it.
+    """
+    text = " ".join((message or "").split())
     if text.startswith("/"):
         head, sep, rest = text.partition(":")
         if sep:
             text = head.rsplit("/", 1)[-1] + sep + rest
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+# Mirrors ``rocjitsu_sanitizers.models._VERDICT_RANK``. The report reduces many
+# verdicts to one by taking the max of that rank, and ``CheckResult`` refuses a check
+# verdict cleaner than its own kernel results. The dashboard reads the serialized
+# strings, so it keeps the same order when it has to reduce several checks' results
+# for one kernel rather than inventing a second notion of "worse".
+_VERDICT_RANK: dict[str, int] = {
+    "pass": 0, "not_checked": 1, "warn": 2, "error": 3, "fail": 4,
+}
+
+
+def _worse_verdict(current: Any, candidate: Any) -> Any:
+    """The less clean of two observed verdicts (pure).
+
+    ``current`` of ``None`` means nothing has been observed yet, so the candidate
+    stands. An unrecognized verdict ranks below every known one rather than raising:
+    this is a renderer, and an unknown string is still worth displaying as-is.
+    """
+    if current is None:
+        return candidate
+    ranked = _VERDICT_RANK.get(str(candidate).strip().lower(), -1)
+    return candidate if ranked > _VERDICT_RANK.get(str(current).strip().lower(), -1) else current
+
+
+def _kernel_reason_text(reasons: Sequence[tuple[str, str]]) -> str:
+    """One kernel's fail-closed reasons, for a one-line display context (pure).
+
+    A lone reason renders bare -- the common case, one check per kernel. Two or more
+    are labelled with the sanitizer that produced them, since a report can hold one
+    check per requested sanitizer over the same worklist and an unlabelled
+    concatenation would not say which check refused.
+    """
+    if len(reasons) == 1:
+        return reasons[0][1]
+    return "; ".join(
+        f"{sanitizer}: {reason}" if sanitizer else reason for sanitizer, reason in reasons
+    )
 
 
 def _primary_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -645,8 +692,11 @@ def _observation_text(
     san, verdict = primary.get("sanitizer"), primary.get("verdict")
     head = f"{san or _DASH} {verdict or _DASH}" if (san or verdict) else "no sanitizer check ran"
     parts = [head]
-    if primary.get("reason"):
-        parts.append(f"reason {primary['reason']}")
+    # ``_clean_msg`` because a check-level reason is not always a bare constant: the
+    # combined ConSan hook builds ``waitcheck_analysis_failed: <parser output>`` from
+    # the tool's own text, and this one-liner is rendered as a single Markdown line.
+    if reason := _clean_msg(str(primary.get("reason") or ""), 240):
+        parts.append(f"reason {reason}")
     if kernel_reasons:
         parts.append(
             ", ".join(f"{kernel}: {reason}" for kernel, reason in kernel_reasons)
@@ -698,39 +748,68 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     kr_by_name: dict[str, dict[str, Any]] = {}
     # A whole-code-object scan is deduped by (sha256, index), so the kernels that
     # share an object with an earlier selection carry no kernel_result of their own.
-    # Index the results by object too, so those rows can be attributed to the scan
-    # that covered them instead of rendering as an em dash (see the kernels loop).
-    #
-    # Keyed only for identities that carry a real digest. Waitcheck dedups a
-    # ``code_object_scan``, which requires both a code object and its SHA-256, so a
-    # digest-less identity was never deduped and has nothing to be attributed to.
-    # Admitting one would make every ConSan kernel (code_object and sha both null)
-    # share the ``(None, None)`` key and let an unrelated sibling's verdict and
-    # reason be reported as "the same code object" -- an attribution to an object
-    # that does not exist.
-    kr_by_object: dict[tuple[str, Any], dict[str, Any]] = {}
+    # Map each scanned object to the kernel whose result covered it, so those rows can
+    # be attributed to that scan instead of rendering as an em dash (see the kernels
+    # loop). Storing the name rather than the result keeps the attribution pointed at
+    # the fully-accumulated ``kr_by_name`` entry once every check has been folded in.
+    kr_by_object: dict[tuple[str, Any], str] = {}
     findings_by_name: dict[str | None, int] = {}
     for check in checks:
+        sanitizer = str(check.get("sanitizer") or "")
         for result in check.get("kernel_results", []):
             identity = result.get("identity") or {}
             name = identity.get("name")
+            # A report can hold more than one check over the same worklist -- the
+            # shipped waitcheck+consan survey recipes select a single kernel and scan
+            # it with both -- so this kernel may already carry a result from an
+            # earlier check. Reducing to the last one silently dropped an errored
+            # Waitcheck reason whenever the later ConSan result for that kernel had
+            # none, which is the very disappearance this row exists to prevent. So
+            # accumulate across checks instead: reasons kept per sanitizer, findings
+            # summed so the column still sums to the case total, and the verdict the
+            # least clean of them, ranked as ``models._VERDICT_RANK`` ranks the
+            # report's own rollup, so the badge can never read cleaner than the
+            # Detail column beside it.
+            previous = kr_by_name.get(name)
+            reasons: list[tuple[str, str]] = list(previous["reasons"]) if previous else []
+            # The fail-closed detail. ``CheckResult.reason`` only ever carries the
+            # rollup (``worklist_not_fully_checked``); the per-kernel reason is the
+            # only field that says what actually went wrong, so it must survive into
+            # the row the renderers read.
+            if reason := _clean_msg(str(result.get("reason") or ""), 300):
+                reasons.append((sanitizer, reason))
             reduced = {
-                "verdict": result.get("verdict"),
-                "findings": len(result.get("findings", [])),
-                # The fail-closed detail. ``CheckResult.reason`` only ever carries the
-                # rollup (``worklist_not_fully_checked``); the per-kernel reason is the
-                # only field that says what actually went wrong, so it must survive
-                # into the row the renderers read.
+                "verdict": _worse_verdict(
+                    previous["verdict"] if previous else None, result.get("verdict")
+                ),
+                "findings": (previous["findings"] if previous else 0)
+                + len(result.get("findings", [])),
                 "state": result.get("state"),
-                "reason": result.get("reason"),
+                "reasons": reasons,
+                "reason": _kernel_reason_text(reasons),
                 "returncode": result.get("returncode"),
-                "covering_kernel": name,
             }
             kr_by_name[name] = reduced
+            # Only a Waitcheck whole-object scan is ever deduped, so only such a scan
+            # may stand in for a kernel that has no result of its own. The identity
+            # has to be a whole-object one -- real object, real digest, no entry
+            # offset, i.e. ``KernelIdentity.code_object_scan`` -- because an
+            # exact-entry scan covers one entry and not the object: in a mixed
+            # worklist an exact result keyed here first would lend its verdict and
+            # reason to a deduped whole-object sibling it never analyzed. Demanding a
+            # real digest also keeps every digest-less ConSan identity off a shared
+            # ``(None, None)`` key, where an unrelated sibling's verdict would be
+            # reported as "the same code object" -- an attribution to an object that
+            # does not exist.
             result_sha = identity.get("code_object_sha256")
-            if result_sha:
+            if (
+                sanitizer == "waitcheck"
+                and identity.get("code_object")
+                and result_sha
+                and identity.get("entry_offset") is None
+            ):
                 kr_by_object.setdefault(
-                    (str(result_sha), identity.get("code_object_index")), reduced
+                    (str(result_sha), identity.get("code_object_index")), str(name)
                 )
         for finding in check.get("findings", []):
             key = finding.get("kernel_name")
@@ -749,7 +828,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             verdict, findings = result["verdict"], result["findings"]
             detail = str(result["reason"] or "")
         elif entry_sha and (
-            covering := kr_by_object.get(
+            covered_by := kr_by_object.get(
                 (str(entry_sha), identity.get("code_object_index"))
             )
         ) is not None:
@@ -758,9 +837,9 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             # covers this kernel too -- reporting an em dash here read as "not checked"
             # and hid a gated kernel whose object had failed. Findings stay on the
             # covering row so the per-kernel column still sums to the case total.
+            covering = kr_by_name[covered_by]
             verdict = covering["verdict"]
             findings = 0
-            covered_by = covering["covering_kernel"]
             detail = f"same code object as {covered_by}; scanned once"
             if covering["reason"]:
                 detail = f"{detail} \u2014 {covering['reason']}"
@@ -801,8 +880,8 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     # Only the kernels that carry their own fail-closed reason; a deduped row's
     # detail restates its covering scan's reason, which would double it up here.
     kernel_reasons = [
-        (str(result["covering_kernel"]), str(result["reason"]))
-        for result in kr_by_name.values()
+        (str(name), str(result["reason"]))
+        for name, result in kr_by_name.items()
         if result["reason"]
     ]
     observation = _observation_text(

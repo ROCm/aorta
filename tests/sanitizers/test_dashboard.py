@@ -358,6 +358,222 @@ def test_case_env_records_kernel_reasons_beside_the_rollup():
     ]
 
 
+def _mixed_scope_waitcheck_report(*, exact_first: bool) -> dict:
+    """One object reached by an exact-entry scan AND a whole-object scan.
+
+    Waitcheck only dedups a whole-object scan, so an exact-entry selection always
+    produces its own result. Three kernels share ``sha``/index 0: one pinned to an
+    entry offset, one scanning the whole object, and one deduped away behind the
+    latter. ``exact_first`` puts the exact result ahead of the object result, which is
+    the order that made the deduped row inherit a scan that never covered it.
+    """
+    sha = "beef57c5d8efa401"
+
+    def _entry(name: str, offset: int | None) -> dict:
+        return {
+            "identity": {
+                "name": name, "target": "gfx950", "code_object": "/a/b/sol_9.hsaco",
+                "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+            },
+            "total_time_ms": 0.0, "dispatch_count": 10, "sources": ["gemm_csv"],
+        }
+
+    def _result(name: str, offset: int | None, verdict: str, reason: str | None) -> dict:
+        return {
+            "identity": {
+                "name": name, "target": "gfx950", "code_object": "/a/b/sol_9.hsaco",
+                "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+            },
+            "state": "ran" if reason is None else "error",
+            "verdict": verdict, "findings": [], "reason": reason,
+            "returncode": 0 if reason is None else 2,
+        }
+
+    exact = _result("gemm_pinned_entry", 0x100, "pass", None)
+    whole = _result(
+        "gemm_whole_object", None, "error",
+        "waitcheck_backend_exit_2: /a/b/sol_9.hsaco: failed to parse input executable",
+    )
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                _entry("gemm_pinned_entry", 0x100),
+                _entry("gemm_whole_object", None),
+                _entry("gemm_deduped_sibling", None),
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [exact, whole] if exact_first else [whole, exact],
+            "coverage": [],
+            "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+        }],
+    }
+
+
+def test_an_exact_entry_scan_never_covers_a_deduped_sibling():
+    # An exact-entry scan analyzes one entry, not the object, so it cannot stand in
+    # for a kernel that was deduped away. Keying every digest-carrying result by
+    # object let the exact result land on (sha, index) first and lend its clean
+    # verdict to a sibling it never looked at -- reporting `pass` for a kernel behind
+    # an object whose only whole-object scan had failed. Order must not matter.
+    for exact_first in (True, False):
+        case = gen.summarize_case(_mixed_scope_waitcheck_report(exact_first=exact_first), "warn")
+        pinned, whole, deduped = case["kernels"]
+
+        # both real scans keep their own result
+        assert pinned.get("verdict") == "pass" and pinned.get("detail") == ""
+        assert whole.get("verdict") == "error"
+
+        # the deduped row is attributed to the whole-object scan, never the entry one
+        assert deduped.get("name") == "gemm_deduped_sibling"
+        assert deduped.get("verdict") == "error"
+        assert "same code object as gemm_whole_object" in deduped.get("detail", "")
+        assert "failed to parse input executable" in deduped.get("detail", "")
+        assert "gemm_pinned_entry" not in deduped.get("detail", "")
+
+
+def _two_check_report(*, consan_reason: str | None, with_findings: bool = False) -> dict:
+    """One kernel scanned by both sanitizers, as the shipped survey recipes do.
+
+    ``tiny-vecadd-survey.yaml`` and friends select ``top_n: 1`` and request
+    ``[waitcheck, consan]``, so ``run_sanitizers`` emits one check per sanitizer over
+    the same worklist and ConSan attributes its result to that same identity.
+    """
+    identity = {
+        "name": "tiny_vecadd", "target": "gfx950", "code_object": "/a/b/vecadd.hsaco",
+        "code_object_sha256": "beefaeb46fded102", "code_object_index": 0,
+        "entry_offset": None,
+    }
+
+    def _finding(sanitizer: str, code: str) -> dict:
+        return {
+            "sanitizer": sanitizer, "severity": "race", "code": code,
+            "message": f"{sanitizer} diagnostic", "kernel_name": "tiny_vecadd",
+            "code_object": None, "entry_offset": None, "metadata": {},
+        }
+
+    wc_findings = [_finding("waitcheck", "wait_hazard")] if with_findings else []
+    cs_findings = [_finding("consan", "1")] if with_findings else []
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{
+                "identity": identity, "total_time_ms": 0.0,
+                "dispatch_count": 7, "sources": ["gemm_csv"],
+            }],
+        },
+        "checks": [
+            {
+                "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+                "reason": "worklist_not_fully_checked", "returncode": None,
+                "findings": wc_findings,
+                "kernel_results": [{
+                    "identity": identity, "state": "error", "verdict": "error",
+                    "findings": wc_findings, "returncode": 2,
+                    "reason": (
+                        "waitcheck_backend_exit_2: /a/b/vecadd.hsaco: "
+                        "failed to parse input executable or code object"
+                    ),
+                }],
+                "coverage": [],
+                "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+            },
+            {
+                "sanitizer": "consan",
+                "state": "ran" if consan_reason is None else "error",
+                "verdict": "fail" if with_findings else "pass",
+                "reason": consan_reason, "returncode": 0, "findings": cs_findings,
+                "kernel_results": [{
+                    "identity": identity,
+                    "state": "ran" if consan_reason is None else "error",
+                    "verdict": "fail" if with_findings else "pass",
+                    "findings": cs_findings, "reason": consan_reason, "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            },
+        ],
+    }
+
+
+def test_a_later_check_cannot_erase_an_earlier_checks_reason():
+    # Reducing every check's result for one kernel to the last one wrote ConSan's
+    # reasonless PASS over Waitcheck's errored result, so the reason this PR exists
+    # to surface vanished again on exactly the recipes that run both sanitizers.
+    case = gen.summarize_case(_two_check_report(consan_reason=None), "pass")
+    kernel = case["kernels"][0]
+
+    assert "failed to parse input executable or code object" in kernel.get("detail", "")
+    # and the badge cannot read cleaner than the detail beside it
+    assert kernel.get("verdict") == "error"
+    assert case.get("kernel_reasons") == [
+        (
+            "tiny_vecadd",
+            "waitcheck_backend_exit_2: /a/b/vecadd.hsaco: "
+            "failed to parse input executable or code object",
+        )
+    ]
+    assert "tiny_vecadd: waitcheck_backend_exit_2" in case.get("observation", "")
+
+
+def test_two_reasons_for_one_kernel_are_labelled_by_sanitizer():
+    # With a reason from each check, an unlabelled concatenation would not say which
+    # sanitizer refused, so each is named. Findings sum across checks too, keeping
+    # the per-kernel column summing to the case total.
+    case = gen.summarize_case(
+        _two_check_report(consan_reason="consan_hook_not_found", with_findings=True), "pass"
+    )
+    kernel = case["kernels"][0]
+
+    assert "waitcheck: waitcheck_backend_exit_2" in kernel.get("detail", "")
+    assert "consan: consan_hook_not_found" in kernel.get("detail", "")
+    # fail outranks error in the report's own verdict ranking
+    assert kernel.get("verdict") == "fail"
+    assert kernel.get("findings") == 2
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings")
+
+
+def test_a_multiline_backend_reason_stays_on_one_markdown_row():
+    # A Waitcheck backend reason quotes up to 300 characters of stderr tail, which is
+    # genuinely multi-line. Copied through unchanged it ended the table row mid-table
+    # and split the remaining cells into a stray paragraph.
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["kernel_results"][0]["reason"] = (
+        "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco:\n"
+        "  failed to parse input executable\n\n  or code object\n"
+    )
+    case = gen.summarize_case(report, "warn")
+
+    for row in (case["kernels"][0], case["kernels"][1]):
+        assert "\n" not in row.get("detail", "")
+        assert "failed to parse input executable or code object" in row.get("detail", "")
+    assert "\n" not in case.get("observation", "")
+    assert all("\n" not in reason for _kernel, reason in case.get("kernel_reasons") or [])
+    assert "\n" not in gen._survey_message_parts(case)[1]
+
+    # the rendered table keeps one line per kernel and no stray continuation
+    entries = gen.survey_cases_from_spec(
+        {"cases": [{"name": "gemm", "label": "daily GEMM", "report": report}]}
+    )
+    md = "\n".join(gen._survey_section_md(entries)).splitlines()
+    heads = [i for i, line in enumerate(md) if line.endswith("| SHA-256 | Detail |")]
+    assert len(heads) == 1, f"expected one kernels table, got {heads}"
+    head = heads[0]
+    rows = md[head + 2 : head + 2 + len(case["kernels"])]
+    assert len(rows) == 3
+    assert all(line.startswith("| `") and line.endswith(" |") for line in rows)
+    # the row after the last kernel is the table's blank terminator, not a spill
+    assert md[head + 2 + len(case["kernels"])] == ""
+
+
 def test_summarize_consan_credits_process_findings_to_single_kernel():
     case = gen.summarize_case(_consan_racy_report(), "fail")
 
