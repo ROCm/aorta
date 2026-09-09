@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -7,6 +8,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Hosts that mean "run here" rather than "SSH somewhere".
 LOCAL_HOSTS = {"", "local", "localhost", "127.0.0.1"}
@@ -130,18 +133,35 @@ def run_probe(host: str, cmd: str, timeout: int = 15) -> str:
         return f"ERROR: {e}"
 
 
-def node_exists(node: str) -> bool:
-    """True when Slurm knows about this node name."""
-    if not node or not slurm_available():
-        return False
+def node_placement(node: str) -> tuple[bool, str]:
+    """Whether *node* can be pinned, and why not when it cannot.
+
+    Three different things used to arrive here as one ``False``: a node Slurm
+    has never heard of, a Slurm that is not reachable at all, and an scontrol
+    that timed out. They mean different things to whoever asked for that node,
+    and only the first is about the node.
+
+    Returns (can_pin, reason); *reason* is empty when there is nothing to say.
+    """
+    if not node:
+        return False, ""
+    if not slurm_available():
+        return False, "Slurm is not reachable from here"
     try:
         r = subprocess.run(
             ["scontrol", "show", "node", node],
             capture_output=True, text=True, timeout=15,
         )
-        return r.returncode == 0
-    except Exception:
-        return False
+    except Exception as exc:
+        return False, f"scontrol could not be asked ({type(exc).__name__})"
+    if r.returncode != 0:
+        return False, "Slurm does not know that node"
+    return True, ""
+
+
+def node_exists(node: str) -> bool:
+    """True when Slurm knows about this node name."""
+    return node_placement(node)[0]
 
 
 def venv_activate_path() -> str:
@@ -228,12 +248,29 @@ def build_sbatch_script(
     partition = os.environ.get("CIA_PARTITION", "")
     if partition:
         directives.append(f"#SBATCH --partition={partition}")
-    if node and node_exists(node):
+    can_pin, why_not = node_placement(node)
+    if can_pin:
         directives.append(f"#SBATCH --nodelist={node}")
     for token in shlex.split(os.environ.get("CIA_SBATCH_EXTRA", "")):
         directives.append(f"#SBATCH {token}")
 
     body = ["set -uo pipefail", 'echo "[cia] node=$(hostname) slurm_job=$SLURM_JOB_ID"']
+    if node and not can_pin:
+        # A repro pinned to one machine that quietly runs on another reports on
+        # the wrong machine, and the report reads exactly the same either way.
+        # The echo matters more than the warning: the job log is in the bundle
+        # when somebody reads the verdict, and a warning is long gone by then.
+        log.warning(
+            "Requested node %s was not pinned: %s. The job will run wherever the "
+            "scheduler puts it.", node, why_not,
+        )
+        body.append(
+            "echo "
+            + shlex.quote(
+                f"[cia] requested node {node} not pinned: {why_not}; "
+                "the scheduler chose this one"
+            )
+        )
     # sbatch does propagate PATH, but only whatever the submitting shell had. Sourcing
     # the venv makes the script resolve the same CLIs no matter how it was submitted.
     activate = venv_activate_path()
