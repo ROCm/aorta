@@ -628,6 +628,39 @@ def _worse_verdict(current: Any, candidate: Any) -> Any:
     return candidate if ranked > _VERDICT_RANK.get(str(current).strip().lower(), -1) else current
 
 
+def _with_sanitizer(previous: dict[str, Any] | None, sanitizer: str) -> list[str]:
+    """The sanitizers that have contributed a result for one kernel, in order (pure)."""
+    seen = list(previous["sanitizers"]) if previous else []
+    return seen if sanitizer in seen else [*seen, sanitizer]
+
+
+def _merge_reduced(primary: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
+    """Fold two accumulated records for the same kernel into one (pure).
+
+    Same arithmetic as the per-check accumulation: the least clean verdict, findings
+    summed so the column still sums to the case total, and every reason kept. Used
+    where one check serialized a full identity for a kernel and another serialized a
+    sparse one, so the two landed under different join keys.
+    """
+    reasons = [*primary["reasons"], *other["reasons"]]
+    return {
+        "verdict": _worse_verdict(primary["verdict"], other["verdict"]),
+        "findings": primary["findings"] + other["findings"],
+        "state": primary["state"],
+        "reasons": reasons,
+        "reason": _kernel_reason_text(reasons),
+        "returncode": (
+            primary["returncode"] if primary["returncode"] is not None else other["returncode"]
+        ),
+        "name": primary["name"],
+        "identity": primary["identity"],
+        "sanitizers": [
+            *primary["sanitizers"],
+            *(s for s in other["sanitizers"] if s not in primary["sanitizers"]),
+        ],
+    }
+
+
 def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
     """The join key from a kernel result to its worklist row (pure).
 
@@ -656,6 +689,12 @@ def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
 # that is inherent to a fixed-width cell with a prefix, and the cell names the
 # covering row, which carries the same reason in full.
 _DETAIL_LIMIT = 300
+
+# A kernel label's share of any length-capped line it appears in. Kernel names are
+# unbounded -- a mangled template instantiation runs to hundreds of characters -- so an
+# unbudgeted label can spend the whole allowance and push the reason beside it off the
+# end, which is the one thing these lines exist to carry.
+_LABEL_LIMIT = 60
 
 
 def _identity_qualifier(
@@ -944,29 +983,11 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 # Kept so a reason can name *which* object failed when two selected
                 # kernels share a symbol name (see ``_kernel_reason_entries``).
                 "identity": identity,
+                # Which checks contributed, so the dedup index below can be built from
+                # Waitcheck results only without re-walking the checks.
+                "sanitizers": _with_sanitizer(previous, sanitizer),
             }
             kr_by_identity[key] = reduced
-            # Only a Waitcheck whole-object scan is ever deduped, so only such a scan
-            # may stand in for a kernel that has no result of its own. The identity
-            # has to be a whole-object one -- real object, real digest, no entry
-            # offset, i.e. ``KernelIdentity.code_object_scan`` -- because an
-            # exact-entry scan covers one entry and not the object: in a mixed
-            # worklist an exact result keyed here first would lend its verdict and
-            # reason to a deduped whole-object sibling it never analyzed. Demanding a
-            # real digest also keeps every digest-less ConSan identity off a shared
-            # ``(None, None)`` key, where an unrelated sibling's verdict would be
-            # reported as "the same code object" -- an attribution to an object that
-            # does not exist.
-            result_sha = identity.get("code_object_sha256")
-            if (
-                sanitizer == "waitcheck"
-                and identity.get("code_object")
-                and result_sha
-                and identity.get("entry_offset") is None
-            ):
-                kr_by_object.setdefault(
-                    (str(result_sha), identity.get("code_object_index")), key
-                )
         resultless = not check.get("kernel_results")
         for finding in check.get("findings", []):
             key = finding.get("kernel_name")
@@ -1010,21 +1031,57 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         row_key = (row_identity.get("name"), row_identity.get("target"))
         rows_by_name_target[row_key] = rows_by_name_target.get(row_key, 0) + 1
 
+    # Resolve every row to its result *before* anything is attributed from one. Scan
+    # scope is a property of the selection, not of whichever fields a result happened
+    # to serialize, so the dedup index below is built from worklist identities: an
+    # exact-entry result that omits only ``entry_offset`` would otherwise read as a
+    # whole-object scan and lend its verdict to a sibling it never analyzed, and a
+    # ``{name, target}`` whole-object result would never be indexed at all.
+    matched: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for entry in kernel_entries:
+        identity = entry.get("identity", {})
+        row_key = _identity_key(identity)
+        result = kr_by_identity.get(row_key)
+        loose_key = (identity.get("name"), identity.get("target"))
+        candidates = unclaimed.get(loose_key, ())
+        if len(candidates) == 1 and rows_by_name_target.get(loose_key) == 1:
+            # A sparse result is this kernel's result, so it belongs *with* an exact
+            # one rather than instead of it: one check can serialize the full identity
+            # while another serializes only ``{name, target}``, and keeping just the
+            # exact one would drop the other's verdict, reason and findings from the
+            # row -- the same cross-check loss the accumulation above exists to stop.
+            sparse = kr_by_identity.pop(candidates[0])
+            result = _merge_reduced(result, sparse) if result is not None else sparse
+            kr_by_identity[row_key] = result
+        if result is not None:
+            # The row's identity is the fuller one and describes the same kernel, so
+            # the manifest and the labels can name the object the result did not.
+            result["identity"] = identity
+            matched[row_key] = result
+            # Only a Waitcheck whole-object scan is ever deduped, so only such a scan
+            # may stand in for a kernel with no result of its own. The selection has to
+            # be a whole-object one -- real object, real digest, no entry offset, i.e.
+            # ``KernelIdentity.code_object_scan`` -- because an exact-entry scan covers
+            # one entry and not the object. Demanding a real digest also keeps every
+            # digest-less ConSan selection off a shared ``(None, None)`` key, where an
+            # unrelated sibling's verdict would be reported as "the same code object".
+            row_sha = identity.get("code_object_sha256")
+            if (
+                "waitcheck" in result["sanitizers"]
+                and identity.get("code_object")
+                and row_sha
+                and identity.get("entry_offset") is None
+            ):
+                kr_by_object.setdefault(
+                    (str(row_sha), identity.get("code_object_index")), row_key
+                )
+
     kernels: list[dict[str, Any]] = []
     credited: set[Any] = set()
     for entry in kernel_entries:
         identity = entry.get("identity", {})
         name = identity.get("name")
-        result = kr_by_identity.get(_identity_key(identity))
-        if result is None:
-            loose_key = (name, identity.get("target"))
-            candidates = unclaimed.get(loose_key, ())
-            if len(candidates) == 1 and rows_by_name_target.get(loose_key) == 1:
-                result = kr_by_identity[candidates[0]]
-                # The row's identity is the fuller one and describes the same kernel,
-                # so the manifest and the labels can name the object the result did
-                # not. Nothing else reads the sparse identity once it is matched.
-                result["identity"] = identity
+        result = matched.get(_identity_key(identity))
         entry_sha = identity.get("code_object_sha256")
         detail = ""
         if result is not None:
@@ -1049,10 +1106,12 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             # covers this kernel too -- reporting an em dash here read as "not checked"
             # and hid a gated kernel whose object had failed. Findings stay on the
             # covering row so the per-kernel column still sums to the case total.
-            covering = kr_by_identity[covering_key]
+            covering = matched[covering_key]
             verdict = covering["verdict"]
             findings = 0
-            covering_label = label_by_key.get(covering_key, str(covering["name"]))
+            covering_label = _clean_msg(
+                label_by_key.get(covering_key, str(covering["name"])), _LABEL_LIMIT
+            )
             detail = f"same code object as {covering_label}; scanned once"
             if covering["reason"]:
                 detail = f"{detail} \u2014 {covering['reason']}"
@@ -3684,7 +3743,13 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     # answer for an errored case.
     kernel_reasons = row.get("kernel_reasons") or []
     if kernel_reasons:
-        detail = "; ".join(f"{e['label']}: {e['reason']}" for e in kernel_reasons)
+        # The label is budgeted too. Kernel names are unbounded -- a mangled template
+        # instantiation runs to hundreds of characters -- so budgeting only the rollup
+        # still let the *label* spend the allowance before its reason began, leaving a
+        # callout that names a kernel and no cause.
+        detail = "; ".join(
+            f"{_clean_msg(str(e['label']), _LABEL_LIMIT)}: {e['reason']}" for e in kernel_reasons
+        )
         # Budget the rollup down first. Clamping only the concatenation let a long
         # rollup spend the whole allowance and truncate the kernel reasons off the
         # end -- and a rollup is not always short: ConSan builds

@@ -952,6 +952,149 @@ def test_a_sparse_result_is_not_guessed_onto_one_of_two_same_named_rows():
     assert "waitcheck_backend_exit_2" in case.get("observation", "")
 
 
+def test_an_exact_entry_result_missing_its_offset_cannot_cover_a_sibling():
+    # Scan scope is a property of the *selection*, not of whichever fields a result
+    # serialized. An exact-entry result that omits only `entry_offset` reads as a
+    # whole-object scan, so it could win the dedup index over the real object scan and
+    # lend its verdict to a sibling it never analyzed.
+    sha = "beefaaa1"
+
+    def _identity(name: str, offset: int | None) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                # an exact-entry selection, listed first so it keys the index first
+                {"identity": _identity("gemm_entry", 0x100), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity("gemm_object", None), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+                # deduped onto the whole-object scan: no result of its own
+                {"identity": _identity("gemm_gated", None), "total_time_ms": 0.0,
+                 "dispatch_count": 7, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                {
+                    # the offset the selection pins is absent from the result
+                    "identity": _identity("gemm_entry", None), "state": "ran",
+                    "verdict": "pass", "findings": [], "reason": None, "returncode": 0,
+                },
+                {
+                    "identity": _identity("gemm_object", None), "state": "error",
+                    "verdict": "error", "findings": [], "returncode": 2,
+                    "reason": "waitcheck_backend_exit_2: refused the object",
+                },
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    entry_row, object_row, gated = case["kernels"]
+    assert entry_row.get("verdict") == "pass"
+    assert object_row.get("verdict") == "error"
+    # the gated row inherits the scan that actually covered its object
+    assert gated.get("verdict") == "error"
+    assert "same code object as gemm_object" in gated.get("detail", "")
+    assert "refused the object" in gated.get("detail", "")
+
+
+def test_a_sparse_result_merges_into_the_exact_one_for_the_same_row():
+    # One check can serialize the full identity while another serializes only
+    # {name, target}. The two land under different join keys, and taking the exact one
+    # alone dropped the other check's verdict, reason and findings off the row —
+    # the same cross-check loss the accumulation exists to stop.
+    identity = {
+        "name": "vecadd", "target": "gfx950", "code_object": "/a/b/vecadd.hsaco",
+        "code_object_sha256": "beefaaa1", "code_object_index": 0, "entry_offset": None,
+    }
+
+    def _finding(sanitizer: str, code: str) -> dict:
+        return {
+            "sanitizer": sanitizer, "severity": "warning", "code": code,
+            "message": f"{code} on vecadd", "kernel_name": "vecadd",
+            "code_object": "/a/b/vecadd.hsaco", "entry_offset": None, "metadata": {},
+        }
+
+    wait_finding, race_finding = _finding("waitcheck", "wait_hazard"), _finding("consan", "race")
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "fail", "execution_status": "ran",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": identity, "total_time_ms": 0.0,
+                         "dispatch_count": 9, "sources": ["gemm_csv"]}],
+        },
+        "checks": [
+            {
+                "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+                "reason": "worklist_not_fully_checked", "returncode": None,
+                "findings": [wait_finding],
+                "kernel_results": [{
+                    "identity": identity, "state": "error", "verdict": "error",
+                    "findings": [wait_finding], "returncode": 2,
+                    "reason": "waitcheck_backend_exit_2: refused input",
+                }],
+                "coverage": [], "backend": {},
+            },
+            {
+                "sanitizer": "consan", "state": "ran", "verdict": "fail",
+                "reason": None, "returncode": 0, "findings": [race_finding],
+                "kernel_results": [{
+                    # the same kernel, identified by name and target only
+                    "identity": {"name": "vecadd", "target": "gfx950"},
+                    "state": "ran", "verdict": "fail", "findings": [race_finding],
+                    "reason": "consan_race_detected", "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            },
+        ],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    assert len(case["kernels"]) == 1
+    row = case["kernels"][0]
+    # both checks' reasons survive, labelled, and the verdict is the least clean
+    assert "waitcheck: waitcheck_backend_exit_2" in row.get("detail", "")
+    assert "consan: consan_race_detected" in row.get("detail", "")
+    assert row.get("verdict") == "fail"
+    # and the column still sums to the case total rather than losing one check's finding
+    assert row.get("findings") == 2
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings") == 2
+    assert len(case.get("kernel_reasons") or []) == 1
+
+
+def test_a_long_kernel_name_cannot_truncate_its_own_reason_away():
+    # Kernel names are unbounded — a mangled template instantiation runs to hundreds of
+    # characters. Budgeting only the rollup still let the label spend the rest of the
+    # allowance before its reason began, leaving a callout that names a kernel and no
+    # cause at all.
+    long_name = "gemm_" + "N" * 300
+    report = json.loads(
+        json.dumps(_waitcheck_daily_topology_report()).replace(
+            "gemm_NT_M256_N4096_K1024", long_name
+        )
+    )
+
+    case = gen.summarize_case(report, "warn")
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert "waitcheck_backend_exit_2" in text
+
+
 def test_preflight_findings_still_land_in_the_kernel_column():
     # run_sanitizers appends the combined hook's Waitcheck preflight as a third check.
     # `consan._relabel` keeps that check's findings and drops its kernel results, so
