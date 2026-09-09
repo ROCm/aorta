@@ -311,6 +311,11 @@ aorta = [
     # The retrieval eval question set (Decision 19b). Shipped so `aorta chat
     # index eval` works with no arguments on an installed wheel.
     "chat/rag/eval_questions.json",
+    # Watch loads this through Path(__file__).parent. Left out of the wheel it
+    # is not an error: the loader falls back to {} and the built-in defaults
+    # apply, so an installed Watch would poll on a different interval and hold
+    # a shorter list of expectations than the one shipped here, silently.
+    "cia/watch/watch_config.yaml",
     "ebpf/scripts/*.bt",
     "ebpf/scripts/PROVENANCE.md",
     "workloads/hrx_kernels/*.cpp",
