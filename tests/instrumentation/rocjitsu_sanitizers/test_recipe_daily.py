@@ -300,6 +300,7 @@ def _write_kernel_waitcheck_recipe(
     *,
     code_object: str = "fixtures/isa/tiny.hsaco",
     sha256_line: str = "",
+    policy_extra: str = "",
 ) -> Path:
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(
@@ -325,6 +326,7 @@ def _write_kernel_waitcheck_recipe(
         "  policy:\n"
         "    consan_policy: strict\n"
         "    on_missing_backend: fail\n"
+        f"{policy_extra}"
         "  output:\n"
         "    report: sanitizer_report.json\n",
         encoding="utf-8",
@@ -593,6 +595,61 @@ def test_execute_threads_timeout_seconds_into_run_sanitizers(
     recipe = _write_kernel_consan_recipe(tmp_path, timeout_seconds=timeout_seconds)
     execute_sanitizer_run(recipe, output_dir=tmp_path / "out")
     assert captured.get("timeout_seconds") == expected
+
+
+def test_loader_parses_policy_waitcheck_max_diagnostics(tmp_path: Path) -> None:
+    recipe = _write_kernel_waitcheck_recipe(
+        tmp_path, policy_extra="    waitcheck_max_diagnostics: 100000\n"
+    )
+    assert load_sanitizer_recipe(recipe).waitcheck_max_diagnostics == 100000
+
+
+def test_loader_defaults_waitcheck_max_diagnostics_to_none_when_absent(tmp_path: Path) -> None:
+    # Absent keeps rj_waitcheck's own cap; the truncation flag is what makes a
+    # capped scan visible, so the default is not silently raised (#480).
+    loaded = load_sanitizer_recipe(_write_kernel_waitcheck_recipe(tmp_path))
+    assert loaded.waitcheck_max_diagnostics is None
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "true", '"all"', "12.5"])
+def test_loader_rejects_invalid_waitcheck_max_diagnostics(tmp_path: Path, bad_value: str) -> None:
+    recipe = _write_kernel_waitcheck_recipe(
+        tmp_path, policy_extra=f"    waitcheck_max_diagnostics: {bad_value}\n"
+    )
+    with pytest.raises(RecipeSchemaError, match="waitcheck_max_diagnostics"):
+        load_sanitizer_recipe(recipe)
+
+
+@pytest.mark.parametrize(
+    ("policy_extra", "expected"),
+    [("    waitcheck_max_diagnostics: 100000\n", 100000), ("", None)],
+)
+def test_execute_threads_waitcheck_max_diagnostics_into_run_waitcheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy_extra: str,
+    expected: int | None,
+) -> None:
+    # The recipe knob has to reach the backend argv, or a lane cannot escape the
+    # 32-diagnostic cap without editing code.
+    captured: dict[str, object] = {}
+
+    def _fake_run_waitcheck(worklist, *, max_diagnostics=None, **_kwargs) -> CheckResult:
+        captured["max_diagnostics"] = max_diagnostics
+        return CheckResult(
+            sanitizer="waitcheck", state=ExecutionState.RAN, verdict=Verdict.PASS
+        )
+
+    monkeypatch.setattr(pipeline, "run_waitcheck", _fake_run_waitcheck)
+    obj = tmp_path / "fixtures" / "isa" / "tiny.hsaco"
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(b"\x7fELF fake tiny code object")
+    recipe = _write_kernel_waitcheck_recipe(tmp_path, policy_extra=policy_extra)
+
+    execute_sanitizer_run(recipe, output_dir=tmp_path / "out")
+
+    assert "max_diagnostics" in captured  # the waitcheck check actually ran
+    assert captured["max_diagnostics"] == expected
 
 
 def test_verdict_baselines_fixture_present() -> None:

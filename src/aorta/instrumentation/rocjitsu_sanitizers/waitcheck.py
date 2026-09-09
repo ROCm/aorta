@@ -9,6 +9,7 @@ import re
 import shutil
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -34,10 +35,29 @@ _HEADER = re.compile(
     # not misread as a missing analysis summary.
     r"(?:\s*kernel=\.text\+0x(?P<entry>[0-9a-f]+):)?"
     r"\s+instructions=(?P<instructions>[0-9]+).*"
-    r"diagnostics=(?:>=)?(?P<diagnostics>[0-9]+)"
+    # rj_waitcheck stops collecting at --max-diagnostics and marks the capped
+    # summary by prefixing the count with ">=" (``diagnostics=>=32``). Capture
+    # that marker: matching it and dropping it made a partial hazard count
+    # indistinguishable from a complete one (#480).
+    r"diagnostics=(?P<truncated>>=)?(?P<diagnostics>[0-9]+)"
 )
 _DIAGNOSTIC = re.compile(r"\bmissing\s+s_wait|\bhazard\b", re.IGNORECASE)
 _CONTEXT = re.compile(r"^(producer|consumer)\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class ParsedWaitcheckOutput:
+    """One Waitcheck scan's findings and whether the backend capped them.
+
+    ``diagnostics_truncated`` is true when the analysis summary reported
+    ``diagnostics=>=N``: the scan hit ``--max-diagnostics`` (32 by default) and
+    ``findings`` is a partial view of the hazards in the code object. Raise the
+    cap -- ``sanitizer_plan.policy.waitcheck_max_diagnostics`` on a recipe -- to
+    get a complete count.
+    """
+
+    findings: tuple[Finding, ...]
+    diagnostics_truncated: bool
 
 
 class ProcessExecutor(Protocol):
@@ -105,7 +125,12 @@ def parse_waitcheck_jsonl(
     *,
     expected: KernelIdentity,
 ) -> tuple[Finding, ...]:
-    """Parse structured diagnostics and reject identity mismatches."""
+    """Parse structured diagnostics and reject identity mismatches.
+
+    The JSONL stream carries no analysis summary, so — unlike
+    ``parse_waitcheck_text`` — it cannot tell a capped scan from a complete one;
+    a corpus caller that needs that signal has to read the summary line too.
+    """
 
     if not path.exists():
         return ()
@@ -198,17 +223,23 @@ def parse_waitcheck_text(
     output: str,
     *,
     expected: KernelIdentity,
-) -> tuple[Finding, ...]:
-    """Parse exact-entry CLI output until structured single-entry output exists."""
+) -> ParsedWaitcheckOutput:
+    """Parse exact-entry CLI output until structured single-entry output exists.
+
+    Returns the findings together with the analysis summary's ``>=`` cap marker,
+    so a capped scan is not read as a complete one (``ParsedWaitcheckOutput``).
+    """
 
     findings: list[Finding] = []
     header_seen = False
+    truncated = False
     expected_index = expected.code_object_index or 0
     for raw_line in output.splitlines():
         line = raw_line.strip()
         header = _HEADER.search(line)
         if header is not None:
             header_seen = True
+            truncated = truncated or header.group("truncated") is not None
             if header.group("target") != expected.target:
                 raise ValueError(
                     f"Waitcheck target {header.group('target')!r} does not match "
@@ -273,12 +304,17 @@ def parse_waitcheck_text(
     if not header_seen:
         raise ValueError("Waitcheck output did not contain an analysis summary")
     deduplicated = {finding.dedupe_key: finding for finding in findings}
-    return tuple(deduplicated[key] for key in sorted(deduplicated, key=repr))
+    return ParsedWaitcheckOutput(
+        findings=tuple(deduplicated[key] for key in sorted(deduplicated, key=repr)),
+        diagnostics_truncated=truncated,
+    )
 
 
 def waitcheck_argv(
     binary: Path,
     identity: KernelIdentity,
+    *,
+    max_diagnostics: int | None = None,
 ) -> tuple[str, ...]:
     """Build argv for one code-object Waitcheck invocation."""
 
@@ -287,6 +323,13 @@ def waitcheck_argv(
             "Waitcheck requires code_object and code_object_sha256, "
             "and optionally entry_offset for exact-entry mode"
         )
+    # Validated here rather than only in the recipe loader because this and
+    # ``run_waitcheck`` are entered directly by library callers; ``True`` would
+    # otherwise reach the backend as the argument "True".
+    if max_diagnostics is not None and (
+        isinstance(max_diagnostics, bool) or max_diagnostics < 1
+    ):
+        raise ValueError("max_diagnostics must be a positive integer")
     argv = [
         str(binary),
         str(identity.code_object),
@@ -302,6 +345,8 @@ def waitcheck_argv(
                 f"0x{identity.entry_offset:x}",
             ]
         )
+    if max_diagnostics is not None:
+        argv.extend(["--max-diagnostics", str(max_diagnostics)])
     return tuple(argv)
 
 
@@ -321,6 +366,7 @@ def _run_one(
     log_path: Path,
     timeout_seconds: float,
     execute: ProcessExecutor,
+    max_diagnostics: int | None = None,
 ) -> KernelCheckResult:
     if not identity.exact and not identity.code_object_scan:
         return _not_checked(identity, "code_object_identity_required")
@@ -338,7 +384,7 @@ def _run_one(
             reason="code_object_digest_mismatch",
         )
     process = execute(
-        waitcheck_argv(binary, identity),
+        waitcheck_argv(binary, identity, max_diagnostics=max_diagnostics),
         timeout_seconds=timeout_seconds,
     )
     log_path.write_text(
@@ -360,7 +406,7 @@ def _run_one(
             reason=f"waitcheck_launch_error: {process.launch_error}",
         )
     try:
-        findings = parse_waitcheck_text(
+        parsed = parse_waitcheck_text(
             f"{process.stdout}\n{process.stderr}",
             expected=identity,
         )
@@ -381,9 +427,10 @@ def _run_one(
             verdict=Verdict.ERROR,
             reason=f"waitcheck_backend_exit_{process.returncode}{suffix}",
             returncode=process.returncode,
-            findings=findings,
+            findings=parsed.findings,
+            diagnostics_truncated=parsed.diagnostics_truncated,
         )
-    if process.returncode == WAITCHECK_HAZARD_EXIT and not findings:
+    if process.returncode == WAITCHECK_HAZARD_EXIT and not parsed.findings:
         return KernelCheckResult(
             identity=identity,
             state=ExecutionState.ERROR,
@@ -394,9 +441,10 @@ def _run_one(
     return KernelCheckResult(
         identity=identity,
         state=ExecutionState.RAN,
-        verdict=Verdict.WARN if findings else Verdict.PASS,
+        verdict=Verdict.WARN if parsed.findings else Verdict.PASS,
         returncode=process.returncode,
-        findings=findings,
+        findings=parsed.findings,
+        diagnostics_truncated=parsed.diagnostics_truncated,
     )
 
 
@@ -407,8 +455,15 @@ def run_waitcheck(
     binary: Path | None = None,
     timeout_seconds: float = 900.0,
     execute: ProcessExecutor = run_argv,
+    max_diagnostics: int | None = None,
 ) -> CheckResult:
-    """Run exact Waitcheck for every worklist entry, failing closed on gaps."""
+    """Run exact Waitcheck for every worklist entry, failing closed on gaps.
+
+    ``max_diagnostics`` overrides the backend's per-code-object diagnostic cap
+    (``rj_waitcheck --max-diagnostics``, 32 by default). Leaving it unset keeps
+    the backend default; either way a capped scan is reported as
+    ``diagnostics_truncated`` rather than as a complete hazard count.
+    """
 
     resolved = resolve_waitcheck(binary)
     if resolved is None or not resolved.is_file():
@@ -459,6 +514,7 @@ def run_waitcheck(
             log_path=output_dir / f"waitcheck-{task_index}.log",
             timeout_seconds=timeout_seconds,
             execute=execute,
+            max_diagnostics=max_diagnostics,
         )
 
     # Each selected code object is an independent rj_waitcheck subprocess doing
@@ -479,6 +535,9 @@ def run_waitcheck(
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             kernel_results = tuple(pool.map(_scan, scan_tasks))
     findings = tuple(finding for result in kernel_results for finding in result.findings)
+    # One capped scan makes the whole check's finding count a floor, not a total,
+    # so the flag rolls up alongside the findings it qualifies.
+    truncated = any(result.diagnostics_truncated for result in kernel_results)
     if not kernel_results:
         return CheckResult(
             sanitizer="waitcheck",
@@ -501,6 +560,7 @@ def run_waitcheck(
             findings=findings,
             kernel_results=kernel_results,
             backend=backend,
+            diagnostics_truncated=truncated,
         )
     return CheckResult(
         sanitizer="waitcheck",
@@ -509,4 +569,5 @@ def run_waitcheck(
         findings=findings,
         kernel_results=kernel_results,
         backend=backend,
+        diagnostics_truncated=truncated,
     )
