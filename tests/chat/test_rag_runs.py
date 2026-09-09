@@ -24,6 +24,7 @@ from langchain_core.embeddings import Embeddings
 
 from aorta.chat.config import configure, reset_settings, settings
 from aorta.chat.rag import runs as runs_rag
+from aorta.chat.rag.embeddings.base import MAX_COLLECTION_NAME
 from aorta.chat.rag.retriever import SqliteVecStore
 
 VOCABULARY = ["nan", "loss", "rocm", "tf32", "hang", "memory", "triton"]
@@ -271,12 +272,57 @@ class TestTheRunCollectionSeparatesModelsByName:
         assert runs_rag.run_collection_name() != at_a
 
     def test_it_is_still_a_bare_identifier_after_the_suffix(self, monkeypatch):
-        """The suffix lands after the digest, on a name already at the cap."""
+        """The suffix lands after the digest, on a name already at the cap.
+
+        Shape only. Whether the result is *within* the cap is a separate
+        question, and the answer is currently no -- see the xfail below.
+        """
         monkeypatch.setattr(settings, "remote_embedding_model", "q" * 200)
         name = runs_rag.run_collection_name()
 
         assert re.fullmatch(r"[A-Za-z0-9_]+", name)
         assert name.endswith(runs_rag.RUN_COLLECTION_SUFFIX)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "#476: run_collection_name() appends _runs to a name "
+            "build_collection_name() has already filled to MAX_COLLECTION_NAME, "
+            "so the composed name runs up to 68 characters against a cap of 63"
+        ),
+    )
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # Ordinary configuration, not a synthetic edge: slugs to 38
+            # characters, which is over the 36 the remote prefix leaves once the
+            # digest and ``_runs`` are both accounted for. Measures 65.
+            "sentence-transformers/all-MiniLM-L6-v2",
+            # The extreme end, where the slug is truncated to the cap first.
+            # Measures 68.
+            "q" * 200,
+        ],
+    )
+    def test_the_suffix_does_not_push_the_name_over_the_cap(self, monkeypatch, model: str):
+        """The cap is the whole point of reserving room for the digest.
+
+        ``build_collection_name`` reserves for its own suffix and returns a name
+        at exactly :data:`MAX_COLLECTION_NAME`; ``run_collection_name`` then
+        concatenates ``_runs`` onto it, and nothing re-checks. Each function
+        keeps its own contract and the composition breaks it.
+
+        Marked ``xfail(strict=True)`` rather than deleted or inverted: asserting
+        the current 68-character result would pin a defect as a contract, and
+        deleting it would lose the only statement of what the cap means for this
+        collection. Strict so that fixing #476 turns this into a failure that
+        has to be acknowledged, instead of a silent xpass.
+        """
+        monkeypatch.setattr(settings, "remote_embedding_model", model)
+        name = runs_rag.run_collection_name()
+
+        assert len(name) <= MAX_COLLECTION_NAME, (
+            f"{len(name)} characters, cap is {MAX_COLLECTION_NAME}: {name}"
+        )
 
 
 class TestIndexing:
