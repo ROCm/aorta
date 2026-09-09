@@ -344,13 +344,22 @@ class TestSummaryWording:
         assert summary.describe() == expected
 
 
-#: Receivers in ``graph/nodes.py`` whose ``ainvoke`` sends nothing to a
-#: provider, and which are therefore outside what ``_send`` guards. A retriever
-#: queries the local sqlite index; a tool runs local code. Both are awaited
-#: rather than called, so neither blocks the event loop out from under a
-#: concurrent Chainlit session (issue #444) -- and neither carries a message
-#: that redaction would have anything to say about. Anything not named here
-#: still has to go through ``_send``.
+#: Receivers in ``graph/nodes.py`` that are not chat models, and are therefore
+#: outside what ``_send`` guards. ``_send`` is the *chat-model* gate, and that
+#: is the whole of what this exemption means.
+#:
+#: It emphatically does not mean nothing leaves the machine. A tool runs local
+#: code, but a retriever only queries the local sqlite index under the default
+#: ``embedding_provider = "local"``; set it to ``"remote"`` and
+#: ``retriever.ainvoke(last_human)`` sends the raw user query to the embeddings
+#: API, unredacted -- ``docs/chat/redaction.md`` documents that path and says
+#: plainly that it does not go through the chat-message redactor. So the reason
+#: these two are exempt is that they are not the thing ``_send`` gates, not
+#: that they are egress-free.
+#:
+#: Both are awaited rather than called, so neither blocks the event loop out
+#: from under a concurrent Chainlit session (issue #444). Anything not named
+#: here still has to go through ``_send``.
 _NON_MODEL_AINVOKE_RECEIVERS = frozenset({"retriever", "tool_fn"})
 
 #: Every way a LangChain model can be driven asynchronously, all of which are
@@ -365,12 +374,20 @@ _MODEL_INVOCATION_VERBS = frozenset(
         "abatch",
         "abatch_as_completed",
         "agenerate",
+        "agenerate_prompt",
         "astream",
         "astream_events",
         "astream_log",
         "atransform",
     }
 )
+
+#: Async public methods on ``BaseChatModel`` that do *not* drive a request, so
+#: their absence from :data:`_MODEL_INVOCATION_VERBS` is correct rather than a
+#: gap. ``as_tool``/``assign`` build a runnable, ``asdict`` serialises. They are
+#: listed because the completeness test below works by subtraction: naming what
+#: is deliberately not egress is what lets it treat everything else as egress.
+_NON_INVOKING_ASYNC_ATTRS = frozenset({"as_tool", "asdict", "assign"})
 
 #: How each AST node that can bind a name exposes the expression it binds
 #: *from*. The guard below walks bindings rather than assignments because the
@@ -843,6 +860,41 @@ class TestGraphChokepoint:
         source = Path(nodes_path()).read_text(encoding="utf-8")
         assert _unaccounted_bound_names(source) == []
         assert _module_bound_names(source) >= set(_NON_MODEL_AINVOKE_RECEIVERS)
+
+    def test_the_guarded_verbs_cover_every_async_api_the_model_exposes(self):
+        """``BaseChatModel`` is the oracle, so a langchain upgrade cannot open a gap.
+
+        An enumerated verb list is only as good as the day it was written: this
+        one was missing ``agenerate_prompt``, so a direct
+        ``llm.agenerate_prompt(...)`` would have sent prompts outside ``_send``
+        with the chokepoint test still green. Rather than add that one name,
+        derive the expectation from the class itself and subtract the async
+        attributes that provably do not drive a request
+        (:data:`_NON_INVOKING_ASYNC_ATTRS`).
+
+        So the failure mode is inverted. A future langchain that adds an async
+        verb fails here -- loudly, naming the verb -- instead of silently
+        widening the hole the guard exists to close.
+        """
+        from langchain_core.language_models.chat_models import BaseChatModel
+
+        exposed = {
+            name
+            for name in dir(BaseChatModel)
+            if name.startswith("a")
+            and not name.startswith("_")
+            and callable(getattr(BaseChatModel, name, None))
+        }
+        unguarded = exposed - _NON_INVOKING_ASYNC_ATTRS - _MODEL_INVOCATION_VERBS
+        assert not unguarded, (
+            f"BaseChatModel exposes async verb(s) the redaction chokepoint does "
+            f"not guard: {sorted(unguarded)}. Add each to "
+            f"_MODEL_INVOCATION_VERBS, or to _NON_INVOKING_ASYNC_ATTRS if it "
+            f"cannot drive a request."
+        )
+        # And the exclusion list must not rot into a way to hide a real verb:
+        # every name in it has to still exist on the class.
+        assert _NON_INVOKING_ASYNC_ATTRS <= exposed
 
 
 def nodes_path() -> str:

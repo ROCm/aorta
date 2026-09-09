@@ -16,6 +16,7 @@ query and some tokens to discover:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1280,6 +1281,232 @@ class TestWastedCallGuards:
         assert result["messages"][0].content == _NO_ANSWER_MSG
 
 
+class TestOneOutageDoesNotSpendTheWholeFailureBudget:
+    """The budget counts probes that learned something, not requests in flight.
+
+    ``_MAX_NATIVE_FAILURES`` is two so that a single bad minute cannot disable
+    the escalation for the process: a permanent refusal and a 503 look the same
+    on one failure, and the *second* attempt is what separates them. Two
+    Chainlit sessions failing inside the same outage are not that second
+    attempt -- nothing was probed between them.
+
+    Measured before the fix: two concurrent sessions, one transient 503, both
+    increments landed, and every later query in the process was denied its
+    retry even after the endpoint recovered.
+    """
+
+    @staticmethod
+    def _rig(*, failing: bool):
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        bound = MagicMock()
+        if failing:
+
+            async def outage(*_a, **_kw):
+                # Yield, so both sessions are genuinely in flight together.
+                await asyncio.sleep(0.01)
+                raise RuntimeError("503 transient")
+
+            bound.ainvoke = AsyncMock(side_effect=outage)
+        else:
+            bound.ainvoke = AsyncMock(return_value=AIMessage(content="Native answer."))
+        plain.bind_tools = MagicMock(return_value=bound)
+        return plain, bound
+
+    @pytest.mark.asyncio
+    async def test_concurrent_failures_in_one_outage_count_once(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        plain, _bound = self._rig(failing=True)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="x"),
+        ):
+            await asyncio.gather(act_node(_state()), act_node(_state()))
+        assert nodes._escalation.native_failures == 1
+        assert nodes._escalation.native_failures < nodes._MAX_NATIVE_FAILURES
+
+    @pytest.mark.asyncio
+    async def test_a_query_after_the_outage_still_gets_its_retry(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The point of the fix, stated as the user-visible outcome."""
+        plain, _bound = self._rig(failing=True)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="x"),
+        ):
+            await asyncio.gather(act_node(_state()), act_node(_state()))
+        recovered, bound = self._rig(failing=False)
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=recovered):
+            result = await act_node(_state())
+        assert bound.ainvoke.await_count >= 1, "the retry was denied after one outage"
+        assert result["messages"][0].content == "Native answer."
+
+    @pytest.mark.asyncio
+    async def test_two_sequential_probes_still_write_native_off(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The coalescing must not have become "never reach the budget".
+
+        Two probes with a completed failure between them carry the information
+        the budget exists to collect, so they must still spend it.
+        """
+        plain, _bound = self._rig(failing=True)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="x"),
+        ):
+            await act_node(_state())
+            assert nodes._escalation.native_failures == 1
+            await act_node(_state())
+        assert nodes._escalation.native_failures == nodes._MAX_NATIVE_FAILURES
+
+    def test_the_reset_clears_every_field(self):
+        """An enumerated reset had already fallen behind once."""
+        import dataclasses
+
+        nodes._escalation.escalated = True
+        nodes._escalation.native_failures = 7
+        nodes._escalation.probes_begun = 7
+        nodes._escalation.counted_watermark = 7
+        nodes.reset_tool_mode_escalation()
+        assert nodes._escalation == nodes._EscalationState()
+        # And the reset must cover fields added after it was written.
+        assert {f.name for f in dataclasses.fields(nodes._EscalationState)} == {
+            "escalated",
+            "native_failures",
+            "probes_begun",
+            "counted_watermark",
+        }
+
+
+class TestTheRetryDoesNotRunATextProtocolToolASecondTime:
+    """The escalation must not re-execute what the text round already ran.
+
+    The retry used to start from a bare prompt: ``prior_trace`` reached the
+    *returned* trace but never the retry's ``messages``, and its ``seen`` set
+    started empty. So a model that wanted the call the text round had already
+    made got it executed again. Measured before the fix: one question,
+    ``list_files(path="src")`` run twice, and the result recorded twice in the
+    trace handed to the critic.
+
+    Cost on the default registry, whose nine tools are all read-only. Not only
+    cost with ``enable_shell_tool`` set, which puts ``run_terminal_command`` in
+    the same registry the escalated loop binds -- then the repeated call is a
+    repeated side effect.
+    """
+
+    @staticmethod
+    def _text_runs_a_tool_then_dead_ends(native_repeats_the_call: bool):
+        """Text: one real tool call, then silence. Native: asks for it again."""
+        rounds = {"n": 0}
+
+        async def text_reply(_messages, **_kw):
+            rounds["n"] += 1
+            if rounds["n"] == 1:
+                return AIMessage(content='ACTION: list_files(path="src")')
+            return _dead_end_reply()
+
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=text_reply)
+        repeat = _tool_call("list_files", {"path": "src"})
+        fresh = _tool_call("read_file", {"path": "other.py"})
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[repeat if native_repeats_the_call else fresh],
+                ),
+                AIMessage(content="Here are the files."),
+            ]
+        )
+        plain.bind_tools = MagicMock(return_value=bound)
+        return plain, bound
+
+    @pytest.mark.asyncio
+    async def test_the_duplicate_call_is_not_executed_again(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        executed = []
+
+        async def record(name, kwargs):
+            executed.append((name, tuple(sorted(kwargs.items()))))
+            return "a.py\nb.py"
+
+        plain, _bound = self._text_runs_a_tool_then_dead_ends(True)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", side_effect=record),
+        ):
+            result = await act_node(_state())
+        assert len(executed) == 1, f"tool ran {len(executed)}x: {executed}"
+        assert len(result["tool_trace"]) == 1, "the result must not be recorded twice"
+        assert result["messages"][0].content == "Here are the files."
+
+    @pytest.mark.asyncio
+    async def test_the_retry_is_shown_the_result_it_must_not_ask_for(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """Seeding ``seen`` alone would refuse a result never shown to it.
+
+        The duplicate guard answers a repeat with "already made, see above" --
+        which is a lie the model cannot act on if the prior round happened in a
+        protocol whose messages it never received. So the result has to be in
+        the prompt, not merely in the guard.
+        """
+        plain, bound = self._text_runs_a_tool_then_dead_ends(True)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py\nb.py"),
+        ):
+            await act_node(_state())
+        sent = bound.ainvoke.await_args_list[0][0][0]
+        prompt = " ".join(str(getattr(m, "content", "")) for m in sent)
+        assert "a.py" in prompt, "the retry cannot use a result it was never given"
+        assert "Do not repeat these calls" in prompt
+
+    @pytest.mark.asyncio
+    async def test_a_different_call_still_runs(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The guard must not have become "no tools after an escalation"."""
+        executed = []
+
+        async def record(name, kwargs):
+            executed.append(name)
+            return "contents"
+
+        plain, _bound = self._text_runs_a_tool_then_dead_ends(False)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", side_effect=record),
+        ):
+            result = await act_node(_state())
+        assert executed == ["list_files", "read_file"]
+        assert len(result["tool_trace"]) == 2
+
+    def test_the_two_protocols_agree_on_what_a_call_is_called(self):
+        """One signature function, because seeding compares across protocols.
+
+        The text loop parses kwargs and the native loop reads structured
+        ``args``. Two separately-written format strings that have to agree is
+        how the seeding stops matching without anything failing.
+        """
+        from aorta.chat.graph.nodes import _call_signature
+
+        assert _call_signature("list_files", {"path": "src"}) == _call_signature(
+            "list_files", {"path": "src"}
+        )
+        # Argument order must not make two identical calls look different.
+        assert _call_signature("f", {"a": 1, "b": 2}) == _call_signature(
+            "f", {"b": 2, "a": 1}
+        )
+        assert _call_signature("f", {}) == _call_signature("f", None)
+        assert _call_signature("f", {"a": 1}) != _call_signature("f", {"a": 2})
+
+
 class TestABackendThatFallsOverPartWayThroughNative:
     """A failure *after* native worked is not a failure of native.
 
@@ -1359,6 +1586,29 @@ class TestABackendThatFallsOverPartWayThroughNative:
         assert result["tool_trace"], "the gathered results must still be recorded"
         assert "no answer to give" in caplog.text
         assert "Answering from what was gathered" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_the_switch_is_not_announced_as_an_answer(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """The protocol moved because tools were called, not because it answered.
+
+        ``_commit_escalation`` hard-coded "Native function calling answered it",
+        which is false here -- this path is reached *after* the request raised.
+        An operator reading the log would see the switch announced as a success
+        on the one query it did not rescue.
+        """
+        plain, _bound = self._llm_that_breaks_after_one_tool_call()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", return_value="a.py"),
+            caplog.at_level(logging.WARNING),
+        ):
+            await act_node(_state())
+        assert "answered it" not in caplog.text
+        assert "drove real tool calls before the backend failed" in caplog.text
+        # The switch still moves -- the protocol is proven either way.
+        assert "will use native from here" in caplog.text
 
     @pytest.mark.asyncio
     async def test_it_does_not_count_against_the_native_failure_budget(

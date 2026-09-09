@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from typing import Any
 
 from langchain_core.messages import (
@@ -793,6 +794,14 @@ class _EscalationState:
     #: Nothing was learned about the endpoint either way, and the budget is the
     #: same budget.
     native_failures: int = 0
+    #: Escalated probes begun, monotonic. Each probe keeps the value it read
+    #: here, which is what lets :func:`_record_escalation_failure` tell a second
+    #: *sequential* attempt from a second *concurrent* one.
+    probes_begun: int = 0
+    #: ``probes_begun`` as it stood when a failure was last counted. Any probe
+    #: that began at or before this was already in flight then, so it belongs to
+    #: the same wave and must not be billed again.
+    counted_watermark: int = 0
 
 
 #: Failed escalated attempts before native is written off for the process.
@@ -807,9 +816,16 @@ _escalation = _EscalationState()
 
 
 def reset_tool_mode_escalation() -> None:
-    """Forget what was learned about the protocol. For tests, which share one process."""
-    _escalation.escalated = False
-    _escalation.native_failures = 0
+    """Forget what was learned about the protocol. For tests, which share one process.
+
+    Restores every field from a fresh :class:`_EscalationState` rather than
+    naming them, because it had already fallen behind once: two fields were
+    added for the concurrent-failure fix and an enumerated reset would have
+    leaked both into the next test, as state that looks like a previous
+    session's probe.
+    """
+    for field in dataclass_fields(_EscalationState):
+        setattr(_escalation, field.name, field.default)
 
 
 def _tool_mode_is_explicit() -> bool:
@@ -875,13 +891,31 @@ def _escalate_to_native(response: Any) -> bool:
     return _is_reasoning_dead_end(response)
 
 
-def _commit_escalation(signature: str) -> None:
-    """Move the rest of the process to native, once native has actually answered.
+#: What proved the protocol works, for :func:`_commit_escalation` to announce.
+#: The switch moves on either, but they are not the same event and the log must
+#: not say the first when it was the second: a retry can demonstrate structured
+#: tool calling and *still* fail to answer, if the call that would have
+#: synthesised the results is the one the backend dropped.
+_ANSWERED = "Native function calling answered it"
+_CALLED_TOOLS = (
+    "Native function calling drove real tool calls before the backend failed, "
+    "so the protocol works even though this query got no answer"
+)
 
-    Committed on success rather than on the decision to try, because an
+
+def _commit_escalation(signature: str, evidence: str = _ANSWERED) -> None:
+    """Move the rest of the process to native, once native has proved it works.
+
+    Committed on evidence rather than on the decision to try, because an
     endpoint that cannot serve the protocol must not be able to select it: a
     switch thrown up front sent every later query into the same refusal, and
     the refusal was the thing being recovered from.
+
+    *evidence* is what the caller observed -- :data:`_ANSWERED` or
+    :data:`_CALLED_TOOLS`. It exists because this used to hard-code "answered
+    it" and one of the two callers reaches here after the request *raised*, so
+    the announcement was false on exactly the path where an operator reading
+    the log most needs it to be true.
 
     Announced once. Later queries reach native through
     :func:`_resolved_tool_mode` and are then ordinary native queries -- a
@@ -894,23 +928,59 @@ def _commit_escalation(signature: str) -> None:
     _escalation.escalated = True
     logger.warning(
         "The model returned no answer and no tool call (%s), which is how a "
-        "reasoning model behaves on the 'text' tool protocol. Native function "
-        "calling answered it, so this process will use native from here. Set "
-        "AORTA_CHAT_LLM_TOOL_MODE to choose the protocol yourself; this "
-        "process started on the 'text' protocol.",
+        "reasoning model behaves on the 'text' tool protocol. %s, so this "
+        "process will use native from here. Set AORTA_CHAT_LLM_TOOL_MODE to "
+        "choose the protocol yourself; this process started on the 'text' "
+        "protocol.",
         signature,
+        evidence,
     )
 
 
-def _record_escalation_failure() -> str:
+def _begin_escalated_probe() -> int:
+    """Claim an identity for one escalated probe, before it is sent.
+
+    Read before the request so the number says *when the probe began*, which is
+    the fact :func:`_record_escalation_failure` needs. Reading it afterwards
+    would make every failure look sequential.
+    """
+    _escalation.probes_begun += 1
+    return _escalation.probes_begun
+
+
+def _record_escalation_failure(probe: int) -> str:
     """Count an escalated attempt that did not answer; return what follows next.
 
     Shared by the two ways the retry can fail to rescue a query -- the request
     raised, or it came back as silent as the text round before it. Both spend
     the same budget, and both leave the protocol where it was, so counting them
     in one place is what stops a caller from spending it forever by forgetting.
+
+    Counts *waves*, not attempts. The budget is two so that one bad minute does
+    not disable the escalation for the process -- a permanent refusal and a 503
+    look identical on a single failure, so the second attempt is what tells
+    them apart. Two Chainlit sessions failing inside the same outage is not
+    that second attempt: nothing was probed in between, so it carries no
+    information the first failure did not. Counting it anyway spent the whole
+    budget on one outage, and it was measured doing exactly that -- two
+    concurrent sessions, one transient 503, and every later query in the
+    process denied its retry.
+
+    So a failure counts only if its probe began *after* the last counted one
+    was recorded. The watermark moves to :attr:`_EscalationState.probes_begun`
+    rather than to this probe's own number, which is what absorbs the rest of
+    the wave: every probe already in flight is at or below it.
+
+    No lock, deliberately. Serialising the probe would make one session's
+    provider call block another's, which is the event-loop stall issue #444 is
+    about -- and this runs on the recovery path, where a queue behind a timing
+    out request is the worst place to put one. Coalescing needs no mutual
+    exclusion: these are plain integer reads and writes between ``await``
+    points on one event loop.
     """
-    _escalation.native_failures += 1
+    if probe > _escalation.counted_watermark:
+        _escalation.native_failures += 1
+        _escalation.counted_watermark = _escalation.probes_begun
     if _escalation.native_failures >= _MAX_NATIVE_FAILURES:
         return " native will not be tried again in this process."
     return " a later query may try again."
@@ -931,10 +1001,17 @@ class _EscalateToNative:
     tool before going quiet must not be told there that it used none. It
     carries the observed signature for the same reason -- the announcement now
     happens after the retry, and the evidence for it was seen before.
+
+    ``calls`` is the same tool history as ``trace``, structured rather than
+    rendered, so the retry can seed its duplicate guard and show the model what
+    already came back. ``trace`` cannot serve that: it is display text the
+    critic scans line-by-line, and re-parsing it to recover the arguments would
+    be a second parser to keep in step with the first.
     """
 
     trace: tuple[str, ...] = ()
     signature: str = ""
+    calls: tuple[tuple[str, dict, str], ...] = ()
 
 #: Goes into the answer slot, so it names nothing internal: no environment
 #: variable, neither tool protocol, and no class of model. The user asked a
@@ -942,14 +1019,23 @@ class _EscalateToNative:
 #: is still recorded on the log lines beside the abandon branch, including the
 #: tool protocol, which the ``LLM backend`` line names at startup. ``aorta chat
 #: doctor`` is named because it is where an operator looks first and it covers
-#: the configuration faults that reach this message by other routes -- an
-#: unreachable backend, a missing index. It does not report the tool protocol;
-#: adding that check lives in ``chat/doctor.py``, which this change does not
-#: touch.
+#: the configuration faults that reach this message by *some* of its routes --
+#: an unreachable backend, a missing index.
+#:
+#: It does not assert one, though, and used to: "something in my own
+#: configuration is stopping me" was wrong on most of the paths that reach
+#: here. A model that returns empty content on both protocols is not a
+#: misconfiguration, and neither is a backend that falls over mid-loop -- the
+#: troubleshooting table in ``docs/chat/providers.md`` says of one of them, in
+#: as many words, that nothing there is a configuration fault. Naming a cause
+#: the code has not established sends the operator to `doctor` to audit
+#: settings that are all correct. So the text says what is true on every path
+#: (no answer, and the reason is recorded next to it) and points at both places
+#: the specifics actually live.
 _NO_ANSWER_MSG = (
-    "I wasn't able to answer that: something in my own configuration is "
-    "stopping me from working on this request. Run `aorta chat doctor` for "
-    "details."
+    "I wasn't able to answer that, and I've logged why. Check the warning "
+    "logged with this reply for the specific reason, or run `aorta chat "
+    "doctor` to rule out a configuration problem."
 )
 
 #: Prefixed to a fallback answer, and the labelling is not decoration. Silently
@@ -1108,7 +1194,7 @@ async def act_node(state: AgentState) -> dict[str, Any]:
         result = await _act_text(state)
         if isinstance(result, _EscalateToNative):
             return await _escalated_native_attempt(
-                state, list(result.trace), result.signature
+                state, list(result.trace), result.signature, list(result.calls)
             )
         return result
     raise ValueError(
@@ -1118,7 +1204,10 @@ async def act_node(state: AgentState) -> dict[str, Any]:
 
 
 async def _escalated_native_attempt(
-    state: AgentState, trace: list[str], signature: str
+    state: AgentState,
+    trace: list[str],
+    signature: str,
+    calls: list[tuple[str, dict, str]] | None = None,
 ) -> dict[str, Any]:
     """The native retry, and what happens when the endpoint will not serve it.
 
@@ -1168,8 +1257,13 @@ async def _escalated_native_attempt(
     is silent on both protocols must not be billed for a native round on every
     query from here on.
     """
+    # Claimed before the request, so a failure knows whether it began before or
+    # after the last counted one -- see `_record_escalation_failure`.
+    probe = _begin_escalated_probe()
     try:
-        outcome = await _run_native_loop(state, escalated=True, prior_trace=trace)
+        outcome = await _run_native_loop(
+            state, escalated=True, prior_trace=trace, prior_calls=calls
+        )
     except _NativeLoopError as failure:
         # Everything the native loop achieved before it broke, in front of what
         # the text loop had achieved before it gave up. Both belong to the same
@@ -1184,7 +1278,7 @@ async def _escalated_native_attempt(
             # otherwise strand the process on `text` for good. Committed for
             # the same reason `_NativeOutcome.answered` counts a tool call as
             # proof: the question the escalation asks has been answered yes.
-            _commit_escalation(signature)
+            _commit_escalation(signature, _CALLED_TOOLS)
             logger.warning(
                 "The escalated native tool-calling request drove %d tool "
                 "call(s) and then failed (%s: %s). Structured tool calling "
@@ -1201,7 +1295,7 @@ async def _escalated_native_attempt(
                 len(whole_trace),
             )
             return await _abandoned_result(state, whole_trace)
-        followup = _record_escalation_failure()
+        followup = _record_escalation_failure(probe)
         logger.warning(
             "The escalated native tool-calling request failed (%s: %s) without "
             "making a tool call. This is attempt %d of %d;%s Answering from "
@@ -1221,7 +1315,7 @@ async def _escalated_native_attempt(
         # resolves the backend and binds the tool schemas before it makes any.
         # Those raise plainly, and letting them through would put the traceback
         # back on the query this whole path exists to keep an answer on.
-        followup = _record_escalation_failure()
+        followup = _record_escalation_failure(probe)
         logger.warning(
             "The escalated native tool-calling request failed before it could "
             "call anything (%s: %s). This is attempt %d of %d;%s Answering "
@@ -1240,7 +1334,7 @@ async def _escalated_native_attempt(
         # text. Committing here is what the switch has to refuse to do: a
         # protocol that has never answered would then be selected for every
         # later query on the strength of an attempt that failed.
-        followup = _record_escalation_failure()
+        followup = _record_escalation_failure(probe)
         logger.warning(
             "The escalated native tool-calling request returned no answer and "
             "no tool call either, so the 'text' protocol stays in force. This "
@@ -1382,10 +1476,57 @@ async def _act_native(state: AgentState, escalated: bool = False) -> dict[str, A
     return (await _run_native_loop(state, escalated=escalated)).result
 
 
+def _call_signature(name: str, kwargs: dict | None) -> str:
+    """Identity of a tool call, for the duplicate guard.
+
+    One function because the guard now compares calls made through *different*
+    protocols -- the text loop's parsed kwargs against the native loop's
+    structured ``args`` -- and two separately-written format strings that have
+    to agree is how the seeding silently stops matching.
+    """
+    return f"{name}({sorted((kwargs or {}).items())})"
+
+
+def _prior_results_msg(prior_calls: list[tuple[str, dict, str]]) -> str:
+    """Hand the escalated retry what the text protocol already ran.
+
+    Without this the retry starts from a bare prompt, so a model that wants the
+    same tool call the text round already made gets it *executed a second time*
+    -- measured: one query, ``list_files(path="src")`` run twice, and the same
+    result recorded twice in the trace handed to the critic. With the shell tool
+    enabled (``enable_shell_tool``) the repeated call is
+    ``run_terminal_command``, so this is a duplicated side effect and not merely
+    a duplicated bill.
+
+    Results are passed as text rather than as reconstructed
+    ``AIMessage(tool_calls=...)``/``ToolMessage`` pairs. The text protocol never
+    had structured call IDs to reconstruct from, and inventing them risks a
+    provider rejecting the request for an assistant turn whose ``tool_calls`` do
+    not match the ``ToolMessage`` ids that follow -- which would turn a recovery
+    path into a new failure. The model does not need to believe *it* made these
+    calls; it needs to know they were made and what came back.
+    """
+    lines = [
+        "Tool results already gathered for this question, before switching to "
+        "function calling. Do not repeat these calls -- use the results:",
+        "",
+    ]
+    for name, kwargs, result in prior_calls:
+        lines.append(f"{name}({kwargs}) returned:")
+        lines.append(result)
+        lines.append("")
+    lines.append(
+        "Call a different tool if you still need something, or answer with "
+        "what is here."
+    )
+    return "\n".join(lines)
+
+
 async def _run_native_loop(
     state: AgentState,
     escalated: bool = False,
     prior_trace: list[str] | None = None,
+    prior_calls: list[tuple[str, dict, str]] | None = None,
 ) -> _NativeOutcome:
     """:func:`_act_native`, plus the answer to "did native work?".
 
@@ -1402,6 +1543,15 @@ async def _run_native_loop(
     :func:`whole_trace` is the merge, and every reporting exit uses it; seeding
     would conflate the two and buy a synthesis call off the back of a tool the
     other protocol ran.
+
+    *prior_calls* is the same history in structured form -- ``(name, kwargs,
+    result)`` -- and does two things ``prior_trace`` cannot, because it is
+    display text the critic scans rather than data. It seeds ``seen``, so a
+    repeat of a call the text protocol already made is refused by the duplicate
+    guard rather than executed again, and it is rendered into the prompt by
+    :func:`_prior_results_msg` so the model can use the result instead of
+    needing to ask for it. Both matter: seeding alone would tell the model "you
+    already asked that" about a result it had never been shown.
     """
     plain = _get_llm(temperature=0.1, streaming=False)
     llm = plain.bind_tools(list(TOOL_REGISTRY.values()))
@@ -1411,6 +1561,8 @@ async def _run_native_loop(
     if is_search:
         messages.append(SystemMessage(content=_SEARCH_FORCE_MSG))
     messages.extend(state["messages"])
+    if prior_calls:
+        messages.append(HumanMessage(content=_prior_results_msg(prior_calls)))
     _ensure_ends_with_user(messages)
 
     max_rounds = (
@@ -1418,7 +1570,11 @@ async def _run_native_loop(
     )
     unproductive_cap = _MAX_ESCALATED_ROUNDS if escalated else _MAX_UNPRODUCTIVE_ROUNDS
     unproductive = 0
-    seen: set[str] = set()
+    # Seeded with what the other protocol ran, so the duplicate guard below
+    # covers the whole query rather than only this loop's own calls.
+    seen: set[str] = {
+        _call_signature(name, kwargs) for name, kwargs, _result in (prior_calls or [])
+    }
     trace: list[str] = []
     # Whether the model ever emitted structured `tool_calls`, which is the
     # question "does this endpoint serve native?" reduces to. Tracked separately
@@ -1486,7 +1642,7 @@ async def _run_native_loop(
         tool_called = True
         messages.append(response)
         for call in tool_calls:
-            signature = f"{call['name']}({sorted((call['args'] or {}).items())})"
+            signature = _call_signature(call["name"], call["args"])
             logger.info(
                 "Act round %d: %s(%s)", round_num + 1, call["name"], call["args"]
             )
@@ -1635,6 +1791,7 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
     _ensure_ends_with_user(messages)
 
     tool_trace: list[str] = []
+    tool_calls_made: list[tuple[str, dict, str]] = []
     unproductive = 0
 
     for round_num in range(max_rounds):
@@ -1661,7 +1818,9 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
                     # function's job is to drive one protocol, not to pick one.
                     if _escalate_to_native(response):
                         return _EscalateToNative(
-                            tuple(tool_trace), _dead_end_signature(response)
+                            tuple(tool_trace),
+                            _dead_end_signature(response),
+                            tuple(tool_calls_made),
                         )
                     return await _abandoned_result(state, tool_trace)
                 messages.append(HumanMessage(content=_SEARCH_REPROMPT_MSG))
@@ -1706,6 +1865,9 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
         # the arrow hid every failed command in text tool mode and let the
         # critic approve an answer built on one.
         tool_trace.append(f"[{tool_name}({kwargs})] →\n{result}")
+        # Structured alongside the rendered form, for the escalated retry's
+        # duplicate guard. See `_EscalateToNative.calls`.
+        tool_calls_made.append((tool_name, kwargs, result))
 
         messages.append(AIMessage(content=text))
         messages.append(HumanMessage(

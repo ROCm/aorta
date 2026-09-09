@@ -225,6 +225,17 @@ Four things follow from that:
   two failures — otherwise two transient 503s after working tool calls would
   strand the process on `text` for good. Only a failure with no tool call
   behind it counts, which is the shape a refused `tools` payload actually has.
+  The budget also counts *probes*, not requests in flight: two `ui` sessions
+  that both fail inside the same outage spend one failure between them, because
+  neither was a second probe — nothing was tried in between, so the pair says
+  nothing the first failure did not. Two failures with a completed attempt
+  between them still write native off, which is the case the budget is for.
+- **A tool the text protocol already ran is not run again.** The retry is
+  handed the results the abandoned loop gathered and its duplicate guard is
+  seeded with those calls, so a model that asks for one of them gets the
+  recorded result rather than a second execution. That is a saved call on the
+  default tool set, all of which is read-only; with `enable_shell_tool` it is a
+  side effect that does not happen twice.
 - **The scope is the process, not the conversation.** Under `aorta chat` that is
   the same thing, but `aorta chat ui` serves many browser sessions from one
   server, and there the escalation is shared by all of them. That is deliberate:
@@ -296,11 +307,17 @@ at all — their `probe()` is a configuration preflight, deliberately, so that a
 diagnostic cannot bill you for a round trip. The startup line names the
 resolved protocol alongside the provider.
 
-The one path that still ends with no answer is a model that also returns empty
-content on the tool-free route. That is rarer than it sounds: the reporter's
+Two paths still end with no answer. The first is a model that also returns empty
+content on the tool-free route — rarer than it sounds, since the reporter's
 transcript shows the same question answered correctly through the `question`
 route in 2 calls while the `action` route returned nothing in 4, because the
 empty-content behaviour belongs to the tool protocols and not to the model.
+
+The second is the flip side of the paragraph above: because a non-empty tool
+trace skips the retrieval fallback, a query that *did* run tools and then failed
+to turn them into prose gets the give-up notice with its results recorded but
+unused. Answering from partial results is tracked in
+[#475](https://github.com/ROCm/aorta/issues/475) and is not fixed here.
 
 Both protocols run the same tools, retrieval and critic, and both are guarded
 the same way: an empty reply is never used as the answer, unproductive rounds
