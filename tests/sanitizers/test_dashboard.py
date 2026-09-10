@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import importlib.util
 import json
 import os
@@ -1381,6 +1382,43 @@ def test_two_long_names_differing_only_in_the_elided_middle_are_told_apart():
         (identity_a["name"], identity_a), (identity_b["name"], identity_b)
     ])
     assert len(set(labels)) == 2
+
+
+def test_two_names_differing_only_in_whitespace_are_told_apart():
+    # Review (#479): the last-resort digest hashed the RENDERED name, and rendering
+    # collapses internal whitespace. Two whole-object selections in one code object
+    # named "a b" and "a  b" have distinct stable_keys, but every rendering tier
+    # showed the same text and the digest agreed too, so both labels tied.
+    head, tail = "gemm_" + "K" * 60, "L" * 60 + "_end"
+    identity_a = {
+        "name": f"{head} {tail}", "target": "gfx950",
+        "code_object": "/a/b/sol.hsaco", "code_object_sha256": "beefaaa1",
+        "code_object_index": 0, "entry_offset": None,
+    }
+    identity_b = dict(identity_a, name=f"{head}  {tail}")
+    assert identity_a["name"] != identity_b["name"]
+
+    labels = gen._display_labels([
+        (identity_a["name"], identity_a), (identity_b["name"], identity_b)
+    ])
+    assert len(set(labels)) == 2
+
+    # the digest is over the name as written, so it separates the two on its own
+    digests = {gen._hashed_clip_name(i["name"]) for i in (identity_a, identity_b)}
+    assert len(digests) == 2
+
+
+def test_the_last_resort_label_carries_the_whole_name_digest():
+    # Review (#479): an 8-hex prefix is 32 bits and can tie by itself, which would
+    # leave _display_labels' uniqueness claim false with no tier left to widen into.
+    # The widening therefore ends at the full digest; pin that it is not re-truncated.
+    render, rendering = gen._NAME_RENDERINGS[-1]
+    assert render is gen._hashed_clip_name and rendering == {"width": 64}
+
+    name = "gemm_" + "K" * 200
+    whole = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    assert gen._hashed_clip_name(name, width=64).endswith(f"~{whole}")
+    assert gen._hashed_clip_name(name).endswith(f"~{whole[:8]}")
 
 
 def test_an_unattributed_reason_is_not_labelled_like_a_visible_row():

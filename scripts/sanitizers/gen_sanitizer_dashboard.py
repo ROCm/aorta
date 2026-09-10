@@ -77,7 +77,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from html import escape as _esc
 from pathlib import Path
@@ -807,7 +807,7 @@ def _middle_clip_name(name: str) -> str:
     return f"{clean[:head]}\u2026{clean[head - _LABEL_LIMIT + 1:]}"
 
 
-def _hashed_clip_name(name: str) -> str:
+def _hashed_clip_name(name: str, width: int = 8) -> str:
     """A clipped kernel name with a digest of the whole one (pure).
 
     The last resort. Two names can agree on both ends and differ only in the middle the
@@ -815,10 +815,15 @@ def _hashed_clip_name(name: str) -> str:
     them either. A digest of the full name always can, at the cost of a label nobody
     can read back to a symbol -- which is why nothing reaches for it until every
     readable discriminator has tied.
+
+    The digest is taken over the name as the report spelled it, not over the rendered
+    copy: rendering collapses internal whitespace, so ``foo bar`` and ``foo  bar`` are
+    two valid selections with distinct ``stable_key`` s that hash alike if normalized
+    first. ``width`` truncates it, and a truncated digest can itself tie -- see
+    ``_NAME_RENDERINGS`` for the widening that ends at the full digest.
     """
-    clean = " ".join(name.split())
-    digest = hashlib.sha256(clean.encode("utf-8")).hexdigest()[:8]
-    return f"{_middle_clip_name(clean)} ~{digest}"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:width]
+    return f"{_middle_clip_name(name)} ~{digest}"
 
 
 def _clip_qualified_label(label: str, limit: int) -> str:
@@ -842,6 +847,18 @@ _QUALIFIER_WIDENINGS: tuple[dict[str, bool], ...] = (
     {"index": True, "full": True, "scope": True},
 )
 
+# How a name is rendered, cheapest first, with the same "only pay for the ambiguity you
+# have" rule as the qualifiers. The head-only budget is what a reader wants; the tail
+# and then the digest exist for collisions the tier before cannot resolve. The last
+# tier carries the *full* SHA-256, which is what makes the uniqueness claim in
+# ``_display_labels`` true -- an 8-hex prefix is 32 bits and can tie on its own.
+_NAME_RENDERINGS: tuple[tuple[Callable[..., str], dict[str, int]], ...] = (
+    (_clip_name, {}),
+    (_middle_clip_name, {}),
+    (_hashed_clip_name, {"width": 8}),
+    (_hashed_clip_name, {"width": 64}),
+)
+
 
 def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
     """Labels for ``(name, identity)`` pairs, qualified only where a name repeats (pure).
@@ -856,8 +873,8 @@ def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
     digest of the whole name, which cannot tie for names that differ at all.
     """
     labels: list[str] = []
-    for render in (_clip_name, _middle_clip_name, _hashed_clip_name):
-        display = [render(str(name)) for name, _ in items]
+    for render, rendering in _NAME_RENDERINGS:
+        display = [render(str(name), **rendering) for name, _ in items]
         counts: dict[str, int] = {}
         for shown in display:
             counts[shown] = counts.get(shown, 0) + 1
