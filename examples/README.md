@@ -18,6 +18,7 @@ Two kinds of thing live in this directory:
 | | What it is | Start at |
 |---|---|---|
 | [`profiling/`](profiling/README.md) | Four GPU payloads captured with the `rocprof` and `proton` collectors: a HIP SGEMM, a torch matmul, and two Triton kernels | [`profiling/README.md`](profiling/README.md) |
+| [`rl/`](rl/README.md) | Seam demonstrations for RL post-training. Not workloads, not wired into CI: a graded recipe-synthesis reward computed by aorta's own validators | [`rl/README.md`](rl/README.md) |
 | [`mitigations-sidecar.json`](mitigations-sidecar.json) | Template for a sidecar file that adds named mitigations *and* environments without installing a plugin. Pass with `--mitigations-file` | [`src/aorta/registry/README.md`](../src/aorta/registry/README.md) |
 | [`probe-flag-sidecar.json`](probe-flag-sidecar.json) | Ready-made sidecar of workload-internal flags (`FBGEMM_*`, `TORCHINDUCTOR_*`, `EVAL_DISABLE_PIPELINING`) to sweep as mitigations. Pairs with [`recipes/probe/probe-flag-sweep.yaml`](../recipes/probe/probe-flag-sweep.yaml) | [`src/aorta/registry/README.md`](../src/aorta/registry/README.md) |
 
