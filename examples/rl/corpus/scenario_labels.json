@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "description": [
+    "Ground-truth autopsy category per sanitizer scenario: the label a correct",
+    "triage should name given that scenario's evidence. Every value must be a",
+    "member of aorta.agent.llm.AUTOPSY_CATEGORIES; tests/agent/test_autopsy_categories.py",
+    "enforces that, and that each scenario names a recipe that exists.",
+    "",
+    "Kept as a file keyed by scenario rather than as a column inside the corpus",
+    "rows because the corpus is generated: examples/rl/build_corpus.py rebuilds",
+    "triage.jsonl and proposal.jsonl from a tree of sanitizer runs, so a label",
+    "written into a row is lost on the next rebuild. The scenario ids are the",
+    "ones build_corpus.py emits as scenario_id."
+  ],
+  "categories_source": "aorta.agent.llm.AUTOPSY_CATEGORY_GUIDANCE",
+  "evidence": [
+    "Nine sanitizer runs on a gfx950 compute node (Slurm job 32192, ROCm 7.0.2.2),",
+    "RocJITsu bundle f92da4cb. Verdicts and finding counts as recorded in the",
+    "corpus manifest; see examples/rl/corpus/README.md for provenance."
+  ],
+  "coverage_note": [
+    "Three scenarios carry a committed label and six are honestly `unknown`.",
+    "This corpus is a sanitizer guardrail suite -- five of the nine rows are",
+    "controls with zero findings, and two more are harness errors -- so `unknown`",
+    "is the correct answer there, not a gap in the label set.",
+    "",
+    "It does mean this corpus exercises exactly one of the three labels added",
+    "when the set was widened: there is no nondeterminism scenario and no",
+    "NaN/numerics scenario in it. Extending the closed set unblocks those two",
+    "use cases at the contract level, but training signal for them needs new",
+    "scenarios; re-labelling alone cannot produce it."
+  ],
+  "scenarios": {
+    "consan-clean": {
+      "recipe": "recipes/sanitizers/daily-consan-clean.yaml",
+      "category": "unknown",
+      "why": "Race-free control on the single-wave LDS repro. ConSan passes with zero findings, so there is no failure to categorise and `unknown` is the correct label rather than a missing one."
+    },
+    "consan-racy": {
+      "recipe": "recipes/sanitizers/daily-consan-racy.yaml",
+      "category": "kernel_race",
+      "why": "Two-wave LDS data race: 64 ConSan findings collapsing to one site, one record per lane and LDS byte range. This is the scenario that previously drew `checkpoint_race` -- the nearest available name in the old set, and the wrong one."
+    },
+    "consan-lds-dispatch": {
+      "recipe": "recipes/sanitizers/daily-consan-lds-dispatch.yaml",
+      "category": "unknown",
+      "why": "Race-free LDS reduction, instrumented and actually dispatched. The end-to-end control for the dynamic record/replay path; it passes with zero findings, so no failure label applies."
+    },
+    "consan-tiny": {
+      "recipe": "recipes/sanitizers/daily-consan-tiny.yaml",
+      "category": "unknown",
+      "why": "Deliberate negative control. tiny_vecadd has no admissible sites, so strict require-records fails closed (exit 86) rather than emitting a false pass. The error is the harness refusing to lie, not a workload defect -- no autopsy label applies."
+    },
+    "consan-gemm": {
+      "recipe": "recipes/sanitizers/daily-consan-gemm.yaml",
+      "category": "unknown",
+      "why": "Capacity rejection: on the pinned CI base the Tensile object exceeds the patched-image growth ceiling and ConSan rejects it before instrumenting anything, so the row is error with zero findings. A tooling limit, not a workload defect."
+    },
+    "waitcheck": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-gemm.yaml",
+      "category": "kernel_race",
+      "why": "Missing s_waitcnt hazards over the top-3 GEMM shapes: 64 findings across two distinct sites. A missing wait count is the absence of an ordering guarantee between a memory op and its consumer inside one kernel, and waitcheck names the sites -- the same diagnostic and the same fix surface as an LDS race."
+    },
+    "waitcheck-gemm": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-gemm-object.yaml",
+      "category": "kernel_race",
+      "why": "Missing s_waitcnt hazards on the real f32 Tensile code object: 32 findings at one site. Same reasoning as `waitcheck`, against the object rather than the CSV shapes."
+    },
+    "waitcheck-lds-dispatch": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml",
+      "category": "unknown",
+      "why": "Clean static scan over the LDS reduction kernel: pass, zero findings, nothing to categorise."
+    },
+    "waitcheck-tiny": {
+      "recipe": "recipes/sanitizers/daily-waitcheck-tiny.yaml",
+      "category": "unknown",
+      "why": "Clean static scan over tiny_vecadd: pass, zero findings, nothing to categorise."
+    }
+  }
+}

@@ -8,10 +8,12 @@ only labels failures and proposes registered mitigation names.
 
 from aorta.agent.llm import (
     AUTOPSY_CATEGORIES,
+    AUTOPSY_CATEGORY_GUIDANCE,
     AgentStep,
     FakeLLMProposer,
     LiteLLMProposer,
     LLMProposer,
+    format_category_guidance,
 )
 from aorta.agent.loop import AgentConfig, AgentLoopResult, run_agent_loop
 from aorta.agent.policy import AgentPolicy, PolicyViolation
@@ -20,6 +22,7 @@ from aorta.agent.state import AgentState, append_log_event, wake
 
 __all__ = [
     "AUTOPSY_CATEGORIES",
+    "AUTOPSY_CATEGORY_GUIDANCE",
     "AgentConfig",
     "AgentLoopResult",
     "AgentPolicy",
@@ -30,6 +33,7 @@ __all__ = [
     "LiteLLMProposer",
     "PolicyViolation",
     "append_log_event",
+    "format_category_guidance",
     "run_agent_loop",
     "wake",
     "write_agent_report",
