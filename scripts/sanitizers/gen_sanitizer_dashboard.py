@@ -683,15 +683,22 @@ def _dedup_covers(row: Mapping[str, Any], covering: Mapping[str, Any]) -> bool:
     deduped away is genuinely covered -- which is why an em dash there read as "not
     checked" and hid a gated kernel whose object had failed.
 
-    But ``run_waitcheck`` only dedups selections with ``entry_offset is None``; an
-    exact-entry selection always gets its own scan task. A missing result on such a row
-    therefore means the result was lost or unattributable, not that it was folded into
-    this scan, and a *clean* scan standing in for it would render "scanned once" over a
-    row whose own error is sitting unattributed at case scope. A non-clean scan is still
-    worth showing there -- the object it lives in did fail -- so only the clean
-    direction is withheld.
+    But ``run_waitcheck`` dedups a selection only when it is a whole-object one, and
+    that is the full ``KernelIdentity.code_object_scan`` shape -- a real object, a real
+    digest, and no entry offset. An exact-entry selection, or one carrying a digest with
+    no object, always gets its own scan task. A missing result on such a row therefore
+    means the result was lost or unattributable, not that it was folded into this scan,
+    and a *clean* scan standing in for it would render "scanned once" over a row whose
+    own error is sitting unattributed at case scope. A non-clean scan is still worth
+    showing there -- the object it lives in did fail -- so only the clean direction is
+    withheld. The condition mirrors the producer's, applied to the recipient.
     """
-    if row.get("entry_offset") is None:
+    could_have_been_deduped = bool(
+        row.get("code_object")
+        and row.get("code_object_sha256")
+        and row.get("entry_offset") is None
+    )
+    if could_have_been_deduped:
         return True
     return str(covering.get("verdict") or "").strip().lower() not in {"pass", "not_checked"}
 

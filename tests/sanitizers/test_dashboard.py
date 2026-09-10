@@ -1191,6 +1191,61 @@ def test_a_clean_object_scan_does_not_speak_for_an_exact_entry_row():
     assert "refused the entry" in case.get("observation", "")
 
 
+def test_a_clean_object_scan_does_not_speak_for_an_objectless_row():
+    # Review (#479): the recipient side of the same rule. A row carrying a digest but
+    # no code object is not `KernelIdentity.code_object_scan`, so run_waitcheck would
+    # never have deduped it either — yet it matched the (sha, index) key and inherited
+    # a clean verdict as "scanned once". Only the objectless row differs from
+    # test_a_deduped_sibling_is_attributed_only_from_a_real_object_scan.
+    sha = "beefaaa1"
+
+    def _identity(name: str, code_object: str | None) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": code_object,
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _report(covering_verdict: str, why: str | None) -> dict:
+        return {
+            "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+            "overall_verdict": "error", "execution_status": "error",
+            "worklist": {
+                "schema": "aorta.kernel_worklist/0.1",
+                "requirement": "top_dispatch_count", "top_n": 2, "kernel_count": 2,
+                "kernels": [
+                    {"identity": _identity("kern_A", "/a/b/sol.hsaco"),
+                     "total_time_ms": 0.0, "dispatch_count": 9, "sources": ["gemm_csv"]},
+                    # same digest and index, but no object of its own
+                    {"identity": _identity("kern_B", None), "total_time_ms": 0.0,
+                     "dispatch_count": 8, "sources": ["gemm_csv"]},
+                ],
+            },
+            "checks": [{
+                "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+                "reason": "worklist_not_fully_checked", "returncode": None,
+                "findings": [],
+                "kernel_results": [{
+                    "identity": _identity("kern_A", "/a/b/sol.hsaco"), "state": "ran",
+                    "verdict": covering_verdict, "findings": [], "reason": why,
+                    "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            }],
+        }
+
+    clean = gen.summarize_case(_report("pass", None), "warn")
+    objectless = clean["kernels"][1]
+    assert objectless.get("verdict") != "pass"
+    assert "scanned once" not in objectless.get("detail", "")
+
+    # a failing scan still shows there: the object it shares did fail
+    failed = gen.summarize_case(
+        _report("error", "waitcheck_backend_exit_2: refused the object"), "warn"
+    )
+    assert failed["kernels"][1].get("verdict") == "error"
+    assert "scanned once" in failed["kernels"][1].get("detail", "")
+
+
 def test_a_sparse_result_merges_into_the_exact_one_for_the_same_row():
     # One check can serialize the full identity while another serializes only
     # {name, target}. The two land under different join keys, and taking the exact one
