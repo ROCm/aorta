@@ -2491,11 +2491,15 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
         prefix = 2 + nodes._MAX_UNPRODUCTIVE_ROUNDS
         search = caps.max_act_rounds_search
         return {
-            # ... one escalated native round, then the retrieval fallback.
+            # ... one escalated native round, then the retrieval fallback. No
+            # critic call: `command_output` is empty on this path, so it
+            # short-circuits and the graph ends.
             "silent": prefix + nodes._MAX_ESCALATED_ROUNDS + 1,
-            # ... the full native budget, then one synthesis call.
-            "search": prefix + search + 1,
-            "other": prefix + caps.max_act_rounds + 1,
+            # ... the full native budget, a synthesis call, and the critic's
+            # one validation call. `act` always flows to `critic`, so omitting
+            # it would make these act-loop subtotals rather than turn costs.
+            "search": prefix + search + 1 + 1,
+            "other": prefix + caps.max_act_rounds + 1 + 1,
             # Passes after the first are native from the start, so they pay no
             # text rounds; the critic costs one call per pass.
             "turn": (
@@ -2517,19 +2521,37 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
         """The arithmetic itself, pinned against the run that produced it.
 
         Measured by driving the graph with a counting double: 6 for a turn
-        silent on both protocols, 13 for a productive escalation on a search
-        query, 10 elsewhere, and 34 for a whole turn the critic rejects every
-        time. If a cap moves these change together and the assertions below
+        silent on both protocols, 14 for a productive escalation the critic
+        accepts on a search query, 11 elsewhere, 34 for one it rejects every
+        pass, and 32 for that same rejected turn once the protocol has already
+        moved. If a cap moves these change together and the assertions below
         re-point at the new figures; if the *arithmetic* is what someone
         changes, this is the test that objects.
         """
         assert self._ceilings() == {
             "silent": 6,
-            "search": 13,
-            "other": 10,
+            "search": 14,
+            "other": 11,
             "turn": 34,
             "turn_unescalated": 32,
         }
+
+    def test_the_critic_pass_is_counted_in_the_productive_figures(self):
+        """Pinned separately because leaving it out is the mistake made here.
+
+        `act` has an unconditional edge to `critic`, and a productive turn
+        gives the critic a non-empty `command_output` to validate -- so it
+        spends a call. The first version of these figures stopped at the act
+        loop and still called the result a turn cost, which understated an
+        accepted turn by exactly one. Asserted as a difference so it cannot be
+        satisfied by two independently-wrong numbers.
+        """
+        from aorta.chat.config import Settings
+
+        caps = Settings()
+        ceilings = self._ceilings()
+        act_loop_only = 2 + nodes._MAX_UNPRODUCTIVE_ROUNDS + caps.max_act_rounds_search + 1
+        assert ceilings["search"] - act_loop_only == 1
 
     def test_the_page_states_each_ceiling(self):
         page = self._page()

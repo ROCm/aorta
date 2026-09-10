@@ -208,22 +208,21 @@ Five things follow from that:
   one round would spend the call and throw away the answer it was about to
   reach.
 
-  So the two cases have different ceilings, and only the first is the
-  escalation's own bill. A turn that is silent on both protocols costs **6**
-  calls: router, plan, two text rounds, one escalated native round, and one
-  retrieval-fallback answer. A turn where native *does* drive tools costs up to
-  **13** on a search query and **10** on any other — the same four-call prefix,
-  then `MAX_ACT_ROUNDS_SEARCH` (8) or `MAX_ACT_ROUNDS` (5) native rounds, then
-  one synthesis call. The escalation does not raise the round budget; it reaches
-  the ordinary one on a query that had already spent two rounds proving it
-  needed to. And because the protocol moves once per process rather than once
-  per query, those two text rounds are paid once, not on every later query.
+  So the cases have different ceilings, and only the first is the escalation's
+  own bill. Counted as whole turns — `act` always flows to `critic`, so a
+  figure that stops at the act loop is a subtotal, not a cost:
 
-  Both figures are the act pass alone. A whole turn can go higher, because the
-  critic may return a rejected answer to `act` up to `MAX_RETRY_ITERATIONS` (3)
-  times, and passes after the first start on `native` with no text rounds to
-  pay: measured at **34** for a search query whose every pass is rejected. That
-  ceiling belongs to the agent loop and is unchanged by the escalation.
+  | Escalated turn | Calls | Made up of |
+  |---|---|---|
+  | Silent on both protocols | **6** | router, plan, 2 text rounds, 1 escalated native round, 1 retrieval-fallback answer — the critic short-circuits on the empty `command_output` and spends nothing |
+  | Native drives tools, critic accepts | **14** search, **11** otherwise | the same 4-call prefix, then `MAX_ACT_ROUNDS_SEARCH` (8) or `MAX_ACT_ROUNDS` (5) native rounds, 1 synthesis call, 1 critic validation |
+  | Native drives tools, critic rejects every pass | **34** search | three act passes — `MAX_RETRY_ITERATIONS` (3) counts passes, not hand-backs, so the critic returns to `act` twice — with the second and third starting on `native` and paying no text rounds |
+
+  The escalation does not raise the round budget; it reaches the ordinary one on
+  a query that had already spent two rounds proving it needed to. And because
+  the protocol moves once per process rather than once per query, those two text
+  rounds are paid once and not on every later query — the same rejected-every-
+  pass turn costs 32 once the protocol has already moved.
 - **The switch is thrown only once native has answered.** An endpoint that
   refuses the protocol must not be able to select it, which is what throwing the
   switch up front let it do: the refusal became the state for every later query.
