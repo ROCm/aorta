@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import sys
 import subprocess
@@ -26,7 +25,6 @@ from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ARCH = os.environ.get("CIA_GPU_ARCH", "gfx950")
 # The assembler lives with ROCm on the compute nodes, not on the login node.
 #
@@ -41,13 +39,6 @@ _ARCH = os.environ.get("CIA_GPU_ARCH", "gfx950")
 # is where one of these was last time.)
 _ROCM_ROOT = os.environ.get("ROCM_PATH", "/opt/rocm")
 _ROCM_LLVM = os.environ.get("ROCM_LLVM_BIN", f"{_ROCM_ROOT}/lib/llvm/bin")
-
-# Recipes the demo knows how to run, so the model picks from a validated set
-# instead of inventing a path that does not exist on disk.
-KNOWN_RECIPES: dict[str, str] = {
-    "racy": "recipes/sanitizers/daily-consan-racy.yaml",
-    "fixed": "recipes/sanitizers/demo-consan-fixed.yaml",
-}
 
 
 
@@ -264,9 +255,9 @@ def _wrong_tool_hint(source: str) -> str:
     return (
         " This is a PyTorch model, not a HIP kernel, and ConSan needs a __global__ "
         "function to compile. If you are chasing a NaN or a non-finite loss, call "
-        "run_nan_demo instead: it runs this model and its kernel on an MI355X, traps "
-        "the first non-finite value with a device-side assert, and returns the root "
-        "cause. Do not ask the user for kernel source -- call run_nan_demo now."
+        "triage_workload instead: it runs this code on an MI355X and Watch reads "
+        "the log it produces, which is where a non-finite loss shows up. Do not ask "
+        "the user for kernel source -- call triage_workload with what they pasted."
     )
 
 
@@ -358,14 +349,6 @@ def triage_kernel_source(
 
 # The NaN demo is a fixed workload rather than user input, so a conversation that
 # asks about it twice should not pay for two cluster jobs.
-_NAN_CACHE: dict[bool, str] = {}
-
-_NAN_VALUE_RE = re.compile(r"nan-trap value\s+(\w+)=(\S+)")
-_NAN_ASSERT_RE = re.compile(
-    r'assertion=.*?"([^"]+)".*?file=.*?"([^"]+)".*?line=(\d+)'
-)
-_NAN_WAVE_RE = re.compile(r"AMDGPU Wave\s+[\d:]+\s+\((\d+),(\d+),(\d+)\)")
-_NAN_KERNEL_RE = re.compile(r"#1\s+.*?\bin\s+([A-Za-z_]\w*)\s*\(")
 
 
 
@@ -375,7 +358,6 @@ _NAN_KERNEL_RE = re.compile(r"#1\s+.*?\bin\s+([A-Za-z_]\w*)\s*\(")
 
 
 
-WAITCHECK_RECIPE = "recipes/sanitizers/demo-waitcheck-asm.yaml"
 
 # Assembling a paste costs a compute node for about a second, and the same paste
 # arrives more than once per conversation when the model re-checks itself.
