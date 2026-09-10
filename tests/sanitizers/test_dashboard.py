@@ -3187,6 +3187,61 @@ def test_survey_message_error_reason_takes_precedence_over_partial_findings():
     assert "REGRESSION" not in html and "Regression" not in html
 
 
+def _coverage_incomplete_reason(attribution: str) -> str:
+    # The real CoverageDecision.reasons shape: counts and mismatches first, then
+    # _failure_attributions LAST (consan_coverage.py builds it in that order). The
+    # attribution is the only part that says WHY coverage was rejected -- capacity
+    # (resource_failed) or a lowering/transform defect (placement_or_lowering_failed).
+    counts = "; ".join(
+        [
+            "verdict static_complete=false",
+            "verdict dynamic_complete=false",
+            "unsupported_code_objects=3",
+            "failed_code_objects=2",
+            "skipped_code_objects=1",
+            "access patched/supported mismatch: 0/14",
+            "barrier patched/supported mismatch: 0/9",
+            "atomic patched/supported mismatch: 0/6",
+        ]
+    )
+    sites = "; ".join(
+        f"{kind} sites {attribution} in gemm_kernel.hsaco: {n}"
+        for kind, n in (("access", 14), ("barrier", 9), ("atomic", 6))
+    )
+    return f"coverage incomplete: {counts}; {sites}"
+
+
+def test_the_observation_keeps_the_tail_that_discriminates_a_coverage_reason():
+    # Review (#479): the observation must not clamp primary.reason. A ConSan coverage
+    # reason carries its discriminator at the END, so a right-truncating cap keeps the
+    # counts -- identical between the two causes -- and drops the attribution that
+    # separates a capacity rejection from a lowering defect, collapsing them to one
+    # sentence. The whitespace normalization is kept; only the length cap is gone.
+    capacity, defect = (
+        gen.summarize_case(
+            _errored_report_with_partial_findings(_coverage_incomplete_reason(attribution)),
+            None,
+        )
+        for attribution in ("resource_failed", "placement_or_lowering_failed")
+    )
+
+    assert capacity["observation"] != defect["observation"]
+    assert "resource_failed" in capacity["observation"]
+    assert "placement_or_lowering_failed" in defect["observation"]
+    # no kernel_results on this path, so nothing else can carry the cause
+    assert (capacity.get("kernel_reasons") or []) == []
+
+    # normalization survives: a multi-line reason still renders on one line, whole
+    multiline = gen.summarize_case(
+        _errored_report_with_partial_findings(
+            "coverage incomplete:\n  access sites\tresource_failed in gemm.hsaco: 14\n"
+        ),
+        None,
+    )
+    assert "\n" not in multiline["observation"] and "\t" not in multiline["observation"]
+    assert "access sites resource_failed in gemm.hsaco: 14" in multiline["observation"]
+
+
 def test_survey_informational_dir_isolates_malformed_nested_reports(tmp_path):
     # Review (#374): a top-level dict with a malformed NESTED shape (e.g.
     # {"checks": null}) passes the isinstance guard but makes the reduction raise

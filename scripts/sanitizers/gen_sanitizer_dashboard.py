@@ -587,7 +587,7 @@ def format_instant(value: Any) -> str:
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _clean_msg(message: str, limit: int = 160) -> str:
+def _clean_msg(message: str, limit: int | None = 160) -> str:
     """Collapse a leading absolute path to its basename and clamp length.
 
     Internal whitespace collapses to single spaces first. Every caller renders into
@@ -597,13 +597,22 @@ def _clean_msg(message: str, limit: int = 160) -> str:
     diagnostic. Either would end the table row mid-table and split the rest of the
     cells into a stray paragraph. Only this display copy is normalized; the raw
     ``sanitizer_report.json`` keeps the message as the backend emitted it.
+
+    ``limit=None`` normalizes without clamping, for the sinks that render onto a line
+    of their own. Truncation is from the right, which is destructive when the
+    discriminating part of a message is its tail -- a ``CoverageDecision`` reason
+    appends ``_failure_attributions`` (``resource_failed`` vs
+    ``placement_or_lowering_failed``) after its counts, so a clamp keeps the counts
+    and drops the only text that says *why* coverage was rejected.
     """
     text = " ".join((message or "").split())
     if text.startswith("/"):
         head, sep, rest = text.partition(":")
         if sep:
             text = head.rsplit("/", 1)[-1] + sep + rest
-    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+    if limit is None or len(text) <= limit:
+        return text
+    return text[: limit - 1] + "\u2026"
 
 
 # Mirrors ``rocjitsu_sanitizers.models._VERDICT_RANK``. The report reduces many
@@ -973,7 +982,11 @@ def _observation_text(
     # ``_clean_msg`` because a check-level reason is not always a bare constant: the
     # combined ConSan hook builds ``waitcheck_analysis_failed: <parser output>`` from
     # the tool's own text, and this one-liner is rendered as a single Markdown line.
-    if reason := _clean_msg(str(primary.get("reason") or ""), 240):
+    # Normalized but *not* clamped: this text goes onto a line of its own rather than
+    # into a table cell, and a ConSan coverage reason carries its discriminator last
+    # (see ``_clean_msg``), so a length cap here would collapse a lowering defect and
+    # a capacity rejection into the same sentence.
+    if reason := _clean_msg(str(primary.get("reason") or ""), None):
         parts.append(f"reason {reason}")
     if kernel_reasons:
         parts.append(
