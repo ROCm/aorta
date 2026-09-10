@@ -168,7 +168,9 @@ class Manifest:
         return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> Manifest:
+    def from_dict(
+        cls, raw: dict[str, Any], *, advise: bool = True, strict: bool = True
+    ) -> Manifest:
         """Build from a parsed manifest, dropping keys this version predates.
 
         Forward-tolerant about *keys* by design: a newer CI job adding a field
@@ -206,9 +208,45 @@ class Manifest:
         vouch for must not answer questions -- see the module docstring. The
         remedy is one command and the message names it.
 
+        That remedy assumes the manifest is this install's own sidecar, which
+        is all this method can see: it is handed a dict, and a local sidecar, a
+        download and a side-loaded file arrive here identically while being
+        fixed by three different things. Assuming wrong produced a loop -- a
+        malformed *published* manifest closed with "Replace it with 'aorta chat
+        index fetch'", carried verbatim into the fetch error by
+        ``index_ops._parse_manifest``, telling the user to re-run the download
+        that had just produced the bad bytes. Same URL, same bytes, same error.
+
+        So ``advise=False`` suppresses it, for the callers that know the origin
+        and write a remedy for it. The default stays on because the local
+        sidecar is both the common case and the one where the advice is right.
+
+        ``strict=False`` keeps the wrong-typed values instead of refusing them,
+        for the callers whose job is to *describe* a broken sidecar rather than
+        to use it. ``index_ops``'s write guards are the case: they exist to tell
+        a user which of "no manifest", "a manifest naming another install's
+        model" and "a manifest whose provenance cannot be read" is in front of
+        them, and a reader that refuses all three identically collapses the
+        distinction the refusals are made of. It is not a way around the check
+        -- a tolerantly-parsed manifest reaches ``index_provenance``, which
+        validates ``corpus_roots`` itself and fails closed, and
+        ``_unusable_reasons``, which treats a field it cannot render as a reason
+        the index is unusable. Anything that *uses* an index parses strictly.
+
+        Args:
+            raw: The parsed manifest object.
+            advise: Whether to close a type-mismatch refusal with the command
+                that replaces a local sidecar. Pass ``False`` when the manifest
+                did not come from this install and the caller supplies its own
+                remedy.
+            strict: Whether a field of the wrong declared type is a refusal.
+                ``False`` only for a caller that reports on the manifest rather
+                than trusting it.
+
         Raises:
             ManifestError: If ``raw`` is not an object, is missing a required
-                field, or carries a field whose type is not the declared one.
+                field, or (when ``strict``) carries a field whose type is not
+                the declared one.
         """
         if not isinstance(raw, dict):
             raise ManifestError(f"manifest is a {type(raw).__name__}, not an object")
@@ -224,10 +262,11 @@ class Manifest:
             for key, value in sorted(accepted.items())
             if not _fits_shape(value, known[key])
         ]
-        if wrong:
+        if wrong and strict:
+            remedy = f" Replace it with {_refresh_advice()}." if advise else ""
             raise ManifestError(
-                f"manifest field(s) are not the type the format declares: {'; '.join(wrong)}. "
-                f"Replace it with {_refresh_advice()}."
+                f"manifest field(s) are not the type the format declares: "
+                f"{'; '.join(wrong)}.{remedy}"
             )
 
         try:
@@ -281,8 +320,20 @@ def write_manifest(index_path: str | Path, manifest: Manifest) -> Path:
     return target
 
 
-def read_manifest(index_path: str | Path) -> Manifest:
+def read_manifest(index_path: str | Path, *, advise: bool = True, strict: bool = True) -> Manifest:
     """Read the sidecar manifest for an index file.
+
+    Args:
+        index_path: The index whose sidecar to read.
+        advise: Whether a refusal may close with the command that replaces a
+            local sidecar. ``False`` for a file this install did not write --
+            ``index_ops.side_load`` reads a staged pair this way, because the
+            file that has to change there is the one the user carried in and
+            neither index command touches it. See :meth:`Manifest.from_dict`.
+        strict: Whether a field of the wrong declared type is a refusal. Every
+            path that *loads* an index leaves this on; ``False`` is for the
+            write guards, which report on a sidecar they may not be able to
+            use. See :meth:`Manifest.from_dict`.
 
     Raises:
         ManifestError: If it is absent, unparseable, or from a schema this
@@ -292,22 +343,24 @@ def read_manifest(index_path: str | Path) -> Manifest:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ManifestError(
-            f"no manifest beside the index at {index_path}.\n"
-            "An index without one cannot be checked against this install's "
+        missing = (
+            "\nAn index without one cannot be checked against this install's "
             "embedding model, which is the check that stops a silently "
-            "mismatched index answering from the wrong vectors. Replace it "
+            f"mismatched index answering from the wrong vectors. Replace it "
             f"with {_refresh_advice()}."
-        ) from exc
+            if advise
+            else ""
+        )
+        raise ManifestError(f"no manifest beside the index at {index_path}.{missing}") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestError(f"could not read the manifest at {path}: {exc}") from exc
 
-    manifest = Manifest.from_dict(raw)
-    ensure_supported_schema(manifest, f"the index at {index_path}")
+    manifest = Manifest.from_dict(raw, advise=advise, strict=strict)
+    ensure_supported_schema(manifest, f"the index at {index_path}", advise=advise)
     return manifest
 
 
-def ensure_supported_schema(manifest: Manifest, subject: str) -> None:
+def ensure_supported_schema(manifest: Manifest, subject: str, *, advise: bool = True) -> None:
     """Raise unless this build can interpret ``manifest``'s schema version.
 
     Separate from :meth:`Manifest.from_dict` so parsing stays independent of
@@ -325,13 +378,17 @@ def ensure_supported_schema(manifest: Manifest, subject: str) -> None:
     parse. It is kept because this function is exported and the comparison is
     its own to make safe: a caller holding a hand-built manifest is the one
     case the parser never saw.
+
+    ``advise`` carries the same meaning as it does on :meth:`Manifest.from_dict`
+    and for the same reason: this function cannot see whose manifest it is
+    either, so a caller that does knows better than the remedy composed here.
     """
     version = manifest.schema_version
     if isinstance(version, bool) or not isinstance(version, int):
+        remedy = f" Replace it with {_refresh_advice()}." if advise else ""
         raise ManifestError(
             f"the manifest for {subject} carries a non-integer schema version "
-            f"({version!r}), so it is malformed and cannot be interpreted. "
-            f"Replace it with {_refresh_advice()}."
+            f"({version!r}), so it is malformed and cannot be interpreted.{remedy}"
         )
     if version > SCHEMA_VERSION:
         raise ManifestError(
@@ -348,6 +405,18 @@ class ValidationReport:
     manifest: Manifest
     warnings: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
+    #: Why the store under the manifest could not be opened, when that is what
+    #: happened. Set by ``index_ops.check_index``, which is the only caller that
+    #: opens the file; ``validate`` compares a manifest and leaves it empty.
+    #:
+    #: Carried as a field rather than left for a reader to recognise in
+    #: ``refusals``, because the two states want different sentences and the
+    #: only thing separating them there is prose. A report whose refusals are
+    #: all about an unopenable file is not the "index does not match this
+    #: install" that a wrong embedding model is, and telling that user their
+    #: vectors are from another model sends them to rebuild a file whose real
+    #: problem is that it is truncated.
+    unreadable: str = ""
 
     @property
     def ok(self) -> bool:

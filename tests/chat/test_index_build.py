@@ -623,10 +623,16 @@ class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
         raw["corpus_roots"] = "src/aorta"
         path.write_text(json.dumps(raw), encoding="utf-8")
 
-        assert index_ops.index_provenance(index_ops.manifest_mod.read_manifest(target)) == (
-            index_ops.PROVENANCE_INVALID
-        ), "the fixture must be unclassifiable as well as refused"
-        assert index_ops.check_index(target, strict=False).refusals
+        assert index_ops.index_provenance(
+            index_ops.manifest_mod.read_manifest(target, strict=False)
+        ) == (index_ops.PROVENANCE_INVALID), (
+            "the fixture must be unclassifiable as well as refused -- read the way the "
+            "guard reads it, since a strict parse refuses this sidecar outright"
+        )
+        assert index_ops._unusable_reasons(target), (
+            "and refused as the exemption asks it: not check_index directly, whose "
+            "strict read this sidecar no longer survives"
+        )
 
         result = index_ops.build_index(local_corpus(repo), index_path=target)
 
