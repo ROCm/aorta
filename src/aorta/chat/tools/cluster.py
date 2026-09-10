@@ -23,6 +23,7 @@ from langchain_core.tools import tool
 
 from aorta.chat.config import settings
 from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
+from aorta.chat.tools.cache import current_tool_cache
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
 
@@ -268,13 +269,6 @@ def _wrong_tool_hint(source: str) -> str:
     )
 
 
-# Triaging one kernel costs a multi-minute cluster job, and the same kernel gets
-# submitted more than once per conversation: the model re-checks its own answer and
-# the critic can re-run a turn. Reusing the verdict for an identical kernel keeps a
-# demo to one job per kernel instead of one per attempt.
-_TRIAGE_CACHE: dict[tuple[str, int, int], str] = {}
-
-
 @tool
 def triage_kernel_source(
     source: str,
@@ -310,12 +304,13 @@ def triage_kernel_source(
     except HarnessError as exc:
         return f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
 
+    cache = current_tool_cache().triage
     cache_key = (source.strip(), block_size, grid_size)
-    if not force and cache_key in _TRIAGE_CACHE:
+    cached = None if force else cache.get(cache_key)
+    if cached is not None:
         return (
             "(Reusing the triage already run for this exact kernel in this "
-            "conversation — no second cluster job was submitted.)\n\n"
-            + _TRIAGE_CACHE[cache_key]
+            "conversation — no second cluster job was submitted.)\n\n" + cached
         )
 
     staging = settings.jobs_root / "chat-kernels"
@@ -351,25 +346,8 @@ def triage_kernel_source(
     # Only a completed run is worth reusing; a transient launch failure should be
     # retried rather than remembered.
     if "Autopsy verdict:" in rendered:
-        _TRIAGE_CACHE[cache_key] = rendered
+        cache.put(cache_key, rendered)
     return rendered
-
-
-# The NaN demo is a fixed workload rather than user input, so a conversation that
-# asks about it twice should not pay for two cluster jobs.
-
-
-
-
-
-
-
-
-
-
-# Assembling a paste costs a compute node for about a second, and the same paste
-# arrives more than once per conversation when the model re-checks itself.
-_ASM_CACHE: dict[str, str] = {}
 
 
 @tool
@@ -397,11 +375,13 @@ def triage_assembly_source(source: str, label: str = "") -> str:
     except AsmHarnessError as exc:
         return f"Cannot analyse this assembly: {exc}"
 
+    cache = current_tool_cache().asm
     cache_key = source.strip()
-    if cache_key in _ASM_CACHE:
+    cached = cache.get(cache_key)
+    if cached is not None:
         return (
             "(Reusing the analysis already run for this exact assembly in this "
-            "conversation.)\n\n" + _ASM_CACHE[cache_key]
+            "conversation.)\n\n" + cached
         )
 
     staging = settings.jobs_root / "chat-asm"
@@ -453,7 +433,7 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         "the kernel was tested."
     )
     result = "\n".join([body, "", *note])
-    _ASM_CACHE[cache_key] = result
+    cache.put(cache_key, result)
     return result
 
 @tool
