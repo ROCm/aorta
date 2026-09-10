@@ -2936,6 +2936,21 @@ class TestEveryCommandTheReportNamesCanRun:
                 texts += [check.hint, check.procedure, check.detail]
             texts += manifest_mod.remedy_lines()
             texts.append(manifest_mod._refresh_advice())
+
+        # The settings-rejected report, which no entry in STATES can produce.
+        # Those set attributes on the singleton, which bypasses validation, so
+        # ``get_settings()`` always succeeds under them and the rows that only
+        # exist when it raises were invisible to this sweep -- including the
+        # one that offers a command. Reached through the environment instead,
+        # which is the way a user reaches it. Last, because the settings stay
+        # unloadable for the rest of the call.
+        import aorta.chat.config as config_mod
+
+        monkeypatch.setattr(config_mod, "_cached", None)
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_MODEL", "")
+        for check in run_checks(backend=False).checks:
+            texts += [check.hint, check.procedure, check.detail]
+
         return [t for t in texts if t]
 
     def test_every_offered_command_parses_as_printed(self, monkeypatch, tmp_path: Path):
