@@ -1495,7 +1495,6 @@ class TestOneOutageDoesNotSpendTheWholeFailureBudget:
         nodes._escalation.native_failures = 7
         nodes._escalation.probes_begun = 7
         nodes._escalation.counted_watermark = 7
-        nodes._escalation.successful_watermark = 7
         nodes.reset_tool_mode_escalation()
         assert nodes._escalation == nodes._EscalationState()
         # And the reset must cover fields added after it was written.
@@ -1504,7 +1503,6 @@ class TestOneOutageDoesNotSpendTheWholeFailureBudget:
             "native_failures",
             "probes_begun",
             "counted_watermark",
-            "successful_watermark",
         }
 
 
@@ -1572,7 +1570,7 @@ class TestMixedConcurrentProbeOutcomes:
 
 
 class TestACommitReleasesTheRequestsAlreadyInTheTextLoop:
-    """A spent budget must not refuse a request after native has been proved.
+    """A proved protocol outranks the failure budget, reading and writing.
 
     Issue #485 filed this divergence -- ``escalated`` true while
     ``native_failures`` sits at the cap -- as inert, on the premise that
@@ -1583,6 +1581,12 @@ class TestACommitReleasesTheRequestsAlreadyInTheTextLoop:
     flight across the commit therefore read a counter that the commit had made
     meaningless, and answered from retrieved context instead of retrying on the
     protocol another request had just demonstrated.
+
+    ``escalated`` has to win at both sites, which is why there are two tests
+    here for one idea. On the read side a spent budget must not refuse the
+    retry; on the write side that retry's own failure must not be billed to the
+    budget or reported as ``text`` still being in force. Fixing only the read
+    side let the count run past its own cap.
     """
 
     @staticmethod
@@ -1592,18 +1596,19 @@ class TestACommitReleasesTheRequestsAlreadyInTheTextLoop:
             return " ".join(str(getattr(m, "content", m)) for m in payload)
         return str(payload)
 
-    @pytest.mark.asyncio
-    async def test_a_request_mid_text_loop_retries_on_the_proved_protocol(
-        self, text_mode, tool_mode_not_chosen
-    ):
-        """The interleaving that reaches the divergence, driven end to end.
+    async def _park_a_request_across_a_commit(self, victim_retry, on_committed=None):
+        """Drive the interleaving that reaches the divergence, end to end.
 
         Filling the budget takes two waves, and once it is full no *new*
         request can probe -- so the only thing that can still commit is a probe
         that began while the budget had room. That ordering is forced here
         rather than assumed, and the state it produces is asserted before the
-        parked request is released, so the test cannot pass by never reaching
+        parked request is released, so neither test can pass by never reaching
         the divergence at all.
+
+        *victim_retry* is what the parked request's native retry does, which is
+        the only difference between the read side of this bug and the write
+        side.
         """
         probing = asyncio.Event()  # the proof's probe is in flight
         parked = asyncio.Event()  # the victim is inside the text loop
@@ -1621,7 +1626,7 @@ class TestACommitReleasesTheRequestsAlreadyInTheTextLoop:
             query = self._query_in(args, kwargs)
             native_queries.append(query)
             if "in flight" in query:  # the victim's retry
-                return AIMessage(content="Native answer.")
+                return await victim_retry()
             if "slowly" in query:  # the concurrent proof
                 probing.set()
                 await budget_full.wait()
@@ -1660,17 +1665,68 @@ class TestACommitReleasesTheRequestsAlreadyInTheTextLoop:
             # The divergence, now real: native is the protocol and the budget
             # that would refuse it is spent.
             assert nodes._escalation.escalated is True
-            assert nodes._escalation.native_failures >= nodes._MAX_NATIVE_FAILURES
+            assert nodes._escalation.native_failures == nodes._MAX_NATIVE_FAILURES
 
+            if on_committed is not None:
+                on_committed()
             committed.set()
             result = await victim
+
+        assert any("in flight" in q for q in native_queries), "the retry never ran"
+        return result
+
+    @pytest.mark.asyncio
+    async def test_a_request_mid_text_loop_retries_on_the_proved_protocol(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        async def answers():
+            return AIMessage(content="Native answer.")
+
+        result = await self._park_a_request_across_a_commit(answers)
 
         assert result["messages"][0].content == "Native answer.", (
             "a request already in the text loop honoured a budget the commit had "
             "made meaningless, and answered from retrieval instead"
         )
         assert result["messages"][0].content != _NO_ANSWER_MSG
-        assert any("in flight" in q for q in native_queries), "the retry never ran"
+
+    @pytest.mark.asyncio
+    async def test_a_failure_after_the_commit_neither_counts_nor_blames_text(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """The write side of the same divergence.
+
+        Letting the retry through is only half of it. If that retry then fails,
+        the failure must not be billed to a budget whose question native has
+        already answered -- and the log must not tell an operator that ``text``
+        is in force while :func:`_resolved_tool_mode` returns native.
+
+        Scoping the suppression to the proof's wave missed this: the parked
+        request's probe *begins after* the commit, so it fell through to the
+        counting branch and printed "attempt 3 of 2" -- a count past its own
+        cap -- alongside two claims that were false at the moment they were
+        written.
+        """
+
+        async def fails():
+            raise RuntimeError("503 transient")
+
+        with caplog.at_level(logging.WARNING):
+            result = await self._park_a_request_across_a_commit(fails, on_committed=caplog.clear)
+
+        # The failure was real, so this query still gets the give-up notice.
+        assert result["messages"][0].content == _NO_ANSWER_MSG
+        # But it is not evidence against a protocol already proved to work.
+        assert nodes._escalation.native_failures == nodes._MAX_NATIVE_FAILURES, (
+            "a post-commit failure was billed to the budget, running the count "
+            "past its own cap"
+        )
+        assert f"of {nodes._MAX_NATIVE_FAILURES}" not in caplog.text
+        assert "text' protocol stays in force" not in caplog.text
+        assert nodes._resolved_tool_mode() == "native"
+        assert "has already proved native works on this endpoint" in caplog.text
+        # The advice is wrong here too: native demonstrably works.
+        assert "enable-auto-tool-choice" not in caplog.text
 
 
 class TestEveryFailureSiteRecitesOneClause:

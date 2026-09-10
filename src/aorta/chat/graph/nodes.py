@@ -802,11 +802,6 @@ class _EscalationState:
     #: that began at or before this was already in flight then, so it belongs to
     #: the same wave and must not be billed again.
     counted_watermark: int = 0
-    #: ``probes_begun`` as it stood when native was proved to work. Any probe
-    #: that began at or before this is older than that proof, so a later failure
-    #: from it must not spend the failure budget or announce that text stayed in
-    #: force.
-    successful_watermark: int = 0
 
 
 #: Remediation for a native request that failed outright, appended by
@@ -970,7 +965,6 @@ def _commit_escalation(signature: str, evidence: str = _ANSWERED) -> None:
     if _escalation.escalated:
         return
     _escalation.escalated = True
-    _escalation.successful_watermark = _escalation.probes_begun
     logger.warning(
         # "A round", not "the model": escalation is triggered by the round that
         # gave up, and earlier rounds of the same query may well have run tools
@@ -1031,10 +1025,15 @@ def _record_escalation_failure(probe: int, *, endpoint_hint: bool = False) -> st
     concurrent sessions, one transient 503, and every later query in the
     process denied its retry.
 
-    A failure also stops being evidence once another probe in the same wave has
-    already committed native. In that case the process is already on native, so
-    incrementing the budget would write off a proven protocol and the caller
-    would log the opposite of the state later queries now observe.
+    A failure also stops being evidence once native has been committed at all
+    -- not merely once a probe in the same wave has. In that case the process
+    is already on native, so incrementing the budget would write off a proven
+    protocol and the caller would log the opposite of the state later queries
+    now observe. Scoping this to the wave was too narrow: a request that
+    resolved ``text`` before the commit probes *after* it, and a failure on
+    that probe reported "the 'text' protocol stays in force" while
+    :func:`_resolved_tool_mode` returned native, over a count that had run past
+    its own cap.
 
     So a failure counts only if its probe began *after* the last counted one
     was recorded. The watermark moves to :attr:`_EscalationState.probes_begun`
@@ -1048,12 +1047,12 @@ def _record_escalation_failure(probe: int, *, endpoint_hint: bool = False) -> st
     exclusion: these are plain integer reads and writes between ``await``
     points on one event loop.
     """
-    if probe <= _escalation.successful_watermark:
+    if _escalation.escalated:
         # No endpoint hint on this branch even when the caller asks for one:
         # native demonstrably works here, so tool-parser advice would send the
         # operator to fix something that is not broken.
         return (
-            "Another concurrent retry has already proved native works on this "
+            "Another retry has already proved native works on this "
             "endpoint, so the protocol has moved to native regardless and this "
             "failure is not counted against the budget."
         )
