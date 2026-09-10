@@ -106,6 +106,44 @@ own image selection, mounts, devices, IPC/shared-memory settings, entrypoints,
 and inner commands. Top-level recipe `extra_env` is a matrix/triage feature;
 probe-mode recipes retain their separate environment-passthrough contract.
 
+## `aorta chat` settings
+
+The [`aorta chat`](chat/README.md) assistant is a separate configuration surface
+and does not interact with anything above. Its settings configure the assistant
+process itself: they never enter the controlled trial overlay, and nothing a
+recipe, a mitigation or an `extra_env` sets can reach them.
+
+Its precedence, from lowest to highest, is:
+
+```text
+built-in defaults
+< the TOML profile at $XDG_CONFIG_HOME/aorta/chat.toml (~/.config/aorta/chat.toml)
+< AORTA_CHAT_* environment variables
+< constructor arguments, which is how the CLI applies its own flags
+```
+
+Every setting has both spellings: a TOML key in the profile, and `AORTA_CHAT_`
+plus its upper-cased name, so `chunk_size` is `AORTA_CHAT_CHUNK_SIZE`. The
+environment outranking the file is deliberate: a one-off `export` or a CI job
+wins over whatever is on disk. Unknown keys in the profile are ignored at load
+rather than rejected, so a file written by a newer AORTA does not stop an older
+one from starting; `aorta chat config validate` is where they are reported.
+
+Two points against the rest of this guide:
+
+- **The `AORTA_CHAT_` prefix is not decoration.** Chat settings include names
+  like `chunk_size` and `allowed_commands`, and a bare `CHUNK_SIZE` in a tool
+  that runs inside other people's job scripts is asking for a collision. The
+  namespace also keeps these distinct from the `AORTA_*` variables the runtime
+  already reads (`AORTA_ENV_FILE`, `AORTA_TRIAL_MASTER_PORT_BASE` and the like),
+  which configure a run rather than the assistant.
+- **The profile can hold an API key**, so it is created mode `0600` and
+  `aorta bundle` refuses to package it.
+
+For the full key list, the profile wizard (`aorta chat config init`) and the
+inspection commands (`aorta chat config show` / `validate`), see
+[the chat configuration guide](chat/configuration.md).
+
 ## Configuration Reference
 
 | Category | Knob | Expected Behaviour |

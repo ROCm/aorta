@@ -114,7 +114,7 @@ layer.
 
 | Layer | Scope | This agent |
 |-------|-------|------------|
-| Cluster autopsy | Post-mortem across nodes, traces, Prometheus | Future interop: cluster agent could invoke `aorta agent` with a frozen argv |
+| Cluster autopsy | Post-mortem across nodes, traces, Prometheus | Future interop: cluster agent could invoke `aorta agent mitigate` with a frozen argv |
 | **Probe agent** | Mitigation search on one opaque command | **Shipped here** |
 
 Standalone today; integration is a one-slide handoff, not a hard dependency.
@@ -125,7 +125,7 @@ Standalone today; integration is a one-slide handoff, not a hard dependency.
 
 | Phase | Deliverable |
 |-------|-------------|
-| **A** | `aorta agent` CLI + fake-LLM loop + `agent_log.jsonl` + tests (no API) |
+| **A** | `aorta agent mitigate` CLI + fake-LLM loop + `agent_log.jsonl` + tests (no API) |
 | **B** | LiteLLM client + structured output + `agent_report.md` |
 | **C** | Approval gates + `wake()` resume + optional `aorta bundle` at end |
 
@@ -151,7 +151,7 @@ docs/agent/aorta-probe-agent.md   # this file
 ### CLI
 
 ```bash
-aorta agent \
+aorta agent mitigate \
   --output ./agent_results \
   --ticket ROCM-EXAMPLE \
   --max-iterations 8 \

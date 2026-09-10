@@ -1,0 +1,85 @@
+{
+  "description": "Retrieval probes for `aorta chat index eval` (Decision 19b). Each entry is a question a user would plausibly ask, plus the files that would answer it. Expected paths are relative to the aorta package and matched as suffixes, so one set works whether the index was built from a checkout or from an installed wheel. Any one expected source counts as a hit -- several files can legitimately answer the same question, and requiring the whole set would score the phrasing rather than the embedder.",
+  "questions": [
+    {
+      "question": "How does aorta strip hostnames and IP addresses out of a support archive?",
+      "expected": ["bundle/redactor.py", "bundle/writer.py"],
+      "note": "Redaction is the first thing asked about before sharing an archive externally."
+    },
+    {
+      "question": "What decides when the automated mitigation search gives up and stops trying?",
+      "expected": ["agent/loop.py", "agent/policy.py"],
+      "note": "Stopping conditions live in the policy, not in the loop that consults it."
+    },
+    {
+      "question": "How are code snippets found and ranked before they are sent to the model?",
+      "expected": ["chat/rag/retriever.py", "chat/rag/indexer.py"],
+      "note": "The core retrieval path; a miss here means the assistant is answering blind."
+    },
+    {
+      "question": "Where do I point the assistant at my own OpenAI-compatible endpoint?",
+      "expected": ["chat/inference/providers/factory.py", "chat/config.py"],
+      "note": "Provider selection and the settings that drive it."
+    },
+    {
+      "question": "Which ROCm knobs get captured when a run records its machine state?",
+      "expected": ["instrumentation/environment.py", "_env_rules.py"],
+      "note": "The environment snapshot is what makes a reproducer reproducible."
+    },
+    {
+      "question": "How is a partially finished probe picked up again without redoing work?",
+      "expected": ["probe/resume.py", "probe/sandbox.py"],
+      "note": "Resume semantics, asked whenever a long sweep is interrupted."
+    },
+    {
+      "question": "What is the on-disk schema for the results table a triage produces?",
+      "expected": ["artifacts/matrix.py", "artifacts/env.py"],
+      "note": "Downstream tooling reads these files, so their shape is a public contract."
+    },
+    {
+      "question": "How does aorta launch bpftrace and turn its output into structured records?",
+      "expected": ["ebpf/runner.py", "ebpf/parser.py"],
+      "note": "Spans the two halves of the eBPF path: invocation and parsing."
+    },
+    {
+      "question": "Are local file paths sent to a remote provider, and can that be turned off?",
+      "expected": ["chat/redaction.py"],
+      "note": "A single-file answer, so it probes precision rather than breadth."
+    },
+    {
+      "question": "Why is langchain not imported when the command line starts up?",
+      "expected": ["cli/chat.py"],
+      "note": "Deferred imports keep `aorta --help` cheap; phrased without naming the file."
+    },
+    {
+      "question": "What happens if a downloaded index was built for a different release?",
+      "expected": ["chat/rag/manifest.py", "chat/rag/index_ops.py"],
+      "note": "Version-mismatch refusal, the most common fetch-time surprise."
+    },
+    {
+      "question": "Which model turns text into vectors, and how is it obtained on a node with no egress?",
+      "expected": ["chat/rag/embeddings/fastembed_bge.py", "chat/rag/embeddings/factory.py"],
+      "note": "Air-gapped setup is a supported path, so the weights question is a real one."
+    },
+    {
+      "question": "What can the assistant actually do besides answering from retrieved text?",
+      "expected": ["chat/tools/search.py", "chat/tools/files.py"],
+      "note": "Tool discovery, phrased the way someone unfamiliar with the agent would ask."
+    },
+    {
+      "question": "How is the directory name for an exported bundle chosen?",
+      "expected": ["bundle/_slug.py", "bundle/manifest.py"],
+      "note": "A deliberately narrow question aimed at a small helper."
+    },
+    {
+      "question": "How does a question get routed between retrieval and tool calls?",
+      "expected": ["chat/graph/nodes.py", "chat/graph/graph.py"],
+      "note": "The agent graph's control flow."
+    },
+    {
+      "question": "Which subcommand sweeps a set of mitigations across a workload?",
+      "expected": ["cli/triage.py", "cli/run.py"],
+      "note": "Command discovery, which is what a first-time user asks."
+    }
+  ]
+}

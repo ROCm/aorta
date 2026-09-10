@@ -242,6 +242,20 @@ genuinely unexpected failure. `capture_to()` uses the same collection path and
 returns the same `EnvSnapshot`, then writes it as UTF-8 JSON. It raises only
 when the output directory/file cannot be created or validated.
 
+For *reading* a snapshot back, `EnvSnapshot.from_dict()` above reconstructs the
+whole thing. A narrower alternative is `aorta.artifacts.read_env()`, which
+returns a small typed view of an `env.json` / `host_env.json` file --
+`captured_at`, `partial` / `partial_reasons`, `rocm.version`, the schema
+compatibility status, and a `block()` escape hatch onto the blocks it does not
+type (a sibling `read_matrix()` does the same for `matrix.json`). It depends
+only on the standard library, so it works from a base `pip install amd-aorta`,
+and it never presents an absent or unreadable field as a default: the value is
+`None` and its name appears in `missing_fields`, so an absent `partial` does not
+read as "the probe was clean". Note that `aorta.artifacts` is
+**internal for now** -- scoped to what AORTA's own tooling needs today, with
+names that may change without a deprecation cycle -- so pin your AORTA version
+if you build on it.
+
 ## env.json schema
 
 | Top-level key | Type | Source | Notes |

@@ -25,5 +25,9 @@ class UnknownEnvironmentError(_PlainStrKeyError):
     """Raised when an environment name is not in the merged registry."""
 
 
+class UnknownAgentError(_PlainStrKeyError):
+    """Raised when an agent name is not in the merged registry."""
+
+
 class RegistryCollisionError(RegistryError):
     """Raised when two contributors register the same name in any registry."""

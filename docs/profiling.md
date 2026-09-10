@@ -20,6 +20,12 @@ Full reference — options, artifact layout, analysis recipes, troubleshooting:
 [Profiling Collectors](profiling-collectors.md). Runnable examples:
 [`examples/profiling/`](../examples/profiling/README.md).
 
+Proton has five backends and they do not measure the same thing — whole-kernel
+timing, intra-kernel cycle counts and PC sampling are three different
+questions, and one of them publishes no numeric metrics at all. If you are
+deciding which to use, start at
+[Choosing a Proton backend](proton-backends.md).
+
 The rest of this guide covers two other things: the benchmark harness's own
 built-in telemetry (below), which is independent of the collectors, and the
 older hand-rolled `rocprofv3` capture scripts, which are kept working but are

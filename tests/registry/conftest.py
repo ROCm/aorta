@@ -26,6 +26,10 @@ class _FakeEntryPoint:
     dist: _FakeDist
 
     def load(self):
+        # An exception payload simulates an entry-point whose import blows up,
+        # which the agents loader must log and skip rather than propagate.
+        if isinstance(self.payload, BaseException):
+            raise self.payload
         return self.payload
 
 
@@ -51,6 +55,12 @@ def fake_eps(monkeypatch):
 def fake_env_eps(monkeypatch):
     """Install fake environment entry-points: fake_env_eps([(name, payload, dist), ...])."""
     return _fake_eps_for(monkeypatch, "aorta.registry.environments.entry_points")
+
+
+@pytest.fixture
+def fake_agent_eps(monkeypatch):
+    """Install fake agent entry-points: fake_agent_eps([(name, payload, dist), ...])."""
+    return _fake_eps_for(monkeypatch, "aorta.registry.agents.entry_points")
 
 
 @pytest.fixture

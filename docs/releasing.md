@@ -70,6 +70,10 @@ The workflow then:
 - publishes the **same** wheel + sdist to PyPI (the `publish-pypi` job reuses the
   built artifacts via Trusted Publishing — see below).
 
+A separate job then builds the `aorta chat` retrieval index for the same tag and
+attaches it to the release; see [the index asset](#the-aorta-chat-index-asset)
+below.
+
 ### One-time PyPI Trusted Publishing setup
 
 PyPI publishing uses [Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
@@ -93,6 +97,51 @@ Until this is configured the `publish-pypi` job will fail; the GitHub Release
 After the workflow finishes, confirm the [latest release](https://github.com/ROCm/aorta/releases/latest)
 shows `amd_aorta-X.Y.Z-py3-none-any.whl` plus the sdist, and run the customer
 install command below in a clean virtualenv as a smoke test.
+
+### The `aorta chat` index asset
+
+Every release also carries a prebuilt retrieval index for
+[`aorta chat`](chat/README.md), so a customer who installed the wheel can run
+`aorta chat index fetch` instead of embedding the tree themselves. Three assets
+are attached alongside the wheel and sdist:
+
+```text
+aorta-chat-index.sqlite
+aorta-chat-index.sqlite.manifest.json
+aorta-chat-index.sqlite.sha256
+```
+
+`index fetch` resolves by **installed version**: an exact `X.Y.Z` fetches that
+release's tag, so the index describes the code the customer actually has, while
+a `.dev` build falls back to the rolling `main` asset the nightly publishes (see
+below). Release assets are immutable and never expire, which is what makes the
+version-matched fetch work. Unlike the nightly there is deliberately **no digest
+skip** here: a release must carry its own asset even when the corpus is
+byte-identical to the previous release's, because `index fetch` resolves by tag.
+
+The index is built by a **separate `chat-index` job**, ordered after the release
+job rather than being a step inside it, so it cannot delay or fail the wheel
+publish or the PyPI upload. If it fails, the release still stands with the wheel
+attached and only the index asset is missing.
+
+**The corpus is restricted to git-tracked files of the public repository**, by
+three overlapping guards. The index stores every chunk's source text verbatim,
+so the published asset is a redistribution of the tree it was built from:
+
+1. the job is gated on the repository being `ROCm/aorta`, so it does not run in
+   a fork;
+2. `aorta chat index build --public-only` re-checks that `origin` resolves to
+   that repository *and* restricts the corpus to what `git ls-files` reports —
+   the tracked-file half is what catches an untracked reproducer or customer
+   bundle left in the working directory, which no remote check can see;
+3. [`scripts/verify_chat_index_sources.py`](../scripts/verify_chat_index_sources.py)
+   then scans the built index and fails the job if any chunk's recorded source
+   path is not tracked.
+
+All three raise rather than warn. The job additionally fails if the `chat-cli`
+extra resolved a `torch`, `nvidia-*` or `chromadb` wheel, and scores retrieval
+against the shipped question set — logged, not gated, so an immature baseline
+cannot block a release.
 
 ## Customer install flow
 
@@ -145,6 +194,27 @@ pip install "amd-aorta==X.Y.ZrcYYYYMMDD" \
 [`.github/workflows/cleanup_releases.yml`](../.github/workflows/cleanup_releases.yml)
 prunes `dev-wheels` assets older than 90 days (weekly; manual runs default to a
 dry run) so the rolling release stays bounded.
+
+The nightly also publishes the rolling `aorta chat` index built from `main`, to
+the same `dev-wheels` tag and under the same three asset names as a release.
+That is what `aorta chat index fetch` resolves to from a `.dev` install — which
+is every editable and git install, since `setuptools_scm` stamps them that way —
+and it prints how far past the last release the running build is. Two
+differences from the release job are worth knowing when reading a nightly run:
+
+- It is **ordered after** the wheel job rather than running beside it. Both write
+  to `dev-wheels` and the wheel job force-moves that tag, so running them in
+  parallel would race a tag move against an asset upload. A failed wheel build
+  therefore publishes no index either, which is the right way round.
+- It **skips the rebuild when the corpus digest is unchanged**
+  (`aorta chat index digest`), because most nights touch no indexed file and
+  re-uploading a byte-identical asset is churn. The digest covers the corpus
+  content plus the chunking and model parameters, deliberately not the git SHA.
+  A missing or unreadable published manifest counts as "no baseline" and
+  rebuilds; only an explicit digest match skips.
+
+The same three public-tree guards apply, with the repository gate additionally
+narrowed to scheduled runs and manual runs from `main`.
 
 ## Out of scope (possible follow-ups)
 

@@ -73,3 +73,6 @@ aorta sweep run --recipe /path/to/recipe.yaml --dry-run
 - [Running the Benchmark](running-benchmark.md) - Launch an in-tree training run
 - [Configuration Guide](configuration.md) - Customize trial and workload settings
 - [Environment Probe](env-probe.md) - Capture and compare environments
+- [`aorta chat`](chat/README.md) - Opt-in interactive assistant over the AORTA
+  codebase and your own run artifacts; installed via its own extras, so nothing
+  above changes if you skip it

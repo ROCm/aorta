@@ -124,3 +124,148 @@ jobs:
             dist/*.tar.gz
           prerelease: true
           make_latest: "false"  # never overtake the stable "Latest" release
+
+  # Rolling `aorta chat` retrieval index built from main, so a developer or CI
+  # install (which is every internal install -- setuptools_scm makes them all
+  # .devN versions) can `aorta chat index fetch` instead of spending ~20 minutes
+  # embedding the tree themselves. `aorta chat index fetch` resolves a .devN
+  # version to this asset; a released wheel resolves to its own release's asset
+  # from release.yml instead. See "Release vs nightly" in the merge plan.
+  #
+  # Separate job, not a step in `nightly`: it must not be able to delay or fail
+  # the wheel publish, and it is skipped entirely on a night when the corpus
+  # digest is unchanged.
+  chat-index:
+    # Ordered after the wheel job because both write to the rolling `dev-wheels`
+    # release and that job force-moves the tag. Running them in parallel would
+    # race a tag move against an asset upload. A failed wheel build therefore
+    # publishes no index either, which is the right way round.
+    needs: nightly
+    # HARD GUARD, part 1 of 2. The index stores every chunk's source text
+    # verbatim, so the published asset IS a redistribution of the tree it was
+    # built from. That is fine for MIT-licensed ROCm/aorta and an IP incident for
+    # anything else, so the job cannot run anywhere else -- and a fork cannot
+    # reach the canonical release either way. Part 2 is `--public-only` below,
+    # which re-checks the remote and restricts the corpus to git-tracked files.
+    if: >-
+      github.repository == 'ROCm/aorta' &&
+      ((github.event_name == 'schedule') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # setuptools_scm needs tags; the manifest records HEAD
+
+      - name: Set up Python
+        # 3.11 is chat's floor (Decision 13a) and the version the index is
+        # published from, so the build matches what most users query with.
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install aorta with the chat CLI extra
+        run: python -m pip install -e ".[chat-cli]"
+
+      # No torch, no nvidia-*, no chromadb. Asserted rather than trusted: the
+      # whole point of Decision 19a is that this stack cannot pull a CUDA wheel,
+      # and a transitive dependency change is exactly how that would come back.
+      - name: Verify the embedding stack is torch-free
+        run: |
+          if python -m pip list --format=freeze | grep -Ei '^(torch|nvidia-|chromadb|sentence-transformers)'; then
+            echo "::error::The chat-cli extra resolved a torch/CUDA/chromadb dependency. See Decision 19a."
+            exit 1
+          fi
+          python -c "import fastembed, onnxruntime; print('fastembed', fastembed.__version__)"
+
+      # Skip the rebuild when nothing indexable changed. The digest covers the
+      # corpus content plus the chunking and model parameters, but deliberately
+      # not the git SHA -- most commits touch no indexed file, and keying on the
+      # SHA would re-upload an identical 18 MB asset every night.
+      - name: Decide whether the corpus changed
+        id: digest
+        env:
+          ASSET_BASE: https://github.com/${{ github.repository }}/releases/download/dev-wheels
+        run: |
+          set -uo pipefail
+          current="$(aorta chat index digest --public-only --path . | python -c 'import json,sys; print(json.load(sys.stdin)["corpus_digest"])')"
+          if [ -z "${current}" ]; then
+            echo "::error::Could not compute the corpus digest."
+            exit 1
+          fi
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+
+          # A missing or unreadable published manifest means "no baseline", which
+          # must rebuild rather than skip. Only an explicit digest match skips.
+          published=""
+          if curl -fsSL --retry 3 "${ASSET_BASE}/aorta-chat-index.sqlite.manifest.json" -o published.json; then
+            published="$(python -c 'import json; print(json.load(open("published.json")).get("corpus_digest",""))' || true)"
+          else
+            echo "No published manifest yet; building."
+          fi
+
+          # The manifest is the smallest of the three assets and the one most
+          # likely to survive a partial upload or a manual asset deletion. On
+          # its own it proves nothing about what `index fetch` will find, so a
+          # digest match that skips the rebuild would leave fetch broken every
+          # night until unrelated corpus content happened to change. Require
+          # the whole published set before trusting the match.
+          complete=true
+          for asset in aorta-chat-index.sqlite aorta-chat-index.sqlite.sha256; do
+            if ! curl -fsSL --retry 3 -I "${ASSET_BASE}/${asset}" >/dev/null; then
+              echo "Published asset ${asset} is missing; rebuilding the whole set."
+              complete=false
+            fi
+          done
+          if [ "${complete}" != "true" ]; then
+            published=""
+          fi
+
+          if [ -n "${published}" ] && [ "${published}" = "${current}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Corpus digest unchanged (${current}); skipping the rebuild."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Corpus digest ${published:-<none>} -> ${current}; rebuilding."
+          fi
+
+      # HARD GUARD, part 2 of 2. --public-only re-verifies that origin resolves
+      # to ROCm/aorta and restricts the corpus to files git tracks. The remote
+      # check catches a misconfigured workflow; the tracked-file filter catches
+      # an untracked internal reproducer or customer bundle in the working
+      # directory, which the remote check cannot see. Both raise, neither warns.
+      - name: Build the index
+        if: steps.digest.outputs.changed == 'true'
+        run: |
+          mkdir -p index-out
+          aorta chat index build --public-only --path . \
+            --output index-out/aorta-chat-index.sqlite
+
+      # Belt and braces on the guard above: assert no chunk came from a path the
+      # public tree does not track. The build already enforces this, so a hit
+      # here means the enforcement broke -- which is worth a red run.
+      - name: Verify no untracked source reached the index
+        if: steps.digest.outputs.changed == 'true'
+        run: python scripts/verify_chat_index_sources.py index-out/aorta-chat-index.sqlite
+
+      - name: Score retrieval on the shipped question set
+        if: steps.digest.outputs.changed == 'true'
+        # Decision 19b. Not a gate: the baseline is young and a threshold picked
+        # today would be arbitrary. Logged so a regression is visible in the run
+        # history when someone changes the chunker or the model.
+        env:
+          AORTA_CHAT_INDEX_PATH: index-out/aorta-chat-index.sqlite
+        run: aorta chat index eval || echo "::warning::Retrieval eval failed; index still published."
+
+      - name: Publish the rolling main index
+        if: steps.digest.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: dev-wheels
+          files: |
+            index-out/aorta-chat-index.sqlite
+            index-out/aorta-chat-index.sqlite.manifest.json
+            index-out/aorta-chat-index.sqlite.sha256
+          prerelease: true
+          make_latest: "false"

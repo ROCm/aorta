@@ -3,12 +3,25 @@
 Covers the option schema, both attach modes (``cli`` argv rewrite and ``env``
 variable bundle), the ``HIP_VISIBLE_DEVICES`` -> ``ROCR_VISIBLE_DEVICES``
 translation Proton needs on AMD, and fail-soft ``.hatchet`` parsing.
+
+It also carries two guards over the *sibling* GPU module's source: the GPU legs
+are path-skipped on most PRs, so a convention that only they exercise needs a
+CPU test to hold it. One checks that every child launch there carries the shared
+budget (``test_gpu_smoke_subprocesses_all_use_the_shared_child_budget``); the
+other checks the budget's own *value*
+(``test_the_shared_child_budget_value_stays_under_the_gpu_job_timeout``), since
+pinning the constant's name everywhere still permits raising the constant.
+Because the first reads one fixed file, its detection is exercised separately
+against snippets -- a guard checked only against source that already complies
+cannot say what it would reject.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,9 +29,12 @@ import pytest
 
 from aorta.instrumentation.proton import (
     AUTO_BACKEND,
+    BACKEND_MODES,
     BACKENDS,
     ENV_PREFIX,
     ENV_PROTON_PYTHON,
+    HOOKS,
+    MODE_BEARING_KEYS,
     OPTION_KEYS,
     OUTPUT_SUBDIR,
     PROFILE_BASENAME,
@@ -190,6 +206,98 @@ def test_validate_options_rejects_intra_kernel_knob_on_wrong_backend(key):
         validate_options({"backend": "roctracer", key: "cta" if key == "granularity" else "mma"})
 
 
+@pytest.mark.parametrize(
+    ("backend", "backend_mode"),
+    sorted((backend, mode) for backend, modes in BACKEND_MODES.items() for mode in modes),
+)
+def test_validate_options_accepts_every_backend_mode_of_its_backend(backend, backend_mode):
+    effective = validate_options({"backend": backend, "backend_mode": backend_mode})
+    assert effective["backend_mode"] == backend_mode
+
+
+def test_validate_options_rejects_a_backend_mode_the_backend_does_not_have():
+    """The domains differ per backend -- ``pcsampling`` is a rocprofiler / cupti
+    mode, and roctracer only has ``periodic_flushing``. A flat union would
+    accept this and fail later inside Proton."""
+    with pytest.raises(ValueError, match="not one of.*for backend: roctracer"):
+        validate_options({"backend": "roctracer", "backend_mode": "pcsampling"})
+
+
+#: A valid (backend, value) pair for each ``--mode``-bearing option, so the
+#: parametrised tests below cover whatever ``MODE_BEARING_KEYS`` holds; a key
+#: added there without an entry here fails with the KeyError naming it.
+_MODE_BEARING_SAMPLE: dict[str, tuple[str, str]] = {
+    "backend_mode": ("cupti", "pcsampling"),
+    "instrumentation_mode": ("instrumentation", "mma"),
+    "granularity": ("instrumentation", "warp"),
+}
+
+
+def test_mode_bearing_sample_covers_every_declared_key():
+    assert set(_MODE_BEARING_SAMPLE) == set(MODE_BEARING_KEYS)
+
+
+@pytest.mark.parametrize("key", MODE_BEARING_KEYS)
+def test_validate_options_does_not_gate_mode_knobs_on_the_attach_mode(key):
+    """``mode: cli`` with a ``--mode`` knob is accepted, deliberately. Triton
+    3.8.0 forwards ``mode=args.mode`` into ``start()``, so refusing it would
+    reject a recipe that is correct on the current release -- and aorta validates
+    in its own interpreter, so it cannot tell which Triton will run the wrap.
+    Whether the value lands is documented per version, not enforced here."""
+    backend, value = _MODE_BEARING_SAMPLE[key]
+    effective = validate_options({"mode": "cli", "backend": backend, key: value})
+    assert effective[key] == value
+
+
+def test_validate_options_rejects_unknown_backend_mode():
+    with pytest.raises(ValueError, match="not one of"):
+        validate_options({"backend": "rocprofiler", "backend_mode": "sampling"})
+
+
+@pytest.mark.parametrize("backend", ["auto", "instrumentation"])
+def test_validate_options_rejects_backend_mode_without_a_backend_to_validate_it(backend):
+    """``auto`` resolves at runtime, so its mode domain is unknown here; the
+    instrumentation backend's modes are the ``instrumentation_mode`` pair."""
+    with pytest.raises(ValueError, match="requires an explicit backend"):
+        validate_options({"backend": backend, "backend_mode": "pcsampling"})
+
+
+@pytest.mark.parametrize("intra_kernel_key", ["instrumentation_mode", "granularity"])
+def test_validate_options_rejects_backend_mode_beside_an_intra_kernel_knob(intra_kernel_key):
+    """Both render Proton's single ``--mode``, so the pair has no rendering.
+
+    The message must name the collision rather than the backend gate that would
+    also have rejected this: the fix is dropping one option, not changing the
+    backend.
+    """
+    value = "cta" if intra_kernel_key == "granularity" else "mma"
+    with pytest.raises(ValueError, match="conflicts with"):
+        validate_options(
+            {
+                "backend": "instrumentation",
+                "backend_mode": "pcsampling",
+                intra_kernel_key: value,
+            }
+        )
+
+
+@pytest.mark.parametrize("hook", sorted(HOOKS))
+def test_validate_options_accepts_every_hook(hook):
+    assert validate_options({"hook": hook})["hook"] == hook
+
+
+def test_validate_options_rejects_unknown_hook():
+    with pytest.raises(ValueError, match="'hook'"):
+        validate_options({"hook": "launch"})
+
+
+def test_hook_is_not_gated_on_a_backend():
+    """Proton's ``-k`` is backend-independent: it registers a launch hook that
+    records Triton kernel metadata whichever backend measures."""
+    for backend in sorted(BACKENDS):
+        assert validate_options({"backend": backend, "hook": "triton"})["hook"] == "triton"
+
+
 def test_validate_options_does_not_mutate_input():
     supplied = {"backend": "ROCTRACER"}
     validate_options(supplied)
@@ -197,16 +305,28 @@ def test_validate_options_does_not_mutate_input():
 
 
 def test_option_keys_match_the_validator():
-    samples = {
+    """Two samples rather than one: ``backend_mode`` and the intra-kernel pair
+    render the same ``--mode`` and are rejected together, so no single mapping
+    can carry every declared key."""
+    intra_kernel = {
         "mode": "cli",
         "backend": "instrumentation",
         "context": "shadow",
         "data": "tree",
         "instrumentation_mode": "mma",
         "granularity": "warp",
+        "hook": "triton",
     }
-    assert set(samples) == set(OPTION_KEYS)
-    assert validate_options(samples)
+    whole_kernel = {
+        "mode": "env",
+        "backend": "roctracer",
+        "backend_mode": "periodic_flushing",
+        "context": "python",
+        "data": "trace",
+    }
+    assert set(intra_kernel) | set(whole_kernel) == set(OPTION_KEYS)
+    assert validate_options(intra_kernel)
+    assert validate_options(whole_kernel)
 
 
 # ---- --mode rendering ----------------------------------------------------
@@ -231,6 +351,14 @@ def test_mode_argument_name_and_granularity():
         {"backend": "instrumentation", "instrumentation_mode": "mma", "granularity": "cta"}
     )
     assert mode_argument(effective) == "mma:granularity=cta"
+
+
+def test_mode_argument_renders_backend_mode():
+    """``backend_mode`` is Proton's ``--mode`` for the whole-kernel backends, so
+    it renders as the bare name -- no ``granularity=`` grammar, which belongs to
+    the instrumentation backend."""
+    effective = validate_options({"backend": "roctracer", "backend_mode": "periodic_flushing"})
+    assert mode_argument(effective) == "periodic_flushing"
 
 
 # ---- Interpreter resolution ---------------------------------------------
@@ -353,6 +481,24 @@ def test_build_argv_prefix_includes_mode_for_intra_kernel(tmp_path):
     assert argv[argv.index("--mode") + 1] == "mma"
 
 
+def test_build_argv_prefix_includes_mode_for_a_backend_mode(tmp_path):
+    argv = build_argv_prefix(tmp_path, {"backend": "cupti", "backend_mode": "pcsampling"})
+    assert argv[argv.index("--mode") + 1] == "pcsampling"
+
+
+def test_build_argv_prefix_omits_mode_when_no_knob_asks_for_it(tmp_path):
+    assert "--mode" not in build_argv_prefix(tmp_path, {"backend": "cupti"})
+
+
+def test_build_argv_prefix_omits_the_hook_flag_by_default(tmp_path):
+    assert "-k" not in build_argv_prefix(tmp_path)
+
+
+def test_build_argv_prefix_renders_the_hook(tmp_path):
+    argv = build_argv_prefix(tmp_path, {"hook": "triton"})
+    assert argv[argv.index("-k") + 1] == "triton"
+
+
 def test_build_argv_prefix_propagates_option_error(tmp_path):
     with pytest.raises(ValueError, match="unknown option"):
         build_argv_prefix(tmp_path, {"nope": "1"})
@@ -466,17 +612,115 @@ def test_wrap_argv_does_not_mutate_the_input(tmp_path):
     assert inner == ["python", "vecadd.py"]
 
 
+# ---- CLI mode cannot pin a queue-intercepting backend -------------------
+#
+# Verified on gfx950 / ROCm 7.0.2 / Triton 3.7.1 against the shipped
+# triton-vecadd payload: no ``-b`` gives a ~3 KB hatchet holding 27 dispatches,
+# while ``-b roctracer`` gives a 160-byte hatchet whose ROOT frame has empty
+# metrics -- from a run that exits 0. Proton's front-end calls
+# ``_select_backend()`` only when ``-b`` is absent, and that call is what
+# initialises the HIP driver; a queue interceptor that starts first records
+# nothing. In aorta that surfaced as a trial with no proton metrics at all,
+# since ``parse_summary`` degrades to the artifact directory for an empty tree.
+#
+# The guard covers ``roctracer`` and nothing else, and the exclusions are not
+# one rule but three:
+#
+# * ``instrumentation`` needs no interceptor and captures correctly under a CLI
+#   pin, so refusing it would cost a working configuration; what ``mode: cli``
+#   costs there is the ``--mode`` knobs, which the schema documents.
+# * ``rocprofiler`` has the *opposite* contract. Triton 3.8.0 calls
+#   ``rocprofiler_force_configure`` from an ``__attribute__((constructor))`` in
+#   ``libproton.so``, and its source warns that letting HSA come up first -- "a
+#   torch import chain" -- yields an empty dispatch buffer. The CLI path loads
+#   libproton before the payload, so it is the ordering upstream *wants*.
+# * ``auto`` is the ``-b``-absent path, i.e. the working one.
+
+
+def test_wrap_argv_cli_refuses_to_pin_roctracer(tmp_path):
+    with pytest.raises(ProtonWrapError, match="cannot pin backend"):
+        wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"}, env={})
+
+
+@pytest.mark.parametrize("backend", ["rocprofiler", "instrumentation", "cupti"])
+def test_wrap_argv_cli_allows_the_backends_whose_ordering_it_does_not_break(tmp_path, backend):
+    """Only ``roctracer`` is refused. ``rocprofiler`` in particular must stay
+    allowed: refusing it would push operators onto the env-mode ordering its own
+    upstream source warns produces an empty dispatch buffer."""
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": backend}, env={})
+    assert argv[argv.index("-b") + 1] == backend
+
+
+def test_cli_backend_pin_rejection_names_the_mechanism_and_the_route(tmp_path):
+    """The message has to carry the reason, because the alternative outcome is
+    a green trial: an operator who is only told "not supported" will reach for
+    the pin again on the next Triton."""
+    with pytest.raises(ProtonWrapError) as excinfo:
+        wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"}, env={})
+    message = str(excinfo.value)
+    assert "_select_backend()" in message
+    assert "empty ROOT frame" in message
+    assert "mode: env" in message
+
+
+def test_wrap_argv_cli_still_allows_the_default_backend(tmp_path):
+    """``auto`` is the ``-b``-absent path, so it is the one that works."""
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": AUTO_BACKEND}, env={})
+    assert "-b" not in argv
+
+
+@pytest.mark.parametrize("backend", ["instrumentation", "cupti"])
+def test_wrap_argv_cli_still_pins_a_non_intercepting_backend(tmp_path, backend):
+    """Neither installs an HSA queue interceptor, so neither depends on
+    attaching before the runtime comes up."""
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": backend}, env={})
+    assert argv[argv.index("-b") + 1] == backend
+
+
+@pytest.mark.parametrize("backend", ["roctracer", "rocprofiler"])
+def test_wrap_argv_env_mode_pins_the_same_backend_happily(tmp_path, env_on_path, backend):
+    """``mode: env`` accepts either backend -- but what the payload must then do
+    differs, and the collector cannot enforce it from here.
+
+    For ``roctracer`` this is the route the CLI rejection names: the payload
+    starts Proton after its own ``import torch`` has brought the runtime up. For
+    ``rocprofiler`` the responsibility is the opposite one -- import Proton
+    *before* torch, so its ``libproton.so`` constructor configures the SDK
+    before HSA exists (see ``amd-rocprofiler/gelu.py``). Env mode is safe for
+    both; only the payload's import order distinguishes them.
+    """
+    argv = wrap_argv(
+        ["python", "pipeline.py"],
+        tmp_path,
+        {"mode": "env", "backend": backend},
+        env={},
+    )
+    assert f"{ENV_PREFIX}BACKEND={backend}" in argv
+
+
+def test_cli_pin_is_refused_before_the_argv_shape_is_checked(tmp_path):
+    """Both failures are fixed by ``mode: env``, and this is the one whose
+    absence is invisible, so it is the one to report."""
+    with pytest.raises(ProtonWrapError, match="cannot pin backend"):
+        wrap_argv(["/tmp/aorta_hip_gemm", "512"], tmp_path, {"backend": "roctracer"}, env={})
+
+
 # ---- Device-variable translation ----------------------------------------
 
 
 def test_wrap_argv_translates_hip_visible_devices(tmp_path, env_on_path):
     """Proton on AMD does not honour ``HIP_VISIBLE_DEVICES`` for the
     queue-intercepting backends, so a device-pinned cell would otherwise
-    profile the wrong GPU."""
+    profile the wrong GPU.
+
+    Spelled with ``backend: auto`` because that is the only queue-intercepting
+    backend ``mode: cli`` will pin, and the assertion below is about where the
+    ``env(1)`` prefix sits relative to the CLI wrap.
+    """
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"backend": AUTO_BACKEND},
         env={"HIP_VISIBLE_DEVICES": "1"},
     )
     assert argv[0] == str(env_on_path)
@@ -492,11 +736,15 @@ def test_wrap_argv_translates_cuda_visible_devices(tmp_path, env_on_path):
     ROCm's PyTorch presents its devices as ``cuda``, so an operator pinning a
     GPU commonly reaches for ``CUDA_VISIBLE_DEVICES``. Handling only the HIP
     spelling left that trial reaching Proton with a variable it refuses.
+
+    ``mode: env`` throughout the explicitly-pinned cases below: an explicit
+    ``roctracer`` / ``rocprofiler`` is refused in ``mode: cli``, and the
+    translation is the same code either way.
     """
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"mode": "env", "backend": "roctracer"},
         env={"CUDA_VISIBLE_DEVICES": "2"},
     )
     assert "CUDA_VISIBLE_DEVICES" in argv
@@ -508,7 +756,7 @@ def test_wrap_argv_unsets_both_device_spellings_and_prefers_hip(tmp_path, env_on
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "rocprofiler"},
+        {"mode": "env", "backend": "rocprofiler"},
         env={"HIP_VISIBLE_DEVICES": "1", "CUDA_VISIBLE_DEVICES": "2"},
     )
     assert "HIP_VISIBLE_DEVICES" in argv
@@ -593,7 +841,7 @@ def test_wrap_argv_keeps_an_explicit_rocr_visible_devices(tmp_path, env_on_path)
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "rocprofiler"},
+        {"mode": "env", "backend": "rocprofiler"},
         env={"HIP_VISIBLE_DEVICES": "1", "ROCR_VISIBLE_DEVICES": "0"},
     )
     assert "ROCR_VISIBLE_DEVICES=0" in argv
@@ -609,7 +857,7 @@ def test_wrap_argv_translates_an_empty_hip_visible_devices(tmp_path, env_on_path
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"mode": "env", "backend": "roctracer"},
         env={"HIP_VISIBLE_DEVICES": ""},
     )
     assert "HIP_VISIBLE_DEVICES" in argv
@@ -622,7 +870,7 @@ def test_wrap_argv_keeps_an_explicitly_empty_rocr_visible_devices(tmp_path, env_
     argv = wrap_argv(
         ["python", "vecadd.py"],
         tmp_path,
-        {"backend": "roctracer"},
+        {"mode": "env", "backend": "roctracer"},
         env={"HIP_VISIBLE_DEVICES": "1", "ROCR_VISIBLE_DEVICES": ""},
     )
     assert "ROCR_VISIBLE_DEVICES=" in argv
@@ -668,20 +916,20 @@ def test_wrap_argv_fails_when_env_binary_is_missing(tmp_path, monkeypatch):
         wrap_argv(
             ["python", "vecadd.py"],
             tmp_path,
-            {"backend": "roctracer"},
+            {"backend": AUTO_BACKEND},
             env={"HIP_VISIBLE_DEVICES": "1"},
         )
 
 
 def test_wrap_argv_reads_os_environ_by_default(tmp_path, env_on_path, monkeypatch):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "3")
-    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"})
+    argv = wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": AUTO_BACKEND})
     assert "ROCR_VISIBLE_DEVICES=3" in argv
 
 
 def test_wrap_argv_never_mutates_the_supplied_env(tmp_path, env_on_path):
     env = {"HIP_VISIBLE_DEVICES": "1"}
-    wrap_argv(["python", "vecadd.py"], tmp_path, {"backend": "roctracer"}, env=env)
+    wrap_argv(["python", "vecadd.py"], tmp_path, {"mode": "env", "backend": "roctracer"}, env=env)
     assert env == {"HIP_VISIBLE_DEVICES": "1"}
 
 
@@ -712,6 +960,21 @@ def test_build_env_carries_an_explicit_backend(tmp_path):
 def test_build_env_includes_mode_for_intra_kernel(tmp_path):
     env = build_env(tmp_path, {"backend": "instrumentation", "granularity": "warp"})
     assert env[f"{ENV_PREFIX}MODE"] == "default:granularity=warp"
+
+
+def test_build_env_includes_mode_for_a_backend_mode(tmp_path):
+    env = build_env(tmp_path, {"backend": "rocprofiler", "backend_mode": "pcsampling"})
+    assert env[f"{ENV_PREFIX}MODE"] == "pcsampling"
+
+
+def test_build_env_omits_the_hook_by_default(tmp_path):
+    assert f"{ENV_PREFIX}HOOK" not in build_env(tmp_path)
+
+
+def test_build_env_carries_the_hook(tmp_path):
+    """The env bundle mirrors the CLI flags one-for-one, so a payload driving
+    Proton itself can forward ``hook`` into ``proton.start()``."""
+    assert build_env(tmp_path, {"hook": "triton"})[f"{ENV_PREFIX}HOOK"] == "triton"
 
 
 def test_build_env_accepts_str_out_dir():
@@ -1114,3 +1377,240 @@ def test_parse_summary_from_streams_consumes_a_lazy_iterator(tmp_path):
     )
     assert metrics.get("proton_kernel_count") == 3
     assert metrics.get("proton_gpu_time_ms") == pytest.approx(2.0)
+
+
+#: Callables that block on a child process and take a ``timeout`` keyword.
+#: Matched on the trailing name only, so ``subprocess.run(...)``,
+#: ``run(...)`` after ``from subprocess import run`` and
+#: ``proc.communicate(...)`` all resolve the same way.
+_BLOCKS_ON_A_CHILD = frozenset(
+    {"run", "call", "check_call", "check_output", "communicate", "wait", "wait_for"}
+)
+
+#: Child launches that cannot be given a timeout at all, so there is no
+#: bounded spelling of them to accept.
+_UNBOUNDABLE_CHILD_LAUNCH = frozenset({"system", "popen"})
+
+
+def _called_name(node: ast.Call) -> str | None:
+    """Trailing identifier of a call's callee, ignoring how it was reached."""
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _child_budget_violations(source: str, filename: str = "<snippet>") -> dict[str, list]:
+    """Ways ``source`` escapes the shared child budget, keyed by how.
+
+    ``narrowed``: a ``timeout=`` that is not ``_CHILD_TIMEOUT_S``, on any call
+    shape. ``unbounded``: a blocking child call with no ``timeout=`` keyword.
+    ``unboundable``: a launch that takes no timeout at all.
+    """
+    tree = ast.parse(source, filename=filename)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    return {
+        "narrowed": [
+            (keyword.lineno, ast.unparse(keyword.value))
+            for node in calls
+            for keyword in node.keywords
+            if keyword.arg == "timeout"
+            and not (
+                isinstance(keyword.value, ast.Name) and keyword.value.id == "_CHILD_TIMEOUT_S"
+            )
+        ],
+        "unbounded": [
+            (node.lineno, ast.unparse(node.func))
+            for node in calls
+            if (_called_name(node) or "") in _BLOCKS_ON_A_CHILD
+            and not any(keyword.arg == "timeout" for keyword in node.keywords)
+        ],
+        "unboundable": [
+            (node.lineno, ast.unparse(node.func))
+            for node in calls
+            if (_called_name(node) or "") in _UNBOUNDABLE_CHILD_LAUNCH
+        ],
+    }
+
+
+def _assigned_int(source: str, name: str) -> int | None:
+    """Value of a module-level ``name = <int literal>`` assignment.
+
+    ``None`` for anything else -- an annotated assignment, an expression, a
+    negation -- so the caller fails closed and says what it could not read
+    rather than silently checking nothing. ``bool`` is rejected despite being
+    an ``int`` subclass: ``True`` would otherwise read as a one-second budget
+    and pass every bound.
+    """
+    for node in ast.parse(source).body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets) and isinstance(
+            node.value, ast.Constant
+        ):
+            value = node.value.value
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return None
+
+
+@pytest.mark.parametrize(
+    ("kind", "snippet"),
+    [
+        pytest.param("narrowed", "subprocess.run(argv, timeout=3600)", id="literal-timeout"),
+        pytest.param("narrowed", "proc.communicate(timeout=600)", id="literal-on-communicate"),
+        pytest.param("unbounded", "subprocess.run(argv)", id="no-timeout-at-all"),
+        pytest.param("unbounded", "run(argv, check=True)", id="no-timeout-bare-import"),
+        pytest.param("unbounded", "subprocess.check_output(argv)", id="no-timeout-check-output"),
+        pytest.param("unbounded", "proc.communicate()", id="no-timeout-communicate"),
+        pytest.param("unbounded", "proc.wait()", id="no-timeout-wait"),
+        pytest.param("unboundable", "os.system(cmd)", id="os-system"),
+        # Spellings a human reviewer mutation-tested against the keyword-only
+        # version of this guard and found it green on. Kept as their own cases
+        # so the three cannot regress independently of the ones above.
+        pytest.param(
+            "unbounded",
+            "subprocess.run(argv, capture_output=True, text=True)",
+            id="reviewer-kwarg-deleted",
+        ),
+        pytest.param("unbounded", "proc.wait(3600)", id="reviewer-positional-wait"),
+        pytest.param(
+            "unbounded",
+            'subprocess.run(argv, **{"timeout": 3600})',
+            id="reviewer-kwargs-unpack",
+        ),
+    ],
+)
+def test_the_child_budget_guard_reports_each_kind_of_escape(kind, snippet):
+    """Each escape must be reported, and filed as its own kind.
+
+    The guard below reads one fixed file, so on its own it can only say that
+    *today's* calls are bounded. These snippets are what say it would notice a
+    new one -- the first version keyed on ``timeout=`` being present, so
+    ``subprocess.run(argv)``, the most likely regression of all, sailed past it.
+
+    What it does not claim to cover: a launch spelled with a name outside
+    :data:`_BLOCKS_ON_A_CHILD` and :data:`_UNBOUNDABLE_CHILD_LAUNCH` (say
+    ``os.spawnv`` or a bare ``Popen`` that is never waited on). A budget passed
+    positionally is reported as missing rather than accepted, which is the
+    fail-closed direction.
+    """
+    found = _child_budget_violations(snippet)
+    assert found[kind], f"{snippet!r} not reported as {kind}: {found}"
+    assert not [k for k in found if k != kind and found[k]], f"{snippet!r} misfiled: {found}"
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param("subprocess.run(argv, timeout=_CHILD_TIMEOUT_S)", id="run"),
+        pytest.param("proc.communicate(timeout=_CHILD_TIMEOUT_S)", id="communicate"),
+        pytest.param("json.load(handle)", id="unrelated-call"),
+        pytest.param("shutil.which('proton')", id="no-child"),
+    ],
+)
+def test_the_child_budget_guard_accepts_what_it_should(snippet):
+    """A guard that flags correct code gets disabled, so pin the negatives too."""
+    assert not any(_child_budget_violations(snippet).values()), snippet
+
+
+def test_gpu_smoke_subprocesses_all_use_the_shared_child_budget():
+    """Every child launch in the GPU smoke module must carry ``_CHILD_TIMEOUT_S``.
+
+    ``test_proton_smoke_gpu.py`` sizes ``_CHILD_TIMEOUT_S`` so a wedged payload
+    surfaces as ``TimeoutExpired`` naming that payload, rather than as the CI
+    job hitting its own 60-minute cap -- which cancels the run and takes the
+    junit report with it (ROCm/aorta#434). The calls most likely to wedge are
+    the ones that build their own argv instead of going through ``_capture``.
+
+    Three ways to leave that budget, and the guard rejects each separately. A
+    ``timeout=`` literal is a *narrowed* budget, and it can appear on any call
+    shape, so that check stays keyed on the keyword rather than the callee:
+    ``from subprocess import run``, a ``Popen.communicate`` or an ``asyncio``
+    wait would each escape a callee-shaped check while leaving the same hole.
+    An omitted ``timeout=`` is an *absent* budget -- ``subprocess.run(argv)``
+    is completely unbounded -- and nothing about the keyword can catch that, so
+    that check does look at the callee, matching its trailing name so the
+    import spelling still does not matter. It requires the keyword spelling:
+    ``communicate`` and ``wait`` would also take the budget positionally, and
+    asking for the keyword is what lets the guard see it. ``os.system`` and
+    ``os.popen`` are the third -- no timeout exists to pass, so they are
+    rejected outright.
+
+    Checked from the CPU suite because the GPU legs are path-skipped on most
+    PRs, so a regression here would otherwise reach `main` unobserved. Read
+    from the AST rather than grepped so a reflowed call still matches.
+    """
+    source = Path(__file__).with_name("test_proton_smoke_gpu.py")
+    found = _child_budget_violations(source.read_text(encoding="utf-8"), filename=str(source))
+    narrowed, unbounded, unboundable = (
+        found["narrowed"],
+        found["unbounded"],
+        found["unboundable"],
+    )
+
+    assert not narrowed, (
+        f"{source.name} sets a per-call timeout instead of _CHILD_TIMEOUT_S at "
+        f"{narrowed}. A wedged Proton payload would then run past the GPU job's "
+        "own cap, which cancels the job and loses its report -- see ROCm/aorta#434."
+    )
+    assert not unbounded, (
+        f"{source.name} waits on a child without a timeout= keyword at {unbounded}. "
+        "Pass timeout=_CHILD_TIMEOUT_S, or launch through _capture, so a wedge "
+        "fails this test's payload rather than the whole GPU job -- see "
+        "ROCm/aorta#434."
+    )
+    assert not unboundable, (
+        f"{source.name} launches a child that cannot be bounded at {unboundable}. "
+        "os.system and os.popen take no timeout, so a wedge there runs until the "
+        "GPU job's own cap. Use subprocess with timeout=_CHILD_TIMEOUT_S -- see "
+        "ROCm/aorta#434."
+    )
+
+
+def test_the_shared_child_budget_value_stays_under_the_gpu_job_timeout():
+    """The budget's *value* has to be bounded, not just its name.
+
+    The guard above pins every call to ``_CHILD_TIMEOUT_S`` and says nothing
+    about what that constant holds, so raising it in one place reinstates the
+    original incident while leaving all three passes green -- the shortest path
+    back to run 33527313950, where a wedged payload ran until the GPU job's own
+    60-minute cap, which cancels the job and takes the junit report with it
+    (ROCm/aorta#434).
+
+    Anchored to the workflow's ``--timeout`` rather than to a literal here,
+    because "below the thing that would otherwise kill us" is the actual
+    property: a budget above it never fires, and pytest-timeout kills the test
+    from outside with no payload name and no partial output. Either side
+    changing is caught. Comment lines are skipped when reading the workflow --
+    ``gpu-tests.yml`` explains the flag a few lines above passing it, and a
+    guard that reads the prose instead of the flag would keep passing after the
+    two drifted apart.
+    """
+    module = Path(__file__).with_name("test_proton_smoke_gpu.py")
+    budget = _assigned_int(module.read_text(encoding="utf-8"), "_CHILD_TIMEOUT_S")
+    assert budget is not None, (
+        f"{module.name} no longer defines _CHILD_TIMEOUT_S as a module-level int "
+        "literal, so its value cannot be checked. Keep it one, or teach this test "
+        "the new shape -- an unbounded budget is how ROCm/aorta#434 happened."
+    )
+
+    workflow = Path(__file__).parents[2] / ".github" / "workflows" / "gpu-tests.yml"
+    pytest_timeouts = [
+        int(match)
+        for line in workflow.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+        for match in re.findall(r"--timeout=(\d+)", line)
+    ]
+    assert pytest_timeouts, (
+        f"{workflow.name} no longer passes --timeout= to pytest. The child budget is "
+        "sized to sit under it, so that bound needs re-deriving before this test can "
+        "hold anything."
+    )
+
+    assert 0 < budget < min(pytest_timeouts), (
+        f"_CHILD_TIMEOUT_S is {budget}s, which is not below the GPU job's pytest "
+        f"--timeout of {min(pytest_timeouts)}s. A payload wedge would then be killed "
+        "by pytest-timeout from outside -- or, past the job's 60-minute cap, cancel "
+        "the job and lose its report -- instead of failing as a TimeoutExpired that "
+        "names the payload. See ROCm/aorta#434."
+    )

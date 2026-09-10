@@ -1,6 +1,6 @@
-# `aorta.registry` — mitigations + environments
+# `aorta.registry` — mitigations + environments + agents
 
-Two small registries that ship with aorta:
+Three small registries that ship with aorta:
 
 - **Mitigations** (`name → env vars`) — process-level flags applied just before
   the workload subprocess launches. Examples: `tf32_off`, `xnack`.
@@ -9,9 +9,18 @@ Two small registries that ship with aorta:
   Launch hints include `docker`, `venv`, and `buck_target`; `env` is an
   optional `dict[str, str]` intrinsic to that environment. Examples: `local`,
   `default`.
+- **Agents** (`name → Click command`) — autonomous workflows that run
+  unattended to a verdict and write artifacts, surfaced as `aorta agent <name>`.
+  Example: `mitigate`.
 
-Both follow the same shape: built-ins ship from this package; external
+All three follow the same shape: built-ins ship from this package; external
 contributions arrive via Python entry-points and are merged at runtime.
+
+A fourth registry of that shape — **chat tools** (`name → langchain BaseTool`),
+the tools `aorta chat` offers its model — lives in `aorta.chat.plugins` rather
+than here, because its payload type only exists once a chat extra is installed.
+It borrows this package's collision error and follows the same rules; see
+[Adding a chat tool](#adding-a-chat-tool).
 
 ## Adding a mitigation
 
@@ -297,14 +306,143 @@ Adding a fourth tier later (e.g. Bazel) follows the same pattern: extend
 `Environment`, extend `_VALID_ENV_KEYS`, document the read pattern here.
 The dispatcher round-trips the field for free (`asdict(env_descriptor)`).
 
+## Adding an agent
+
+An **agent** is autonomous: it runs unattended, reaches a verdict, and writes
+artifacts. That is the line against interactive, human-in-the-loop surfaces —
+if a human sits and watches it, it is not an agent and does not belong here.
+
+`aorta agent <name>` resolves `<name>` through this registry, so the group
+never hard-codes its subcommands. The payload is the `click.Command` that
+implements the agent.
+
+### Built-in
+
+Built-ins register directly in `BUILTIN_AGENTS` in
+`src/aorta/registry/agents.py`, as a `"module:attr"` target string pointing at
+a Click command under `src/aorta/cli/` (Click code stays in the CLI layer;
+`aorta.registry` must not import `aorta.cli`, which is why the value is a
+string and not an import):
+
+```python
+BUILTIN_AGENTS: dict[str, str] = {
+    "mitigate": "aorta.cli.agent_mitigate:mitigate",
+    "autopsy":  "aorta.cli.agent_autopsy:autopsy",   # <-- your addition
+}
+```
+
+The entry-point group below is **reserved for third-party packages** — do not
+route a built-in through it.
+
+### Plugin
+
+Ship the agent from your own package via the `aorta.agents` entry-point group.
+The entry-point name IS the name `aorta agent <name>` dispatches on:
+
+```toml
+[project.entry-points."aorta.agents"]
+autopsy = "my_package.cli:autopsy"
+```
+
+```python
+# my_package/cli.py
+import click
+
+
+@click.command(name="autopsy")
+@click.option("--bundle", type=click.Path(exists=True))
+def autopsy(bundle):
+    """Post-mortem triage over a collected bundle."""
+```
+
+An entry that fails to import, or that does not resolve to a `click.Command`,
+is logged via the `aorta.registry.agents` logger and skipped — one broken
+plugin cannot take the whole `aorta agent` namespace down. A **name collision**
+is different and still raises, per the rule below.
+
+### Deprecated: bare `aorta agent -- <command>`
+
+Before the namespace existed, `aorta agent` *was* the mitigation search. That
+spelling keeps working for one release: it prints a stderr deprecation notice
+and runs `aorta agent mitigate` unchanged.
+
+## Adding a chat tool
+
+A **chat tool** is one step `aorta chat`'s model can take mid-conversation:
+listing files, grepping the tree, reading a run's `matrix.json`. That is the
+line against an agent — a chat tool is a single call the model chooses to make
+while a human watches, not a workflow that runs to a verdict.
+
+The registry lives in `src/aorta/chat/plugins.py`, not in this package, because
+its payload is a langchain `BaseTool` and that type only exists once a chat
+extra is installed. Everything else is the shape described above.
+
+### Built-in
+
+Built-ins register directly in `BUILTIN_CHAT_TOOLS` in
+`src/aorta/chat/plugins.py`, as the decorated tool object itself rather than as
+a `"module:attr"` string — that module already sits inside `aorta.chat`, so
+importing the tools directly crosses no layer, which is the constraint that made
+`BUILTIN_AGENTS` a table of strings:
+
+```python
+BUILTIN_CHAT_TOOLS: dict[str, BaseTool] = {
+    "list_files": list_files,
+    "read_file": read_file,
+    "read_fabric_counters": read_fabric_counters,   # <-- your addition
+}
+```
+
+The entry-point group below is **reserved for third-party packages** — aorta's
+own tools are not listed in any `pyproject.toml`.
+
+### Plugin
+
+Ship the tool from your own package via the `aorta.chat_tools` entry-point
+group:
+
+```toml
+[project.entry-points."aorta.chat_tools"]
+read_fabric_counters = "my_package.chat_tools:read_fabric_counters"
+```
+
+```python
+# my_package/chat_tools.py
+from langchain_core.tools import tool
+
+
+@tool
+def read_fabric_counters(node: str) -> str:
+    """Read the Infinity Fabric performance counters for one node."""
+```
+
+**The entry-point name must equal the tool's own `name`.** This is the one rule
+that does not carry over from the sibling groups, where the entry-point name is
+the only name there is. Here there are two — the entry-point name, and the
+`BaseTool`'s own `name` — and only the second reaches the model: `bind_tools`
+sends `tool.name`, the provider echoes `tool.name` back, and a registry keyed on
+a different entry-point name would never find it. A mismatch is therefore a tool
+that fails on every call, so `load_chat_tools()` refuses it at load instead of
+registering it.
+
+An entry that fails to import, that does not resolve to a `BaseTool`, or whose
+two names disagree is logged via the `aorta.chat.plugins` logger and skipped —
+one broken plugin cannot take the assistant's whole tool surface down. A **name
+collision** is different and still raises, per the rule below.
+
+For the tool-authoring guidance itself — what the docstring is for, why tools
+return errors as strings rather than raising, and how a plugin tool reaches both
+tool-calling protocols — see
+[`docs/chat/extending.md`](../../../docs/chat/extending.md).
+
 ## Collisions
 
 If two contributors register the same name (built-in vs plugin, or plugin vs
-plugin), `load_mitigations()` / `load_environments()` raises
-`RegistryCollisionError` naming both packages. There is no winner — the human
-resolves it by renaming or removing one of the entries. This is intentional:
-silent overrides cause hours of "why does my mitigation behave wrong"
-debugging.
+plugin), `load_mitigations()` / `load_environments()` / `load_agents()` /
+`load_chat_tools()` raises `RegistryCollisionError` naming both packages. There
+is no winner — the human resolves it by renaming or removing one of the entries.
+This is intentional: silent overrides cause hours of "why does my mitigation
+behave wrong" debugging.
 
 ## Runtime + diagnostic flag sweep set
 
@@ -342,6 +480,8 @@ Tracked in issue #195.
 ```bash
 aorta mitigations list
 aorta environments list
+aorta agent --help          # lists every registered agent
+aorta chat tools            # needs a chat extra; --json for the machine form
 ```
 
 Each shows every registered entry plus its source package — useful when

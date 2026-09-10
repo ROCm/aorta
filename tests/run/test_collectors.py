@@ -452,9 +452,21 @@ def test_wrap_propagates_an_unattachable_collector(tmp_path, monkeypatch):
 
 
 def test_wrap_forwards_env_to_proton(profilers_on_path, tmp_path):
-    config = _config(["proton"], collect_dir=tmp_path, options={"proton": {"backend": "roctracer"}})
+    config = _config(["proton"], collect_dir=tmp_path, options={"proton": {"backend": "auto"}})
     argv = wrap_argv_for_collectors(config, _INNER, env={"HIP_VISIBLE_DEVICES": "1"})
     assert "ROCR_VISIBLE_DEVICES=1" in argv
+
+
+def test_wrap_propagates_the_proton_backend_pin_rejection(profilers_on_path, tmp_path):
+    """A pinned ``roctracer`` under ``mode: cli`` captures an empty tree, so the
+    collector seam has to surface the refusal rather than run the trial and
+    report no metrics. Scoped to that backend on purpose -- ``rocprofiler``
+    intercepts queues too but its CLI pin is deliberately allowed."""
+    config = _config(
+        ["proton"], collect_dir=tmp_path, options={"proton": {"backend": "roctracer"}}
+    )
+    with pytest.raises(proton.ProtonWrapError, match="mode: env"):
+        wrap_argv_for_collectors(config, _INNER)
 
 
 # ---- Nesting order ------------------------------------------------------

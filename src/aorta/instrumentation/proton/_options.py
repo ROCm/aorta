@@ -21,22 +21,67 @@ AUTO_BACKEND: str = "auto"
 
 #: Proton profiling backends. ``auto`` is aorta's spelling for "omit Proton's
 #: ``-b`` and let it choose", which is the only value that is correct on every
-#: Triton: ``rocprofiler`` is the preferred AMD path but was added after
-#: Triton 3.7, whose CLI rejects the name at argparse before the payload runs;
-#: ``roctracer`` is the deprecated AMD predecessor Proton still falls back to;
+#: Triton: ``rocprofiler`` is the preferred AMD path and arrived in Triton
+#: 3.8.0, so 3.7.x and earlier reject the name at argparse before the payload
+#: runs; ``roctracer`` is the deprecated AMD predecessor, present in every
+#: release and what ``auto`` still resolves to below 3.8.0;
 #: ``instrumentation`` is the intra-kernel path; ``cupti`` is the NVIDIA one,
 #: accepted so a recipe stays portable even though aorta's examples are AMD.
+#: Naming ``roctracer`` also commits the recipe to ``mode: env``: the collector
+#: refuses to pin *that one* under ``mode: cli``, where the capture comes back
+#: empty (see :func:`aorta.instrumentation.proton.wrap_argv`). The other two AMD
+#: backends are not covered, for different reasons -- ``instrumentation``
+#: installs no interceptor, and ``rocprofiler`` configures itself when
+#: ``libproton`` loads, so for it the CLI path is the *preferred* ordering.
 BACKENDS: frozenset[str] = frozenset(
     {"auto", "cupti", "rocprofiler", "roctracer", "instrumentation"}
 )
 
 #: Backends that install an HSA queue interceptor and therefore cannot share a
-#: process with ``rocprofv3``. Consumed by the collector registry's conflict
-#: guard, which is why it lives in the schema rather than in the guard.
+#: process with ``rocprofv3``. Consumed by the collector registry's ``rocprof``
+#: conflict check, which is why it lives in the schema rather than in the guard.
 #: ``auto`` is included because on AMD it resolves to ``rocprofiler`` or
-#: ``roctracer`` -- both intercepting -- and the guard has to reject a pairing
-#: it cannot prove is safe.
+#: ``roctracer`` -- both intercepting -- and the conflict guard has to reject a
+#: pairing it cannot prove is safe.
+#:
+#: **Not** the source of the ``mode: cli`` pin refusal, which it used to be.
+#: Interception and initialisation ordering are independent questions:
+#: ``rocprofiler`` intercepts queues (so it belongs here) and yet configures
+#: itself at ``libproton`` load time, so its CLI pin is safe. See
+#: ``_CLI_UNPINNABLE_BACKENDS`` in the collector, which is now spelled out.
 QUEUE_INTERCEPTING_BACKENDS: frozenset[str] = frozenset({"auto", "rocprofiler", "roctracer"})
+
+#: ``backend_mode`` values per backend: Proton's ``--mode`` is backend-specific,
+#: and each backend accepts only its own names (the domains ``proton.start()``
+#: documents). Keyed by backend so a mode can be validated against the backend
+#: that will run it rather than against a flat union, where
+#: ``roctracer`` + ``pcsampling`` would pass validation and then fail inside
+#: Proton. ``instrumentation`` is deliberately absent: its modes are the
+#: ``instrumentation_mode`` / ``granularity`` pair, which render the same
+#: ``--mode`` argument with a different grammar.
+BACKEND_MODES: dict[str, frozenset[str]] = {
+    "cupti": frozenset({"pcsampling", "periodic_flushing"}),
+    "rocprofiler": frozenset({"pcsampling", "periodic_flushing"}),
+    "roctracer": frozenset({"periodic_flushing"}),
+}
+
+#: ``hook`` values (Proton's ``-k``). ``triton`` registers Proton's launch
+#: hook, which records Triton kernel launch metadata alongside the timing.
+#: Forwarded by every Proton CLI, unlike the ``--mode`` knobs below, so this
+#: option behaves the same in either attach mode on every version.
+HOOKS: frozenset[str] = frozenset({"triton"})
+
+#: Options that render Proton's single ``--mode`` argument. **Whether they reach
+#: Proton through ``mode: cli`` depends on the Triton version**, which is why
+#: they are grouped: Triton 3.8.0's front-end forwards ``mode=args.mode`` into
+#: ``start()``, while 3.7.1 and earlier parse ``-m/--mode`` and then call
+#: ``start()`` without it, dropping the value. Not validated against the attach
+#: mode -- aorta runs ``validate_options`` in its own interpreter, not the
+#: workload's, so it cannot know which Triton will execute the wrap, and
+#: refusing the combination would reject a recipe that is correct on the current
+#: release. ``mode: env`` is unaffected on every version, because there the
+#: payload passes the value to ``start()`` itself.
+MODE_BEARING_KEYS: tuple[str, ...] = ("backend_mode", "granularity", "instrumentation_mode")
 
 #: ``proton --context`` values.
 CONTEXTS: frozenset[str] = frozenset({"shadow", "python"})
@@ -67,10 +112,12 @@ GRANULARITIES: frozenset[str] = frozenset(
 OPTION_KEYS: tuple[str, ...] = (
     "mode",
     "backend",
+    "backend_mode",
     "context",
     "data",
     "instrumentation_mode",
     "granularity",
+    "hook",
 )
 
 _DEFAULTS: dict[str, str] = {
@@ -87,6 +134,7 @@ _ENUMS: dict[str, frozenset[str]] = {
     "data": DATA_FORMATS,
     "instrumentation_mode": INSTRUMENTATION_MODES,
     "granularity": GRANULARITIES,
+    "hook": HOOKS,
 }
 
 
@@ -103,11 +151,15 @@ def validate_options(options: Mapping[str, str] | None) -> dict[str, str]:
         normalised to lowercase.
 
     Raises:
-        ValueError: an unknown key, a value outside its declared domain, or an
+        ValueError: an unknown key, a value outside its declared domain, an
             intra-kernel knob (``instrumentation_mode`` / ``granularity``) set
             without ``backend: instrumentation`` -- Proton would ignore it, so
             accepting it would silently produce a profile the operator did not
-            ask for.
+            ask for -- or a ``backend_mode`` that its backend does not accept,
+            that collides with an intra-kernel knob over Proton's single
+            ``--mode``, or that was set without an explicit backend to
+            validate it against. The attach mode is deliberately *not* validated
+            against :data:`MODE_BEARING_KEYS`; see that constant for why.
     """
     raw = dict(options or {})
     unknown = sorted(set(raw) - set(OPTION_KEYS))
@@ -126,21 +178,56 @@ def validate_options(options: Mapping[str, str] | None) -> dict[str, str]:
             raise ValueError(f"proton option {key!r}: {value!r} is not one of {sorted(allowed)}")
 
     intra_kernel = [k for k in ("instrumentation_mode", "granularity") if k in effective]
+    # Before the per-backend gate below, because the two rejections have
+    # different fixes and the collision is the one the operator can act on:
+    # gating first would report the backend as the problem when the real
+    # problem is asking for two mutually exclusive ``--mode`` values.
+    if "backend_mode" in effective and intra_kernel:
+        raise ValueError(
+            f"proton option 'backend_mode' conflicts with {sorted(intra_kernel)}: "
+            "both render into Proton's single '--mode' argument, so only one "
+            "can be set. 'backend_mode' configures the whole-kernel backends "
+            "(rocprofiler / roctracer / cupti); the intra-kernel pair "
+            "configures backend: instrumentation."
+        )
     if intra_kernel and effective["backend"] != "instrumentation":
         raise ValueError(
             f"proton option(s) {sorted(intra_kernel)} require "
             "backend: instrumentation (they configure Proton's intra-kernel "
             f"mode); got backend: {effective['backend']}"
         )
+    if "backend_mode" in effective:
+        allowed = BACKEND_MODES.get(effective["backend"])
+        if allowed is None:
+            raise ValueError(
+                "proton option 'backend_mode' requires an explicit backend "
+                f"from {sorted(BACKEND_MODES)} -- Proton's '--mode' domain is "
+                "backend-specific, so there is nothing to validate it against "
+                f"under backend: {effective['backend']}. Pin the backend "
+                "(roctracer additionally needs mode: env), or drop the option."
+            )
+        if effective["backend_mode"] not in allowed:
+            raise ValueError(
+                f"proton option 'backend_mode': {effective['backend_mode']!r} is "
+                f"not one of {sorted(allowed)} for backend: {effective['backend']}"
+            )
     return effective
 
 
 def mode_argument(options: Mapping[str, str]) -> str | None:
-    """Render the Proton ``--mode`` value from the intra-kernel knobs.
+    """Render the Proton ``--mode`` value from whichever knob set it.
 
-    Returns ``None`` when no intra-kernel knob is set, so the CLI wrap omits
-    ``--mode`` entirely and Proton keeps its own default.
+    ``backend_mode`` and the intra-kernel pair share Proton's single ``--mode``
+    argument; :func:`validate_options` rejects them together, so reading
+    ``backend_mode`` first is a precedence in spelling only.
+
+    Returns ``None`` when no mode knob is set, so the CLI wrap omits ``--mode``
+    entirely, ``mode: env`` exports no ``AORTA_PROTON_MODE``, and Proton keeps
+    its own default.
     """
+    backend_mode = options.get("backend_mode")
+    if backend_mode is not None:
+        return backend_mode
     name = options.get("instrumentation_mode")
     granularity = options.get("granularity")
     if name is None and granularity is None:
@@ -153,11 +240,14 @@ def mode_argument(options: Mapping[str, str]) -> str | None:
 
 __all__ = [
     "AUTO_BACKEND",
+    "BACKEND_MODES",
     "BACKENDS",
     "CONTEXTS",
     "DATA_FORMATS",
     "GRANULARITIES",
+    "HOOKS",
     "INSTRUMENTATION_MODES",
+    "MODE_BEARING_KEYS",
     "MODES",
     "OPTION_KEYS",
     "QUEUE_INTERCEPTING_BACKENDS",

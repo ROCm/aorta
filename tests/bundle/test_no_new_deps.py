@@ -77,22 +77,46 @@ def test_no_third_party_imports_beyond_click():
             )
 
 
+# ``aorta._user_paths`` is the one sanctioned cross-package import: it is
+# stdlib-only (pinned by test_user_paths_is_stdlib_only below) and it is the
+# single source of truth for the ``aorta chat`` profile filename, which the
+# writer must know in order to refuse bundling a file that may hold an API key.
+# Inlining the constant instead would need its own drift test, which is what
+# ``aorta.bundle._slug`` had to do -- an import is cheaper and cannot drift.
+_ALLOWED_CROSS_PACKAGE = frozenset({"aorta._user_paths"})
+
+
 def test_bundle_only_imports_its_own_aorta_subpackage():
     """The bundle package must not import sibling ``aorta`` packages.
 
     ``aorta.triage.output`` (the old home of ``safe_slug``) imports
     PyYAML and the registry stack, so a ``from aorta.triage... import``
     silently busts the stdlib+click import budget (PR #199 review).
-    Only ``aorta.bundle.*`` internal imports are allowed.
+    Only ``aorta.bundle.*`` internal imports are allowed, plus the
+    stdlib-only modules in ``_ALLOWED_CROSS_PACKAGE``.
     """
     for path in _bundle_source_files():
         for name in _imports(path):
             if name == "aorta" or name.startswith(_AORTA_INTERNAL_PREFIX):
-                assert name.startswith("aorta.bundle"), (
+                assert name.startswith("aorta.bundle") or name in _ALLOWED_CROSS_PACKAGE, (
                     f"{path}: cross-package import {name!r}; aorta.bundle must "
                     "depend only on its own subpackage to stay stdlib+click "
                     "(no transitive PyYAML via aorta.triage)."
                 )
+
+
+def test_user_paths_is_stdlib_only():
+    """The allowlisted cross-package import must stay dependency-free.
+
+    ``aorta.bundle`` is stdlib + click by acceptance criterion 7, and it now
+    reaches ``aorta._user_paths``. If that module ever grows a third-party
+    import, the budget is busted transitively rather than visibly.
+    """
+    stdlib = set(getattr(__import__("sys"), "stdlib_module_names", set()))
+    path = Path(__file__).resolve().parents[2] / "src/aorta/_user_paths.py"
+    for name in _imports(path):
+        top = name.split(".", 1)[0]
+        assert top in stdlib, f"{path}: {name!r} is not stdlib"
 
 
 def test_bundle_safe_slug_matches_triage_canonical():

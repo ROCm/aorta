@@ -44,7 +44,9 @@ class AgentConfig:
     symptom: str | None = None
     policy: AgentPolicy = field(default_factory=AgentPolicy)
     llm_backend: str = "fake"
-    llm_model: str = "gpt-4o-mini"
+    # None means "no opinion": the chat provider settings decide, and the
+    # standalone litellm path applies its own gpt-4o-mini default.
+    llm_model: str | None = None
     mitigations_allowlist: tuple[str, ...] | None = None
     recipe_path: Path | None = None
     dry_run: bool = False

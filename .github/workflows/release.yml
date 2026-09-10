@@ -45,6 +45,11 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    # Exported so the chat-index job below checks out and attaches to the same
+    # tag this job resolved, rather than re-deriving it and risking a disagreement.
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -182,6 +187,90 @@ jobs:
             dist/*.tar.gz
           make_latest: "true"  # mark this the "Latest" release
           generate_release_notes: true
+
+  # Build the `aorta chat` retrieval index for THIS release and attach it, so a
+  # customer who ran `pip install amd-aorta` can `aorta chat index fetch` and get
+  # an index describing the code they actually have. Release assets are immutable
+  # and never expire, which is what makes version-matched fetch work
+  # (Decision 18a); nightly.yml publishes the rolling `main` asset for the .devN
+  # installs instead.
+  #
+  # Separate job so it can never delay or fail the wheel release or the PyPI
+  # publish. There is no digest skip here, unlike the nightly: a release must
+  # carry its own asset even when the corpus is byte-identical to the previous
+  # release's, because `index fetch` resolves by tag.
+  chat-index:
+    needs: build-and-release
+    # HARD GUARD, part 1 of 2. The index stores every chunk's source text
+    # verbatim, so the published asset is a redistribution of the tree it was
+    # built from -- harmless for MIT-licensed ROCm/aorta, an IP incident for
+    # anything else. Part 2 is `--public-only` below, which re-checks the remote
+    # and restricts the corpus to git-tracked files.
+    if: github.repository == 'ROCm/aorta'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # attach the asset to the release created above
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@v5
+        with:
+          # The tag build-and-release just pushed (manual run) or was pushed to
+          # trigger this run. Checked out by name rather than by SHA so the
+          # manifest records the release tag, which is what `index fetch`
+          # resolves against.
+          ref: ${{ needs.build-and-release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"  # chat's floor (Decision 13a)
+
+      - name: Install aorta with the chat CLI extra
+        run: python -m pip install -e ".[chat-cli]"
+
+      # No torch, no nvidia-*, no chromadb. Asserted rather than trusted: the
+      # whole point of Decision 19a is that this stack cannot resolve a CUDA
+      # wheel, and a transitive dependency change is how that would come back.
+      - name: Verify the embedding stack is torch-free
+        run: |
+          if python -m pip list --format=freeze | grep -Ei '^(torch|nvidia-|chromadb|sentence-transformers)'; then
+            echo "::error::The chat-cli extra resolved a torch/CUDA/chromadb dependency. See Decision 19a."
+            exit 1
+          fi
+
+      # HARD GUARD, part 2 of 2. --public-only re-verifies that origin resolves
+      # to ROCm/aorta and restricts the corpus to files git tracks. The remote
+      # check catches a misconfigured workflow; the tracked-file filter catches
+      # an untracked internal reproducer or customer bundle in the working
+      # directory, which no remote check can see. Both raise, neither warns.
+      - name: Build the index
+        run: |
+          mkdir -p index-out
+          aorta chat index build --public-only --path . \
+            --output index-out/aorta-chat-index.sqlite
+
+      - name: Verify no untracked source reached the index
+        run: python scripts/verify_chat_index_sources.py index-out/aorta-chat-index.sqlite
+
+      - name: Score retrieval on the shipped question set
+        # Decision 19b. Logged, not gated: the baseline is young and a threshold
+        # picked today would be arbitrary. A release must not be blocked by it.
+        env:
+          AORTA_CHAT_INDEX_PATH: index-out/aorta-chat-index.sqlite
+        run: aorta chat index eval || echo "::warning::Retrieval eval failed; index still published."
+
+      - name: Attach the index to the release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.build-and-release.outputs.tag }}
+          files: |
+            index-out/aorta-chat-index.sqlite
+            index-out/aorta-chat-index.sqlite.manifest.json
+            index-out/aorta-chat-index.sqlite.sha256
+          # Re-asserted to match what build-and-release set. Passing "false"
+          # here would *demote* the release this job is adding an asset to.
+          make_latest: "true"
 
   # Publish the same artifacts to PyPI via Trusted Publishing (OIDC) so customers
   # can `pip install amd-aorta`. Requires a one-time PyPI trusted-publisher setup for
