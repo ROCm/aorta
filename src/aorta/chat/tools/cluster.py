@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import sys
 import subprocess
@@ -241,6 +242,12 @@ def _run_triage(extra_args: list[str], label: str) -> str:
 
 
 _PYTORCH_MARKERS = ("import torch", "nn.Module", "def forward", "torch.nn", "@torch")
+
+
+#: Everything a staged filename may be made of. Anything else -- a separator, a
+#: dot that could start `..`, a shell character -- is replaced, because the name
+#: it is built from comes from the model.
+_STAGED_STEM_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
 def _wrong_tool_hint(source: str) -> str:
@@ -477,7 +484,17 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
 
     staged = settings.jobs_root / "staged"
     staged.mkdir(parents=True, exist_ok=True)
-    script = staged / f"{name.replace(' ', '_')}.py"
+    # The label is model-supplied and became the filename directly, so
+    # `../../../../.bashrc` wrote the user's pasted source outside staged/.
+    # Keeping only characters a filename is made of leaves nothing that means
+    # "somewhere else" -- a separator, a parent reference, or a leading dot.
+    #
+    # The timestamp is not decoration either: two runs sharing a label wrote the
+    # same path, so a second triage overwrote the first one's script while it
+    # was still being read on the node. The kernel and assembly paths already
+    # stamp their stems; this one did not.
+    stem = _STAGED_STEM_RE.sub("_", name).strip("._")[:60] or "workload"
+    script = staged / f"{stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.py"
     script.write_text(source, encoding="utf-8")
     # {bundle} is substituted by the driver, so a workload that writes
     # artifacts puts them where Autopsy will look.
