@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import dspy
@@ -10,10 +13,51 @@ from aorta.cia.llm import ensure_configured
 # Tools available to the ReAct loop
 # ---------------------------------------------------------------------------
 
+#: What the tools below may read, for the assessment currently running.
+#:
+#: Their ``path`` argument is chosen by the model, so without this they read any
+#: file the agent can: /etc/passwd, an SSH config, or a path the model noticed in
+#: a log. Redaction does not help here -- it rewrites paths and addresses in the
+#: text, not the contents of whatever was opened -- and what comes back goes
+#: into the trajectory and on to the provider.
+#:
+#: Empty by default, and empty means refuse. A caller that forgets to bind gets
+#: nothing rather than everything.
+_ALLOWED_ROOTS: ContextVar[tuple[Path, ...]] = ContextVar("_ALLOWED_ROOTS", default=())
+
+
+@contextmanager
+def reading_within(*roots: Path | str) -> Iterator[None]:
+    """Let the tools read under *roots*, and nowhere else, inside this block."""
+    resolved = tuple(Path(r).resolve() for r in roots if r)
+    token = _ALLOWED_ROOTS.set(resolved)
+    try:
+        yield
+    finally:
+        _ALLOWED_ROOTS.reset(token)
+
+
+def _allowed(path: str) -> Path | None:
+    """*path* resolved, if it is inside one of the roots for this assessment."""
+    roots = _ALLOWED_ROOTS.get()
+    if not roots or not path:
+        return None
+    try:
+        candidate = Path(path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    for root in roots:
+        if candidate == root or candidate.is_relative_to(root):
+            return candidate
+    return None
+
+
 def read_file_tail(path: str, lines: int = 80) -> str:
     """Read the last N lines of a file for extra context. Does not advance cursor."""
     try:
-        p = Path(path)
+        p = _allowed(path)
+        if p is None:
+            return f"[refused: {path} is outside this job's directory]"
         if not p.is_file():
             return f"[file not found: {path}]"
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -25,9 +69,12 @@ def read_file_tail(path: str, lines: int = 80) -> str:
 def list_job_files(job_dir: str) -> str:
     """List files in job dir with sizes and mtimes — spot new log files."""
     import subprocess
+    directory = _allowed(job_dir)
+    if directory is None:
+        return f"[refused: {job_dir} is outside this job's directory]"
     try:
         r = subprocess.run(
-            ["find", job_dir, "-maxdepth", "4", "-type", "f",
+            ["find", str(directory), "-maxdepth", "4", "-type", "f",
              "-printf", "%T@ %s %p\n"],
             capture_output=True, text=True, timeout=10,
         )
@@ -107,9 +154,23 @@ class LogWatcher(dspy.Module):
             max_iters=4,
         )
 
-    def forward(self, new_content: str, job_context: str, expectations: str) -> dspy.Prediction:
-        return self.react.forward(
-            new_content=new_content,
-            job_context=job_context,
-            expectations=expectations,
-        )
+    def forward(
+        self,
+        new_content: str,
+        job_context: str,
+        expectations: str,
+        allowed_roots: Sequence[Path | str] = (),
+    ) -> dspy.Prediction:
+        """Assess *new_content*, reading only under *allowed_roots*.
+
+        One instance serves every job in the poll loop, so the roots are bound
+        per assessment rather than at construction. Passing none leaves the file
+        tools refusing, which is the right default for a caller that has not
+        said which job it is asking about.
+        """
+        with reading_within(*allowed_roots):
+            return self.react.forward(
+                new_content=new_content,
+                job_context=job_context,
+                expectations=expectations,
+            )
