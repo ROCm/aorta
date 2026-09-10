@@ -7,6 +7,7 @@ from typing import Any
 import dspy
 
 from aorta.agent.llm import AUTOPSY_CATEGORIES
+from aorta.cia.autopsy.adapters.base import resolve_in_bundle as _resolve_in_bundle
 from aorta.cia.llm import build_lm
 
 
@@ -70,25 +71,14 @@ def resolve_in_bundle(uri: str, bundle_root: str) -> Path | None:
     """*uri* as a path inside *bundle_root*, or None if it points outside.
 
     The uri arrives from the evidence list and from the model's own tool call,
-    and both used to be joined to the bundle root and read. Two ways out of the
-    bundle: ``../../../etc/passwd`` walks out of it, and an absolute path skips
-    it entirely, because ``Path(root) / "/etc/passwd"`` discards the root. What
-    came back went into the router's context and could be quoted into the
-    rationale, which is written to the report and sent to a model.
+    and both used to be joined to the bundle root and read. What came back went
+    into the router's context and could be quoted into the rationale, which is
+    written to the report and sent to a model.
 
-    Resolving both sides also settles symlinks, so a link inside the bundle
-    that points out of it is outside.
+    The policy itself lives with BundleContext, which is what defines a bundle;
+    this is the same check the adapters get, spelled for a string root.
     """
-    if not uri:
-        return None
-    try:
-        root = Path(bundle_root).resolve()
-        candidate = (root / uri).resolve()
-    except (OSError, ValueError, RuntimeError):
-        return None
-    if candidate != root and not candidate.is_relative_to(root):
-        return None
-    return candidate
+    return _resolve_in_bundle(Path(bundle_root), uri)
 
 
 def read_evidence_file(uri: str, bundle_root: str) -> str:
