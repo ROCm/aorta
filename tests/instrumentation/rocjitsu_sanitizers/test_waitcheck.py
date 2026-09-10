@@ -201,6 +201,23 @@ def test_waitcheck_argv_rejects_a_cap_that_is_not_a_positive_integer(
         )
 
 
+@pytest.mark.parametrize("bad_cap", [0, -1, True, 1.5, "1"])
+def test_run_waitcheck_rejects_an_invalid_cap_before_early_returns(
+    tmp_path: Path, bad_cap: object
+) -> None:
+    with pytest.raises(ValueError, match="max_diagnostics"):
+        run_waitcheck(
+            KernelWorklist(
+                requirement=SelectionRequirement.TOP_TIME,
+                top_n=1,
+                kernels=(),
+            ),
+            output_dir=tmp_path / "out",
+            binary=tmp_path / "missing",
+            max_diagnostics=bad_cap,
+        )
+
+
 def test_waitcheck_backend_error_never_passes(tmp_path: Path) -> None:
     binary = tmp_path / "rj_waitcheck"
     binary.write_text("binary")

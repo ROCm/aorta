@@ -310,6 +310,15 @@ def parse_waitcheck_text(
     )
 
 
+def _validate_max_diagnostics(max_diagnostics: int | None) -> None:
+    if max_diagnostics is not None and (
+        isinstance(max_diagnostics, bool)
+        or not isinstance(max_diagnostics, int)
+        or max_diagnostics < 1
+    ):
+        raise ValueError("max_diagnostics must be a positive integer")
+
+
 def waitcheck_argv(
     binary: Path,
     identity: KernelIdentity,
@@ -323,15 +332,7 @@ def waitcheck_argv(
             "Waitcheck requires code_object and code_object_sha256, "
             "and optionally entry_offset for exact-entry mode"
         )
-    # Validated here rather than only in the recipe loader because this and
-    # ``run_waitcheck`` are entered directly by library callers; ``True`` would
-    # otherwise reach the backend as the argument "True".
-    if max_diagnostics is not None and (
-        isinstance(max_diagnostics, bool)
-        or not isinstance(max_diagnostics, int)
-        or max_diagnostics < 1
-    ):
-        raise ValueError("max_diagnostics must be a positive integer")
+    _validate_max_diagnostics(max_diagnostics)
     argv = [
         str(binary),
         str(identity.code_object),
@@ -468,6 +469,9 @@ def run_waitcheck(
     ``diagnostics_truncated`` rather than as a complete hazard count.
     """
 
+    # Validate at the public boundary so missing backends and empty/rejected
+    # worklists cannot silently accept a malformed library-call argument.
+    _validate_max_diagnostics(max_diagnostics)
     resolved = resolve_waitcheck(binary)
     if resolved is None or not resolved.is_file():
         return CheckResult(
