@@ -1527,3 +1527,208 @@ def test_a_verdict_outside_the_vocabulary_is_rejected(triage_reward, tmp_path):
     }) + "\n")
     with pytest.raises(ValueError, match="outside this scorer's vocabulary"):
         triage_reward.load_corpus(corpus)
+
+
+def test_shotgun_counts_the_names_offered_not_the_length_written(run_e2e):
+    """A list can be as long as the offered set without covering it.
+
+    `shotgun_all_offered` exists to make one of the two routes to a saturated
+    reward visible -- naming everything, so no choice was made. Comparing list
+    lengths counts a proposal that repeats one name as having named them all,
+    which reports the opposite of what happened and puts the wrong number in a
+    measurement record.
+    """
+    rows = _proposal_rows({"s0": ["a"], "s1": ["b"], "s2": ["c"]})
+    rows[0]["mitigations_claimed"] = ["amd_log_level_4", "amd_log_level_4"]
+    rows[1]["mitigations_claimed"] = ["hip_launch_blocking", "amd_log_level_4"]
+    rows[2]["mitigations_claimed"] = ["amd_log_level_4"]
+
+    summary = run_e2e.aggregate(rows, [])["proposal"]
+
+    assert summary["shotgun_all_offered"] == 1, (
+        "only the second proposal names both offered mitigations"
+    )
+
+
+def test_a_disagreement_row_is_dropped_before_it_costs_a_rollout(
+    run_e2e, build_corpus, triage_reward, tmp_path, capsys
+):
+    """The driver has to agree with the scorer about which rows exist.
+
+    `load_corpus` skips baseline disagreements, so driving the rollout from the
+    raw JSONL sampled prompts that cannot be graded and then died indexing the
+    label map -- after the GPU time had been spent. The filter is applied to
+    both drives, not just triage: a report the baseline contradicts is the same
+    report the proposal prompt is built from.
+    """
+    out, _ = _build(build_corpus, tmp_path, _SURVEY)
+    corpus = out / "triage.jsonl"
+    rows = [json.loads(line) for line in corpus.read_text().splitlines() if line.strip()]
+    rows[0]["ground_truth"]["agrees"] = False
+    corpus.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    labels = {
+        example_id: label for example_id, label, _ in triage_reward.load_corpus(corpus)
+    }
+    assert f"triage:{rows[0]['scenario_id']}" not in labels
+
+    kept = [r for r in rows if f"triage:{r['scenario_id']}" in labels]
+    assert len(kept) == len(rows) - 1
+
+    # The rows the driver keeps are exactly the rows it can grade, so the
+    # indexing that used to raise cannot.
+    for row in kept:
+        assert labels[f"triage:{row['scenario_id']}"] is not None
+
+
+def test_agreement_means_the_whole_baseline_contract_not_just_the_verdict(
+    build_corpus, tmp_path
+):
+    """A report can keep its verdict and lose the evidence it is meant to cite.
+
+    The committed baseline checks four things -- `overall_verdict`,
+    `execution_status`, the per-sanitizer verdicts and the `finding_shape`
+    substrings. Deciding agreement from the first alone marks a report that
+    regressed on any of the other three as agreeing, and then hands its
+    regressed evidence to a reward as ground truth.
+    """
+    source = _SURVEY / "reports" / "gemm_f32_waitcheck" / "sanitizer_report.json"
+    doc = json.loads(source.read_text(encoding="utf-8"))
+
+    # `consan-racy` is one of the three case names build_corpus gates, so
+    # placing the report there is what puts it under a baseline at all.
+    results = tmp_path / "results" / "consan-racy"
+    results.mkdir(parents=True)
+    (results / "sanitizer_report.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    def build(baseline: dict) -> dict:
+        baselines = tmp_path / f"baselines-{len(list(tmp_path.iterdir()))}.json"
+        baselines.write_text(json.dumps({"consan_racy": baseline}), encoding="utf-8")
+        out = tmp_path / f"corpus-{baselines.stem}"
+        build_corpus.main([
+            "--results", str(results.parent),
+            "--baselines", str(baselines),
+            "--out", str(out),
+        ])
+        line = (out / "triage.jsonl").read_text().splitlines()[0]
+        return json.loads(line)["ground_truth"]
+
+    matching = build(
+        {
+            "overall_verdict": doc["overall_verdict"],
+            "execution_status": doc["execution_status"],
+        }
+    )
+    assert matching["agrees"] is True
+    assert matching["disagreements"] == []
+
+    # Same top-level verdict, different execution status: invisible to a
+    # verdict-only comparison, and a real regression.
+    status_regressed = build(
+        {"overall_verdict": doc["overall_verdict"], "execution_status": "timeout"}
+    )
+    assert status_regressed["agrees"] is False
+    assert any("execution_status" in p for p in status_regressed["disagreements"])
+
+    # Same verdict and status, but the finding the baseline names is gone.
+    evidence_lost = build(
+        {
+            "overall_verdict": doc["overall_verdict"],
+            "execution_status": doc["execution_status"],
+            "finding_shape": {"waitcheck": "a finding this report does not carry"},
+        }
+    )
+    assert evidence_lost["agrees"] is False
+    assert any("finding_shape" in p or "shape" in p for p in evidence_lost["disagreements"])
+
+
+@pytest.fixture(scope="module")
+def nccl_roundtrip_check():
+    return _load("nccl_roundtrip_check")
+
+
+def _gen(text):
+    return {"status": 200 if text is not None else 500, "text": text}
+
+
+def test_the_round_trip_is_only_proven_when_both_completions_exist(
+    nccl_roundtrip_check,
+):
+    """The failure this driver exists to prevent, reachable inside the driver.
+
+    A failed generation carries `text=None`, which compares unequal to the
+    baseline -- indistinguishable, to a bare comparison, from the weights
+    having moved. Ordered naively, a 500 after the perturb followed by a
+    healthy restore reports PROVEN: the strongest verdict this tool can give,
+    from a completion B that never existed.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    baseline = _gen("A")
+
+    proven, changed, recovered = decide(
+        baseline=baseline,
+        perturbed=_gen("B"),
+        restored=_gen("A"),
+        perturb_status=200,
+        restore_status=200,
+    )
+    assert (proven, changed, recovered) == ("PROVEN", True, True)
+
+    verdict, changed, recovered = decide(
+        baseline=baseline,
+        perturbed=_gen(None),
+        restored=_gen("A"),
+        perturb_status=200,
+        restore_status=200,
+    )
+    assert verdict == "POST_UPDATE_GENERATION_FAILED"
+    # Not `False` either: there was nothing to compare, and a boolean here
+    # would read as an observation that was never made.
+    assert changed is None and recovered is None
+
+
+def test_a_rejected_restore_update_is_named_rather_than_scored(
+    nccl_roundtrip_check,
+):
+    """`C == A` proves faithfulness only if the restore was actually applied.
+
+    A restore whose `/update_weights` was rejected leaves the perturbed weights
+    in place, so C equalling A would mean the perturb never landed -- the
+    opposite of what PROVEN claims. Only the perturb status was checked before.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    verdict, _, _ = decide(
+        baseline=_gen("A"),
+        perturbed=_gen("B"),
+        restored=_gen("A"),
+        perturb_status=200,
+        restore_status=500,
+    )
+    assert verdict == "RESTORE_UPDATE_REJECTED"
+
+
+def test_the_two_real_negative_results_still_come_back(nccl_roundtrip_check):
+    """Guarding the failures must not swallow the findings.
+
+    `HTTP_OK_BUT_WEIGHTS_UNCHANGED` is the defect this branch measured, and
+    `CHANGED_BUT_NOT_FAITHFUL` is the one a perturbation-only test would miss.
+    Both are reachable with everything healthy.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    unchanged, _, _ = decide(
+        baseline=_gen("A"),
+        perturbed=_gen("A"),
+        restored=_gen("A"),
+        perturb_status=200,
+        restore_status=200,
+    )
+    assert unchanged == "HTTP_OK_BUT_WEIGHTS_UNCHANGED"
+
+    unfaithful, _, _ = decide(
+        baseline=_gen("A"),
+        perturbed=_gen("B"),
+        restored=_gen("C"),
+        perturb_status=200,
+        restore_status=200,
+    )
+    assert unfaithful == "CHANGED_BUT_NOT_FAITHFUL"

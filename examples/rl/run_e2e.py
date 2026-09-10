@@ -693,13 +693,19 @@ def aggregate(
     # routes to 1.0 that involve no diagnosis and no choice. A reward saturated
     # by these two moves is saturated whatever the mean says.
     abstained = sum(1 for p in proposals if p.get("category_claimed") == "unknown")
-    n_offered = len(proposals[0]["offered"]) if proposals else 0
+    # Set inclusion, not list length. A proposal that repeats one name enough
+    # times is long but has named one mitigation, and counting it here would
+    # report the opposite of what the field means. Each proposal is checked
+    # against its own `offered`, so a mixed-condition results file -- one drive
+    # with `--full-candidates`, one without -- stays countable.
     shotgun = sum(
         1
         for p in proposals
         if isinstance(p.get("mitigations_claimed"), list)
-        and n_offered > 1
-        and len(p["mitigations_claimed"]) >= n_offered
+        and len(p.get("offered") or []) > 1
+        and set(p["offered"]).issubset(
+            {m for m in p["mitigations_claimed"] if isinstance(m, str)}
+        )
     )
 
     # The format gate, as the plan states it: parses, carries the keys, and
@@ -769,7 +775,7 @@ def aggregate(
             else 0.0,
             "shotgun_all_offered": shotgun,
             "shotgun_rate": round(shotgun / len(proposals), 4) if proposals else 0.0,
-            "offered_count": n_offered,
+            "offered_count": len(proposals[0]["offered"]) if proposals else 0,
             "per_scenario": per_scenario,
             "degenerate_groups": degenerate_groups,
             "collapsed_groups": collapsed_groups,
@@ -904,6 +910,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="suppress the reasoning trace via "
                              "chat_template_kwargs.enable_thinking=false")
     parser.add_argument("--skip-triage", action="store_true")
+    parser.add_argument("--include-disagreements", action="store_true",
+                        help="also sample scenarios whose observed verdict "
+                             "contradicts the committed baseline. Off by "
+                             "default: those rows score a policy against a "
+                             "verdict already known to be wrong. On is the "
+                             "right setting when the question is how the tool "
+                             "behaves rather than what the answer is")
     parser.add_argument("--full-candidates", action="store_true",
                         help="offer the whole registry instead of the corpus's "
                              "four-name slice, so tiers 4 and 5 involve a choice")
@@ -925,9 +938,32 @@ def main(argv: list[str] | None = None) -> int:
         if line.strip()
     ]
     rows = [r for r in rows if r.get("kind") == "triage"]
-    labels = {eid: label for eid, label, _ in load_triage_corpus(args.corpus)}
+    labels = {
+        eid: label
+        for eid, label, _ in load_triage_corpus(
+            args.corpus, include_disagreements=args.include_disagreements
+        )
+    }
+    # The scorer is what decides which rows are scoreable -- by default it drops
+    # the ones whose observed verdict contradicts the committed baseline -- so
+    # the rollout has to be driven from its answer rather than from the file.
+    # Read the other way round this samples GPU rollouts for prompts that cannot
+    # be graded, and then dies indexing `labels` after they have been paid for.
+    # Both drives are filtered, not just triage: a contradicted report is the
+    # same report the proposal prompt is built from.
+    dropped = sorted(
+        r["scenario_id"] for r in rows if f"triage:{r['scenario_id']}" not in labels
+    )
+    if dropped:
+        print(
+            f"skipping {len(dropped)} scenario(s) the scorer excludes as "
+            f"baseline disagreements ({', '.join(dropped)}); "
+            f"pass --include-disagreements to sample them anyway",
+            file=sys.stderr,
+        )
+    rows = [r for r in rows if f"triage:{r['scenario_id']}" in labels]
     if not rows:
-        print(f"no triage rows in {args.corpus}", file=sys.stderr)
+        print(f"no scoreable triage rows in {args.corpus}", file=sys.stderr)
         return 2
 
     candidates = full_candidates() if args.full_candidates else CANDIDATES
@@ -960,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
         "slurm_job": os.environ.get("SLURM_JOB_ID"),
         "python": platform.python_version(),
         "corpus": str(args.corpus),
+        "include_disagreements": args.include_disagreements,
+        "scenarios_excluded_as_disagreements": dropped,
         "autopsy_categories": sorted(AUTOPSY_CATEGORIES),
         "candidates": candidates,
         "tried": TRIED,

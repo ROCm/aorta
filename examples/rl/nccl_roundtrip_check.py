@@ -132,6 +132,50 @@ def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str
     return out
 
 
+def decide_verdict(
+    *,
+    baseline: dict[str, Any],
+    perturbed: dict[str, Any],
+    restored: dict[str, Any],
+    perturb_status: int,
+    restore_status: int,
+) -> tuple[str, bool | None, bool | None]:
+    """The round trip's verdict, plus the two observations behind it.
+
+    Split out of ``main`` because the ordering of these branches is the whole
+    check, and getting it wrong is silent: a failed generation carries
+    ``text=None``, and ``None`` compares unequal to the baseline, which is
+    exactly what a successful weight change looks like. Ordered naively, a 500
+    from the perturbed engine followed by a healthy restore reports ``PROVEN``
+    against a completion B that never existed -- the strongest possible verdict
+    from the weakest possible evidence, which is the one failure this driver
+    was written to prevent.
+
+    So both post-update generations must have happened before ``changed`` and
+    ``recovered`` mean anything, and both updates must have been accepted --
+    the restore for the same reason as the perturb. ``changed`` and
+    ``recovered`` come back as ``None`` when there was nothing to compare,
+    rather than as a default that reads like an observation.
+    """
+    both_generated = perturbed["text"] is not None and restored["text"] is not None
+    changed = perturbed["text"] != baseline["text"] if both_generated else None
+    recovered = restored["text"] == baseline["text"] if both_generated else None
+
+    if perturb_status != 200:
+        verdict = "UPDATE_REJECTED"
+    elif restore_status != 200:
+        verdict = "RESTORE_UPDATE_REJECTED"
+    elif not both_generated:
+        verdict = "POST_UPDATE_GENERATION_FAILED"
+    elif changed and recovered:
+        verdict = "PROVEN"
+    elif changed:
+        verdict = "CHANGED_BUT_NOT_FAITHFUL"
+    else:
+        verdict = "HTTP_OK_BUT_WEIGHTS_UNCHANGED"
+    return verdict, changed, recovered
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--engine-url", default="http://127.0.0.1:30000")
@@ -239,21 +283,16 @@ def main() -> int:
     report["after_restore"] = restored
     log(f"after restore: {restored['text']!r}")
 
-    changed = perturbed["text"] != baseline["text"]
-    recovered = restored["text"] == baseline["text"]
+    verdict, changed, recovered = decide_verdict(
+        baseline=baseline,
+        perturbed=perturbed,
+        restored=restored,
+        perturb_status=report["perturb"]["update"]["status"],
+        restore_status=report["restore"]["update"]["status"],
+    )
     report["weights_changed_under_perturb"] = changed
     report["weights_recovered_under_restore"] = recovered
-
-    if report["perturb"]["update"]["status"] != 200:
-        report["verdict"] = "UPDATE_REJECTED"
-    elif changed and recovered:
-        report["verdict"] = "PROVEN"
-    elif changed and not recovered:
-        report["verdict"] = "CHANGED_BUT_NOT_FAITHFUL"
-    elif not changed:
-        report["verdict"] = "HTTP_OK_BUT_WEIGHTS_UNCHANGED"
-    else:
-        report["verdict"] = "INDETERMINATE"
+    report["verdict"] = verdict
 
     report["update_seconds"] = {
         "perturb": report["perturb"]["update"]["seconds"],

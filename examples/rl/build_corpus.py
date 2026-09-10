@@ -18,6 +18,12 @@ reported separately from the raw finding count so the inflation stays visible.
 **Ground truth comes from the committed baselines, not from the run.** A
 scenario named in `fixtures/expected/verdict_baselines.json` carries the
 expected verdict alongside the observed one, plus an explicit agreement flag.
+Agreement is decided by the gate's own `_compare_case`, imported from
+`scripts/sanitizers/compare_verdict_baselines.py` rather than restated here, so
+it covers the whole contract -- `overall_verdict`, `execution_status`, the
+per-sanitizer verdicts and the `finding_shape` substrings. Comparing only the
+top-level verdict would let a report keep its verdict while losing the evidence
+it is supposed to cite, and still be recorded as agreeing.
 When the two disagree the example is still emitted -- it is evidence of a tool
 defect, and dropping it would hide exactly the thing worth reporting -- but it
 is flagged `ground_truth.agrees = false`, and `triage_reward.load_corpus` skips
@@ -43,7 +49,15 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The gate's own comparison, imported rather than restated. Agreement here has
+# to mean what it means to `scripts/sanitizers/compare_verdict_baselines.py`,
+# or a report can keep its top-level verdict while its execution status, a
+# per-sanitizer verdict or a cited finding shape regresses, be recorded as
+# agreeing, and then hand that regressed evidence to a reward as ground truth.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "sanitizers"))
 
+from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport  # noqa: E402
+from compare_verdict_baselines import _compare_case  # noqa: E402
 from triage_reward import label_sanitizer_report  # noqa: E402
 
 CORPUS_SCHEMA = "aorta.rl_corpus/0.1"
@@ -200,6 +214,31 @@ def collect(root: Path) -> list[Scenario]:
     return scenarios
 
 
+def _baseline_problems(scenario: Scenario, expected: dict[str, Any]) -> list[str]:
+    """Every way this report departs from its committed baseline, or ``[]``.
+
+    Delegates to the gate's ``_compare_case``, so the four things the baseline
+    contract actually covers -- ``overall_verdict``, ``execution_status``, the
+    per-sanitizer verdicts and the ``finding_shape`` substrings -- are all
+    checked. Comparing only the top-level verdict, which is what this did
+    first, calls a report that lost its cited evidence "agreeing".
+
+    An ungated scenario returns ``[]``, and the caller turns that into
+    ``agrees: None`` rather than ``True``: uncovered is not the same as
+    checked-and-matching, and most of the corpus is uncovered.
+    """
+    if not expected:
+        return []
+    try:
+        report = SanitizerReport.from_dict(scenario.doc)
+    except (ValueError, KeyError, TypeError) as exc:
+        # `label_sanitizer_report` has already parsed this document by the time
+        # we are called, so reaching here means the two disagree about it --
+        # which is itself a disagreement worth recording rather than crashing on.
+        return [f"report did not load for comparison: {type(exc).__name__}: {exc}"]
+    return _compare_case(scenario.baseline_key or scenario.case, report, expected)
+
+
 def triage_example(
     scenario: Scenario, baselines: dict[str, Any], run_meta: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -232,6 +271,7 @@ def triage_example(
             )
 
     expected = baselines.get(scenario.baseline_key or "", {})
+    problems = _baseline_problems(scenario, expected)
     ground_truth = {
         "source": "verdict_baselines.json" if expected else "none",
         "baseline_key": scenario.baseline_key,
@@ -239,9 +279,12 @@ def triage_example(
         "expected_execution_status": expected.get("execution_status"),
         "observed_verdict": label.verdict,
         "observed_execution_status": scenario.doc.get("execution_status"),
-        "agrees": (
-            expected.get("overall_verdict") == label.verdict if expected else None
-        ),
+        "agrees": (problems == []) if expected else None,
+        # Named, not just counted. "This report disagrees with its baseline" is
+        # not actionable; "check 'consan' verdict='pass', expected 'fail'" is,
+        # and it is the difference between a row a reader can triage and one
+        # they have to re-derive.
+        "disagreements": problems,
         "by_construction": scenario.case in {"consan-racy", "consan-clean"},
     }
 
