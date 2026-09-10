@@ -1677,7 +1677,9 @@ class TestTheRetryDoesNotRunATextProtocolToolASecondTime:
     """
 
     @staticmethod
-    def _text_runs_a_tool_then_dead_ends(native_repeats_the_call: bool):
+    def _text_runs_a_tool_then_dead_ends(
+        native_repeats_the_call: bool, native_name: str = "list_files"
+    ):
         """Text: one real tool call, then silence. Native: asks for it again."""
         rounds = {"n": 0}
 
@@ -1689,7 +1691,7 @@ class TestTheRetryDoesNotRunATextProtocolToolASecondTime:
 
         plain = MagicMock()
         plain.ainvoke = AsyncMock(side_effect=text_reply)
-        repeat = _tool_call("list_files", {"path": "src"})
+        repeat = _tool_call(native_name, {"path": "src"})
         fresh = _tool_call("read_file", {"path": "other.py"})
         bound = MagicMock()
         bound.ainvoke = AsyncMock(
@@ -1745,6 +1747,49 @@ class TestTheRetryDoesNotRunATextProtocolToolASecondTime:
         prompt = " ".join(str(getattr(m, "content", "")) for m in sent)
         assert "a.py" in prompt, "the retry cannot use a result it was never given"
         assert "Do not repeat these calls" in prompt
+
+    @pytest.mark.asyncio
+    async def test_a_harmony_suffixed_name_is_the_same_call(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The guard must decide identity the way the dispatcher does.
+
+        `_execute_tool` normalises the name before it looks the tool up, so
+        `list_files<|channel|>commentary` *runs* `list_files`. A signature
+        built from the raw name calls that a different call, so the duplicate
+        the seeding exists to catch is executed anyway -- and the models that
+        leak the marker are the models that reach this retry, which makes the
+        two facts meet on the same query rather than in theory.
+        """
+        executed = []
+
+        async def record(name, kwargs):
+            executed.append((name, tuple(sorted(kwargs.items()))))
+            return "a.py\nb.py"
+
+        plain, _bound = self._text_runs_a_tool_then_dead_ends(
+            True, native_name="list_files<|channel|>commentary"
+        )
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch("aorta.chat.graph.nodes._execute_tool", side_effect=record),
+        ):
+            result = await act_node(_state())
+        assert len(executed) == 1, f"tool ran {len(executed)}x: {executed}"
+        assert len(result["tool_trace"]) == 1, "the result must not be recorded twice"
+
+    def test_the_signature_agrees_with_the_dispatcher_on_the_name(self):
+        """The unit form of the above, pinned against the dispatcher's rule.
+
+        Asserted as equality with what `_execute_tool` would look up, rather
+        than against a literal, so the two cannot drift apart if the marker
+        syntax changes.
+        """
+        mangled = "list_files<|channel|>commentary"
+        assert nodes._normalise_tool_name(mangled) == "list_files"
+        assert nodes._call_signature(mangled, {"path": "src"}) == nodes._call_signature(
+            nodes._normalise_tool_name(mangled), {"path": "src"}
+        )
 
     @pytest.mark.asyncio
     async def test_a_different_call_still_runs(

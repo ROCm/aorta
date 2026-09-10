@@ -1556,8 +1556,20 @@ def _call_signature(name: str, kwargs: dict | None) -> str:
     protocols -- the text loop's parsed kwargs against the native loop's
     structured ``args`` -- and two separately-written format strings that have
     to agree is how the seeding silently stops matching.
+
+    Normalised through :func:`_normalise_tool_name` for the same reason, and
+    this is the part that has teeth. :func:`_execute_tool` dispatches on the
+    normalised name, so ``list_files<|channel|>commentary`` *runs*
+    ``list_files``; a signature built from the raw name would call that a
+    different call and let the duplicate through. The two functions have to
+    decide identity the same way, and the population this matters for is
+    exactly the one that reaches the escalation: gpt-oss behind a serving stack
+    whose harmony parser leaks the channel marker is both why
+    :func:`_normalise_tool_name` exists and why the retry runs at all. It also
+    covers the within-loop case, where two channel markers on one tool would
+    otherwise be two calls.
     """
-    return f"{name}({sorted((kwargs or {}).items())})"
+    return f"{_normalise_tool_name(name)}({sorted((kwargs or {}).items())})"
 
 
 def _prior_results_msg(prior_calls: list[tuple[str, dict, str]]) -> str:
