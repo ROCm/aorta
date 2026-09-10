@@ -3486,6 +3486,76 @@ def test_the_observation_keeps_the_tail_that_discriminates_a_coverage_reason():
     assert "access sites resource_failed in gemm.hsaco: 14" in observation
 
 
+def test_a_long_backend_tail_survives_into_the_observation_and_manifest():
+    # Review (#479): the same defect as the observation clamp, one layer upstream. The
+    # accumulation clamped the per-kernel reason to 300, and _run_one builds
+    # "waitcheck_backend_exit_N: " plus up to 300 characters of stderr tail -- so the
+    # cap cut the tail that carries the cause, for the sinks that are deliberately
+    # unbounded (the observation, env.json) as well as the bounded ones.
+    tail = "".join(f"frame{i:03d} " for i in range(40))[:300]
+    assert len(tail) == 300
+    reason = f"waitcheck_backend_exit_2: {tail}"
+    assert len(reason) > gen._DETAIL_LIMIT
+
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["kernel_results"][0]["reason"] = reason
+    case = gen.summarize_case(report, "warn")
+
+    # the whole reason reaches the unbounded sinks, tail included
+    reasons = case.get("kernel_reasons") or []
+    assert [e.get("reason") for e in reasons] == [reason]
+    assert reason in case.get("observation", "")
+    assert tail[-40:] in case.get("observation", "")
+
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+    recorded = ((env.get("observed") or {}).get("kernel_reasons") or [{}])[0]
+    assert recorded.get("reason") == reason
+
+    # while the bounded display sinks still apply their own budget
+    for row in case["kernels"][:2]:
+        assert len(row.get("detail", "")) <= gen._DETAIL_LIMIT
+    assert len(gen._survey_message_parts(case)[1]) <= gen._MSG_LIMIT
+
+
+def test_a_lone_row_is_credited_both_finding_scopes_without_a_result():
+    # Review (#479): the mirror of the matched branch, which adds the process-scope
+    # count unconditionally for a lone row. Here it was gated on the named count being
+    # zero, so a check emitting one kernel-named AND one process-scope finding credited
+    # only the named one and the column fell one short of the case total.
+    def _finding(kernel_name):
+        return {
+            "sanitizer": "consan", "severity": "race", "code": "data_race",
+            "message": "conflict", "kernel_name": kernel_name,
+            "code_object": None, "entry_offset": None, "metadata": {},
+        }
+
+    identity = {"name": "gemm_f32_ss", "target": "gfx950"}
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "fail", "execution_status": "ok",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": identity, "total_time_ms": 0.0,
+                         "dispatch_count": 1, "sources": ["consan_repro"]}],
+        },
+        "checks": [{
+            "sanitizer": "consan", "state": "ran", "verdict": "fail", "reason": None,
+            "returncode": 0, "findings": [_finding("gemm_f32_ss"), _finding(None)],
+            "kernel_results": [], "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "fail")
+    assert case.get("findings") == 2
+    assert [k.get("findings") for k in case["kernels"]] == [2]
+    assert sum(k.get("findings") or 0 for k in case["kernels"]) == case.get("findings")
+
+
 def test_survey_informational_dir_isolates_malformed_nested_reports(tmp_path):
     # Review (#374): a top-level dict with a malformed NESTED shape (e.g.
     # {"checks": null}) passes the isinstance guard but makes the reduction raise

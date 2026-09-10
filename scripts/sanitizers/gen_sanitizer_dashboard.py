@@ -1126,7 +1126,14 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             # the rollup (``worklist_not_fully_checked``); the per-kernel reason is
             # the only field that says what actually went wrong, so it must survive
             # into the row the renderers read.
-            if reason := _clean_msg(str(result.get("reason") or ""), _DETAIL_LIMIT):
+            #
+            # Normalized but not clamped: this is the accumulation, upstream of every
+            # sink, and ``_run_one`` builds ``waitcheck_backend_exit_N: `` plus up to
+            # 300 characters of stderr tail -- so a cap here truncates the tail that
+            # carries the cause, for the unbounded sinks (the observation, ``env.json``)
+            # as well as the bounded ones. Each display sink applies its own budget:
+            # the Detail cell below, and ``_survey_message_parts`` for the callout.
+            if reason := _clean_msg(str(result.get("reason") or ""), None):
                 reasons.append((sanitizer, reason))
             reduced = {
                 "verdict": _worse_verdict(
@@ -1292,9 +1299,13 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 credited.add(name)
                 findings = unattributed_by_name.get(name, 0)
                 # dynamic ConSan attributes race findings at process scope
-                # (kernel_name is null); with one worklist row, credit it there.
-                if findings == 0 and len(kernel_entries) == 1:
-                    findings = unattributed_by_name.get(None, 0)
+                # (kernel_name is null); with one worklist row, credit it there. Added
+                # unconditionally, as in the matched branch above: a check can emit a
+                # kernel-named finding *and* a process-scope one, and gating this on
+                # there being no named finding dropped the process-scope count off the
+                # only row that could hold it.
+                if len(kernel_entries) == 1:
+                    findings += unattributed_by_name.get(None, 0)
             verdict = report.get("overall_verdict") if len(kernel_entries) == 1 or findings else "—"
         kernels.append({
             "name": name,
