@@ -61,6 +61,26 @@ _METRIC_POLICIES: dict[str, str] = {
     "output_throughput": "min",
     "total_token_throughput": "min",
     "request_throughput": "min",
+    # Rollout-mode generated-length metrics -- `mean_output_tokens_per_request`
+    # and the `generated_tokens_*` family -- are deliberately absent, and should
+    # stay absent. Listing a name here is not a description of it, it is an
+    # election to gate it: `refresh_baselines --perf-gate` arms a bound for every
+    # allowlisted min/max metric automatically, from one observation and a flat
+    # margin.
+    #
+    # These lengths are not a property of the stack. Under EOS-respecting
+    # generation at temperature 1.0 they are the policy's choice and vary between
+    # runs by construction, so a margin-derived floor would flap; and on the
+    # `random` dataset both rollout recipes use, nothing induces EOS, so the
+    # value is pinned near `output_len * n` and a floor under it would measure
+    # the recipe rather than the engine. Neither reading is a regression signal.
+    #
+    # The real invariant they were reaching for -- a collapsed policy that
+    # answers every request with an immediate EOS -- is already enforced in the
+    # workload by `min_mean_output_tokens`, a hand-set per-step floor that fails
+    # the trial as `rollout_output_too_short`. That is the right shape for it: a
+    # threshold someone chose, not one armed off a baseline. They remain captured
+    # for trends, which is what a diagnostic metric should get.
     "logits_checksum": "equal",
     "output_checksum": "equal",
     "checksum": "equal",
