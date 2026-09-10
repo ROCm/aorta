@@ -113,7 +113,7 @@ re-download the embedding weights.
 | `build` | downloaded, but not usable by this install | rebuilt; it cannot answer anything, so nothing is lost |
 | `fetch` or `--from` | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
 | `build` | a manifest whose `corpus_roots` cannot be read | refused, unless a row above already exempts it; pass `--force` |
-| any of them | *not an index at all* — a path that exists with no manifest beside it | refused; pass `--force` |
+| any of them, `--public-only` included | *not an index at all* — a path that exists with no manifest beside it | refused; pass `--force` |
 
 `fetch` also opens the store before deciding a refresh would change nothing.
 A matching `index_sha256` says the right index was installed, not that the file
@@ -145,6 +145,14 @@ mistyped `--output`, a file something else owns, or an index whose sidecars were
 lost. Only the first two are unrecoverable, and nothing on disk tells them
 apart, so all three are refused. A path that does *not* exist is a first
 install and is always permitted — that distinction is the whole rule.
+
+This row is checked **before every exemption above it**, `--public-only`
+included. The exemptions answer "is this a narrowing, or an index that cannot
+be queried anyway" — questions that presume an index is what is there, which is
+the one thing this case does not establish. A typo is a typo on the CI path
+too. It costs the published build nothing: `nightly.yml` and `release.yml` run
+on a fresh workspace and never restore `index-out/`, so their first write is to
+a path that does not exist and every later one is over complete sidecars.
 
 The exemptions come first, which is why the `build` row above is qualified. An
 unreadable `corpus_roots` means the index is either a published one or a local

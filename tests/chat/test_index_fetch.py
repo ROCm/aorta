@@ -790,6 +790,7 @@ class TestTheFetchedSchemaIsChecked:
             ("collection", ["c"]),
             ("corpus_digest", 7),
             ("corpus_roots", "src/aorta"),
+            ("corpus_roots", [42]),
             ("dimensions", "384"),
             ("chunk_count", True),
         ],
@@ -810,7 +811,12 @@ class TestTheFetchedSchemaIsChecked:
 
         Parametrised across the types rather than pinned to that one field,
         because the hole was the missing check and not the field that exposed
-        it.
+        it. ``corpus_roots: [42]`` is in the list because checking the
+        container and not its elements let that value *install*, and the next
+        fetch then classified the sidecar it had just written as unclassifiable
+        and refused a routine refresh -- a boundary check that admits what the
+        guard behind it rejects is worse than none, because the damage surfaces
+        one command later.
         """
         raw = json.loads(
             server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX].decode("utf-8")
@@ -852,6 +858,32 @@ class TestTheFetchedSchemaIsChecked:
         assert len(options) == 3, options
         for line in options:
             assert flag in line, f"option acts on the wrong index: {line!r}"
+
+    @pytest.mark.parametrize("missing", ["manifest", "checksum"])
+    def test_a_sidecar_404_remedy_also_names_the_destination(
+        self, server, tmp_path: Path, monkeypatch, missing
+    ):
+        """The two sites the first sweep missed, on both sidecars.
+
+        `_download_text`'s 404 offers `aorta chat index build`, which resolves
+        `--output` to the cache -- so a fetch aimed anywhere else was told to
+        build over an index unrelated to the failure. Same property as the
+        refusal remedies; a different function, which is why grepping for the
+        property rather than for `_pasteable` is what finds it.
+        """
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "cache.sqlite"))
+        suffix = (
+            manifest_mod.MANIFEST_SUFFIX if missing == "manifest" else manifest_mod.CHECKSUM_SUFFIX
+        )
+        del server.assets[ASSET_NAME + suffix]
+        dest = tmp_path / "elsewhere.sqlite"
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        message = str(exc.value)
+        assert "companion sidecar" in message
+        assert f"aorta chat index build --output {shlex.quote(str(dest))}" in message
 
     def test_an_older_schema_is_still_accepted(self, server, tmp_path: Path):
         """Forward tolerance runs one way only; an older sidecar still parses."""
@@ -1154,6 +1186,52 @@ class TestFetchWillNotSilentlyDiscardALocalBuild:
         assert dest.read_text(encoding="utf-8") == "a year of notes"
         assert side_load(origin, index_path=dest, force=True).index_path == dest
 
+    def test_a_sidecar_that_is_not_utf8_is_refused_rather_than_raised(
+        self, server, tmp_path: Path
+    ):
+        """``read_manifest`` wraps a bad *parse*, not a bad *read*.
+
+        So one class of unreadable sidecar -- a truncated multi-byte write, or
+        a file something else owns -- came out of the guard as
+        ``UnicodeDecodeError`` rather than as the unreadable-destination state
+        the rest of them produce. Same answer, one layer lower.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"an index built here")
+        manifest_mod.manifest_path(dest).write_bytes(b"\xff\xfe not utf-8 at all")
+
+        with pytest.raises(index_ops.IndexOverwriteError, match="no manifest beside it"):
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert dest.read_bytes() == b"an index built here"
+
+    def test_a_local_sidecar_with_a_wrong_typed_field_does_not_crash_the_guard(
+        self, server, tmp_path: Path
+    ):
+        """Local manifests are untyped on purpose, so the guard must absorb it.
+
+        ``_unusable_reasons`` promised never to raise while catching only
+        ``ManifestError``. A sidecar recording ``embedding_identity: 42`` makes
+        ``check_index`` raise ``AttributeError`` rendering the identity, and a
+        non-string ``aorta_sha`` raises ``TypeError`` slicing it -- both past
+        that handler and out of the build guard as a traceback. A malformed
+        field is a reason this install cannot use the index, which is what the
+        helper returns; it is not a reason to crash the caller.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(b"an index built here")
+        manifest_mod.write_manifest(dest, _manifest(corpus_roots=[str(tmp_path / "checkout")]))
+        path = manifest_mod.manifest_path(dest)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["embedding_identity"] = 42
+        raw["aorta_sha"] = None
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        # Reached through the guard, which is the caller that used to crash.
+        assert index_ops._unusable_reasons(dest), "a malformed sidecar is a reason, not a crash"
+        with pytest.raises(index_ops.IndexOverwriteError):
+            fetch_index(version="0.2.1", index_path=dest)
+
     def test_the_remedy_names_the_index_that_was_refused(
         self, server, tmp_path: Path, monkeypatch
     ):
@@ -1275,6 +1353,29 @@ class TestCompareIndex:
         comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
 
         assert comparison.verdict == index_ops.VERDICT_NO_BASELINE
+
+    def test_the_no_baseline_remedy_names_the_index_that_was_asked_about(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """``status --index`` and ``build --output`` are one path, two flags.
+
+        The remedy carried in ``baseline_error`` is a build command, and a bare
+        one builds the cache -- so a reader who asked about a different index
+        was told to build over the one they had not mentioned. Translating
+        ``--index`` into ``--output`` is the whole fix, but it has to happen,
+        because the user cannot be expected to.
+        """
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "cache.sqlite"))
+        del server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX]
+        asked_about = tmp_path / "elsewhere.sqlite"
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=asked_about)
+
+        assert comparison.verdict == index_ops.VERDICT_NO_BASELINE
+        assert (
+            f"aorta chat index build --output {shlex.quote(str(asked_about))}"
+            in comparison.baseline_error
+        )
 
     def test_no_local_index_is_its_own_verdict(self, server, tmp_path: Path):
         comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "absent")
@@ -1479,6 +1580,54 @@ class TestSideLoad:
             str(dest),
             "--force",
         ]
+
+    @pytest.mark.parametrize(
+        ("field", "value"), [("embedding_identity", 42), ("corpus_roots", [42])]
+    )
+    def test_a_staged_manifest_is_held_to_the_same_field_types(
+        self, tmp_path: Path, field, value
+    ):
+        """The hand-carried sidecar is the *most* likely to be hand-edited.
+
+        The downloaded path got the field-type check and this one did not, so
+        `--from` remained the way in for a wrong-typed field:
+        ``embedding_identity: 42`` escaped as ``AttributeError`` out of the
+        provider validation, and ``corpus_roots: [42]`` installed and poisoned
+        the next refresh.
+        """
+        staging = tmp_path / "usb"
+        staging.mkdir()
+        origin = staging / ASSET_NAME
+        origin.write_bytes(BODY)
+        manifest_mod.write_manifest(origin, _manifest())
+        path = manifest_mod.manifest_path(origin)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw[field] = value
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        dest = tmp_path / "i.sqlite"
+        with pytest.raises(IndexFetchError) as exc:
+            side_load(origin, index_path=dest)
+
+        assert "is not usable" in str(exc.value)
+        assert field in str(exc.value)
+        assert not dest.exists()
+
+    def test_a_staged_sidecar_that_is_not_utf8_is_a_sentence_not_a_traceback(
+        self, tmp_path: Path
+    ):
+        """Same read/parse split as the destination guard, on the source side."""
+        staging = tmp_path / "usb"
+        staging.mkdir()
+        origin = staging / ASSET_NAME
+        origin.write_bytes(BODY)
+        manifest_mod.manifest_path(origin).write_bytes(b"\xff\xfe not utf-8")
+
+        dest = tmp_path / "i.sqlite"
+        with pytest.raises(IndexFetchError, match="is not usable"):
+            side_load(origin, index_path=dest)
+
+        assert not dest.exists()
 
     def test_a_staged_index_without_a_manifest_is_refused(self, tmp_path: Path):
         """Side-loading is where a mismatch is most likely, not least.

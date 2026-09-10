@@ -735,25 +735,50 @@ class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
         assert index_ops.build_index(local_corpus(repo), index_path=target, force=True)
         assert index_ops.check_index(target, strict=True).refusals == []
 
-    def test_a_published_build_over_a_manifest_less_destination_still_proceeds(
+    def test_public_only_does_not_exempt_a_manifest_less_destination(
         self, repo: Path, tmp_path, monkeypatch
     ):
-        """``nightly.yml`` and ``release.yml`` run the same command repeatedly.
+        """A typo is a typo on the CI path too.
 
-        Their second run lands on an ``index-out/`` that a restored cache, or
-        the previous run in the same job, has already populated -- and an
-        interrupted first run leaves the index there with no sidecar. The
-        ``--public-only`` exemption is ahead of this refusal for that reason,
-        and a guard that tripped here would stop the published index updating
-        at all.
+        The first version of this ordering let the ``--public-only`` exemption
+        return *before* the destination was looked at, so
+        ``build --public-only --output ~/notes.txt`` replaced an unrelated file
+        without a word -- while the documented rule said any manifest-less path
+        is refused. The exemption answers the *provenance* question ("is this a
+        narrowing?"); it cannot answer "is there an index here at all".
+
+        This costs the published build nothing, which is why the ordering could
+        change: see the sibling test below for the shape CI actually runs.
         """
         from aorta.chat.rag import index_ops
 
         _install_fake_embedder(monkeypatch)
-        target = tmp_path / "index-out" / "aorta-chat-index.sqlite"
-        target.parent.mkdir()
-        target.write_bytes(b"an interrupted first run left this behind")
+        target = tmp_path / "notes.txt"
+        target.write_text("a year of notes", encoding="utf-8")
 
+        with pytest.raises(index_ops.IndexOverwriteError, match="no manifest beside it"):
+            index_ops.build_index(published_corpus(repo), index_path=target)
+
+        assert target.read_text(encoding="utf-8") == "a year of notes"
+        assert index_ops.build_index(published_corpus(repo), index_path=target, force=True)
+
+    def test_the_shape_ci_actually_runs_is_unaffected(self, repo: Path, tmp_path, monkeypatch):
+        """``nightly.yml`` and ``release.yml``, both runs of them.
+
+        Both are ``ubuntu-latest`` with a fresh workspace and neither restores
+        ``index-out/``, so their first write is to a path that does not exist
+        and every later one is over an index carrying complete sidecars. The
+        refusal above sits between those two states and touches neither, which
+        is what made it safe to move ahead of the exemption.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        out = tmp_path / "index-out"
+        out.mkdir()
+        target = out / "aorta-chat-index.sqlite"
+
+        assert index_ops.build_index(published_corpus(repo), index_path=target)
         assert index_ops.build_index(published_corpus(repo), index_path=target)
 
     def test_the_remedy_names_the_index_that_was_refused(
