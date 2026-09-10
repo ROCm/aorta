@@ -1,8 +1,8 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `34350894756` (2026-09-09 12:46:56 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/34350894756)
+> ⚠️ **Stale** — latest sanitizer nightly run `34476548600` (2026-09-10 12:49:39 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/34476548600)
 
-Run `2026-09-09T124656-34350894756` · commit `6a8c70da0add` · 2026-09-09 12:46:56 UTC
+Run `2026-09-10T124939-34476548600` · commit `6a8c70da0add` · 2026-09-10 12:49:39 UTC
 
 ❌ **REGRESSION** — investigate 1/3 sanitizer outcomes that do not match their baselines
 
@@ -60,7 +60,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=109489874965712 index=0 kind=1 code_object=fnv1a64:3deb93883c6c6fa8 report_generation=2 generatio… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=96264269645120 index=0 kind=1 code_object=fnv1a64:3deb93883c6c6fa8 report_generation=2 generation… |
 
 </details>
 
@@ -98,7 +98,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatc
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `e2c61afad3` |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `2826114b7b` |
 
 </details>
 
@@ -112,7 +112,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `c6d8ba5d11` |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `02628914c7` |
 
 </details>
 
@@ -138,7 +138,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `e2c61afad3` |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `2826114b7b` |
 
 </details>
 
@@ -150,7 +150,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `c6d8ba5d11` |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `02628914c7` |
 
 </details>
 
@@ -158,6 +158,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-09-10T124939-34476548600 | `6a8c70da0add` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-09T124656-34350894756 | `6a8c70da0add` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-08T124853-34225959457 | `d84bea127a2e` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-07T124249-34121807780 | `d5a8bba0383e` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
@@ -187,4 +188,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-08-16-31946286609 | `b4be48fdd6dd` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-15-31883858931 | `b4be48fdd6dd` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-14-31800000546 | `68c980aa449f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
-| 2026-08-13-31718502485 | `68c980aa449f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
