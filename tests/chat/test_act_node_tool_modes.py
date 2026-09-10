@@ -1335,13 +1335,63 @@ class TestTheSignatureCountsWhicheverRoundItAppearedOn:
             await act_node(_state())
         # Both rounds get their own empty-content line, and round 2's honestly
         # reports 0 tokens -- so this has to read the *announcement*, which
-        # quotes the signature the escalation acted on.
+        # quotes the signature the escalation acted on. Selected on the phrase
+        # the troubleshooting table indexes the line by, rather than on the
+        # part describing what the round did: that description is the bit most
+        # likely to be reworded, and keying on it made this a spurious failure
+        # when it was.
         announcement = next(
             line
             for line in caplog.text.splitlines()
-            if "no answer and no tool call" in line
+            if "will use native from here" in line
         )
         assert "105 output tokens" in announcement, announcement
+
+    @pytest.mark.asyncio
+    async def test_the_announcement_does_not_contradict_the_turns_own_trace(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """The switch line describes a round, so it must not deny the query's tools.
+
+        Escalation fires on the round that gave up, and earlier rounds of the
+        same query may have run tools -- that is why the retry is seeded with
+        their results at all. Phrased as a claim about the model rather than the
+        round, the line said "returned no answer and no tool call" on a turn
+        whose own ``tool_trace`` listed the call, which is the trace an operator
+        reads next.
+        """
+        rounds = {"n": 0}
+
+        async def text_reply(_messages, **_kw):
+            rounds["n"] += 1
+            if rounds["n"] == 1:
+                return AIMessage(content='ACTION: list_files(path="src")')
+            return _dead_end_reply()
+
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=text_reply)
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(return_value=AIMessage(content="Here they are."))
+        plain.bind_tools = MagicMock(return_value=bound)
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            patch(
+                "aorta.chat.graph.nodes._execute_tool",
+                AsyncMock(return_value="a.py"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await act_node(_state())
+        announcement = next(
+            line
+            for line in caplog.text.splitlines()
+            if "will use native from here" in line
+        )
+        # The tool ran, and the turn says so.
+        assert any("list_files" in entry for entry in result["tool_trace"])
+        # So the announcement must not claim the query made no tool call.
+        assert "no answer and no tool call" not in announcement
+        assert "A round returned no text and no tool call" in announcement
 
     @pytest.mark.asyncio
     async def test_rounds_that_never_showed_it_do_not_escalate(

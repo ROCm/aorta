@@ -952,11 +952,16 @@ def _commit_escalation(signature: str, evidence: str = _ANSWERED) -> None:
     _escalation.escalated = True
     _escalation.successful_watermark = _escalation.probes_begun
     logger.warning(
-        "The model returned no answer and no tool call (%s), which is how a "
-        "reasoning model behaves on the 'text' tool protocol. %s, so this "
-        "process will use native from here. Set AORTA_CHAT_LLM_TOOL_MODE to "
-        "choose the protocol yourself; this process started on the 'text' "
-        "protocol.",
+        # "A round", not "the model": escalation is triggered by the round that
+        # gave up, and earlier rounds of the same query may well have run tools
+        # -- which is why the retry is seeded with their results at all. Phrased
+        # as a claim about the query, this line contradicted the tool trace
+        # recorded on the very same turn.
+        "A round returned no text and no tool call (%s), which is how a "
+        "reasoning model behaves on the 'text' tool protocol; any tools the "
+        "earlier rounds ran are on the turn's trace. %s, so this process will "
+        "use native from here. Set AORTA_CHAT_LLM_TOOL_MODE to choose the "
+        "protocol yourself; this process started on the 'text' protocol.",
         signature,
         evidence,
     )
