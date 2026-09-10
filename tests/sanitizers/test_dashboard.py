@@ -1063,7 +1063,8 @@ def test_the_manifest_does_not_invent_a_scope_the_report_never_claimed():
         summary=stated, report=None, built_refs=[], inputs=[],
     )
     stated_reason = ((stated_env.get("observed") or {}).get("kernel_reasons") or [{}])[0]
-    assert "entry_offset" in stated_reason and stated_reason["entry_offset"] is None
+    assert "entry_offset" in stated_reason
+    assert stated_reason.get("entry_offset") is None
 
 
 def test_an_exact_entry_result_missing_its_offset_cannot_cover_a_sibling():
@@ -1569,7 +1570,7 @@ def test_two_names_differing_only_in_whitespace_are_told_apart():
         "code_object_index": 0, "entry_offset": None,
     }
     identity_b = dict(identity_a, name=f"{head}  {tail}")
-    assert identity_a["name"] != identity_b["name"]
+    assert identity_a.get("name") != identity_b.get("name")
 
     labels = gen._display_labels([
         (identity_a["name"], identity_a), (identity_b["name"], identity_b)
@@ -1577,7 +1578,7 @@ def test_two_names_differing_only_in_whitespace_are_told_apart():
     assert len(set(labels)) == 2
 
     # the digest is over the name as written, so it separates the two on its own
-    digests = {gen._hashed_clip_name(i["name"]) for i in (identity_a, identity_b)}
+    digests = {gen._hashed_clip_name(str(i.get("name"))) for i in (identity_a, identity_b)}
     assert len(digests) == 2
 
 
@@ -3467,9 +3468,9 @@ def test_the_observation_keeps_the_tail_that_discriminates_a_coverage_reason():
         for attribution in ("resource_failed", "placement_or_lowering_failed")
     )
 
-    assert capacity["observation"] != defect["observation"]
-    assert "resource_failed" in capacity["observation"]
-    assert "placement_or_lowering_failed" in defect["observation"]
+    assert capacity.get("observation") != defect.get("observation")
+    assert "resource_failed" in capacity.get("observation", "")
+    assert "placement_or_lowering_failed" in defect.get("observation", "")
     # no kernel_results on this path, so nothing else can carry the cause
     assert (capacity.get("kernel_reasons") or []) == []
 
@@ -3480,8 +3481,9 @@ def test_the_observation_keeps_the_tail_that_discriminates_a_coverage_reason():
         ),
         None,
     )
-    assert "\n" not in multiline["observation"] and "\t" not in multiline["observation"]
-    assert "access sites resource_failed in gemm.hsaco: 14" in multiline["observation"]
+    observation = multiline.get("observation", "")
+    assert "\n" not in observation and "\t" not in observation
+    assert "access sites resource_failed in gemm.hsaco: 14" in observation
 
 
 def test_survey_informational_dir_isolates_malformed_nested_reports(tmp_path):

@@ -902,7 +902,10 @@ def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
     as one string and are as ambiguous to a reader as a genuinely repeated name. When
     the qualifiers tie as well -- two long names in the same code object -- the names
     are re-rendered keeping their tails, and then, if even those agree, carrying a
-    digest of the whole name, which cannot tie for names that differ at all.
+    digest of the whole name (see ``_NAME_RENDERINGS``, which ends at the full digest).
+    Distinct names therefore cannot tie: the worklist rejects a duplicate
+    ``stable_key``, so any two items here differ somewhere, and the last tier hashes
+    the whole name untruncated.
     """
     labels: list[str] = []
     for render, rendering in _NAME_RENDERINGS:
