@@ -285,11 +285,12 @@ def triage_kernel_source(
 ) -> str:
     """Compile a HIP kernel the user supplied and run it under a sanitizer.
 
-    Builds the kernel for gfx950 on a GPU node, generates a launch harness if
-    the source is a bare __global__ function rather than a whole program, and
-    runs it twice under record/replay. Reports accesses that two waves made to
-    the same shared-memory bytes with nothing ordering them, naming each wave,
-    the byte range and the instruction offsets, and classifies the result.
+    Builds the kernel for this cluster's GPU on a GPU node, generates a launch
+    harness if the source is a bare __global__ function rather than a whole
+    program, and runs it twice under record/replay. Reports accesses that two
+    waves made to the same shared-memory bytes with nothing ordering them,
+    naming each wave, the byte range and the instruction offsets, and
+    classifies the result.
     Takes several minutes.
 
     Args:
@@ -339,7 +340,7 @@ def triage_kernel_source(
     if prepared.single_wave:
         lines.append(
             f"WARNING — geometry caveat: the harness launched {prepared.block} "
-            f"threads, which is a single {WAVEFRONT}-lane wavefront on gfx950. "
+            f"threads, which is a single {WAVEFRONT}-lane wavefront. "
             f"ConSan only reports conflicts BETWEEN waves, so this run cannot "
             f"show a cross-wave race and a 'pass' here does NOT mean the kernel "
             f"is race-free. Re-run with block_size={prepared.block * 2} to put "
@@ -373,14 +374,14 @@ _ASM_CACHE: dict[str, str] = {}
 
 @tool
 def triage_assembly_source(source: str, label: str = "") -> str:
-    """Assemble gfx950 assembly the user supplied and analyse it for wait hazards.
+    """Assemble AMD GPU assembly the user supplied and analyse it for wait hazards.
 
     Wraps the pasted instructions in a minimal kernel if they are a fragment,
-    assembles them for gfx950, and runs the static wait checker over the
-    resulting code object. Reports instructions whose result is consumed before
-    any wait guarantees it has landed, naming the producing and consuming
-    instructions, their byte offsets and the register involved, plus waits
-    stronger than the dependency requires.
+    assembles them for the architecture this cluster runs, and runs the static
+    wait checker over the resulting code object. Reports instructions whose
+    result is consumed before any wait guarantees it has landed, naming the
+    producing and consuming instructions, their byte offsets and the register
+    involved, plus waits stronger than the dependency requires.
 
     Args:
         source: The assembly text, exactly as the user pasted it.
@@ -390,7 +391,9 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         The hazards found in the supplied assembly, or a clean result.
     """
     try:
-        prepared = prepare_asm(source)
+        # Must match the -mcpu below: the .amdgcn_target it writes and the
+        # compiler's target are checked against each other at assemble time.
+        prepared = prepare_asm(source, arch=_ARCH)
     except AsmHarnessError as exc:
         return f"Cannot analyse this assembly: {exc}"
 
