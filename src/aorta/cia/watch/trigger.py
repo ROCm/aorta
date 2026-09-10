@@ -14,7 +14,17 @@ def trigger_autopsy(bundle_root: Path, job: JobRecord, jobs_root: Path) -> dict:
     from aorta.cia.autopsy.orchestrator import run_autopsy
 
     print(f"[autopsy] starting on bundle {bundle_root}")
-    report = run_autopsy(bundle_root, kb_version="kb-static-poc")
+    # The job goes through. Without it run_autopsy cannot escalate -- its
+    # production sweep is guarded on `job is not None` -- so every autopsy Watch
+    # triggered could recommend `aorta sweep run` and none could ever run one.
+    # The recommendation was reaching the report while the path that acts on it
+    # was unreachable from the only caller that produces those reports.
+    report = run_autopsy(
+        bundle_root,
+        kb_version="kb-static-poc",
+        job=job,
+        head_node=job.head_node,
+    )
 
     report_path = bundle_root / "report.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
