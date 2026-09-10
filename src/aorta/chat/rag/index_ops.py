@@ -831,6 +831,24 @@ def compute_digest(corpus: corpus_mod.Corpus | None = None) -> tuple[str, int]:
 # ── validating what arrived ───────────────────────────────────────────────
 
 
+def _no_collection_reason(target: Path, collection: str) -> str:
+    """Why a readable store holds no chunks for the configured collection.
+
+    Separated from the caller because the three states behind it want different
+    sentences and only one of them is about the store's contents: a manifest
+    whose index file is simply gone is a different problem from a store built
+    against another provider, and telling the second user their file is missing
+    would send them looking for it.
+    """
+    if not target.exists():
+        return f"the manifest is here but the index file it describes is not ({target})"
+    return (
+        f"the index holds no {collection} collection, so this install cannot "
+        "query it -- it was built by a different embedding provider, or the "
+        "build did not reach the point of writing chunks"
+    )
+
+
 def check_index(
     index_path: str | Path | None = None,
     *,
@@ -897,6 +915,24 @@ def check_index(
             else "the index could not be read as a sqlite store"
         )
         report.refusals.append(f"contents: {claim} ({unreadable})")
+    elif chunk_count is None:
+        # A store that opened without holding the collection this install
+        # queries. ``collection_chunk_count`` returns ``None`` here rather than
+        # raising, and ``validate`` skips its count comparison when handed
+        # ``None`` -- so between them this state produced *no refusals at all*,
+        # and the two readers built on that silence drew the worst available
+        # conclusion from it: the build guard exempted a rebuild, and ``fetch``
+        # reported "already up to date" over an index that cannot answer a
+        # single query. ``None`` is an ordinary answer from that helper and the
+        # wrong one to treat as consent, because it covers three states and
+        # every one of them is refused by the load path
+        # (``retriever._open_store``, which names the collections that *are*
+        # there): the sidecar outliving its store, a store some other
+        # provider's collection was built into, and a build that stopped before
+        # the chunk table existed.
+        report.refusals.append(
+            f"contents: {_no_collection_reason(target, provider.collection_name())}"
+        )
     if strict:
         report.raise_if_refused(target)
     return report
@@ -1129,13 +1165,37 @@ def describe_target(source: IndexSource, dest: str | Path) -> list[str]:
     return lines
 
 
-def _parse_manifest(text: str, source: IndexSource) -> manifest_mod.Manifest:
+def _parse_manifest(text: str, source: IndexSource, dest: Path) -> manifest_mod.Manifest:
     """Parse a downloaded manifest, or raise :class:`IndexFetchError`.
 
     The schema and field-type checks belong here rather than after the install:
     a manifest this build cannot read must fail the fetch rather than land on
     disk and then be rejected by the first load, which reports a successful
     fetch and leaves a chat that no longer starts.
+
+    **The remedy is this function's to write, and not the parser's.** The
+    parsers wrapped here are handed a dict and cannot know whose manifest it is
+    -- local sidecar, this download, or a side-loaded file all arrive
+    identically and are fixed by three different things -- so a remedy composed
+    down there is a remedy composed from the reader's configuration when the
+    *origin* was the question. That is not hypothetical: #463 found the parser
+    closing its type-mismatch and schema-version errors with "Replace it with
+    'aorta chat index fetch'", which this wrapper carried verbatim into a fetch
+    error, telling the user to re-run the download that produced the bad bytes.
+    Retrying is deterministic -- same URL, same bytes, same failure.
+
+    So the remedy here is the one a *published* origin admits, which is the
+    thing worth saying plainly: nothing the user does to their own machine
+    fixes it. Both commands offered therefore go somewhere else -- a different
+    release, or their own corpus. This covers every parser reached below rather
+    than the two sites that were reported, because they all arrive as one
+    exception at one wrap; :func:`side_load` writes its own for the same reason
+    from the other side.
+
+    ``dest`` is required rather than defaulted, because a remedy naming the
+    wrong index is the defect one layer along: both callers know the path they
+    were asked about, and an optional parameter is how the bare ``index build``
+    got into the sidecar 404s twice.
     """
     try:
         manifest = manifest_mod.Manifest.from_dict(json.loads(text))
@@ -1143,7 +1203,12 @@ def _parse_manifest(text: str, source: IndexSource) -> manifest_mod.Manifest:
         manifest_mod.ensure_supported_schema(manifest, f"the index at {source.index_url}")
     except (ValueError, manifest_mod.ManifestError) as exc:
         raise IndexFetchError(
-            f"the manifest at {source.manifest_url} is not usable: {exc}"
+            f"the manifest at {source.manifest_url} is not usable: {exc}\n"
+            "This is the published release's own metadata, so fetching it again "
+            "downloads the same bytes -- there is no local fix. Pin a different "
+            "release with 'aorta chat index fetch --version <tag>', or build "
+            f"from your own corpus with '{_pasteable('aorta chat index build', dest)}'. "
+            "Please report the broken release."
         ) from exc
     return manifest
 
@@ -1329,7 +1394,7 @@ def fetch_index(
     # ``from_dict`` drops keys this version predates, and writing them back out
     # would strip a newer builder's fields from the sidecar this machine keeps.
     manifest_text = _download_text(source.manifest_url, dest)
-    manifest = _parse_manifest(manifest_text, source)
+    manifest = _parse_manifest(manifest_text, source, dest)
     report = _validate_against_provider(manifest)
     report.raise_if_refused(source.index_url)
 
@@ -1348,8 +1413,9 @@ def fetch_index(
         # would have contradicted that from the other side.
         #
         # Deliberately the load path's notion of usable, not a schema probe:
-        # this catches a store nothing can open and a row count the manifest
-        # disagrees with, and not the several ways a store can open, count
+        # this catches a store nothing can open, one holding no chunks for the
+        # collection this install queries, and a row count the manifest
+        # disagrees with -- and not the several ways a store can open, count
         # correctly and still be the wrong shape underneath (``doctor``
         # enumerates those). Matching the reader the *first query* uses is the
         # property that matters here -- "already up to date" must not mean
@@ -1556,18 +1622,29 @@ def compare_index(
         # user asked about with ``--index``, not the cache. ``status --index``
         # and ``build --output`` are the same path under two flag names, and the
         # remedy has to be spelled in the second one.
-        published = _parse_manifest(_download_text(source.manifest_url, dest), source)
+        published = _parse_manifest(_download_text(source.manifest_url, dest), source, dest)
     except IndexFetchError as exc:
         baseline_error = str(exc)
 
     if published is None:
         verdict = VERDICT_NO_BASELINE
+    elif unreadable:
+        # Ahead of the compatibility check, which reads the *published*
+        # manifest: when both hold, the local read failure is the one the user
+        # can act on, and it is the only one of the two this command exits
+        # non-zero for. Ordered the other way, an install with an unreadable
+        # sidecar *and* an incompatible baseline reported ``incompatible`` and
+        # exited 0 -- so the state this verdict was added for was reported as
+        # the state it was added to be distinguished from, and a script gating
+        # on the exit code saw success. Absent-local stays *after*
+        # compatibility, unchanged: there is nothing local to have failed to
+        # read, and a baseline this install could not use is then the more
+        # useful answer than "you have no index".
+        verdict = VERDICT_UNREADABLE_LOCAL_INDEX
     elif _validate_against_provider(published).refusals:
         # Checked before the content comparison: an index this install cannot
         # query is not made usable by being newer.
         verdict = VERDICT_INCOMPATIBLE
-    elif unreadable:
-        verdict = VERDICT_UNREADABLE_LOCAL_INDEX
     elif local is None:
         verdict = VERDICT_NO_LOCAL_INDEX
     elif _is_same_index(local, published):
@@ -1674,7 +1751,18 @@ def side_load(
         manifest = manifest_mod.read_manifest(origin)
         _ensure_field_types(manifest)
     except (manifest_mod.ManifestError, UnicodeDecodeError, ValueError) as exc:
-        raise IndexFetchError(f"the manifest beside {origin} is not usable: {exc}") from exc
+        # Its own remedy, for the same reason :func:`_parse_manifest` writes
+        # one: the bytes are local but they are not aorta's, so neither a fetch
+        # nor a build addresses them -- the file that has to change is the one
+        # the user carried in. Naming the sidecar rather than the index, since
+        # that is the half that failed and they are two files.
+        raise IndexFetchError(
+            f"the manifest beside {origin} is not usable: {exc}\n"
+            f"Re-stage {manifest_source.name} from wherever the index was "
+            "built; it travelled with the index and did not survive the trip "
+            "intact, so re-running this command on the same pair fails the "
+            "same way."
+        ) from exc
     checksum = manifest_mod.sha256_file(origin)
     if manifest.index_sha256 and manifest.index_sha256 != checksum:
         raise IndexFetchError(

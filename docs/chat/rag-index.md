@@ -93,7 +93,9 @@ Two verdicts exit non-zero, and both mean no comparison was made: *no baseline*,
 and *unreadable local index* — a file at the index path with no manifest this
 build can read, which is also what the first query would refuse. An **absent**
 local index exits zero; that is a normal answer for someone who has not
-installed one yet.
+installed one yet. When the local sidecar is unreadable *and* the published
+index is one this install could not use, the local failure is the verdict: it is
+the half the reader can act on, and the half that exits non-zero.
 
 ### What replaces what
 
@@ -119,6 +121,16 @@ re-download the embedding weights.
 A matching `index_sha256` says the right index was installed, not that the file
 is still one, so a damaged store under an untouched sidecar is re-fetched rather
 than reported as *already up to date* — by the one command that would repair it.
+"Damaged" includes a store that opens cleanly but holds no chunks for the
+collection this install queries, which is what an index built by the other
+embedding provider and a build that stopped early both look like.
+
+When the published manifest itself is malformed, the refusal says so and does
+**not** offer a re-fetch: the same release yields the same bytes, so the remedies
+are another release (`--version`) or a local build. A malformed sidecar carried
+in with `--from` asks for the file to be re-staged, for the same reason. This is
+a rule rather than three messages — an error raised by `index fetch` may not
+advise an `index fetch` that would fail identically.
 
 A refusal names what would be lost and the flag that proceeds anyway, following
 `config init --force` rather than prompting, so a script and a terminal behave

@@ -16,6 +16,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import re
 import shlex
 import urllib.error
 from pathlib import Path
@@ -552,6 +553,65 @@ class TestAlreadyUpToDate:
         assert fetch_index(version="0.2.1", index_path=dest).up_to_date is False
         assert any(url.endswith(ASSET_NAME) for url in server.requested)
 
+    def test_a_matching_sidecar_over_a_store_with_no_chunk_table_is_not_up_to_date(
+        self, server, tmp_path: Path
+    ):
+        """The third damaged state, and the one the other two hid.
+
+        The two tests above damage the store in ways something *raises* about:
+        filler bytes cannot be opened, and a different row count contradicts the
+        manifest. This one is a valid sqlite file with the chunk table simply
+        absent -- and both readers answered it with silence rather than a
+        complaint. ``collection_chunk_count`` returns ``None`` (an ordinary
+        answer: it also means "another provider's index"), and ``validate``
+        skips its count comparison rather than compare against ``None``. No
+        refusals, so the shortcut called it current and the repair never ran.
+        """
+        import sqlite3
+
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        conn = sqlite3.connect(dest)
+        try:
+            conn.execute(f'DROP TABLE "chunks_{COLLECTION}"')
+            conn.commit()
+        finally:
+            conn.close()
+        # Nothing else is touched: the sidecars still record the published
+        # index_sha256, which is the pairing the shortcut trusted.
+        server.requested.clear()
+
+        result = fetch_index(version="0.2.1", index_path=dest)
+
+        assert result.up_to_date is False
+        assert any(url.endswith(ASSET_NAME) for url in server.requested)
+        assert dest.read_bytes() == BODY, "the store must be repaired"
+
+    def test_the_no_collection_refusal_distinguishes_a_missing_index_file(
+        self, server, tmp_path: Path
+    ):
+        """Same silence, different cause, and the sentences must not be swapped.
+
+        Asserted on ``check_index`` rather than through ``fetch``, because
+        ``fetch`` does not reach it: the shortcut reads the *sidecar* through
+        ``_local_manifest``, which returns ``None`` when the index file is gone,
+        so the refresh is never skipped in this state to begin with. ``doctor``
+        is the caller that does reach it -- it asks ``check_index`` directly to
+        list everything wrong at once -- and it is the one place the difference
+        shows: a sidecar outliving its index and a store some other provider
+        built are one ``None`` from ``collection_chunk_count`` and two entirely
+        different things to go and do. Telling this user their embedding
+        provider is wrong would send them to a setting that is fine.
+        """
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        dest.unlink()
+
+        refusals = " ".join(index_ops.check_index(dest, strict=False).refusals)
+
+        assert "index file it describes is not" in refusals
+        assert "different embedding provider" not in refusals
+
     def test_a_local_index_with_no_sidecar_is_refused_rather_than_assumed(
         self, server, tmp_path: Path
     ):
@@ -892,6 +952,166 @@ class TestTheFetchedSchemaIsChecked:
 
         assert fetch_index(version="0.2.1", index_path=dest).index_path == dest
         assert dest.exists()
+
+
+#: Flags that make an offered ``index fetch`` a *different* command from the one
+#: that raised. A bare re-run of the failing fetch is the whole defect below, so
+#: this is the property rather than any one sentence: ``--version`` goes to
+#: another release, ``--from`` to a local file, ``--force`` past a refusal.
+_CHANGES_THE_OUTCOME = ("--version", "--from", "--force")
+_FETCH_OFFER = re.compile(r"aorta chat index fetch[^'\n]*")
+
+
+def _unfollowable_fetch_offers(message: str) -> list[str]:
+    """Fetches this message tells the user to run that would fail identically.
+
+    Derived from the message rather than compared against expected wording,
+    because the defect is a *class*: three parser errors reached one wrapper,
+    and enumerating the sentences is how the fourth gets missed. Any ``index
+    fetch`` offered by an error that a fetch raised has to differ from the fetch
+    that raised it, or pasting it repeats the failure verbatim.
+    """
+    return [
+        offer.rstrip("'.\" ")
+        for offer in _FETCH_OFFER.findall(message)
+        if not any(flag in offer for flag in _CHANGES_THE_OUTCOME)
+    ]
+
+
+class TestTheRemedyCanBeFollowed:
+    """A refusal's remedy has to lead somewhere other than back to the refusal.
+
+    Routed here from #463, which found ``Manifest.from_dict`` closing its
+    type-mismatch error with "Replace it with 'aorta chat index fetch'" -- text
+    this module's wrapper carried verbatim into a fetch error, so a malformed
+    *published* manifest told the user to re-run the download that had just
+    produced it. Same URL, same bytes, same error: a loop, not advice.
+
+    The cause generalises past that one string. The parsers are handed a dict
+    and cannot know whose manifest it is; a local sidecar, this download and a
+    side-loaded file arrive identically and are fixed by three different things.
+    So the remedy belongs to whoever knows the origin, which is the caller --
+    and the tests here assert that property over the paths rather than the
+    wording of the errors, because the reported defect had three sites reaching
+    one wrapper and the wording is the part that will keep changing.
+    """
+
+    def _serve_malformed(self, server) -> None:
+        """A published manifest with a field of the wrong declared type."""
+        raw = json.loads(_manifest().to_json())
+        raw["corpus_roots"] = 42
+        server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = json.dumps(raw).encode()
+
+    def test_a_malformed_published_manifest_does_not_advise_fetching_it_again(
+        self, server, tmp_path: Path
+    ):
+        self._serve_malformed(server)
+        dest = tmp_path / "i.sqlite"
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        message = str(exc.value)
+        assert _unfollowable_fetch_offers(message) == []
+        # And it says why, because "there is no local fix" is the useful part:
+        # a user who cannot tell a broken release from a broken machine will
+        # spend the afternoon on their machine.
+        assert "no local fix" in message
+        assert not dest.exists(), "nothing may be installed from a manifest that failed"
+
+    def test_the_published_remedy_offers_a_different_release_and_a_local_build(
+        self, server, tmp_path: Path
+    ):
+        """The two things that do work, since a refusal with no exit is the
+        complaint this batch opened with."""
+        self._serve_malformed(server)
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        message = str(exc.value)
+        assert "aorta chat index fetch --version" in message
+        assert "aorta chat index build" in message
+
+    def test_the_published_remedy_names_the_index_the_caller_asked_about(
+        self, server, tmp_path: Path, monkeypatch
+    ):
+        """``--output`` again: the remedy is only advice if pasting it acts on
+        the index that was refused, not on the configured cache."""
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "configured.sqlite"))
+        self._serve_malformed(server)
+        dest = tmp_path / "scratch.sqlite"
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert f"aorta chat index build --output {shlex.quote(str(dest))}" in str(exc.value)
+
+    def test_a_malformed_staged_manifest_advises_restaging_it(self, tmp_path: Path):
+        """The third origin, and the one where neither index command helps.
+
+        The bytes are local but they are not aorta's, so the file that has to
+        change is the one the user carried in -- and re-running ``--from`` over
+        the same pair fails the same way, which is the same defect as the
+        published case reached from the other side.
+        """
+        origin = tmp_path / "staged" / ASSET_NAME
+        origin.parent.mkdir(parents=True)
+        origin.write_bytes(BODY)
+        raw = json.loads(_manifest().to_json())
+        raw["corpus_roots"] = 42
+        manifest_mod.manifest_path(origin).write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(IndexFetchError) as exc:
+            side_load(origin, index_path=tmp_path / "i.sqlite")
+
+        message = str(exc.value)
+        assert _unfollowable_fetch_offers(message) == []
+        assert "Re-stage" in message
+        assert manifest_mod.manifest_path(origin).name in message
+
+    @pytest.mark.parametrize(
+        ("label", "field", "value"),
+        [
+            ("a field of the wrong declared type", "corpus_roots", 42),
+            ("a non-integer schema version", "schema_version", "1"),
+            ("a schema version this build predates", "schema_version", 99),
+            ("a chunk_count that is a bool", "chunk_count", True),
+            ("a required field that is absent", "dimensions", None),
+        ],
+    )
+    def test_no_malformed_published_manifest_advises_refetching_it(
+        self, server, tmp_path: Path, label: str, field: str, value: object
+    ):
+        """The property over every way the parse can fail, not over five strings.
+
+        A matrix rather than one case because that is what the reported defect
+        was: three parser branches reached this module's single wrapper, the
+        review named one of them, #463 found a second while verifying it, and
+        the third is only distinguishable by which layer refuses first. Asserted
+        through the real fetch so it stays true of the message a *user* reads,
+        which is the composition of the parser's diagnosis and this module's
+        remedy -- and which of those two layers refuses a given malformation is
+        exactly what #463 is moving. That makes this the tripwire for the half
+        of the fix outside this PR's files: if a parser error starts naming a
+        bare ``index fetch`` again and it reaches this wrapper, the user gets
+        two remedies for one failure and the first one loops. This fails then,
+        rather than at the next review.
+        """
+        raw = json.loads(_manifest().to_json())
+        if value is None:
+            del raw[field]
+        else:
+            raw[field] = value
+        server.assets[ASSET_NAME + manifest_mod.MANIFEST_SUFFIX] = json.dumps(raw).encode()
+        dest = tmp_path / "i.sqlite"
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        message = str(exc.value)
+        assert _unfollowable_fetch_offers(message) == [], label
+        assert not dest.exists(), "nothing may be installed from a manifest that failed"
 
 
 class TestTransferFailures:
@@ -1450,6 +1670,45 @@ class TestCompareIndex:
         _reserialise(server, _manifest(embedding_model="other/model"))
 
         comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
+
+        assert comparison.verdict == index_ops.VERDICT_INCOMPATIBLE
+
+    def test_an_unreadable_local_sidecar_outranks_an_incompatible_baseline(
+        self, server, tmp_path: Path
+    ):
+        """When both hold, the local failure is the one that is actionable.
+
+        The two verdicts were tested one at a time and the combination was not,
+        which is where the ordering hid: the incompatibility check ran first, so
+        this install reported ``incompatible`` -- and ``incompatible`` exits 0
+        while ``unreadable_local_index`` exits non-zero, so the state was
+        reported as the state it exists to be distinguished from *and* a script
+        gating on the exit code saw success.
+        """
+        _reserialise(server, _manifest(embedding_model="other/model"))
+        dest = tmp_path / "i.sqlite"
+        dest.write_bytes(BODY)
+        manifest_mod.manifest_path(dest).write_text('{"aorta_version": "0.2', encoding="utf-8")
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_UNREADABLE_LOCAL_INDEX
+        assert comparison.local_error
+
+    def test_an_absent_local_index_still_yields_to_an_incompatible_baseline(
+        self, server, tmp_path: Path
+    ):
+        """The half of the ordering that is deliberately left alone.
+
+        Pinning it because the fix above moves one branch past this check and
+        not the other, and the asymmetry is the reasoning rather than an
+        oversight: there is no local read to have failed, so a baseline this
+        install could not use anyway is the more useful thing to say than "you
+        have no index".
+        """
+        _reserialise(server, _manifest(embedding_model="other/model"))
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "absent")
 
         assert comparison.verdict == index_ops.VERDICT_INCOMPATIBLE
 
