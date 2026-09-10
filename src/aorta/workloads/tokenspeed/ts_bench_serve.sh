@@ -965,9 +965,23 @@ if failed != 0 or completed != expected:
 # per-request array, because those two fields are the ones every export version
 # carries. `output_lens` is used for the distribution the host reports, but it
 # is not depended on for the verdict.
+#
+# Non-positive is UNPARSEABLE here, not SHORTLEN, and the boundary matters
+# because the two verdicts route differently: SHORTLEN says a policy stopped
+# generating and UNPARSEABLE says the export cannot be read. The host draws it
+# in exactly this place -- its floor requires `total_output_tokens > 0` and
+# leaves every other shape to `result_json_unusable` -- so drawing it anywhere
+# else here would make the container announce a collapsed policy for a step the
+# host is about to call unreadable, and a reader would have to reconcile two
+# names for one defect. Every request completing while zero tokens were
+# generated is not a short answer; an immediate EOS is still a token.
 if min_mean_output > 0:
     total_output = doc.get("total_output_tokens")
-    if not isinstance(total_output, int) or isinstance(total_output, bool):
+    if (
+        not isinstance(total_output, int)
+        or isinstance(total_output, bool)
+        or total_output <= 0
+    ):
         print(f"UNPARSEABLE total_output_tokens={total_output!r}")
         raise SystemExit(0)
     mean_output = total_output / completed

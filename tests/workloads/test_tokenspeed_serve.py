@@ -4305,6 +4305,39 @@ def test_the_in_container_floor_rejects_a_boolean_token_total(tmp_path):
     assert verdict.startswith("UNPARSEABLE"), verdict
 
 
+@pytest.mark.parametrize("total_output_tokens", [0, -1])
+def test_the_two_audits_draw_the_unreadable_line_in_the_same_place(
+    tmp_path, monkeypatch, total_output_tokens
+):
+    """Non-positive token totals are unreadable to both audits, not short to one.
+
+    The container audit runs first and stops the run, so whichever verdict it
+    prints is the one a reader sees. If it called this SHORTLEN while the host
+    calls it `result_json_unusable`, one broken export would carry two names --
+    and the container's would be the wrong one, since zero tokens across
+    completed requests is not a policy answering briefly (an immediate EOS is
+    still a token) but an export that cannot be read.
+    """
+    verdict = _run_script_audit(
+        tmp_path,
+        {"completed": 32, "failed": 0, "total_output_tokens": total_output_tokens},
+        min_mean_output=8,
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=total_output_tokens)]
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
 def test_rollout_reports_generated_length_per_request(tmp_path, monkeypatch):
     """Per *request*, and named that way on purpose.
 
