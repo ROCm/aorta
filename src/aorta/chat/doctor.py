@@ -1222,11 +1222,34 @@ def _check_index(report: Report) -> None:
 
         result = check_index(index_file, strict=False)
     except manifest_mod.ManifestError as exc:
+        # ``FAIL``, not the ``WARN`` this inherited, and the change is about the
+        # aggregate verdict rather than the wording. ``Report.failed`` counts
+        # only ``FAIL``, and ``cli/chat.py`` derives both the ``--json`` ``ok``
+        # field and the exit status from it -- so an install in this state was
+        # handed ``"ok": true`` and exit 0 while every query was refused, which
+        # is what a script, a CI step or a support engineer reads.
+        #
+        # Measured across the three ways to reach here, each confirmed to make
+        # ``read_manifest`` raise: a future ``schema_version``, a deleted
+        # sidecar and an unparseable one. All three reported ``warn``/``ok:
+        # true``/exit 0 before this, and ``retriever._check_manifest`` turns
+        # every one of them into ``IndexMismatchError`` with no softening, so
+        # there is no state reaching this branch that would be over-reported.
+        #
+        # The inconsistency is what makes it this PR's rather than a follow-up:
+        # three cases down, a store defect under a *readable* manifest now
+        # reports ``FAIL``. Both states refuse every query identically and only
+        # one of them failed the report, in a function this PR rewrote.
+        #
+        # Carries the remedies for the same reason the ``embedding provider``
+        # row does: a ``FAIL`` whose hint names the fault and no route out of
+        # it is the complaint this PR started from.
         report.add(
             "index manifest",
-            WARN,
-            "cannot be verified",
+            FAIL,
+            "cannot be verified; queries are refused",
             hint=str(exc),
+            procedure="\n".join(manifest_mod.remedy_lines(include_doctor=False)),
         )
         return
 

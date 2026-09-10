@@ -872,6 +872,67 @@ class TestEmbeddingModelCache:
 
 
 class TestIndexChecks:
+    @pytest.mark.parametrize(
+        "wreck",
+        [
+            pytest.param("future-schema", id="a schema this install does not know"),
+            pytest.param("absent", id="the sidecar deleted"),
+            pytest.param("unparseable", id="the sidecar corrupt"),
+        ],
+    )
+    def test_an_unverifiable_manifest_fails_rather_than_warns(
+        self, monkeypatch, tmp_path: Path, wreck: str
+    ):
+        """The aggregate verdict, which was ``ok`` over an index nothing can query.
+
+        Review's blocking finding, and it is about ``--json`` and the exit code
+        rather than the wording: the hint named the fault correctly in all
+        three states. ``Report.failed`` counts only ``FAIL`` and ``cli/chat.py``
+        derives both the ``ok`` field and the exit status from it, so a ``WARN``
+        here told a script that a completely broken install was fine.
+
+        Each state is asserted to be a genuine refusal first, through
+        ``read_manifest`` -- which is what ``retriever._check_manifest`` calls
+        and converts into ``IndexMismatchError``. Without that the test would
+        pass just as well over a state where the report is right to be quiet,
+        which is how a severity assertion goes vacuous.
+
+        Driven through the CLI rather than through ``run_checks`` because the
+        report object was never the thing that lied; the two fields derived
+        from it were.
+        """
+        import json
+
+        from click.testing import CliRunner
+
+        from aorta.chat.rag import manifest as manifest_mod
+        from aorta.cli.chat import chat as chat_group
+
+        index = _write_index(monkeypatch, tmp_path)
+        sidecar = manifest_mod.manifest_path(index)
+        if wreck == "absent":
+            sidecar.unlink()
+        elif wreck == "unparseable":
+            sidecar.write_text("{not json")
+        else:
+            payload = json.loads(sidecar.read_text())
+            payload["schema_version"] = manifest_mod.SCHEMA_VERSION + 1
+            sidecar.write_text(json.dumps(payload))
+
+        with pytest.raises(manifest_mod.ManifestError):
+            manifest_mod.read_manifest(index)
+
+        result = CliRunner().invoke(chat_group, ["doctor", "--json", "--no-backend"])
+        payload = json.loads(result.output)
+        row = next(check for check in payload["checks"] if check["name"] == "index manifest")
+
+        assert row["status"] == FAIL
+        assert payload["ok"] is False
+        assert result.exit_code == 1
+        # A FAIL that names the fault and no way out of it is the complaint
+        # this PR started from, so the row carries the conditional remedies.
+        assert "aorta chat index" in row["procedure"]
+
     def test_an_absent_index_fails_with_both_ways_to_get_one(self, monkeypatch, tmp_path: Path):
         monkeypatch.setattr(settings, "index_path", str(tmp_path / "absent.sqlite"))
         check = _by_name(run_checks(backend=False), "chat index")
@@ -916,13 +977,22 @@ class TestIndexChecks:
         assert absent
         assert absent in refused
 
-    def test_an_index_without_a_manifest_warns(self, monkeypatch, tmp_path: Path):
+    def test_an_index_without_a_manifest_fails(self, monkeypatch, tmp_path: Path):
+        """Was ``..._warns``, and is kept inverted as the regression.
+
+        The state it describes is a file with no sidecar, which
+        ``retriever._check_manifest`` refuses outright -- so the ``WARN`` this
+        used to assert was the report telling a script that an install nothing
+        can query is fine. The ``chat index`` row above it stays ``OK``, and
+        correctly: the file is present and its size is what that row reports.
+        """
         index = tmp_path / "index.sqlite"
         index.write_bytes(b"x" * 1024)
         monkeypatch.setattr(settings, "index_path", str(index))
         report = run_checks(backend=False)
         assert _by_name(report, "chat index").status == OK
-        assert _by_name(report, "index manifest").status == WARN
+        assert _by_name(report, "index manifest").status == FAIL
+        assert report.failed
 
     def test_a_matching_manifest_is_ok(self, monkeypatch, tmp_path: Path):
         index = _write_index(monkeypatch, tmp_path)
