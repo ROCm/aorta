@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from aorta.agent.llm import AUTOPSY_CATEGORIES, AgentStep
+from aorta.agent.llm import PROBE_CATEGORIES, AgentStep
 from aorta.registry import get_mitigation
 from aorta.registry.errors import UnknownMitigationError
 
@@ -62,10 +62,14 @@ class AgentPolicy:
 
     def validate_step(self, step: AgentStep) -> AgentStep:
         """Normalize and enforce registry + category constraints."""
-        if step.category not in AUTOPSY_CATEGORIES:
+        # The probe's own subset, not the shared vocabulary: gpu_race,
+        # numeric_silent and tooling_gap are established by an instrument, and
+        # accepting one here would let a mitigation sweep assert a race it never
+        # observed.
+        if step.category not in PROBE_CATEGORIES:
             raise PolicyViolation(
                 f"invalid category {step.category!r}; "
-                f"allowed: {sorted(AUTOPSY_CATEGORIES)}"
+                f"allowed: {sorted(PROBE_CATEGORIES)}"
             )
         cleaned: list[str] = []
         for name in step.next_mitigations:
