@@ -99,10 +99,19 @@ def _model_and_native_note(provider: str) -> tuple[str, str]:
 
     try:
         backend = get_backend(provider)
-    except Exception:
-        # ValueError for an unknown name; anything else means the backend's own
-        # construction failed, which _check_backend is the row that says so.
+    except ValueError:
+        # What the factory raises for a name it has no backend for, and the
+        # only case this function is allowed to answer blankly. Deliberately
+        # not ``except Exception``: a backend that fails to *construct* is a
+        # fault, and swallowing it here would report the same two blanks as a
+        # typo'd provider name.
         return "", ""
+    # Outside the ``try`` on purpose. These attributes are the interface that
+    # replaced doctor's own provider set, so a backend that does not implement
+    # them has to raise -- loudly in CI, via
+    # ``test_every_registered_backend_answers_both_questions``, and as a failed
+    # row rather than a quiet one at runtime. Widening the guard above to cover
+    # them would restore exactly the silent drift this design removed.
     return str(backend.model_name or ""), backend.native_requirement
 
 

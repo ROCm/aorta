@@ -2196,6 +2196,29 @@ class TestTheProviderRegistryIsNotDuplicated:
         """No backend means no model setting to read, and guessing would invent one."""
         assert doctor._model_and_native_note("not-a-provider") == ("", "")
 
+    def test_a_backend_missing_the_interface_raises_rather_than_reading_blank(self, monkeypatch):
+        """The mechanism that makes drift loud, pinned so it cannot be softened.
+
+        A future backend that implements neither attribute must *raise*, not
+        read as an unknown provider. If the guard around ``get_backend`` were
+        ever widened to ``except Exception``, this function would answer with
+        the same two blanks it gives a typo'd provider name -- and the
+        reasoning-model warning would go quiet for the new backend, which is
+        the exact failure moving these facts onto the interface removed.
+
+        Asserted counterfactually, by registering a backend that has only a
+        name, because the property is about a backend that does not exist yet.
+        """
+        from aorta.chat.inference.providers import factory
+
+        class _NameOnlyBackend:
+            name = "name-only"
+
+        monkeypatch.setitem(factory._BACKENDS, "name-only", _NameOnlyBackend)
+        monkeypatch.setattr(factory, "_instances", {})
+        with pytest.raises(AttributeError):
+            doctor._model_and_native_note("name-only")
+
     def test_the_model_is_read_live_from_the_provider_that_serves_it(self, monkeypatch):
         """Each backend names its own setting, which is the point of moving it there.
 
