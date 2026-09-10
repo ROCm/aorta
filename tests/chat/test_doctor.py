@@ -1721,6 +1721,65 @@ class TestRemoteEmbeddingProfile:
         assert 'embedding_provider = "local"' in check.procedure
         assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in check.procedure
 
+    @pytest.mark.parametrize(
+        "embedding_model",
+        [
+            MODEL,
+            "BAAI/bge-base-en-v1.5",
+            # Empty and whitespace-padded are custom models too, for the same
+            # reason they are everywhere else in this module: the local
+            # provider reads the setting verbatim into all three identities the
+            # fetch is validated against.
+            "",
+            f"  {MODEL}  ",
+        ],
+    )
+    def test_the_hint_does_not_promise_a_fetch_a_custom_model_refuses(
+        self, monkeypatch, embedding_model: str
+    ):
+        """The promise scored against the code that would keep it.
+
+        The gap review found, and the shape this whole PR is about: advice that
+        is true in the state its author had in mind. Switching
+        ``embedding_provider`` to local restores ``index fetch`` only where
+        ``embedding_model`` is the published default, because the switch does
+        not touch that setting -- so a profile carrying both was promised the
+        fetch and would have met the same refusal one edit later.
+
+        The oracle is the *counterfactual* one, and that is the point. Asking
+        ``_fetch_would_be_accepted()`` in the state that prints the hint
+        answers "no" in every arm, since the provider is remote; the hint is
+        not a claim about now. So the provider is switched to local, everything
+        else is left exactly as the profile has it, and the question becomes
+        the one the sentence actually asks.
+
+        That is also why the command sweep could not have caught this. Its
+        outcome tier scores commands the report *offers*, in the state that
+        offered them; this hint offers nothing -- it names a setting and
+        promises a command comes back. Adding the remote-plus-custom-model
+        state to ``STATES`` was still right, but it is this test that closes
+        the case.
+        """
+        self._remote(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", embedding_model)
+
+        hint = _by_name(run_checks(backend=False), "embedding profile").hint
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        would_work = _fetch_would_be_accepted()
+
+        # The edit itself is named either way -- it is still the right edit,
+        # and withholding it would trade one wrong hint for another.
+        assert 'embedding_provider = "local"' in hint
+        promised = "brings it back" in hint
+        assert promised is would_work, (
+            f"with embedding_model={embedding_model!r} the hint "
+            f"{'promises' if promised else 'withholds'} the fetch and switching to "
+            f"local {'would' if would_work else 'would not'} restore it"
+        )
+        if not would_work:
+            assert "embedding_model" in hint, "the hint has to name the setting still in the way"
+
     def test_it_names_the_profile_rewrite_as_the_alternative(self, monkeypatch):
         """``config init --force`` fixes it, and nobody knows to run it."""
         self._remote(monkeypatch)
@@ -2552,6 +2611,14 @@ class TestEveryCommandTheReportNamesCanRun:
         # this is the state that proves the tier can reject *both* oracles
         # rather than only choosing between them.
         ("sbert", "", "text", "gpt-4o", DEFAULT_LOCAL_MODEL),
+        # Remote *and* a custom model. Both settings were already swept, and
+        # never together: every remote state here carried the default model, so
+        # the remote arms were only ever scored in the state where what they
+        # say about a switch to local happens to be true. Added with the
+        # finding it belongs to, though it is not what caught it -- see
+        # ``test_the_hint_does_not_promise_a_fetch_a_custom_model_refuses``
+        # for why this sweep structurally cannot, and what does instead.
+        ("remote", "sk-test", "native", "gpt-4o", "BAAI/bge-base-en-v1.5"),
     )
 
     def _texts(self, monkeypatch, tmp_path: Path) -> list[str]:

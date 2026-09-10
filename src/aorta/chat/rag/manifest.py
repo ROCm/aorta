@@ -533,6 +533,30 @@ def _after_switching_to_local() -> list[str]:
     ]
 
 
+def switching_to_local_restores_the_fetch() -> bool:
+    """Whether ``embedding_provider = "local"`` alone would make ``index fetch`` work.
+
+    The claim ``doctor``'s remote-profile hint makes, given a name and one
+    implementation. Both remote arms of :func:`remedy_lines` make it too,
+    through :func:`_after_switching_to_local`; review has now raised it once
+    for every site that stated it independently -- five times across six rounds
+    on the two arms, and again on the hint, which is the copy those rounds
+    never reached because it lives in another module.
+
+    Counterfactual on purpose. It asks what a *local* install would get, for an
+    install whose provider is remote right now, so it passes ``"local"``
+    explicitly instead of reading the configured provider. The only thing that
+    can make the answer ``False`` is the setting the switch does not touch:
+    ``embedding_model``, which the local provider reads verbatim, and which the
+    published index is not built with when it is customised.
+
+    Public because its only caller is in another module. That is also the
+    point -- a promise about this module's behaviour should be answered here
+    rather than restated there.
+    """
+    return _refresh_command("local") == "aorta chat index fetch"
+
+
 def _refresh_advice(embedding_provider: str | None = None) -> str:
     """:func:`_refresh_command`, quoted, with any precondition it depends on.
 

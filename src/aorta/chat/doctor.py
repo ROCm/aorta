@@ -1023,6 +1023,8 @@ def _check_remote_embedding_profile(report: Report, *, usable: bool) -> None:
     reason: reordering the report to share one result reads worse than the
     second read costs, and neither touches the network.
     """
+    from aorta.chat.rag import manifest as manifest_mod
+
     try:
         healthy = _index_is_healthy()
     except Exception as exc:
@@ -1054,7 +1056,28 @@ def _check_remote_embedding_profile(report: Report, *, usable: bool) -> None:
             "This profile selects a remote embedding provider, and the\n"
             "published index cannot be read that way -- which is why\n"
             "'aorta chat index fetch' is not offered as an index remedy.\n"
-            'Setting embedding_provider = "local" brings it back; see below.'
+            # The last line is the whole subject of this PR in miniature:
+            # advice that is true in the state its author had in mind. The
+            # switch restores the fetch only where ``embedding_model`` is the
+            # published default, because the switch does not touch that setting
+            # and the local provider reads it verbatim -- so a profile carrying
+            # both lands on the same refusal it started from, with one more
+            # edit behind it.
+            #
+            # Asked of ``manifest`` rather than decided here. That module owns
+            # the answer, states it in both remote arms of ``remedy_lines``,
+            # and had already been made to condition it there; this hint was
+            # the third copy of the same promise and the one those rounds could
+            # not see. Two statements of one fact is how it went wrong twice.
+            + (
+                'Setting embedding_provider = "local" brings it back; see below.'
+                if manifest_mod.switching_to_local_restores_the_fetch()
+                else 'Setting embedding_provider = "local" is still the edit to\n'
+                "make, but it does not bring the fetch back on its own: this\n"
+                "profile also sets a custom embedding_model, which the local\n"
+                "provider reads verbatim and the published index is not built\n"
+                "with. See below."
+            )
         ),
         procedure=_REMOTE_EMBEDDING_MIGRATION
         + (_REMOTE_KEEPING_IT_WORKS if usable else _REMOTE_KEEPING_IT_NEEDS_A_KEY),
