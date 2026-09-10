@@ -33,9 +33,9 @@
 #   TS_MODEL      HF model id to serve   (default Qwen/Qwen3-8B)
 #   TS_PORT       gateway port           (default 8000)
 #   TS_CONTROL    control port           (default 8001)
-#   TS_HF_HOME    host HF cache          (default /apps/vikhande/cache/hf)
-#   TS_OUT_DIR    host scratch (/ts-out) (default /apps/vikhande/rl-e2e/ts-out)
-#   TS_LOG_DIR    host log directory     (default /apps/vikhande/rl-e2e/logs)
+#   TS_HF_HOME    host HF cache          (default $HF_HOME, else ~/.cache/huggingface)
+#   TS_OUT_DIR    host scratch (/ts-out) (default $TMPDIR/aorta-rl-e2e/ts-out)
+#   TS_LOG_DIR    host log directory     (default $TMPDIR/aorta-rl-e2e/logs)
 #   TS_GPU        HIP_VISIBLE_DEVICES    (default 0)
 #   TS_READY_SEC  readiness deadline     (default 2400)
 #   TS_GRAMMAR    --grammar-backend      (default xgrammar; see below)
@@ -49,9 +49,14 @@ IMAGE="${TS_IMAGE:-lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c
 MODEL="${TS_MODEL:-Qwen/Qwen3-8B}"
 PORT="${TS_PORT:-8000}"
 CONTROL="${TS_CONTROL:-8001}"
-HF_HOME_HOST="${TS_HF_HOME:-/apps/vikhande/cache/hf}"
-OUT_DIR="${TS_OUT_DIR:-/apps/vikhande/rl-e2e/ts-out}"
-LOG_DIR="${TS_LOG_DIR:-/apps/vikhande/rl-e2e/logs}"
+# Defaults are deliberately machine-neutral: the model download is large and
+# slow, so an HF cache the caller already populated should be reused rather than
+# refilled, and everything else is scratch. On a node whose root filesystem is
+# small or full, point TMPDIR (or TS_OUT_DIR/TS_LOG_DIR) at the big mount --
+# `/tmp` is the fallback, not a recommendation.
+HF_HOME_HOST="${TS_HF_HOME:-${HF_HOME:-$HOME/.cache/huggingface}}"
+OUT_DIR="${TS_OUT_DIR:-${TMPDIR:-/tmp}/aorta-rl-e2e/ts-out}"
+LOG_DIR="${TS_LOG_DIR:-${TMPDIR:-/tmp}/aorta-rl-e2e/logs}"
 GPU="${TS_GPU:-0}"
 READY_SEC="${TS_READY_SEC:-2400}"
 # Defaulted ON here, against the engine's own default of `none`, because

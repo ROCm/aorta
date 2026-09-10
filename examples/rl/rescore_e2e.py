@@ -44,7 +44,7 @@ report it as if it satisfied criterion 3.
 Usage
 -----
 
-    python examples/rl/rescore_e2e.py /apps/vikhande/rl-e2e/results/faithful.json
+    python examples/rl/rescore_e2e.py results/faithful.json
     python examples/rl/rescore_e2e.py results/*.json --json
 """
 

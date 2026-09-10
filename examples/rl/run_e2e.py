@@ -62,7 +62,7 @@ Usage
         --base-url http://127.0.0.1:8000/v1 \
         --model openai/Qwen/Qwen3-8B \
         --samples 5 \
-        --out /apps/vikhande/rl-e2e/results/as-is.json
+        --out results/as-is.json
 """
 
 from __future__ import annotations
