@@ -118,13 +118,6 @@ def wait_for_job(slurm_id: str, timeout: int, interval: int = 5, *, stop: Stop =
     return f"TIMEOUT_WAITING({state})"
 
 
-def run(cmd: list[str], timeout: int, env: dict | None = None) -> subprocess.CompletedProcess:
-    log.info(f"$ {shlex.join(cmd)}")
-    return subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, env=env or os.environ.copy()
-    )
-
-
 _KERNEL_RE = re.compile(r'__global__\s+[\w\s:<>,*&]*?\b(\w+)\s*\(', re.MULTILINE)
 
 
@@ -432,17 +425,6 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
             + echo_findings
         )
 
-    # Watch and Autopsy both reach the LLM through llm/config.py, which defaults
-    # to localhost:4000. The proxy lives in its own Slurm allocation, so without
-    # this Watch's assessment raises a connection error, and because poll.py
-    # saves its file cursor before the assessment runs, the consumed log is gone:
-    # the job silently looks healthy no matter what was in it.
-    # The sanitizer positive control exits non-zero by design ("guardrail not
-    # clean"). Let the batch script swallow that so Slurm reports COMPLETED and
-    # the verdict comes from the sanitizer report rather than the exit code.
-    env = os.environ.copy()
-    env["CIA_TOLERATE_NONZERO"] = "1"
-
     record = JobRecord(
         job_id=job_id,
         node=args.node,
@@ -465,23 +447,20 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     reconcile_stale_jobs(jobs_root)
     log.info("── Launch ──")
 
-    saved = os.environ.get("CIA_TOLERATE_NONZERO")
-    os.environ["CIA_TOLERATE_NONZERO"] = "1"
-    try:
-        slurm_id, err = launch(
-            command=command,
-            job_name=job_id,
-            log_path=log_path,
-            script_path=job_dir / "launch.sbatch",
-            working_dir=args.aorta_root,
-            env_vars=record.env_vars,
-            node=args.node,
-        )
-    finally:
-        if saved is None:
-            os.environ.pop("CIA_TOLERATE_NONZERO", None)
-        else:
-            os.environ["CIA_TOLERATE_NONZERO"] = saved
+    slurm_id, err = launch(
+        command=command,
+        job_name=job_id,
+        log_path=log_path,
+        script_path=job_dir / "launch.sbatch",
+        working_dir=args.aorta_root,
+        env_vars=record.env_vars,
+        node=args.node,
+        # The sanitizer positive control exits non-zero by design ("guardrail
+        # not clean"), so the batch script swallows the code and the verdict
+        # comes from the sanitizer report. Per call, not per process: triages
+        # run concurrently and share one environment.
+        tolerate_nonzero=True,
+    )
 
     if err:
         return {"ok": False, "stage": "launch", "error": err, "job_id": job_id}

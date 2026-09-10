@@ -17,6 +17,7 @@ def launch(
     working_dir: str = "",
     env_vars: dict[str, str] | None = None,
     node: str = "",
+    tolerate_nonzero: bool = False,
 ) -> tuple[str, str]:
     """Submit *command*. Returns ``(job_id, error)``; one of the two is empty.
 
@@ -33,4 +34,5 @@ def launch(
         working_dir=working_dir,
         env_vars=env_vars,
         node=node,
+        tolerate_nonzero=tolerate_nonzero,
     )
