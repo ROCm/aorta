@@ -98,6 +98,21 @@ def _required_bool(data: Mapping[str, object], key: str) -> bool:
     return value
 
 
+def _optional_bool(data: Mapping[str, object], key: str, *, default: bool) -> bool:
+    """Read a boolean field a stored report may predate, defaulting when absent.
+
+    A present value is still type-checked, so a malformed one fails loudly
+    instead of being coerced by truthiness.
+    """
+
+    if key not in data:
+        return default
+    value = data[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} must be a boolean")
+    return value
+
+
 def _mapping(value: object, *, name: str) -> Mapping[str, object]:
     if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
         raise TypeError(f"{name} must be an object with string keys")
@@ -421,6 +436,10 @@ class KernelCheckResult:
     findings: tuple[Finding, ...] = ()
     reason: str | None = None
     returncode: int | None = None
+    # True when the backend stopped collecting diagnostics at its own cap, so
+    # ``findings`` is a floor rather than the kernel's full hazard count
+    # (Waitcheck's ``diagnostics=>=N`` summary, #480).
+    diagnostics_truncated: bool = False
 
     def __post_init__(self) -> None:
         if self.state is ExecutionState.NOT_CHECKED:
@@ -444,6 +463,7 @@ class KernelCheckResult:
             "findings": [finding.to_dict() for finding in self.findings],
             "reason": self.reason,
             "returncode": self.returncode,
+            "diagnostics_truncated": self.diagnostics_truncated,
         }
 
     @classmethod
@@ -458,6 +478,7 @@ class KernelCheckResult:
             ),
             reason=_optional_str(data, "reason"),
             returncode=_optional_int(data, "returncode"),
+            diagnostics_truncated=_optional_bool(data, "diagnostics_truncated", default=False),
         )
 
 
@@ -472,6 +493,9 @@ class CheckResult:
     kernel_results: tuple[KernelCheckResult, ...] = ()
     coverage: tuple[ObjectCoverage, ...] = ()
     backend: tuple[tuple[str, str], ...] = ()
+    # True when any scanned kernel hit the backend's diagnostic cap, so this
+    # check's aggregated ``findings`` under-counts the hazards present (#480).
+    diagnostics_truncated: bool = False
 
     def __post_init__(self) -> None:
         if not self.sanitizer:
@@ -497,6 +521,10 @@ class CheckResult:
             _VERDICT_RANK[result.verdict] for result in self.kernel_results
         ):
             raise ValueError("a check verdict cannot be cleaner than its kernel results")
+        if not self.diagnostics_truncated and any(
+            result.diagnostics_truncated for result in self.kernel_results
+        ):
+            raise ValueError("a check cannot report a complete count over a truncated kernel")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -509,6 +537,7 @@ class CheckResult:
             "kernel_results": [result.to_dict() for result in self.kernel_results],
             "coverage": [item.to_dict() for item in self.coverage],
             "backend": dict(self.backend),
+            "diagnostics_truncated": self.diagnostics_truncated,
         }
 
     @classmethod
@@ -539,6 +568,7 @@ class CheckResult:
             backend=tuple(
                 sorted((key, value) for key, value in backend.items() if isinstance(value, str))
             ),
+            diagnostics_truncated=_optional_bool(data, "diagnostics_truncated", default=False),
         )
 
 

@@ -33,6 +33,7 @@ def run_sanitizers(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     report_name: str = "sanitizer_report.json",
     consan_target: KernelIdentity | None = None,
+    waitcheck_max_diagnostics: int | None = None,
 ) -> SanitizerReport:
     """Run supported checks and persist one versioned report."""
 
@@ -54,6 +55,7 @@ def run_sanitizers(
                     output_dir=output_dir / "waitcheck",
                     binary=waitcheck_binary,
                     timeout_seconds=timeout_seconds,
+                    max_diagnostics=waitcheck_max_diagnostics,
                 )
             )
         elif sanitizer == "consan":

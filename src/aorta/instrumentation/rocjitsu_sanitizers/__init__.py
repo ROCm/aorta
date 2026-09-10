@@ -51,6 +51,7 @@ from .selection import (
     select_kernels,
 )
 from .waitcheck import (
+    ParsedWaitcheckOutput,
     parse_waitcheck_jsonl,
     parse_waitcheck_text,
     run_waitcheck,
@@ -72,6 +73,7 @@ __all__ = [
     "KernelWorklist",
     "ObjectCoverage",
     "ParsedCombinedOutput",
+    "ParsedWaitcheckOutput",
     "SanitizerRecipe",
     "SanitizerReport",
     "SelectionRequirement",

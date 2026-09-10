@@ -175,6 +175,7 @@ class SanitizerRecipe:
     repro_variant: str | None = None
     kernel_specs: tuple[KernelSourceSpec, ...] = ()
     timeout_seconds: float | None = None
+    waitcheck_max_diagnostics: int | None = None
 
     @property
     def recipe_dir(self) -> Path | None:
@@ -223,6 +224,26 @@ def _optional_timeout_seconds(block: Mapping[str, object]) -> float | None:
             "sanitizer_plan.policy.timeout_seconds must be a positive number"
         )
     return float(value)
+
+
+def _optional_waitcheck_max_diagnostics(block: Mapping[str, object]) -> int | None:
+    """Parse an optional positive ``waitcheck_max_diagnostics`` from a block.
+
+    Absent keeps the backend's own cap (``rj_waitcheck --max-diagnostics``, 32
+    per code object), which reports a capped scan as ``diagnostics_truncated``.
+    A bool, non-integer, or non-positive value is rejected at load so a
+    malformed knob cannot silently reinstate the default cap on a lane that
+    asked for a complete count.
+    """
+
+    if "waitcheck_max_diagnostics" not in block:
+        return None
+    value = block.get("waitcheck_max_diagnostics")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RecipeSchemaError(
+            "sanitizer_plan.policy.waitcheck_max_diagnostics must be a positive integer"
+        )
+    return value
 
 
 def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
@@ -282,6 +303,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
             f"unsupported sanitizer_plan.policy.on_missing_backend={on_missing_backend!r}"
         )
     timeout_seconds = _optional_timeout_seconds(policy)
+    waitcheck_max_diagnostics = _optional_waitcheck_max_diagnostics(policy)
     output = _require_mapping(plan.get("output"), name="sanitizer_plan.output")
     report_name = _require_str(output, "report")
 
@@ -353,6 +375,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         repro_variant=repro_variant,
         kernel_specs=kernel_specs,
         timeout_seconds=timeout_seconds,
+        waitcheck_max_diagnostics=waitcheck_max_diagnostics,
     )
 
 
@@ -474,5 +497,6 @@ def execute_sanitizer_run(
             if recipe.timeout_seconds is not None
             else DEFAULT_TIMEOUT_SECONDS
         ),
+        waitcheck_max_diagnostics=recipe.waitcheck_max_diagnostics,
     )
     return report_path

@@ -33,6 +33,15 @@ def _race_finding() -> Finding:
     )
 
 
+def _hazard_finding() -> Finding:
+    return Finding(
+        sanitizer="waitcheck",
+        severity=FindingSeverity.WARNING,
+        code="wait_hazard",
+        message="missing s_waitcnt lgkmcnt(0)",
+    )
+
+
 def test_pass_check_cannot_carry_findings() -> None:
     with pytest.raises(ValueError, match="PASS check cannot carry findings"):
         CheckResult(
@@ -66,6 +75,27 @@ def test_check_cannot_be_cleaner_than_kernel_results(kernel_verdict: Verdict) ->
             sanitizer="consan",
             state=ExecutionState.RAN,
             verdict=Verdict.PASS,
+            kernel_results=(kernel,),
+        )
+
+
+def test_check_cannot_report_a_complete_count_over_a_truncated_kernel() -> None:
+    # The finding count of a truncated scan is a floor. A check that aggregates one
+    # and still claims a complete count would understate the hazard load exactly the
+    # way the discarded ">=" marker did (#480).
+    kernel = KernelCheckResult(
+        identity=KernelIdentity(name="k", target="gfx950"),
+        state=ExecutionState.RAN,
+        verdict=Verdict.WARN,
+        findings=(_hazard_finding(),),
+        diagnostics_truncated=True,
+    )
+    with pytest.raises(ValueError, match="complete count over a truncated kernel"):
+        CheckResult(
+            sanitizer="waitcheck",
+            state=ExecutionState.RAN,
+            verdict=Verdict.WARN,
+            findings=(_hazard_finding(),),
             kernel_results=(kernel,),
         )
 
@@ -112,6 +142,104 @@ def test_report_round_trip_and_fail_closed_precedence(tmp_path: Path) -> None:
     assert rebuilt.overall_verdict is Verdict.NOT_CHECKED
     assert rebuilt.execution_status is ExecutionSummary.PARTIAL
     assert path.stat().st_size > 0
+
+
+def test_report_round_trip_preserves_diagnostics_truncation(tmp_path: Path) -> None:
+    # The flag is only useful if it survives into sanitizer_report.json and back out
+    # again, since that file is what consumers quote (#480).
+    kernel = KernelCheckResult(
+        identity=KernelIdentity(name="kernel", target="gfx950"),
+        state=ExecutionState.RAN,
+        verdict=Verdict.WARN,
+        findings=(_hazard_finding(),),
+        diagnostics_truncated=True,
+    )
+    report = build_report(
+        target="gfx950",
+        worklist=_worklist(),
+        checks=(
+            CheckResult(
+                sanitizer="waitcheck",
+                state=ExecutionState.RAN,
+                verdict=Verdict.WARN,
+                findings=(_hazard_finding(),),
+                kernel_results=(kernel,),
+                diagnostics_truncated=True,
+            ),
+        ),
+    )
+    path = tmp_path / "sanitizer_report.json"
+
+    write_report(report, path)
+    rebuilt = read_report(path)
+
+    assert rebuilt == report
+    assert rebuilt.checks[0].diagnostics_truncated is True
+    assert rebuilt.checks[0].kernel_results[0].diagnostics_truncated is True
+
+
+def test_report_written_before_the_truncation_flag_still_loads() -> None:
+    # Reports emitted by earlier versions carry no diagnostics_truncated key. They
+    # must keep loading, as a complete count -- that is what they claimed.
+    report = build_report(
+        target="gfx950",
+        worklist=_worklist(),
+        checks=(
+            CheckResult(
+                sanitizer="waitcheck",
+                state=ExecutionState.RAN,
+                verdict=Verdict.PASS,
+            ),
+        ),
+    )
+    data = report.to_dict()
+    for check in data["checks"]:
+        check.pop("diagnostics_truncated")
+
+    rebuilt = SanitizerReport.from_dict(data)
+
+    assert rebuilt.checks[0].diagnostics_truncated is False
+
+
+@pytest.mark.parametrize("location", ["check", "kernel"])
+def test_report_rejects_null_diagnostics_truncated(location: str) -> None:
+    kernel = KernelCheckResult(
+        identity=KernelIdentity(name="kernel", target="gfx950"),
+        state=ExecutionState.RAN,
+        verdict=Verdict.WARN,
+        findings=(_hazard_finding(),),
+        diagnostics_truncated=True,
+    )
+    report = build_report(
+        target="gfx950",
+        worklist=_worklist(),
+        checks=(
+            CheckResult(
+                sanitizer="waitcheck",
+                state=ExecutionState.RAN,
+                verdict=Verdict.WARN,
+                findings=(_hazard_finding(),),
+                kernel_results=(kernel,),
+                diagnostics_truncated=True,
+            ),
+        ),
+    )
+    data = report.to_dict()
+    checks = data.get("checks")
+    assert isinstance(checks, list)
+    check = checks[0]
+    assert isinstance(check, dict)
+    if location == "check":
+        check["diagnostics_truncated"] = None
+    else:
+        kernel_results = check.get("kernel_results")
+        assert isinstance(kernel_results, list)
+        kernel_result = kernel_results[0]
+        assert isinstance(kernel_result, dict)
+        kernel_result["diagnostics_truncated"] = None
+
+    with pytest.raises(TypeError, match="diagnostics_truncated must be a boolean"):
+        SanitizerReport.from_dict(data)
 
 
 def test_report_rejects_tampered_overall_verdict() -> None:
