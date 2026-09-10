@@ -1571,6 +1571,108 @@ class TestMixedConcurrentProbeOutcomes:
         assert "enable-auto-tool-choice" not in caplog.text
 
 
+class TestACommitReleasesTheRequestsAlreadyInTheTextLoop:
+    """A spent budget must not refuse a request after native has been proved.
+
+    Issue #485 filed this divergence -- ``escalated`` true while
+    ``native_failures`` sits at the cap -- as inert, on the premise that
+    nothing reads the counter once native is in force. The premise was wrong.
+    :func:`_resolved_tool_mode` only routes requests that *arrive* after the
+    commit, and ``_act_text`` reaches the budget check through
+    ``_escalate_to_native`` without re-resolving the mode. Every request in
+    flight across the commit therefore read a counter that the commit had made
+    meaningless, and answered from retrieved context instead of retrying on the
+    protocol another request had just demonstrated.
+    """
+
+    @staticmethod
+    def _query_in(args, kwargs) -> str:
+        payload = args[0] if args else kwargs.get("input")
+        if isinstance(payload, (list, tuple)):
+            return " ".join(str(getattr(m, "content", m)) for m in payload)
+        return str(payload)
+
+    @pytest.mark.asyncio
+    async def test_a_request_mid_text_loop_retries_on_the_proved_protocol(
+        self, text_mode, tool_mode_not_chosen
+    ):
+        """The interleaving that reaches the divergence, driven end to end.
+
+        Filling the budget takes two waves, and once it is full no *new*
+        request can probe -- so the only thing that can still commit is a probe
+        that began while the budget had room. That ordering is forced here
+        rather than assumed, and the state it produces is asserted before the
+        parked request is released, so the test cannot pass by never reaching
+        the divergence at all.
+        """
+        probing = asyncio.Event()  # the proof's probe is in flight
+        parked = asyncio.Event()  # the victim is inside the text loop
+        budget_full = asyncio.Event()  # the second wave spent the last unit
+        committed = asyncio.Event()  # native has been proved
+        native_queries: list[str] = []
+
+        async def text_call(*args, **kwargs):
+            if "in flight" in self._query_in(args, kwargs):
+                parked.set()
+                await committed.wait()
+            return _dead_end_reply()
+
+        async def native_call(*args, **kwargs):
+            query = self._query_in(args, kwargs)
+            native_queries.append(query)
+            if "in flight" in query:  # the victim's retry
+                return AIMessage(content="Native answer.")
+            if "slowly" in query:  # the concurrent proof
+                probing.set()
+                await budget_full.wait()
+                return AIMessage(content="Native answer.")
+            raise RuntimeError("503 transient")  # the two failure waves
+
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(side_effect=text_call)
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=native_call)
+        plain.bind_tools = MagicMock(return_value=bound)
+
+        with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
+            # Wave one spends the first unit of the budget.
+            await act_node(_state("find all mitigations, wave one"))
+            assert nodes._escalation.native_failures == 1
+
+            # The victim resolves 'text' and parks inside its text loop, before
+            # anything has been proved.
+            victim = asyncio.create_task(act_node(_state("find all mitigations, in flight")))
+            await parked.wait()
+            assert nodes._escalation.escalated is False
+
+            # A probe begins while the budget still has room; it is the only
+            # thing that can commit after the budget fills.
+            proof = asyncio.create_task(act_node(_state("find all mitigations, slowly")))
+            await probing.wait()
+
+            # Wave two spends the last unit.
+            await act_node(_state("find all mitigations, wave two"))
+            assert nodes._escalation.native_failures == nodes._MAX_NATIVE_FAILURES
+
+            budget_full.set()
+            assert (await proof)["messages"][0].content == "Native answer."
+
+            # The divergence, now real: native is the protocol and the budget
+            # that would refuse it is spent.
+            assert nodes._escalation.escalated is True
+            assert nodes._escalation.native_failures >= nodes._MAX_NATIVE_FAILURES
+
+            committed.set()
+            result = await victim
+
+        assert result["messages"][0].content == "Native answer.", (
+            "a request already in the text loop honoured a budget the commit had "
+            "made meaningless, and answered from retrieval instead"
+        )
+        assert result["messages"][0].content != _NO_ANSWER_MSG
+        assert any("in flight" in q for q in native_queries), "the retry never ran"
+
+
 class TestEveryFailureSiteRecitesOneClause:
     """The three failure sites must not each describe the budget themselves.
 

@@ -896,11 +896,22 @@ def _escalate_to_native(response: Any) -> bool:
     * the user must not have chosen the protocol themselves;
     * and native must not already have failed to answer
       :data:`_MAX_NATIVE_FAILURES` times, or every query would pay a round to
-      rediscover that.
+      rediscover that -- *unless* native has since been proven to work, which
+      answers the budget's question before it is asked.
+
+    That last exception is not bookkeeping. :func:`_resolved_tool_mode` routes
+    every request that *arrives* after a commit straight to native, but a
+    request already inside :func:`_act_text` resolved its mode before the
+    commit and still reaches this gate. Without the exception a spent budget
+    refuses it, and it answers from retrieved context instead of retrying on
+    the protocol another request has just demonstrated -- one degraded answer
+    per request in flight across the commit. The budget exists to stop queries
+    paying to rediscover that native does not work; once it does, there is
+    nothing left to rediscover.
     """
     if _tool_mode_is_explicit():
         return False
-    if _escalation.native_failures >= _MAX_NATIVE_FAILURES:
+    if not _escalation.escalated and _escalation.native_failures >= _MAX_NATIVE_FAILURES:
         return False
     return _is_reasoning_dead_end(response)
 
