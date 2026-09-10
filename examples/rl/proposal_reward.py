@@ -76,9 +76,11 @@ graded *within* the tier rather than being pass/fail:
   appends *every* proposed name to the mitigation axis and runs a probe cell for
   each, while charging the whole proposal a single unit of the iteration budget
   (``loop.py``, ``check_iteration_budget`` then the ``for mitigation in
-  step.next_mitigations`` append). So a k-name proposal costs k GPU cells and the
+  step.next_mitigations`` append). So a k-cell proposal costs k GPU cells and the
   budget the policy enforces does not restrain it at all. ``precision_credit``
-  prices that.
+  prices that. ``k`` is the count *after* ``AgentPolicy.validate_step`` has
+  dropped ``none`` and collapsed repeats -- see ``probe_cells`` -- because a cell
+  that is never created cannot be a cost.
 
 Two consequences worth stating plainly, because both are deliberate:
 
@@ -235,16 +237,38 @@ def category_credit(category: str) -> float:
     return ABSTENTION_CREDIT if category == ABSTENTION_CATEGORY else 1.0
 
 
-def precision_credit(n_mitigations: int) -> float:
-    """What the tier 4-5 block is worth for a list of `n_mitigations` names.
+def probe_cells(names: list[str]) -> list[str]:
+    """The names the loop will actually run a probe cell for.
+
+    `AgentPolicy.validate_step` normalises the proposal before `run_agent_loop`
+    iterates it: `none` is dropped (it is the no-op baseline, already a cell) and
+    repeats are collapsed (`if name not in cleaned`). So the *written* length and
+    the *charged* length are different numbers, and it is the second one the
+    precision term is pricing. Scoring the first penalised a proposal for cells
+    that will never be created -- which broke the term's whole stated basis,
+    since its justification is the GPU cost the loop incurs.
+
+    Order-preserving, matching `validate_step`, so this stays a mirror of the
+    consumer rather than an independent notion of the same thing.
+    """
+    cells: list[str] = []
+    for name in names:
+        if name == "none" or name in cells:
+            continue
+        cells.append(name)
+    return cells
+
+
+def precision_credit(n_cells: int) -> float:
+    """What the tier 4-5 block is worth for a proposal costing `n_cells` cells.
 
     Flat up to `FREE_MITIGATIONS`, then the reciprocal of the cell count the
     loop would spend. Blind to *which* names were chosen, for the same reason
     `category_credit` is blind to which category.
     """
-    if n_mitigations <= 0:
+    if n_cells <= 0:
         return 0.0
-    return min(1.0, FREE_MITIGATIONS / n_mitigations)
+    return min(1.0, FREE_MITIGATIONS / n_cells)
 
 
 @dataclass
@@ -258,7 +282,11 @@ class Score:
     # apart from the tier it was reached at -- the tier no longer determines it.
     category_credit: float = 1.0
     precision: float = 1.0
+    # What the model wrote, and what the loop will charge for. They differ when
+    # a proposal repeats a name or includes `none`, both of which the consumer
+    # drops -- so `precision` is priced off the second.
     n_mitigations: int = 0
+    n_cells: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -270,6 +298,7 @@ class Score:
             "category_credit": round(self.category_credit, 4),
             "precision": round(self.precision, 4),
             "n_mitigations": self.n_mitigations,
+            "n_cells": self.n_cells,
         }
 
     @property
@@ -362,9 +391,20 @@ def score_proposal(proposal: Proposal) -> Score:
     # fails here too: a proposal that names nothing is not a proposal.
     names = [str(m) for m in raw_obj["next_mitigations"]]
     score.n_mitigations = len(names)
-    if not names:
+    # What the loop will charge for, after the consumer's own normalisation.
+    # Reported alongside the written count rather than replacing it: a gap
+    # between the two is a proposal that looks wider than it is.
+    cells = probe_cells(names)
+    score.n_cells = len(cells)
+    if not cells:
         score.stopped_at = "tier4_registry"
-        score.detail = "no mitigation proposed; the loop reads this as a stop"
+        score.detail = (
+            "no mitigation proposed; the loop reads this as a stop"
+            if not names
+            else f"proposal normalises to no cells ({names}); "
+            "`none` and repeats are dropped by AgentPolicy.validate_step, "
+            "so the loop reads this as a stop"
+        )
         return _finish(score)
     unknown: list[str] = []
     for name in names:
@@ -380,9 +420,9 @@ def score_proposal(proposal: Proposal) -> Score:
         )
         return _finish(score)
     score.tier = 4
-    # Every name is a probe cell the loop will run, so the block that rewards
-    # naming things is scaled by how many cells the proposal spends.
-    score.precision = precision_credit(len(names))
+    # Every surviving name is a probe cell the loop will run, so the block that
+    # rewards naming things is scaled by how many cells the proposal spends.
+    score.precision = precision_credit(len(cells))
 
     # Tier 5 -- names that are available, and a usable confidence. Registered
     # but not offered is still silently dropped.
@@ -762,7 +802,12 @@ def run_demo(as_json: bool, corpus: Path | None = None) -> int:
         if s.tier >= 3:
             print(
                 f"       category credit {s.category_credit:.2f}"
-                f"   precision {s.precision:.2f} over {s.n_mitigations} name(s)"
+                f"   precision {s.precision:.2f} over {s.n_cells} cell(s)"
+                + (
+                    f" from {s.n_mitigations} name(s)"
+                    if s.n_cells != s.n_mitigations
+                    else ""
+                )
             )
         print(f"       consumer would: {s.consumer_outcome}")
         if s.stopped_at:

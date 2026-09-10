@@ -290,7 +290,9 @@ def load_sanitizer_reports(root: Path) -> list[tuple[str, Label]]:
     return out
 
 
-def load_corpus(path: Path) -> list[tuple[str, Label, str]]:
+def load_corpus(
+    path: Path, *, include_disagreements: bool = False
+) -> list[tuple[str, Label, str]]:
     """Load a `build_corpus.py` triage JSONL as labels, with their families.
 
     The corpus stores the label rather than recomputing it from the report,
@@ -300,6 +302,20 @@ def load_corpus(path: Path) -> list[tuple[str, Label, str]]:
     verdict is one this scorer knows, so a corpus written by a newer builder
     with a wider vocabulary fails loudly rather than scoring as a mismatch
     against every answer.
+
+    **Rows whose observed verdict contradicts the committed baseline are skipped
+    by default.** ``build_corpus.py`` deliberately emits them -- a disagreement
+    is evidence of a tool defect and dropping it at build time would hide the
+    one thing worth reporting -- and flags them ``ground_truth.agrees = false``
+    for a consumer to act on. Nothing acted on it, so the advertised
+    no-conversion path scored a policy against the *observed* verdict on exactly
+    the scenarios where the observed verdict is known to be wrong: the corpus
+    would teach the defect. Pass ``include_disagreements=True`` to score them
+    anyway, which is the right setting when the question is how the tool behaves
+    rather than what the right answer is.
+
+    Rows with no baseline (``agrees`` is ``None``) are kept. Ungated is not the
+    same as contradicted, and most of the corpus is ungated.
     """
     out: list[tuple[str, Label, str]] = []
     for line_number, line in enumerate(
@@ -311,6 +327,10 @@ def load_corpus(path: Path) -> list[tuple[str, Label, str]]:
         row = json.loads(line)
         if row.get("kind") != "triage":
             continue
+        if not include_disagreements:
+            ground_truth = row.get("ground_truth") or {}
+            if ground_truth.get("agrees") is False:
+                continue
         stored = row["label"]
         verdict = stored["verdict"]
         if verdict not in SANITIZER_VERDICTS:
@@ -452,11 +472,15 @@ FIXTURES: tuple[dict[str, Any], ...] = (
 
 
 def run_demo(
-    as_json: bool, runs_root: Path | None, corpus: Path | None = None
+    as_json: bool,
+    runs_root: Path | None,
+    corpus: Path | None = None,
+    *,
+    include_disagreements: bool = False,
 ) -> int:
     families: dict[str, int] = {}
     if corpus is not None:
-        rows = load_corpus(corpus)
+        rows = load_corpus(corpus, include_disagreements=include_disagreements)
         if not rows:
             print(f"no triage examples in {corpus}", file=sys.stderr)
             return 2
@@ -564,9 +588,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--corpus", type=Path, default=None,
                     help="triage.jsonl written by build_corpus.py; scores the "
                          "labelled corpus directly, with no conversion pass")
+    ap.add_argument("--include-disagreements", action="store_true",
+                    help="also score rows whose observed verdict contradicts "
+                         "the committed baseline. Excluded by default: on those "
+                         "scenarios the label is a known tool defect, so scoring "
+                         "them rewards reproducing it")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     args = ap.parse_args(argv)
-    return run_demo(args.json, args.runs, args.corpus)
+    return run_demo(
+        args.json, args.runs, args.corpus,
+        include_disagreements=args.include_disagreements,
+    )
 
 
 if __name__ == "__main__":

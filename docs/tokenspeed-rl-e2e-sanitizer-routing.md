@@ -444,9 +444,18 @@ same term becomes correctness-sensitive with no rewrite.
 ### 5.2 Implemented: a precision term on the mitigation block
 
 The tier 4–5 block is scaled by `precision_credit(k) = min(1, 2/k)` for a
-k-name proposal. The cost model is the loop's, not a preference: `loop.py` runs
-a probe cell per name and charges one unit of iteration budget for the whole
-proposal, so k names is k GPU cells and the budget does not restrain it.
+proposal costing k probe cells. The cost model is the loop's, not a preference:
+`loop.py` runs a probe cell per name and charges one unit of iteration budget
+for the whole proposal, so k cells is k GPU cells and the budget does not
+restrain it.
+
+**k is the cell count, not the written length**, and the two differ: review
+caught that `AgentPolicy.validate_step` drops `none` and collapses repeats
+before `run_agent_loop` iterates, so charging for the raw list priced work that
+never happens. `probe_cells` now mirrors the consumer. **None of the numbers
+below move**: across all 1,185 proposals in the recorded rollouts, zero contain
+a repeated name and zero contain `none`, so written length and cell count were
+equal everywhere they were measured.
 
 The free pair is what neutralises the perversity a brevity term invites. With no
 correctness signal the reward cannot tell a right name from a wrong one, so any

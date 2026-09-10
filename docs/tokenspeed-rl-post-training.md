@@ -187,18 +187,24 @@ contract and `triage_reward.py` scores verdict plus attribution; both *import*
 aorta — `AgentStep.from_dict`, `AgentPolicy.validate_step`, `get_mitigation` —
 so they cannot drift from the contract the agent actually enforces, and they
 inherit aorta's own tests. `build_corpus.py` turns real sanitizer runs into
-JSONL the graders read with no conversion pass, and the committed corpus is
-**9 scenarios / 54 examples** with provenance recorded
-([4.6](#46-what-the-corpus-actually-contains)).
+JSONL the graders read with no conversion pass, and the corpus the measurements
+here were taken against is **9 scenarios / 54 examples** with provenance
+recorded ([4.6](#46-what-the-corpus-actually-contains)). Its JSONL is *not*
+committed — `*.jsonl` is gitignored and it is a GPU run output — so rebuild it
+before reproducing anything; `examples/rl/corpus/README.md` gives both routes,
+including a no-GPU one over the survey reports this repo does commit.
 
-**The failure taxonomy was widened from 8 categories to 11**, adding
-`kernel_race`, `nondeterminism` and `numeric_instability`
-([PR #484](https://github.com/ROCm/aorta/pull/484), 54 new tests). The set is
-now derived from a single name-to-description mapping rather than maintained
-twice, so the labels and the guidance the model is given cannot drift apart. It
-also fixed a real pre-existing routing bug: the substring `barrier` used to
-route GPU-side evidence to a checkpoint-I/O category, and now routes to
-`kernel_race`.
+**Widening the failure taxonomy from 8 categories to 11 is written and open, not
+landed.** [PR #484](https://github.com/ROCm/aorta/pull/484) adds `kernel_race`,
+`nondeterminism` and `numeric_instability` with 54 new tests, derives the set
+from a single name-to-description mapping so the labels and the guidance the
+model is given cannot drift apart, and fixes a real pre-existing routing bug —
+the substring `barrier` used to route GPU-side evidence to a checkpoint-I/O
+category and now routes to `kernel_race`. **Until it merges this checkout has
+eight categories**, and the two use cases that need the new ones stay at
+`unknown`. Nothing here needs editing when it lands: the reward code reads the
+set by import (`proposal_reward.py`, `run_e2e.py`), so the new members are
+picked up automatically.
 
 **We found and fixed a genuine engine defect.** TokenSpeed picks its sampling
 backend like this:
@@ -298,10 +304,10 @@ PR.** Both reward scorers are validated end to end against real data:
 `examples/rl/proposal_reward.py` (five-tier proposal-contract ladder) and
 `examples/rl/triage_reward.py` (verdict plus attribution), plus
 `examples/rl/build_corpus.py`, which turns real sanitizer runs into JSONL both
-scorers read with no conversion pass. The committed corpus under
-`examples/rl/corpus/` is **9 scenarios / 54 examples** (9 triage, 45 proposal),
-generated on a gfx950 compute node; `examples/rl/corpus/README.md` records its
-provenance. 48 tests pass under `tests/examples/test_rl_rewards.py`.
+scorers read with no conversion pass. The corpus behind the numbers here is
+**9 scenarios / 54 examples** (9 triage, 45 proposal), generated on a gfx950
+compute node; its JSONL is a run output rather than a committed fixture, and
+`examples/rl/corpus/README.md` records the provenance and how to rebuild. 48 tests pass under `tests/examples/test_rl_rewards.py`.
 
 ### The blocker: read this before spending another node-hour
 
@@ -341,15 +347,23 @@ equivalent:
 Do not pick between these by generating more data. None of the three is
 distinguished by a larger corpus.
 
-### The 0.629 floor is provisional
+### The degenerate floor is 0.5333, and it is provisional
 
-On the committed corpus the always-pass degenerate policy earns **0.629**
-against a **1.0** oracle. That gap is narrow, and the reason is the corpus, not
-the scorer: 4 of 9 scenarios are `pass`, so guessing `pass` and citing nothing
-is right most of the time and scores full marks on attribution by the
-empty-empty convention. Read it as a property of a small, pass-heavy sample.
-**Re-measure it once the corpus is balanced rather than treating it as a fixed
-baseline** — and if it stays near 0.6 on a balanced corpus, that is the point at
+On the corpus the always-`pass` degenerate policy earns **0.5333** against a
+**1.0** oracle, and the arithmetic checks independently of the grader: 4 of the
+9 scenarios are `pass`, and an empty-empty citation is 1.0 by the scorer's
+convention, so the reward is `0.6·(4/9) + 0.4·(6/9) = 0.5333`.
+
+**The 0.629 this section used to quote is the rollout plan's number and
+reproduces nowhere** — not on the synthetic fixtures (0.2222), not on the six
+archived survey reports (0.5333), not on the nine-scenario corpus. It is
+retracted here rather than left standing, because a floor is only useful if a
+score can be read against it.
+
+That gap is still narrow, and the reason is the corpus, not the scorer: guessing
+`pass` and citing nothing is right most of the time on a pass-heavy sample.
+**Re-measure once the corpus is balanced rather than treating this as a fixed
+baseline** — and if it stays near 0.5 on a balanced corpus, that is the point at
 which to suspect the scorer instead.
 
 ### Generation is cheap; variety is the constraint

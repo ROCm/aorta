@@ -205,6 +205,58 @@ def test_a_malformed_copy_is_not_rescued_by_being_a_copy(recipe_reward):
     assert grade.reward == 0.0
 
 
+def test_grading_never_calls_a_workloads_setup(recipe_reward, monkeypatch):
+    """A reward function must not acquire hardware to compute a number.
+
+    Only `tokenspeed_serve` and `hrx_perf` expose `_validated_config`, so the old
+    `else: instance.setup()` fallback was the common path -- and `setup()` on the
+    other eight imports torch, selects GPU 0, or calls `dist.init_process_group`.
+    Grading is a CPU activity; a grader that initialises a process group is not
+    grading.
+    """
+    calls = []
+
+    class Hardware:
+        def __init__(self, config):
+            self.config = config
+
+        def setup(self):  # pragma: no cover -- the assertion is that this never runs
+            calls.append("setup")
+            raise AssertionError("grading called setup()")
+
+    with pytest.raises(recipe_reward.NoConfigOnlySeam) as excinfo:
+        recipe_reward._validate_config(Hardware, {})
+
+    assert not calls
+    # The message has to say it is a gap in the grader, not a fault in the
+    # recipe, or the reason string reads as the model's mistake.
+    assert "_validated_config" in str(excinfo.value)
+    assert "Not a judgement on the recipe" in str(excinfo.value)
+
+
+def test_an_ungradeable_workload_is_named_apart_from_an_invalid_config(
+    recipe_reward, monkeypatch
+):
+    """`tier4_ungradeable` and `tier4_workload` are different findings.
+
+    Folding the first into the second would let "we could not check this" be
+    counted as "the model wrote something wrong", which is the same conflation
+    the tier ladder exists to avoid elsewhere.
+    """
+    class Hardware:
+        def __init__(self, config):
+            self.config = config
+
+        def setup(self):  # pragma: no cover
+            raise AssertionError("grading called setup()")
+
+    monkeypatch.setattr(recipe_reward, "get_workload_class", lambda _name: Hardware)
+    grade = recipe_reward.grade_recipe_text(recipe_reward._GOOD, corpus=None)
+
+    assert grade.tier == 3
+    assert grade.failed_at == "tier4_ungradeable"
+
+
 # --------------------------------------------------------------------------- #
 # triage_reward: labelling and the degenerate floor
 # --------------------------------------------------------------------------- #
@@ -434,6 +486,68 @@ def test_an_on_contract_proposal_reaches_the_top_tier(proposal_reward):
     assert score.tier == proposal_reward.MAX_TIER
     assert score.reward == 1.0
     assert score.consumer_outcome == "accepted"
+
+
+def test_precision_prices_the_cells_the_loop_runs_not_the_names_written(
+    proposal_reward,
+):
+    """`AgentPolicy.validate_step` collapses repeats before `run_agent_loop`
+    iterates, so a repeated name is one cell, not two.
+
+    The precision term's whole justification is the GPU cost a wide proposal
+    incurs. Charging for a cell that will never be created is therefore not a
+    harsher version of the same rule -- it prices work that does not happen, and
+    the term stops meaning what its docstring says.
+    """
+    def score(names):
+        return proposal_reward.score_proposal(
+            proposal_reward.Proposal(
+                "dupes",
+                json.dumps(
+                    {
+                        "category": "rccl_hang",
+                        "hypothesis": "collective timed out on every rank",
+                        "next_mitigations": names,
+                        "confidence": 0.6,
+                        "stop": False,
+                    }
+                ),
+                ["nccl_launch_order_implicit", "tf32_off"],
+            )
+        )
+
+    once = score(["nccl_launch_order_implicit"])
+    twice = score(["nccl_launch_order_implicit", "nccl_launch_order_implicit"])
+
+    assert twice.n_mitigations == 2, "the written length is still reported"
+    assert twice.n_cells == 1
+    assert twice.precision == once.precision
+    assert twice.reward == pytest.approx(once.reward)
+
+
+def test_a_proposal_of_only_none_is_the_stop_the_consumer_reads(proposal_reward):
+    """`validate_step` drops `none` -- it is the no-op baseline and already a
+    cell -- so a proposal naming nothing else normalises to an empty list, which
+    `run_agent_loop` reads as a stop. Scoring it as a one-cell proposal credited
+    a step the loop will not take."""
+    score = proposal_reward.score_proposal(
+        proposal_reward.Proposal(
+            "only-none",
+            json.dumps(
+                {
+                    "category": "rccl_hang",
+                    "hypothesis": "nothing to try",
+                    "next_mitigations": ["none"],
+                    "confidence": 0.6,
+                    "stop": False,
+                }
+            ),
+            ["nccl_launch_order_implicit"],
+        )
+    )
+    assert score.n_mitigations == 1
+    assert score.n_cells == 0
+    assert score.stopped_at == "tier4_registry"
 
 
 def test_a_hallucinated_mitigation_is_docked_and_would_stop_the_search(
@@ -1036,6 +1150,56 @@ def test_the_corpus_scores_through_the_triage_scorer(
         assert family != "unknown"
         oracle = triage_reward.Answer(label.verdict, sorted(label.cited_detectors))
         assert triage_reward.score_answer(oracle, label).reward == pytest.approx(1.0)
+
+
+def test_a_baseline_disagreement_is_emitted_but_not_scored_by_default(
+    build_corpus, triage_reward, tmp_path
+):
+    """Two different jobs, and conflating them trains the defect.
+
+    `build_corpus.py` keeps a row whose observed verdict contradicts the
+    committed baseline, because that row is the evidence a tool defect happened.
+    But the label on it is the *observed* verdict, so scoring it rewards a policy
+    for reproducing the defect -- on exactly the scenarios where we already know
+    the right answer and know the tool got it wrong. Emit, flag, and let the
+    consumer skip.
+    """
+    out, _ = _build(build_corpus, tmp_path, _SURVEY)
+    corpus = out / "triage.jsonl"
+    rows = [json.loads(line) for line in corpus.read_text().splitlines() if line.strip()]
+
+    # No committed survey scenario is baseline-gated, so manufacture the
+    # disagreement rather than waiting for a sweep that has one.
+    gated = rows[0]
+    gated["ground_truth"]["agrees"] = False
+    corpus.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    kept = triage_reward.load_corpus(corpus)
+    everything = triage_reward.load_corpus(corpus, include_disagreements=True)
+
+    assert len(everything) == len(rows)
+    assert len(kept) == len(rows) - 1
+    assert gated["example_id"] not in {example_id for example_id, _, _ in kept}
+    assert gated["example_id"] in {example_id for example_id, _, _ in everything}
+
+
+def test_an_ungated_scenario_is_not_treated_as_a_disagreement(
+    build_corpus, triage_reward, tmp_path
+):
+    """`agrees` is `None` for a scenario no baseline covers, and most of the
+    corpus is uncovered. Skipping those too would silently discard the majority
+    of the data on a filter that reads as narrow."""
+    out, _ = _build(build_corpus, tmp_path, _SURVEY)
+    rows = [
+        json.loads(line)
+        for line in (out / "triage.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    ungated = [r for r in rows if (r.get("ground_truth") or {}).get("agrees") is None]
+    assert ungated, "precondition: the survey corpus has ungated scenarios"
+
+    kept = {example_id for example_id, _, _ in triage_reward.load_corpus(out / "triage.jsonl")}
+    assert {r["example_id"] for r in ungated} <= kept
 
 
 def test_the_corpus_scores_through_the_proposal_scorer(

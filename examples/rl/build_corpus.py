@@ -20,7 +20,13 @@ scenario named in `fixtures/expected/verdict_baselines.json` carries the
 expected verdict alongside the observed one, plus an explicit agreement flag.
 When the two disagree the example is still emitted -- it is evidence of a tool
 defect, and dropping it would hide exactly the thing worth reporting -- but it
-is flagged `ground_truth.agrees = false` so a training run can exclude it.
+is flagged `ground_truth.agrees = false`, and `triage_reward.load_corpus` skips
+those rows unless asked for them (`--include-disagreements`). The flag on its
+own was not enough: nothing read it, so the advertised no-conversion path scored
+against the observed verdict on precisely the scenarios where the observed
+verdict is known to be wrong, and a policy that reproduced the defect was
+rewarded for it. Emit-and-flag is the right build-time decision; acting on the
+flag is the consumer's job and now happens by default.
 
 The verdict label itself is produced by `triage_reward.label_sanitizer_report`,
 which routes it through `SanitizerReport.from_dict`. That is the seam that

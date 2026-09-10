@@ -375,8 +375,11 @@ Not to be re-planned — listed so the asks above have context.
   aorta rather than restating it — `AgentStep.from_dict`,
   `AgentPolicy.validate_step`, `get_mitigation`, the verdict resolver — so they
   cannot drift from the contract, and they inherit aorta's own tests. An oracle
-  policy scores 1.0; a degenerate always-pass policy scores 0.629, printed
-  beside every real score so no reward is ever read alone.
+  policy scores 1.0; a degenerate always-`pass` policy scores **0.5333**, printed
+  beside every real score so no reward is ever read alone. (The 0.629 this
+  section used to quote came from the rollout plan and reproduces nowhere — see
+  [the end-to-end report](tokenspeed-rl-e2e-sanitizer-routing.md#on-the-0629-floor).
+  The floor checks arithmetically as `0.6·(4/9) + 0.4·(6/9)`.)
 - **A corpus builder** turning sanitizer runs into JSONL both scorers read with
   no conversion pass, and the 54-example corpus with committed provenance.
 - **Rollout-shaped serving** in `tokenspeed_serve`: several sampled completions

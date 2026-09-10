@@ -76,11 +76,13 @@ tier:
 python examples/rl/recipe_reward.py
 ```
 
-Grade real files, or check a candidate against the committed corpus:
+Grade real files. The novelty gate — which checks a candidate against the
+committed recipes so a memorised copy cannot score as a new one — is on by
+default; `--no-novelty-gate` turns it off.
 
 ```bash
 python examples/rl/recipe_reward.py recipes/tokenspeed/tokenspeed-serve-load.yaml
-python examples/rl/recipe_reward.py --check-memorisation --json candidate.yaml
+python examples/rl/recipe_reward.py --json candidate.yaml
 ```
 
 ### Why tier 5 is separate from tier 4
@@ -331,9 +333,14 @@ python examples/rl/triage_reward.py   --corpus examples/rl/corpus/triage.jsonl
 python examples/rl/proposal_reward.py --corpus examples/rl/corpus/proposal.jsonl
 ```
 
-The committed corpus under `corpus/` is the first one generated from real runs;
-`corpus/README.md` records what is in it, its provenance, and the tool defects
-the runs surfaced.
+**`corpus/` holds a README and nothing else** — `*.jsonl` is gitignored
+repo-wide and these are run outputs, not fixtures, so the two commands above
+need a corpus built first. Without a GPU, point `--results` at
+`recipes/sanitizers/survey/reports`, the six survey reports this repo does
+commit; that exercises every scorer path on a smaller, less balanced set.
+`corpus/README.md` is the provenance record for the nine-scenario sweep the
+measurements in the docs were taken against — what was in it, and the tool
+defects those runs surfaced.
 
 ### One example is one scenario, not one finding
 

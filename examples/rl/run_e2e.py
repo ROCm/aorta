@@ -886,8 +886,12 @@ def main(argv: list[str] | None = None) -> int:
                              "sampling belongs to the rollout, not the agent")
     parser.add_argument("--seed", type=int, default=None,
                         help="base seed; each sample gets sha256(seed:scenario:"
-                             "index), so a group's completions differ from each "
-                             "other and the whole run replays from one integer")
+                             "index), recorded per sample. NOT reproducibility: "
+                             "TokenSpeed accepted and ignored every seed form "
+                             "tested (see --seed-mode and probe_seed.py), so "
+                             "this makes the request replayable, not the "
+                             "completion. Do not read a matching seed as "
+                             "evidence that two runs sampled alike")
     parser.add_argument("--seed-mode", default="top_level",
                         choices=["top_level", "sampling_seed", "seed"],
                         help="how the seed reaches the engine: the OpenAI "

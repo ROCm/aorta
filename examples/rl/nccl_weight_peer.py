@@ -225,8 +225,20 @@ def main() -> int:
         "dtype_names": [_DTYPE_NAMES[str(originals[n].dtype)] for n in names],
         "shapes": [list(originals[n].shape) for n in names],
     }
-    with open(args.plan_out, "w") as fh:
+    # Published by rename, because the driver treats the file *existing* as the
+    # signal that the plan is complete and parses it on the next line. Writing
+    # in place creates the path before `json.dump` has put anything in it, so
+    # the driver can win that race and die on a `JSONDecodeError` that looks
+    # like a corrupt plan. `os.replace` is atomic within a filesystem, and the
+    # temp file is a sibling so the rename never crosses one -- which matters
+    # here, since the two processes are documented as coordinating through a
+    # shared mount.
+    plan_tmp = f"{args.plan_out}.partial"
+    with open(plan_tmp, "w") as fh:
         json.dump(plan, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(plan_tmp, args.plan_out)
     log(f"plan written to {args.plan_out}: {len(names)} tensor(s)")
     for name in names:
         log(f"  {name} {tuple(originals[name].shape)} {originals[name].dtype}")

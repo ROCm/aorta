@@ -188,24 +188,43 @@ def _cell_configs(recipe: Any) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+class NoConfigOnlySeam(Exception):
+    """The workload offers no way to validate a config without a machine."""
+
+
 def _validate_config(workload_cls: type, config: dict[str, Any]) -> None:
     """Run the workload's own config validation, without touching hardware.
 
-    Prefers `_validated_config`, which is the pure-config half of `setup()` --
-    `setup()` itself then goes on to require docker and a readable /dev/kfd, so
-    calling it here would make the reward depend on the grader having a GPU.
+    Uses `_validated_config`, the pure-config half of `setup()` -- `setup()`
+    itself then goes on to require docker and a readable /dev/kfd, so calling it
+    here would make the reward depend on the grader having a GPU.
 
-    That this is a private name is a real gap in the seam, and the one thing a
-    productionised version of this file would want changed upstream: a public
-    `Workload.validate_config()` would let a reward function commit to a
-    supported surface instead of to an underscore.
+    There used to be an `else: instance.setup()` fallback for workloads without
+    that half, and it was worse than a missing feature. Only `tokenspeed_serve`
+    and `hrx_perf` define `_validated_config`, so the fallback was the *common*
+    path, and what it ran was not validation: `GpuSmokeWorkload.setup()` imports
+    torch, requires `torch.cuda.is_available()` and selects GPU 0, and
+    `LlmDeterminismWorkload.setup()` calls `dist.init_process_group`. A reward
+    function initialising a process group is not a grading strategy. On a
+    CPU-only grader the same fallback marked correct recipes down at tier 4 with
+    a torch import error as the reason.
+
+    So this raises instead, and the caller reports the gap by name. That does
+    mean eight of the ten workload families cannot currently reach tier 5, which
+    is a real limitation and the reason it is stated here rather than absorbed:
+    the fix is upstream, a public `Workload.validate_config()`, which would let a
+    reward function commit to a supported surface instead of to an underscore.
     """
     instance = workload_cls(config)
     validator = getattr(instance, "_validated_config", None)
-    if callable(validator):
-        validator()
-    else:
-        instance.setup()
+    if not callable(validator):
+        raise NoConfigOnlySeam(
+            f"{workload_cls.__name__} exposes no config-only validation seam "
+            "(`_validated_config`), and its `setup()` acquires hardware -- torch, "
+            "a visible GPU, or a process group -- so this grader cannot check "
+            "the cell without one. Not a judgement on the recipe."
+        )
+    validator()
 
 
 def grade_recipe_text(
@@ -289,6 +308,14 @@ def grade_recipe_text(
                 config.setdefault("work_dir", str(Path(tmp) / "work"))
                 try:
                     _validate_config(workload_cls, config)
+                except NoConfigOnlySeam as exc:
+                    # Distinguished from a bad config on purpose. The recipe may
+                    # be perfect; we simply cannot say. Reported under its own
+                    # name so a run can be read as "ungraded here" rather than
+                    # counted as evidence that the model wrote something wrong.
+                    grade.failed_at = "tier4_ungradeable"
+                    grade.reason = f"cell {cell_name!r}: {exc}"
+                    return _finish(grade, text, corpus)
                 except Exception as exc:  # noqa: BLE001
                     grade.failed_at = "tier4_workload"
                     grade.reason = f"cell {cell_name!r}: {type(exc).__name__}: {exc}"

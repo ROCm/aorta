@@ -161,7 +161,13 @@ def main() -> int:
     def flush() -> None:
         Path(args.out).write_text(json.dumps(report, indent=2))
 
-    if not wait_healthy(args.engine_url, 900):
+    # The control URL, not the generation one. `/health` lives on the control
+    # endpoint -- `serve_for_rollouts.sh` polls it there, `probe_weight_transfer.py`
+    # reads it there, and `/get_world_size` two lines below is already addressed
+    # there. Probing the gateway instead means the documented
+    # `--engine-url :8000 --control-url :8001` invocation waits the full fifteen
+    # minutes and then reports ENGINE_UNHEALTHY against a server that came up.
+    if not wait_healthy(args.control_url, 900):
         report["verdict"] = "ENGINE_UNHEALTHY"
         flush()
         return 2
