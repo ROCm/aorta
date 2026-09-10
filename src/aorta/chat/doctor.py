@@ -76,31 +76,35 @@ _EXTRA_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
 #: opt-in surfaces, so "not installed" is a fact rather than a finding.
 _REQUIRED_EXTRAS = frozenset({"chat-cli"})
 
-#: LLM providers that talk to a remote OpenAI-compatible endpoint, as opposed
-#: to the local vLLM one. Which of the two decides where the served model's
-#: name is configured and what ``native`` costs to turn on. It does *not*
-#: decide whether ``text`` works: a reasoning model breaks it wherever it is
-#: served, so both flows are checked.
-_REMOTE_LLM_PROVIDERS = frozenset({"openai", "litellm"})
 
-#: What ``native`` needs beyond the setting, per flow. A stock vLLM rejects the
-#: ``tools`` parameter until it is started for it, so the local remedy is two
-#: server flags on top of the setting rather than the setting alone. These
-#: restate the ``Endpoint requirement`` and ``Local vLLM`` rows of the table in
-#: ``docs/chat/providers.md``.
-#: Protocol-neutral on purpose. ``_REMOTE_LLM_PROVIDERS`` covers ``litellm``
-#: as well as ``openai``, and the LiteLLM flow exists precisely for providers
-#: with a native, non-OpenAI protocol -- Anthropic, Gemini, Bedrock. Calling
-#: every remote endpoint an "OpenAI-compatible gateway" described those users'
-#: setup wrongly while telling them what it needs.
-_REMOTE_NATIVE_NOTE = (
-    "It needs an endpoint that accepts the 'tools' parameter, which a remote\n"
-    "provider's tool-calling API normally does."
-)
-_VLLM_NATIVE_NOTE = (
-    "It needs the vLLM server restarted with --enable-auto-tool-choice and a\n"
-    "--tool-call-parser; a stock server does not accept the 'tools' parameter."
-)
+#: Where the served model's name is configured, and what ``native`` costs to
+#: turn on, both come from the backend the factory builds -- see
+#: :attr:`ChatBackend.model_name` and :attr:`ChatBackend.native_requirement`.
+#:
+#: This used to be a ``frozenset({"openai", "litellm"})`` here plus a note per
+#: flow, which was a second provider registry alongside ``_BACKENDS``. A
+#: backend added to the factory was silently treated here as having no model
+#: name and no native requirement, so the reasoning-model warning went quiet
+#: for it. ``docs/chat/providers.md``'s ``Endpoint requirement`` and
+#: ``Local vLLM`` rows are the same facts, now stated once each in the backend
+#: that owns them.
+def _model_and_native_note(provider: str) -> tuple[str, str]:
+    """The configured model and native requirement for *provider*, or two blanks.
+
+    Blank for a provider no backend is registered for. ``_check_backend``
+    reports that on its own row, so this one neither repeats it nor guesses
+    which setting would have held the name.
+    """
+    from aorta.chat.inference.providers.factory import get_backend
+
+    try:
+        backend = get_backend(provider)
+    except Exception:
+        # ValueError for an unknown name; anything else means the backend's own
+        # construction failed, which _check_backend is the row that says so.
+        return "", ""
+    return str(backend.model_name or ""), backend.native_requirement
+
 
 #: The half of the remote-embedder story ``manifest.remedy_lines`` cannot tell.
 #:
@@ -1384,11 +1388,7 @@ def _check_tool_mode(report: Report) -> None:
             ),
         )
         return
-    model = native_note = ""
-    if provider in _REMOTE_LLM_PROVIDERS:
-        model, native_note = str(settings.remote_llm_model or ""), _REMOTE_NATIVE_NOTE
-    elif provider == "vllm":
-        model, native_note = str(settings.vllm_model or ""), _VLLM_NATIVE_NOTE
+    model, native_note = _model_and_native_note(provider)
 
     if mode == "native":
         # Resolved after the provider, not before it, so this line can say what
@@ -1414,13 +1414,20 @@ def _check_tool_mode(report: Report) -> None:
         # A provider no backend is registered for -- ``_check_backend`` reports
         # that -- or one whose model setting is empty. Either way there is no
         # name to read, and guessing which setting holds it would invent one.
+        #
+        # SKIP, not OK. Whether ``text`` works is decided by the model: the
+        # branch below refuses to call it fine for a reasoning one. With no
+        # name in hand that question was not answered, and answering it green
+        # claimed a check that did not run -- the same defect this command
+        # exists to report, one layer in. SKIP says which it is.
+        #
         # The *hint* does not depend on the name, though, so it is attached
-        # here too: this was the one green line in the report carrying no route
-        # to a fix, and it belongs to a user who is already misconfigured.
+        # here too: this was the one line in the report carrying no route to a
+        # fix, and it belongs to a user who is already misconfigured.
         report.add(
             "llm tool mode",
-            OK,
-            "text (ACTION: lines parsed out of the reply); no model name to check",
+            SKIP,
+            "text (ACTION: lines parsed out of the reply); no model name to check it against",
             hint=_with_native_note(_TEXT_MODE_HINT, native_note),
         )
         return
@@ -1504,6 +1511,51 @@ def _check_backend(report: Report) -> None:
     report.add("llm backend", OK, backend.describe())
 
 
+def _settings_load_error(report: Report) -> bool:
+    """Report whether the settings load at all, and return True if they do not.
+
+    Runs before the checks that read them. Without it a single rejected field
+    is reported once per check that touches the settings -- the same pydantic
+    text under ``embedding provider``, ``chat index`` and ``llm tool mode``
+    alike, the last of which the user then has to work out is not actually a
+    tool-mode problem. One row, named once, is the honest shape.
+
+    Rendered through :func:`_unresolvable_settings_reason`, which names the
+    rejected fields without echoing their values: ``str(ValidationError)``
+    carries pydantic's ``input_value``, and the field that failed may be a
+    gateway key. The same function backs ``config init``'s echo and
+    ``config validate``, so all three describe an unloadable config alike.
+
+    A FAIL rather than a WARN. Nothing that reads settings can run, which
+    means ``chat``, ``index build`` and ``index fetch`` cannot either, and a
+    warning that exits 0 would report a working install to ``--json``.
+    """
+    from aorta.chat.config import _unresolvable_settings_reason, get_settings
+
+    try:
+        get_settings()
+    except Exception as exc:
+        logger.debug("doctor could not load the settings", exc_info=True)
+        report.add(
+            "chat settings",
+            FAIL,
+            _unresolvable_settings_reason(exc),
+            hint=(
+                "Nothing that reads configuration can run until this is "
+                "corrected --\n"
+                "not chat, not 'aorta chat index build', not "
+                "'aorta chat index fetch'.\n"
+                "To see the offending setting in full:\n"
+                "  aorta chat config validate\n"
+                "The value is withheld here because a rejected setting can be "
+                "a credential."
+            ),
+        )
+        return True
+    report.add("chat settings", OK, "loaded")
+    return False
+
+
 def run_checks(*, backend: bool = True) -> Report:
     """Run every check and return the report.
 
@@ -1514,20 +1566,33 @@ def run_checks(*, backend: bool = True) -> Report:
     report = Report()
     _check_python(report)
     _check_extras(report)
+    settings_error = _settings_load_error(report)
     # Labelled rather than derived from ``__name__`` so a check that raises is
-    # still reported under the name the user is looking for.
-    for label, check in (
-        ("sqlite", _check_sqlite),
-        ("embedding provider", _check_embedding_model),
-        ("chat index", _check_index),
-        ("llm tool mode", _check_tool_mode),
+    # still reported under the name the user is looking for. The flag says
+    # whether the check reads the settings, and so whether it can run at all
+    # when they were rejected.
+    for label, check, needs_settings in (
+        ("sqlite", _check_sqlite, False),
+        ("embedding provider", _check_embedding_model, True),
+        ("chat index", _check_index, True),
+        ("llm tool mode", _check_tool_mode, True),
     ):
+        if needs_settings and settings_error:
+            # Skipped rather than run, because every one of them would raise
+            # the same ValidationError and report it as its own failure --
+            # three rows blaming three subsystems for one rejected field, one
+            # of them the tool-mode check, which has nothing to do with it.
+            # The row above already named the field and the fix.
+            report.add(label, SKIP, "not checked; the settings did not load")
+            continue
         try:
             check(report)
         except Exception as exc:  # a doctor must not die on its own diagnostics
             logger.debug("doctor check %s raised", label, exc_info=True)
             report.add(label, FAIL, f"{type(exc).__name__}: {exc}")
-    if backend:
+    if settings_error:
+        report.add("llm backend", SKIP, "not checked; the settings did not load")
+    elif backend:
         _check_backend(report)
     else:
         report.add("llm backend", SKIP, "not checked (--no-backend)")

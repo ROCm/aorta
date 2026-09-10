@@ -456,9 +456,14 @@ def _unknown_embedding_provider() -> str:
 def _custom_local_model() -> str | None:
     """The configured local model when it is not the published one, else ``None``.
 
-    ``None`` rather than ``""`` for the absent case, because ``""`` is itself a
-    reachable *value* of the setting and a non-default one. See the empty-model
-    note below.
+    ``None`` rather than ``""`` for the absent case, so that "not custom" and
+    "custom, and empty" stay distinguishable values. ``""`` can no longer
+    arrive from a configuration -- ``Settings._reject_blank_embedding_model``
+    refuses it at the boundary, because an empty name selects no model and
+    every remedy built on one fails before the first chunk. The sentinel stays
+    ``None`` anyway: it costs nothing, and collapsing the two onto ``""``
+    would make the distinction unexpressible again if the value ever reaches
+    here by another route. See the empty-model note below.
 
     The local half of :func:`_remote_embedder_error`, and the same defect one
     setting over. ``embedding_model`` is configurable, but CI publishes exactly

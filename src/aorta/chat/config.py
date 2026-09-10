@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import tomllib
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -349,6 +349,56 @@ class Settings(BaseSettings):
             name, _, header_value = pair.partition("=")
             headers[name.strip()] = header_value.strip()
         return headers
+
+    @field_validator("embedding_model", "remote_embedding_model", mode="after")
+    @classmethod
+    def _reject_blank_embedding_model(cls, value: str, info: ValidationInfo) -> str:
+        """An embedding model name is required; blank is not a value either side accepts.
+
+        Rejected here, at the one place the setting enters the process, rather
+        than at the places a blank leaks to. It leaked to at least three, and
+        each of them reasoned about it as though it were a model name: the
+        pre-warm remedy in ``doctor`` built ``TextEmbedding("")``, which raises
+        ``Model  is not supported in TextEmbedding``; the local arm of
+        ``manifest.remedy_lines`` offered ``index build``, which resolves the
+        same empty name through ``FastembedBgeEmbeddings`` and fails before the
+        first chunk; and the remote arm offered the same build with an empty
+        model in every embeddings API call. Patching those three would have
+        left the fourth to be found later -- ``collection_name()`` already
+        hashes ``""`` into a plausible-looking collection, and ``describe()``
+        renders ``local BGE embeddings ( on onnxruntime)``.
+
+        Whitespace-only is rejected with it. A name of spaces is as unusable as
+        an empty one, and accepting it here would just move the same defect
+        behind a value that looks non-empty to every ``if not model`` in the
+        tree.
+
+        The value is otherwise returned verbatim -- deliberately not stripped.
+        ``model_id()`` and ``vector_identity()`` return this setting as it is
+        and ``collection_name()`` hashes it, so stripping would silently change
+        an install's embedding identity and mismatch the index it already
+        built. Rejecting a name with stray whitespace is this validator's job;
+        rewriting one is not.
+
+        Not applied to the LLM model settings. An empty ``vllm_model`` or
+        ``remote_llm_model`` is a different question -- the tool-mode check
+        reads them and cannot distinguish an empty model from a provider it has
+        no model setting for at all -- and that path reports its own verdict
+        rather than relying on this.
+        """
+        if not value.strip():
+            # Named, not quoted: the rejected value is empty, but
+            # _unresolvable_settings_reason exists because pydantic appends
+            # input_value to whatever this says, and the field name is the
+            # actionable half regardless.
+            raise ValueError(
+                f"{info.field_name} must name an embedding model. It is empty, and an "
+                "empty name selects no model: the embedder raises on it and both "
+                "'aorta chat index build' and 'aorta chat index fetch' fail before "
+                "the first chunk. Remove the setting to take the default, or name a "
+                "model."
+            )
+        return value
 
     @property
     def aorta_root(self) -> Path:

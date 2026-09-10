@@ -13,11 +13,46 @@ if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel
 
 
+#: The :attr:`ChatBackend.native_requirement` both remote backends share.
+#:
+#: Protocol-neutral on purpose, and shared rather than written out twice. The
+#: LiteLLM flow exists precisely for providers with a native, non-OpenAI
+#: protocol -- Anthropic, Gemini, Bedrock -- so calling every remote endpoint
+#: an "OpenAI-compatible gateway" described those users' setup wrongly while
+#: telling them what it needs.
+REMOTE_NATIVE_REQUIREMENT = (
+    "It needs an endpoint that accepts the 'tools' parameter, which a remote\n"
+    "provider's tool-calling API normally does."
+)
+
+
 @runtime_checkable
 class ChatBackend(Protocol):
     """A source of chat models, plus its own readiness check."""
 
     name: str
+
+    #: What ``native`` tool mode costs on this backend, beyond the setting
+    #: itself. Advice text, in the same spirit as :meth:`unreachable_hint`:
+    #: whether an endpoint accepts the ``tools`` parameter is a fact about the
+    #: backend, so the sentence that says so lives with it.
+    #:
+    #: Here rather than in ``aorta chat doctor`` because doctor used to keep
+    #: its own set of provider names to decide this, and a backend added to
+    #: the factory was silently treated as needing nothing and having no
+    #: model. The factory is the only registry (see :mod:`.factory`); anything
+    #: that varies per provider is reached through this interface.
+    native_requirement: str
+
+    @property
+    def model_name(self) -> str:
+        """The model this backend is configured to send to, read live.
+
+        A property rather than an attribute because the settings behind it are
+        read at call time -- a test or a job script that changes the model
+        after the backend is constructed gets the new value.
+        """
+        ...
 
     def get_chat_model(
         self,

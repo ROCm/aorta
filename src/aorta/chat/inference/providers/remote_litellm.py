@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from aorta.chat.config import settings
 from aorta.chat.inference.callcount import LLMCallCounter
+from aorta.chat.inference.providers.base import REMOTE_NATIVE_REQUIREMENT
 from aorta.chat.remote_auth import PLACEHOLDER_API_KEY, build_auth, describe_auth
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ def _require_auth_config() -> tuple[str, str]:
         )
     return api_key, auth_header
 
+
 LITELLM_IMPORT_MESSAGE = (
     "llm_provider=litellm needs both litellm and langchain-litellm. "
     "Install them with either:\n"
@@ -60,6 +62,12 @@ class RemoteLiteLLMBackend:
     """Chat backend that routes through LiteLLM to any provider it supports."""
 
     name = "litellm"
+
+    native_requirement = REMOTE_NATIVE_REQUIREMENT
+
+    @property
+    def model_name(self) -> str:
+        return settings.remote_llm_model
 
     def get_chat_model(
         self,
@@ -132,14 +140,10 @@ class RemoteLiteLLMBackend:
                 auth_header=settings.remote_llm_auth_header,
                 extra_headers=settings.remote_llm_extra_headers,
             )
-            if settings.remote_llm_auth_header.strip()
-            or settings.remote_llm_extra_headers
+            if settings.remote_llm_auth_header.strip() or settings.remote_llm_extra_headers
             else "LiteLLM environment variables"
         )
-        return (
-            f"remote LiteLLM -- {settings.remote_llm_model} "
-            f"via {endpoint} (auth: {auth})"
-        )
+        return f"remote LiteLLM -- {settings.remote_llm_model} via {endpoint} (auth: {auth})"
 
 
 def _load_chat_litellm() -> Any:

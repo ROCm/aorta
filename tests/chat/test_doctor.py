@@ -2156,6 +2156,139 @@ class TestRemoteEmbeddingProfile:
         assert _by_name(run_checks(backend=False), "embedding provider").status == OK
 
 
+class TestTheProviderRegistryIsNotDuplicated:
+    """``_BACKENDS`` is the only registry; doctor reads per-provider facts through it.
+
+    This check used to keep its own ``frozenset({"openai", "litellm"})`` and a
+    native note per flow, which is a second registry that has to agree with
+    the factory's. Every parallel table in this work has eventually disagreed
+    with its counterpart, and the failure here was silent: a backend added to
+    the factory read as having no model name and no native requirement, so the
+    reasoning-model warning simply went quiet for it.
+    """
+
+    def test_every_registered_backend_answers_both_questions(self):
+        """The drift guard. A new backend fails this rather than going quiet.
+
+        Swept over the factory's own registry rather than a list repeated
+        here -- a list repeated here would be the third copy of the thing this
+        test exists to prevent.
+        """
+        from aorta.chat.inference.providers.factory import available_providers
+
+        for provider in available_providers():
+            model, native_note = doctor._model_and_native_note(provider)
+            assert model, f"{provider} reports no model name"
+            assert native_note, f"{provider} reports no native requirement"
+            assert "tools" in native_note, (
+                f"{provider}'s native requirement does not say what native needs"
+            )
+
+    def test_doctor_no_longer_keeps_its_own_provider_set(self):
+        """Pinned by name, because the fix is the deletion.
+
+        Re-adding the set is the specific regression: it would pass every
+        behavioural test above while restoring the drift.
+        """
+        assert not hasattr(doctor, "_REMOTE_LLM_PROVIDERS")
+
+    def test_an_unregistered_provider_reads_blank_rather_than_guessing(self):
+        """No backend means no model setting to read, and guessing would invent one."""
+        assert doctor._model_and_native_note("not-a-provider") == ("", "")
+
+    def test_the_model_is_read_live_from_the_provider_that_serves_it(self, monkeypatch):
+        """Each backend names its own setting, which is the point of moving it there.
+
+        vLLM reads ``vllm_model`` and the remote flows read
+        ``remote_llm_model``; the doctor no longer knows which is which.
+        """
+        monkeypatch.setattr(settings, "vllm_model", "local-one")
+        monkeypatch.setattr(settings, "remote_llm_model", "remote-one")
+        assert doctor._model_and_native_note("vllm")[0] == "local-one"
+        assert doctor._model_and_native_note("openai")[0] == "remote-one"
+        assert doctor._model_and_native_note("litellm")[0] == "remote-one"
+
+    def test_the_two_remote_backends_share_one_requirement_string(self):
+        """Written once. Two copies of a sentence is the same defect, smaller."""
+        from aorta.chat.inference.providers.base import REMOTE_NATIVE_REQUIREMENT
+
+        assert doctor._model_and_native_note("openai")[1] is REMOTE_NATIVE_REQUIREMENT
+        assert doctor._model_and_native_note("litellm")[1] is REMOTE_NATIVE_REQUIREMENT
+
+    def test_the_local_requirement_is_still_the_vllm_one(self):
+        """Moving the note must not have flattened the distinction it encodes.
+
+        A stock vLLM needs two server flags, not just the setting -- that is
+        the whole reason the note is per-backend rather than one sentence.
+        """
+        note = doctor._model_and_native_note("vllm")[1]
+        assert "--enable-auto-tool-choice" in note
+        assert "--tool-call-parser" in note
+        # Protocol-neutral wording is load bearing on the remote side: LiteLLM
+        # exists for Anthropic, Gemini and Bedrock, which are not gateways.
+        assert "gateway" not in doctor._model_and_native_note("litellm")[1]
+
+
+class TestSettingsThatDoNotLoad:
+    """One row saying the settings were rejected, not one per check that reads them.
+
+    Every settings-dependent check raises the same ``ValidationError`` when a
+    field is refused. Letting each report it made three rows blame three
+    subsystems for one bad field -- including ``llm tool mode``, which would
+    tell a user their tool mode was broken by ``embedding_model``. That is the
+    defect this command exists to report, committed by the command itself.
+    """
+
+    @pytest.fixture
+    def rejected(self, monkeypatch):
+        """A configuration the boundary refuses, arriving the way a user's does."""
+        import aorta.chat.config as config_mod
+
+        monkeypatch.setattr(config_mod, "_cached", None)
+        monkeypatch.setenv("AORTA_CHAT_EMBEDDING_MODEL", "")
+        return run_checks(backend=False)
+
+    def test_the_rejection_is_reported_once_and_names_the_field(self, rejected):
+        check = _by_name(rejected, "chat settings")
+        assert check.status == FAIL
+        assert "embedding_model" in check.detail
+
+    def test_the_checks_that_cannot_run_say_so_rather_than_failing(self, rejected):
+        """SKIP, not FAIL: they were not run, so they found nothing."""
+        for name in ("embedding provider", "chat index", "llm tool mode", "llm backend"):
+            check = _by_name(rejected, name)
+            assert check.status == SKIP, f"{name} reported {check.status}"
+            assert "settings did not load" in check.detail
+
+    def test_no_row_repeats_the_validation_error(self, rejected):
+        """The regression is duplication, so it is duplication that is asserted."""
+        carrying = [c.name for c in rejected.checks if "validation error" in c.detail.lower()]
+        assert carrying == [], f"pydantic's text is repeated on {carrying}"
+
+    def test_the_rejected_value_is_not_echoed(self, rejected):
+        """A refused setting can be a credential; only the field name is safe.
+
+        The same rule ``_unresolvable_settings_reason`` exists for, asserted
+        here because this is a new caller of it.
+        """
+        check = _by_name(rejected, "chat settings")
+        assert "input_value" not in check.detail
+
+    def test_the_checks_that_do_not_read_settings_still_run(self, rejected):
+        """The first property of this command: report everything, skip nothing idly."""
+        assert _by_name(rejected, "sqlite").status == OK
+        assert _by_name(rejected, "python").status == OK
+
+    def test_it_is_a_failure_rather_than_a_warning(self, rejected):
+        """``--json`` exits 0 on a warning, and this install cannot chat at all."""
+        assert rejected.failed
+
+    def test_a_loadable_configuration_reports_the_row_green(self):
+        """Asserted both ways, so the row is evidence rather than decoration."""
+        check = _by_name(run_checks(backend=False), "chat settings")
+        assert check.status == OK
+
+
 class TestToolMode:
     """The setup-time signal for a failure that otherwise only shows as a dead query.
 
@@ -2263,12 +2396,18 @@ class TestToolMode:
         assert "gateway" not in check.hint
 
     def test_a_provider_with_no_model_setting_reads_no_name(self, monkeypatch):
-        """Guessing which setting holds it would invent one; the backend check reports it."""
+        """Guessing which setting holds it would invent one; the backend check reports it.
+
+        SKIP rather than OK, and that is the assertion worth having. Whether
+        ``text`` works is decided by the model name, and there is none here --
+        so the question was not answered. Reporting it green claimed a check
+        that did not run, which is the same defect ``doctor`` exists to find.
+        """
         monkeypatch.setattr(settings, "llm_tool_mode", "text")
         monkeypatch.setattr(settings, "llm_provider", "not-a-provider")
         check = _by_name(run_checks(backend=False), "llm tool mode")
-        assert check.status == OK
-        assert "no model name to check" in check.detail
+        assert check.status == SKIP
+        assert "no model name to check it against" in check.detail
 
     def test_the_line_with_no_model_name_still_carries_the_fix(self, monkeypatch):
         """It was the one green line in the report offering no route to a fix.
@@ -2286,12 +2425,17 @@ class TestToolMode:
         assert 'llm_tool_mode = "native"' in check.hint
 
     def test_an_empty_model_setting_on_a_known_provider_gets_that_native_note(self, monkeypatch):
-        """The provider is known even when the model is not, so the cost is too."""
+        """The provider is known even when the model is not, so the cost is too.
+
+        SKIP on the verdict, but the hint is still the vLLM one: not knowing
+        the model is what stops the *check*, and it does not stop this command
+        from saying what ``native`` costs on the provider it can see.
+        """
         monkeypatch.setattr(settings, "llm_tool_mode", "text")
         monkeypatch.setattr(settings, "llm_provider", "vllm")
         monkeypatch.setattr(settings, "vllm_model", "")
         check = _by_name(run_checks(backend=False), "llm tool mode")
-        assert check.status == OK
+        assert check.status == SKIP
         assert 'llm_tool_mode = "native"' in check.hint
         assert "--enable-auto-tool-choice" in check.hint
 
