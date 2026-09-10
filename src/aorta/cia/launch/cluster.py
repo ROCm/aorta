@@ -189,6 +189,10 @@ FORWARDED_ENV = (
 )
 
 
+#: What a shell will accept as a variable name, and nothing else.
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def forwarded_env() -> dict[str, str]:
     """Values of FORWARDED_ENV that are actually set in this process."""
     return {k: os.environ[k] for k in FORWARDED_ENV if os.environ.get(k)}
@@ -282,6 +286,15 @@ def build_sbatch_script(
 
     resolved_env: dict[str, str] = {**forwarded_env(), **{k: str(v) for k, v in (env_vars or {}).items()}}
     for key, value in resolved_env.items():
+        # The name is rendered verbatim, so quoting the value is not enough:
+        # these come from LaunchPlan.env_vars, which is model output, and a key
+        # like ``X; curl ... #`` renders as `export X; curl ... #=value` --
+        # an export, then a command, then a comment eating the rest of the line.
+        # A name that is not a shell identifier means the plan is malformed, so
+        # this refuses rather than dropping it: a job that runs without a
+        # variable it was told to set fails later and somewhere else.
+        if _ENV_NAME.fullmatch(key) is None:
+            raise ValueError(f"invalid environment variable name: {key!r}")
         body.append(f"export {key}={shlex.quote(value)}")
 
     body.append(containerize(command, working_dir, resolved_env))
@@ -318,14 +331,21 @@ def submit_sbatch(
     if not sbatch_available():
         return "", "sbatch not found on PATH — is this a Slurm cluster?"
 
-    script = build_sbatch_script(
-        command=command,
-        job_name=job_name,
-        log_path=log_path,
-        working_dir=working_dir,
-        env_vars=env_vars,
-        node=node,
-    )
+    try:
+        script = build_sbatch_script(
+            command=command,
+            job_name=job_name,
+            log_path=log_path,
+            working_dir=working_dir,
+            env_vars=env_vars,
+            node=node,
+        )
+    except ValueError as e:
+        # Rendering rejects a malformed plan. This function promises
+        # (job_id, error), and callers surface that error -- a traceback out of
+        # here would instead read to them as a launch that never happened.
+        return "", f"could not render the sbatch script: {e}"
+
     try:
         script_path.parent.mkdir(parents=True, exist_ok=True)
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
