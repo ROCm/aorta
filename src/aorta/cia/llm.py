@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any
 
 try:
@@ -67,6 +68,34 @@ class ProviderNotConfigured(RuntimeError):
     """No endpoint was configured, and guessing at one is worse than saying so."""
 
 
+#: The same names ``aorta.chat.config`` reads, for the fallback below. Kept
+#: literal rather than derived, because deriving them needs the module that is
+#: missing in the case this exists for.
+_ENV_PREFIX = "AORTA_CHAT_"
+_VLLM_FIELDS = ("vllm_base_url", "vllm_api_key", "vllm_model")
+_REMOTE_FIELDS = ("remote_llm_base_url", "remote_llm_api_key", "remote_llm_model")
+
+_warned_no_settings = False
+
+
+def _settings_from_env() -> tuple[str, str, str] | None:
+    """The chat settings as far as the environment gives them, or None.
+
+    ``aorta.chat.config`` reads ``chat.toml`` with stdlib ``tomllib``, which is
+    3.11, and this package supports 3.10. There the module cannot be imported at
+    all -- so without this, a 3.10 user who had exported AORTA_CHAT_VLLM_BASE_URL
+    correctly was told the provider was not configured, which is both wrong and
+    points at the wrong fix.
+
+    Same variables, same precedence, one thing missing: the profile file. That
+    is said out loud rather than left to be discovered.
+    """
+    provider = os.environ.get(f"{_ENV_PREFIX}LLM_PROVIDER", "vllm")
+    fields = _VLLM_FIELDS if provider == "vllm" else _REMOTE_FIELDS
+    values = tuple(os.environ.get(f"{_ENV_PREFIX}{f.upper()}", "") for f in fields)
+    return values if any(values) else None  # type: ignore[return-value]
+
+
 def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str] | None:
     """(base_url, api_key, model) from the chat configuration, or None.
 
@@ -79,26 +108,35 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str] | Non
 
     Only the settings are read, not the provider layer. ``aorta.chat.config``
     imports pydantic and stdlib and nothing from the chat extras, so this keeps
-    the agents runnable on a base install -- and when that module is absent,
-    because those extras are not installed, this returns None rather than
-    failing the import.
+    the agents runnable on a base install.
 
     With *configured_only*, None also means "nothing here was actually set".
     Every field has a default, so answering with one would silently outrank a
     deployment that had configured the agents some other way.
     """
+    global _warned_no_settings
     try:
         from aorta.chat.config import settings
-    except Exception:  # pragma: no cover - depends on what is installed
-        log.debug("aorta.chat.config is not importable; not reading chat settings")
-        return None
+    except ImportError as exc:
+        if not _warned_no_settings:
+            _warned_no_settings = True
+            log.warning(
+                "Reading the chat settings from the environment only: %s. On "
+                "Python %d.%d, aorta.chat.config cannot be imported -- it reads "
+                "chat.toml with stdlib tomllib, which is 3.11. AORTA_CHAT_* is "
+                "still honoured; the profile file is not.",
+                exc,
+                sys.version_info[0],
+                sys.version_info[1],
+            )
+        return _settings_from_env()
 
     if getattr(settings, "llm_provider", "") == "vllm":
-        fields = ("vllm_base_url", "vllm_api_key", "vllm_model")
+        fields = _VLLM_FIELDS
     else:
         # An empty remote base URL means "the provider's own endpoint", which
         # is a decision rather than a gap.
-        fields = ("remote_llm_base_url", "remote_llm_api_key", "remote_llm_model")
+        fields = _REMOTE_FIELDS
 
     if configured_only and not ({*fields, "llm_provider"} & settings.model_fields_set):
         return None
@@ -233,7 +271,8 @@ def build_lm(
         raise ProviderNotConfigured(
             "The agents reach a model through the same configuration as the "
             "rest of aorta chat, and none is available. Run `aorta chat config "
-            "init`, or set AORTA_CHAT_VLLM_BASE_URL."
+            "init`, or set AORTA_CHAT_VLLM_BASE_URL. On Python 3.10 the profile "
+            "file cannot be read at all -- only AORTA_CHAT_* is honoured there."
         )
     settings_base, settings_key, settings_model = resolved or ("", "", "")
 
