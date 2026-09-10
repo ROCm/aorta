@@ -734,7 +734,11 @@ _LABEL_LIMIT = 60
 
 
 def _identity_qualifier(
-    identity: dict[str, Any], *, index: bool = False, full: bool = False
+    identity: dict[str, Any],
+    *,
+    index: bool = False,
+    full: bool = False,
+    scope: bool = False,
 ) -> str:
     """The shortest identity fragment that tells two same-named kernels apart (pure).
 
@@ -755,6 +759,10 @@ def _identity_qualifier(
     sharing a prefix *and* an index is the one collision the widened qualifier cannot
     otherwise resolve; it is remote, which is why the prefix is what gets rendered
     until a label actually ties.
+
+    ``scope`` distinguishes an identity that omitted ``entry_offset`` from one that
+    explicitly states a whole-object scope with ``entry_offset: null``. The omitted
+    form must stay visibly unattributed instead of looking like the whole-object row.
     """
     digest = identity.get("code_object_sha256")
     parts = (
@@ -766,6 +774,8 @@ def _identity_qualifier(
     offset = identity.get("entry_offset")
     if isinstance(offset, int):
         parts = f"{parts}+0x{offset:x}" if parts else f"0x{offset:x}"
+    elif scope and "entry_offset" not in identity:
+        parts = f"{parts}; scope unknown" if parts else "scope unknown"
     return parts
 
 
@@ -809,6 +819,7 @@ _QUALIFIER_WIDENINGS: tuple[dict[str, bool], ...] = (
     {},
     {"index": True},
     {"index": True, "full": True},
+    {"index": True, "full": True, "scope": True},
 )
 
 
@@ -1109,14 +1120,14 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         row_key = _identity_key(identity)
         result = kr_by_identity.get(row_key)
         candidates = fallback_by_row.get(row_key, ())
-        if len(candidates) == 1:
-            # A sparse result is this kernel's result, so it belongs *with* an exact
-            # one rather than instead of it: one check can serialize the full identity
-            # while another serializes only ``{name, target}``, and keeping just the
-            # exact one would drop the other's verdict, reason and findings from the
-            # row -- the same cross-check loss the accumulation above exists to stop.
-            sparse = kr_by_identity.pop(candidates[0])
+        for candidate in candidates:
+            # Sparse results compatible with exactly this row belong *with* any exact
+            # result and with one another: separate checks can serialize different
+            # subsets of the same identity, and keeping none when several candidates
+            # exist drops every verdict, reason and finding from the row.
+            sparse = kr_by_identity.pop(candidate)
             result = _merge_reduced(result, sparse) if result is not None else sparse
+        if candidates:
             kr_by_identity[row_key] = result
         if result is not None:
             # The row's identity is the fuller one and describes the same kernel, so

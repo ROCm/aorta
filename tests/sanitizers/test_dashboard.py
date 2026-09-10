@@ -1082,6 +1082,57 @@ def test_a_sparse_result_merges_into_the_exact_one_for_the_same_row():
     assert len(case.get("kernel_reasons") or []) == 1
 
 
+def test_multiple_sparse_representations_merge_into_their_only_compatible_row():
+    # Separate checks may serialize different optional subsets of one identity.
+    # Once each candidate is compatible with exactly one row, their count is not
+    # ambiguous: all of them belong on that row.
+    report = _waitcheck_report()
+    identity = report["worklist"]["kernels"][0]["identity"]
+
+    def _finding(sanitizer: str, code: str) -> dict:
+        return {
+            "sanitizer": sanitizer, "severity": "warning", "code": code,
+            "message": f"{code} on gemm_x", "kernel_name": "gemm_x",
+            "code_object": identity["code_object"], "entry_offset": None, "metadata": {},
+        }
+
+    wait_finding = _finding("waitcheck", "wait_hazard")
+    race_finding = _finding("consan", "race")
+    report["checks"] = [
+        {
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None,
+            "findings": [wait_finding], "coverage": [], "backend": {},
+            "kernel_results": [{
+                "identity": {"name": "gemm_x", "target": "gfx950"},
+                "state": "error", "verdict": "error", "findings": [wait_finding],
+                "reason": "waitcheck_backend_exit_2: refused input", "returncode": 2,
+            }],
+        },
+        {
+            "sanitizer": "consan", "state": "ran", "verdict": "fail",
+            "reason": None, "returncode": 0, "findings": [race_finding],
+            "coverage": [], "backend": {},
+            "kernel_results": [{
+                "identity": {
+                    "name": "gemm_x", "target": "gfx950",
+                    "code_object": identity["code_object"],
+                },
+                "state": "ran", "verdict": "fail", "findings": [race_finding],
+                "reason": "consan_race_detected", "returncode": 0,
+            }],
+        },
+    ]
+    report["overall_verdict"] = "fail"
+
+    case = gen.summarize_case(report, "fail")
+    row = case["kernels"][0]
+    assert "waitcheck: waitcheck_backend_exit_2" in row.get("detail", "")
+    assert "consan: consan_race_detected" in row.get("detail", "")
+    assert row.get("verdict") == "fail"
+    assert row.get("findings") == case.get("findings") == 2
+
+
 def test_a_result_naming_a_different_object_is_not_attributed_to_the_row():
     # Only *omitted* fields are wildcards. A result whose identity is fully populated
     # and disagrees with the row describes a different object, so attributing it would
@@ -1311,6 +1362,7 @@ def test_an_omitted_offset_does_not_merge_two_selections_of_one_object():
     assert [e.get("reason") for e in reasons] == [
         "waitcheck_backend_exit_2: refused the entry"
     ]
+    assert reasons[0].get("label") == "gemm (beefaaa1#0; scope unknown)"
 
 
 def test_two_long_names_differing_only_in_the_elided_middle_are_told_apart():
