@@ -889,7 +889,16 @@ def _guard(action: Any) -> Any:
         manifest.IndexMismatchError,
         manifest.ManifestError,
         ops.IndexFetchError,
-        FileNotFoundError,
+        # ``OSError`` rather than ``FileNotFoundError`` alone. The narrow one
+        # covered the missing index and left every other filesystem refusal
+        # unwrapped: a build into a read-only parent surfaced
+        # ``PermissionError: [Errno 13] ... '.aorta-index-cbr5wi0q'`` as a
+        # traceback naming a staging directory the user never chose, where the
+        # message they need -- which directory, and that it is not writable --
+        # was already in ``str(exc)``. These are reports about the path the
+        # command was given, which is the category this function exists to
+        # print rather than raise.
+        OSError,
         # The embedding and LLM provider factories report bad configuration as
         # ValueError, message-first; a traceback would bury it.
         ValueError,

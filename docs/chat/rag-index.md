@@ -132,6 +132,14 @@ in with `--from` asks for the file to be re-staged, for the same reason. This is
 a rule rather than three messages — an error raised by `index fetch` may not
 advise an `index fetch` that would fail identically.
 
+Nothing locks the index path, and two builds aimed at the same `--output` both
+report success: the later rename wins, and the surviving index and sidecars are
+the winner's, matching each other. That is last-writer-wins rather than
+corruption, because the crossed pairing — one build's index under the other's
+manifest — is what the contents check refuses. A read concurrent with the rename
+sees the old index or the new one, and briefly can see the post-move window,
+where it fails closed with a mismatch rather than answering from it.
+
 A refusal names what would be lost and the flag that proceeds anyway, following
 `config init --force` rather than prompting, so a script and a terminal behave
 identically. The command it prints carries any non-default `--path` and

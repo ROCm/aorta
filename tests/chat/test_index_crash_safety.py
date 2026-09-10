@@ -102,6 +102,26 @@ def _sidecars(target: Path) -> tuple[str, str]:
     )
 
 
+def _write_store(target: Path, *, chunks: int) -> None:
+    """A real store with a known chunk count, without running a build.
+
+    The install step is being tested here rather than the embedding, and a
+    build would take the property under test (which file ends up at the
+    destination) and bury it under tens of seconds of unrelated work.
+    """
+    store = SqliteVecStore(path=target, embedding=_Fake(), collection=COLLECTION)
+    try:
+        store.reset()
+        store.add_documents(
+            [
+                Document(page_content=f"chunk {n}", metadata={"source": f"{n}.md"})
+                for n in range(chunks)
+            ]
+        )
+    finally:
+        store.close()
+
+
 def _add_run_collection(target: Path, *, texts=("run one failed", "run two passed")) -> None:
     """Write the per-user run collection into the same file, as ``rag/runs`` does."""
     store = SqliteVecStore(path=target, embedding=_Fake(), collection=RUN_COLLECTION)
@@ -140,9 +160,21 @@ class TestInterruptedBuild:
         assert index_ops.check_index(target, strict=True).refusals == []
         assert collection_chunk_count(target, COLLECTION) == first.chunk_count
 
-    def test_it_leaves_no_staging_directory_behind(
+    def test_an_unwound_interruption_leaves_no_staging_directory_behind(
         self, corpus_root: Path, tmp_path: Path, monkeypatch
     ):
+        """Named for what it establishes, which is narrower than "no leak".
+
+        ``TemporaryDirectory`` cleans up when an exception *unwinds* the
+        ``with`` block, so this covers Ctrl-C and any raised failure -- and does
+        not cover the process dying. A real ``SIGKILL`` mid-build leaves a
+        ``.aorta-index-*`` directory holding a full copy of the staged index,
+        measured on the review of this PR, and nothing reaps it. The previous
+        name claimed the general case and this test could never have caught it,
+        which is worse than not testing it: it is the name a reader would trust
+        instead of looking. No documentation promises the general case, so the
+        overclaim was here rather than in the docs.
+        """
         target = tmp_path / "cache" / "index.sqlite"
         _build(corpus_root, target)
 
@@ -174,6 +206,47 @@ class TestInterruptedBuild:
 
         assert not target.exists()
         assert not manifest_mod.manifest_path(target).exists()
+
+
+class TestTheInstallIsOneRenameAndNotACopy:
+    """The single line the whole crash-safety claim rests on.
+
+    Added because the human review of this PR mutated ``staged.replace(dest)``
+    to ``shutil.copy2(staged, dest)`` and every test in this file still passed.
+    The interruptions here are injected before the install (``add_documents``)
+    and after it (``write_manifest``), so none of them is in flight *during* it
+    -- and that is exactly the window the two implementations differ in. A
+    rename is atomic on one filesystem; a copy is a truncating write over the
+    live index, which is the "wrong but self-consistent" state this module's
+    docstring says must never exist, reached by the one step nobody was
+    watching.
+
+    Pinned on the property rather than by interrupting mid-copy, which needs a
+    real kill inside a syscall and is not reliably schedulable. A rename keeps
+    the inode; a copy makes a new one. That distinguishes the two
+    implementations deterministically and in-process, and it is the same fact
+    that makes the rename atomic.
+    """
+
+    def test_the_destination_inherits_the_staged_file_rather_than_its_bytes(
+        self, tmp_path: Path
+    ):
+        dest = tmp_path / "index.sqlite"
+        _write_store(dest, chunks=2)
+        staged = tmp_path / "staging" / "index.sqlite"
+        staged.parent.mkdir()
+        _write_store(staged, chunks=7)
+        staged_inode = staged.stat().st_ino
+
+        index_ops._install_staged(staged, dest)
+
+        assert dest.stat().st_ino == staged_inode, (
+            "the install copied bytes into the live index instead of renaming "
+            "over it, so an interruption mid-install leaves a truncated index "
+            "under the previous index's sidecars"
+        )
+        assert not staged.exists(), "a rename consumes the staged file"
+        assert collection_chunk_count(dest, COLLECTION) == 7
 
 
 class TestSidecarsComeLast:

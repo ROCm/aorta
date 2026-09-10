@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,49 @@ class TestBuild:
         assert result.exit_code != 0
         assert "corpus path does not exist" in result.output
         assert "Traceback" not in result.output
+
+    @pytest.mark.skipif(
+        getattr(os, "geteuid", lambda: 1)() == 0,
+        reason="root ignores the directory mode this test relies on",
+    )
+    def test_an_unwritable_output_directory_is_a_sentence_not_a_traceback(
+        self, runner: CliRunner, tmp_path: Path
+    ):
+        """The one filesystem refusal ``_guard`` was not catching.
+
+        Its ``known`` tuple listed ``FileNotFoundError`` and so covered the
+        missing index while leaving every other errno unwrapped. Found on the
+        human review of this PR: a build into a read-only parent raised
+        ``PermissionError: [Errno 13] ... '.aorta-index-cbr5wi0q'`` -- a
+        traceback whose most prominent noun is a staging directory the user
+        never chose and cannot look up, while the two facts they need were
+        already in the message. Asserted on the *shape* rather than the errno,
+        because the point is the category: a report about the path the command
+        was given is printed, not raised.
+        """
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        (tmp_path / "corpus").mkdir()
+        (tmp_path / "corpus" / "a.md").write_text("hello", encoding="utf-8")
+        locked.chmod(0o500)
+        try:
+            result = runner.invoke(
+                chat,
+                [
+                    "index",
+                    "build",
+                    "--path",
+                    str(tmp_path / "corpus"),
+                    "--output",
+                    str(locked / "index.sqlite"),
+                ],
+            )
+        finally:
+            locked.chmod(0o700)
+
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert str(locked) in result.output
 
     def test_public_only_refuses_a_non_public_tree(self, runner: CliRunner, tmp_path: Path):
         """The guard the workflow relies on, exercised through the flag CI passes."""
