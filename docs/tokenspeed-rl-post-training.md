@@ -84,18 +84,6 @@ already anticipates being invoked by a cluster agent — which is what CIA is.
 
 ## Start here: what this is for, and what already works
 
-Vivek Agrawal asked: *"can you please share what have you done for RL work?
-just wanted to know the usecase and what problem are we trying to solve using
-it"*. This section answers those two questions and nothing else — the open
-work, the blockers and the sequencing are the rest of this document's job.
-
-It assumes ROCm and GPU knowledge and assumes **nothing** about reinforcement
-learning, so each machine-learning term is glossed the first time it appears.
-It links to the sections that establish each claim, and to the two sibling
-documents — [the framework, model and topology
-decisions](rl-post-training-decisions.md) and [the first end-to-end
-run](tokenspeed-rl-e2e-sanitizer-routing.md) — rather than restating them.
-
 ### What we are trying to do
 
 `aorta agent` already exists and already runs. When a workload fails it reads
