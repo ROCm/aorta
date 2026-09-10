@@ -592,12 +592,15 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
     repo_map = load_repo_map()
     last_msg = state["messages"][-1]
 
+    recommendation = _recommendation(state)
+    system = PLAN_PROMPT + f"\n\nREPOSITORY MAP:\n{repo_map}"
+    if recommendation:
+        system += f"\n\n{recommendation}"
+
     response = await _send(
         llm,
         [
-            SystemMessage(
-                content=PLAN_PROMPT + f"\n\nREPOSITORY MAP:\n{repo_map}"
-            ),
+            SystemMessage(content=system),
             HumanMessage(content=last_msg.content),
         ]
     )
@@ -758,6 +761,38 @@ async def act_node(state: AgentState) -> dict[str, Any]:
     )
 
 
+def _recommendation(state: AgentState) -> str:
+    """The selector's ranking, phrased so it can only widen the choice.
+
+    Without this the ranking reached the screen and nothing else:
+    ``candidate_tools`` was written by ``selector_node``, kept in state, shown
+    in the UI, and read by no node -- so the selector cost a model call per turn
+    and changed nothing about which tool ran. A ranking that does not reach the
+    model is not advisory, it is decorative.
+
+    It is advice and says so. The full tool list is still bound, and a tool the
+    selector left out is still allowed, so a bad ranking loses nothing that was
+    previously available -- which is the property that makes it safe to act on
+    an LLM's opinion of an LLM's options.
+    """
+    candidates = [c for c in (state.get("candidate_tools") or []) if c]
+    if not candidates:
+        # The selector declined, or its output could not be parsed. Saying
+        # nothing leaves the model exactly where it was before this node ran.
+        return ""
+
+    lines = [f"Most likely tools for this request, best first: {', '.join(candidates)}."]
+    why = (state.get("selection_rationale") or "").strip()
+    if why:
+        lines.append(f"Why: {why}")
+    lines.append(
+        "This is a ranking, not a restriction. Every registered tool is still "
+        "available, and one that is not listed is still the right call if the "
+        "request needs it."
+    )
+    return "\n".join(lines)
+
+
 def _act_messages(state: AgentState) -> list[Any]:
     """System framing shared by both protocols."""
     context = state.get("retrieved_context", "")
@@ -765,6 +800,9 @@ def _act_messages(state: AgentState) -> list[Any]:
     critic_fb = state.get("critic_feedback", "")
 
     messages: list[Any] = [_build_system_message(context)]
+    recommendation = _recommendation(state)
+    if recommendation:
+        messages.append(SystemMessage(content=recommendation))
     if plan:
         messages.append(SystemMessage(content=f"PLAN:\n{plan}"))
     if critic_fb:
