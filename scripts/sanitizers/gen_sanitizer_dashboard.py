@@ -4573,7 +4573,11 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
     ]
     for key, entries in groups:
         by_san = _survey_group_by_sanitizer(entries)
-        note = _survey_group_note(entries)
+        # Same treatment as the sibling Detail and Example cells: a group note is a
+        # backend reason (``waitcheck_analysis_failed: <parser output>``), so it can
+        # carry newlines that end the row mid-table and pipes that shift every cell
+        # after it. The HTML twin renders inside a ``<td>`` and needs neither.
+        note = _clean_msg(_survey_group_note(entries), _MSG_LIMIT).replace("|", "\\|")
         lines.append(
             f"| {_survey_group_label(key, entries)} | {cell(by_san.get('waitcheck'))} "
             f"| {cell(by_san.get('consan'))} | {_survey_group_findings(entries)} "

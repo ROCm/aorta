@@ -256,52 +256,127 @@ def test_observation_and_inline_message_name_the_cause_behind_a_rollup():
     assert "gemm_NT_M256_N4096_K1024" in text
 
 
-def test_digestless_kernels_are_never_attributed_to_each_other():
-    # The other collision direction: ConSan identities carry no code object and no
-    # SHA-256, so keying attribution on (sha, index) alone collapses every one of
-    # them onto (None, None) and lets an unrelated sibling's verdict and reason be
-    # reported as "the same code object" -- an object that does not exist. Only a
-    # real digest can have been deduped, so only a real digest may be attributed.
-    def _entry(name: str) -> dict:
+def _dedup_attribution_report(
+    *, sanitizer: str, code_object: str | None, sha: str | None, why: str
+) -> dict:
+    """Two rows on one object where only the first came back with a result.
+
+    The shape the dedup attribution exists for. Whether the second row may inherit the
+    first's verdict as "same code object; scanned once" turns on one conjunct of the
+    attribution predicate at a time, so each conjunct gets this fixture with exactly
+    one field changed.
+    """
+    def _identity(name: str) -> dict:
         return {
-            "identity": {
-                "name": name, "target": "gfx950", "code_object": None,
-                "code_object_sha256": None, "code_object_index": None,
-                "entry_offset": None,
-            },
-            "total_time_ms": 0.0, "dispatch_count": 1, "sources": ["consan_repro"],
+            "name": name, "target": "gfx950", "code_object": code_object,
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
         }
 
-    report = {
+    return {
         "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
         "overall_verdict": "error", "execution_status": "error",
         "worklist": {
             "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
             "top_n": 2, "kernel_count": 2,
-            "kernels": [_entry("kern_A"), _entry("kern_B")],
+            "kernels": [
+                {"identity": _identity(name), "total_time_ms": 0.0,
+                 "dispatch_count": 1, "sources": ["gemm_csv"]}
+                for name in ("kern_A", "kern_B")
+            ],
         },
         "checks": [{
-            "sanitizer": "consan", "state": "error", "verdict": "error",
+            "sanitizer": sanitizer, "state": "error", "verdict": "error",
             "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
             "kernel_results": [{
-                "identity": {
-                    "name": "kern_A", "target": "gfx950", "code_object": None,
-                    "code_object_sha256": None, "code_object_index": None,
-                },
-                "state": "error", "verdict": "error", "findings": [],
-                "reason": "consan_hook_not_found", "returncode": None,
+                "identity": _identity("kern_A"), "state": "error", "verdict": "error",
+                "findings": [], "reason": why, "returncode": None,
             }],
             "coverage": [], "backend": {},
         }],
     }
 
-    case = gen.summarize_case(report, "pass")
+
+def test_a_deduped_sibling_is_attributed_only_from_a_real_object_scan():
+    # Positive control for the three exclusion tests below: with all conjuncts
+    # satisfied, kern_B DOES inherit the scan that covered its object. Without this,
+    # a predicate that excluded everything would pass all three of them.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="waitcheck", code_object="/a/b/sol.hsaco", sha="beefaaa1",
+            why="waitcheck_backend_exit_2: refused the object",
+        ),
+        "pass",
+    )
+    covered, sibling = case["kernels"]
+    assert covered.get("detail") == "waitcheck_backend_exit_2: refused the object"
+    assert sibling.get("verdict") == "error"
+    assert "same code object as kern_A; scanned once" in sibling.get("detail", "")
+
+
+def test_digestless_kernels_are_never_attributed_to_each_other():
+    # Review (#479): this fixture used to be a ConSan check with code_object=None, so
+    # the sanitizer and code-object conjuncts each excluded the attribution before the
+    # digest was consulted -- it pinned the disjunction, not the conjunct it is named
+    # for. A waitcheck check with a real code object and no digest isolates it.
+    #
+    # Keying attribution on (sha, index) collapses every digest-less identity onto
+    # (None, None) and lets an unrelated sibling's verdict be reported as "the same
+    # code object" -- an object that cannot have been deduped, because dedup is keyed
+    # on the digest. Only a real digest may be attributed.
+    #
+    # The digest requirement is enforced on both sides of the index -- the producer
+    # asks for a real `row_sha`, the recipient for a real `entry_sha` -- and this test
+    # pins the pair. Relaxing either alone cannot change the output: both read the same
+    # field of the same object, so a covering row without a digest keys ("None", index)
+    # and can never match a recipient row that has one.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="waitcheck", code_object="/a/b/sol.hsaco", sha=None,
+            why="waitcheck_backend_exit_2: refused the object",
+        ),
+        "pass",
+    )
     covered, uncovered = case["kernels"]
-    assert covered.get("detail") == "consan_hook_not_found"
-    # kern_B ran nothing and shares no object, so it keeps the em dash and stays silent
+    assert covered.get("detail") == "waitcheck_backend_exit_2: refused the object"
+    # kern_B has nothing that could have been deduped, so it stays silent
     assert uncovered.get("verdict") == "\u2014"
     assert uncovered.get("detail") == ""
-    assert "same code object" not in uncovered.get("detail", "")
+
+
+def test_an_objectless_kernel_is_never_attributed_to_a_sibling():
+    # The code-object conjunct on its own. A digest with no code object is not a scan
+    # of anything nameable -- "same code object as kern_A" would cite a file the report
+    # never identified, and ConSan identities reach here with exactly that shape.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="waitcheck", code_object=None, sha="beefaaa1",
+            why="waitcheck_backend_exit_2: refused the object",
+        ),
+        "pass",
+    )
+    covered, uncovered = case["kernels"]
+    assert covered.get("detail") == "waitcheck_backend_exit_2: refused the object"
+    assert uncovered.get("verdict") == "\u2014"
+    assert uncovered.get("detail") == ""
+
+
+def test_only_a_waitcheck_scan_covers_a_sibling_sharing_its_object():
+    # The sanitizer conjunct on its own: a full identity, digest and all, but the
+    # result came from ConSan. Whole-object dedup is Waitcheck's behaviour
+    # (run_waitcheck skips a repeated (sha, index) selection); ConSan runs the process
+    # once and attributes per kernel, so a ConSan result for kern_A says nothing about
+    # kern_B and "scanned once" would be a fabricated claim of coverage.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="consan", code_object="/a/b/sol.hsaco", sha="beefaaa1",
+            why="consan_hook_not_found",
+        ),
+        "pass",
+    )
+    covered, uncovered = case["kernels"]
+    assert covered.get("detail") == "consan_hook_not_found"
+    assert uncovered.get("verdict") == "\u2014"
+    assert uncovered.get("detail") == ""
 
 
 def test_kernel_tables_render_the_reason_on_both_twins():
@@ -3321,6 +3396,37 @@ def test_survey_message_error_reason_takes_precedence_over_partial_findings():
     assert '<span class="lbl">Reason</span><span class="msg">combined_hook_timeout' in html
     assert "HEALTHY" in html
     assert "REGRESSION" not in html and "Regression" not in html
+
+
+def test_a_group_note_cannot_corrupt_the_survey_rollup_row():
+    # Review (#479): the last sink of the class this PR swept. The Note cell took the
+    # reason raw, unlike the sibling Detail and Example cells, so a backend reason —
+    # reachable today via "waitcheck_analysis_failed: <parser output>" — ended the row
+    # mid-table on its newline and shifted every later cell on its pipe.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "consan-obj", "group": "obj", "sanitizer": "consan",
+             "report": _errored_report_with_partial_findings(
+                 "waitcheck_analysis_failed: worklist_not_fully_checked\nwith | a pipe"
+             )},
+        ]}
+    )
+    groups = gen._group_survey_entries(entries)
+    lines = gen._survey_summary_md(groups)
+    rows = [line for line in lines if line.startswith("| ") and "---" not in line]
+    header, body = rows[0], rows[1:]
+    assert header == "| Kernel | waitcheck | ConSan | Findings | Note |"
+    assert len(body) == 1
+    row = body[0]
+
+    # the row stays one line with exactly the header's cell count
+    assert "\n" not in row
+    assert row.count("|") - row.count("\\|") == header.count("|")
+    # and the note is still readable, on one line, with its pipe escaped
+    assert "worklist_not_fully_checked with \\| a pipe" in row
+
+    # the HTML twin renders inside a <td> and needs neither, but must stay intact
+    assert "worklist_not_fully_checked" in gen._survey_group_note(groups[0][1])
 
 
 def _coverage_incomplete_reason(attribution: str) -> str:
