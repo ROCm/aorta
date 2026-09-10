@@ -797,18 +797,26 @@ class TestFetchFailures:
         ``test_it_replaces_an_existing_index``: the staging directory sits
         beside the destination and installing is a rename, so a refusal raised
         before ``_install_staged`` must leave both files exactly as they were.
+
+        The sidecar is a whole manifest rather than the one-field stub this
+        started with, because the write guards now read it: a stub is a
+        destination whose manifest this install cannot parse, which is its own
+        refusal (``IndexOverwriteError``, raised before the download) and not
+        the mismatch this test is about. Both refusals leave the files alone,
+        so the stub would have gone on passing for the wrong reason.
         """
         _reserialise(server, _manifest(embedding_model="other/model"))
         dest = tmp_path / "index.sqlite"
         dest.write_bytes(b"the index the user already had")
         existing = manifest_mod.manifest_path(dest)
-        existing.write_text('{"schema_version": 1}', encoding="utf-8")
+        installed = _manifest().to_json()
+        existing.write_text(installed, encoding="utf-8")
 
         with pytest.raises(manifest_mod.IndexMismatchError):
             fetch_index(version="0.2.1", index_path=dest)
 
         assert dest.read_bytes() == b"the index the user already had"
-        assert existing.read_text(encoding="utf-8") == '{"schema_version": 1}'
+        assert existing.read_text(encoding="utf-8") == installed
         assert sorted(p.name for p in dest.parent.iterdir()) == [
             "index.sqlite",
             "index.sqlite.manifest.json",
@@ -1245,23 +1253,42 @@ class TestProvenanceIsReadOffTheManifest:
         ids=["str-with-slash", "bare-str", "null", "int", "object", "mixed-list"],
     )
     def test_a_recorded_value_that_is_not_a_list_of_paths_is_invalid(self, roots):
-        """``Manifest.from_dict`` type-checks nothing, so this has to.
+        """The classifier validates the field it classifies on.
 
         Iterating a string yields characters and ``Path("/").is_absolute()`` is
         true, so ``"src/aorta"`` classified as a *local build* and ``"docs"``
         as a *published* one -- both answers derived from nothing -- while
         ``[42]`` raised ``TypeError`` straight past the CLI's error guard.
+
+        Parsed with ``strict=False`` because that is how the value gets here
+        now: #463 made the field-type check part of parsing, and the write
+        guards opted out of it in ``_read_destination`` precisely so they can
+        still tell an unclassifiable sidecar from a missing one. This is the
+        reader on the other end of that decision.
         """
         manifest = manifest_mod.Manifest.from_dict(
-            {**json.loads(_manifest().to_json()), "corpus_roots": roots}
+            {**json.loads(_manifest().to_json()), "corpus_roots": roots}, strict=False
         )
 
         assert index_ops.index_provenance(manifest) == index_ops.PROVENANCE_INVALID
 
+    @pytest.mark.parametrize("roots", ["src/aorta", 7, ["src/aorta", 42]])
+    def test_the_strict_parse_every_other_reader_uses_refuses_them(self, roots):
+        """The other half of that split, so the opt-out cannot spread silently.
+
+        Tolerance belongs to the write guards alone. If a default parse ever
+        starts admitting these values, an index that cannot be classified
+        becomes one that gets *loaded*, and the test above would not notice.
+        """
+        raw = {**json.loads(_manifest().to_json()), "corpus_roots": roots}
+
+        with pytest.raises(manifest_mod.ManifestError, match="corpus_roots"):
+            manifest_mod.Manifest.from_dict(raw)
+
     def test_the_status_payload_reports_an_unusable_value_as_null(self):
         """Not as the characters of a string, which is what ``list()`` gave."""
         manifest = manifest_mod.Manifest.from_dict(
-            {**json.loads(_manifest().to_json()), "corpus_roots": "src/aorta"}
+            {**json.loads(_manifest().to_json()), "corpus_roots": "src/aorta"}, strict=False
         )
 
         assert index_ops._side(manifest)["corpus_roots"] is None
@@ -1369,6 +1396,15 @@ class TestFetchWillNotSilentlyDiscardALocalBuild:
         be classified by iterating it: ``"docs"`` came out *published*, so the
         fetch went ahead and overwrote whatever was there, and ``[42]`` left a
         ``TypeError`` traceback. Neither answer is available, so this refuses.
+
+        Still the *unclassifiable* refusal after #463 moved field-type checking
+        into the parser, because ``_read_destination`` reads a write target
+        tolerantly on purpose: parsed strictly, this sidecar would be merely
+        unreadable, which is a different -- and here untrue -- thing to tell
+        someone. ``_unfollowable_fetch_offers`` is asserted for the same reason
+        it is in ``TestTheRemedyCanBeFollowed``: this refusal ends in its own
+        ``--force``, so a parser remedy carried into it would be a second,
+        looping instruction.
         """
         dest = tmp_path / "i.sqlite"
         dest.write_bytes(b"an index of unknown provenance")
@@ -1376,9 +1412,11 @@ class TestFetchWillNotSilentlyDiscardALocalBuild:
         raw["corpus_roots"] = "docs"
         manifest_mod.manifest_path(dest).write_text(json.dumps(raw), encoding="utf-8")
 
-        with pytest.raises(index_ops.IndexOverwriteError, match="cannot classify"):
+        with pytest.raises(index_ops.IndexOverwriteError, match="cannot classify") as exc:
             fetch_index(version="0.2.1", index_path=dest)
 
+        message = str(exc.value)
+        assert _unfollowable_fetch_offers(message) == []
         assert dest.read_bytes() == b"an index of unknown provenance"
         assert server.requested == [], "it should refuse before any request"
         assert fetch_index(version="0.2.1", index_path=dest, force=True).index_path == dest

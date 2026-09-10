@@ -264,14 +264,23 @@ PROVENANCE_INVALID = "invalid"
 def _corpus_roots(manifest: manifest_mod.Manifest) -> list[str] | None:
     """``corpus_roots`` as a list of strings, or ``None`` when it is unusable.
 
-    ``Manifest.from_dict`` is forward-tolerant and type-checks nothing, so a
-    hand-written or hand-edited sidecar -- which is the side-load path's
-    ordinary case -- can carry a scalar here. Iterating a string yields
+    A hand-written or hand-edited sidecar -- the side-load path's ordinary case
+    -- used to reach here carrying a scalar. Iterating a string yields
     characters and ``Path("/").is_absolute()`` is true, so ``"src/aorta"``
     classified as a local build and ``"docs"`` as a published one, both from
     nothing at all; ``[42]`` raised ``TypeError`` straight past the CLI's
     error guard. A field that decides whether a destructive overwrite is
     refused has to be validated rather than coerced.
+
+    #463 added a field-type check to ``Manifest.from_dict``, which closes that
+    route for every reader that parses strictly -- meaning everything that
+    loads an index. It does not close it here: :func:`_read_destination` parses
+    a write target with ``strict=False`` on purpose, because "this sidecar
+    cannot be classified" and "this path has no manifest I can read" are
+    different things to tell someone about a file that is about to be
+    overwritten, and only this function can tell them apart. So a scalar still
+    arrives, from the one caller that has to see it, and this still fails
+    closed -- the cost of guessing is an overwrite.
 
     One reader, shared by the guards and by ``index status``'s payload, so the
     verdict and the reported value cannot disagree about what was readable.
@@ -351,7 +360,33 @@ def _read_destination(index_path: str | Path) -> tuple[manifest_mod.Manifest | N
             return None, f"{target} is a symlink to {os.readlink(target)}, which does not exist"
         return None, ""
     try:
-        return manifest_mod.read_manifest(target), ""
+        # ``strict=False``: the three states above are the whole product of this
+        # function, and #463's field-type check collapses two of them. A sidecar
+        # recording ``corpus_roots`` as a scalar is a *classification* failure,
+        # answered below by ``index_provenance`` returning ``invalid`` and by
+        # the guards' unclassifiable refusal; parsed strictly it becomes an
+        # unreadable manifest instead, indistinguishable from a mistyped
+        # ``--output`` at a file this tool never wrote. Both refuse, so nothing
+        # was unsafe -- but the refusals say different things, only one of them
+        # is true, and the build guard's exemption for an index this install
+        # already refuses cannot be evaluated at all once the manifest it turns
+        # on has stopped being readable. That exemption is what keeps `doctor`
+        # says rebuild -> `build` refuses from being a dead end.
+        #
+        # Strictness is not lost, it is relocated to the reader that needs it:
+        # everything that *loads* an index still parses strictly, and the values
+        # this tolerance admits reach only ``index_provenance``, which validates
+        # ``corpus_roots`` itself, and ``_unusable_reasons``/
+        # ``_describe_tolerantly``, which are built to survive a field they
+        # cannot render.
+        #
+        # ``advise=False``: this reason is embedded in a refusal that ends with
+        # its own ``--force`` escape, so the parser's "Replace it with 'aorta
+        # chat index fetch'" arrives inside the message refusing that very
+        # fetch. Same loop as the published case in :func:`_parse_manifest`,
+        # reached from the local side -- the caller knowing the origin is again
+        # the one that should write the remedy.
+        return manifest_mod.read_manifest(target, advise=False, strict=False), ""
     except (manifest_mod.ManifestError, UnicodeDecodeError, OSError) as exc:
         # ``read_manifest`` wraps its parse failures and not its *read* ones, so
         # a sidecar that is not UTF-8 -- a truncated multi-byte write, or a file
@@ -397,7 +432,16 @@ def _unusable_reasons(target: Path) -> list[str]:
     sidecar that changed in between must not become a traceback either.
     """
     try:
-        return list(check_index(target, strict=False).refusals)
+        # Read the way :func:`_read_destination` reads, and handed to
+        # ``check_index`` so it is not read twice. Strictly, a sidecar with one
+        # wrong-typed field raises here and every such index reports "unusable"
+        # -- which is the answer that *exempts* it from the build guard, so the
+        # guard would have stopped refusing anything with a hand-edited
+        # manifest. The question being asked is whether this install could
+        # query the index, and one bad ``corpus_roots`` over a matching store
+        # does not stop it.
+        manifest = manifest_mod.read_manifest(target, strict=False)
+        return list(check_index(target, strict=False, manifest=manifest).refusals)
     except manifest_mod.ManifestError as exc:
         return [str(exc)]
     except Exception as exc:  # noqa: BLE001 - a broken sidecar is an answer, not a crash
@@ -891,6 +935,7 @@ def check_index(
     index_path: str | Path | None = None,
     *,
     strict: bool = True,
+    manifest: manifest_mod.Manifest | None = None,
 ) -> manifest_mod.ValidationReport:
     """Validate an on-disk index against the configured provider.
 
@@ -903,12 +948,18 @@ def check_index(
     reporting a healthy index over one whose build was interrupted, where every
     field it could read came from the sidecar the interrupted build never got
     round to replacing.
+
+    ``manifest`` lets a caller supply the sidecar it has already read, which is
+    :func:`_unusable_reasons` asking this question of a manifest parsed
+    tolerantly. Read here otherwise, and strictly, because every other caller
+    is predicting what the load path will do and the load path parses strictly.
     """
     from aorta.chat.rag.retriever import IndexUnreadableError, collection_chunk_count
 
     target = Path(index_path) if index_path else settings.index_file
     provider = get_provider()
-    manifest = manifest_mod.read_manifest(target)
+    if manifest is None:
+        manifest = manifest_mod.read_manifest(target)
 
     unreadable = ""
     chunk_count: int | None = None
@@ -944,6 +995,9 @@ def check_index(
     # defeated this function's own docstring, and PR #463 grew a second
     # store-reading helper in ``doctor`` to work around it.
     if unreadable:
+        # Recorded on the report as well as refused, so ``doctor`` can tell this
+        # apart from a provider mismatch without reading the sentence back.
+        report.unreadable = unreadable
         # Two messages, because "describes 0 chunks" would be a claim the
         # manifest never made.
         claim = (
@@ -1236,9 +1290,11 @@ def _parse_manifest(text: str, source: IndexSource, dest: Path) -> manifest_mod.
     got into the sidecar 404s twice.
     """
     try:
-        manifest = manifest_mod.Manifest.from_dict(json.loads(text))
+        manifest = manifest_mod.Manifest.from_dict(json.loads(text), advise=False)
         _ensure_field_types(manifest)
-        manifest_mod.ensure_supported_schema(manifest, f"the index at {source.index_url}")
+        manifest_mod.ensure_supported_schema(
+            manifest, f"the index at {source.index_url}", advise=False
+        )
     except (ValueError, manifest_mod.ManifestError) as exc:
         raise IndexFetchError(
             f"the manifest at {source.manifest_url} is not usable: {exc}\n"
@@ -1819,7 +1875,7 @@ def side_load(
     # escaped as ``AttributeError`` out of the provider validation below, both
     # past the ``IndexFetchError`` the CLI knows how to print.
     try:
-        manifest = manifest_mod.read_manifest(origin)
+        manifest = manifest_mod.read_manifest(origin, advise=False)
         _ensure_field_types(manifest)
     except (manifest_mod.ManifestError, UnicodeDecodeError, ValueError) as exc:
         # Its own remedy, for the same reason :func:`_parse_manifest` writes

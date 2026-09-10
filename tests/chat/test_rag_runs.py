@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -676,3 +678,117 @@ class TestMissingCollection:
         from aorta.chat.tools.artifacts import search_run_artifacts
 
         assert search_run_artifacts.invoke({"query": "x", "k": 0}).startswith("Error:")
+
+
+class TestTheRunStoreIsOpenedOnceUnderConcurrency:
+    """One store per process, even when the first two queries overlap.
+
+    ``_store_cache`` was safe while every reader was on the event loop, which
+    serialised them by construction. ``retrieve_node`` now reaches it through
+    ``asyncio.to_thread``, so two sessions whose first run-artifact query
+    overlaps genuinely run ``_get_store`` on two worker threads.
+
+    Measured before the lock, at 8 threads: 8 sqlite connections opened, 7 of
+    them dropped by a later assignment without being closed, and 8 embedding
+    models loaded -- the per-instance lock in ``FastembedBgeEmbeddings`` does
+    not cover this, because each store builds its own provider.
+    """
+
+    @staticmethod
+    def _race(monkeypatch, tmp_path, threads=8):
+        index = tmp_path / "index.sqlite"
+        index.write_text("x")
+        opened = []
+
+        class SlowStore:
+            def __init__(self, **_kw):
+                opened.append(self)
+                # Widen the window a real cold open would have anyway.
+                threading.Event().wait(0.02)
+
+            def collection_exists(self):
+                return True
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(runs_rag, "SqliteVecStore", SlowStore)
+        monkeypatch.setattr(runs_rag, "get_provider", lambda: SimpleNamespace(
+            get_embeddings=lambda: object()
+        ))
+        monkeypatch.setattr(runs_rag, "run_collection_name", lambda: "c")
+        monkeypatch.setattr(
+            runs_rag,
+            "settings",
+            SimpleNamespace(index_file=index, runs_root=tmp_path),
+        )
+        monkeypatch.setattr(runs_rag, "_store_cache", None)
+
+        ready = threading.Barrier(threads)
+        got = []
+
+        def go():
+            ready.wait(timeout=5)
+            got.append(runs_rag._get_store())
+
+        # Daemon threads: a worker stuck on a lock must not keep the
+        # interpreter alive after the verdict. Without this the assertion below
+        # reports in ~10s and the process then hangs at exit anyway, which puts
+        # the runner back where it started.
+        workers = [
+            threading.Thread(target=go, daemon=True) for _ in range(threads)
+        ]
+        for w in workers:
+            w.start()
+        # One deadline for the whole set, not a timeout per worker: the latter
+        # waits `threads * 10s` in the worst case, so the bound grows with the
+        # thread count and a slow hang can outlast the early joins and still
+        # look clean.
+        deadline = time.monotonic() + 10
+        for w in workers:
+            w.join(timeout=max(0.0, deadline - time.monotonic()))
+        # Bounded *and* asserted. The bound alone would turn a hang into a
+        # false pass: `opened` can read 1 while workers are still blocked
+        # inside `_get_store`, which is exactly what the callers assert on. The
+        # liveness check is what makes the bound mean something.
+        stuck = [w for w in workers if w.is_alive()]
+        assert not stuck, (
+            f"{len(stuck)} of {threads} workers still in _get_store() after 10s"
+        )
+        return opened, got
+
+    def test_eight_racing_threads_open_one_connection(self, monkeypatch, tmp_path):
+        opened, _got = self._race(monkeypatch, tmp_path)
+        assert len(opened) == 1
+
+    def test_every_thread_gets_that_same_store(self, monkeypatch, tmp_path):
+        opened, got = self._race(monkeypatch, tmp_path)
+        # The point of the re-check under the lock: the waiters must adopt the
+        # winner's store, not open their own once the lock frees.
+        assert len(got) == 8
+        assert {id(s) for s in got} == {id(opened[0])}
+
+    def test_the_cached_read_does_not_take_the_lock(self, monkeypatch, tmp_path):
+        """Otherwise every later search serialises behind one mutex forever.
+
+        Asserted with a double that raises on entry, not by holding the real
+        lock. Holding it would make this test *hang* on the regression it
+        exists to catch: ``_store_lock`` is not reentrant, so a cached path
+        that took it would block forever on a lock this same thread already
+        owns. A hang is strictly worse than a failure -- it burns a runner to
+        the platform timeout and reports nothing -- and ``pytest-timeout`` is
+        installed here but never armed (#474), so nothing would cut it short.
+        Same shape as the ``_model_lock`` test in
+        ``test_embeddings_factory.py``.
+        """
+        _opened, got = self._race(monkeypatch, tmp_path, threads=2)
+
+        class Explodes:
+            def __enter__(self):
+                raise AssertionError("the lock was taken on the cached path")
+
+            def __exit__(self, *_):
+                return False
+
+        monkeypatch.setattr(runs_rag, "_store_lock", Explodes())
+        assert runs_rag._get_store() is got[0]

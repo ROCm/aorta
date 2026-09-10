@@ -186,6 +186,135 @@ The symptom is distinctive — `finish_reason` is `stop`, output tokens are
 non-zero, and `content` is empty — and the logs say so:
 `act_node ... produced no text despite N output tokens`.
 
+### Automatic escalation to `native`
+
+**AORTA now acts on that signature rather than only logging it.** On seeing it,
+the query is retried once through `native`; if that retry answers, the protocol
+is kept for the rest of the process and one log line says so. The default stays
+`text`, because flipping it globally would break a stock local vLLM (see the
+endpoint row in the table above) — this is detection, not a new default.
+
+Five things follow from that:
+
+- **An explicit `llm_tool_mode` is never overridden**, whether it comes from
+  the profile file or `AORTA_CHAT_LLM_TOOL_MODE`. If you set `text`
+  deliberately, set it; the escalation only ever moves the built-in default.
+- **The wasted spend is bounded; the retry itself is not capped to one call.**
+  What is bounded is the cost of *failure*: the escalated retry tolerates a
+  single empty reply rather than the usual two, so a model that is silent on
+  `native` as well costs exactly one extra call. A retry that is *working* —
+  calling tools and getting results — is not truncated; it runs the ordinary act
+  loop under the ordinary round budget, because cutting a productive loop off at
+  one round would spend the call and throw away the answer it was about to
+  reach.
+
+  So the cases have different ceilings, and only the first is the escalation's
+  own bill. Counted as whole turns — `act` always flows to `critic`, so a
+  figure that stops at the act loop is a subtotal, not a cost:
+
+  | Escalated turn | Calls | Made up of |
+  |---|---|---|
+  | Silent on both protocols | **6** | router, plan, 2 text rounds, 1 escalated native round, 1 retrieval-fallback answer — the critic short-circuits on the empty `command_output` and spends nothing |
+  | Native drives tools, critic accepts | **14** search, **11** otherwise | the same 4-call prefix, then `MAX_ACT_ROUNDS_SEARCH` (8) or `MAX_ACT_ROUNDS` (5) native rounds, 1 synthesis call, 1 critic validation |
+  | Native drives tools, critic rejects every pass | **34** search | three act passes — `MAX_RETRY_ITERATIONS` (3) counts passes, not hand-backs, so the critic returns to `act` twice — with the second and third starting on `native` and paying no text rounds |
+
+  The escalation does not raise the round budget; it reaches the ordinary one on
+  a query that had already spent two rounds proving it needed to. And because
+  the protocol moves once per process rather than once per query, those two text
+  rounds are paid once and not on every later query — the same rejected-every-
+  pass turn costs 32 once the protocol has already moved.
+- **The switch is thrown only once native has answered.** An endpoint that
+  refuses the protocol must not be able to select it, which is what throwing the
+  switch up front let it do: the refusal became the state for every later query.
+  A failed retry therefore changes nothing except a counter, and the query falls
+  back exactly as it would have if the escalation had never fired. Two such
+  failures write native off for the rest of the process — two rather than one
+  because a timeout and a permanent refusal arrive identically, and what tells
+  them apart is whether it happens again. A retry that comes back *silent*
+  counts the same as one that errored: "the request returned" is not "the
+  protocol works", and a model that says nothing on either protocol must not be
+  billed for a native round on every query from then on.
+  "Answered" means the model returned prose **or** made at least one tool call.
+  A retry that drove a real tool call and then hit a backend error has proved
+  the protocol works, so it moves the protocol and does *not* spend one of the
+  two failures — otherwise two transient 503s after working tool calls would
+  strand the process on `text` for good. Only a failure with no tool call
+  behind it counts, which is the shape a refused `tools` payload actually has.
+  The same applies when the retry's calls were *all* duplicates of ones the
+  text loop had already run: the duplicate guard below answers them from the
+  recorded results, so nothing new is executed and the retry can end with no
+  fresh results and no prose. It emitted structured `tool_calls` to get there,
+  which is the whole question being asked, so it moves the protocol and spends
+  no failure. The log for it says the calls were repeats rather than claiming
+  the query was answered, because on this path it was not.
+  The budget also counts *probes*, not requests in flight: two `ui` sessions
+  that both fail inside the same outage spend one failure between them, because
+  neither was a second probe — nothing was tried in between, so the pair says
+  nothing the first failure did not. Two failures with a completed attempt
+  between them still write native off, which is the case the budget is for.
+- **A tool the text protocol already ran is not run again.** The retry is
+  handed the results the abandoned loop gathered and its duplicate guard is
+  seeded with those calls, so a model that asks for one of them gets the
+  recorded result rather than a second execution. That is a saved call on the
+  default tool set, all of which is read-only; with `enable_shell_tool` it is a
+  side effect that does not happen twice.
+- **The scope is the process, not the conversation.** Under `aorta chat` that is
+  the same thing, but `aorta chat ui` serves many browser sessions from one
+  server, and there the escalation is shared by all of them. That is deliberate:
+  what was detected is a property of the *model* — it emits reasoning instead of
+  an `ACTION:` line — so it is equally true for every session talking to that
+  endpoint, and sharing it means only the first query in the process pays the
+  wasted round. Nothing about a conversation is carried across; the state is a
+  flag and a counter about protocol support. Sessions that dead-end at the same
+  moment each get their own retry — the shared state records the outcome, it
+  does not ration the attempt.
+
+### Reading the protocol that is actually in force
+
+Two places name it, and both come from this change. The `LLM backend:` line
+logged at startup names the protocol alongside the provider. The escalation logs
+a line of its own when it fires, and that one names the protocol itself rather
+than pointing at the startup banner, so it stands on its own wherever it is
+read — including in a server log where the startup line has scrolled away.
+
+`aorta chat doctor` is the third place, and what it says there is owned by
+[#463](https://github.com/ROCm/aorta/pull/463) rather than by this change: it
+adds a hint to the tool-mode line naming the configured protocol and what it
+costs. The two startup signals above are what this change contributes and they
+do not depend on #463 having landed.
+
+One gap in them: the startup line comes from the CLI entry points, so
+`aorta chat` and `aorta chat ask` get it and `aorta chat ui` does not — its
+Chainlit welcome banner names the provider but not the protocol, which is the
+front door where the process-wide scope above matters most.
+[#468](https://github.com/ROCm/aorta/issues/468) tracks putting it there. Until
+it does, a UI operator reads the protocol from the escalation warning in the
+server log, or from `aorta chat doctor`.
+
+### Answering from retrieved context when the act loop gives up
+
+When the act loop gives up, it makes one tool-free attempt to answer from the
+context `retrieve` already gathered, and labels that answer as having used no
+tools. **This is independent of the escalation to `native`** and worth stating
+separately, because the two are often confused: it fires whenever the loop
+abandons with no tool run, including under an explicitly configured
+`llm_tool_mode = "text"`, where the escalation is refused outright and no native
+retry is attempted at all. So an action-routed question to a reasoning model
+does not come back empty-handed even when the protocol never moves.
+
+It applies only when no tool ran at all: once one has — including one that
+returned an error, and including one the escalated native retry made before the
+backend fell over — "I could not use my tools" would be untrue, so that query
+gets the plain give-up notice instead. A tool *outage* is therefore not covered
+by it. What is covered is a model that can drive neither protocol, and an
+endpoint that refuses the escalated one (a stock local vLLM without
+`--enable-auto-tool-choice` and a matching `--tool-call-parser` does): that
+refusal never moves the protocol — the switch is thrown only once native has
+answered, so there is nothing to roll back — and it lands on this same fallback
+rather than escaping as an error. It takes two such failures to write native
+off for the rest of the process, so one transient timeout does not disable the
+escalation; the warning names which attempt it was.
+
 `aorta chat doctor` reports the resolved mode as its own check, and warns before
 you spend a query on it when `text` is paired with a model whose name reads as a
 reasoning one — a locally served one as much as a remote one, since the channel
@@ -197,7 +326,20 @@ endpoint has to accept, because nothing in that report tests it: no probe sends
 a request carrying `tools`. A local vLLM is asked for `/health`, which a server
 that rejects `tools` answers normally, and the remote backends are not called
 at all — their `probe()` is a configuration preflight, deliberately, so that a
-diagnostic cannot bill you for a round trip.
+diagnostic cannot bill you for a round trip. The startup line names the
+resolved protocol alongside the provider.
+
+Two paths still end with no answer. The first is a model that also returns empty
+content on the tool-free route — rarer than it sounds, since the reporter's
+transcript shows the same question answered correctly through the `question`
+route in 2 calls while the `action` route returned nothing in 4, because the
+empty-content behaviour belongs to the tool protocols and not to the model.
+
+The second is the flip side of the paragraph above: because a non-empty tool
+trace skips the retrieval fallback, a query that *did* run tools and then failed
+to turn them into prose gets the give-up notice with its results recorded but
+unused. Answering from partial results is tracked in
+[#475](https://github.com/ROCm/aorta/issues/475) and is not fixed here.
 
 Both protocols run the same tools, retrieval and critic, and both are guarded
 the same way: an empty reply is never used as the answer, unproductive rounds
@@ -215,10 +357,13 @@ The agent is agentic, not a single completion, so one question fans out:
 | --- | --- |
 | Question (route → retrieve → answer) | 2 |
 | Action, first pass (route → plan → retrieve → act → critic) | 3 + up to `max_act_rounds`, plus one synthesis call if the loop is exhausted |
-| Each critic rejection | Replays act + critic, up to `max_retry_iterations` times |
+| Each critic rejection | Replays act + critic; `max_retry_iterations` caps *act passes*, so the shipped 3 allows two replays |
 
-A search-shaped action query can therefore reach about 12 calls in one pass, and
-several critic passes can push a single question past forty. Most action queries
+A search-shaped action query can therefore reach **12** calls in one pass, and
+all three passes reach **32** — or **34** when it is also the query that
+escalates to `native`, which pays two text rounds once (see [Automatic
+escalation to `native`](#automatic-escalation-to-native) for the per-case
+breakdown). Most action queries
 land in the 4–6 range in practice, because the act loop stops as soon as the
 model answers without a tool call and the critic usually accepts first time.
 With `embedding_provider = "remote"`, each retrieval and each `search_code` call
@@ -263,7 +408,13 @@ Knobs that lower the bill, roughly in order of effect:
 | `Incorrect API key provided: unused` from `platform.openai.com` | `remote_llm_auth_header` is set but `remote_llm_base_url` is empty, so the request went to OpenAI. The preflight line says `at the provider default endpoint` when this is wrong. |
 | `404` on an `*.openai.azure.com` endpoint | Azure OpenAI needs the `litellm` backend, not `openai`. |
 | `missing_keys: ['AZURE_API_VERSION', ...]` | Export all three `AZURE_*` variables; there is no setting for `api_version`. |
-| `I could not complete that request...` | The model returned empty content. On a reasoning model, set `llm_tool_mode = "native"`. |
+| `I wasn't able to answer that -- check the warning logged...` | The act loop produced no usable text. Which attempts it made first depends on `llm_tool_mode` and on whether a tool had already run, so read the warning logged beside this message — it names the step that gave up. `aorta chat doctor` covers the configuration faults that reach this message by other routes. |
+| `this process will use native from here` | Not an error. A *round* under `text` returned neither text nor a tool call — the line names the signature that was observed — and native then proved the protocol works, so chat switched for the rest of this process. It is a claim about that round, not about the query: earlier rounds may have run tools successfully, their results are on the turn's trace, and the retry is seeded with them. The same line is logged whether native *answered* the query or only *drove structured tool calls* without answering it — the clause before the comma says which, and only the first means this query got a reply. Set `llm_tool_mode` yourself to pin it either way. |
+| `The escalated native tool-calling request failed ... without making a tool call` | The retry was tried and the request did not come back, having called nothing. If it is a local vLLM, it needs both `--enable-auto-tool-choice` and a matching `--tool-call-parser` (see the endpoint row in the table above); otherwise the endpoint may simply have been unwell. The protocol does *not* move, and the line says which attempt it was — after the second, native is not tried again in this process. Set `llm_tool_mode = "text"` to skip the attempt entirely. |
+| `The escalated native tool-calling request failed before it could call anything` | The same outcome, one step earlier: the backend could not even be built or the tool schemas could not be bound, so no request was made. Counts as an attempt in the same way. Read the exception named on the line — this is a backend or configuration fault, not a protocol one. |
+| `... drove structured tool calls and then failed` | Structured tool calling *works* on this endpoint and the backend fell over afterwards. So the protocol **does** move to `native`, and this deliberately does not count against the two-failure budget — otherwise two transient errors after working tool calls would strand the process on `text`. What those calls gathered is recorded on the turn, but the request that would have turned it into an answer is the one that failed, so this query still gets the give-up notice — synthesising a reply from partial results is [#475](https://github.com/ROCm/aorta/issues/475). |
+| `The escalated native tool-calling request returned no answer and no tool call either` | The retry reached the endpoint and the model was as silent on `native` as it was on `text`, so the protocol is not what it is failing on. `text` stays in force, and this counts as one of the two attempts above. Nothing here is a configuration fault; the model cannot drive either protocol for this query. |
+| An answer prefixed `I could not use my tools for this question` | The act loop gave up without any tool having run, so the answer came from retrieved context alone and anything needing a live lookup is missing from it. The prefix does not identify *why*, and it is not always the row above: it is also reached when `llm_tool_mode` is explicitly `text` so no escalation is allowed, when the two-failure budget is already spent *and* native was never proved to work (once it has been, a spent budget no longer refuses the retry), and when the native retry failed before it could call anything. Read the warning logged beside the answer — that line, not this prefix, names the cause. |
 | Many `Act round N: ... re-prompting` lines and no answer | Same cause. Set `llm_tool_mode = "native"`. |
 | `Waiting for vLLM at ...` when you meant to go remote | `llm_provider` is still `vllm`. Check the backend line printed at startup. |
 | The call-count line never appears | Expected on `llm_provider = "vllm"`; only the remote backends attach the counter. |

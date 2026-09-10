@@ -166,7 +166,12 @@ def _quiet_mode() -> None:
 
     # Keep backend readiness, remote call counts, and agent routing/act
     # messages visible.
-    for useful in ("aorta.chat.session", "aorta.chat.inference", "aorta.chat.graph.nodes"):
+    for useful in (
+        "aorta.cli.chat",
+        "aorta.chat.session",
+        "aorta.chat.inference",
+        "aorta.chat.graph.nodes",
+    ):
         logging.getLogger(useful).setLevel(logging.INFO)
 
 
@@ -403,7 +408,15 @@ async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) 
             await backend.preflight()
     except (ImportError, ValueError) as exc:
         raise click.ClickException(f"LLM backend unavailable: {exc}") from exc
-    logger.info("LLM backend: %s", backend.describe())
+    # The tool protocol rides along with the provider. It decides whether an
+    # action-routed query can call a tool at all, and until it appeared here the
+    # first signal that it was wrong for the configured model was a query that
+    # answered nothing.
+    logger.info(
+        "LLM backend: %s (tool protocol: %s)",
+        backend.describe(),
+        _load("config").get_settings().llm_tool_mode,
+    )
 
     if query is None:
         await _interactive_loop(session.invoke_agent, output_mode, quiet, backend)

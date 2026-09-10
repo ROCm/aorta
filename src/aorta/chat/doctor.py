@@ -1293,6 +1293,27 @@ def _check_index(report: Report) -> None:
         # turn, and a first remedy that cannot work gets the whole refusal
         # worked around.
         remedies = "\n".join(manifest_mod.remedy_lines(include_doctor=False))
+        if result.unreadable:
+            # A file nothing can open is not a mismatch, and used to arrive at
+            # the branch below instead: ``check_index`` only refused an
+            # unopenable store when the manifest claimed a chunk count to
+            # contradict, so the state fell through to ``_store_defect``, which
+            # is why that second store reader exists. #465 removed the gate, so
+            # every unopenable store now refuses here first -- and the mismatch
+            # wording below would tell someone whose index is truncated that
+            # their vectors came from a different embedding model.
+            report.add(
+                "index manifest",
+                FAIL,
+                "describes an index this install cannot read",
+                hint="\n".join(result.refusals),
+                procedure=(
+                    "The manifest and the store under it are from different "
+                    "builds, or the file did not arrive intact. Queries are "
+                    "refused rather than answered from whatever survived.\n" + remedies
+                ),
+            )
+            return
         report.add(
             "index manifest",
             FAIL,
