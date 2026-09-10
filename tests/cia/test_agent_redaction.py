@@ -103,18 +103,26 @@ class TestTheGateIsOnEveryAgentLM:
             assert name in vars(RedactingLM), f"{name} is not gated"
 
 
-class TestWhenRedactionIsUnavailable:
-    def test_text_passes_through_rather_than_crashing(self, monkeypatch):
-        """The agents run on a base install; the chat package may be absent."""
+class TestWhenTheChatPackageIsAbsent:
+    def test_the_text_is_still_redacted(self, monkeypatch):
+        """The agents run on a base install, and that is the point.
+
+        This test used to assert the opposite -- that the text passed through
+        unchanged -- which encoded the vulnerability as the intended behaviour:
+        the [cia]-only install this package advertises was the one that sent
+        evidence unredacted. The scrubber is core, so there is nothing to fall
+        back from. See tests/cia/test_redaction_without_chat.py.
+        """
         real_import = __import__
 
-        def no_redaction(name, *args, **kwargs):
-            if name == "aorta.chat.redaction":
+        def no_chat(name, *args, **kwargs):
+            if name.startswith("aorta.chat"):
                 raise ImportError("not installed")
             return real_import(name, *args, **kwargs)
 
-        monkeypatch.setattr("builtins.__import__", no_redaction)
-        assert redact(SECRETS) == SECRETS
+        monkeypatch.setattr("builtins.__import__", no_chat)
+        assert redact(SECRETS) != SECRETS
+        assert "/home/avsharma" not in redact(SECRETS)
 
 
 def test_the_setting_that_turns_it_off_is_respected(monkeypatch):

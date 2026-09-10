@@ -161,6 +161,24 @@ def _legacy_env() -> tuple[str, str, str] | None:
     )
 
 
+class RedactionUnavailable(RuntimeError):
+    """The gate cannot load, so nothing may be sent through it."""
+
+
+def _redaction_enabled() -> bool:
+    """Whether the operator has turned redaction off.
+
+    The switch lives in the chat settings, which need pydantic-settings and, for
+    the profile file, 3.11. When they cannot be read the answer is yes: not
+    knowing whether someone disabled redaction is not a reason to skip it.
+    """
+    try:
+        from aorta.chat.config import settings
+    except ImportError:
+        return True
+    return bool(getattr(settings, "redact", True))
+
+
 def redact(text: str) -> str:
     """*text* with filesystem paths and addresses rewritten, per Decision 16.
 
@@ -169,16 +187,32 @@ def redact(text: str) -> str:
     does: Watch ships log tails, Launch discovery ships the heads of scripts
     found under a home directory, and Autopsy ships bundle evidence.
 
-    Returns *text* unchanged when the chat settings are unavailable, which is
-    the only honest thing to do -- but that is also why the gate below is not
-    the only protection: the probes were narrowed to stop collecting what
-    should not be sent in the first place.
+    The scrubber is ``aorta.probe.redaction``, which is core -- stdlib and
+    aorta's own bundle code, no pydantic and no tomllib. This used to reach it
+    through ``aorta.chat.redaction``, a thin wrapper over the same function, and
+    caught the ImportError by returning the text unchanged. On a base install
+    with only the [cia] extra, or on 3.10, that import fails -- so the advertised
+    headless path was the one that sent Watch and Autopsy evidence unredacted,
+    and said nothing.
+
+    Raises RedactionUnavailable if even the core scrubber cannot be imported.
+    Sending unredacted evidence is not a fallback.
     """
-    try:
-        from aorta.chat.redaction import redact_text
-    except Exception:  # pragma: no cover - depends on what is installed
+    if not text:
         return text
-    scrubbed, _summary = redact_text(text)
+    try:
+        from aorta.probe.redaction import scrub_text
+    except ImportError as exc:  # pragma: no cover - core is always installed
+        raise RedactionUnavailable(
+            "aorta.probe.redaction could not be imported, so outbound text "
+            "cannot be scrubbed. Refusing to send it unredacted."
+        ) from exc
+
+    if not _redaction_enabled():
+        return text
+    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(
+        text, scrub_paths=True, scrub_ip_addresses=True
+    )
     return scrubbed
 
 
