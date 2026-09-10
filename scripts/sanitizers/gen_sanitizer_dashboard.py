@@ -812,6 +812,17 @@ def _hashed_clip_name(name: str) -> str:
     return f"{_middle_clip_name(clean)} ~{digest}"
 
 
+def _clip_qualified_label(label: str, limit: int) -> str:
+    """Budget a display label without removing its identity qualifier (pure)."""
+    if len(label) <= limit:
+        return label
+    name, separator, qualifier = label.rpartition(" (")
+    suffix = f"{separator}{qualifier}" if separator else ""
+    if suffix and len(suffix) < limit:
+        return f"{_clean_msg(name, limit - len(suffix))}{suffix}"
+    return _clean_msg(label, limit)
+
+
 # The qualifier widens one field at a time, cheapest first. Everything past the short
 # digest exists for a collision the tier before it cannot resolve, so a label only pays
 # for the ambiguity it actually has.
@@ -870,11 +881,11 @@ def _kernel_reason_entries(
     diagnosable, and a basename plus a digest prefix can tie where the full path and
     digest do not -- which would put the ambiguity straight back into the manifest.
 
-    ``labels_by_key`` is built over the whole worklist rather than over the failing
-    results, because what makes a name ambiguous is what the *page* shows: one failure
-    beside a clean same-named sibling still leaves a reader unable to say which of the
-    two rows the reason belongs to. A result with no worklist row behind it has nothing
-    to be ambiguous against and keeps its bare name.
+    ``labels_by_key`` is built over both the whole worklist and unmatched results.
+    What makes a name ambiguous is what the *page* shows: one failure beside a
+    successfully scanned same-named sibling still leaves a reader unable to say which
+    row the reason belongs to, while an incompatible unmatched result sharing a
+    visible row's name must be qualified so it cannot appear to accuse that row.
     """
     entries: list[dict[str, Any]] = []
     for result in results:
@@ -3821,6 +3832,7 @@ def _survey_howto_html(entry: dict[str, Any]) -> str:
 # the budget rather than letting a long rollup truncate them away.
 _MSG_LIMIT = 240
 _MSG_ROLLUP_LIMIT = 80
+_MSG_REASON_MIN = 64
 
 
 def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
@@ -3843,17 +3855,22 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     # answer for an errored case.
     kernel_reasons = row.get("kernel_reasons") or []
     if kernel_reasons:
-        # Labels arrive with their name already budgeted (``_display_labels``), which
-        # is what stops an unbounded kernel name from spending the allowance before its
-        # reason begins -- while keeping the identity qualifier a right-truncation here
-        # would have cut off.
-        detail = "; ".join(f"{e['label']}: {e['reason']}" for e in kernel_reasons)
-        # Budget the rollup down first. Clamping only the concatenation let a long
-        # rollup spend the whole allowance and truncate the kernel reasons off the
-        # end -- and a rollup is not always short: ConSan builds
-        # ``waitcheck_analysis_failed: <parser output>`` out of tool text. The
-        # kernel reasons are the payload here, so they keep the larger share.
-        rollup = _clean_msg(str(reason), _MSG_ROLLUP_LIMIT) if reason else ""
+        # Reserve enough room for the first backend cause even when disambiguation
+        # needs a full digest/index/offset qualifier. Any label clipping falls on its
+        # name while preserving that qualifier.
+        detail_parts = []
+        for entry in kernel_reasons:
+            entry_reason = str(entry["reason"])
+            reason_reserve = min(len(entry_reason), _MSG_REASON_MIN)
+            label_limit = _MSG_LIMIT - len(": ") - reason_reserve
+            label = _clip_qualified_label(str(entry["label"]), label_limit)
+            detail_parts.append(f"{label}: {entry_reason}")
+        detail = "; ".join(detail_parts)
+        # Give the detail first claim on the line, then spend only its remaining
+        # budget on the rollup. A long rollup or full-identity label can no longer
+        # push the backend explanation off the end.
+        rollup_limit = min(_MSG_ROLLUP_LIMIT, _MSG_LIMIT - len(detail) - len(" — "))
+        rollup = _clean_msg(str(reason), rollup_limit) if reason and rollup_limit > 0 else ""
         reason_text = _clean_msg(
             f"{rollup} \u2014 {detail}" if rollup else detail, _MSG_LIMIT
         )

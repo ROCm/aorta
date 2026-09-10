@@ -1441,6 +1441,30 @@ def test_a_long_kernel_name_cannot_truncate_its_own_reason_away():
     assert "waitcheck_backend_exit_2" in text
 
 
+def test_a_full_identity_label_cannot_truncate_the_backend_cause():
+    # A name-budgeted label can still be long when disambiguation needs the full
+    # digest and index. The rollup must yield space without dropping that qualifier
+    # or the backend explanation after it.
+    first = "0123456789" + "a" * 54
+    second = "0123456789" + "b" * 54
+    long_name = "gemm_" + "N" * 300
+    report = json.loads(
+        json.dumps(_report_with_two_objects_sharing_a_name())
+        .replace("beefaaa1", first)
+        .replace("beefbbb2", second)
+        .replace("gemm_shared_symbol", long_name)
+    )
+    report["checks"][0]["reason"] = "waitcheck_analysis_failed: " + "backend noise " * 40
+
+    case = gen.summarize_case(report, "warn")
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert text.startswith("waitcheck_analysis_failed:")
+    assert f"({second}#0)" in text
+    assert "refused the second object" in text
+    assert len(text) <= gen._MSG_LIMIT
+
+
 def test_preflight_findings_still_land_in_the_kernel_column():
     # run_sanitizers appends the combined hook's Waitcheck preflight as a third check.
     # `consan._relabel` keeps that check's findings and drops its kernel results, so
