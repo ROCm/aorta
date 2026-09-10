@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Run one sanitizer recipe end to end: Launch -> Watch -> Autopsy.
 
-Executed with the cluster-intelligence-agent virtualenv so it can reuse the
-agents' own job-record and sbatch machinery instead of reimplementing them.
-Emits a single JSON object on stdout; progress goes to stderr so the caller can
-show it live without corrupting the result.
+Two callers, and the difference matters. ``run_triage`` is a function that
+returns a dict, and the chat tools call it directly on a worker thread inside
+the chat server's own process -- there is no separate agent virtualenv and
+nothing shells out. ``main`` wraps it for the command line, where the same dict
+is printed to stdout as JSON and progress goes to stderr.
+
+Progress goes through :mod:`logging` rather than straight to stderr, because in
+the library case that stream belongs to the chat server and is not this
+module's to write on. ``main`` configures a handler so the command line still
+shows the running commentary it always did.
 
 Launch here is the deterministic path: the recipe, node constraints and the
 ConSan environment are passed in explicitly rather than discovered by the
@@ -16,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import shlex
@@ -28,6 +35,7 @@ from pathlib import Path
 
 import yaml
 
+
 from aorta.cia.autopsy.orchestrator import run_autopsy
 from aorta.cia.cancellation import Stop, pause, stopped
 # Through the seam, not around it: launch() exists so a scheduler-less backend
@@ -39,6 +47,8 @@ from aorta.cia.watch.poll import poll_jobs
 from aorta.cia.launch.job import (
     JobRecord, _utc_now, new_job_id, read_job_json, update_job_status, write_job_json,
 )
+
+log = logging.getLogger(__name__)
 
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"}
 
@@ -75,10 +85,6 @@ def venv_bin(name: str) -> str:
     return shutil.which(name) or name
 
 
-def log(msg: str) -> None:
-    print(f"[triage] {msg}", file=sys.stderr, flush=True)
-
-
 def sacct_state(slurm_id: str) -> str:
     """Terminal-or-running state of a Slurm job, tolerating a lagging accounting DB."""
     try:
@@ -100,20 +106,20 @@ def wait_for_job(slurm_id: str, timeout: int, interval: int = 5, *, stop: Stop =
     while time.time() < deadline:
         state = sacct_state(slurm_id)
         if state in TERMINAL_STATES:
-            log(f"slurm {slurm_id} reached {state}")
+            log.info(f"slurm {slurm_id} reached {state}")
             return state
-        log(f"slurm {slurm_id} state={state} ...")
+        log.info(f"slurm {slurm_id} state={state} ...")
         # This is where the wait actually spends its time: up to fifteen
         # minutes of five-second sleeps, and the caller may have given up
         # during any one of them.
         if pause(stop, interval):
-            log(f"slurm {slurm_id} still {state}; caller gave up, so we stop waiting")
+            log.info(f"slurm {slurm_id} still {state}; caller gave up, so we stop waiting")
             return f"ABANDONED({state})"
     return f"TIMEOUT_WAITING({state})"
 
 
 def run(cmd: list[str], timeout: int, env: dict | None = None) -> subprocess.CompletedProcess:
-    log(f"$ {shlex.join(cmd)}")
+    log.info(f"$ {shlex.join(cmd)}")
     return subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout, env=env or os.environ.copy()
     )
@@ -219,7 +225,7 @@ def reconcile_stale_jobs(jobs_root: Path) -> int:
                               "completed" if state == "COMPLETED" else "failed")
             fixed += 1
     if fixed:
-        log(f"reconciled {fixed} stale job record(s) to terminal")
+        log.info(f"reconciled {fixed} stale job record(s) to terminal")
     return fixed
 
 
@@ -406,7 +412,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         job_env_vars["RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE"] = os.environ.get(
             "RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE", "1"
         )
-        log(f"kernel={kernel_name} arch={args.arch} source={src.name}")
+        log.info(f"kernel={kernel_name} arch={args.arch} source={src.name}")
     elif args.command:
         # A raw workload: no recipe, no sanitizer sweep. Watch still tails the
         # log and Autopsy still classifies whatever artifacts the workload leaves
@@ -414,7 +420,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         # kernel sweep.
         recipe = None
         command = args.command.replace("{bundle}", str(job_dir / "bundle"))
-        log(f"raw command: {command[:160]}")
+        log.info(f"raw command: {command[:160]}")
     else:
         recipe = Path(args.recipe).expanduser().resolve()
         if not recipe.is_file():
@@ -452,9 +458,12 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         env_vars=job_env_vars,
     )
 
-    log(f"job_id={job_id} recipe={recipe.name if recipe else '(raw command)'} label={args.label or '-'}")
+    log.info(
+        f"job_id={job_id} recipe={recipe.name if recipe else '(raw command)'} "
+        f"label={args.label or '-'}"
+    )
     reconcile_stale_jobs(jobs_root)
-    log("── Launch ──")
+    log.info("── Launch ──")
 
     saved = os.environ.get("CIA_TOLERATE_NONZERO")
     os.environ["CIA_TOLERATE_NONZERO"] = "1"
@@ -479,15 +488,15 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
 
     record.scheduler_job_id = slurm_id
     write_job_json(record, jobs_root)
-    log(f"submitted slurm job {slurm_id}")
+    log.info(f"submitted slurm job {slurm_id}")
 
     bundle = job_dir / "bundle"
     report_path = bundle / "report.json"
 
     # Watch has to start while the record still says 'running', because the job
     # registry is what makes it eligible for monitoring at all.
-    log("── Watch ──")
-    log(f"poll_jobs(rounds={args.watch_rounds})")
+    log.info("── Watch ──")
+    log.info(f"poll_jobs(rounds={args.watch_rounds})")
     watcher = threading.Thread(
         target=poll_jobs,
         kwargs={"jobs_root": jobs_root, "max_rounds": args.watch_rounds, "stop": stop},
@@ -500,13 +509,13 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # Give Watch a bounded window to notice the finished log, alert, assemble the
     # bundle and trigger Autopsy before falling back to doing it directly.
     grace = args.watch_grace
-    log(f"waiting up to {grace}s for Watch to alert and assemble the bundle")
+    log.info(f"waiting up to {grace}s for Watch to alert and assemble the bundle")
     deadline = time.time() + grace
     while time.time() < deadline:
         if report_path.is_file() or not watcher.is_alive():
             break
         if pause(stop, 5):
-            log("caller gave up; not waiting out the rest of the grace window")
+            log.info("caller gave up; not waiting out the rest of the grace window")
             break
 
     watcher.join(timeout=30)
@@ -516,7 +525,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         for e in watch_events
     ]
     for line in watch_tail:
-        log(f"watch| {line}")
+        log.info(f"watch| {line}")
 
     # Watch only assembles a bundle after it raises an alert, so the bundle
     # existing before the fallback runs is the reliable signal that it fired.
@@ -528,7 +537,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # directly otherwise so the caller always gets a verdict rather than silence.
     if not report_path.is_file():
         if not (bundle / "manifest.yaml").is_file():
-            log("── Bundle (direct) ──")
+            log.info("── Bundle (direct) ──")
             try:
                 from aorta.cia.watch.bundle_writer import write_bundle
                 evidence = ""
@@ -537,16 +546,16 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
                         Path(log_path).read_text(errors="replace").splitlines()[-200:]
                     )
                 write_bundle(record, job_dir, evidence, "sanitizer_guardrail_not_clean")
-                log(f"assembled bundle at {bundle}")
+                log.info(f"assembled bundle at {bundle}")
             except Exception as exc:
-                log(f"bundle assembly failed: {exc}")
+                log.info(f"bundle assembly failed: {exc}")
 
-        log("── Autopsy (direct) ──")
+        log.info("── Autopsy (direct) ──")
         # The bundle above is worth assembling either way -- a caller that gave
         # up is told where to find it. The verdict is not: it is an unbounded
         # model call whose answer has nowhere left to go.
         if stopped(stop):
-            log("caller gave up; skipping the autopsy rather than paying for a verdict")
+            log.info("caller gave up; skipping the autopsy rather than paying for a verdict")
             return {
                 "ok": False,
                 "stage": "autopsy",
@@ -556,12 +565,12 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         try:
             report = run_autopsy(bundle, kb_version="kb-static-poc")
             report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-            log(f"autopsy category={report.get('category')} "
+            log.info(f"autopsy category={report.get('category')} "
                 f"confidence={report.get('confidence')}")
         except Exception as exc:
-            log(f"autopsy failed: {exc}")
+            log.info(f"autopsy failed: {exc}")
     else:
-        log("── Autopsy (via Watch) ──")
+        log.info("── Autopsy (via Watch) ──")
 
     result: dict = {
         "ok": True,
@@ -618,7 +627,13 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
 
 
 def main() -> int:
-    """CLI wrapper: the chatbot calls run_triage() directly instead."""
+    """CLI wrapper: the chatbot calls run_triage() directly instead.
+
+    Configuring the handler is what keeps the running commentary the command
+    line has always shown. A library caller does not reach this, so the chat
+    server's own logging setup stands.
+    """
+    logging.basicConfig(level=logging.INFO, format="[triage] %(message)s", stream=sys.stderr)
     result = run_triage()
     print(json.dumps(result, indent=2))
     return 0 if result.get("ok") else 1

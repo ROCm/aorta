@@ -1,9 +1,19 @@
 """Tools that let the assistant drive the Cluster Intelligence Agents.
 
 These wrap the Launch -> Watch -> Autopsy pipeline so a user can go from "why did
-my kernel race?" to a classified failure bundle without touching a terminal. The
-agents live in their own virtualenv, so everything here shells out to that venv's
-console scripts rather than importing them into the chatbot process.
+my kernel race?" to a classified failure bundle without touching a terminal.
+
+The agents are imported and called in this process -- ``run_triage`` is a
+function here, not a console script in a separate virtualenv -- so a triage is
+a call on a worker thread rather than a subprocess. What that buys is the
+result as a dict instead of parsed stdout; what it costs is that the pipeline's
+waits, threads and output are now the chat server's, which is why the calls
+below carry a stop flag and a timeout. Triage's own progress goes through
+:mod:`logging` for the same reason; Watch and the probe still print theirs,
+which lands on this process's stdout.
+
+The cluster is still reached the old way, through the scheduler: srun and
+sbatch are subprocesses because that is what talking to Slurm is.
 """
 
 from __future__ import annotations
