@@ -206,8 +206,24 @@ Five things follow from that:
   calling tools and getting results — is not truncated; it runs the ordinary act
   loop under the ordinary round budget, because cutting a productive loop off at
   one round would spend the call and throw away the answer it was about to
-  reach. So the worst case is the normal budget, not double it, and the protocol
-  moves once per process rather than once per query.
+  reach.
+
+  So the two cases have different ceilings, and only the first is the
+  escalation's own bill. A turn that is silent on both protocols costs **6**
+  calls: router, plan, two text rounds, one escalated native round, and one
+  retrieval-fallback answer. A turn where native *does* drive tools costs up to
+  **13** on a search query and **10** on any other — the same four-call prefix,
+  then `MAX_ACT_ROUNDS_SEARCH` (8) or `MAX_ACT_ROUNDS` (5) native rounds, then
+  one synthesis call. The escalation does not raise the round budget; it reaches
+  the ordinary one on a query that had already spent two rounds proving it
+  needed to. And because the protocol moves once per process rather than once
+  per query, those two text rounds are paid once, not on every later query.
+
+  Both figures are the act pass alone. A whole turn can go higher, because the
+  critic may return a rejected answer to `act` up to `MAX_RETRY_ITERATIONS` (3)
+  times, and passes after the first start on `native` with no text rounds to
+  pay: measured at **34** for a search query whose every pass is rejected. That
+  ceiling belongs to the agent loop and is unchanged by the escalation.
 - **The switch is thrown only once native has answered.** An endpoint that
   refuses the protocol must not be able to select it, which is what throwing the
   switch up front let it do: the refusal became the state for every later query.

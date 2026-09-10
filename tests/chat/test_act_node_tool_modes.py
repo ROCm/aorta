@@ -2448,3 +2448,96 @@ class TestTheGiveUpLogDoesNotBlameTheRoundBudget:
         assert "still calling tools" in caplog.text
         assert "Raise MAX_ACT_ROUNDS" in caplog.text
         assert "gave up after" not in caplog.text
+
+
+class TestTheDocumentedCallCeilingsMatchTheCaps:
+    """The call ceilings in `providers.md` are derived, not observed.
+
+    Every figure on that page is a sum of five caps -- `_MAX_UNPRODUCTIVE_ROUNDS`,
+    `_MAX_ESCALATED_ROUNDS`, `max_act_rounds`, `max_act_rounds_search` and
+    `max_retry_iterations`. Nothing stops someone raising one of those and
+    leaving the prose behind, and a stale spend figure is the kind of error a
+    reader cannot catch: it reads like a measurement.
+
+    The page previously said only that the worst case was "the normal budget,
+    not double it", which was true of the failure path and wrong by roughly
+    half for a productive escalation -- 6 calls against 13. So the numbers are
+    now stated per case, and recomputed here from the caps rather than
+    hard-coded, which is what makes this a drift guard rather than a second
+    copy of the same claim.
+    """
+
+    PAGE = "docs/chat/providers.md"
+
+    def _page(self) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[2] / self.PAGE).read_text(
+            encoding="utf-8"
+        )
+
+    @staticmethod
+    def _ceilings() -> dict[str, int]:
+        """Recompute the four figures the way the run was measured.
+
+        Defaults, deliberately: the page quotes the shipped configuration, so a
+        settings object mutated by another test would make this pass or fail on
+        someone else's fixture.
+        """
+        from aorta.chat.config import Settings
+
+        caps = Settings()
+        # router + plan, then the text rounds that buy the diagnosis.
+        prefix = 2 + nodes._MAX_UNPRODUCTIVE_ROUNDS
+        search = caps.max_act_rounds_search
+        return {
+            # ... one escalated native round, then the retrieval fallback.
+            "silent": prefix + nodes._MAX_ESCALATED_ROUNDS + 1,
+            # ... the full native budget, then one synthesis call.
+            "search": prefix + search + 1,
+            "other": prefix + caps.max_act_rounds + 1,
+            # Passes after the first are native from the start, so they pay no
+            # text rounds; the critic costs one call per pass.
+            "turn": (
+                2
+                + (nodes._MAX_UNPRODUCTIVE_ROUNDS + search + 1)
+                + (caps.max_retry_iterations - 1) * (search + 1)
+                + caps.max_retry_iterations
+            ),
+        }
+
+    def test_the_caps_still_produce_the_numbers_measured(self):
+        """The arithmetic itself, pinned against the run that produced it.
+
+        Measured by driving the graph with a counting double: 6 for a turn
+        silent on both protocols, 13 for a productive escalation on a search
+        query, 10 elsewhere, and 34 for a whole turn the critic rejects every
+        time. If a cap moves these change together and the assertions below
+        re-point at the new figures; if the *arithmetic* is what someone
+        changes, this is the test that objects.
+        """
+        assert self._ceilings() == {
+            "silent": 6,
+            "search": 13,
+            "other": 10,
+            "turn": 34,
+        }
+
+    def test_the_page_states_each_ceiling(self):
+        page = self._page()
+        for case, value in self._ceilings().items():
+            assert f"**{value}**" in page, (
+                f"providers.md no longer states the {case} ceiling of {value}; "
+                "the caps moved and the prose did not follow"
+            )
+
+    def test_the_page_does_not_keep_the_old_undifferentiated_claim(self):
+        """The wording that made one case's figure read as both.
+
+        Asserted as an absence because the correction was to *split* a claim,
+        and a split is the one edit a positive assertion cannot detect: both
+        numbers can be present while the sentence that conflated them survives
+        alongside them.
+        """
+        page = self._page()
+        assert "the normal budget, not double it" not in page

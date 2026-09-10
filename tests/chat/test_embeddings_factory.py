@@ -337,6 +337,7 @@ class TestTheModelIsLoadedOnceUnderConcurrency:
 
     def test_eight_threads_load_one_model(self, monkeypatch):
         import threading
+        import time
 
         from aorta.chat.rag.embeddings import fastembed_bge
 
@@ -355,15 +356,26 @@ class TestTheModelIsLoadedOnceUnderConcurrency:
         provider = fastembed_bge.FastembedBgeEmbeddings(model_name="m")
 
         def race():
-            ready.wait()
+            ready.wait(timeout=5)
             provider._get_model()
 
-        threads = [threading.Thread(target=race) for _ in range(8)]
+        # Daemon, so a thread stuck on the lock cannot hold the interpreter
+        # open past the verdict.
+        threads = [threading.Thread(target=race, daemon=True) for _ in range(8)]
         for thread in threads:
             thread.start()
+        # One deadline across all eight rather than a timeout each, which would
+        # wait up to 80s and let a slow hang outlast the early joins.
+        deadline = time.monotonic() + 10
         for thread in threads:
-            thread.join()
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
+        # Bounded, and then asserted. A bare `join()` hangs the run if a future
+        # `_get_model` blocks; a bounded one that never checks lets a hung
+        # thread *pass*, since `loads` can read 1 while seven are still stuck
+        # inside. Neither is a usable report.
+        stuck = [thread for thread in threads if thread.is_alive()]
+        assert not stuck, f"{len(stuck)} of 8 threads still in _get_model() after 10s"
         assert len(loads) == 1, f"model loaded {len(loads)}x under 8 threads"
 
     def test_the_cached_model_is_returned_without_taking_the_lock(self, monkeypatch):
