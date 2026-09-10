@@ -65,6 +65,38 @@ def elapsed_seconds(launched_at: str) -> int | None:
     return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
 
 
+#: How many polls a chunk is retried for before it is given up on. Three is
+#: enough for a rate limit or a dropped connection and short enough that a job
+#: whose assessment cannot succeed is not stuck on the same bytes for ever.
+MAX_ASSESS_ATTEMPTS = 3
+
+
+def _emit_skipped(events_path: Path, job, content: str, error: str) -> None:
+    """Record a chunk that could not be assessed, where the verdicts go."""
+    with events_path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "schema_version": "0.1",
+                    "event_id": str(uuid.uuid4()),
+                    "ts": _utc_now(),
+                    "phase": "watchdog",
+                    "event_type": "watchdog_skipped",
+                    "job_id": job.job_id,
+                    "signal": "WATCH_ASSESSMENT_FAILED",
+                    "confidence": 0.0,
+                    "excerpt": content[:500],
+                    "assessment": (
+                        f"{MAX_ASSESS_ATTEMPTS} assessment attempts failed; this "
+                        f"log chunk was not examined. Last error: {error}"
+                    ),
+                    "source": job.watch_files[0] if job.watch_files else "",
+                }
+            )
+            + "\n"
+        )
+
+
 def poll_jobs(
     jobs_root: Path,
     *,
@@ -94,6 +126,10 @@ def poll_jobs(
     #: about the failure, not about the bytes that arrived after it, so a job
     #: is diagnosed once per session however much more it goes on to write.
     alerted: set[str] = set()
+    #: Consecutive assessment failures per job, so a chunk is retried rather
+    #: than dropped, and a job whose assessment always fails is eventually let
+    #: go rather than blocking its own progress for ever.
+    failures: dict[str, int] = {}
 
     print(f"[watch] polling {jobs_root} every {interval}s")
 
@@ -156,9 +192,11 @@ def poll_jobs(
                 if text:
                     new_parts.append(f"=== {p.name} ===\n{text}")
                     total_new += len(text)
-            save_cursors(job_dir, cursors)
 
             if not new_parts:
+                # Nothing read, so nothing to lose by committing: this keeps a
+                # file that shrank or was rotated from being re-read forever.
+                save_cursors(job_dir, cursors)
                 continue
 
             new_content = "\n\n".join(new_parts)
@@ -180,8 +218,33 @@ def poll_jobs(
                     allowed_roots=[job_dir, *(Path(p).parent for p in job.watch_files)],
                 )
             except Exception as e:
-                print(f"[watch] {job.job_id}: watcher error: {e}")
+                # The cursors for this chunk are deliberately not saved, so the
+                # next poll reads these bytes again. Saving before assessing
+                # meant a single transient model failure discarded the chunk for
+                # good -- and a NaN, a fault or an OOM is usually printed once.
+                attempts = failures.get(job.job_id, 0) + 1
+                failures[job.job_id] = attempts
+                print(
+                    f"[watch] {job.job_id}: watcher error "
+                    f"(attempt {attempts}/{MAX_ASSESS_ATTEMPTS}): {e}"
+                )
+                if attempts < MAX_ASSESS_ATTEMPTS:
+                    continue
+
+                # Out of attempts. Retrying for ever would stop this job ever
+                # being watched again, so the chunk is given up on -- visibly,
+                # in the same events file the verdict would have gone to, rather
+                # than by advancing a cursor and saying nothing.
+                _emit_skipped(events_path, job, new_content, str(e))
+                print(
+                    f"[watch] {job.job_id}: giving up on {total_new} bytes after "
+                    f"{attempts} attempts; recorded as WATCH_ASSESSMENT_FAILED"
+                )
+                failures.pop(job.job_id, None)
+                save_cursors(job_dir, cursors)
                 continue
+
+            failures.pop(job.job_id, None)
 
             signal = getattr(pred, "signal", "WATCH_CLEAN")
             healthy = getattr(pred, "healthy", True)
@@ -207,6 +270,9 @@ def poll_jobs(
                     "source": job.watch_files[0] if job.watch_files else "",
                 }
                 fh.write(json.dumps(ev) + "\n")
+
+            # Assessed, and the event is on disk. Only now is this chunk done.
+            save_cursors(job_dir, cursors)
 
             if should_alert(healthy, confidence, confidence_threshold):
                 print(f"[watch] {job.job_id}: ALERT {signal} — triggering autopsy")
