@@ -120,6 +120,7 @@ STRUCTURAL_DAMAGE = (
     "vec-table",
     "vec-table-not-virtual",
     "vec-table-width",
+    "vec-shadow-chunks",
     "vector-rows",
     "vector-rowids",
     "registry-width",
@@ -324,6 +325,14 @@ def _break_store(index: Path, collection: str, how: str) -> None:
                 f'INSERT INTO "vec_{collection}" (rowid, embedding) VALUES (?, ?)',
                 [(n + 1, b"\x00" * 4) for n in range(rows)],
             )
+        elif how == "vec-shadow-chunks":
+            # The member of vec0's shadow set that retrieval actually needs.
+            # Review twice asked for a missing ``_rowids`` to be a defect;
+            # dropping ``_rowids`` or ``_info`` leaves the read path answering
+            # correctly, and this one makes it raise. A partially copied store
+            # is how it happens -- the virtual-table entry survives in
+            # ``sqlite_master`` while one of its storage tables does not.
+            conn.execute(f'DROP TABLE "vec_{collection}_chunks"')
         elif how == "vector-rows":
             conn.execute(
                 f'DELETE FROM "vec_{collection}" WHERE rowid = '
@@ -1270,6 +1279,51 @@ class TestStoreProbeAgreesWithTheReadPath:
 
         assert stricter == ["vector-rows", "vector-rowids"]
 
+    def test_a_zero_width_manifest_no_longer_hides_a_wrong_registry(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """The reported case: the sentinel that turned the width check off.
+
+        ``dimensions`` was documented as "0 means not known, skip the
+        comparison". Nothing passed it that way -- ``Manifest.dimensions`` is
+        required and both callers hand it straight through -- so the only value
+        that reached it was a sidecar genuinely recording zero, and reading
+        that as "unknown" disabled the one width check the probe has. A
+        registry of 999 underneath then read as healthy while every search was
+        refused.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        index = _write_index(monkeypatch, tmp_path, dimensions=0)
+        _break_store(index, get_provider().collection_name(), "registry-width")
+
+        assert _read_path_answers(index), "the state has to defeat retrieval to be worth catching"
+        assert _probe(index), "a zero-width manifest must not switch the comparison off"
+
+        report = run_checks(backend=False)
+        assert _by_name(report, "index manifest").status == FAIL
+
+    def test_a_manifest_recording_no_width_is_a_defect_rather_than_an_unknown(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """And it is reported even where the store underneath is fine.
+
+        Deliberately one of the few places the probe is stricter than the read
+        path: a correct registry under a zero-width manifest still retrieves,
+        so this warns about an index that works. The reason is that the
+        manifest is the only comparand available at a doctor's price -- knowing
+        the provider's real width means embedding something -- so a manifest
+        that cannot be compared against leaves the width unverifiable, and
+        saying so beats silently not checking. Asserted here rather than left
+        to the strictness sweep, which walks store damage and would never
+        construct a manifest-side state.
+        """
+        index = _write_index(monkeypatch, tmp_path, dimensions=0)
+
+        assert not _read_path_answers(index), "the store itself is intact here"
+        defect = _probe(index)
+        assert "not a width any index was built at" in defect, defect
+
     def test_metadata_that_is_not_a_json_object_is_caught(self, monkeypatch, tmp_path: Path):
         """The reported case: the column exists, its values defeat the read path.
 
@@ -1414,11 +1468,20 @@ class TestStoreProbeAgreesWithTheReadPath:
 
         assert "not a number" in _probe(index)
 
-    def test_an_unknown_manifest_width_still_checks_what_it_can(self, monkeypatch, tmp_path: Path):
-        """``0`` means "the manifest does not say", which is not "anything goes".
+    def test_a_manifest_width_of_zero_no_longer_waves_the_comparison_through(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """This test used to assert the bug, which is how the bug survived.
 
-        The comparison is skipped, because there is nothing to compare against.
-        The coercion is not, because ``_knn`` performs it either way.
+        It read ``_store_defect(index, 0) == ""`` over a registry already
+        damaged to 999 and called that "the comparison is skipped, because
+        there is nothing to compare against" -- a green assertion on precisely
+        the state where the read path refuses every search. The sentinel was
+        invented here rather than by any caller, and writing a test for it made
+        it look like a contract.
+
+        Kept, inverted, as the regression: the same two states, the opposite
+        expectations.
         """
         from aorta.chat.rag.embeddings.factory import get_provider
 
@@ -1426,7 +1489,7 @@ class TestStoreProbeAgreesWithTheReadPath:
         index = _write_index(monkeypatch, tmp_path)
 
         _break_store(index, collection, "registry-width")
-        assert doctor._store_defect(index, 0) == ""
+        assert doctor._store_defect(index, 0), "a zero width is a defect, not an unknown"
         _break_store(index, collection, "registry-width-text")
         assert doctor._store_defect(index, 0)
 
@@ -1772,13 +1835,24 @@ class TestToolMode:
         assert "/health" in check.hint
         assert "--enable-auto-tool-choice" in check.hint
 
-    def test_native_on_a_remote_gateway_names_the_gateway_requirement_instead(self, monkeypatch):
-        """The remedy is the provider's, the same way it is in text mode."""
+    @pytest.mark.parametrize("provider", ["openai", "litellm"])
+    def test_native_on_a_remote_provider_names_its_requirement_without_naming_a_protocol(
+        self, monkeypatch, provider
+    ):
+        """The remedy is the provider's, the same way it is in text mode.
+
+        Parametrised over ``litellm`` because the note used to call every
+        remote endpoint an "OpenAI-compatible gateway", and the LiteLLM flow
+        exists for providers whose protocol is not OpenAI's -- Anthropic,
+        Gemini, Bedrock. The requirement is real for both; the protocol was an
+        assumption about one of them.
+        """
         monkeypatch.setattr(settings, "llm_tool_mode", "native")
-        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "llm_provider", provider)
         monkeypatch.setattr(settings, "remote_llm_model", "gpt-4o")
         check = _by_name(run_checks(backend=False), "llm tool mode")
-        assert "gateway" in check.hint
+        assert "'tools' parameter" in check.hint
+        assert "OpenAI-compatible" not in check.hint
         assert "--enable-auto-tool-choice" not in check.hint
 
     def test_every_reported_tool_mode_carries_a_hint(self, monkeypatch):

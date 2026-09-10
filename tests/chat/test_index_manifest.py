@@ -455,9 +455,12 @@ class TestRemedyLines:
         """It overwrites the index at the configured path, and used to read as a download.
 
         ``fetch_index`` installs over ``settings.index_file``, and nothing in
-        the manifest records which corpus an index was built from -- so an
-        index built over a different ``aorta_path`` is indistinguishable from a
-        published one here, and cannot be detected and spared. What is left is
+        the manifest is consulted here when choosing the wording -- ``Manifest``
+        does carry ``corpus_roots``/``corpus_digest``, which would distinguish a
+        local build from a published one, but this line does not read them and a
+        pre-provenance manifest carries neither. So an index built over a
+        different ``aorta_path`` is indistinguishable to *this* code, and cannot
+        be detected and spared. What is left is
         to stop the line reading as a pure addition, so the reader with such an
         index can choose ``build`` on the next line instead.
         """
@@ -467,6 +470,61 @@ class TestRemedyLines:
     def test_a_local_provider_leads_with_fetch(self):
         lines = manifest_mod.remedy_lines("local")
         assert lines[0].strip().startswith("aorta chat index fetch")
+
+    @pytest.mark.parametrize("provider", ["local", "remote", "openai"])
+    def test_no_arm_promises_a_fetch_a_custom_model_would_refuse(self, monkeypatch, provider):
+        """``embedding_model`` survives a provider switch, so it gates every arm.
+
+        The local arm consulted ``_custom_local_model()`` from the start; the
+        two remote arms promised "the fetch works" after switching the provider
+        and never asked. Review raised it five times across six rounds -- once
+        per line number, since each arm carried its own copy of the promise --
+        which is why this asserts the property over every arm instead of the
+        two that were reported.
+
+        The exact string matters: the local arm legitimately says that setting
+        the model *back* to the default makes the fetch work again, which is
+        conditional and true. What may never appear is the unconditional
+        promise.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        monkeypatch.setattr(settings, "embedding_model", "intfloat/e5-small")
+        text = "\n".join(manifest_mod.remedy_lines(provider))
+        assert "'aorta chat index fetch' works" not in text, text
+
+        # The other direction, so this cannot pass by the promise being absent
+        # everywhere: on the default model the fetch is exactly what to offer.
+        monkeypatch.setattr(settings, "embedding_model", fastembed_bge.DEFAULT_MODEL)
+        offered = "\n".join(manifest_mod.remedy_lines(provider))
+        assert "aorta chat index fetch" in offered
+
+    @pytest.mark.parametrize("provider", ["local", "remote", "openai", "nonesuch"])
+    @pytest.mark.parametrize("model", ["", "intfloat/e5-small"])
+    def test_every_remedy_line_fits_one_report_line(self, monkeypatch, provider, model):
+        """A report line is a line, and one commit's worth of it was not.
+
+        Dropping the comma between two adjacent literals in an aligned block
+        made Python concatenate them, printing a single 90-column line with the
+        indentation doubled in the middle. Every substring assertion in this
+        file passed, because every substring was still present -- just on one
+        line instead of two.
+
+        So the width is asserted rather than the wording. 79 is the bound the
+        blocks are written to; the widest legitimate line is 74.
+
+        Measured after joining and re-splitting, not per list element: one
+        element deliberately carries its own ``\\n`` and is two report lines, so
+        measuring elements would call a correctly wrapped entry 133 columns
+        wide. What reaches the terminal is what this has to be true of.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        monkeypatch.setattr(settings, "embedding_model", model or fastembed_bge.DEFAULT_MODEL)
+        for line in "\n".join(manifest_mod.remedy_lines(provider)).splitlines():
+            assert len(line) <= 79, (len(line), line)
 
     def test_a_remote_provider_explains_the_absence_rather_than_hiding_it(self, monkeypatch):
         """Otherwise the user goes looking for the command the docs mention."""
@@ -733,13 +791,38 @@ class TestACustomisedLocalModel:
         assert manifest_mod._custom_local_model() == padded
         assert manifest_mod._refresh_command() == "aorta chat index build"
 
-    def test_an_empty_model_setting_is_treated_as_the_default(self, monkeypatch):
-        """Falling back to the shipped default is what the provider itself does."""
+    def test_an_empty_embedding_model_is_a_custom_one_not_the_default(self, monkeypatch):
+        """``""`` is a value of the setting, and it is not the published one.
+
+        The helper used to read ``settings.embedding_model or DEFAULT_MODEL``,
+        so an empty setting was reported as the default and offered the fetch.
+        The provider has no such fallback -- ``model_id()`` and
+        ``vector_identity()`` return the setting verbatim and
+        ``collection_name()`` hashes it -- so that install's identity is empty,
+        the published manifest does not match it, and the offered fetch is
+        refused on all three counts.
+
+        This is why the helper returns ``None`` rather than ``""`` for "not
+        custom": with ``""`` as the sentinel the absent case and the empty case
+        are the same value, and the bug is unexpressible.
+
+        Replaces ``test_an_empty_model_setting_is_treated_as_the_default``,
+        which asserted this same ``== ""`` and read it the other way round --
+        as "empty falls back to the shipped default, which is what the provider
+        itself does". The provider does no such thing: ``model_id()`` and
+        ``vector_identity()`` have no ``or DEFAULT_MODEL``. So the old test
+        pinned the bug and, once the sentinel changed, would have gone on
+        passing while asserting the opposite of its own name.
+        """
         from aorta.chat.config import settings
 
         monkeypatch.setattr(settings, "embedding_provider", "local")
         monkeypatch.setattr(settings, "embedding_model", "")
+
         assert manifest_mod._custom_local_model() == ""
+        text = "\n".join(manifest_mod.remedy_lines())
+        assert "'aorta chat index fetch' works" not in text
+        assert "is not offered here" in text
 
     def test_chunk_drift_does_not_withhold_the_fetch(self, monkeypatch):
         """`manifest.py`'s chunk leniency is deliberate; the remedy must respect it.
@@ -765,7 +848,7 @@ class TestACustomisedLocalModel:
         )
         assert report.refusals == []
         assert report.warnings
-        assert manifest_mod._custom_local_model() == ""
+        assert manifest_mod._custom_local_model() is None
         assert manifest_mod.remedy_lines()[0].strip().startswith("aorta chat index fetch")
 
 

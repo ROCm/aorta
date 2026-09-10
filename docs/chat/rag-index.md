@@ -145,10 +145,14 @@ whether `remote_embedding_api_key` is set (see below), so run `aorta chat
 doctor`, which conditions its remedy on that.
 
 Note that a fetch *replaces* whatever index is at the configured path. Nothing
-in the manifest records which corpus an index was built from, so neither
-`doctor` nor the validation messages can tell a published index from one you
-built over a different `aorta_path` — if you have one of those, `build` is your
-refresh command, not `fetch`.
+in the manifest is *consulted* when choosing that wording. `build_index` does
+record provenance — `corpus_roots` and `corpus_digest` — and `corpus_roots`
+distinguishes a local build over an absolute root from a published build over
+its subpaths. Neither `doctor` nor the validation messages read it yet when
+they pick a refresh command, and a manifest written before those fields existed
+carries neither, so the advice cannot currently tell a published index from one
+you built over a different `aorta_path` — if you have one of those, `build` is
+your refresh command, not `fetch`.
 
 Withholding the fetch is only half of it, because a remote embedder is often
 not a decision anyone made — a profile for a remote LLM is where the setting
@@ -172,7 +176,12 @@ uses — so `doctor` will not tell them to build the index locally either. Every
 chunk of the corpus goes through the embeddings API, and `RemoteApiProvider`
 raises on an empty key before it sends anything, so with no key that build
 fails on the first chunk. Switching to local embeddings is the remedy that
-needs neither a key nor a rebuild.
+needs neither a key nor a rebuild — on the default `embedding_model`. That
+setting is independent of the provider and survives the switch, and the local
+provider reads it verbatim, so a profile carrying a custom one still has the
+published asset refused on it and does need a build (or the model set back to
+its default). The remedy lists condition on this, which is why one of them
+offers `build` where the others offer `fetch`.
 
 That is knowable from settings alone, with no network call, so the remedy lists
 act on it: with `embedding_provider = "remote"` and no key, **neither** index

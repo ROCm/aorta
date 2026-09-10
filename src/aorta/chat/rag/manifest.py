@@ -453,8 +453,12 @@ def _unknown_embedding_provider() -> str:
     return ""
 
 
-def _custom_local_model() -> str:
-    """The configured local model when it is not the published one, else "".
+def _custom_local_model() -> str | None:
+    """The configured local model when it is not the published one, else ``None``.
+
+    ``None`` rather than ``""`` for the absent case, because ``""`` is itself a
+    reachable *value* of the setting and a non-default one. See the empty-model
+    note below.
 
     The local half of :func:`_remote_embedder_error`, and the same defect one
     setting over. ``embedding_model`` is configurable, but CI publishes exactly
@@ -481,8 +485,52 @@ def _custom_local_model() -> str:
     # all three of embedding model, collection and identity. Stripping here
     # would call that value the published default and offer the fetch it
     # refuses, which is the exact defect this function exists to prevent.
-    configured = settings.embedding_model or fastembed_bge.DEFAULT_MODEL
-    return "" if configured == fastembed_bge.DEFAULT_MODEL else configured
+    # No ``or DEFAULT_MODEL`` fallback, for the same reason the comparison is
+    # unstripped. ``FastembedBgeProvider`` has no such fallback either:
+    # ``model_id()`` and ``vector_identity()`` return ``settings.embedding_model``
+    # verbatim and ``collection_name()`` hashes it, so an empty setting is an
+    # install whose identity is empty -- which the published manifest does not
+    # match. Reading it as the default here offered that install the fetch, and
+    # the fetch is refused on all three of model, collection and identity. The
+    # value is returned as-is rather than described, so the caller's
+    # ``embedding_model = {custom!r}`` prints ``''`` and names the real setting.
+    configured = settings.embedding_model
+    return None if configured == fastembed_bge.DEFAULT_MODEL else configured
+
+
+def _after_switching_to_local() -> list[str]:
+    """What actually becomes possible once ``embedding_provider`` is local.
+
+    The continuation of the aligned block both remote arms print. Switching the
+    provider does not touch ``embedding_model``, which is a separate setting the
+    local provider reads verbatim -- so an install carrying a custom one lands
+    on the local arm's *withheld-fetch* branch, not its two-command branch, and
+    a remote arm promising "the fetch works" hands the user precisely the
+    refusal that branch exists to prevent.
+
+    Factored out because the promise was written once per arm and the setting
+    was consulted in neither: review raised it on both arms and on the docs
+    page, five times across six rounds, each time as a separate line number. One
+    function means the next arm cannot be written without the question being
+    asked.
+    """
+    if _custom_local_model() is None:
+        return [
+            "                             after which",
+            "                             'aorta chat index fetch' works",
+        ]
+    # Terse, and inside the aligned block rather than a paragraph after it: the
+    # ``doctor`` line follows this list, so a note appended here would land
+    # between the commands and one of the commands. The install that follows
+    # this advice arrives at the local arm above, which explains the model
+    # refusal in full; what is needed here is only that the fetch is not the
+    # thing that starts working.
+    return [
+        "                             after which",
+        "                             'aorta chat index build' works -- not the",
+        "                             fetch, which needs the default",
+        "                             embedding_model as well",
+    ]
 
 
 def _refresh_advice(embedding_provider: str | None = None) -> str:
@@ -507,7 +555,7 @@ def _refresh_advice(embedding_provider: str | None = None) -> str:
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
     if provider == "local":
         custom = _custom_local_model()
-        if not custom:
+        if custom is None:
             return f"'{command}'"
         return (
             f"'{command}' -- the published index is built with the default "
@@ -545,7 +593,7 @@ def _refresh_command(embedding_provider: str | None = None) -> str:
     from here and disowning it in the same sentence.
     """
     provider = (embedding_provider or _configured_embedding_provider()).strip().lower()
-    if provider != "local" or _custom_local_model():
+    if provider != "local" or _custom_local_model() is not None:
         return "aorta chat index build"
     return "aorta chat index fetch"
 
@@ -632,7 +680,7 @@ def remedy_lines(
 
     if provider == "local":
         custom = _custom_local_model()
-        if not custom:
+        if custom is None:
             return [
                 "  aorta chat index fetch     replace this install's index with the\n"
                 "                             published one, built for this version",
@@ -668,11 +716,14 @@ def remedy_lines(
         return [
             '  embedding_provider = "local"',
             "                             in chat.toml, or, for one shell session,",
-            "                             export AORTA_CHAT_EMBEDDING_PROVIDER=local,"
             # Kept on one line: a command name broken across a wrap cannot be
-            # copied out of the report in one go.
-            "                             after which",
-            "                             'aorta chat index fetch' works",
+            # copied out of the report in one go. The trailing comma is
+            # load-bearing -- without it Python concatenates this string with
+            # the next one and prints a single 90-column line with the
+            # indentation doubled in the middle of it, which is what happened
+            # here for one commit.
+            "                             export AORTA_CHAT_EMBEDDING_PROVIDER=local,",
+            *_after_switching_to_local(),
             *(doctor_line if include_doctor else []),
             "",
             "Neither index command is offered as-is. The published index is built with",
@@ -682,6 +733,26 @@ def remedy_lines(
             f"  {blocker}.",
         ]
 
+    # The escape hatch this paragraph offers is only an escape hatch when the
+    # model setting agrees. ``embedding_model`` survives the provider switch,
+    # and the local provider reads it verbatim, so on a custom one the fetch
+    # this used to promise is refused on all three of model, collection and
+    # identity -- the same defect the local arm above already guards, one
+    # setting over.
+    custom = _custom_local_model()
+    if custom is not None:
+        escape = [
+            'turn. Setting embedding_provider = "local" does not make it available',
+            f"either, because embedding_model = {custom!r} is not the model CI",
+            "publishes and the asset is refused on that too. Set both -- the provider",
+            "to local and the model back to its default -- or keep building locally.",
+        ]
+    else:
+        escape = [
+            'turn. Set embedding_provider = "local" (or',
+            "export AORTA_CHAT_EMBEDDING_PROVIDER=local) and the fetch works, at no",
+            "cost in embedding API calls.",
+        ]
     return [
         "  aorta chat index build     embed the corpus with the configured",
         "                             provider -- slow, and every chunk goes",
@@ -691,9 +762,7 @@ def remedy_lines(
         "'aorta chat index fetch' is not offered here: the published index is built",
         "with the local embedder, so no published asset can match a remote one, and",
         f"fetching it under embedding_provider = {provider!r} would be refused in",
-        'turn. Set embedding_provider = "local" (or',
-        "export AORTA_CHAT_EMBEDDING_PROVIDER=local) and the fetch works, at no",
-        "cost in embedding API calls.",
+        *escape,
     ]
 
 

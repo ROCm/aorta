@@ -88,9 +88,14 @@ _REMOTE_LLM_PROVIDERS = frozenset({"openai", "litellm"})
 #: server flags on top of the setting rather than the setting alone. These
 #: restate the ``Endpoint requirement`` and ``Local vLLM`` rows of the table in
 #: ``docs/chat/providers.md``.
+#: Protocol-neutral on purpose. ``_REMOTE_LLM_PROVIDERS`` covers ``litellm``
+#: as well as ``openai``, and the LiteLLM flow exists precisely for providers
+#: with a native, non-OpenAI protocol -- Anthropic, Gemini, Bedrock. Calling
+#: every remote endpoint an "OpenAI-compatible gateway" described those users'
+#: setup wrongly while telling them what it needs.
 _REMOTE_NATIVE_NOTE = (
     "It needs an endpoint that accepts the 'tools' parameter, which a remote\n"
-    "OpenAI-compatible gateway normally does."
+    "provider's tool-calling API normally does."
 )
 _VLLM_NATIVE_NOTE = (
     "It needs the vLLM server restarted with --enable-auto-tool-choice and a\n"
@@ -210,15 +215,21 @@ _TEXT_MODE_HINT = (
 #: And the pointer every ``native`` line carries, found by sweeping this
 #: function for the same green-with-no-advice shape review found in the
 #: no-model-name branch. ``native`` is the mode with an endpoint requirement,
-#: and nothing in this report tests it: ``_check_backend`` asks the backend for
-#: ``/health``, which a server that rejects the ``tools`` parameter answers
-#: perfectly well. So this line read green over the one tool-mode setting that
-#: cannot work at all -- ``native`` on a stock local vLLM -- and the user who
-#: reaches it has already configured the failure.
+#: and nothing in this report tests it. Stated as "no probe sends a request
+#: carrying ``tools``" rather than as "the probe asks ``/health``", because only
+#: the vLLM backend asks anything: both remote ``probe()`` implementations are
+#: ``preflight()`` under another name and make no network call at all, on
+#: purpose -- a reachability check against a metered endpoint bills the operator
+#: for running a diagnostic. Naming ``/health`` told a remote user a request had
+#: succeeded when none was made, which is a worse failure than the one this hint
+#: was added for: it read green over the one tool-mode setting that cannot work
+#: at all -- ``native`` on a stock local vLLM -- and the user who reaches it has
+#: already configured the failure.
 _NATIVE_MODE_HINT = (
-    "Nothing here confirms the endpoint accepts it: the backend probe asks\n"
-    "for /health, which a server that rejects the 'tools' parameter answers\n"
-    'normally. If action-routed questions fail, "text" is the mode to try.\n'
+    "Nothing here confirms the endpoint accepts it: no probe sends a request\n"
+    "carrying 'tools'. A local server answers /health normally whether or not\n"
+    "it takes them, and a remote backend is only checked for configuration.\n"
+    'If action-routed questions fail, "text" is the mode to try.\n'
 )
 
 #: The same warning for a model that has no such fallback. Review found the
@@ -231,11 +242,12 @@ _NATIVE_MODE_HINT = (
 #: mode is branched on -- so the only reason it said it was that nobody asked
 #: the question on this path.
 _NATIVE_REASONING_HINT = (
-    "Nothing here confirms the endpoint accepts it: the backend probe asks\n"
-    "for /health, which a server that rejects the 'tools' parameter answers\n"
-    "normally. This model has no second option if it does not -- a reasoning\n"
-    'model cannot drive "text" mode, which is why that mode warns about it,\n'
-    "so the endpoint is the thing to fix rather than the setting.\n"
+    "Nothing here confirms the endpoint accepts it: no probe sends a request\n"
+    "carrying 'tools'. A local server answers /health normally whether or not\n"
+    "it takes them, and a remote backend is only checked for configuration.\n"
+    "This model has no second option if it does not -- a reasoning model\n"
+    'cannot drive "text" mode, which is why that mode warns about it, so\n'
+    "the endpoint is the thing to fix rather than the setting.\n"
 )
 
 
@@ -376,7 +388,11 @@ def _store_defect(index_file: Path, dimensions: int) -> str:
 
     ``dimensions`` is the width the manifest records, which both callers
     already hold from the ``check_index`` they just ran, so it costs no extra
-    read. Pass ``0`` for "not known", which skips only the width comparison.
+    read. A non-positive value is a *defect*, not a "not known" sentinel: that
+    sentinel was documented here and had no caller, because
+    ``Manifest.dimensions`` is a required field with no default and both
+    callers pass it through unexamined. Reading it as "unknown" is what
+    disabled the width comparison for a manifest recording zero.
 
     The half ``check_index`` does not report. It escalates an unopenable index
     to a refusal only when the manifest claims a chunk count to contradict, and
@@ -593,7 +609,34 @@ def _collection_schema_defect(
                 f"dimension of {registered[0]!r}, which is not a number; the query "
                 "path reads it before every search and cannot"
             )
-        if dimensions > 0 and width != dimensions:
+        # A manifest width that is not a width at all. ``dimensions`` used to be
+        # documented as "0 means not known, skip the comparison", and that
+        # contract had no user: ``Manifest.dimensions`` is a required field with
+        # no default, and both callers pass it straight through, so a
+        # non-positive value here never means "the caller did not know" -- it
+        # means the sidecar says the index was built at zero dimensions.
+        # Treating it as "unknown" disabled the only width check the probe has,
+        # which is how a registry of 999 under a manifest of 0 read as healthy
+        # while ``_knn`` refused every search.
+        #
+        # Reported rather than skipped even though a *correct* registry under
+        # such a manifest still retrieves, which makes this one of the declared
+        # places the probe is stricter than the read path (see the strictness
+        # test). The reason is the same fail-closed one as the derived damage
+        # table: the manifest is the only comparand available at a doctor's
+        # price -- knowing the provider's real width means embedding something
+        # -- so a manifest that cannot be compared against leaves the probe
+        # unable to vouch for the width at all, and saying so is better than
+        # silently not checking. No index aorta built can reach it: ``build``
+        # writes the width it measured.
+        if dimensions <= 0:
+            return (
+                f"the manifest beside {index_file} records {dimensions} embedding "
+                "dimensions, which is not a width any index was built at; the "
+                f"collection is registered at {width} and nothing can confirm that "
+                "is the width this install's queries will be refused against"
+            )
+        if width != dimensions:
             return (
                 f"this install's collection is registered at {width} dimensions in "
                 f"{index_file} but the manifest records {dimensions}; the query path "
@@ -734,7 +777,10 @@ def _collection_schema_defect(
         # every healthy index tomorrow, and both are judgement rather than
         # measurement. Said out loud so neither reads as verified.
         declared = re.search(r"\[\s*(\d+)\s*\]", sql or "")
-        if declared and dimensions > 0 and int(declared.group(1)) != dimensions:
+        # No ``dimensions > 0`` guard here: a non-positive manifest width has
+        # already returned above, so repeating the test would be a claim about
+        # this function's own control flow that nothing checks.
+        if declared and int(declared.group(1)) != dimensions:
             return (
                 f"the {vectors} table in {index_file} holds "
                 f"{int(declared.group(1))}-dimension vectors but the manifest records "
@@ -748,6 +794,30 @@ def _collection_schema_defect(
         # known to be there, and a future sqlite-vec layout would otherwise
         # make every healthy index read as broken.
         if f"{vectors}_rowids" in tables:
+            # Within the layout that shadow table identifies, the *other* member
+            # retrieval cannot do without. Review asked twice for ``_rowids``
+            # itself to be treated as a defect, on the reasoning that vec0
+            # fails when its storage is incomplete. Measured instead of
+            # reasoned, and the reasoning does not hold: with ``_rowids``
+            # dropped -- or ``_info`` -- ``embedding MATCH ?`` still returns the
+            # right rows through the join. With ``_chunks`` dropped it raises
+            # ``OperationalError: no such table: main.vec_<collection>_chunks``.
+            # The right family, the wrong member, and the member that matters
+            # was the one nobody named.
+            #
+            # Gated on ``_rowids`` rather than tested on its own so the
+            # fail-open property of the comment below survives: an index whose
+            # shadow layout this module does not recognise is still not called
+            # broken, and a future sqlite-vec rename cannot fail every healthy
+            # index. Inside a layout we do recognise, a missing member is a
+            # defect rather than a silence.
+            if f"{vectors}_chunks" not in tables:
+                return (
+                    f"the {vectors} vector index in {index_file} is missing its "
+                    f"{vectors}_chunks storage table; retrieval matches the query "
+                    "vector against the index and raises on the missing table "
+                    "before it can return anything"
+                )
             rowids = f"{vectors}_rowids"
             embedded = conn.execute(f'SELECT COUNT(*) FROM "{rowids}"').fetchone()[0]
             if embedded != chunks:
@@ -798,10 +868,17 @@ def _index_is_healthy() -> bool:
     the second would tell a working remote setup to abandon it.
     ``_check_embedding_model`` runs before ``_check_index`` because
     provider-before-index reads better in the report, so it cannot read the
-    later check's result; running the same validation twice costs two sqlite
-    opens and no network, which is cheaper than reordering the output. Twice is
-    the ceiling either way -- the two callers are on mutually exclusive
-    branches of the provider check.
+    later check's result and the validation runs a second time. Twice is the
+    ceiling -- this function's two callers are on mutually exclusive branches
+    of the provider check -- but "twice" is the honest count of *whole
+    validations*, not of sqlite opens, which is what this docstring used to
+    say. ``_store_defect`` walks the chunk table more than once on its own
+    (a count, a ``typeof`` sweep over ``content``, a decode of every blob row,
+    a ``json_valid`` sweep over ``metadata``) so on a large custom index the
+    cost is a scan rather than an open, and doubling it is a real cost rather
+    than the rounding error the old wording implied. Reusing one result across
+    both callers is the fix and is filed; it wants a cache key that cannot go
+    stale between the two calls, which is more than this PR should carry.
 
     Warnings do not disqualify an index. Source drift is a reason to refresh
     it, not a reason for advice that would replace it with a worse one.
