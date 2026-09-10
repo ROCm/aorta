@@ -13,16 +13,34 @@ asks a model whether the evidence that tool returns would answer the question in
 front of it. A new tool needs a docstring. A new way of describing an old
 problem needs nothing at all.
 
-The one thing decided in code is :data:`_REQUIRES`, which is structural rather
-than semantic: a tool that analyses pasted source cannot run when nothing was
-pasted, and that is not a judgement call.
+The one thing decided in code is structural rather than semantic: a tool that
+analyses pasted source cannot run when nothing was pasted, and that is not a
+judgement call. A tool says so itself, the same way it says what it produces,
+so a contributed tool can state the requirement it has instead of being unable
+to state it and then being offered a question with nothing to read.
 """
 
 from __future__ import annotations
 
-#: Tools that read something the user supplied in the message. Proposing one of
-#: these with nothing pasted is impossible, not merely unlikely, so it is the
-#: single filter applied to the model's ranking.
+import logging
+
+logger = logging.getLogger(__name__)
+
+#: What a tool can declare it needs from the request. Only one so far, and a
+#: closed set on purpose: the value of enforcing this in code rather than
+#: leaving it to the model is that each of these is checkable, and a
+#: requirement nothing knows how to check would silently never be met.
+KNOWN_REQUIREMENTS = frozenset({"pasted_source"})
+
+#: Where a tool declares its requirements. ``requires`` for a tool that can
+#: carry an attribute, and the two mappings that ``BaseTool`` offers for a tool
+#: built by the ``@tool`` decorator, which takes no ``requires`` of its own.
+_DECLARATION_KEY = "requires"
+
+#: The built-ins, which predate the attribute and read better without it: these
+#: two are the reason the rule exists, and naming them here keeps that visible
+#: rather than buried in a decorator argument. Contributed tools declare their
+#: own; this is a fallback, not a registry.
 _REQUIRES: dict[str, frozenset[str]] = {
     "triage_kernel_source": frozenset({"pasted_source"}),
     "triage_assembly_source": frozenset({"pasted_source"}),
@@ -66,13 +84,61 @@ def catalogue(tools: dict[str, object] | None = None) -> str:
     return "\n".join(lines)
 
 
-def requirements(tool_name: str) -> frozenset[str]:
-    """What the request must contain for *tool_name* to be able to run."""
-    return _REQUIRES.get(tool_name, frozenset())
+def _declared(tool: object) -> frozenset[str] | None:
+    """What *tool* says it needs, or None if it says nothing.
+
+    Three places because a tool arrives in more than one shape. A class can
+    carry a ``requires`` attribute; a function wrapped by ``@tool`` cannot, and
+    reaches ``BaseTool.metadata`` through the constructor or ``extras`` through
+    the decorator. Reading all three is what lets a contributor use whichever
+    their tool is built with.
+    """
+    for source in (
+        getattr(tool, _DECLARATION_KEY, None),
+        (getattr(tool, "metadata", None) or {}).get(_DECLARATION_KEY),
+        (getattr(tool, "extras", None) or {}).get(_DECLARATION_KEY),
+    ):
+        if source is None:
+            continue
+        if isinstance(source, str):
+            source = [source]
+        try:
+            declared = frozenset(source)
+        except TypeError:
+            continue
+        unknown = declared - KNOWN_REQUIREMENTS
+        if unknown:
+            # Not enforced, because nothing here knows how to check it. Said
+            # out loud, because a contributor who declared it is entitled to
+            # know it is being ignored rather than quietly holding.
+            logger.warning(
+                "%s declares requirements this version cannot check: %s. Known: %s.",
+                getattr(tool, "name", tool),
+                ", ".join(sorted(unknown)),
+                ", ".join(sorted(KNOWN_REQUIREMENTS)),
+            )
+        return declared & KNOWN_REQUIREMENTS
+    return None
+
+
+def requirements(tool_name: str, tools: dict[str, object] | None = None) -> frozenset[str]:
+    """What the request must contain for *tool_name* to be able to run.
+
+    Read off the tool, so a tool contributed through the ``aorta.chat_tools``
+    entry point can declare a requirement rather than being proposed for
+    questions it has nothing to work on. The table is consulted only for a tool
+    that declares nothing.
+    """
+    if tools is None:
+        from aorta.chat.plugins import load_chat_tools
+
+        tools = {name: entry.tool for name, entry in load_chat_tools().items()}
+    declared = _declared(tools.get(tool_name)) if tool_name in tools else None
+    return declared if declared is not None else _REQUIRES.get(tool_name, frozenset())
 
 
 def enforce_requirements(
-    tools: list[str], *, has_pasted_source: bool
+    tools: list[str], *, has_pasted_source: bool, registry: dict[str, object] | None = None
 ) -> tuple[list[str], list[str]]:
     """Drop proposals whose preconditions the request cannot satisfy.
 
@@ -81,9 +147,16 @@ def enforce_requirements(
     none. Returns the surviving tools and the ones removed, so a caller can say
     what it dropped rather than silently shortening the list.
     """
+    if registry is None:
+        # Resolved once: load_chat_tools rescans the entry points every call,
+        # and there is a candidate list to walk.
+        from aorta.chat.plugins import load_chat_tools
+
+        registry = {name: entry.tool for name, entry in load_chat_tools().items()}
+
     kept, dropped = [], []
     for name in tools:
-        if "pasted_source" in requirements(name) and not has_pasted_source:
+        if "pasted_source" in requirements(name, registry) and not has_pasted_source:
             dropped.append(name)
         else:
             kept.append(name)
