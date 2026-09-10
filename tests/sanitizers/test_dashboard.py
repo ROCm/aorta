@@ -1526,6 +1526,23 @@ def test_a_resultless_finding_is_credited_once_across_same_named_rows():
     assert sum(row.get("findings", 0) for row in case["kernels"]) == case.get("findings") == 1
 
 
+def test_an_uncovered_row_does_not_borrow_a_same_named_results_finding():
+    # Findings already carried by a kernel result belong to that identity. Falling
+    # back through the name-only index put the same finding on an earlier uncovered
+    # row as well, so the kernel column counted it twice.
+    report = _report_with_two_objects_sharing_a_name()
+    check = report["checks"][0]
+    finding = check["findings"][0]
+    finding["kernel_name"] = "gemm_shared_symbol"
+    matched_result = check["kernel_results"][1]
+    matched_result["findings"] = [finding]
+    check["kernel_results"] = [matched_result]
+
+    case = gen.summarize_case(report, "warn")
+    assert [row.get("findings") for row in case["kernels"]] == [0, 1]
+    assert sum(row.get("findings", 0) for row in case["kernels"]) == case.get("findings") == 1
+
+
 def test_a_long_rollup_cannot_truncate_the_kernel_reasons_away():
     # The callout is one line and length-capped. Clamping only the concatenated
     # string let a long check-level rollup spend the whole budget, so the per-kernel

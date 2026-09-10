@@ -1216,11 +1216,11 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             findings = 0
             if name not in credited:
                 credited.add(name)
-                findings = findings_by_name.get(name, 0)
+                findings = unattributed_by_name.get(name, 0)
                 # dynamic ConSan attributes race findings at process scope
                 # (kernel_name is null); with one worklist row, credit it there.
                 if findings == 0 and len(kernel_entries) == 1:
-                    findings = findings_by_name.get(None, 0)
+                    findings = unattributed_by_name.get(None, 0)
             verdict = report.get("overall_verdict") if len(kernel_entries) == 1 or findings else "—"
         kernels.append({
             "name": name,
