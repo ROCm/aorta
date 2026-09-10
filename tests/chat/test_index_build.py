@@ -722,6 +722,27 @@ class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
         assert "--force" in message
         assert target.read_text(encoding="utf-8") == "a year of notes", "the file must survive"
 
+    def test_a_dangling_symlink_destination_is_refused(self, repo: Path, tmp_path, monkeypatch):
+        """The same gap reached through the link, where ``exists()`` lies.
+
+        ``Path.exists()`` follows the symlink, so a broken one answers ``False``
+        about a path that is very much occupied -- and the guard above reads
+        ``False`` as a first install. The third write path is pinned here
+        because ``build`` has its own guard; ``fetch`` and ``--from`` are
+        covered in ``test_index_fetch.py``.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "index.sqlite"
+        target.symlink_to(tmp_path / "never-existed.sqlite")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert "symlink" in str(exc.value)
+        assert target.is_symlink(), "the link itself must survive a refusal"
+
     def test_force_builds_over_a_manifest_less_destination(
         self, repo: Path, tmp_path, monkeypatch
     ):

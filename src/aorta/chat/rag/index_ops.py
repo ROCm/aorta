@@ -338,6 +338,17 @@ def _read_destination(index_path: str | Path) -> tuple[manifest_mod.Manifest | N
     """
     target = Path(index_path)
     if not target.exists():
+        # ``is_symlink`` as well, because ``exists()`` *follows* the link and so
+        # answers about the target rather than the path the user named: a
+        # dangling symlink reported "nothing here", the guards read that as a
+        # first install, and ``replace()`` then consumed the link without
+        # asking. A symlink is a deliberate object -- someone pointed it
+        # somewhere -- and a broken one is the case where its owner is least
+        # likely to notice it went. It is also unidentifiable by definition,
+        # which is the state this function exists to distinguish, so it takes
+        # the same refusal rather than a special one.
+        if target.is_symlink():
+            return None, f"{target} is a symlink to {os.readlink(target)}, which does not exist"
         return None, ""
     try:
         return manifest_mod.read_manifest(target), ""
@@ -1647,7 +1658,22 @@ def compare_index(
         verdict = VERDICT_INCOMPATIBLE
     elif local is None:
         verdict = VERDICT_NO_LOCAL_INDEX
-    elif _is_same_index(local, published):
+    elif _is_same_index(local, published) and not _refresh_notes(local, published):
+        # Both halves, because ``status`` prints the differences beside the
+        # verdict and the two must not disagree in the same output. The hash is
+        # the right predicate for ``fetch``, where the question is "would the
+        # transfer change these bytes" and the answer is no -- but ``status``
+        # answers "is my index the published one", and a sidecar carrying the
+        # published ``index_sha256`` under a different ``aorta_sha`` or
+        # ``corpus_digest`` reported *up to date* while the table below it
+        # listed those very fields as differing. A reader shown a contradiction
+        # believes the shorter half.
+        #
+        # Asked through ``_refresh_notes`` rather than by comparing a second
+        # list of fields here, because that function *is* what the command
+        # prints: a field added to it is then covered by this verdict without
+        # anyone remembering to add it twice, which is how the two would drift
+        # apart again.
         verdict = VERDICT_UP_TO_DATE
     elif index_provenance(local) == PROVENANCE_LOCAL:
         # Deliberately not a recency claim. ``built_at`` is wall-clock from

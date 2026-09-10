@@ -116,6 +116,7 @@ re-download the embedding weights.
 | `fetch` or `--from` | a manifest whose `corpus_roots` cannot be read | refused; pass `--force` |
 | `build` | a manifest whose `corpus_roots` cannot be read | refused, unless a row above already exempts it; pass `--force` |
 | any of them, `--public-only` included | *not an index at all* — a path that exists with no manifest beside it | refused; pass `--force` |
+| any of them | a symlink whose target does not exist | refused; pass `--force`. It is occupied, even though `exists()` says otherwise |
 
 `fetch` also opens the store before deciding a refresh would change nothing.
 A matching `index_sha256` says the right index was installed, not that the file

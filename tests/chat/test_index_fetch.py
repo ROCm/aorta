@@ -612,6 +612,44 @@ class TestAlreadyUpToDate:
         assert "index file it describes is not" in refusals
         assert "different embedding provider" not in refusals
 
+    def test_a_dangling_symlink_destination_is_refused_rather_than_consumed(
+        self, server, tmp_path: Path
+    ):
+        """``exists()`` follows the link, so it answers about the wrong path.
+
+        A broken symlink reported "nothing here" and the guards read that as a
+        first install, so ``replace()`` consumed the link without ``--force``.
+        Somebody pointed it somewhere on purpose, and a *broken* one is exactly
+        the case where its owner has not noticed it went -- so silently turning
+        it into a real index removes the evidence of both facts.
+        """
+        dest = tmp_path / "i.sqlite"
+        dest.symlink_to(tmp_path / "never-existed.sqlite")
+
+        with pytest.raises(IndexFetchError) as exc:
+            fetch_index(version="0.2.1", index_path=dest)
+
+        assert "symlink" in str(exc.value)
+        assert dest.is_symlink(), "the link itself must survive a refusal"
+        assert "--force" in str(exc.value)
+
+    def test_a_dangling_symlink_is_refused_by_side_load_too(self, tmp_path: Path):
+        """The second of the three write paths; ``build`` is covered in
+        ``test_index_build.py``. Asserted per path because they have separate
+        guards and it was one shared reader that misread the state."""
+        origin = tmp_path / "staged" / ASSET_NAME
+        origin.parent.mkdir(parents=True)
+        origin.write_bytes(BODY)
+        manifest_mod.write_manifest(origin, _manifest())
+        dest = tmp_path / "i.sqlite"
+        dest.symlink_to(tmp_path / "never-existed.sqlite")
+
+        with pytest.raises(IndexFetchError) as exc:
+            side_load(origin, index_path=dest)
+
+        assert "symlink" in str(exc.value)
+        assert dest.is_symlink()
+
     def test_a_local_index_with_no_sidecar_is_refused_rather_than_assumed(
         self, server, tmp_path: Path
     ):
@@ -1672,6 +1710,49 @@ class TestCompareIndex:
         comparison = index_ops.compare_index(version="0.2.1", index_path=tmp_path / "i.sqlite")
 
         assert comparison.verdict == index_ops.VERDICT_INCOMPATIBLE
+
+    def test_a_matching_hash_under_differing_fields_is_not_up_to_date(
+        self, server, tmp_path: Path
+    ):
+        """The verdict may not contradict the table printed underneath it.
+
+        ``status`` shows both, so a sidecar carrying the published
+        ``index_sha256`` beside a different ``aorta_sha`` said *up to date* over
+        a list of the fields that differ. The hash predicate is right for
+        ``fetch`` -- the transfer genuinely would change nothing -- and wrong
+        here, where the question is whether this is the published index rather
+        than whether the bytes would move.
+        """
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        published = manifest_mod.read_manifest(dest)
+        manifest_mod.write_manifest(
+            dest,
+            _manifest(
+                index_sha256=published.index_sha256,
+                aorta_sha="f" * 40,
+                corpus_digest="e" * 64,
+            ),
+        )
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.up_to_date is False
+        assert comparison.differences, "the fields it disagrees on must be named"
+        assert comparison.verdict != index_ops.VERDICT_UP_TO_DATE
+
+    def test_an_identical_pair_is_still_up_to_date_after_that(
+        self, server, tmp_path: Path
+    ):
+        """The other side of the same change, so the stricter predicate cannot
+        quietly make the common case report a difference that is not there."""
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict == index_ops.VERDICT_UP_TO_DATE
+        assert comparison.differences == []
 
     def test_an_unreadable_local_sidecar_outranks_an_incompatible_baseline(
         self, server, tmp_path: Path
