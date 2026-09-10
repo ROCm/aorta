@@ -1,0 +1,67 @@
+# Shape check for rollout-mode serving. Run this before the full recipe.
+#
+# Two cells, eight prompts each, a 256-token allowance: small enough that the
+# run is dominated by model load rather than by generation, which is what makes
+# it a check on the plumbing instead of a measurement. What it establishes is
+# that sampled multi-completion requests reach the engine, that generation stops
+# on EOS rather than at `output_len`, and that the export carries the per-request
+# lengths the distribution is computed from.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-rollout-smoke.yaml \
+#     --output-dir /tmp/ts-rollout-smoke
+#
+# The first thing to read is `mean_output_tokens_per_request` across the two
+# cells. Measured on gfx950 this comes out at 256 for `n=1` and 1024 for `n=4`,
+# which is how the gateway's `usage.completion_tokens` was established to sum
+# across all sampled choices -- no single choice can exceed its own 256-token
+# cap. A flat reading instead would mean the throughput figures describe one
+# sample per prompt rather than the whole rollout.
+#
+# The second is `generated_tokens_max`. Expect it at 256, and do not read that as
+# EOS being ignored: `dataset: random` prompts are random tokens, so nothing
+# induces an end-of-sequence token and every completion runs to the allowance.
+# EOS respect is real -- a direct probe returned `finish_reason: "stop"` at
+# variable lengths -- but this dataset cannot show it.
+schema_version: 1
+ticket: TOKENSPEED-SERVE-ROLLOUT-SMOKE
+workload: tokenspeed_serve
+trials: 1
+steps: 1
+
+workload_config:
+  # Digest, not the :nightly-20260714 tag it came from, for the reason every
+  # recipe here pins one: a registry can retarget a date tag.
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  model: Qwen/Qwen3-0.6B
+
+  rollout: true
+  temperature: 1.0
+
+  input_len: 128
+  output_len: 256
+  num_prompts: 8
+  max_concurrency: 8
+
+  # No discarded step. A warmup doubles the run for a check that is not
+  # measuring anything, and the Triton-compilation outlier it exists to absorb
+  # only matters to a reported number.
+  warmup_steps: 0
+  num_warmups: 1
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  ready_timeout_sec: 1200
+
+cells:
+  # The control: one completion per prompt, so the only difference from the cell
+  # below is `n`.
+  - name: rollout-n1
+    mitigations: [none]
+    environment: local
+    workload_config:
+      rollout_samples: 1
+
+  - name: rollout-n4
+    mitigations: [none]
+    environment: local
+    workload_config:
+      rollout_samples: 4
