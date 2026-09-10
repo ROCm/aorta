@@ -150,7 +150,7 @@ CRASHES_THE_READ_PATH = frozenset({"_rowids"})
 #: claims to, and the two-way test above the constant keeps that claim honest.
 VEC0_SHADOW_DAMAGE = tuple(
     f"vec-shadow{suffix.replace('_', '-')}"
-    for suffix in doctor.VEC0_STORAGE_SUFFIXES
+    for suffix in doctor.VEC0_REQUIRED_SHADOW_SUFFIXES
     if suffix not in CRASHES_THE_READ_PATH
 ) + ("vec-shadow-all",)
 
@@ -263,7 +263,7 @@ def _shadow_suffixes(how: str) -> list[str]:
     and the damage that implements it cannot describe different tables.
     """
     if how == "vec-shadow-all":
-        return list(doctor.VEC0_STORAGE_SUFFIXES)
+        return list(doctor.VEC0_REQUIRED_SHADOW_SUFFIXES)
     return ["_" + how[len("vec-shadow-") :].replace("-", "_")]
 
 
@@ -1455,6 +1455,13 @@ class TestStoreProbeAgreesWithTheReadPath:
         The query runs in a child process because dropping ``_rowids`` does not
         raise, it segfaults -- which is also how the earlier measurement came
         to record that the read path survives it.
+
+        The third assertion is the one that makes the probe's fail-open safe.
+        ``sqlite-vec>=0.1.6`` is a floor, so a user can run a layout newer than
+        this suite tests, and the probe answers "not my layout" for any shadow
+        table it does not recognise rather than reporting a healthy index as
+        broken. That is only defensible if the skew is loud somewhere, and this
+        is where: a renamed or added shadow table fails here.
         """
         from aorta.chat.rag.embeddings.factory import get_provider
 
@@ -1473,6 +1480,12 @@ class TestStoreProbeAgreesWithTheReadPath:
         finally:
             conn.close()
         assert shadow, "sqlite-vec built no shadow tables; this derivation has nothing to stand on"
+        assert set(shadow) <= set(doctor.VEC0_KNOWN_SHADOW_SUFFIXES), (
+            f"sqlite-vec builds {sorted(shadow)} and the probe recognises "
+            f"{sorted(doctor.VEC0_KNOWN_SHADOW_SUFFIXES)}; an unrecognised name makes the "
+            "probe treat every index as a layout it cannot judge, which switches the "
+            "storage check off silently rather than reporting anything"
+        )
 
         needed = []
         for suffix in shadow:
@@ -1489,17 +1502,52 @@ class TestStoreProbeAgreesWithTheReadPath:
             survived = _read_path_survives_in_a_child(index, collection)
             if not survived:
                 needed.append(suffix)
-            assert bool(_probe(index)) is (not survived), (
+            defect = _probe(index)
+            assert bool(defect) is (not survived), (
                 f"with {prefix}{suffix} dropped the read path "
                 f"{'answers' if survived else 'does not answer'} and the probe says "
-                f"{_probe(index)!r}; the two have to agree"
+                f"{defect!r}; the two have to agree"
             )
 
-        assert set(needed) == set(doctor.VEC0_STORAGE_SUFFIXES), (
+        assert set(needed) == set(doctor.VEC0_REQUIRED_SHADOW_SUFFIXES), (
             f"the read path needs {sorted(needed)} of sqlite-vec's shadow tables and the "
-            f"probe requires {sorted(doctor.VEC0_STORAGE_SUFFIXES)}; a table missing from "
-            "the probe's list is one a partial copy can remove without the doctor "
+            f"probe requires {sorted(doctor.VEC0_REQUIRED_SHADOW_SUFFIXES)}; a table missing "
+            "from the probe's list is one a partial copy can remove without the doctor "
             "noticing, and one left over there fails an index that reads fine"
+        )
+
+    def test_an_unrecognised_shadow_layout_is_not_called_broken(self, monkeypatch, tmp_path: Path):
+        """The fail-open direction, which is the expensive one to get wrong.
+
+        ``sqlite-vec>=0.1.6`` is a floor rather than a pin, so a user can run a
+        shadow layout this module has never seen. Requiring the names it knows
+        unconditionally would report *every healthy index* as broken under a
+        rename, through a probe that drives a ``FAIL`` and a non-zero exit.
+
+        So the discriminator is whether the layout is one these names describe,
+        not whether the names are present: a partial copy removes shadow tables
+        and puts nothing in their place, while a rename brings tables the module
+        has never heard of. This builds the second shape -- a required member
+        gone *and* an unrecognised member present -- and requires silence.
+
+        Distinguished from ``vec-shadow-chunks``, which removes the same table
+        and is reported, so this cannot pass by the check being off entirely.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        collection = get_provider().collection_name()
+        index = _write_index(monkeypatch, tmp_path)
+        conn = _vec_connection(index)
+        try:
+            conn.execute(f'DROP TABLE "vec_{collection}_chunks"')
+            conn.execute(f'CREATE TABLE "vec_{collection}_storage07" (rowid INTEGER)')
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert _probe(index) == "", (
+            "a shadow layout this module does not recognise must not be reported as "
+            "damaged -- that is every healthy index failing after a sqlite-vec rename"
         )
 
     def test_a_healthy_store_satisfies_both(self, monkeypatch, tmp_path: Path):
