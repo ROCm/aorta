@@ -27,9 +27,7 @@ from aorta.chat.inference.providers.remote_litellm import (
 from aorta.chat.remote_auth import PLACEHOLDER_API_KEY
 
 _LITELLM_INSTALLED = importlib.util.find_spec("litellm") is not None
-_needs_litellm = pytest.mark.skipif(
-    not _LITELLM_INSTALLED, reason="requires the 'remote' extra"
-)
+_needs_litellm = pytest.mark.skipif(not _LITELLM_INSTALLED, reason="requires the 'remote' extra")
 
 APIM_HEADER = "Ocp-Apim-Subscription-Key"
 SECRET = "sk-not-a-real-subscription-key"
@@ -39,9 +37,7 @@ SECRET = "sk-not-a-real-subscription-key"
 def gateway(monkeypatch):
     """The gateway's Anthropic path: native Anthropic protocol behind APIM."""
     monkeypatch.setattr(settings, "remote_llm_model", "anthropic/claude-example")
-    monkeypatch.setattr(
-        settings, "remote_llm_base_url", "https://gateway.example.com/anthropic"
-    )
+    monkeypatch.setattr(settings, "remote_llm_base_url", "https://gateway.example.com/anthropic")
     monkeypatch.setattr(settings, "remote_llm_api_key", SECRET)
     monkeypatch.setattr(settings, "remote_llm_auth_header", APIM_HEADER)
     monkeypatch.setattr(settings, "remote_llm_extra_headers", {})
@@ -88,16 +84,12 @@ class TestGatewayHeaders:
 
 @_needs_litellm
 class TestWithoutAGateway:
-    def test_no_headers_are_sent_and_litellm_keeps_its_own_auth(
-        self, plain_provider, no_network
-    ):
+    def test_no_headers_are_sent_and_litellm_keeps_its_own_auth(self, plain_provider, no_network):
         """Unchanged behaviour: keys come from ANTHROPIC_API_KEY and friends."""
         llm = RemoteLiteLLMBackend().get_chat_model(streaming=False)
         assert "extra_headers" not in (llm.model_kwargs or {})
 
-    def test_an_empty_base_url_is_omitted_not_passed_blank(
-        self, plain_provider, no_network
-    ):
+    def test_an_empty_base_url_is_omitted_not_passed_blank(self, plain_provider, no_network):
         llm = RemoteLiteLLMBackend().get_chat_model(streaming=False)
         assert llm.api_base is None
 

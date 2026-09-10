@@ -168,19 +168,16 @@ class TestParseActionEdgeCases:
         assert "ls -td" in kwargs["command"]
 
     def test_command_with_subshell(self, shell_tool_registered):
-        text = 'ACTION: run_terminal_command(command="find . -name \'*.py\' -exec grep -l main {} +")'
+        text = (
+            "ACTION: run_terminal_command(command=\"find . -name '*.py' -exec grep -l main {} +\")"
+        )
         result = _parse_action(text)
         assert result is not None
         name, kwargs = result
         assert name == "run_terminal_command"
 
     def test_action_in_markdown_code_block(self):
-        text = (
-            "Let me check.\n"
-            "```\n"
-            'ACTION: list_files(path="src")\n'
-            "```\n"
-        )
+        text = 'Let me check.\n```\nACTION: list_files(path="src")\n```\n'
         result = _parse_action(text)
         assert result is not None
         name, kwargs = result
@@ -188,11 +185,7 @@ class TestParseActionEdgeCases:
         assert kwargs == {"path": "src"}
 
     def test_action_in_labeled_code_block(self):
-        text = (
-            "```python\n"
-            'ACTION: search_code(query="config")\n'
-            "```\n"
-        )
+        text = '```python\nACTION: search_code(query="config")\n```\n'
         result = _parse_action(text)
         assert result is not None
         name, kwargs = result

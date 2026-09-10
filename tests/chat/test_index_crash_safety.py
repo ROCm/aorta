@@ -266,7 +266,7 @@ class TestPartialIndexUnderAStaleManifest:
 
 
 class TestAnUnreadableIndexIsNotSkipped:
-    """"Cannot be read" must not reach the same place as "is not there".
+    """ "Cannot be read" must not reach the same place as "is not there".
 
     Returning "no evidence" for both would let a file nothing can open pass the
     contents check by being too damaged to contradict its own manifest.
@@ -301,9 +301,7 @@ class TestAnUnreadableIndexIsNotSkipped:
         with pytest.raises(IndexUnreadableError):
             collection_chunk_count(target, COLLECTION)
 
-    def test_the_load_path_refuses_it_with_something_to_do(
-        self, corpus_root: Path, tmp_path: Path
-    ):
+    def test_the_load_path_refuses_it_with_something_to_do(self, corpus_root: Path, tmp_path: Path):
         from aorta.chat.rag import retriever
 
         target = tmp_path / "index.sqlite"

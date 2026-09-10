@@ -14,6 +14,8 @@ standing between them and a plausible wrong answer.
 from __future__ import annotations
 
 import json
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -25,12 +27,27 @@ from aorta.chat.rag.manifest import (
     Manifest,
     ManifestError,
     checksum_path,
+    ensure_supported_schema,
     manifest_path,
     read_manifest,
     sha256_file,
     validate,
     write_manifest,
 )
+
+
+def _with_a_usable_remote_embedder(monkeypatch):
+    """Make the remote provider buildable, so a test can reach the keyed arm.
+
+    ``remote_embedding_api_key`` defaults to empty and no profile template has
+    ever prompted for it, so a bare ``remedy_lines("remote")`` now describes an
+    install that cannot embed anything. The tests below are about the provider
+    dimension rather than the key one, and this separates the two.
+    """
+    from aorta.chat.config import settings
+
+    monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
+
 
 MODEL = "BAAI/bge-small-en-v1.5"
 COLLECTION = "aorta_fastembed_baai_bge_small_en_v1_5"
@@ -131,13 +148,143 @@ class TestReadFailures:
         That escaped every caller, all of which handle only ``ManifestError``,
         so a malformed sidecar surfaced as an unhandled crash instead of the
         refusal the reader is supposed to produce.
+
+        Refused earlier now, by the field-type check in ``from_dict`` -- which
+        is the point of moving it there, since ``schema_version`` was only the
+        first field of several to be compared or sliced without one. The
+        property under test is the same and is what this asserts: a malformed
+        sidecar is a ``ManifestError``, never a ``TypeError``.
         """
         raw = json.loads(_manifest().to_json())
         raw["schema_version"] = value
         manifest_path(index_file).write_text(json.dumps(raw))
 
-        with pytest.raises(ManifestError, match="non-integer schema version"):
+        with pytest.raises(ManifestError, match="not the type the format declares"):
             read_manifest(index_file)
+
+    @pytest.mark.parametrize("value", ["1", None, 1.5, [1], True])
+    def test_the_schema_guard_holds_for_a_manifest_that_skipped_the_parser(self, value):
+        """``ensure_supported_schema`` is exported, so it cannot lean on ``from_dict``.
+
+        Every path that turns bytes into a manifest goes through the parser, so
+        this is defence in depth rather than a live route -- but the comparison
+        is this function's to make safe, and a caller holding a hand-built
+        manifest is the one case the parser never saw.
+        """
+        manifest = replace(_manifest(), schema_version=value)
+        with pytest.raises(ManifestError, match="non-integer schema version"):
+            ensure_supported_schema(manifest, "the index under test")
+
+
+class TestFieldTypes:
+    """A sidecar is untrusted input, and nothing downstream re-checks its types.
+
+    ``describe`` slices ``aorta_sha``, ``validate`` slices it twice more and
+    calls ``startswith`` on it, and ``index_ops`` walks ``corpus_roots``. Each
+    of those assumed the declared type, so a hand-edited or truncated sidecar
+    reached the CLI as an exception no caller handles: ``"aorta_sha": 42`` as
+    ``TypeError: 'int' object is not subscriptable``, and ``{"sha": "abc"}`` as
+    ``KeyError: slice(None, 7, None)`` -- a slice being hashable since 3.12, so
+    the dict lookup succeeds in failing.
+
+    Checked once at the parser rather than at each use site, because the use
+    site that gets forgotten is the one a user hits.
+    """
+
+    #: One value of the wrong type per declared field shape, and per JSON type
+    #: a sidecar can carry. ``True`` is here because ``bool`` is an ``int``
+    #: subclass, so a count field would otherwise accept it as 1.
+    WRONG = (
+        ("aorta_sha", 42, "a whole number"),
+        ("aorta_sha", {"sha": "abc"}, "an object"),
+        ("aorta_sha", None, "null"),
+        ("aorta_sha", ["abc"], "a list"),
+        ("aorta_version", 2, "a whole number"),
+        ("embedding_model", ["m"], "a list"),
+        ("dimensions", "384", "a string"),
+        ("dimensions", 384.0, "a fractional number"),
+        ("chunk_count", True, "a boolean"),
+        ("file_count", None, "null"),
+        ("corpus_roots", "src/aorta", "a string"),
+        ("corpus_roots", [1, 2], "a list"),
+    )
+
+    @pytest.mark.parametrize(("field_name", "value", "described"), WRONG)
+    def test_a_field_of_the_wrong_type_is_a_manifest_error(self, field_name, value, described):
+        raw = json.loads(_manifest().to_json())
+        raw[field_name] = value
+        with pytest.raises(ManifestError) as exc:
+            Manifest.from_dict(raw)
+        assert field_name in str(exc.value)
+        assert described in str(exc.value)
+
+    def test_the_message_names_every_bad_field_not_just_the_first(self):
+        """Someone repairing a sidecar by hand should not need three attempts."""
+        raw = json.loads(_manifest().to_json())
+        raw.update({"aorta_sha": 42, "dimensions": "384", "corpus_roots": "src"})
+        with pytest.raises(ManifestError) as exc:
+            Manifest.from_dict(raw)
+        for name in ("aorta_sha", "dimensions", "corpus_roots"):
+            assert name in str(exc.value)
+
+    def test_it_names_the_command_that_replaces_the_manifest(self):
+        """A refusal the user cannot act on gets worked around."""
+        raw = json.loads(_manifest().to_json())
+        raw["aorta_sha"] = 42
+        with pytest.raises(ManifestError, match="aorta chat index"):
+            Manifest.from_dict(raw)
+
+    def test_a_read_surfaces_it_as_a_manifest_error_not_a_type_error(self, index_file: Path):
+        """The whole point: callers handle ``ManifestError`` and nothing else."""
+        raw = json.loads(_manifest().to_json())
+        raw["aorta_sha"] = 42
+        manifest_path(index_file).write_text(json.dumps(raw))
+        with pytest.raises(ManifestError):
+            read_manifest(index_file)
+
+    def test_the_types_a_manifest_does_declare_are_accepted(self, index_file: Path):
+        """Including an empty string and a zero, which are not "missing"."""
+        raw = json.loads(_manifest().to_json())
+        raw.update({"aorta_tag": "", "chunk_count": 0, "corpus_roots": []})
+        manifest_path(index_file).write_text(json.dumps(raw))
+        found = read_manifest(index_file)
+        assert found.aorta_tag == ""
+        assert found.chunk_count == 0
+        assert found.corpus_roots == []
+
+    def test_an_unknown_key_of_a_bad_type_is_still_only_ignored(self, index_file: Path):
+        """Forward tolerance is about keys; the type check must not undo it."""
+        raw = json.loads(_manifest().to_json())
+        raw["future_field"] = {"nested": [1, 2]}
+        manifest_path(index_file).write_text(json.dumps(raw))
+        assert read_manifest(index_file).embedding_model == MODEL
+
+    def test_every_declared_field_shape_is_one_the_check_knows(self):
+        """The import-time guard, asserted rather than left to fire on someone.
+
+        A field added in a shape ``_fits_shape`` does not handle would skip
+        validation silently, which is the hole the check exists to close.
+        """
+        from dataclasses import fields
+
+        declared = {field_.type for field_ in fields(Manifest)}
+        assert declared <= set(manifest_mod._SHAPE_NAMES), declared
+
+    def test_a_bad_type_reaches_describe_and_validate_only_as_a_refusal(self, index_file: Path):
+        """Both #465 reproductions, end to end through the reader."""
+        for value in (42, {"sha": "abc"}):
+            raw = json.loads(_manifest().to_json())
+            raw["aorta_sha"] = value
+            manifest_path(index_file).write_text(json.dumps(raw))
+            with pytest.raises(ManifestError):
+                manifest = read_manifest(index_file)
+                manifest.describe()
+                validate(
+                    manifest,
+                    embedding_model=MODEL,
+                    collection=COLLECTION,
+                    installed_sha="b" * 7,
+                )
 
     def test_an_unknown_extra_key_is_tolerated(self, index_file: Path):
         """A newer builder adding a field must not strand an older client.
@@ -285,6 +432,643 @@ class TestRefusalText:
         assert "aorta chat index build" in text
         assert "aorta chat doctor" in text
 
+    def test_a_remote_embedder_is_not_told_to_fetch(self, monkeypatch):
+        """The impossible remedy, offered first, is what sends people to a workaround.
+
+        CI publishes one index asset and builds it with the local embedder, so
+        "the index matching this install" does not exist for a remote provider
+        and never will. Following that line gets a second refusal with different
+        wording, from which the reasonable conclusion is that chat is broken.
+        """
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        _with_a_usable_remote_embedder(monkeypatch)
+        text = self._refusal()
+        commands = [line for line in text.splitlines() if line.startswith("  aorta")]
+        assert not any("index fetch" in line for line in commands)
+        assert any("index build" in line for line in commands)
+
+
+class TestRemedyLines:
+    """Which commands a mismatch is resolved by depends on the embedding provider."""
+
+    def test_the_fetch_line_says_it_replaces_the_current_index(self):
+        """It overwrites the index at the configured path, and used to read as a download.
+
+        ``fetch_index`` installs over ``settings.index_file``, and nothing in
+        the manifest is consulted here when choosing the wording -- ``Manifest``
+        does carry ``corpus_roots``/``corpus_digest``, which would distinguish a
+        local build from a published one, but this line does not read them and a
+        pre-provenance manifest carries neither. So an index built over a
+        different ``aorta_path`` is indistinguishable to *this* code, and cannot
+        be detected and spared. What is left is
+        to stop the line reading as a pure addition, so the reader with such an
+        index can choose ``build`` on the next line instead.
+        """
+        line = manifest_mod.remedy_lines("local")[0]
+        assert "replace" in line
+
+    def test_a_local_provider_leads_with_fetch(self):
+        lines = manifest_mod.remedy_lines("local")
+        assert lines[0].strip().startswith("aorta chat index fetch")
+
+    @pytest.mark.parametrize("provider", ["local", "remote", "openai"])
+    def test_no_arm_promises_a_fetch_a_custom_model_would_refuse(self, monkeypatch, provider):
+        """``embedding_model`` survives a provider switch, so it gates every arm.
+
+        The local arm consulted ``_custom_local_model()`` from the start; the
+        two remote arms promised "the fetch works" after switching the provider
+        and never asked. Review raised it five times across six rounds -- once
+        per line number, since each arm carried its own copy of the promise --
+        which is why this asserts the property over every arm instead of the
+        two that were reported.
+
+        The exact string matters: the local arm legitimately says that setting
+        the model *back* to the default makes the fetch work again, which is
+        conditional and true. What may never appear is the unconditional
+        promise.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        monkeypatch.setattr(settings, "embedding_model", "intfloat/e5-small")
+        text = "\n".join(manifest_mod.remedy_lines(provider))
+        assert "'aorta chat index fetch' works" not in text, text
+
+        # The other direction, so this cannot pass by the promise being absent
+        # everywhere: on the default model the fetch is exactly what to offer.
+        monkeypatch.setattr(settings, "embedding_model", fastembed_bge.DEFAULT_MODEL)
+        offered = "\n".join(manifest_mod.remedy_lines(provider))
+        assert "aorta chat index fetch" in offered
+
+    @pytest.mark.parametrize("provider", ["local", "remote", "openai", "nonesuch"])
+    @pytest.mark.parametrize("model", ["", "intfloat/e5-small"])
+    def test_every_remedy_line_fits_one_report_line(self, monkeypatch, provider, model):
+        """A report line is a line, and one commit's worth of it was not.
+
+        Dropping the comma between two adjacent literals in an aligned block
+        made Python concatenate them, printing a single 90-column line with the
+        indentation doubled in the middle. Every substring assertion in this
+        file passed, because every substring was still present -- just on one
+        line instead of two.
+
+        So the width is asserted rather than the wording. 79 is the bound the
+        blocks are written to; the widest legitimate line is 74.
+
+        Measured after joining and re-splitting, not per list element: one
+        element deliberately carries its own ``\\n`` and is two report lines, so
+        measuring elements would call a correctly wrapped entry 133 columns
+        wide. What reaches the terminal is what this has to be true of.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        monkeypatch.setattr(settings, "embedding_model", model or fastembed_bge.DEFAULT_MODEL)
+        for line in "\n".join(manifest_mod.remedy_lines(provider)).splitlines():
+            assert len(line) <= 79, (len(line), line)
+
+    def test_a_remote_provider_explains_the_absence_rather_than_hiding_it(self, monkeypatch):
+        """Otherwise the user goes looking for the command the docs mention."""
+        _with_a_usable_remote_embedder(monkeypatch)
+        text = "\n".join(manifest_mod.remedy_lines("remote"))
+        assert "is not offered here" in text
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in text
+
+    def test_doctor_is_not_told_to_run_doctor(self):
+        text = "\n".join(manifest_mod.remedy_lines("local", include_doctor=False))
+        assert "aorta chat doctor" not in text
+
+    def test_it_reads_the_configured_provider_when_not_given_one(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        _with_a_usable_remote_embedder(monkeypatch)
+        assert "is not offered here" in "\n".join(manifest_mod.remedy_lines())
+
+    def test_an_empty_provider_setting_is_treated_as_local(self, monkeypatch):
+        """A setting that resolves to no provider falls back to the shipped default.
+
+        Which is also the one the published index is built with, so the fetch
+        remedy is the right guess when there is nothing to read.
+        """
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "")
+        assert manifest_mod._configured_embedding_provider() == "local"
+
+    def test_every_alias_of_the_local_provider_still_gets_the_fetch_remedy(self, monkeypatch):
+        """``onnx`` and ``fastembed`` are spellings of ``local``, not remote providers.
+
+        Comparing ``settings.embedding_provider`` as a raw string handed an
+        ordinary local install the remote remedy: it withholds ``index fetch``,
+        the one command that fixes its index, and tells it to set the provider
+        it is already on. Discovered from the factory rather than listed here,
+        so a new alias is covered without editing this test.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import factory
+
+        aliases = [name for name, target in factory._ALIASES.items() if target == "local"]
+        assert aliases, "the factory no longer aliases anything to the local provider"
+        for alias in aliases:
+            monkeypatch.setattr(settings, "embedding_provider", alias)
+            assert manifest_mod._configured_embedding_provider() == "local", alias
+            lines = manifest_mod.remedy_lines()
+            assert lines[0].strip().startswith("aorta chat index fetch"), alias
+            assert "is not offered here" not in "\n".join(lines), alias
+
+
+class TestAProviderAortaDoesNotHave:
+    """A typo in ``embedding_provider`` is a configuration error, not a local install.
+
+    ``_configured_embedding_provider`` resolves an unknown name to ``local``,
+    which is a sound guess for an environment that cannot *construct* a
+    provider it can name -- and was being applied to a name the factory
+    rejects, where the value is right there in the message. The advice arms
+    then offered both index commands, and both die resolving the same setting.
+    """
+
+    TYPO = "sbert"
+
+    def _typo(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", self.TYPO)
+
+    def test_neither_index_command_can_actually_run(self, monkeypatch):
+        """The measurement the arm is conditioned on, kept executable.
+
+        Not "the provider is unusable" in the abstract: both commands resolve
+        the provider before doing anything else, so both raise this before the
+        first byte.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        self._typo(monkeypatch)
+        with pytest.raises(ValueError, match="unknown embedding provider"):
+            get_provider()
+
+    def test_the_predicate_returns_the_factorys_own_message(self, monkeypatch):
+        self._typo(monkeypatch)
+        complaint = manifest_mod._unknown_embedding_provider()
+        assert self.TYPO in complaint
+        # The valid set, so the reader does not have to go and find it.
+        assert "local" in complaint and "remote" in complaint
+
+    def test_a_provider_that_resolves_is_not_reported_as_unknown(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        for name in ("local", "remote", "onnx", "fastembed"):
+            monkeypatch.setattr(settings, "embedding_provider", name)
+            assert manifest_mod._unknown_embedding_provider() == "", name
+
+    def test_neither_index_command_is_offered(self, monkeypatch):
+        self._typo(monkeypatch)
+        offered = [line for line in manifest_mod.remedy_lines() if line.startswith("  aorta")]
+        assert not any("index" in line for line in offered)
+        # ``doctor`` still is: it runs, and it is where the row that names the
+        # bad value lives.
+        assert any("aorta chat doctor" in line for line in offered)
+
+    def test_it_reads_as_a_configuration_error(self, monkeypatch):
+        self._typo(monkeypatch)
+        text = "\n".join(manifest_mod.remedy_lines())
+        assert "configuration error rather than a missing index" in text
+        assert self.TYPO in text
+        assert 'embedding_provider = "local"' in text
+
+    def test_the_inline_form_does_not_name_a_command_as_runnable(self, monkeypatch):
+        """The one-line slots get prose, not a command they would have to disown."""
+        self._typo(monkeypatch)
+        advice = manifest_mod._refresh_advice()
+        assert "no index command can run" in advice
+        assert "index fetch" not in advice
+        assert "index build" not in advice
+
+    def test_an_explicit_provider_argument_still_wins(self, monkeypatch):
+        """Callers that name a provider are answered about that provider.
+
+        Reading the setting underneath an explicit argument would answer a
+        question nobody asked -- and the validation messages pass the provider
+        recorded in the *manifest*, which is not this install's setting.
+        """
+        self._typo(monkeypatch)
+        assert manifest_mod.remedy_lines("local")[0].strip().startswith("aorta chat index fetch")
+        assert manifest_mod._refresh_command("local") == "aorta chat index fetch"
+        assert manifest_mod._refresh_advice("local") == "'aorta chat index fetch'"
+
+    def test_an_unbuildable_but_known_provider_still_gets_the_old_fallback(self, monkeypatch):
+        """The half of the fallback whose reasoning always held, left alone.
+
+        A name the factory *has* but cannot construct here -- a missing extra,
+        say -- is not a claim that the setting is wrong. That still resolves to
+        local, which is the shipped default and the one the published index is
+        built with.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings import factory
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+
+        def explode():
+            raise ImportError("no fastembed here")
+
+        monkeypatch.setattr(factory, "get_provider", explode)
+        assert manifest_mod._unknown_embedding_provider() == ""
+        assert manifest_mod._configured_embedding_provider() == "local"
+
+
+class TestACustomisedLocalModel:
+    """The local half of the same defect, one setting over.
+
+    ``embedding_model`` is configurable, but CI publishes exactly one asset and
+    builds it with the default. ``fetch_index`` validates the published
+    manifest against this install's provider identity and refuses, so the
+    fetch remedy was an impossible command for every customised local install
+    -- a state the parser tier of the command sweep can never reject, because
+    ``aorta chat index fetch`` parses perfectly well.
+    """
+
+    CUSTOM = "BAAI/bge-base-en-v1.5"
+
+    def _customise(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", self.CUSTOM)
+
+    def test_the_published_asset_is_refused_by_a_customised_model(self, monkeypatch):
+        """The measurement the remedy is conditioned on, kept executable.
+
+        Runs the comparison ``fetch_index`` runs. Three refusals, not one: the
+        collection name and the vector identity both carry the model.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        publisher = get_provider()
+        published = _manifest(
+            embedding_model=publisher.model_id(),
+            collection=publisher.collection_name(),
+            embedding_identity=publisher.vector_identity(),
+            embedding_provider="local",
+        )
+
+        monkeypatch.setattr(settings, "embedding_model", self.CUSTOM)
+        provider = get_provider()
+        report = validate(
+            published,
+            embedding_model=provider.model_id(),
+            collection=provider.collection_name(),
+            embedding_identity=provider.vector_identity(),
+        )
+        assert len(report.refusals) == 3
+
+    def test_the_fetch_is_not_offered(self, monkeypatch):
+        self._customise(monkeypatch)
+        offered = [line for line in manifest_mod.remedy_lines() if line.startswith("  aorta")]
+        assert not any("index fetch" in line for line in offered)
+        assert any("index build" in line for line in offered)
+
+    def test_it_says_why_and_how_to_get_the_fetch_back(self, monkeypatch):
+        self._customise(monkeypatch)
+        text = "\n".join(manifest_mod.remedy_lines())
+        assert "is not offered here" in text
+        assert self.CUSTOM in text
+        assert "back to the default" in text
+
+    def test_the_inline_form_names_the_reason(self, monkeypatch):
+        self._customise(monkeypatch)
+        assert manifest_mod._refresh_command() == "aorta chat index build"
+        advice = manifest_mod._refresh_advice()
+        assert "index build" in advice
+        assert self.CUSTOM in advice
+
+    def test_the_default_model_is_unaffected(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        assert manifest_mod._refresh_advice() == "'aorta chat index fetch'"
+        assert manifest_mod.remedy_lines()[0].strip().startswith("aorta chat index fetch")
+
+    def test_a_whitespace_padded_default_is_not_the_default(self, monkeypatch):
+        """Reads as the published model; is not one, anywhere it matters.
+
+        ``model_id()``, ``collection_name()`` and ``vector_identity()`` all
+        read ``settings.embedding_model`` verbatim, so ``fetch_index``
+        validates against the padded string and refuses on all three. An
+        earlier version of the predicate stripped before comparing and called
+        this the default -- offering the fetch it refuses, which is the defect
+        the predicate exists to prevent.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        padded = f"  {MODEL}  "
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        publisher = get_provider()
+        published = _manifest(
+            embedding_model=publisher.model_id(),
+            collection=publisher.collection_name(),
+            embedding_identity=publisher.vector_identity(),
+            embedding_provider="local",
+        )
+
+        monkeypatch.setattr(settings, "embedding_model", padded)
+        provider = get_provider()
+        assert provider.model_id() == padded
+        report = validate(
+            published,
+            embedding_model=provider.model_id(),
+            collection=provider.collection_name(),
+            embedding_identity=provider.vector_identity(),
+        )
+        assert report.refusals, "the padded model can read the published asset after all"
+
+        assert manifest_mod._custom_local_model() == padded
+        assert manifest_mod._refresh_command() == "aorta chat index build"
+
+    def test_an_empty_embedding_model_is_a_custom_one_not_the_default(self, monkeypatch):
+        """``""`` is a value of the setting, and it is not the published one.
+
+        The helper used to read ``settings.embedding_model or DEFAULT_MODEL``,
+        so an empty setting was reported as the default and offered the fetch.
+        The provider has no such fallback -- ``model_id()`` and
+        ``vector_identity()`` return the setting verbatim and
+        ``collection_name()`` hashes it -- so that install's identity is empty,
+        the published manifest does not match it, and the offered fetch is
+        refused on all three counts.
+
+        This is why the helper returns ``None`` rather than ``""`` for "not
+        custom": with ``""`` as the sentinel the absent case and the empty case
+        are the same value, and the bug is unexpressible.
+
+        Replaces ``test_an_empty_model_setting_is_treated_as_the_default``,
+        which asserted this same ``== ""`` and read it the other way round --
+        as "empty falls back to the shipped default, which is what the provider
+        itself does". The provider does no such thing: ``model_id()`` and
+        ``vector_identity()`` have no ``or DEFAULT_MODEL``. So the old test
+        pinned the bug and, once the sentinel changed, would have gone on
+        passing while asserting the opposite of its own name.
+        """
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", "")
+
+        assert manifest_mod._custom_local_model() == ""
+        text = "\n".join(manifest_mod.remedy_lines())
+        assert "'aorta chat index fetch' works" not in text
+        assert "is not offered here" in text
+
+    def test_chunk_drift_does_not_withhold_the_fetch(self, monkeypatch):
+        """`manifest.py`'s chunk leniency is deliberate; the remedy must respect it.
+
+        ``chunk_size``/``chunk_overlap`` drift is a warning and ``fetch_index``
+        installs through it, so conditioning the remedy on those settings would
+        withhold a fetch that works. Asserted both ways: the settings differ
+        from the published manifest's, ``validate`` still refuses nothing, and
+        the fetch is still offered.
+        """
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "local")
+        monkeypatch.setattr(settings, "embedding_model", MODEL)
+        monkeypatch.setattr(settings, "chunk_size", 1024)
+        monkeypatch.setattr(settings, "chunk_overlap", 99)
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            chunk_size=1024,
+            chunk_overlap=99,
+        )
+        assert report.refusals == []
+        assert report.warnings
+        assert manifest_mod._custom_local_model() is None
+        assert manifest_mod.remedy_lines()[0].strip().startswith("aorta chat index fetch")
+
+
+class TestAKeylessRemoteEmbedder:
+    """The arm for an install whose remote provider cannot embed anything.
+
+    ``remote_embedding_api_key`` defaults to empty, no profile template has
+    ever prompted for it, and it does not fall back to the chat key -- so this
+    is not an exotic state, it is the default state of every profile that
+    carries ``embedding_provider = "remote"``. Leading such an install with
+    ``index build`` names the one command it is guaranteed to fail.
+    """
+
+    def test_the_predicate_agrees_with_the_provider(self, monkeypatch):
+        """Asked of the provider, not re-derived from settings, so it cannot drift.
+
+        The oracle is the code the command would run:
+        ``RemoteApiProvider.get_embeddings`` raises on an empty key before it
+        sends anything, which is what makes the failure knowable offline.
+        """
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.remote_api import RemoteApiProvider
+
+        for key in ("", "sk-test"):
+            monkeypatch.setattr(settings, "remote_embedding_api_key", key)
+            try:
+                RemoteApiProvider().get_embeddings()
+            except Exception as exc:
+                oracle = str(exc)
+            else:
+                oracle = ""
+            assert manifest_mod._remote_embedder_error() == oracle, key
+        # And that the empty key is the state that fails, not both or neither.
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        assert "remote_embedding_api_key" in manifest_mod._remote_embedder_error()
+
+    def test_an_unimportable_client_does_not_take_the_message_down(self, monkeypatch):
+        """The remedy runs on installs missing the chat-cli extra.
+
+        ``remote_api`` pulls in the OpenAI client, and this predicate is
+        consulted while composing a refusal -- so an import at function scope
+        outside the ``try`` would replace "your index does not match" with an
+        ImportError traceback, on the install least able to interpret it.
+        """
+        import builtins
+
+        real_import = builtins.__import__
+
+        def refuse(name, *args, **kwargs):
+            if "remote_api" in name or name.split(".")[0] in ("openai", "langchain_openai"):
+                raise ModuleNotFoundError(name)
+            return real_import(name, *args, **kwargs)
+
+        for module in [m for m in list(sys.modules) if "remote_api" in m]:
+            monkeypatch.delitem(sys.modules, module)
+        monkeypatch.setattr(builtins, "__import__", refuse)
+        assert manifest_mod._remote_embedder_error()
+        assert manifest_mod.remedy_lines("remote")[0].strip().startswith("embedding_provider")
+
+    def test_it_is_not_led_with_a_build_it_cannot_run(self):
+        """The finding: the remote arm offered ``index build`` unconditionally."""
+        lines = manifest_mod.remedy_lines("remote")
+        offered = [line for line in lines if line.startswith("  aorta")]
+        assert not any("index build" in line for line in offered)
+        assert not any("index fetch" in line for line in offered)
+
+    def test_it_leads_with_the_only_remedy_that_runs(self):
+        lines = manifest_mod.remedy_lines("remote")
+        assert lines[0].strip().startswith('embedding_provider = "local"')
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER=local" in "\n".join(lines)
+
+    def test_it_says_why_rather_than_going_quiet(self, monkeypatch):
+        """Withholding both commands without a reason reads as chat being broken."""
+        text = "\n".join(manifest_mod.remedy_lines("remote"))
+        assert "Neither index command is offered" in text
+        assert "remote_embedding_api_key" in text
+
+    def test_a_keyed_remote_provider_still_gets_the_build(self, monkeypatch):
+        """The other side of the fork, so this cannot become a blanket refusal."""
+        _with_a_usable_remote_embedder(monkeypatch)
+        offered = [line for line in manifest_mod.remedy_lines("remote") if line.startswith("  ao")]
+        assert any("index build" in line for line in offered)
+
+    def test_a_local_provider_is_unaffected_by_the_key(self, monkeypatch):
+        """The local embedder does not read it, so it must not change the advice."""
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        assert manifest_mod.remedy_lines("local")[0].strip().startswith("aorta chat index fetch")
+
+    def test_the_inline_form_names_the_blocker(self):
+        advice = manifest_mod._refresh_advice("remote")
+        assert "aorta chat index build" in advice
+        assert "remote_embedding_api_key" in advice
+
+    def test_the_inline_form_does_not_offer_a_one_shot_env_var_fetch(self):
+        """The remedy that runs, succeeds, and leaves the install just as broken.
+
+        ``AORTA_CHAT_EMBEDDING_PROVIDER=local aorta chat index fetch`` is a
+        tempting single command for this state -- it needs no key and it
+        installs an index. But the variable is gone by the next query, which
+        resolves the remote provider again and validates the *published*
+        manifest against it. Driving that comparison gives two refusals,
+        embedding model and collection, because the asset was built by the
+        local embedder. So the command reports success and changes nothing a
+        user can see except their belief that it is fixed. The switch has to
+        be persistent, which makes it a settings change, not a command.
+        """
+        advice = manifest_mod._refresh_advice("remote")
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER" not in advice
+
+    def test_the_published_asset_is_still_refused_after_such_a_fetch(self):
+        """The measurement behind the test above, kept executable."""
+        from aorta.chat.config import settings
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        published = _manifest(
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            embedding_provider="local",
+        )
+        settings.remote_embedding_api_key = "sk-test"
+        settings.embedding_provider = "remote"
+        try:
+            provider = get_provider()
+            report = validate(
+                published,
+                embedding_model=provider.model_id(),
+                collection=provider.collection_name(),
+            )
+        finally:
+            settings.embedding_provider = "local"
+            settings.remote_embedding_api_key = ""
+        assert len(report.refusals) == 2
+        assert any("embedding model" in line for line in report.refusals)
+        assert any("collection" in line for line in report.refusals)
+
+    def test_the_inline_form_still_keeps_fetch_out_of_a_remote_message(self):
+        """Naming the switch to local here would undo the older fix.
+
+        ``index fetch`` is withheld from a remote install because the published
+        asset cannot match it; spelling the whole alternative out in a one-line
+        warning slot would put the command back in front of the user who
+        cannot use it. The slot names the blocker and points at ``doctor``.
+        """
+        assert "index fetch" not in manifest_mod._refresh_advice("remote")
+
+    def test_the_keyed_inline_form_is_just_the_command(self, monkeypatch):
+        _with_a_usable_remote_embedder(monkeypatch)
+        assert manifest_mod._refresh_advice("remote") == "'aorta chat index build'"
+        assert manifest_mod._refresh_advice("local") == "'aorta chat index fetch'"
+
+
+class TestRefreshCommand:
+    """The one-command form, for the messages that are prose rather than a report."""
+
+    def test_a_local_provider_is_told_to_fetch(self):
+        assert manifest_mod._refresh_command("local") == "aorta chat index fetch"
+
+    def test_a_remote_provider_with_a_key_is_told_to_build(self, monkeypatch):
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-test")
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        assert manifest_mod._refresh_command("remote") == "aorta chat index build"
+
+    def test_a_keyless_remote_provider_does_not_get_a_one_shot_env_var(self, monkeypatch):
+        """This slot stays a bare command; the precondition goes in the advice.
+
+        A one-shot ``AORTA_CHAT_EMBEDDING_PROVIDER=local`` prefix would make
+        this the only arm whose "command" is a shell line rather than a
+        command, and it would not work:
+        ``TestAKeylessRemoteEmbedder.test_the_published_asset_is_still_refused
+        _after_such_a_fetch`` drives the comparison the next query makes and
+        gets two refusals. :func:`_refresh_advice` carries the condition
+        instead, which keeps one honest sentence in place of two commands that
+        disagree.
+        """
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        assert manifest_mod._refresh_command("remote") == "aorta chat index build"
+        assert "AORTA_CHAT_EMBEDDING_PROVIDER" not in manifest_mod._refresh_advice("remote")
+
+    def test_it_agrees_with_the_block_form(self):
+        """Two independent answers to "is a fetch worth suggesting" would drift.
+
+        Read off the command lines rather than the whole block: the remote
+        block names ``index fetch`` in prose precisely to say it is not on
+        offer, so a substring search over all of it answers the wrong question.
+        """
+        for provider in ("local", "remote"):
+            commands = [
+                line for line in manifest_mod.remedy_lines(provider) if line.startswith("  aorta")
+            ]
+            offered = any("index fetch" in line for line in commands)
+            assert offered == (manifest_mod._refresh_command(provider) == "aorta chat index fetch")
+
+    def test_a_missing_manifest_names_a_command_the_provider_can_run(self, monkeypatch, tmp_path):
+        """The message doctor prints for an index nobody can verify.
+
+        It reaches a remote install through ``doctor``'s "cannot be verified"
+        branch and through the query-time refusal, so a hardcoded fetch here is
+        the same impossible remedy in two more places.
+        """
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        with pytest.raises(manifest_mod.ManifestError) as excinfo:
+            manifest_mod.read_manifest(tmp_path / "index.sqlite")
+        assert "no manifest beside" in str(excinfo.value)
+        assert "index fetch" not in str(excinfo.value)
+        assert "aorta chat index build" in str(excinfo.value)
+
+    def test_a_malformed_schema_version_names_one_too(self, monkeypatch):
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "local")
+        with pytest.raises(manifest_mod.ManifestError) as excinfo:
+            manifest_mod.ensure_supported_schema(_manifest(schema_version="1"), "the index")
+        assert "aorta chat index fetch" in str(excinfo.value)
+
 
 class TestWarnings:
     def test_version_drift_warns_rather_than_refuses(self):
@@ -307,6 +1091,49 @@ class TestWarnings:
         )
         assert any("aorta chat index fetch" in line for line in report.warnings)
 
+    def test_the_drift_warning_does_not_name_fetch_on_a_remote_provider(self, monkeypatch):
+        """The index still works here, so the advice must be a command that runs.
+
+        A fetch under a remote embedder is refused rather than stale, so
+        answering "your index is a little old" with it trades a warning the
+        user could act on for an error they cannot.
+        """
+        monkeypatch.setattr(manifest_mod, "_configured_embedding_provider", lambda: "remote")
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            installed_version="0.3.0",
+        )
+        drift = [line for line in report.warnings if "source drift" in line]
+        assert drift
+        assert not any("index fetch" in line for line in drift)
+        assert any("aorta chat index build" in line for line in drift)
+
+    def test_the_drift_warning_names_the_blocker_for_a_keyless_remote(self, monkeypatch):
+        """The index still works here, so the warning must not read as fatal.
+
+        Drift is the mildest thing this module says, and a keyless remote
+        install cannot act on either index command. Naming the build and the
+        one setting that unblocks it says both, in the one line the warning
+        has -- where a prefixed shell command would say something that does
+        not survive the next query.
+        """
+        from aorta.chat.config import settings
+
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_api_key", "")
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            installed_version="0.3.0",
+        )
+        drift = [line for line in report.warnings if "source drift" in line]
+        assert drift
+        assert all("remote_embedding_api_key is set" in line for line in drift)
+        assert not any("AORTA_CHAT_EMBEDDING_PROVIDER" in line for line in drift)
+
     def test_an_identical_version_does_not_warn(self):
         report = validate(
             _manifest(),
@@ -325,6 +1152,44 @@ class TestWarnings:
         )
         assert report.refusals == []
         assert any("chunk size" in line for line in report.warnings)
+
+    def test_chunk_overlap_drift_warns_on_its_own(self):
+        """The sibling branch, which had no test where ``chunk_size`` did.
+
+        Both are optional arguments compared independently, so the size test
+        passing said nothing about the overlap one: a typo in either the field
+        name or the comparison would have gone unnoticed on this branch. It
+        warns rather than refuses for the same reason as the size -- the
+        vectors are still this provider's, so the index answers, and the spans
+        merely have different edges than a rebuild would give them.
+        """
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            chunk_overlap=128,
+        )
+        assert report.refusals == []
+        assert any("chunk overlap" in line for line in report.warnings)
+        # And is not the size warning wearing the wrong label.
+        assert not any("chunk size" in line for line in report.warnings)
+
+    def test_both_chunk_warnings_can_be_raised_at_once(self):
+        """A rebuild after changing both settings should say so twice.
+
+        Written because the two branches are adjacent and an ``elif`` between
+        them would silently drop the second, which no single-setting test can
+        see.
+        """
+        report = validate(
+            _manifest(),
+            embedding_model=MODEL,
+            collection=COLLECTION,
+            chunk_size=1024,
+            chunk_overlap=128,
+        )
+        assert any("chunk size" in line for line in report.warnings)
+        assert any("chunk overlap" in line for line in report.warnings)
 
     def test_a_sha_delta_warns_when_the_version_string_matches(self):
         """A dev install and the rolling asset can share a version and differ."""

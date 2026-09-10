@@ -71,9 +71,7 @@ class TestNoTruncationNeeded:
 
 
 class TestSearchToolReadsTheFullMap:
-    def test_search_repo_map_matches_beyond_the_prompt_cap(
-        self, big_map: str
-    ):
+    def test_search_repo_map_matches_beyond_the_prompt_cap(self, big_map: str):
         """A term only present late in the file must still be findable."""
         from aorta.chat.tools.search import search_repo_map
 

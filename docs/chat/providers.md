@@ -186,6 +186,19 @@ The symptom is distinctive — `finish_reason` is `stop`, output tokens are
 non-zero, and `content` is empty — and the logs say so:
 `act_node ... produced no text despite N output tokens`.
 
+`aorta chat doctor` reports the resolved mode as its own check, and warns before
+you spend a query on it when `text` is paired with a model whose name reads as a
+reasoning one — a locally served one as much as a remote one, since the channel
+is the model's rather than the endpoint's. A deployment can be served under any
+name, so for a name the check does not recognise — or a provider with no model
+name to read — it still names `native`, and what turning it on costs here, in
+the hint under the line it prints. Under `native` the same line names what the
+endpoint has to accept, because nothing in that report tests it: no probe sends
+a request carrying `tools`. A local vLLM is asked for `/health`, which a server
+that rejects `tools` answers normally, and the remote backends are not called
+at all — their `probe()` is a configuration preflight, deliberately, so that a
+diagnostic cannot bill you for a round trip.
+
 Both protocols run the same tools, retrieval and critic, and both are guarded
 the same way: an empty reply is never used as the answer, unproductive rounds
 are capped at two, a repeated identical tool call is answered with "you already

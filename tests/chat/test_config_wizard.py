@@ -194,9 +194,7 @@ class TestConfigInit:
         mode = stat.S_IMODE(chat_profile.stat().st_mode)
         assert mode == 0o600, oct(mode)
 
-    def test_a_permissive_existing_profile_is_tightened_before_the_key_lands(
-        self, chat_profile
-    ):
+    def test_a_permissive_existing_profile_is_tightened_before_the_key_lands(self, chat_profile):
         """``O_CREAT``'s mode applies only on create, so an existing file kept its.
 
         A key written into a 0644 profile and chmodded afterwards is readable by
@@ -589,9 +587,7 @@ class TestExtraHeaderValuesAreMasked:
     def test_json_output_is_masked_too(self, chat_profile, monkeypatch):
         """--json is the form most likely to be pasted into a ticket."""
         secret = "gw-abcdefgh12345678"
-        monkeypatch.setenv(
-            "AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", f"x-api-key={secret}"
-        )
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", f"x-api-key={secret}")
         config.reset_settings()
         result = CliRunner().invoke(chat, ["config", "show", "--json"])
         assert result.exit_code == 0, result.output
@@ -599,9 +595,7 @@ class TestExtraHeaderValuesAreMasked:
 
     def test_reveal_still_prints_it(self, chat_profile, monkeypatch):
         secret = "gw-abcdefgh12345678"
-        monkeypatch.setenv(
-            "AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", f"x-api-key={secret}"
-        )
+        monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_EXTRA_HEADERS", f"x-api-key={secret}")
         config.reset_settings()
         result = CliRunner().invoke(chat, ["config", "show", "--reveal"])
         assert result.exit_code == 0, result.output
@@ -686,9 +680,7 @@ class TestConfigValidate:
         reported healthy at 0644 -- the check honouring the field name rather
         than the secret.
         """
-        chat_profile.write_text(
-            f'{field} = {{ "x-api-key" = "gw-live" }}\n', encoding="utf-8"
-        )
+        chat_profile.write_text(f'{field} = {{ "x-api-key" = "gw-live" }}\n', encoding="utf-8")
         chat_profile.chmod(0o644)
         problems = config.validate_profile(chat_profile)
         assert any("0644" in p and "chmod 600" in p for p in problems), problems

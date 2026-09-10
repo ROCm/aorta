@@ -184,12 +184,8 @@ class TestCriticSeesTheTrace:
         fake.ainvoke = AsyncMock(return_value=AIMessage(content="VALID"))
         state = {
             "messages": [HumanMessage(content="how do I profile?")],
-            "command_output": (
-                "Use `aorta sweep run --collect rocprof` (docs/profiling.md:11)."
-            ),
-            "tool_trace": [
-                "TOOL RESULT from read_file:\naorta sweep run --collect rocprof"
-            ],
+            "command_output": ("Use `aorta sweep run --collect rocprof` (docs/profiling.md:11)."),
+            "tool_trace": ["TOOL RESULT from read_file:\naorta sweep run --collect rocprof"],
             "iteration": 0,
             "critic_feedback": None,
             "route": "action",
@@ -224,9 +220,7 @@ class TestCriticSeesTheTrace:
         assert "no tool results gathered" not in prompt
 
     @pytest.mark.asyncio
-    async def test_a_nonzero_exit_code_in_the_trace_is_still_caught(
-        self, monkeypatch
-    ):
+    async def test_a_nonzero_exit_code_in_the_trace_is_still_caught(self, monkeypatch):
         """Failure detection reads the trace too, not only the message scan."""
         from aorta.chat.graph import nodes
 
@@ -236,9 +230,7 @@ class TestCriticSeesTheTrace:
         state = {
             "messages": [HumanMessage(content="run the tests")],
             "command_output": "I ran pytest",
-            "tool_trace": [
-                "TOOL RESULT from run_terminal_command:\nExit code: 1\nboom"
-            ],
+            "tool_trace": ["TOOL RESULT from run_terminal_command:\nExit code: 1\nboom"],
             "iteration": 0,
             "critic_feedback": None,
             "route": "action",
@@ -250,9 +242,7 @@ class TestCriticSeesTheTrace:
         assert result["critic_feedback"] == "the command failed"
 
     @pytest.mark.asyncio
-    async def test_the_text_mode_trace_puts_the_exit_code_at_a_line_start(
-        self, monkeypatch
-    ):
+    async def test_the_text_mode_trace_puts_the_exit_code_at_a_line_start(self, monkeypatch):
         """The shape act_node writes in text tool mode, not a hand-made one.
 
         ``critic_node`` matches with ``line.startswith("Exit code: ")``, so the
@@ -271,9 +261,7 @@ class TestCriticSeesTheTrace:
             "messages": [HumanMessage(content="run the tests")],
             "command_output": "I ran pytest",
             # Exactly the shape act_node appends for a text-protocol tool call.
-            "tool_trace": [
-                f"[run_terminal_command({{'command': 'pytest'}})] →\n{formatted}"
-            ],
+            "tool_trace": [f"[run_terminal_command({{'command': 'pytest'}})] →\n{formatted}"],
             "iteration": 0,
             "critic_feedback": None,
             "route": "action",
@@ -286,9 +274,7 @@ class TestCriticSeesTheTrace:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("verdict", ["INVALID", "not valid", "INVALID: no citation"])
-    async def test_a_rejection_containing_the_word_valid_is_a_rejection(
-        self, monkeypatch, verdict
-    ):
+    async def test_a_rejection_containing_the_word_valid_is_a_rejection(self, monkeypatch, verdict):
         """``"VALID" in "INVALID"`` is True, so the substring test passed them.
 
         The prompt asks for exactly ``VALID`` on success, which made every

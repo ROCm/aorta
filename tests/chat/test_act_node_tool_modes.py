@@ -159,9 +159,7 @@ class TestExecuteToolNeverRaises:
             assert name in result
 
     def test_a_mangled_name_is_executed_rather_than_rejected(self):
-        with patch.dict(
-            TOOL_REGISTRY, {"list_files": MagicMock(invoke=lambda _: "ok")}
-        ):
+        with patch.dict(TOOL_REGISTRY, {"list_files": MagicMock(invoke=lambda _: "ok")}):
             assert _execute_tool("list_files<|channel|>commentary", {}) == "ok"
 
     def test_a_tool_that_raises_is_reported_not_propagated(self):
@@ -176,9 +174,7 @@ class TestNativeLoop:
     async def test_a_tool_call_is_executed_and_fed_back(self, native_mode):
         plain, bound = _fake_llm(
             [
-                AIMessage(
-                    content="", tool_calls=[_tool_call("list_files", {"path": "."})]
-                ),
+                AIMessage(content="", tool_calls=[_tool_call("list_files", {"path": "."})]),
                 AIMessage(content="There are three files."),
             ]
         )
@@ -213,12 +209,8 @@ class TestNativeLoop:
     async def test_differing_arguments_are_not_treated_as_a_repeat(self, native_mode):
         plain, _bound = _fake_llm(
             [
-                AIMessage(
-                    content="", tool_calls=[_tool_call("search_code", {"k": 10})]
-                ),
-                AIMessage(
-                    content="", tool_calls=[_tool_call("search_code", {"k": 20}, "c2")]
-                ),
+                AIMessage(content="", tool_calls=[_tool_call("search_code", {"k": 10})]),
+                AIMessage(content="", tool_calls=[_tool_call("search_code", {"k": 20}, "c2")]),
                 AIMessage(content="Done."),
             ]
         )
@@ -301,9 +293,7 @@ class TestNativeLoop:
 
 class TestWastedCallGuards:
     @pytest.mark.asyncio
-    async def test_the_text_loop_gives_up_instead_of_spending_the_budget(
-        self, text_mode
-    ):
+    async def test_the_text_loop_gives_up_instead_of_spending_the_budget(self, text_mode):
         """gpt-oss burned 11 calls here; the cap is 2 unproductive rounds."""
         fake = MagicMock()
         fake.ainvoke = AsyncMock(return_value=AIMessage(content=""))
@@ -325,9 +315,7 @@ class TestWastedCallGuards:
     async def test_a_real_text_answer_returns_immediately(self, text_mode):
         """A non-search query needs no tools, so one round is enough."""
         fake = MagicMock()
-        fake.ainvoke = AsyncMock(
-            return_value=AIMessage(content="AORTA uses Python 3.10+.")
-        )
+        fake.ainvoke = AsyncMock(return_value=AIMessage(content="AORTA uses Python 3.10+."))
         with patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
             result = await act_node(_state("what python version does AORTA need"))
         assert result["messages"][0].content == "AORTA uses Python 3.10+."
@@ -344,9 +332,7 @@ class TestWastedCallGuards:
         assert result["messages"][0].content == "Answer from context."
 
     @pytest.mark.asyncio
-    async def test_the_native_loop_also_stops_when_nothing_comes_back(
-        self, native_mode
-    ):
+    async def test_the_native_loop_also_stops_when_nothing_comes_back(self, native_mode):
         plain, bound = _fake_llm([AIMessage(content="")] * 8, final_text="")
         with patch("aorta.chat.graph.nodes._get_llm", return_value=plain):
             result = await act_node(_state())

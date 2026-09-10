@@ -21,9 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from tests.chat.conftest import make_fake_llm, make_llm_sequence
 
 
-def _patch_settings(
-    mock_nodes_settings, mock_graph_settings, max_retries: int = 3
-) -> None:
+def _patch_settings(mock_nodes_settings, mock_graph_settings, max_retries: int = 3) -> None:
     """Pin every settings value the action path reads to a concrete value.
 
     A MagicMock attribute left unset reaches real logic as a Mock: unpinned,
@@ -49,9 +47,7 @@ class TestEndToEndGraph:
             patch("aorta.chat.graph.nodes.get_retriever", return_value=fake_retriever),
             patch(
                 "aorta.chat.graph.nodes._get_llm",
-                side_effect=make_llm_sequence(
-                    router_llm, plan_llm, act_llm, critic_llm
-                ),
+                side_effect=make_llm_sequence(router_llm, plan_llm, act_llm, critic_llm),
             ),
             patch("aorta.chat.graph.nodes.load_repo_map", return_value="(test map)"),
             patch("aorta.chat.graph.nodes.settings") as mock_nodes_s,
@@ -64,13 +60,15 @@ class TestEndToEndGraph:
             graph = build_graph()
             # Phrased to miss _SEARCH_KEYWORDS, so act may answer in one round
             # instead of being re-prompted to use tools first.
-            result = await graph.ainvoke({
-                "messages": [HumanMessage(content="How is AORTA started?")],
-                "retrieved_context": None,
-                "command_output": None,
-                "critic_feedback": None,
-                "iteration": 0,
-            })
+            result = await graph.ainvoke(
+                {
+                    "messages": [HumanMessage(content="How is AORTA started?")],
+                    "retrieved_context": None,
+                    "command_output": None,
+                    "critic_feedback": None,
+                    "iteration": 0,
+                }
+            )
 
             assert "messages" in result
             final_msgs = result["messages"]
@@ -86,19 +84,19 @@ class TestEndToEndGraph:
         """Full graph: act calls a tool, then answers, and the critic passes."""
         router_llm = make_fake_llm(["action"])
         plan_llm = make_fake_llm(['1. list_files(path=".")'])
-        act_llm = make_fake_llm([
-            'ACTION: list_files(path=".")',
-            "The root has src/, README.md, config.yaml.",
-        ])
+        act_llm = make_fake_llm(
+            [
+                'ACTION: list_files(path=".")',
+                "The root has src/, README.md, config.yaml.",
+            ]
+        )
         critic_llm = make_fake_llm(["VALID"])
 
         with (
             patch("aorta.chat.graph.nodes.get_retriever", return_value=fake_retriever),
             patch(
                 "aorta.chat.graph.nodes._get_llm",
-                side_effect=make_llm_sequence(
-                    router_llm, plan_llm, act_llm, critic_llm
-                ),
+                side_effect=make_llm_sequence(router_llm, plan_llm, act_llm, critic_llm),
             ),
             patch("aorta.chat.graph.nodes.load_repo_map", return_value="(test map)"),
             patch(
@@ -113,13 +111,15 @@ class TestEndToEndGraph:
             from aorta.chat.graph.graph import build_graph
 
             graph = build_graph()
-            result = await graph.ainvoke({
-                "messages": [HumanMessage(content="What files are in the repo?")],
-                "retrieved_context": None,
-                "command_output": None,
-                "critic_feedback": None,
-                "iteration": 0,
-            })
+            result = await graph.ainvoke(
+                {
+                    "messages": [HumanMessage(content="What files are in the repo?")],
+                    "retrieved_context": None,
+                    "command_output": None,
+                    "critic_feedback": None,
+                    "iteration": 0,
+                }
+            )
 
             assert "messages" in result
             final_msgs = result["messages"]
@@ -133,9 +133,7 @@ class TestEndToEndGraph:
         router_llm = make_fake_llm(["action"])
         plan_llm = make_fake_llm(["1. Find the scenario runner."])
         act_llm_first = make_fake_llm(["Run: bash experiment.sh --gpu 0"])
-        critic_llm_first = make_fake_llm([
-            "experiment.sh was not found in any tool result."
-        ])
+        critic_llm_first = make_fake_llm(["experiment.sh was not found in any tool result."])
         act_llm_second = make_fake_llm(["Run: python src/run_scenario.py --gpu 0"])
         critic_llm_second = make_fake_llm(["VALID"])
 
@@ -161,13 +159,15 @@ class TestEndToEndGraph:
             from aorta.chat.graph.graph import build_graph
 
             graph = build_graph()
-            result = await graph.ainvoke({
-                "messages": [HumanMessage(content="Run scenario X")],
-                "retrieved_context": None,
-                "command_output": None,
-                "critic_feedback": None,
-                "iteration": 0,
-            })
+            result = await graph.ainvoke(
+                {
+                    "messages": [HumanMessage(content="Run scenario X")],
+                    "retrieved_context": None,
+                    "command_output": None,
+                    "critic_feedback": None,
+                    "iteration": 0,
+                }
+            )
 
             assert result["iteration"] >= 2
             assert act_llm_second.ainvoke.call_count == 1
@@ -190,9 +190,7 @@ class TestEndToEndGraph:
             patch("aorta.chat.graph.nodes.get_retriever", return_value=fake_retriever),
             patch(
                 "aorta.chat.graph.nodes._get_llm",
-                side_effect=make_llm_sequence(
-                    router_llm, plan_llm, act_llm, critic_llm
-                ),
+                side_effect=make_llm_sequence(router_llm, plan_llm, act_llm, critic_llm),
             ),
             patch("aorta.chat.graph.nodes.load_repo_map", return_value="(test map)"),
             patch("aorta.chat.graph.nodes.settings") as mock_nodes_s,
@@ -203,13 +201,15 @@ class TestEndToEndGraph:
             from aorta.chat.graph.graph import build_graph
 
             graph = build_graph()
-            result = await graph.ainvoke({
-                "messages": [HumanMessage(content="Run scenario X")],
-                "retrieved_context": None,
-                "command_output": None,
-                "critic_feedback": None,
-                "iteration": 0,
-            })
+            result = await graph.ainvoke(
+                {
+                    "messages": [HumanMessage(content="Run scenario X")],
+                    "retrieved_context": None,
+                    "command_output": None,
+                    "critic_feedback": None,
+                    "iteration": 0,
+                }
+            )
 
             assert result["iteration"] == 1
             assert act_llm.ainvoke.call_count == 1

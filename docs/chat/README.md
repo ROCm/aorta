@@ -50,7 +50,7 @@ Both drive an LLM, and the line between them is whether you sit and watch.
 | `aorta chat ui` | Chainlit web UI (needs `chat-ui`) |
 | `aorta chat tools` | List the agent tools, built-in and plugin-contributed |
 | `aorta chat index build\|fetch\|digest\|eval` | Manage the retrieval index; `fetch` takes the prebuilt one |
-| `aorta chat doctor` | Check the extras, the backend, the model cache, and the index manifest |
+| `aorta chat doctor` | Check the extras, the backend, the tool protocol, the model cache, the embedding profile, and the index manifest |
 | `aorta chat config init\|show\|validate` | Create and inspect the profile |
 
 `aorta chat --help` is authoritative for flags.

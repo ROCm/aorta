@@ -174,9 +174,7 @@ class TestTheCliLifecycle:
         assert CliRunner().invoke(chat, ["index", "runs"]).exit_code == 0
         assert retriever.collection_chunk_count(wired.index, "aorta") == 1
 
-    def test_an_empty_run_root_says_so_rather_than_reporting_success(
-        self, wired, tmp_path: Path
-    ):
+    def test_an_empty_run_root_says_so_rather_than_reporting_success(self, wired, tmp_path: Path):
         from click.testing import CliRunner
 
         from aorta.cli.chat import chat

@@ -114,7 +114,7 @@ environment.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `embedding_model` | `BAAI/bge-small-en-v1.5` | Local model. |
+| `embedding_model` | `BAAI/bge-small-en-v1.5` | Local model. Cannot be blank: an empty or whitespace-only value selects no model, so it is refused when the settings load. Remove the setting to take the default. |
 | `model_cache_path` | `$XDG_CACHE_HOME/aorta/chat/models` | Where the local model's ONNX weights are cached. `HF_HOME` overrides it, which is what [air-gapped pre-seeding](rag-index.md#air-gapped-nodes) uses. Explicit rather than `fastembed`'s own `/tmp/fastembed_cache`, which a reboot wipes and other users on a shared node can write. |
 
 The five `remote_embedding_*` settings below are read by the embedding path only
@@ -128,7 +128,7 @@ local index rebuild.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `remote_embedding_model` | `text-embedding-3-small` | Also decides the collection name, since dimensions differ per model. |
+| `remote_embedding_model` | `text-embedding-3-small` | Also decides the collection name, since dimensions differ per model. Cannot be blank, on the same rule as `embedding_model`. |
 | `remote_embedding_api_key` | *(empty)* | Separate from the chat key, so the two can use different providers. Required: an empty value raises rather than falling back to the local model. |
 | `remote_embedding_base_url` | *(empty)* | Empty means the provider default, which for an OpenAI-compatible client is `api.openai.com`. Set it for anything else — a gateway header with an empty base URL sends your corpus to OpenAI. |
 | `remote_embedding_auth_header` / `remote_embedding_extra_headers` | *(empty)* | As on the chat side. Behind a gateway you normally set both or neither. |
