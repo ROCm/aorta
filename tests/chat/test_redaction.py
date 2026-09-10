@@ -368,7 +368,7 @@ _NON_MODEL_AINVOKE_RECEIVERS = frozenset({"retriever", "tool_fn"})
 #: that only knows the verb currently in use stops being a guard on the first
 #: day someone reaches for a different one, and streaming is the obvious
 #: candidate.
-_MODEL_INVOCATION_VERBS = frozenset(
+_ASYNC_MODEL_INVOCATION_VERBS = frozenset(
     {
         "ainvoke",
         "abatch",
@@ -380,6 +380,21 @@ _MODEL_INVOCATION_VERBS = frozenset(
         "astream_log",
         "atransform",
     }
+)
+
+#: The same verbs driven synchronously, which are egress just the same. This
+#: module is async throughout, so a bare ``llm.invoke(...)`` would block the
+#: event loop and is unlikely -- but ``asyncio.to_thread(llm.invoke, ...)`` is
+#: not unlikely at all: offloading blocking work to a thread is exactly what
+#: #444 did to retrieval, so the sync API is a live route to reach a model off
+#: the loop, and it bypassed both ``_send`` and this guard.
+#:
+#: Derived by dropping the ``a``, not listed again. LangChain names every pair
+#: that way, so the convention is the contract, and one list with a computed
+#: half cannot fall out of step the way two hand-written lists do. Verbs whose
+#: sync twin does not exist (``astream_log``) drop out on their own.
+_MODEL_INVOCATION_VERBS = _ASYNC_MODEL_INVOCATION_VERBS | frozenset(
+    verb[1:] for verb in _ASYNC_MODEL_INVOCATION_VERBS
 )
 
 #: Async public methods on ``BaseChatModel`` that do *not* drive a request, so
@@ -459,6 +474,13 @@ _NON_BINDING_IDENTIFIER_FIELDS = {
     (ast.Constant, "value"),
     (ast.keyword, "arg"),
     (ast.ImportFrom, "module"),
+    # ``case Config(retriever=value)``: this field holds the *attribute* being
+    # matched on the class, and the name it binds is in the parallel
+    # ``kwd_patterns``. So it is the pattern-matching spelling of
+    # ``ast.keyword.arg`` -- a read of a name the callee owns. Positional
+    # ``case Config(retriever)`` is a different thing and stays reported: that
+    # one really does bind ``retriever``, via a ``MatchAs`` this scan reads.
+    (ast.MatchClass, "kwd_attrs"),
 }
 
 
@@ -910,6 +932,11 @@ class TestGraphChokepoint:
             # `retriever.ainvoke(...)` stayed exempt from the chokepoint test.
             "import retriever.client\n",
             "import tool_fn.a.b\n",
+            # The positional class pattern, which the `kwd_attrs` exemption
+            # must not swallow: this one binds `retriever` through a `MatchAs`
+            # and the keyword form does not. Exempting a field is asserting it
+            # cannot bind, so the neighbouring form that *can* is pinned here.
+            "match x:\n    case Config(retriever):\n        pass\n",
         ],
     )
     def test_a_binding_the_guard_cannot_read_is_reported_not_ignored(self, binding):
@@ -943,6 +970,10 @@ class TestGraphChokepoint:
             # rather than adding to it, so reading both fields would report a
             # name this statement never introduces.
             "import retriever.client as rc\n",
+            # Binds `value`, not `retriever`: the keyword names the attribute
+            # matched on the class. The positional form two cases down *does*
+            # bind it, and is asserted separately.
+            "match x:\n    case Config(retriever=value):\n        pass\n",
         ],
     )
     def test_a_form_that_binds_no_name_is_not_reported(self, source):
@@ -1026,12 +1057,45 @@ class TestGraphChokepoint:
         assert not unguarded, (
             f"BaseChatModel exposes async verb(s) the redaction chokepoint does "
             f"not guard: {sorted(unguarded)}. Add each to "
-            f"_MODEL_INVOCATION_VERBS, or to _NON_INVOKING_ASYNC_ATTRS if it "
-            f"cannot drive a request."
+            f"_ASYNC_MODEL_INVOCATION_VERBS, or to _NON_INVOKING_ASYNC_ATTRS if "
+            f"it cannot drive a request."
         )
         # And the exclusion list must not rot into a way to hide a real verb:
         # every name in it has to still exist on the class.
         assert _NON_INVOKING_ASYNC_ATTRS <= exposed
+
+    def test_the_synchronous_twin_of_every_guarded_verb_is_guarded_too(self):
+        """The `a`-prefix filter above is the hole this closes.
+
+        Deriving the expectation from ``dir(BaseChatModel)`` made the guard
+        future-proof against new *async* verbs and left it blind to every sync
+        one, because the derivation only ever looked at names starting with
+        ``a``. So ``llm.invoke(...)`` -- or, far more likely in an async module,
+        ``asyncio.to_thread(llm.invoke, ...)`` -- would reach a model without
+        ``_send`` while the chokepoint test stayed green.
+
+        Asserted against the class rather than against a second list: for every
+        async verb guarded, if LangChain also exposes the sync twin then that
+        twin must be guarded. A twin that stops existing drops out silently,
+        which is correct -- a method that is gone cannot be egress.
+        """
+        from langchain_core.language_models.chat_models import BaseChatModel
+
+        missing = {
+            verb[1:]
+            for verb in _ASYNC_MODEL_INVOCATION_VERBS
+            if callable(getattr(BaseChatModel, verb[1:], None))
+            and verb[1:] not in _MODEL_INVOCATION_VERBS
+        }
+        assert not missing, (
+            f"sync egress verb(s) unguarded: {sorted(missing)}. The sync half "
+            f"of _MODEL_INVOCATION_VERBS is derived from the async half, so "
+            f"this means the derivation broke."
+        )
+        # The derivation must actually have produced something, or the check
+        # above passes by covering nothing -- `invoke` is the one that matters.
+        assert "invoke" in _MODEL_INVOCATION_VERBS
+        assert "stream" in _MODEL_INVOCATION_VERBS
 
 
 def nodes_path() -> str:

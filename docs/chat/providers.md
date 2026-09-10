@@ -357,10 +357,13 @@ The agent is agentic, not a single completion, so one question fans out:
 | --- | --- |
 | Question (route → retrieve → answer) | 2 |
 | Action, first pass (route → plan → retrieve → act → critic) | 3 + up to `max_act_rounds`, plus one synthesis call if the loop is exhausted |
-| Each critic rejection | Replays act + critic, up to `max_retry_iterations` times |
+| Each critic rejection | Replays act + critic; `max_retry_iterations` caps *act passes*, so the shipped 3 allows two replays |
 
-A search-shaped action query can therefore reach about 12 calls in one pass, and
-several critic passes can push a single question past forty. Most action queries
+A search-shaped action query can therefore reach **12** calls in one pass, and
+all three passes reach **32** — or **34** when it is also the query that
+escalates to `native`, which pays two text rounds once (see [Automatic
+escalation to `native`](#automatic-escalation-to-native) for the per-case
+breakdown). Most action queries
 land in the 4–6 range in practice, because the act loop stops as soon as the
 model answers without a tool call and the critic usually accepts first time.
 With `embedding_provider = "remote"`, each retrieval and each `search_code` call

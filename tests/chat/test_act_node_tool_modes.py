@@ -2508,6 +2508,9 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
                 + (caps.max_retry_iterations - 1) * (search + 1)
                 + caps.max_retry_iterations
             ),
+            # One act pass with no escalation, quoted by the page's own
+            # "What a question costs" table.
+            "one_pass": 2 + search + 1 + 1,
             # The same turn on a query that never escalates, which is the
             # figure the call counter's own docstring quotes.
             "turn_unescalated": (
@@ -2533,6 +2536,7 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
             "search": 14,
             "other": 11,
             "turn": 34,
+            "one_pass": 12,
             "turn_unescalated": 32,
         }
 
@@ -2555,7 +2559,14 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
 
     def test_the_page_states_each_ceiling(self):
         page = self._page()
-        for case in ("silent", "search", "other", "turn"):
+        for case in (
+            "silent",
+            "search",
+            "other",
+            "turn",
+            "one_pass",
+            "turn_unescalated",
+        ):
             value = self._ceilings()[case]
             assert f"**{value}**" in page, (
                 f"providers.md no longer states the {case} ceiling of {value}; "
@@ -2593,3 +2604,10 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
         """
         page = self._page()
         assert "the normal budget, not double it" not in page
+        # The same claim in the page's older cost section, which reached "past
+        # forty" from the same miscount -- assuming `max_retry_iterations`
+        # hand-backs rather than passes, so four act passes instead of three.
+        # Correcting one section and not the other left the page holding two
+        # incompatible cost models, which is worse than one wrong number.
+        assert "past forty" not in page
+        assert "up to `max_retry_iterations` times" not in page
