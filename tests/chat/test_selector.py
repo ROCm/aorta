@@ -129,7 +129,11 @@ async def test_dropping_is_explained_rather_than_silent():
     reply = json.dumps({"tools": ["triage_assembly_source"], "why": "wait hazard"})
     out = await _select(_PROSE, reply)
     assert out["candidate_tools"] == []
-    assert "needs source" in out["selection_rationale"]
+    rationale = out["selection_rationale"]
+    assert "triage_assembly_source" in rationale
+    # It is the conversation that had no source, not the last message: the
+    # paste and the instruction to act on it are usually different turns.
+    assert "nothing was pasted in this conversation" in rationale
 
 
 async def test_an_explanation_after_the_json_is_ignored():

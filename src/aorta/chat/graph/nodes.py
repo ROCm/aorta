@@ -508,15 +508,43 @@ Reply as JSON and nothing else:
 {{"tools": ["first", "second"], "why": "one sentence naming the evidence that decided it"}}
 """
 
-#: Anything below is prose. Fences and these markers are what tell source from
-#: a description of source, which decides whether a pasted-source tool is even
-#: possible -- see enforce_requirements.
-_CODE_MARKERS = ("```", "__global__", "__shared__", "def ", "class ", "s_load", "v_mov", "import ")
+#: Markers that do not occur in a sentence about code. A fence is a fence, and
+#: nobody writes ``__global__`` in prose. Anywhere in the text is enough.
+_CODE_MARKERS = ("```", "__global__", "__shared__", "s_load", "v_mov")
+
+#: Keywords that are also ordinary English: "I import the model and define a
+#: class for it" is a description, not a paste. They count only at the start of
+#: a line, which is where they fall in code and almost never in a sentence.
+_LINE_START_MARKERS = ("def ", "class ", "import ")
+
+#: How many of the recent human turns to look back over for a paste. Long
+#: enough to cover a clarifying exchange about the code, short enough that a
+#: kernel from far earlier in a long session is not still deciding what the
+#: current question is allowed to reach for.
+_SOURCE_LOOKBACK = 6
 
 
 def _looks_like_pasted_source(text: str) -> bool:
     """Whether the message carries code, as opposed to describing some."""
-    return any(marker in text for marker in _CODE_MARKERS)
+    if any(marker in text for marker in _CODE_MARKERS):
+        return True
+    return any(line.lstrip().startswith(_LINE_START_MARKERS) for line in text.splitlines())
+
+
+def _conversation_has_source(messages: list) -> bool:
+    """Whether the user has pasted code in the recent part of this conversation.
+
+    The paste and the instruction to act on it are usually different turns: a
+    kernel arrives, the agent asks what block size to launch it with, and the
+    reply is "yes, run the sanitizer on it". Reading only the newest message
+    finds no code in that reply and withdraws the source tools from precisely
+    the turn that asked for them.
+
+    Only the human turns count. The requirement is that the *user* supplied
+    something to analyse, and the tool is going to be handed that text.
+    """
+    human = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+    return any(_looks_like_pasted_source(text) for text in human[-_SOURCE_LOOKBACK:])
 
 
 def _first_json_object(text: str) -> dict | None:
@@ -575,10 +603,14 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
         logger.warning("Selector unavailable (%s); the agent will see every tool.", exc)
 
     candidates, dropped = enforce_requirements(
-        proposed[:MAX_CANDIDATES], has_pasted_source=_looks_like_pasted_source(text)
+        proposed[:MAX_CANDIDATES],
+        has_pasted_source=_conversation_has_source(state["messages"]),
     )
     if dropped:
-        why = f"{why} Dropped {', '.join(dropped)}: needs source in the message.".strip()
+        why = (
+            f"{why} Dropped {', '.join(dropped)}: "
+            "nothing was pasted in this conversation."
+        ).strip()
     logger.info("Selector: %s", candidates or "no candidate")
     return {"candidate_tools": candidates, "selection_rationale": why}
 
