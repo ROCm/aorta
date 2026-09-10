@@ -18,6 +18,7 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     Verdict,
     parse_waitcheck_jsonl,
     run_waitcheck,
+    waitcheck,
     waitcheck_argv,
 )
 from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
@@ -309,6 +310,62 @@ def test_waitcheck_expected_exit_still_reports_a_parse_failure(tmp_path: Path) -
     assert kernel.state is ExecutionState.ERROR
     assert str(kernel.reason).startswith("waitcheck_diagnostics_error:")
     assert "did not contain an analysis summary" in str(kernel.reason)
+
+
+def test_waitcheck_unexpected_exit_survives_any_parser_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Review (#479): the defensive parse caught only (OSError, ValueError), so a parser
+    # raising anything else propagated and never reached the exit-code branch -- which
+    # is the one branch that quotes stderr, and the whole reason the parse is defensive.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "kernel.hsaco"
+    artifact.write_bytes(b"\x7fELF")
+    message = f"{artifact}: failed to parse input executable or code object"
+
+    def boom(output: str, *, expected: object) -> tuple[object, ...]:
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr(waitcheck, "parse_waitcheck_text", boom)
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 2, "", message)
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+    )
+
+    kernel = result.kernel_results[0]
+    assert kernel.state is ExecutionState.ERROR
+    assert kernel.reason == f"waitcheck_backend_exit_2: {message}"
+
+    # and on an expected exit code the same failure is still reported, not swallowed
+    def clean(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 0, "", "")
+
+    expected_exit = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out2",
+        binary=binary,
+        execute=clean,
+    )
+    only = expected_exit.kernel_results[0]
+    assert only.state is ExecutionState.ERROR
+    assert only.reason == "waitcheck_diagnostics_error: list index out of range"
 
 
 def test_waitcheck_timeout_never_passes(tmp_path: Path) -> None:

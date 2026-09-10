@@ -425,7 +425,14 @@ def _run_one(
         )
         findings = parsed.findings
         diagnostics_truncated = parsed.diagnostics_truncated
-    except (OSError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - see below
+        # Deliberately broad. The point of parsing here is that an unexpected exit code
+        # reaches the branch below with the backend's own message; a parser raising
+        # anything outside (OSError, ValueError) -- an IndexError or TypeError off a
+        # malformed line -- would propagate and defeat exactly that. Nothing is
+        # swallowed: on an expected exit code the error becomes a fail-closed
+        # ERROR result quoting the exception, and KeyboardInterrupt / SystemExit are
+        # BaseException and still propagate.
         parse_error = exc
     if process.returncode not in {WAITCHECK_CLEAN_EXIT, WAITCHECK_HAZARD_EXIT}:
         stderr_tail = process.stderr[-300:].strip()
