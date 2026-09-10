@@ -478,13 +478,23 @@ async def _execute_tool(tool_name: str, kwargs: dict) -> str:
 # ──────────────────── Router ─────────────────────
 
 
-#: Where a reply that names no route goes. ``question`` because that branch is
+#: Where an *empty* router reply goes. ``question`` because that branch is
 #: retrieval plus a single answer call and needs no tool protocol at all, so its
 #: worst case is a retrieval-only answer rather than none. ``action`` was the
 #: old fallback, and it is the branch a model returning empty content cannot
 #: drive -- so an empty router reply, which is exactly what such a model
 #: produces, was routed into the one branch guaranteed to fail.
-_ROUTER_FALLBACK_ROUTE = "question"
+_ROUTER_EMPTY_ROUTE = "question"
+#: Where a reply that *said something* we could not parse goes. Kept at the old
+#: ``action`` deliberately: these are two different populations and only the
+#: first was ever broken. An empty reply means the model put its answer
+#: somewhere this protocol does not read; a content-bearing one means it tried
+#: to classify and the substring match did not recognise the wording. "act", or
+#: "use the shell to fix it", is a model asking for tools, and sending it to
+#: ``question`` -- which has no tool access -- removes them silently. Treating
+#: both as one fallback fixed the reasoning-model dead end and introduced that
+#: regression in its place.
+_ROUTER_UNPARSED_ROUTE = "action"
 
 
 def _parse_route(route_text: str) -> str | None:
@@ -513,7 +523,7 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     route_text = str(response.content or "").strip().lower()
     route = _parse_route(route_text)
     if route is None:
-        route = _ROUTER_FALLBACK_ROUTE
+        route = _ROUTER_EMPTY_ROUTE if not route_text else _ROUTER_UNPARSED_ROUTE
         logger.warning(
             "Router reply %r does not name exactly one route; classifying as "
             "%s.",
