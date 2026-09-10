@@ -383,6 +383,47 @@ def triage_kernel_source(
     return rendered
 
 
+#: Printed by the assemble command when the node has no amdgcn assembler, so a
+#: missing toolchain can be told apart from assembly that genuinely will not
+#: build. Both used to arrive as "the pasted assembly did not assemble".
+_NO_ASSEMBLER = "AORTA_NO_ASSEMBLER"
+
+
+def _assemble_command(asm_path: Path, obj_path: Path) -> str:
+    """A shell command that finds the assembler on the node, or reports it cannot.
+
+    Which clang exists is a question only the compute node can answer: this
+    runs under srun, and the login node frequently has no ROCm at all while the
+    assemble works perfectly. Resolving the path here -- with ``shutil.which``
+    or an ``is_file`` check -- would be reading the wrong machine's filesystem
+    and would refuse a setup that works.
+
+    So the choice is made where the command runs: the configured path if the
+    node has it, otherwise whatever ``clang`` is on its PATH, and a sentinel if
+    it has neither.
+    """
+    pinned = shlex.quote(f"{_ROCM_LLVM}/clang")
+    return (
+        f'CLANG={pinned}; '
+        '[ -x "$CLANG" ] || CLANG="$(command -v clang || true)"; '
+        f'if [ -z "$CLANG" ]; then echo {_NO_ASSEMBLER} >&2; exit 127; fi; '
+        f'"$CLANG" -target amdgcn-amd-amdhsa -mcpu={shlex.quote(_ARCH)} '
+        f'{shlex.quote(str(asm_path))} -o {shlex.quote(str(obj_path))}'
+    )
+
+
+def _no_assembler_message() -> str:
+    """Say that the toolchain is missing, rather than blaming the paste."""
+    return (
+        "No AMD assembler was found on the compute node, so this assembly was "
+        "not analysed. Nothing is wrong with what you pasted -- the toolchain "
+        "this needs is not installed where the job ran.\n"
+        f"Looked for {_ROCM_LLVM}/clang, then for clang on the node's PATH.\n"
+        "Point ROCM_PATH at the ROCm install on the compute nodes (or set "
+        "ROCM_LLVM_BIN directly) and try again."
+    )
+
+
 @tool
 def triage_assembly_source(source: str, label: str = "") -> str:
     """Assemble AMD GPU assembly the user supplied and analyse it for wait hazards.
@@ -424,17 +465,15 @@ def triage_assembly_source(source: str, label: str = "") -> str:
     obj_path = staging / f"{stem}.hsaco"
     asm_path.write_text(prepared.program, encoding="utf-8")
 
-    clang = f"{_ROCM_LLVM}/clang"
-    build = (
-        f"{shlex.quote(clang)} -target amdgcn-amd-amdhsa -mcpu={shlex.quote(_ARCH)} "
-        f"{shlex.quote(str(asm_path))} -o {shlex.quote(str(obj_path))}"
-    )
+    build = _assemble_command(asm_path, obj_path)
     proc = subprocess.run(
         ["srun", "--nodes=1", "-t", "5", "bash", "-c", build],
         capture_output=True, text=True, timeout=settings.waitcheck_timeout,
         stdin=subprocess.DEVNULL,
     )
     if not obj_path.is_file():
+        if _NO_ASSEMBLER in (proc.stderr or ""):
+            return _no_assembler_message()
         diagnostics = "\n".join(
             line for line in (proc.stderr or "").splitlines()
             if "unused during compilation" not in line
