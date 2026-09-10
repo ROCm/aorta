@@ -807,7 +807,7 @@ def _identity_qualifier(
     *,
     index: bool = False,
     full: bool = False,
-    scope: bool = False,
+    presence: bool = False,
 ) -> str:
     """The shortest identity fragment that tells two same-named kernels apart (pure).
 
@@ -829,9 +829,11 @@ def _identity_qualifier(
     otherwise resolve; it is remote, which is why the prefix is what gets rendered
     until a label actually ties.
 
-    ``scope`` distinguishes an identity that omitted ``entry_offset`` from one that
-    explicitly states a whole-object scope with ``entry_offset: null``. The omitted
-    form must stay visibly unattributed instead of looking like the whole-object row.
+    ``presence`` is the final widening for identities that differ only in whether an
+    optional field was serialized. Omitted fields are unknown while explicit nulls
+    are claims, so their labels must not collapse either -- especially an omitted
+    offset, which must stay visibly unattributed instead of looking like a confirmed
+    whole-object row.
     """
     digest = identity.get("code_object_sha256")
     parts = (
@@ -843,8 +845,20 @@ def _identity_qualifier(
     offset = identity.get("entry_offset")
     if isinstance(offset, int):
         parts = f"{parts}+0x{offset:x}" if parts else f"0x{offset:x}"
-    elif scope and "entry_offset" not in identity:
-        parts = f"{parts}; scope unknown" if parts else "scope unknown"
+    if presence:
+        unknown = [
+            label
+            for field, label in (
+                ("code_object", "object unknown"),
+                ("code_object_sha256", "digest unknown"),
+                ("code_object_index", "index unknown"),
+                ("entry_offset", "scope unknown"),
+            )
+            if field not in identity
+        ]
+        if unknown:
+            marker = ", ".join(unknown)
+            parts = f"{parts}; {marker}" if parts else marker
     return parts
 
 
@@ -904,7 +918,7 @@ _QUALIFIER_WIDENINGS: tuple[dict[str, bool], ...] = (
     {},
     {"index": True},
     {"index": True, "full": True},
-    {"index": True, "full": True, "scope": True},
+    {"index": True, "full": True, "presence": True},
 )
 
 # How a name is rendered, cheapest first, with the same "only pay for the ambiguity you

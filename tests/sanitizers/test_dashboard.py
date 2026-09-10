@@ -1650,6 +1650,72 @@ def test_an_omitted_offset_does_not_merge_two_selections_of_one_object():
     assert reasons[0].get("label") == "gemm (beefaaa1#0; scope unknown)"
 
 
+def test_an_omitted_index_is_labelled_unknown_beside_a_null_index_row():
+    # An omitted index is a wildcard, while an explicit null is a claim. With rows
+    # for null and zero, a result omitting only the index is compatible with both and
+    # must stay visibly unattributed rather than sharing the null-index row's label.
+    sha = "beefaaa1"
+
+    def _identity(index: int | None) -> dict:
+        return {
+            "name": "gemm", "target": "gfx950", "code_object": "/a/b/bundle.hsaco",
+            "code_object_sha256": sha, "code_object_index": index, "entry_offset": None,
+        }
+
+    ambiguous = _identity(None)
+    ambiguous.pop("code_object_index")
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(None), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(0), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [{
+                "identity": ambiguous, "state": "error", "verdict": "error",
+                "findings": [], "reason": "waitcheck_backend_exit_2: unknown object",
+                "returncode": 2,
+            }],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("label") == "gemm (beefaaa1; index unknown)"
+    assert "gemm (beefaaa1; index unknown)" in case.get("observation", "")
+
+
+def test_presence_widening_marks_every_omitted_optional_identity_field():
+    # Presence is part of the join key for every optional identity field, so the
+    # final display widening must preserve the same distinction for all four.
+    explicit = {
+        "name": "gemm", "target": "gfx950", "code_object": None,
+        "code_object_sha256": None, "code_object_index": None, "entry_offset": None,
+    }
+    for field, marker in (
+        ("code_object", "object unknown"),
+        ("code_object_sha256", "digest unknown"),
+        ("code_object_index", "index unknown"),
+        ("entry_offset", "scope unknown"),
+    ):
+        omitted = dict(explicit)
+        omitted.pop(field)
+        labels = gen._display_labels([("gemm", explicit), ("gemm", omitted)])
+        assert len(set(labels)) == 2, field
+        assert marker in labels[1]
+
+
 def test_two_long_names_differing_only_in_the_elided_middle_are_told_apart():
     # Last resort. Two names can agree on both ends and differ only in the middle the
     # budget elides, and if they share a code object no identity field separates them
