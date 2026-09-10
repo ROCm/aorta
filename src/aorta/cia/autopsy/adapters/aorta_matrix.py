@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,29 @@ class MatrixClassification:
     confidence: float
     rationale: str
     signals: list[str]
+
+
+log = logging.getLogger(__name__)
+
+
+def load_matrix(path: Path | None) -> dict[str, Any] | None:
+    """The matrix at *path*, or None when it cannot be read as one.
+
+    Autopsy runs on a bundle assembled from a job that has just failed, and a
+    sweep interrupted mid-write leaves a matrix.json that is half a document.
+    Reading it is therefore expected to fail sometimes, and one artifact that
+    cannot be parsed must not take the whole verdict with it -- the sanitizer
+    path has always degraded to a tooling gap, and this is the same policy in
+    the same place for both readers of this file.
+    """
+    if path is None or not path.is_file():
+        return None
+    try:
+        matrix = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("Could not read the Aorta matrix at %s: %s", path, exc)
+        return None
+    return matrix if isinstance(matrix, dict) else None
 
 
 class AortaMatrixAdapter:
@@ -40,7 +64,21 @@ class AortaMatrixAdapter:
                 ],
             )
 
-        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+        matrix = load_matrix(matrix_path)
+        if matrix is None:
+            # Same shape as the no-matrix branch above: an unreadable artifact
+            # and an absent one are both "this did not tell us anything", and
+            # neither is a reason to abandon the other adapters.
+            return AdapterArtifact(
+                adapter=self.adapter_id,
+                tooling_gaps=[
+                    {
+                        "description": f"Aorta matrix at {matrix_path.name} could not be read.",
+                        "missing_signal": "aorta.matrix.json",
+                        "suggested_tool": "aorta sweep run",
+                    }
+                ],
+            )
         classification = classify_matrix(matrix)
         evidence = build_evidence(matrix_path, matrix_md_path, matrix, classification)
         if "AORTA_MATRIX_INFRA_OK" in classification.signals:

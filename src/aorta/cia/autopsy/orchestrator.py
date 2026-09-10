@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from aorta.cia.autopsy.adapters.aorta_matrix import AortaMatrixAdapter, MatrixClassification, classify_matrix
+from aorta.cia.autopsy.adapters.aorta_matrix import AortaMatrixAdapter, load_matrix, MatrixClassification, classify_matrix
 from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext, load_manifest
 from aorta.cia.autopsy.adapters.sanitizer_report import (
     SanitizerClassification,
@@ -58,15 +58,19 @@ def run_autopsy(
 
     matrix_adapter = artifacts[0]
     stderr_adapter = artifacts[1]
-    matrix_path = ctx.path("aorta_matrix")
-    if matrix_path and matrix_path.is_file():
-        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    # Through the same loader the adapter uses, so a matrix that cannot be read
+    # is a tooling gap here too rather than an exception out of run_autopsy. It
+    # used to be parsed twice, uncaught, and the second parse aborted the whole
+    # autopsy -- discarding the sanitizer and watchdog evidence that had already
+    # been collected, over an artifact that may simply have been half-written.
+    matrix = load_matrix(ctx.path("aorta_matrix"))
+    if matrix is not None:
         classification = classify_matrix(matrix)
     else:
         classification = MatrixClassification(
             category="tooling_gap",
             confidence=0.0,
-            rationale="No Aorta matrix artifact in bundle.",
+            rationale="No readable Aorta matrix artifact in bundle.",
             signals=[],
         )
 
@@ -83,8 +87,14 @@ def run_autopsy(
 
     rocgdb_path = ctx.path("rocgdb_session")
     if rocgdb_path and rocgdb_path.is_file():
-        session = parse_rocgdb_session(rocgdb_path.read_text(encoding="utf-8", errors="replace"))
-        classification = merge_rocgdb(classification, classify_rocgdb(session))
+        try:
+            session = parse_rocgdb_session(
+                rocgdb_path.read_text(encoding="utf-8", errors="replace")
+            )
+        except (OSError, ValueError) as exc:
+            log.warning("Could not read the rocgdb session at %s: %s", rocgdb_path, exc)
+        else:
+            classification = merge_rocgdb(classification, classify_rocgdb(session))
 
     all_evidence: list[dict[str, Any]] = []
     all_next: list[dict[str, Any]] = []
