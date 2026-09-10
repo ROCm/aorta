@@ -420,9 +420,15 @@ require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 5 3600
 # shape here and by value on the host; accepting `1e0` or `.5` would leave the
 # two layers with different notions of what was configured, and the host's
 # reported temperature is what a rollout result is labelled with.
+# `.*` is the leading-dot case the message claims to refuse and, without a
+# pattern of its own, did not: `.5` has no non-decimal character, no second dot,
+# is not a bare `.` and does not end in one, so every other branch here lets it
+# through. The host never emits that spelling -- `format(0.5, "f")` is
+# `0.500000` -- so this only bites a hand-run, which is the case the check is
+# for.
 require_decimal() {  # require_decimal <label> <value>
   case "${2}" in
-    ''|*[!0-9.]*|*.*.*|.|*.)
+    ''|*[!0-9.]*|*.*.*|.|*.|.*)
       echo "TS_BENCH_FAIL: usage ${1} must be a plain decimal number, got '${2}'"
       echo "  Exponent and leading-dot forms are refused so this script and the"
       echo "  host agree on the value the result is labelled with."

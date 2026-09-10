@@ -1514,6 +1514,126 @@ def test_the_default_image_is_digest_pinned():
     assert "@sha256:" in mod._DEFAULT_IMAGE
 
 
+# The numeric metrics `tokenspeed-serve-bench-smoke.yaml` publishes. Only these
+# reach `matrix.json::cells[*].metrics_summary` -- `_aggregate_metrics` keeps
+# finite int/float values and drops strings, bools, `None`, lists and dicts --
+# and `scripts/ci/eval_lib.py::extract_metrics` copies that summary verbatim into
+# the nightly's `results/<date>.json`. So this tuple is the set of series the
+# `tokenspeed_serve_smoke` baseline accumulates, and a name arriving in or
+# leaving it is a change to what the nightly banks.
+#
+# Frozen rather than derived because deriving it from the code under test would
+# assert nothing. Adding a metric to this workload is fine; adding one that the
+# *fixed-length* recipe also publishes means the nightly's series set changed,
+# and during a record-only baseline window that is not a neutral act. Update
+# this tuple deliberately, and not while a window is open.
+_SMOKE_NUMERIC_METRICS = (
+    "completed_total",
+    "container_elapsed_sec",
+    "duration",
+    "failed_total",
+    "input_len",
+    "max_concurrency",
+    "max_concurrent_requests",
+    "max_output_tokens_per_s",
+    "mean_e2el_ms",
+    "mean_itl_ms",
+    "mean_tpot_ms",
+    "mean_ttft_ms",
+    "median_e2el_ms",
+    "median_itl_ms",
+    "median_tpot_ms",
+    "median_ttft_ms",
+    "num_prompts",
+    "num_warmups",
+    "output_len",
+    "output_throughput",
+    "p50_ttft_ms",
+    "p90_ttft_ms",
+    "p99_e2el_ms",
+    "p99_itl_ms",
+    "p99_tpot_ms",
+    "p99_ttft_ms",
+    "request_throughput",
+    "server_startup_sec",
+    "std_e2el_ms",
+    "std_itl_ms",
+    "std_tpot_ms",
+    "std_ttft_ms",
+    "bench_steps",
+    "warmup_steps",
+    "tokens_per_sec",
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_token_throughput",
+)
+
+
+def test_the_nightly_smoke_recipe_publishes_a_fixed_numeric_metric_set(tmp_path, monkeypatch):
+    """The series the `tokenspeed_serve_smoke` baseline accumulates, pinned.
+
+    This recipe is the one `config/ci/nightly_eval_matrix.yaml` runs every night,
+    and a record-only baseline window is a promise that ten nights measured the
+    same thing. A new numeric metric appearing on this cell breaks that promise
+    quietly: the run still passes, the dashboard still renders, and the window
+    has silently become two half-windows with different series in them.
+
+    The export here deliberately carries `output_lens`, the per-request array
+    that only appears under `--save-detailed`. This recipe does not pass that
+    flag, so a real export should not contain it -- but that is the engine's
+    behaviour, not ours, and this workload must not start publishing a length
+    distribution merely because the field turned up. Read from the recipe on
+    disk rather than from a literal config so the two cannot drift apart.
+    """
+    from aorta.triage.recipe import load_recipe
+
+    recipe = load_recipe(_recipe_dir() / "tokenspeed-serve-bench-smoke.yaml")
+    config = dict(recipe.workload_config)
+    config["steps"] = recipe.steps
+    config["work_dir"] = str(tmp_path / "work")
+
+    wl = TokenSpeedServeWorkload(config)
+    wl.setup()
+    doc = _bench_doc(completed=config["num_prompts"])
+    doc["output_lens"] = [config["output_len"]] * config["num_prompts"]
+    _stub_docker(wl, monkeypatch, docs=[doc] * recipe.steps)
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    numeric = {
+        name for name, value in result.metrics.items() if mod._is_scalar(value)
+    }
+    assert numeric == set(_SMOKE_NUMERIC_METRICS), {
+        "unexpected": sorted(numeric - set(_SMOKE_NUMERIC_METRICS)),
+        "missing": sorted(set(_SMOKE_NUMERIC_METRICS) - numeric),
+    }
+
+
+def test_a_fixed_length_run_publishes_no_generated_length_metrics(tmp_path, monkeypatch):
+    """`ignore_eos` makes every completion `output_len` long, so the whole
+    distribution is the recipe restated with a zero standard deviation next to
+    it -- a column that reads as a measurement and is not one.
+
+    The load-bearing consequence is upstream of taste: every `tokenspeed-serve-*`
+    recipe on main ignores EOS, so gating the length metrics on the mode is what
+    keeps this change invisible to the existing serving cells. `output_lens` is
+    supplied here so the assertion is about the mode and not about whether the
+    array happened to be exported.
+    """
+    wl = _make(tmp_path, num_prompts=4, ignore_eos=True)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_bench_doc(completed=4) | {"output_lens": [128, 128, 128, 128]}],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert "mean_output_tokens_per_request" not in result.metrics
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+
+
 def test_equal_explicit_ports_are_rejected(tmp_path):
     """The gateway and the control endpoint are separate listeners.
 
@@ -4416,6 +4536,56 @@ def test_the_script_rejects_ignore_eos_false_on_random_without_rollout(tmp_path)
     output = proc.stdout + proc.stderr
     assert proc.returncode == 64, output
     assert "cannot take effect with TS_DATASET=random" in output, output
+
+
+@pytest.mark.parametrize("spelling", ["1e0", "1E-5", ".5", "1.", ".", "", "0.5.0", "abc"])
+def test_the_script_accepts_only_a_plain_decimal_temperature(tmp_path, spelling):
+    """The error message promises to refuse leading-dot forms, and has to.
+
+    `.5` slipped through every branch of the original pattern -- no non-decimal
+    character, no second dot, not a bare `.`, not trailing -- so the check said
+    one thing and did another. The host never produces that spelling, which is
+    exactly why only a hand-run would find it.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": spelling,
+            "TS_ROLLOUT_SAMPLES": "4",
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    # An empty value is the "you must say what you meant" branch; the rest are
+    # the spelling branch. Both are usage errors, and neither may reach a server.
+    assert "TS_TEMPERATURE" in output, output
+
+
+def test_the_pooled_length_count_is_an_integer(tmp_path, monkeypatch):
+    """A population size, not a measurement.
+
+    Every other count in the repo's trial JSON is an `int` -- `completed_total`
+    beside it, `rocprof_kernel_count`, `proton_kernel_count` -- and a lone
+    `96.0` among them is a type surprise for anything reading the export.
+    """
+    wl = _rollout(tmp_path, num_prompts=4)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=40, output_lens=[10] * 4)],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert type(result.metrics["generated_tokens_count"]) is int
 
 
 def test_an_ordinary_cell_sends_no_extra_body(tmp_path):

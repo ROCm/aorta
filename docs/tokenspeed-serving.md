@@ -316,7 +316,13 @@ volume is a function of the recipe. `output_len` remains meaningful as the
 `max_tokens` **allowance** — a `generated_tokens_max` sitting exactly on it means
 the cap truncated the rollout rather than the model stopping.
 
-Metrics the mode adds:
+Metrics EOS-respecting generation adds — that is, `rollout: true`, or a
+`sharegpt` cell with `ignore_eos: false`. A cell that ignores EOS publishes none
+of them, and that condition is the point rather than a detail: under `ignore_eos`
+every completion is `output_len` long, so the whole table below would be the
+recipe read back with a standard deviation of zero beside it. It also means every
+existing `tokenspeed-serve-*` recipe, all of which hold OSL fixed, reports exactly
+the metric set it reported before this mode existed.
 
 | Metric | Meaning |
 |---|---|
