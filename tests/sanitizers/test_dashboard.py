@@ -217,7 +217,7 @@ def test_summarize_keeps_the_per_kernel_failure_reason():
             "entry_offset": None,
         }
     ]
-    # a clean kernel carries no detail to explain
+    # a successfully scanned kernel with no fail-closed reason carries no detail
     assert case["kernels"][2].get("verdict") == "warn"
     assert case["kernels"][2].get("detail") == ""
 
@@ -338,7 +338,7 @@ def test_survey_md_twin_also_renders_the_reason():
     assert "| SHA-256 | Detail |" in md
     assert "failed to parse input executable or code object" in md
     assert "same code object as gemm_NT_M256_N4096_K1024" in md
-    # a clean kernel's cell degrades to an em dash rather than an empty column
+    # a successfully scanned kernel with no fail-closed reason renders an em dash
     assert "| `93f09ae670` | \u2014 |" not in md  # sha is the fixture's TT digest below
     assert "| `aeb46fded1` | \u2014 |" in md
 
@@ -1449,6 +1449,29 @@ def test_preflight_findings_still_land_in_the_kernel_column():
     case = gen.summarize_case(report, "warn")
     assert case.get("findings") == 3
     assert sum(k.get("findings", 0) for k in case["kernels"]) == 3
+
+
+def test_a_resultless_finding_is_credited_once_across_same_named_rows():
+    # A result-less finding names a kernel rather than an identity. Two uncovered,
+    # non-deduped rows can share that name, but crediting the finding to both makes
+    # the kernel column exceed the case total.
+    report = _report_with_two_objects_sharing_a_name()
+    report["checks"] = [{
+        "sanitizer": "waitcheck_preflight", "state": "ran", "verdict": "warn",
+        "reason": None, "returncode": 0,
+        "findings": [{
+            "sanitizer": "waitcheck_preflight", "severity": "warning",
+            "code": "wait_hazard", "message": "hazard on shared symbol",
+            "kernel_name": "gemm_shared_symbol", "code_object": None,
+            "entry_offset": None, "metadata": {},
+        }],
+        "kernel_results": [], "coverage": [], "backend": {},
+    }]
+    report["overall_verdict"] = "warn"
+
+    case = gen.summarize_case(report, "warn")
+    assert [row.get("findings") for row in case["kernels"]] == [1, 0]
+    assert sum(row.get("findings", 0) for row in case["kernels"]) == case.get("findings") == 1
 
 
 def test_a_long_rollup_cannot_truncate_the_kernel_reasons_away():

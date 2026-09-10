@@ -1037,10 +1037,10 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             # Detail column beside it.
             previous = kr_by_identity.get(key)
             reasons: list[tuple[str, str]] = list(previous["reasons"]) if previous else []
-            # The fail-closed detail. ``CheckResult.reason`` only ever carries the
-            # rollup (``worklist_not_fully_checked``); the per-kernel reason is the
-            # only field that says what actually went wrong, so it must survive into
-            # the row the renderers read.
+            # The fail-closed detail. Waitcheck's ``CheckResult.reason`` only carries
+            # the rollup (``worklist_not_fully_checked``); the per-kernel reason is
+            # the only field that says what actually went wrong, so it must survive
+            # into the row the renderers read.
             if reason := _clean_msg(str(result.get("reason") or ""), _DETAIL_LIMIT):
                 reasons.append((sanitizer, reason))
             reduced = {
@@ -1200,11 +1200,16 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             if covering["reason"]:
                 detail = f"{detail} \u2014 {covering['reason']}"
         else:
-            findings = findings_by_name.get(name, 0)
-            # dynamic ConSan attributes race findings at process scope (kernel_name
-            # is null); with a single-kernel worklist, credit them to that kernel.
-            if findings == 0 and len(kernel_entries) == 1:
-                findings = findings_by_name.get(None, 0)
+            # A result-less finding names a kernel, not an identity. When several
+            # uncovered rows share that name, credit it once rather than once per row.
+            findings = 0
+            if name not in credited:
+                credited.add(name)
+                findings = findings_by_name.get(name, 0)
+                # dynamic ConSan attributes race findings at process scope
+                # (kernel_name is null); with one worklist row, credit it there.
+                if findings == 0 and len(kernel_entries) == 1:
+                    findings = findings_by_name.get(None, 0)
             verdict = report.get("overall_verdict") if len(kernel_entries) == 1 or findings else "—"
         kernels.append({
             "name": name,
