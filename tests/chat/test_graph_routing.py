@@ -122,19 +122,31 @@ class TestOnlyUnclassifiedRepliesChanged:
     model *did* classify, which is exactly what
     https://github.com/ROCm/aorta/issues/433 warns regresses in mirror image.
 
-    So the change is confined to replies that are **empty**. This class is the
-    proof, and it is deliberately stated end to end: for every reply naming
-    exactly one route -- which is every reply the model is asked for, and every
-    reply either issue's repro produced -- the new rule agrees with the old one,
-    and for every reply that named none but *said something*, the branch is
-    unchanged too.
+    So no reply that named **exactly one** route moves: for every one of those
+    -- which is every reply the model is asked for, and every reply either
+    issue's repro produced -- the new rule agrees with the old one.
 
-    The moved set was briefly wider than this. Routing every unparsed reply to
-    ``question`` also moved content-bearing ones, which took tools away from a
-    model that had asked for them; narrowing the fallback to empty replies gave
-    those back. The parametrisations below name the boundary rather than
-    asserting a single destination for both populations, so widening it again
-    would fail here rather than pass quietly.
+    Two populations do move, and it is worth being exact about them rather than
+    calling the change "empty replies only", which is what an earlier revision
+    of this docstring claimed:
+
+    * **empty or whitespace** -- was ``action`` by omission, now ``question``.
+      The reasoning-channel case, and the point of the change.
+    * **naming both routes** -- was ``question`` by substring precedence, now
+      ``action``. Not intended by the narrowing and not the empty case; it
+      follows from ``_parse_route`` treating "names both" as ambiguous, which
+      is a separate decision pinned by
+      ``TestParseRoute.test_a_reply_naming_both_is_ambiguous_rather_than_a_winner``.
+      Those two decisions cannot both hold *and* leave the moved set at empty
+      replies only. See https://github.com/ROCm/aorta/issues/494.
+
+    A reply that named neither route but *said something* does not move.
+    That population was briefly sent to ``question`` too, which took tools away
+    from a model that had asked for them; narrowing the fallback gave it back.
+
+    The parametrisations below name the boundary rather than asserting a single
+    destination for every unparsed reply, so collapsing them again would fail
+    here rather than pass quietly.
     """
 
     @staticmethod
@@ -159,9 +171,31 @@ class TestOnlyUnclassifiedRepliesChanged:
         lowered = reply.strip().lower()
         assert _parse_route(lowered) == self._old_rule(lowered)
 
+    @pytest.mark.parametrize(
+        "reply",
+        ["action or question", "this is a question, not an action"],
+    )
+    async def test_a_reply_naming_both_routes_also_moved(self, reply):
+        """The second moved population, recorded rather than glossed.
+
+        Substring precedence used to hand these to ``question`` because
+        ``"question" in text`` was tested first. ``_parse_route`` now calls
+        naming both routes ambiguous, so they reach the fallback, and the
+        fallback sends a content-bearing reply to ``action``.
+
+        Whether that is the right destination is open -- "this is a question,
+        not an action" is a model fairly clearly saying *question* -- but
+        ``action`` is the conservative direction, since it keeps both retrieval
+        and tools, where ``question`` has no tools at all.
+        """
+        lowered = reply.strip().lower()
+        assert _parse_route(lowered) is None, "it named both, so it classified neither"
+        assert self._old_rule(lowered) == "question", "substring precedence used to win"
+        assert await _route_reply(reply) == "action"
+
     @pytest.mark.parametrize("reply", ["", "   "])
-    async def test_only_an_empty_reply_moved(self, reply):
-        """The changed case: the old rule sent it to the branch it could not drive."""
+    async def test_an_empty_reply_moved(self, reply):
+        """The intended case: the old rule sent it to the branch it could not drive."""
         lowered = reply.strip().lower()
         assert _parse_route(lowered) is None, "it classified nothing"
         assert self._old_rule(lowered) == "action"
