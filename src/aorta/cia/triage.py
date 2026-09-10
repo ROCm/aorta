@@ -288,6 +288,19 @@ def summarize_sanitizer(report: dict) -> dict:
 
 
 def run_triage(argv: list[str] | None = None) -> dict:
+    """Run a triage and return what happened, as a dict, always.
+
+    Three early exits used to print JSON and ``return 1``. Callers read the
+    result with ``.get()``, so an int arrived as
+    ``AttributeError: 'int' object has no attribute 'get'`` -- caught by a broad
+    except in the chat tool and shown to the user as "triage failed", which
+    turned "source not found" into a mystery. ``main()`` did the same on its own
+    return value.
+
+    They also printed to stdout, which was a subprocess pipe when this was a
+    script and is the chat server's stdout now that it is called in-process.
+    Reporting is ``main()``'s job; this returns.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--recipe", help="Path to an existing aorta sanitizer recipe YAML")
     ap.add_argument("--source", help="Path to a .hip file to compile and triage")
@@ -348,17 +361,16 @@ def run_triage(argv: list[str] | None = None) -> dict:
     if compiled_from_source:
         src = Path(args.source).expanduser().resolve()
         if not src.is_file():
-            print(json.dumps({"ok": False, "error": f"source not found: {src}"}))
-            return 1
+            return {"ok": False, "stage": "source", "error": f"source not found: {src}"}
         source_text = src.read_text(encoding="utf-8", errors="replace")
         kernel_name = kernel_name or detect_kernel_name(source_text)
         if not kernel_name:
-            print(json.dumps({
+            return {
                 "ok": False,
+                "stage": "source",
                 "error": "could not find a __global__ kernel in the source; "
                          "pass --kernel-name explicitly",
-            }))
-            return 1
+            }
 
         # Keep the source with the job so the bundle is self-describing.
         staged = job_dir / "kernel.hip"
@@ -400,8 +412,7 @@ def run_triage(argv: list[str] | None = None) -> dict:
     else:
         recipe = Path(args.recipe).expanduser().resolve()
         if not recipe.is_file():
-            print(json.dumps({"ok": False, "error": f"recipe not found: {recipe}"}))
-            return 1
+            return {"ok": False, "stage": "recipe", "error": f"recipe not found: {recipe}"}
         command = (
             f"{shlex.quote(venv_bin('aorta'))} sweep run "
             f"--recipe {shlex.quote(str(recipe))} "
