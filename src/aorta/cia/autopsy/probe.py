@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -24,6 +25,17 @@ def default_head_node() -> str:
     address in a public repository.
     """
     return os.environ.get("CIA_SSH_HOST", "")
+
+
+#: A hostname, and nothing that also means something to a shell. The node is
+#: chosen by the planner from scheduler output, so it is only as trustworthy as
+#: that output -- and it reaches a shell on two machines.
+_HOSTNAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def valid_host(node: str) -> bool:
+    """True when *node* is a plain hostname."""
+    return bool(node) and bool(_HOSTNAME.match(node))
 
 
 def _ssh(node: str, cmd: str, background: bool = False) -> subprocess.CompletedProcess | None:
@@ -76,6 +88,9 @@ def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "") -> P
 
     Returns path to matrix.json in the bundle on success, None on timeout.
     """
+    if not valid_host(job.node):
+        print(f"[probe] {job.node!r} is not a hostname; not probing")
+        return None
     head_node = head_node or job.head_node or default_head_node()
     if not head_node:
         print("[probe] no head node configured (set CIA_SSH_HOST); skipping probe")
@@ -110,7 +125,8 @@ def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "") -> P
     while time.time() < deadline:
         check = _ssh(
             head_node,
-            f"ssh -o ConnectTimeout=5 {job.node} 'test -f {matrix_remote} && echo EXISTS || echo WAITING'"
+            f"ssh -o ConnectTimeout=5 {shlex.quote(job.node)} "
+            + shlex.quote(f"test -f {shlex.quote(str(matrix_remote))} && echo EXISTS || echo WAITING"),
         )
         if check and "EXISTS" in (check.stdout + check.stderr):
             print(f"[probe] matrix.json ready on {job.node}")
@@ -122,16 +138,34 @@ def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "") -> P
         print(f"[probe] timed out after {PROBE_TIMEOUT_SEC}s waiting for matrix.json")
         return None
 
-    # Copy matrix.json into bundle
+    # Copy matrix.json into the bundle, the same way everything else here
+    # reaches the compute node: through the head node.
+    #
+    # This used to scp straight to job.node from wherever the agent runs, which
+    # is the one hop the rest of this module is careful not to assume -- many
+    # sites reach compute nodes only through a login host, and there the copy
+    # failed after a sweep that had already succeeded. It also built the command
+    # as a string for shell=True, with the node and the remote path
+    # interpolated into it; both come from the job record, and the node is
+    # chosen by the planner.
     dest = bundle_root / "aorta" / "matrix.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    copy_cmd = (
-        f"scp -o StrictHostKeyChecking=no "
-        f"{ssh_user()}@{job.node}:{matrix_remote} {dest}"
+    r = subprocess.run(
+        [
+            "scp",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=15",
+            # ProxyJump: local -> head node -> compute node.
+            "-J", f"{ssh_user()}@{head_node}",
+            f"{ssh_user()}@{job.node}:{shlex.quote(str(matrix_remote))}",
+            str(dest),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
-    r = subprocess.run(copy_cmd, shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
-        print(f"[probe] scp failed: {r.stderr}")
+        print(f"[probe] scp failed: {r.stderr.strip()}")
         return None
 
     # Also update manifest to point at the new matrix
