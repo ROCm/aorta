@@ -82,6 +82,201 @@ for the workload this extends and every measured number quoted below,
 first consumer, and whose "Relationship to Cluster-Scale Agent Systems" section
 already anticipates being invoked by a cluster agent — which is what CIA is.
 
+## Start here: what this is for, and what already works
+
+Vivek Agrawal asked: *"can you please share what have you done for RL work?
+just wanted to know the usecase and what problem are we trying to solve using
+it"*. This section answers those two questions and nothing else — the open
+work, the blockers and the sequencing are the rest of this document's job.
+
+It assumes ROCm and GPU knowledge and assumes **nothing** about reinforcement
+learning, so each machine-learning term is glossed the first time it appears.
+It links to the sections that establish each claim, and to the two sibling
+documents — [the framework, model and topology
+decisions](rl-post-training-decisions.md) and [the first end-to-end
+run](tokenspeed-rl-e2e-sanitizer-routing.md) — rather than restating them.
+
+### What we are trying to do
+
+`aorta agent` already exists and already runs. When a workload fails it reads
+the evidence, decides **which sanitizer to run next**, and proposes a
+mitigation; it repeats that until it converges or runs out of candidates. The
+deciding step is a call to a large language model, and today that call goes
+over HTTP to a general-purpose model behind the AMD LLM gateway.
+
+That model has never seen a ROCm failure. It is being asked, from a payload of
+detector hits and cell verdicts, whether a failure is a kernel race or
+numerical instability, and whether ConSan, Waitcheck, ASAN or UBSan is the tool
+that will show the difference. Those are the judgements it has least basis for,
+and they are the judgements the loop turns on: route to the wrong sanitizer and
+the next cell burns GPU minutes to return "no findings", which is
+indistinguishable from a clean run.
+
+**The goal is a model that is genuinely good at GPU failure triage, served from
+an endpoint we own rather than from the gateway.** The serving half is largely
+in place already: `tokenspeed_serve` stands up, supervises and audits an
+engine, and pointing `aorta agent` at one needs no code change — two
+environment variables, `OPENAI_API_BASE` and `OPENAI_API_KEY`, verified against
+a mock endpoint rather than assumed
+([3.3](#33-pointing-it-at-a-self-hosted-model-no-code-change)).
+
+**The first target use case is sanitizer selection and routing** — the same
+ConSan and Waitcheck recipes that already run in this repository. The use-case
+prioritisation in [4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is)
+ranked it "very strong" for RL independently of the code, and it is the row
+with ground truth for free: the races in the corpus are deliberately planted
+reproducers with committed expected verdicts, so the correct answer is known by
+construction rather than by labelling.
+
+### How the training works, for someone new to it
+
+**"Post-training"** means taking a model already trained on general text and
+training it further on a narrow task. The method here is **reinforcement
+learning**: rather than showing the model a correct answer to copy, we let it
+answer, score the answer, and push it toward whatever scored better.
+
+The algorithm is **GRPO** — Group Relative Policy Optimisation. One step:
+
+1. Take one failure scenario from the corpus and build the prompt the agent
+   would really send.
+2. Ask the model for **several** candidate answers to that same prompt. Each
+   generated answer, plus everything recorded about it, is a **rollout**.
+3. Score each candidate with a **reward function** — a grader, ordinary Python,
+   no human in the loop.
+4. Compare each candidate against the *mean score of its own group*. Candidates
+   above the mean get their tokens made more likely; those below get theirs
+   made less likely.
+
+Step 4 is the part worth holding on to. **GRPO learns only from differences
+inside a group**, and has no notion of an absolute score: if every candidate
+for a scenario is identical they all score the same, the group mean equals
+every member, and every gradient is exactly zero — the run does not crash, it
+simply does not move. That is true however good the grader is, which is what
+made the engine defect below a real one rather than a curiosity.
+
+GRPO rather than something with a critic because it compares within the group
+instead of learning a separate value network, saving roughly 16 bytes per
+parameter — a critic carries its own weights, gradients and optimiser state. It
+is also slime's default.
+
+### The decisions, and the arithmetic behind them
+
+**Base model: Qwen3-8B, not GLM-5.3-Flash.** Worth checking rather than taking
+on faith, because the name misleads. GLM-5.3-Flash is a **mixture-of-experts**
+model: 321 billion total parameters, of which the router activates only about
+16 billion per token. "Flash" describes what it costs to *run*; it says nothing
+about what it costs to *train*, because RL holds optimiser state for **every**
+expert whether the router picked it or not.
+
+At roughly 18 bytes per parameter for full-parameter GRPO — bf16 policy, bf16
+gradients, fp32 Adam moments, an fp32 master copy and a frozen bf16 reference
+policy — that is **5,784 GB against the 2,304 GB in an 8×MI355X node**, 251% of
+the machine, before the inference engine gets a byte. Qwen3-8B needs 147 GB,
+about 7%. Full table in
+[the decisions doc](rl-post-training-decisions.md#memory-arithmetic).
+
+**Framework: slime, not verl.** Both are open-source RL post-training
+frameworks and both do GRPO well. The deciding factor is a seam. TokenSpeed's
+SGLang-compatibility layer was written against slime *by name* — it says so in
+its own source, down to a shim translating slime's `sampling_seed` onto
+TokenSpeed's `seed` — and slime has a first-class mode,
+`--rollout-external-engine-addrs`, for attaching to an inference engine it did
+not launch. That is our shape exactly: `tokenspeed_serve` owns the engine's
+bring-up, supervision and audit, and we want to keep it there. verl launches
+and owns its engine in every path it has. Full comparison in
+[§1 of the decisions doc](rl-post-training-decisions.md#1-framework-slime).
+
+### What is already done
+
+**The loop runs end to end.** Qwen3-8B served on TokenSpeed on one gfx950 GPU,
+driven through `aorta agent`'s own unmodified proposer against all nine
+scenarios, with every output scored by both graders — under two minutes for the
+whole loop once the engine is up. That was the part genuinely in doubt, and it
+is no longer in doubt.
+
+**The graders and the corpus exist.** `proposal_reward.py` scores the proposal
+contract and `triage_reward.py` scores verdict plus attribution; both *import*
+aorta — `AgentStep.from_dict`, `AgentPolicy.validate_step`, `get_mitigation` —
+so they cannot drift from the contract the agent actually enforces, and they
+inherit aorta's own tests. `build_corpus.py` turns real sanitizer runs into
+JSONL the graders read with no conversion pass, and the committed corpus is
+**9 scenarios / 54 examples** with provenance recorded
+([4.6](#46-what-the-corpus-actually-contains)).
+
+**The failure taxonomy was widened from 8 categories to 11**, adding
+`kernel_race`, `nondeterminism` and `numeric_instability`
+([PR #484](https://github.com/ROCm/aorta/pull/484), 54 new tests). The set is
+now derived from a single name-to-description mapping rather than maintained
+twice, so the labels and the guidance the model is given cannot drift apart. It
+also fixed a real pre-existing routing bug: the substring `barrier` used to
+route GPU-side evidence to a checkpoint-I/O category, and now routes to
+`kernel_race`.
+
+**We found and fixed a genuine engine defect.** TokenSpeed picks its sampling
+backend like this:
+
+```python
+def _get_default_backend_name() -> str:
+    if current_platform().is_nvidia:
+        return "flashinfer"
+    return "greedy"
+```
+
+On our hardware `is_nvidia` is false, so the default is **`greedy`** — pure
+argmax, which discards `temperature`, `top_p`, `top_k` and `seed` outright. The
+request is accepted, HTTP 200 comes back, the completion is perfectly valid,
+and nothing warns. The symptom was that every sample in a group came back
+byte-identical, which reads as a property of the model rather than a server
+setting; litellm was cleared as the culprit by measuring against a local echo
+server. The decisive measurement was `n=8` in a **single** request at
+temperature 1.2 returning eight identical choices — same batch, same cache
+state. The fix is one flag, `--sampling-backend triton`, now the default in
+`examples/rl/serve_for_rollouts.sh`, which additionally reads the value back
+from `/get_server_info` and warns if the engine still reports greedy; distinct
+completions go from 1/8 to 8/8 at every temperature above zero.
+
+**The generalisable part, and the reason this is worth attention even for
+someone who never touches RL: the default is conditional on the platform being
+NVIDIA, so it cannot surface on an NVIDIA lane.** Upstream CI is green and will
+stay green. Anything of ours that assumes an inference server honours sampling
+parameters should read `/get_server_info` back rather than trust the request.
+Detail and the measurement tables:
+[§5.4](tokenspeed-rl-e2e-sanitizer-routing.md#54-the-rollout-was-not-sampling-and-the-cause-was-a-server-default).
+
+**We established, by measurement rather than argument, that grading a proposal
+on its form does not work.** Scoring JSON validity, membership of the closed
+category set and whether a named sanitizer actually resolves in the registry is
+free — no GPU, no labelling, because the contract is code — and it gave a
+perfect score to the model, to a hand-written oracle and to a template that
+shotgunned every candidate without reading the input, on all nine scenarios in
+the corpus. Each attempt to fix that
+traded one exploit for its mirror image: membership rewards abstaining,
+abstention credit rewards committing to a wrong label, precision rewards naming
+one wrong thing confidently. Shape is all that is observable without running
+the mitigation, so this settled the next design decision — score whether the
+proposed mitigation actually resolves the reproducer
+([§5.5](tokenspeed-rl-e2e-sanitizer-routing.md#55-is-the-contracts-fix-half-worth-a-gpu-now)).
+
+**The weight-transfer machinery was mapped in detail and the findings filed
+upstream.** A training loop has to push updated weights into the running engine
+rather than restarting it — 400 iterations of ~250 s cold start would be 27.8
+hours of loading weights against ~2.5 hours of generation — so all three of
+TokenSpeed's transports were traced through the scheduler's dispatch chain.
+Two of them have no dispatch branch at all: the tensor path raises
+`NotImplementedError` and the disk path hangs on a Future nothing resolves.
+Filed as
+[tokenspeed#1479](https://github.com/lightseekorg/tokenspeed/issues/1479),
+alongside the earlier
+[tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373) on
+the NCCL path reporting success from the request rather than from the wire.
+The probe that measures it is written and committed —
+`examples/rl/nccl_roundtrip_check.py` pushes modified weights, pushes the
+originals back and asserts the model returns to baseline, a round trip rather
+than a one-way perturbation check, which passes on a transport that moves
+nothing.
+
+This is infrastructure and measurements, not yet a trained model.
+
 ## 0. Parked: where this stands and how to resume
 
 **The decisions Manoj asked for are now in
