@@ -412,6 +412,32 @@ def _assemble_command(asm_path: Path, obj_path: Path) -> str:
     )
 
 
+def _assemble(build: str) -> subprocess.CompletedProcess:
+    """Assemble on a compute node, or on this machine when there is no Slurm.
+
+    Assembling a fragment is about a second of CPU and needs no GPU, so the
+    scheduler is how it reaches a node with ROCm on it rather than something
+    the work requires. Where there is no scheduler -- a workstation, a
+    container -- running it here is the same assemble, and refusing outright
+    would be refusing over the absence of something that was only ever a lift.
+
+    Both calls can still raise: ``TimeoutExpired`` from a queue that never gets
+    round to us, ``OSError`` if even bash is missing. Those belong to the
+    caller, which has a paste to answer for.
+    """
+    argv = ["srun", "--nodes=1", "-t", "5", "bash", "-c", build]
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, timeout=settings.waitcheck_timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return subprocess.run(
+            ["bash", "-c", build], capture_output=True, text=True,
+            timeout=settings.waitcheck_timeout, stdin=subprocess.DEVNULL,
+        )
+
+
 def _no_assembler_message() -> str:
     """Say that the toolchain is missing, rather than blaming the paste."""
     return (
@@ -465,12 +491,22 @@ def triage_assembly_source(source: str, label: str = "") -> str:
     obj_path = staging / f"{stem}.hsaco"
     asm_path.write_text(prepared.program, encoding="utf-8")
 
-    build = _assemble_command(asm_path, obj_path)
-    proc = subprocess.run(
-        ["srun", "--nodes=1", "-t", "5", "bash", "-c", build],
-        capture_output=True, text=True, timeout=settings.waitcheck_timeout,
-        stdin=subprocess.DEVNULL,
-    )
+    try:
+        proc = _assemble(_assemble_command(asm_path, obj_path))
+    except subprocess.TimeoutExpired:
+        return (
+            f"The assemble did not finish within {settings.waitcheck_timeout}s, so "
+            "nothing was analysed. This is usually a busy queue rather than a "
+            "problem with what you pasted -- the job was still waiting for a node.\n"
+            f"Wrapped source kept at: {asm_path}"
+        )
+    except OSError as exc:
+        return (
+            "The assembler could not be reached, so this assembly was not "
+            f"analysed: {exc}\n"
+            f"Wrapped source kept at: {asm_path}"
+        )
+
     if not obj_path.is_file():
         if _NO_ASSEMBLER in (proc.stderr or ""):
             return _no_assembler_message()
