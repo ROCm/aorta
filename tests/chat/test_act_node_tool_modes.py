@@ -1564,7 +1564,100 @@ class TestMixedConcurrentProbeOutcomes:
             await asyncio.gather(act_node(_state()), act_node(_state()))
 
         assert "text' protocol stays in force" not in caplog.text
-        assert "native is already in force from a concurrent successful probe" in caplog.text
+        assert "has already proved native works on this endpoint" in caplog.text
+        # The advice is wrong on this branch and must not be printed: native
+        # demonstrably works here, so tool-parser flags would send the operator
+        # to fix something that is not broken.
+        assert "enable-auto-tool-choice" not in caplog.text
+
+
+class TestEveryFailureSiteRecitesOneClause:
+    """The three failure sites must not each describe the budget themselves.
+
+    This is the drift guard, and it is pointed at a defect that already
+    happened: one of these sites said the ``text`` protocol stayed in force
+    after a concurrent probe had moved it. It said so because it built its own
+    sentence, so the fact lived in three places and only two were corrected.
+
+    So rather than assert three wordings, this asserts they are *the same
+    wording* -- the property that makes the class of bug impossible. A site
+    that starts explaining the budget again fails here, whether or not what it
+    says happens to be true on the day it is written.
+    """
+
+    #: What the sites are all reciting on a first, counted failure.
+    CLAUSE = "The 'text' protocol stays in force. This is attempt 1 of 2;"
+
+    @staticmethod
+    def _text_dead_ends():
+        plain = MagicMock()
+        plain.ainvoke = AsyncMock(return_value=_dead_end_reply())
+        return plain
+
+    async def _clause_from(self, plain, caplog):
+        nodes.reset_tool_mode_escalation()
+        with (
+            patch("aorta.chat.graph.nodes._get_llm", return_value=plain),
+            caplog.at_level(logging.WARNING),
+        ):
+            await act_node(_state())
+        line = next(
+            entry
+            for entry in caplog.messages
+            if "The escalated native tool-calling request" in entry
+        )
+        caplog.clear()
+        return line
+
+    @pytest.mark.asyncio
+    async def test_the_three_sites_emit_the_same_budget_clause(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        # 1. the request raised without having made a tool call
+        raised = self._text_dead_ends()
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=RuntimeError("503 transient"))
+        raised.bind_tools = MagicMock(return_value=bound)
+
+        # 2. it failed before it could call anything
+        unbindable = self._text_dead_ends()
+        unbindable.bind_tools = MagicMock(side_effect=RuntimeError("no schemas"))
+
+        # 3. it reached the endpoint and went quiet
+        silent = self._text_dead_ends()
+        quiet = MagicMock()
+        quiet.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        silent.bind_tools = MagicMock(return_value=quiet)
+
+        lines = [
+            await self._clause_from(llm, caplog)
+            for llm in (raised, unbindable, silent)
+        ]
+        assert len(lines) == 3
+        for line in lines:
+            assert self.CLAUSE in line, line
+
+    @pytest.mark.asyncio
+    async def test_the_endpoint_advice_follows_the_failure_not_the_silence(
+        self, text_mode, tool_mode_not_chosen, caplog
+    ):
+        """Requested by the caller, but withheld by the rule that owns it.
+
+        A request that failed may well be an endpoint that cannot serve
+        ``tools``. A model that answered nothing is not that, so the same
+        advice there sends the operator to the wrong place.
+        """
+        raised = self._text_dead_ends()
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=RuntimeError("503 transient"))
+        raised.bind_tools = MagicMock(return_value=bound)
+        assert "enable-auto-tool-choice" in await self._clause_from(raised, caplog)
+
+        silent = self._text_dead_ends()
+        quiet = MagicMock()
+        quiet.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        silent.bind_tools = MagicMock(return_value=quiet)
+        assert "enable-auto-tool-choice" not in await self._clause_from(silent, caplog)
 
 
 class TestTheRetryDoesNotRunATextProtocolToolASecondTime:

@@ -809,6 +809,15 @@ class _EscalationState:
     successful_watermark: int = 0
 
 
+#: Remediation for a native request that failed outright, appended by
+#: :func:`_record_escalation_failure` when its caller asks. One copy, because
+#: two callers print it and a third deliberately does not -- which is a rule
+#: about when it applies, and rules with copies drift.
+_ENDPOINT_HINT = (
+    " If it is a local vLLM, it must be started with --enable-auto-tool-choice "
+    "and a matching --tool-call-parser to serve this protocol."
+)
+
 #: Failed escalated attempts before native is written off for the process.
 #: Two, not one: writing it off on a single failure lets a bad minute strand a
 #: long-lived ``aorta chat ui`` server on the protocol its model cannot drive,
@@ -978,13 +987,28 @@ def _begin_escalated_probe() -> int:
     return _escalation.probes_begun
 
 
-def _record_escalation_failure(probe: int) -> str:
+def _record_escalation_failure(probe: int, *, endpoint_hint: bool = False) -> str:
     """Count an escalated attempt that did not answer; return what follows next.
 
     Shared by the two ways the retry can fail to rescue a query -- the request
     raised, or it came back as silent as the text round before it. Both spend
     the same budget, and both leave the protocol where it was, so counting them
     in one place is what stops a caller from spending it forever by forgetting.
+
+    Returns the **whole** clause, not a suffix, and that is the point. Each
+    caller used to build its own sentence around this and so had to restate
+    what had happened to the protocol and to the budget. The defect that
+    started this was one of those sentences saying the ``text`` protocol stayed
+    in force after a concurrent probe had already moved it -- a call site
+    asserting something no longer true, which is the exact failure this
+    function exists to prevent. Three sites reciting one fact cannot be kept
+    honest by review; computing it here means there is nothing to keep in step.
+
+    ``endpoint_hint`` asks for the local-vLLM tool-parser advice, which suits a
+    caller whose request *failed* and not one whose model merely went quiet. It
+    is a request rather than a decision: the pairing rule -- that the advice is
+    wrong once native is known to work -- lives below with the state it depends
+    on, because that rule is itself a claim that could drift.
 
     Counts *waves*, not attempts. The budget is two so that one bad minute does
     not disable the escalation for the process -- a permanent refusal and a 503
@@ -1014,13 +1038,27 @@ def _record_escalation_failure(probe: int) -> str:
     points on one event loop.
     """
     if probe <= _escalation.successful_watermark:
-        return " native is already in force from a concurrent successful probe."
+        # No endpoint hint on this branch even when the caller asks for one:
+        # native demonstrably works here, so tool-parser advice would send the
+        # operator to fix something that is not broken.
+        return (
+            "Another concurrent retry has already proved native works on this "
+            "endpoint, so the protocol has moved to native regardless and this "
+            "failure is not counted against the budget."
+        )
     if probe > _escalation.counted_watermark:
         _escalation.native_failures += 1
         _escalation.counted_watermark = _escalation.probes_begun
-    if _escalation.native_failures >= _MAX_NATIVE_FAILURES:
-        return " native will not be tried again in this process."
-    return " a later query may try again."
+    budget = (
+        " native will not be tried again in this process."
+        if _escalation.native_failures >= _MAX_NATIVE_FAILURES
+        else " a later query may try again."
+    )
+    return (
+        f"The 'text' protocol stays in force. This is attempt "
+        f"{_escalation.native_failures} of {_MAX_NATIVE_FAILURES};{budget}"
+        f"{_ENDPOINT_HINT if endpoint_hint else ''}"
+    )
 
 
 @dataclass(frozen=True)
@@ -1338,29 +1376,12 @@ async def _escalated_native_attempt(
                 else "Every call repeated one already answered above",
             )
             return await _abandoned_result(state, whole_trace)
-        followup = _record_escalation_failure(probe)
-        if _escalation.escalated:
-            logger.warning(
-                "The escalated native tool-calling request failed (%s: %s) without "
-                "making a tool call, but another concurrent retry has already "
-                "proved native works on this endpoint;%s Answering from retrieved "
-                "context instead.",
-                type(failure.cause).__name__,
-                failure.cause,
-                followup,
-            )
-            return await _abandoned_result(state, whole_trace)
         logger.warning(
             "The escalated native tool-calling request failed (%s: %s) without "
-            "making a tool call. This is attempt %d of %d;%s Answering from "
-            "retrieved context instead. If it is a local vLLM, it must be "
-            "started with --enable-auto-tool-choice and a matching "
-            "--tool-call-parser to serve this protocol.",
+            "making a tool call. Answering from retrieved context instead. %s",
             type(failure.cause).__name__,
             failure.cause,
-            _escalation.native_failures,
-            _MAX_NATIVE_FAILURES,
-            followup,
+            _record_escalation_failure(probe, endpoint_hint=True),
         )
         return await _abandoned_result(state, whole_trace)
     except Exception as exc:
@@ -1369,29 +1390,13 @@ async def _escalated_native_attempt(
         # resolves the backend and binds the tool schemas before it makes any.
         # Those raise plainly, and letting them through would put the traceback
         # back on the query this whole path exists to keep an answer on.
-        followup = _record_escalation_failure(probe)
-        if _escalation.escalated:
-            logger.warning(
-                "The escalated native tool-calling request failed before it could "
-                "call anything (%s: %s), but another concurrent retry has "
-                "already proved native works on this endpoint;%s Answering from "
-                "retrieved context instead.",
-                type(exc).__name__,
-                exc,
-                followup,
-            )
-            return await _abandoned_result(state, trace)
         logger.warning(
             "The escalated native tool-calling request failed before it could "
-            "call anything (%s: %s). This is attempt %d of %d;%s Answering "
-            "from retrieved context instead. If it is a local vLLM, it must be "
-            "started with --enable-auto-tool-choice and a matching "
-            "--tool-call-parser to serve this protocol.",
+            "call anything (%s: %s). Answering from retrieved context "
+            "instead. %s",
             type(exc).__name__,
             exc,
-            _escalation.native_failures,
-            _MAX_NATIVE_FAILURES,
-            followup,
+            _record_escalation_failure(probe, endpoint_hint=True),
         )
         return await _abandoned_result(state, trace)
     if not outcome.answered:
@@ -1399,22 +1404,10 @@ async def _escalated_native_attempt(
         # text. Committing here is what the switch has to refuse to do: a
         # protocol that has never answered would then be selected for every
         # later query on the strength of an attempt that failed.
-        followup = _record_escalation_failure(probe)
-        if _escalation.escalated:
-            logger.warning(
-                "The escalated native tool-calling request returned no answer and "
-                "no tool call either, but another concurrent retry has already "
-                "proved native works on this endpoint;%s",
-                followup,
-            )
-            return outcome.result
         logger.warning(
             "The escalated native tool-calling request returned no answer and "
-            "no tool call either, so the 'text' protocol stays in force. This "
-            "is attempt %d of %d;%s",
-            _escalation.native_failures,
-            _MAX_NATIVE_FAILURES,
-            followup,
+            "no tool call either. %s",
+            _record_escalation_failure(probe),
         )
         return outcome.result
     _commit_escalation(signature, outcome.evidence)
