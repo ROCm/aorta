@@ -889,7 +889,16 @@ def _guard(action: Any) -> Any:
         manifest.IndexMismatchError,
         manifest.ManifestError,
         ops.IndexFetchError,
-        FileNotFoundError,
+        # ``OSError`` rather than ``FileNotFoundError`` alone. The narrow one
+        # covered the missing index and left every other filesystem refusal
+        # unwrapped: a build into a read-only parent surfaced
+        # ``PermissionError: [Errno 13] ... '.aorta-index-cbr5wi0q'`` as a
+        # traceback naming a staging directory the user never chose, where the
+        # message they need -- which directory, and that it is not writable --
+        # was already in ``str(exc)``. These are reports about the path the
+        # command was given, which is the category this function exists to
+        # print rather than raise.
+        OSError,
         # The embedding and LLM provider factories report bad configuration as
         # ValueError, message-first; a traceback would bury it.
         ValueError,
@@ -925,19 +934,37 @@ def index_group() -> None:
     help="Index only git-tracked files of a ROCm/aorta checkout (what CI publishes).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the build result as JSON.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Build over a downloaded index, replacing it with a locally built one.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
 def index_build(
-    path: str | None, output: str | None, public_only: bool, as_json: bool, verbose: bool
+    path: str | None,
+    output: str | None,
+    public_only: bool,
+    as_json: bool,
+    force: bool,
+    verbose: bool,
 ) -> None:
     """Build the index from source on this machine.
 
     The air-gapped and developer path. Needs the embedding weights, which are
     downloaded once (~65 MB) unless the cache is pre-seeded -- run 'aorta chat
     doctor' first if this node has no egress.
+
+    Refuses to build over an index that was downloaded rather than built
+    here, unless --public-only says the corpus is the published one. The test
+    is provenance, not size: an explicit --path over the whole checkout is
+    still refused, because nothing on disk proves it is the same tree the
+    release was built from. Pass --force to do it anyway.
     """
     _index_logging(verbose)
     ops = _load("rag.index_ops")
-    result = _guard(lambda: ops.build_index(_resolve_corpus(path, public_only), index_path=output))
+    result = _guard(
+        lambda: ops.build_index(_resolve_corpus(path, public_only), index_path=output, force=force)
+    )
 
     if as_json:
         click.echo(
@@ -968,6 +995,21 @@ def index_build(
     click.echo(f"  digest      {manifest.corpus_digest}")
 
 
+def _echo_fetch_target(source: Any, output: str | None) -> None:
+    """Show the resolved asset and destination before anything is contacted.
+
+    On stderr, so ``--json`` still emits nothing but its object. Echoed rather
+    than logged because ``_index_logging`` configures the root logger through
+    ``basicConfig``, which is a no-op if something else configured it first --
+    and the defect being fixed here is a command that printed nothing at all,
+    so the one line that explains the wait should not depend on that.
+    """
+    ops = _load("rag.index_ops")
+    config = _load("config")
+    for line in ops.describe_target(source, output or config.settings.index_file):
+        click.echo(line, err=True)
+
+
 @index_group.command(name="fetch")
 @click.option(
     "--version",
@@ -982,12 +1024,18 @@ def index_build(
 )
 @click.option("--output", default=None, help="Where to install it. Defaults to the cache.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the result as JSON.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite an index built on this machine, and re-download an identical one.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
 def index_fetch(
     version: str | None,
     from_path: str | None,
     output: str | None,
     as_json: bool,
+    force: bool,
     verbose: bool,
 ) -> None:
     """Download the prebuilt index matching this aorta version.
@@ -995,6 +1043,10 @@ def index_fetch(
     An exact release version takes that release's asset; a development version
     takes the rolling asset built from main and reports how far off it is.
     Pass --version to override, or --from to side-load a staged file.
+
+    A refresh of an index that was itself downloaded proceeds and reports what
+    changed; one that would replace a locally-built index is refused, because
+    the network cannot give that back. Pass --force to overwrite it.
     """
     if version and from_path:
         raise click.UsageError("--version and --from are mutually exclusive.")
@@ -1002,9 +1054,17 @@ def index_fetch(
     ops = _load("rag.index_ops")
 
     if from_path:
-        result = _guard(lambda: ops.side_load(from_path, index_path=output))
+        result = _guard(lambda: ops.side_load(from_path, index_path=output, force=force))
     else:
-        result = _guard(lambda: ops.fetch_index(version=version, index_path=output))
+        # Resolved and echoed here, before the first request, then handed to
+        # `fetch_index` so it resolves once. Everything below runs after the
+        # download, which is why a fetch that stalled -- or that refused on the
+        # manifest -- used to print nothing at all: the tag, the URL and the
+        # destination were all known up front and shown only on success.
+        # `resolve_source` is pure, so this costs no network.
+        source = _guard(lambda: ops.resolve_source(version))
+        _echo_fetch_target(source, output)
+        result = _guard(lambda: ops.fetch_index(source=source, index_path=output, force=force))
 
     if as_json:
         click.echo(
@@ -1012,6 +1072,9 @@ def index_fetch(
                 {
                     "index": str(result.index_path),
                     "source": result.source,
+                    "up_to_date": result.up_to_date,
+                    "notes": result.notes,
+                    "changes": result.changes,
                     "warnings": result.warnings,
                     "manifest": result.manifest.describe(),
                 },
@@ -1019,11 +1082,130 @@ def index_fetch(
             )
         )
         return
-    click.echo(f"Installed {result.index_path}")
+    verb = "Already up to date" if result.up_to_date else "Installed"
+    click.echo(f"{verb} {result.index_path}")
     click.echo(f"  source    {result.source}")
     click.echo(f"  built as  {result.manifest.describe()}")
+    for change in result.changes:
+        click.echo(f"  replaced  {change}")
     for warning in result.warnings:
         click.echo(f"warning: {warning}", err=True)
+
+
+#: The fields worth putting side by side, and what to call them in the table.
+#: ``built_at`` is last and deliberately not the basis of the verdict: it is
+#: wall-clock from whoever built the index, so a locally-built one can carry a
+#: later timestamp while indexing *older* source. ``corpus_digest`` and
+#: ``aorta_sha`` are the honest answer to "which source".
+#:
+#: ``embedding_identity`` sits next to ``model`` because it is what makes the
+#: model name meaningful: for a remote provider it carries the endpoint too, so
+#: two rows reading the same ``model`` can still be two vector spaces that
+#: share a name. Without it the *incompatible* verdict could be printed over a
+#: table showing no visible difference at all.
+_STATUS_ROWS = (
+    ("model", "embedding_model"),
+    ("identity", "embedding_identity"),
+    ("dimensions", "dimensions"),
+    ("aorta", "aorta_version"),
+    ("aorta_sha", "aorta_sha"),
+    ("corpus", "corpus_digest"),
+    ("index_sha256", "index_sha256"),
+    ("chunks", "chunk_count"),
+    ("built_at", "built_at"),
+)
+
+
+def _status_cell(value: object) -> str:
+    """One table cell: always a single line, so no field can break the columns.
+
+    ``embedding_identity`` is newline-joined -- endpoint, then model -- so
+    printing it as recorded would put half of it on an unlabelled row and
+    misalign every row after it. Collapsing here rather than at the one field
+    that needs it today keeps the table's shape a property of the table.
+    """
+    return " / ".join(part for part in str(value or "").split("\n") if part) or "-"
+
+
+def _echo_status_table(local: dict, published: dict) -> None:
+    """Print both manifests as two columns, so a difference is visible.
+
+    A row whose two values differ only past the column width is repeated
+    underneath in full. Truncating for width is fine until it makes a row that
+    exists to show a difference show agreement instead -- and ``identity`` is
+    where that bites, because a remote one is ``remote / <endpoint> / <model>``
+    and two endpoints on the same provider share far more than 42 characters
+    while the ``model`` and ``dimensions`` rows above stay identical. Digests
+    can collide on a prefix too, just far less often.
+    """
+    click.echo(f"  {'':<13}{'local':<44}published")
+    hidden = []
+    for label, key in _STATUS_ROWS:
+        left = _status_cell(local.get(key))
+        right = _status_cell(published.get(key))
+        if left != right and left[:42] == right[:42]:
+            hidden.append((label, left, right))
+        click.echo(f"  {label:<13}{left[:42]:<44}{right[:42]}")
+    for label, left, right in hidden:
+        click.echo("")
+        click.echo(f"  {label} differs past the column width:")
+        click.echo(f"    local      {left}")
+        click.echo(f"    published  {right}")
+
+
+@index_group.command(name="status")
+@click.option(
+    "--version",
+    default=None,
+    help="Published version or tag to compare against. Overrides version matching.",
+)
+@click.option("--index", "index_path", default=None, help="Local index. Defaults to the cache.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the comparison as JSON.")
+@click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
+def index_status(version: str | None, index_path: str | None, as_json: bool, verbose: bool) -> None:
+    """Compare the local index against the published one, without downloading it.
+
+    Reads the two manifests and nothing else, so it costs about a kilobyte.
+    This is the comparison nightly.yml already does in bash to decide whether
+    to republish.
+
+    Two verdicts exit non-zero, and both mean the same thing: no comparison was
+    made. 'no baseline' is a published manifest that could not be read, never
+    reported as 'up to date'; 'unreadable local index' is a file sitting at the
+    index path with no manifest this build can read, which is also what the
+    first query would refuse. An *absent* local index exits zero -- that is a
+    normal answer for someone who has not installed one yet.
+    """
+    _index_logging(verbose)
+    ops = _load("rag.index_ops")
+    comparison = _guard(lambda: ops.compare_index(version=version, index_path=index_path))
+
+    if as_json:
+        click.echo(json.dumps(ops.comparison_to_dict(comparison), indent=2))
+    else:
+        payload = ops.comparison_to_dict(comparison)
+        click.echo(f"verdict: {comparison.summary}")
+        click.echo("")
+        click.echo(f"  local      {payload['local']['index_path']} ({comparison.provenance})")
+        # Named explicitly: a dev install resolves to the rolling tag, so a
+        # verdict that does not say which asset it compared against is
+        # ambiguous.
+        click.echo(f"  published  {comparison.source.describe()}")
+        click.echo("")
+        _echo_status_table(payload["local"], payload["published"])
+        if comparison.differences:
+            click.echo("")
+            for difference in comparison.differences:
+                click.echo(f"  differs    {difference}")
+        if comparison.local_error:
+            click.echo("")
+            click.echo(f"warning: {comparison.local_error}", err=True)
+        if comparison.baseline_error:
+            click.echo("")
+            click.echo(f"warning: {comparison.baseline_error}", err=True)
+
+    if comparison.verdict in (ops.VERDICT_NO_BASELINE, ops.VERDICT_UNREADABLE_LOCAL_INDEX):
+        raise click.exceptions.Exit(1)
 
 
 @index_group.command(name="runs")

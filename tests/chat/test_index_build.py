@@ -15,6 +15,8 @@ re-uploading tens of megabytes on a night when nothing indexable changed.
 
 from __future__ import annotations
 
+import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -336,6 +338,585 @@ class TestBuildIndex:
         digest, files = index_ops.compute_digest(published_corpus(repo))
         assert digest == result.manifest.corpus_digest
         assert files == result.file_count
+
+
+class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
+    """A local build covers less than the published one, and used to say nothing.
+
+    This is the mechanism behind the bad advice the guard exists to catch:
+    ``index build`` defaults ``--output`` to the live index and its corpus to
+    ``local_corpus``, so following a suggestion to "build" replaced an index
+    covering ``src/aorta``, ``docs`` and ``README.md`` with one covering a
+    single tree.
+    """
+
+    @staticmethod
+    def _install_published(target: Path, monkeypatch, **overrides) -> str:
+        """Put a *readable* index at ``target`` that looks like a CI-published one.
+
+        A real sqlite store holding the collection the manifest names, not
+        filler bytes. The guard asks :func:`check_index` whether the index is
+        usable, and an index nothing can open is exempt from it -- so a fixture
+        of filler bytes made every refusal test here pass through the
+        exemption rather than through the corpus comparison it was written to
+        exercise. The bytes were never load-bearing; being openable is.
+
+        Returns the digest of the file it wrote, so a caller can assert the
+        index was or was not replaced without depending on its contents.
+        """
+        import sqlite3
+
+        from aorta.chat.rag import manifest as manifest_mod
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        collection = overrides.get("collection", "aorta_fake")
+        chunks = overrides.get("chunk_count", 0)
+        conn = sqlite3.connect(target)
+        try:
+            conn.execute(f'CREATE TABLE "chunks_{collection}" (id INTEGER, text TEXT)')
+            conn.executemany(
+                f'INSERT INTO "chunks_{collection}" VALUES (?, ?)',
+                [(i, "the published index") for i in range(chunks)],
+            )
+            conn.commit()
+        finally:
+            # Closed rather than left to the context manager, which commits but
+            # does not close -- and the file is about to be digested and moved.
+            conn.close()
+        values = {
+            "aorta_version": "0.2.1",
+            "aorta_sha": "a" * 40,
+            "embedding_provider": "local",
+            "embedding_model": "fake/model",
+            "dimensions": 8,
+            "collection": "aorta_fake",
+            "chunk_size": settings.chunk_size,
+            "chunk_overlap": settings.chunk_overlap,
+            "index_sha256": manifest_mod.sha256_file(target),
+            "corpus_roots": list(PUBLISHED_SUBPATHS),
+        }
+        values.update(overrides)
+        manifest_mod.write_manifest(target, manifest_mod.Manifest(**values))
+        return manifest_mod.sha256_file(target)
+
+    def test_it_refuses_and_names_what_would_be_lost(self, repo: Path, tmp_path, monkeypatch):
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        digest = self._install_published(target, monkeypatch)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        assert "docs/" in message and "README.md" in message
+        assert "aorta chat index fetch" in message
+        assert "--force" in message
+        assert index_ops.manifest_mod.sha256_file(target) == digest, "the index must be untouched"
+
+    def test_a_published_build_over_a_published_index_is_a_refresh_not_a_downgrade(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The guard is about the corpus narrowing, not about the path being occupied.
+
+        `--public-only` produces the same shape it would replace, so refusing
+        it protects nothing -- and refusing it is how a guard keyed on the
+        destination alone would break `nightly.yml` and `release.yml` the first
+        time their `index-out/` was restored or re-used, which stops the
+        published index updating at all.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        digest = self._install_published(target, monkeypatch)
+
+        result = index_ops.build_index(published_corpus(repo), index_path=target)
+
+        assert result.manifest.corpus_roots == list(PUBLISHED_SUBPATHS)
+        assert index_ops.manifest_mod.sha256_file(target) != digest, "the index must be replaced"
+
+    def test_force_builds_over_it(self, repo: Path, tmp_path, monkeypatch):
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        digest = self._install_published(target, monkeypatch)
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target, force=True)
+        assert index_ops.manifest_mod.sha256_file(target) != digest, "the index must be replaced"
+
+    def test_a_refused_index_is_exempt_so_the_advice_stays_followable(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The cross-PR interaction, which neither diff shows on its own.
+
+        ``doctor`` and the manifest refusal both name ``aorta chat index build``
+        as the remedy for an embedding-identity mismatch, and that is the right
+        remedy. A refused index is still an existing index at the destination,
+        so a guard keyed on presence alone would compose the two into a dead
+        end: refused, told to rebuild, refused again -- landing on a user who
+        is already stuck.
+
+        There is also nothing to protect. Vectors that are not comparable to
+        this install's queries cannot answer anything, so rebuilding over them
+        is not destructive. The guard is for a *usable* published index.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        # Built by a different embedding model: exactly what `validate` refuses.
+        self._install_published(target, monkeypatch, embedding_model="some/other-model")
+
+        assert index_ops.check_index(target, strict=False).refusals, (
+            "the fixture must be an index this install would actually refuse"
+        )
+
+        result = index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert result.index_path == target
+        assert index_ops.check_index(target, strict=True).refusals == []
+
+    def test_an_index_whose_store_cannot_be_read_is_exempt_too(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The exemption is "cannot be used", not "the manifest is refused".
+
+        PR #463 added a FAIL branch for an index whose ``.sqlite`` cannot be
+        opened, and it names ``aorta chat index build`` as the remedy. Such an
+        index has an entirely *valid* manifest, so a guard asking only
+        ``manifest.validate`` refused the rebuild that every reader touching
+        the file was recommending -- the same two-step dead end as the refused
+        case, one layer down. Asked through ``check_index``, which reads the
+        store, so this guard and the load path agree on what "usable" means.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+        # Leave the sidecars, replace the index with something that is not one.
+        target.write_bytes(b"not a sqlite database, not even close" * 40)
+
+        report = index_ops.check_index(target, strict=False)
+        assert report.refusals, "the fixture must be an index this install cannot read"
+        assert not index_ops._validate_against_provider(
+            index_ops.manifest_mod.read_manifest(target)
+        ).refusals, "and its manifest must still be perfectly valid, which is the point"
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target)
+        assert index_ops.check_index(target, strict=True).refusals == []
+
+    def test_a_legacy_manifest_does_not_hide_an_unreadable_store(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """``chunk_count`` of 0 must not buy an unreadable index a clean bill of health.
+
+        ``check_index`` used to suppress its unreadable-file refusal unless the
+        manifest claimed a chunk count, on the reasoning that a manifest
+        predating the field asserts nothing to contradict. But "is the claim
+        contradicted" is not "can this be queried", and the load path refuses
+        such a file with no gate at all -- so this reader was *more permissive
+        than the load path it exists to predict*.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch, chunk_count=0)
+        target.write_bytes(b"not a sqlite database, not even close" * 40)
+
+        assert index_ops.manifest_mod.read_manifest(target).chunk_count == 0
+        refusals = index_ops.check_index(target, strict=False).refusals
+
+        assert refusals, "an unreadable store fails closed whatever the manifest claims"
+        # Worded for a manifest that made no claim, rather than "describes 0 chunks".
+        assert "could not be read as a sqlite store" in " ".join(refusals)
+        assert "describes 0 chunks" not in " ".join(refusals)
+        # And the guard follows it, so #463's advice stays followable here too.
+        assert index_ops.build_index(local_corpus(repo), index_path=target)
+
+    def test_a_stale_index_on_a_remote_provider_needs_no_new_exemption(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The third state #463 names, which the guard already permitted.
+
+        Source drift is a *warning*, so it never reaches the usability
+        exemption -- and it does not need to. On a remote embedding provider
+        ``doctor`` names ``index build`` for drift because a fetch would land
+        the published asset, which that provider refuses. The index in front of
+        the guard is therefore already exempt for a different reason: it is a
+        local build, classified ``local``, and a local index is never protected
+        from ``build``. Pinned so a later widening of the exemption cannot be
+        justified by this case.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        # A local build: one absolute root, which is the local signature.
+        self._install_published(target, monkeypatch, corpus_roots=[str(tmp_path / "checkout")])
+
+        local = index_ops.manifest_mod.read_manifest(target)
+        assert index_ops.index_provenance(local) == index_ops.PROVENANCE_LOCAL
+        assert not index_ops.check_index(target, strict=False).refusals, (
+            "the fixture must be healthy, so the exemption cannot be what permits it"
+        )
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target)
+
+    def test_a_healthy_published_index_is_still_refused(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The control for the three exemptions above: the guard still guards.
+
+        Widening "refused" to "unusable" must not make the guard permissive on
+        the case it exists for -- a healthy published index that a bare build
+        would narrow.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        assert not index_ops.check_index(target, strict=False).refusals
+        with pytest.raises(index_ops.IndexOverwriteError):
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+    def test_a_refused_index_stays_exempt_even_when_its_provenance_is_unreadable(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The exemption is checked *before* the unclassifiable refusal, on purpose.
+
+        It looks like a hole in the "unreadable provenance is refused" rule and
+        it is not. An unreadable ``corpus_roots`` means the index is either a
+        published one or a local one, and a *refused* index reaches the same
+        verdict down both branches: a refused published index is exempt by the
+        rule above, and a local index is never protected from ``build`` at all.
+        So proceeding is not a guess about which is on disk -- it is what both
+        possibilities agree on.
+
+        Reordering the two would also break the cross-PR interaction the
+        exemption exists for: ``doctor`` and the manifest refusal both name
+        ``aorta chat index build`` as the remedy, and a user whose sidecar is
+        *also* hand-edited would be refused, told to rebuild, refused again.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch, embedding_model="some/other-model")
+        path = index_ops.manifest_mod.manifest_path(target)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["corpus_roots"] = "src/aorta"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        assert index_ops.index_provenance(index_ops.manifest_mod.read_manifest(target)) == (
+            index_ops.PROVENANCE_INVALID
+        ), "the fixture must be unclassifiable as well as refused"
+        assert index_ops.check_index(target, strict=False).refusals
+
+        result = index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert result.index_path == target
+        assert index_ops.check_index(target, strict=True).refusals == []
+
+    def test_an_unclassifiable_manifest_is_refused_rather_than_guessed(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The guard reads ``corpus_roots``, which nothing type-checks.
+
+        A sidecar recording it as the string ``"src/aorta"`` classified as a
+        *local* build -- because iterating the string yields ``"/"``, and
+        ``Path("/").is_absolute()`` is true -- so this guard returned early and
+        the published index was overwritten anyway. The mirror spelling
+        ``"docs"`` classified as published. Both are answers from nothing.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        digest = self._install_published(target, monkeypatch)
+        path = index_ops.manifest_mod.manifest_path(target)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["corpus_roots"] = "src/aorta"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert "cannot classify" in str(exc.value)
+        assert "corpus_roots is a str" in str(exc.value)
+        assert index_ops.manifest_mod.sha256_file(target) == digest, "the index must be untouched"
+        assert index_ops.build_index(local_corpus(repo), index_path=target, force=True)
+
+    def test_the_refusal_does_not_claim_a_loss_that_did_not_happen(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """``build --path <a checkout>`` does cover ``docs/`` and ``README.md``.
+
+        The message asserted "no 'docs/' or 'README.md' coverage"
+        unconditionally, which is true of the default corpus (the installed
+        package alone) and false for any build pointed at a full checkout --
+        an error message stating a fact the invocation disproves.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        corpus = local_corpus(repo)
+        covered = {
+            str(document.metadata.get("source", "")) for document in corpus_mod.load_corpus(corpus)
+        }
+        assert any("README" in source for source in covered), "fixture must cover README.md"
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(corpus, index_path=target)
+
+        message = str(exc.value)
+        assert "no 'docs/' or 'README.md' coverage" not in message
+        # What is always true of a corpus reaching this branch, and both sides.
+        assert "no public-tree provenance" in message
+        assert str(repo) in message
+
+    def test_a_mistyped_output_over_someone_elses_file_is_refused(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The gap under the guard rather than in it: no manifest, no opinion.
+
+        Both guards used to open with "read the sidecar; if there is not one,
+        return", which made a path that exists with nothing beside it
+        indistinguishable from a path that does not exist -- so
+        ``--output ~/notes.txt`` reached ``replace()`` unopposed while the
+        strictly better-informed case of a sidecar that reads but classifies
+        badly was refused.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "notes.txt"
+        target.write_text("a year of notes", encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        assert "no manifest beside it" in message
+        assert "typo" in message
+        assert "--force" in message
+        assert target.read_text(encoding="utf-8") == "a year of notes", "the file must survive"
+
+    def test_an_unrenderable_local_sidecar_still_gets_its_refusal(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The guard must not fail open because its subtitle will not format.
+
+        Local sidecars are deliberately untyped, and the locally-built refusal
+        prints ``describe()``, which slices ``aorta_sha``. So `aorta_sha: 42`
+        raised ``TypeError`` out of the refusal itself -- and the classification
+        it was refusing on had already succeeded, because that reads
+        ``corpus_roots``. An irreproducible local build was therefore protected
+        by a guard that crashed instead of refusing, over a courtesy line.
+        """
+        from aorta.chat.rag import index_ops
+        from aorta.chat.rag import manifest as manifest_mod
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "index.sqlite"
+        index_ops.build_index(local_corpus(repo), index_path=target)
+        raw = json.loads(manifest_mod.manifest_path(target).read_text(encoding="utf-8"))
+        raw["aorta_sha"] = 42
+        manifest_mod.manifest_path(target).write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.fetch_index(version="0.2.1", index_path=target)
+
+        assert "built on this machine" in str(exc.value)
+        assert "--force" in str(exc.value)
+
+    def test_a_dangling_symlink_destination_is_refused(self, repo: Path, tmp_path, monkeypatch):
+        """The same gap reached through the link, where ``exists()`` lies.
+
+        ``Path.exists()`` follows the symlink, so a broken one answers ``False``
+        about a path that is very much occupied -- and the guard above reads
+        ``False`` as a first install. The third write path is pinned here
+        because ``build`` has its own guard; ``fetch`` and ``--from`` are
+        covered in ``test_index_fetch.py``.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "index.sqlite"
+        target.symlink_to(tmp_path / "never-existed.sqlite")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert "symlink" in str(exc.value)
+        assert target.is_symlink(), "the link itself must survive a refusal"
+
+    def test_force_builds_over_a_manifest_less_destination(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The escape the refusal names has to work, or it is not an escape."""
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "notes.txt"
+        target.write_text("a year of notes", encoding="utf-8")
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target, force=True)
+        assert index_ops.check_index(target, strict=True).refusals == []
+
+    def test_public_only_does_not_exempt_a_manifest_less_destination(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """A typo is a typo on the CI path too.
+
+        The first version of this ordering let the ``--public-only`` exemption
+        return *before* the destination was looked at, so
+        ``build --public-only --output ~/notes.txt`` replaced an unrelated file
+        without a word -- while the documented rule said any manifest-less path
+        is refused. The exemption answers the *provenance* question ("is this a
+        narrowing?"); it cannot answer "is there an index here at all".
+
+        This costs the published build nothing, which is why the ordering could
+        change: see the sibling test below for the shape CI actually runs.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "notes.txt"
+        target.write_text("a year of notes", encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError, match="no manifest beside it"):
+            index_ops.build_index(published_corpus(repo), index_path=target)
+
+        assert target.read_text(encoding="utf-8") == "a year of notes"
+        assert index_ops.build_index(published_corpus(repo), index_path=target, force=True)
+
+    def test_the_shape_ci_actually_runs_is_unaffected(self, repo: Path, tmp_path, monkeypatch):
+        """``nightly.yml`` and ``release.yml``, both runs of them.
+
+        Both are ``ubuntu-latest`` with a fresh workspace and neither restores
+        ``index-out/``, so their first write is to a path that does not exist
+        and every later one is over an index carrying complete sidecars. The
+        refusal above sits between those two states and touches neither, which
+        is what made it safe to move ahead of the exemption.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        out = tmp_path / "index-out"
+        out.mkdir()
+        target = out / "aorta-chat-index.sqlite"
+
+        assert index_ops.build_index(published_corpus(repo), index_path=target)
+        assert index_ops.build_index(published_corpus(repo), index_path=target)
+
+    def test_the_remedy_names_the_index_that_was_refused(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """A remedy that acts on a different index is worse than none at all.
+
+        Both lines default ``--output`` to the cache and their corpus to the
+        installed package, so a refusal raised over an explicit ``--path`` and
+        ``--output`` printed a bare ``aorta chat index build --force`` -- which
+        rebuilds the *user's real* index, over a corpus they did not name, and
+        leaves the one they were refused exactly as it was. Pasting the advice
+        did damage and did not resolve the refusal.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        monkeypatch.setattr(settings, "index_path", str(tmp_path / "cache" / "default.sqlite"))
+        target = tmp_path / "elsewhere" / "index.sqlite"
+        self._install_published(target, monkeypatch)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        for line in message.splitlines():
+            if not line.strip().startswith("aorta chat index"):
+                continue
+            assert str(target) in line, f"remedy targets the wrong index: {line!r}"
+        assert f"--output {shlex.quote(str(target))}" in message
+        assert f"--path {shlex.quote(str(repo))}" in message
+        assert "aorta chat index build --force\n" not in message
+
+    def test_the_remedy_stays_short_when_the_defaults_are_what_ran(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The flags are carried because they differ, not as decoration.
+
+        A refusal over the configured cache is the common one, and spelling
+        out the two flags a bare command already resolves to would make every
+        such message longer for no reader.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        monkeypatch.setattr(settings, "embedding_model", "fake/model")
+        target = tmp_path / "cache" / "index.sqlite"
+        monkeypatch.setattr(settings, "index_path", str(target))
+        monkeypatch.setattr(settings, "aorta_path", str(repo))
+        self._install_published(target, monkeypatch)
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.build_index(local_corpus(repo), index_path=target)
+
+        message = str(exc.value)
+        assert "--output" not in message
+        assert "--path" not in message
+        assert "aorta chat index build --force" in message
+
+    def test_a_local_build_over_a_local_build_needs_nothing(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """Rebuilding your own index is the ordinary developer loop."""
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "index.sqlite"
+        index_ops.build_index(local_corpus(repo), index_path=target)
+
+        assert index_ops.build_index(local_corpus(repo), index_path=target)
+
+    def test_a_fresh_destination_needs_nothing(self, repo: Path, tmp_path, monkeypatch):
+        """What CI does: `--output` into a directory it just created.
+
+        A guard that tripped here would stop the published index updating at
+        all, which is worse than the defect it is guarding against.
+        """
+        from aorta.chat.rag import index_ops
+
+        _install_fake_embedder(monkeypatch)
+        out = tmp_path / "index-out"
+        out.mkdir()
+
+        result = index_ops.build_index(
+            published_corpus(repo), index_path=out / "aorta-chat-index.sqlite"
+        )
+
+        assert result.index_path.exists()
 
 
 def _install_fake_embedder(monkeypatch) -> None:
