@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from aorta.cia.cancellation import Stop
 from aorta.cia.launch.job import JobRecord, update_job_status
 
 
-def trigger_autopsy(bundle_root: Path, job: JobRecord, jobs_root: Path) -> dict:
+def trigger_autopsy(
+    bundle_root: Path, job: JobRecord, jobs_root: Path, *, stop: Stop = None
+) -> dict:
     """Run Autopsy on the assembled bundle and write report.json.
 
     Imports autopsy lazily to keep watchdog startup fast.
@@ -24,6 +27,7 @@ def trigger_autopsy(bundle_root: Path, job: JobRecord, jobs_root: Path) -> dict:
         kb_version="kb-static-poc",
         job=job,
         head_node=job.head_node,
+        stop=stop,
     )
 
     report_path = bundle_root / "report.json"

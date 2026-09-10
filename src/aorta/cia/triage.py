@@ -29,6 +29,7 @@ from pathlib import Path
 import yaml
 
 from aorta.cia.autopsy.orchestrator import run_autopsy
+from aorta.cia.cancellation import Stop, pause, stopped
 # Through the seam, not around it: launch() exists so a scheduler-less backend
 # is a branch in one place rather than an edit at every call site, and the only
 # production submitter calling submit_sbatch directly is how that stops being
@@ -93,7 +94,7 @@ def sacct_state(slurm_id: str) -> str:
     return "UNKNOWN"
 
 
-def wait_for_job(slurm_id: str, timeout: int, interval: int = 5) -> str:
+def wait_for_job(slurm_id: str, timeout: int, interval: int = 5, *, stop: Stop = None) -> str:
     deadline = time.time() + timeout
     state = "UNKNOWN"
     while time.time() < deadline:
@@ -102,7 +103,12 @@ def wait_for_job(slurm_id: str, timeout: int, interval: int = 5) -> str:
             log(f"slurm {slurm_id} reached {state}")
             return state
         log(f"slurm {slurm_id} state={state} ...")
-        time.sleep(interval)
+        # This is where the wait actually spends its time: up to fifteen
+        # minutes of five-second sleeps, and the caller may have given up
+        # during any one of them.
+        if pause(stop, interval):
+            log(f"slurm {slurm_id} still {state}; caller gave up, so we stop waiting")
+            return f"ABANDONED({state})"
     return f"TIMEOUT_WAITING({state})"
 
 
@@ -287,7 +293,7 @@ def summarize_sanitizer(report: dict) -> dict:
     return summary
 
 
-def run_triage(argv: list[str] | None = None) -> dict:
+def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     """Run a triage and return what happened, as a dict, always.
 
     Three early exits used to print JSON and ``return 1``. Callers read the
@@ -484,12 +490,12 @@ def run_triage(argv: list[str] | None = None) -> dict:
     log(f"poll_jobs(rounds={args.watch_rounds})")
     watcher = threading.Thread(
         target=poll_jobs,
-        kwargs={"jobs_root": jobs_root, "max_rounds": args.watch_rounds},
+        kwargs={"jobs_root": jobs_root, "max_rounds": args.watch_rounds, "stop": stop},
         daemon=True,
     )
     watcher.start()
 
-    state = wait_for_job(slurm_id, timeout=args.job_timeout)
+    state = wait_for_job(slurm_id, timeout=args.job_timeout, stop=stop)
 
     # Give Watch a bounded window to notice the finished log, alert, assemble the
     # bundle and trigger Autopsy before falling back to doing it directly.
@@ -499,7 +505,9 @@ def run_triage(argv: list[str] | None = None) -> dict:
     while time.time() < deadline:
         if report_path.is_file() or not watcher.is_alive():
             break
-        time.sleep(5)
+        if pause(stop, 5):
+            log("caller gave up; not waiting out the rest of the grace window")
+            break
 
     watcher.join(timeout=30)
     watch_events = read_watch_events(job_dir)
@@ -534,6 +542,17 @@ def run_triage(argv: list[str] | None = None) -> dict:
                 log(f"bundle assembly failed: {exc}")
 
         log("── Autopsy (direct) ──")
+        # The bundle above is worth assembling either way -- a caller that gave
+        # up is told where to find it. The verdict is not: it is an unbounded
+        # model call whose answer has nowhere left to go.
+        if stopped(stop):
+            log("caller gave up; skipping the autopsy rather than paying for a verdict")
+            return {
+                "ok": False,
+                "stage": "autopsy",
+                "error": "abandoned by caller",
+                "job_dir": str(job_dir),
+            }
         try:
             report = run_autopsy(bundle, kb_version="kb-static-poc")
             report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

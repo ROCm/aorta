@@ -14,6 +14,7 @@ import re
 import shlex
 import sys
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
@@ -192,12 +193,36 @@ def _format_result(result: dict, label: str) -> str:
     return "\n".join(lines)
 
 
+#: Triage runs off the event loop so a wedged cluster job cannot hang the chat,
+#: and the work outlives the answer when it does: the tool gives up after
+#: ``triage_timeout`` while the run carries on. A pool per call meant a thread
+#: per abandoned run, accumulating for the life of the server, and
+#: ``concurrent.futures`` joins every one of them at exit -- so a chat server
+#: that had timed out a few triages could not shut down. One pool caps how many
+#: can ever be in flight; the stop flag each call carries is what ends them.
+_TRIAGE_WORKERS = 2
+_POOL_LOCK = threading.Lock()
+_POOL: ThreadPoolExecutor | None = None
+
+
+def _triage_pool() -> ThreadPoolExecutor:
+    """The one pool triage runs on, created on first use."""
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = ThreadPoolExecutor(
+                max_workers=_TRIAGE_WORKERS, thread_name_prefix="aorta-triage"
+            )
+        return _POOL
+
+
 def _run_triage(extra_args: list[str], label: str) -> str:
     """Run Launch -> Watch -> Autopsy in-process and render the result.
 
     The agents live in this environment now, so this is a call rather than a
-    subprocess. The timeout still stands: the work happens on a worker thread
-    the caller abandons on expiry, so a wedged cluster job cannot hang the chat.
+    subprocess. The timeout still stands: the work happens on a worker thread,
+    so a wedged cluster job cannot hang the chat, and on expiry that thread is
+    asked to stop rather than left running.
     """
     argv = ["--jobs-root", str(settings.jobs_root), "--label", label, *extra_args]
     if settings.cia_demo_node:
@@ -217,15 +242,23 @@ def _run_triage(extra_args: list[str], label: str) -> str:
         if value:
             argv += ["--env", f"{key}={value}"]
 
-    pool = ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(run_triage, argv)
-    pool.shutdown(wait=False)
+    stop = threading.Event()
+    future = _triage_pool().submit(run_triage, argv, stop=stop)
     try:
+        # Covers the queue as well as the run: with every worker busy the
+        # submission simply waits here, and the caller is told it timed out
+        # rather than blocking for ever on a pool that never frees up.
         result = future.result(timeout=settings.triage_timeout)
     except FuturesTimeout:
+        # Cancelling matters more than the message. Nothing else stops this
+        # work, and until it stops it holds a worker and keeps the interpreter
+        # from exiting.
+        stop.set()
+        future.cancel()
         return (f"Error: triage exceeded {settings.triage_timeout}s. "
                 f"Check {settings.jobs_root} for a partial bundle.")
     except Exception as exc:
+        stop.set()
         return f"Error: triage failed: {type(exc).__name__}: {exc}"
 
     if not result.get("ok"):

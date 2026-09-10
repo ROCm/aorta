@@ -70,7 +70,7 @@ def always_alerts(monkeypatch):
     )
     monkeypatch.setattr(
         "aorta.cia.watch.trigger.trigger_autopsy",
-        lambda bundle, job, jobs_root: triggered.append(job.job_id),
+        lambda bundle, job, jobs_root, stop=None: triggered.append(job.job_id),
     )
     return triggered
 

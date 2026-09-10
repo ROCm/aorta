@@ -37,6 +37,7 @@ def run_autopsy(
     use_llm: bool = True,
     job: "Any | None" = None,
     head_node: str = "",
+    stop: Stop = None,
 ) -> dict[str, Any]:
     bundle_root = bundle_root.resolve()
     manifest = load_manifest(bundle_root)
@@ -158,7 +159,7 @@ def run_autopsy(
     if next_probe == "aorta sweep run" and confidence < 0.85 and job is not None:
         print(f"[autopsy] confidence={confidence:.2f} — escalating to Aorta production sweep")
         from aorta.cia.autopsy.probe import run_aorta_probe
-        matrix_path = run_aorta_probe(bundle_root, job, head_node=head_node)
+        matrix_path = run_aorta_probe(bundle_root, job, head_node=head_node, stop=stop)
         if matrix_path:
             # Re-run with the new production matrix (use_llm stays True, no infinite loop
             # because production matrix will raise confidence above 0.85)
