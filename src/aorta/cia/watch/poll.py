@@ -173,6 +173,11 @@ def poll_jobs(
                     new_content=new_content,
                     job_context=job_ctx,
                     expectations=expectations,
+                    # The file tools are the model's to aim, so they are bound
+                    # to this job: its own directory, and the logs Watch already
+                    # resolved for it, which may sit outside that directory
+                    # because the launcher chose where they go.
+                    allowed_roots=[job_dir, *(Path(p).parent for p in job.watch_files)],
                 )
             except Exception as e:
                 print(f"[watch] {job.job_id}: watcher error: {e}")
