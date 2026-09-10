@@ -105,11 +105,11 @@ def _optional_bool(data: Mapping[str, object], key: str, *, default: bool) -> bo
     instead of being coerced by truthiness.
     """
 
-    value = data.get(key)
-    if value is None:
+    if key not in data:
         return default
+    value = data[key]
     if not isinstance(value, bool):
-        raise TypeError(f"{key} must be a boolean or null")
+        raise TypeError(f"{key} must be a boolean")
     return value
 
 

@@ -142,8 +142,12 @@ def test_waitcheck_reports_a_capped_scan_as_truncated(tmp_path: Path) -> None:
     assert result.diagnostics_truncated is True
     assert result.kernel_results[0].diagnostics_truncated is True
     emitted = result.to_dict()
-    assert emitted["diagnostics_truncated"] is True
-    assert emitted["kernel_results"][0]["diagnostics_truncated"] is True
+    assert emitted.get("diagnostics_truncated") is True
+    kernel_results = emitted.get("kernel_results")
+    assert isinstance(kernel_results, list)
+    kernel_result = kernel_results[0]
+    assert isinstance(kernel_result, dict)
+    assert kernel_result.get("diagnostics_truncated") is True
 
 
 def test_waitcheck_raises_the_backend_cap_when_asked(tmp_path: Path) -> None:
@@ -181,12 +185,13 @@ def test_waitcheck_raises_the_backend_cap_when_asked(tmp_path: Path) -> None:
     assert result.diagnostics_truncated is False
 
 
-@pytest.mark.parametrize("bad_cap", [0, -1, True])
+@pytest.mark.parametrize("bad_cap", [0, -1, True, 1.5, "1"])
 def test_waitcheck_argv_rejects_a_cap_that_is_not_a_positive_integer(
-    tmp_path: Path, bad_cap: int
+    tmp_path: Path, bad_cap: object
 ) -> None:
     # A library caller enters this directly, so the recipe loader's validation is
-    # not the only gate: ``True`` would otherwise be spelled onto the argv.
+    # not the only gate: values such as ``True`` and ``1.5`` would otherwise be
+    # spelled onto the argv.
     artifact = tmp_path / "library.so"
     artifact.write_bytes(b"\x7fELF")
 
@@ -276,6 +281,8 @@ def test_waitcheck_hazard_exit_without_json_is_error(tmp_path: Path) -> None:
 
     assert result.verdict is Verdict.ERROR
     assert "without_structured_diagnostics" in str(result.kernel_results[0].reason)
+    assert result.diagnostics_truncated is True
+    assert result.kernel_results[0].diagnostics_truncated is True
 
 
 def test_waitcheck_requires_exact_identity(tmp_path: Path) -> None:

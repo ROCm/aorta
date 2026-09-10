@@ -201,6 +201,47 @@ def test_report_written_before_the_truncation_flag_still_loads() -> None:
     assert rebuilt.checks[0].diagnostics_truncated is False
 
 
+@pytest.mark.parametrize("location", ["check", "kernel"])
+def test_report_rejects_null_diagnostics_truncated(location: str) -> None:
+    kernel = KernelCheckResult(
+        identity=KernelIdentity(name="kernel", target="gfx950"),
+        state=ExecutionState.RAN,
+        verdict=Verdict.WARN,
+        findings=(_hazard_finding(),),
+        diagnostics_truncated=True,
+    )
+    report = build_report(
+        target="gfx950",
+        worklist=_worklist(),
+        checks=(
+            CheckResult(
+                sanitizer="waitcheck",
+                state=ExecutionState.RAN,
+                verdict=Verdict.WARN,
+                findings=(_hazard_finding(),),
+                kernel_results=(kernel,),
+                diagnostics_truncated=True,
+            ),
+        ),
+    )
+    data = report.to_dict()
+    checks = data.get("checks")
+    assert isinstance(checks, list)
+    check = checks[0]
+    assert isinstance(check, dict)
+    if location == "check":
+        check["diagnostics_truncated"] = None
+    else:
+        kernel_results = check.get("kernel_results")
+        assert isinstance(kernel_results, list)
+        kernel_result = kernel_results[0]
+        assert isinstance(kernel_result, dict)
+        kernel_result["diagnostics_truncated"] = None
+
+    with pytest.raises(TypeError, match="diagnostics_truncated must be a boolean"):
+        SanitizerReport.from_dict(data)
+
+
 def test_report_rejects_tampered_overall_verdict() -> None:
     report = build_report(
         target="gfx950",

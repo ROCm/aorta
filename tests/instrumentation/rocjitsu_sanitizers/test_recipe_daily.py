@@ -649,7 +649,7 @@ def test_execute_threads_waitcheck_max_diagnostics_into_run_waitcheck(
     execute_sanitizer_run(recipe, output_dir=tmp_path / "out")
 
     assert "max_diagnostics" in captured  # the waitcheck check actually ran
-    assert captured["max_diagnostics"] == expected
+    assert captured.get("max_diagnostics") == expected
 
 
 def test_verdict_baselines_fixture_present() -> None:

@@ -327,7 +327,9 @@ def waitcheck_argv(
     # ``run_waitcheck`` are entered directly by library callers; ``True`` would
     # otherwise reach the backend as the argument "True".
     if max_diagnostics is not None and (
-        isinstance(max_diagnostics, bool) or max_diagnostics < 1
+        isinstance(max_diagnostics, bool)
+        or not isinstance(max_diagnostics, int)
+        or max_diagnostics < 1
     ):
         raise ValueError("max_diagnostics must be a positive integer")
     argv = [
@@ -437,6 +439,7 @@ def _run_one(
             verdict=Verdict.ERROR,
             reason="waitcheck_hazard_exit_without_structured_diagnostics",
             returncode=process.returncode,
+            diagnostics_truncated=parsed.diagnostics_truncated,
         )
     return KernelCheckResult(
         identity=identity,
