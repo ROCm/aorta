@@ -39,13 +39,6 @@ from aorta.chat.tools.artifacts import (
     read_run_matrix,
     search_run_artifacts,
 )
-from aorta.chat.tools.cluster import (
-    list_cluster_jobs,
-    read_autopsy_report,
-    triage_assembly_source,
-    triage_kernel_source,
-    triage_workload,
-)
 from aorta.chat.tools.files import list_files, read_file
 from aorta.chat.tools.run import run_terminal_command
 from aorta.chat.tools.search import grep_code, search_code, search_repo_map
@@ -60,13 +53,6 @@ _GROUP = "aorta.chat_tools"
 #: aorta bug.
 BUILTIN_CHAT_TOOLS: dict[str, BaseTool] = {
     "list_files": list_files,
-    # Diagnostics: each runs what the user supplied on a GPU node and
-    # classifies what came back.
-    "triage_kernel_source": triage_kernel_source,
-    "triage_assembly_source": triage_assembly_source,
-    "triage_workload": triage_workload,
-    "list_cluster_jobs": list_cluster_jobs,
-    "read_autopsy_report": read_autopsy_report,
     "read_file": read_file,
     "search_code": search_code,
     "grep_code": grep_code,
@@ -86,12 +72,50 @@ OPTIONAL_CHAT_TOOLS: dict[str, BaseTool] = {
     "run_terminal_command": run_terminal_command,
 }
 
+#: The diagnostic tools, which reach the cluster agents and therefore DSPy.
+#: Imported on use rather than at module scope: the chain from here is
+#: chat.tools.cluster -> cia.triage -> cia.watch.poll -> cia.watch.watcher ->
+#: dspy, and dspy is in the [cia] extra, not in chat-cli or chat-ui. Eagerly,
+#: that made `pip install amd-aorta[chat-ui]` followed by `aorta chat` fail at
+#: import with ModuleNotFoundError -- the mirror image of the property
+#: test_importing_the_agents_does_not_require_the_chat_extras protects going
+#: the other way.
+_DIAGNOSTIC_TOOL_NAMES = (
+    "triage_kernel_source",
+    "triage_assembly_source",
+    "triage_workload",
+    "list_cluster_jobs",
+    "read_autopsy_report",
+)
+
+
+def diagnostic_tools() -> dict[str, BaseTool]:
+    """The cluster diagnostic tools, or nothing when their extra is absent.
+
+    Absent is a shipped configuration, not a fault: chat without [cia] is a
+    working assistant over the codebase and past runs, minus the tools that
+    submit jobs. It says so once rather than leaving the reader to notice five
+    tools missing from a catalogue.
+    """
+    try:
+        from aorta.chat.tools import cluster
+    except ImportError as exc:
+        logger.warning(
+            "The cluster diagnostic tools are unavailable (%s), so %s will not "
+            "be offered. They need the agents: pip install 'amd-aorta[cia]'.",
+            exc,
+            ", ".join(_DIAGNOSTIC_TOOL_NAMES),
+        )
+        return {}
+    return {name: getattr(cluster, name) for name in _DIAGNOSTIC_TOOL_NAMES}
+
 
 def enabled_builtins() -> dict[str, BaseTool]:
     """Built-ins plus whichever optional tools the profile switched on."""
     from aorta.chat.config import settings
 
     tools = dict(BUILTIN_CHAT_TOOLS)
+    tools.update(diagnostic_tools())
     if settings.enable_shell_tool:
         tools.update(OPTIONAL_CHAT_TOOLS)
     return tools
@@ -190,6 +214,7 @@ __all__ = [
     "BUILTIN_CHAT_TOOLS",
     "OPTIONAL_CHAT_TOOLS",
     "ChatTool",
+    "diagnostic_tools",
     "enabled_builtins",
     "load_chat_tools",
 ]

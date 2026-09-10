@@ -78,7 +78,7 @@ def fake_chat_tool_eps(monkeypatch):
 def test_builtins_load_with_no_plugins_installed(fake_chat_tool_eps):
     fake_chat_tool_eps([])
     registry = load_chat_tools()
-    assert set(registry) == set(BUILTIN_CHAT_TOOLS)
+    assert set(registry) == set(enabled_builtins())
     assert all(entry.source_package == "aorta" for entry in registry.values())
 
 
@@ -114,7 +114,7 @@ class TestShellToolIsOptIn:
 
         monkeypatch.setattr(settings, "enable_shell_tool", False)
         fake_chat_tool_eps([])
-        assert set(load_chat_tools()) == set(BUILTIN_CHAT_TOOLS)
+        assert set(load_chat_tools()) == set(enabled_builtins())
 
 
 def test_every_builtin_key_matches_the_tools_own_name():
@@ -319,5 +319,5 @@ def test_chat_tools_json_is_machine_readable(fake_chat_tool_eps):
     result = CliRunner().invoke(chat, ["tools", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert set(payload) == set(BUILTIN_CHAT_TOOLS)
+    assert set(payload) == set(enabled_builtins())
     assert payload["read_file"]["source_package"] == "aorta"
