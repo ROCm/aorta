@@ -180,19 +180,32 @@ class SanitizerReportAdapter:
             reason = str(check.get("reason") or "")
 
             if state != "ran":
+                # "ran" is the only state in which a sanitizer reached a verdict,
+                # so every other one is a gap. This used to name the states that
+                # counted -- a deny list -- and "error" and "timed_out" were not
+                # on it: a sanitizer that crashed contributed no evidence and no
+                # gap, and the clean branch below then reported SAN_CLEAN. The
+                # committed survey reports say `state: error, verdict: error,
+                # overall_verdict: error` and were read as "sanitizers ran
+                # clean". Asking which state means success, rather than which
+                # mean failure, is what keeps a state added upstream from
+                # arriving as a pass.
                 if reason in MISSING_BACKEND_REASONS or state == "not_checked":
-                    tooling_gaps.append(
-                        {
-                            "description": (
-                                f"{name} did not run ({reason or state}); the RocJITsu "
-                                f"backend must be built and ROCJITSU_BUILD exported."
-                            ),
-                            "missing_signal": SIGNAL_RACE if name == "consan" else SIGNAL_HAZARD,
-                            "suggested_tool": "aorta sweep run",
-                        }
+                    description = (
+                        f"{name} did not run ({reason or state}); the RocJITsu "
+                        f"backend must be built and ROCJITSU_BUILD exported."
                     )
-                    if SIGNAL_NOT_CHECKED not in signals:
-                        signals.append(SIGNAL_NOT_CHECKED)
+                else:
+                    description = f"{name} did not complete ({reason or state})."
+                tooling_gaps.append(
+                    {
+                        "description": description,
+                        "missing_signal": SIGNAL_RACE if name == "consan" else SIGNAL_HAZARD,
+                        "suggested_tool": "aorta sweep run",
+                    }
+                )
+                if SIGNAL_NOT_CHECKED not in signals:
+                    signals.append(SIGNAL_NOT_CHECKED)
                 continue
 
             for finding in _findings(check):
