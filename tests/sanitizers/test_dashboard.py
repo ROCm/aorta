@@ -953,6 +953,44 @@ def test_a_sparse_result_is_not_guessed_onto_one_of_two_same_named_rows():
     assert "waitcheck_backend_exit_2" in case.get("observation", "")
 
 
+def test_the_manifest_does_not_invent_a_scope_the_report_never_claimed():
+    # Review (#479): presence is meaning. `_identity_compatible` reads an omitted
+    # entry_offset as an unknown scope and an explicit `entry_offset: null` as a claim
+    # of a whole-object scan, so filling the omission in with None made env.json —
+    # which drops the "scope unknown" label — assert a scope the report never stated.
+    report = _report_with_two_objects_sharing_a_name()
+    for result in report["checks"][0]["kernel_results"]:
+        result["identity"] = {"name": "gemm_shared_symbol", "target": "gfx950"}
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    # this result serialized no code-object field at all, so the omission is the only
+    # thing that can carry "the report did not say which object, or at what scope"
+    assert not any(f in reasons[0] for f in gen._IDENTITY_OBJECT_FIELDS)
+
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+    recorded = ((env.get("observed") or {}).get("kernel_reasons") or [{}])[0]
+    assert recorded.get("reason") == "waitcheck_backend_exit_2: refused the second object"
+    assert "entry_offset" not in recorded
+    assert not any(f in recorded for f in gen._IDENTITY_OBJECT_FIELDS)
+
+    # contrast: a result that *does* claim a whole-object scan keeps the explicit null,
+    # so the two cases stay distinguishable in the manifest
+    stated = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+    stated_env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=stated, report=None, built_refs=[], inputs=[],
+    )
+    stated_reason = ((stated_env.get("observed") or {}).get("kernel_reasons") or [{}])[0]
+    assert "entry_offset" in stated_reason and stated_reason["entry_offset"] is None
+
+
 def test_an_exact_entry_result_missing_its_offset_cannot_cover_a_sibling():
     # Scan scope is a property of the *selection*, not of whichever fields a result
     # serialized. An exact-entry result that omits only `entry_offset` reads as a
@@ -1015,6 +1053,66 @@ def test_an_exact_entry_result_missing_its_offset_cannot_cover_a_sibling():
     assert gated.get("verdict") == "error"
     assert "same code object as gemm_object" in gated.get("detail", "")
     assert "refused the object" in gated.get("detail", "")
+
+
+def test_a_clean_object_scan_does_not_speak_for_an_exact_entry_row():
+    # Review (#479): the other direction of the same fallback. run_waitcheck dedups a
+    # selection only when entry_offset is None, so an exact-entry row always gets its
+    # own scan task — a missing result there means the result was lost, not folded into
+    # the object scan. Letting a CLEAN scan stand in rendered the row `pass`, "scanned
+    # once", while its own backend error sat unattributed at case scope.
+    sha = "beefaaa1"
+
+    def _identity(name: str, offset: int | None) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity("gemm_entry", 0x100), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity("gemm_object", None), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                # the object scan came back clean
+                {"identity": _identity("gemm_object", None), "state": "ran",
+                 "verdict": "pass", "findings": [], "reason": None, "returncode": 0},
+                # the exact row's own result claims whole-object scope, so it cannot
+                # describe that row and stays unattributed
+                {"identity": _identity("gemm_entry", None), "state": "error",
+                 "verdict": "error", "findings": [], "returncode": 2,
+                 "reason": "waitcheck_backend_exit_2: refused the entry"},
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    entry_row, object_row = case["kernels"]
+
+    # the exact row is not claimed as covered, and above all is not reported clean
+    assert entry_row.get("verdict") != "pass"
+    assert "scanned once" not in entry_row.get("detail", "")
+    assert object_row.get("verdict") == "pass"
+
+    # and the error is not lost — it surfaces unattributed
+    reasons = case.get("kernel_reasons") or []
+    assert [e.get("reason") for e in reasons] == [
+        "waitcheck_backend_exit_2: refused the entry"
+    ]
+    assert "refused the entry" in case.get("observation", "")
 
 
 def test_a_sparse_result_merges_into_the_exact_one_for_the_same_row():

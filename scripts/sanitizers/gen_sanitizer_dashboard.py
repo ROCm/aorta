@@ -646,6 +646,18 @@ _IDENTITY_OBJECT_FIELDS = (
 )
 
 
+def _identity_projection(identity: Mapping[str, Any]) -> dict[str, Any]:
+    """An identity's code-object fields, kept present exactly where the report had them.
+
+    Presence is meaning here, not tidiness: ``_identity_compatible`` reads an omitted
+    ``entry_offset`` as an unknown scope and an explicit ``entry_offset: null`` as a
+    claim of a whole-object scan. A projection that filled in the omission with
+    ``None`` would make the manifest assert a scope the report never stated, which is
+    exactly the ambiguity these fields exist to remove.
+    """
+    return {field: identity[field] for field in _IDENTITY_OBJECT_FIELDS if field in identity}
+
+
 def _identity_compatible(row: dict[str, Any], result: dict[str, Any]) -> bool:
     """Whether a result identity can describe this worklist row (pure).
 
@@ -662,6 +674,26 @@ def _identity_compatible(row: dict[str, Any], result: dict[str, Any]) -> bool:
         field not in result or result.get(field) == row.get(field)
         for field in _IDENTITY_OBJECT_FIELDS
     )
+
+
+def _dedup_covers(row: Mapping[str, Any], covering: Mapping[str, Any]) -> bool:
+    """Whether an object scan may speak for a row that has no result of its own (pure).
+
+    A whole-object scan disassembles every entry in the object, so a selection that was
+    deduped away is genuinely covered -- which is why an em dash there read as "not
+    checked" and hid a gated kernel whose object had failed.
+
+    But ``run_waitcheck`` only dedups selections with ``entry_offset is None``; an
+    exact-entry selection always gets its own scan task. A missing result on such a row
+    therefore means the result was lost or unattributable, not that it was folded into
+    this scan, and a *clean* scan standing in for it would render "scanned once" over a
+    row whose own error is sitting unattributed at case scope. A non-clean scan is still
+    worth showing there -- the object it lives in did fail -- so only the clean
+    direction is withheld.
+    """
+    if row.get("entry_offset") is None:
+        return True
+    return str(covering.get("verdict") or "").strip().lower() not in {"pass", "not_checked"}
 
 
 def _with_sanitizer(previous: dict[str, Any] | None, sanitizer: str) -> list[str]:
@@ -902,8 +934,9 @@ def _kernel_reason_entries(
     records the identity fields, so ``env.json`` can attribute a failure without
     reopening ``sanitizer_report.json``.
 
-    The identity fields are recorded *unabridged*. ``label`` is display copy and is
-    abbreviated (see ``_display_labels``); this projection is what makes ``env.json``
+    The identity fields are recorded *unabridged*, and only where the report carried
+    them (see ``_identity_projection``). ``label`` is display copy and is abbreviated
+    (see ``_display_labels``); this projection is what makes ``env.json``
     diagnosable, and a basename plus a digest prefix can tie where the full path and
     digest do not -- which would put the ambiguity straight back into the manifest.
 
@@ -923,10 +956,7 @@ def _kernel_reason_entries(
             "kernel": str(result["name"]),
             "label": label,
             "reason": str(result["reason"]),
-            "code_object": identity.get("code_object"),
-            "code_object_sha256": identity.get("code_object_sha256"),
-            "code_object_index": identity.get("code_object_index"),
-            "entry_offset": identity.get("entry_offset"),
+            **_identity_projection(identity),
         })
     return entries
 
@@ -1236,7 +1266,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             covering_key := kr_by_object.get(
                 (str(entry_sha), identity.get("code_object_index"))
             )
-        ) is not None:
+        ) is not None and _dedup_covers(identity, matched[covering_key]):
             # Deduped: this kernel's object WAS scanned, under the name of the first
             # selection that resolved to it. The scan is object-scope, so its verdict
             # covers this kernel too -- reporting an em dash here read as "not checked"
@@ -2851,14 +2881,14 @@ def build_case_env(
             # which kernel failed or why. Record the per-kernel reasons beside it,
             # each with the identity fields that tell two same-named kernels apart, so
             # this manifest is diagnosable without re-reading sanitizer_report.json.
+            # Field presence is carried through rather than filled in: the display
+            # ``label`` is dropped here, so the omission is all that is left to say
+            # the source report did not state a scope (see ``_identity_projection``).
             "kernel_reasons": [
                 {
                     "kernel": entry["kernel"],
                     "reason": entry["reason"],
-                    "code_object": entry["code_object"],
-                    "code_object_sha256": entry["code_object_sha256"],
-                    "code_object_index": entry["code_object_index"],
-                    "entry_offset": entry["entry_offset"],
+                    **{f: entry[f] for f in _IDENTITY_OBJECT_FIELDS if f in entry},
                 }
                 for entry in (summary.get("kernel_reasons") or [])
             ],
