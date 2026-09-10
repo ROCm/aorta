@@ -722,6 +722,34 @@ class TestBuildWillNotSilentlyDowngradeAFetchedIndex:
         assert "--force" in message
         assert target.read_text(encoding="utf-8") == "a year of notes", "the file must survive"
 
+    def test_an_unrenderable_local_sidecar_still_gets_its_refusal(
+        self, repo: Path, tmp_path, monkeypatch
+    ):
+        """The guard must not fail open because its subtitle will not format.
+
+        Local sidecars are deliberately untyped, and the locally-built refusal
+        prints ``describe()``, which slices ``aorta_sha``. So `aorta_sha: 42`
+        raised ``TypeError`` out of the refusal itself -- and the classification
+        it was refusing on had already succeeded, because that reads
+        ``corpus_roots``. An irreproducible local build was therefore protected
+        by a guard that crashed instead of refusing, over a courtesy line.
+        """
+        from aorta.chat.rag import index_ops
+        from aorta.chat.rag import manifest as manifest_mod
+
+        _install_fake_embedder(monkeypatch)
+        target = tmp_path / "index.sqlite"
+        index_ops.build_index(local_corpus(repo), index_path=target)
+        raw = json.loads(manifest_mod.manifest_path(target).read_text(encoding="utf-8"))
+        raw["aorta_sha"] = 42
+        manifest_mod.manifest_path(target).write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(index_ops.IndexOverwriteError) as exc:
+            index_ops.fetch_index(version="0.2.1", index_path=target)
+
+        assert "built on this machine" in str(exc.value)
+        assert "--force" in str(exc.value)
+
     def test_a_dangling_symlink_destination_is_refused(self, repo: Path, tmp_path, monkeypatch):
         """The same gap reached through the link, where ``exists()`` lies.
 

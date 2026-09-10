@@ -1741,6 +1741,43 @@ class TestCompareIndex:
         assert comparison.differences, "the fields it disagrees on must be named"
         assert comparison.verdict != index_ops.VERDICT_UP_TO_DATE
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("embedding_model", "other/model"),
+            ("embedding_identity", "other-identity"),
+            ("dimensions", 512),
+            ("chunk_count", CHUNKS + 5),
+            ("built_at", "2001-01-01T00:00:00Z"),
+        ],
+    )
+    def test_no_field_the_table_prints_can_differ_under_an_up_to_date_verdict(
+        self, server, tmp_path: Path, field: str, value: object
+    ):
+        """The property, over the fields the command actually shows.
+
+        The first version of this fix bound the verdict to ``_refresh_notes``,
+        which was the right instinct aimed one function short: it named three
+        fields by hand while the table renders ten, so ``embedding_model`` and
+        ``dimensions`` could still differ under *up to date*. Both are now
+        derived from ``_SIDE_FIELDS``, and this is parametrised over that same
+        list rather than over three examples, so a field added to the table
+        cannot reintroduce the disagreement without failing here.
+        """
+        dest = tmp_path / "i.sqlite"
+        fetch_index(version="0.2.1", index_path=dest)
+        published = manifest_mod.read_manifest(dest)
+        manifest_mod.write_manifest(
+            dest, _manifest(index_sha256=published.index_sha256, **{field: value})
+        )
+
+        comparison = index_ops.compare_index(version="0.2.1", index_path=dest)
+
+        assert comparison.verdict != index_ops.VERDICT_UP_TO_DATE
+        assert any(field in note for note in comparison.differences), (
+            f"{field} differs and the verdict says so, but the differences do not name it"
+        )
+
     def test_an_identical_pair_is_still_up_to_date_after_that(
         self, server, tmp_path: Path
     ):

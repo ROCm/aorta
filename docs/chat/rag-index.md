@@ -133,13 +133,18 @@ in with `--from` asks for the file to be re-staged, for the same reason. This is
 a rule rather than three messages — an error raised by `index fetch` may not
 advise an `index fetch` that would fail identically.
 
-Nothing locks the index path, and two builds aimed at the same `--output` both
-report success: the later rename wins, and the surviving index and sidecars are
-the winner's, matching each other. That is last-writer-wins rather than
-corruption, because the crossed pairing — one build's index under the other's
-manifest — is what the contents check refuses. A read concurrent with the rename
-sees the old index or the new one, and briefly can see the post-move window,
-where it fails closed with a mismatch rather than answering from it.
+**Do not run two builds against the same `--output` at once.** Nothing locks the
+index path, and both will report success. The install is a rename followed by
+two sidecar writes, and those are separate steps, so the two builds can
+interleave as *A renames, B renames, B writes sidecars, A writes sidecars* —
+leaving B's index under A's manifest. When the two builds disagree about chunk
+count, the contents check catches that pairing on the next read; when they
+happen to agree, as two builds of the same tree usually will, nothing detects
+it, and the index answers from a manifest describing a different build.
+
+A read concurrent with a single build is fine, and is the case that was designed
+for: it sees the old index or the new one, and the window after the rename and
+before the sidecars fails closed with a mismatch rather than answering from it.
 
 A refusal names what would be lost and the flag that proceeds anyway, following
 `config init --force` rather than prompting, so a script and a terminal behave

@@ -937,7 +937,7 @@ def index_group() -> None:
 @click.option(
     "--force",
     is_flag=True,
-    help="Build over a downloaded index, replacing it with this narrower one.",
+    help="Build over a downloaded index, replacing it with a locally built one.",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
 def index_build(
@@ -954,8 +954,11 @@ def index_build(
     downloaded once (~65 MB) unless the cache is pre-seeded -- run 'aorta chat
     doctor' first if this node has no egress.
 
-    Refuses to build over an index that was downloaded rather than built here,
-    because a local build covers less; pass --force to do it anyway.
+    Refuses to build over an index that was downloaded rather than built
+    here, unless --public-only says the corpus is the published one. The test
+    is provenance, not size: an explicit --path over the whole checkout is
+    still refused, because nothing on disk proves it is the same tree the
+    release was built from. Pass --force to do it anyway.
     """
     _index_logging(verbose)
     ops = _load("rag.index_ops")

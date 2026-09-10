@@ -527,15 +527,42 @@ def _refuse_if_locally_built(dest: Path, *, force: bool, command: str) -> None:
     # field the guard just classified through a second, unchecked path is the
     # shape of the bug that validation exists to close.
     roots = _corpus_roots(local) or []
+    # ``describe()`` and not the raw fields, but tolerantly: it slices
+    # ``aorta_sha`` and formats ``dimensions``, and a *local* sidecar is
+    # deliberately untyped, so `aorta_sha: 42` raised ``TypeError`` out of the
+    # refusal itself. The classification above is unaffected -- it reads
+    # ``corpus_roots``, which was validated -- so the index really is a local
+    # build and really must be refused; only the courtesy line describing it
+    # was unrenderable, and losing the refusal because its subtitle would not
+    # format is the guard failing open over cosmetics.
     raise IndexOverwriteError(
         f"the index at {dest} was built on this machine, not downloaded.\n"
-        f"  built as  {local.describe()}\n"
+        f"  built as  {_describe_tolerantly(local)}\n"
         f"  corpus    {', '.join(roots)}\n"
         "Replacing it with the published index discards a build the network "
         "cannot give back -- the tree it indexed may have moved, and rebuilding "
         "needs the embedding weights again.\n"
         f"Pass --force to overwrite it:  {remedy} --force"
     )
+
+
+def _describe_tolerantly(manifest: manifest_mod.Manifest) -> str:
+    """``Manifest.describe()``, or a note that the manifest cannot be rendered.
+
+    The manifests reaching the write guards are local sidecars, which are
+    deliberately parsed without type checking so that the reports whose job is
+    to say what is wrong with one can still read it. That tolerance has to
+    extend to everything downstream of the read, and ``describe()`` is not
+    written for it -- it slices and formats. This is the seam that keeps
+    reappearing: the *guard's* decision never depends on these fields, so a
+    field it does not consult must not be able to take the refusal down with
+    it.
+    """
+    try:
+        return manifest.describe()
+    except Exception as exc:  # noqa: BLE001 - a summary is not worth a traceback
+        logger.debug("Could not describe the manifest: %r", exc)
+        return f"(its manifest cannot be summarised: {type(exc).__name__})"
 
 
 def _refuse_if_published(target: Path, corpus: corpus_mod.Corpus, *, force: bool) -> None:
@@ -1328,22 +1355,40 @@ def _refresh_notes(
     it is the documented way to refresh, and demanding ``--force`` every time
     would train people to always pass it -- so what it replaced is reported
     instead.
+
+    **Derived from :data:`_SIDE_FIELDS`, which is what ``index status`` prints
+    side by side.** It used to name three fields chosen by hand, and ``status``
+    then took its verdict from this function while rendering a table of ten --
+    so a sidecar differing only in ``embedding_model`` or ``dimensions``
+    reported *up to date* above a table showing the mismatch, and the load path
+    could refuse the same index. One list rather than two is the fix: a field
+    added to the table is reported and judged without a second edit, which is
+    the drift that produced the disagreement in the first place. ``index_sha256``
+    is skipped because it is the identity the caller has already compared and
+    "the hashes differ" is not news beside the fields that explain why.
     """
     if local is None:
         return []
+    was_side, now_side = _side(local), _side(incoming)
     changes = []
-    for label, was, now in (
-        ("built_at", _manifest_text(local.built_at), _manifest_text(incoming.built_at)),
-        ("aorta_sha", _manifest_text(local.aorta_sha)[:7], _manifest_text(incoming.aorta_sha)[:7]),
-        (
-            "corpus_digest",
-            _manifest_text(local.corpus_digest)[:12],
-            _manifest_text(incoming.corpus_digest)[:12],
-        ),
-    ):
-        if was != now:
-            changes.append(f"{label}: {was or 'unknown'} -> {now or 'unknown'}")
+    for name in _SIDE_FIELDS:
+        if name == "index_sha256":
+            continue
+        was = _manifest_text(was_side[name])
+        now = _manifest_text(now_side[name])
+        if was == now:
+            continue
+        trim = _NOTE_TRIM.get(name)
+        if trim:
+            was, now = was[:trim], now[:trim]
+        changes.append(f"{name}: {was or 'unknown'} -> {now or 'unknown'}")
     return changes
+
+
+#: Fields whose full value is a digest, shortened in the change notes. Anything
+#: absent from here is printed whole, because a truncated model name or
+#: dimension count would hide the difference the line exists to show.
+_NOTE_TRIM = {"aorta_sha": 7, "corpus_digest": 12}
 
 
 def _is_same_index(local: manifest_mod.Manifest | None, incoming: manifest_mod.Manifest) -> bool:
