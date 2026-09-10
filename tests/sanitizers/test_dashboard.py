@@ -1191,6 +1191,61 @@ def test_a_clean_object_scan_does_not_speak_for_an_exact_entry_row():
     assert "refused the entry" in case.get("observation", "")
 
 
+def test_a_deduped_sibling_inherits_only_the_waitcheck_scan():
+    # Review (#479): the accumulation folds every sanitizer's result for a kernel into
+    # one record, and the dedup attribution read that aggregate. A covering row with a
+    # Waitcheck `pass` and a ConSan `error` therefore rendered its sibling `error`,
+    # "scanned once — <ConSan reason>" — a claim no scan made, since ConSan reports per
+    # kernel and only the Waitcheck object scan covers the sibling.
+    sha = "beefaaa1"
+
+    def _identity(name: str) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _check(sanitizer: str, verdict: str, why: str | None) -> dict:
+        return {
+            "sanitizer": sanitizer, "state": "ran", "verdict": verdict,
+            "reason": "worklist_not_fully_checked", "returncode": 0, "findings": [],
+            "kernel_results": [{
+                "identity": _identity("kern_A"), "state": "ran", "verdict": verdict,
+                "findings": [], "reason": why, "returncode": 0,
+            }],
+            "coverage": [], "backend": {},
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(name), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]}
+                for name in ("kern_A", "kern_B")
+            ],
+        },
+        "checks": [
+            _check("waitcheck", "pass", None),
+            _check("consan", "error", "consan_hook_not_found"),
+        ],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    covering, sibling = case["kernels"]
+
+    # the covering row keeps the cross-sanitizer aggregate: it really did error
+    assert covering.get("verdict") == "error"
+    assert "consan_hook_not_found" in covering.get("detail", "")
+
+    # the sibling was covered by the object scan only, which passed
+    assert sibling.get("verdict") != "error"
+    assert "consan_hook_not_found" not in sibling.get("detail", "")
+
+
 def test_a_clean_object_scan_does_not_speak_for_an_objectless_row():
     # Review (#479): the recipient side of the same rule. A row carrying a digest but
     # no code object is not `KernelIdentity.code_object_scan`, so run_waitcheck would

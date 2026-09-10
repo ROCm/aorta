@@ -676,6 +676,24 @@ def _identity_compatible(row: dict[str, Any], result: dict[str, Any]) -> bool:
     )
 
 
+def _waitcheck_view(reduced: Mapping[str, Any]) -> dict[str, Any]:
+    """The Waitcheck-only part of an accumulated record (pure).
+
+    Only a Waitcheck whole-object scan covers a deduped sibling, but the accumulation
+    folds every sanitizer's result for a kernel into one record. Attributing that
+    aggregate would lend the sibling an outcome that was never about it: ConSan runs the
+    process once and reports per kernel, so a covering row carrying a Waitcheck ``pass``
+    beside a ConSan ``error`` covers its sibling with the ``pass`` alone -- rendering it
+    ``error`` with "scanned once -- <ConSan reason>" is a claim no scan made.
+    """
+    reasons = [(san, reason) for san, reason in reduced.get("reasons", ()) if san == "waitcheck"]
+    return {
+        "verdict": reduced.get("waitcheck_verdict"),
+        "reason": _kernel_reason_text(reasons),
+        "name": reduced.get("name"),
+    }
+
+
 def _dedup_covers(row: Mapping[str, Any], covering: Mapping[str, Any]) -> bool:
     """Whether an object scan may speak for a row that has no result of its own (pure).
 
@@ -720,6 +738,9 @@ def _merge_reduced(primary: dict[str, Any], other: dict[str, Any]) -> dict[str, 
     reasons = [*primary["reasons"], *other["reasons"]]
     return {
         "verdict": _worse_verdict(primary["verdict"], other["verdict"]),
+        "waitcheck_verdict": _worse_verdict(
+            primary["waitcheck_verdict"], other["waitcheck_verdict"]
+        ),
         "findings": primary["findings"] + other["findings"],
         "state": primary["state"],
         "reasons": reasons,
@@ -1146,6 +1167,14 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
                 "verdict": _worse_verdict(
                     previous["verdict"] if previous else None, result.get("verdict")
                 ),
+                # Folded separately, because only a Waitcheck object scan covers a
+                # deduped sibling -- see ``_waitcheck_view``.
+                "waitcheck_verdict": _worse_verdict(
+                    previous["waitcheck_verdict"] if previous else None,
+                    result.get("verdict"),
+                ) if sanitizer == "waitcheck" else (
+                    previous["waitcheck_verdict"] if previous else None
+                ),
                 "findings": (previous["findings"] if previous else 0)
                 + len(result.get("findings", [])),
                 "state": result.get("state"),
@@ -1283,13 +1312,17 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             covering_key := kr_by_object.get(
                 (str(entry_sha), identity.get("code_object_index"))
             )
-        ) is not None and _dedup_covers(identity, matched[covering_key]):
+        ) is not None and _dedup_covers(
+            identity, _waitcheck_view(matched[covering_key])
+        ):
             # Deduped: this kernel's object WAS scanned, under the name of the first
             # selection that resolved to it. The scan is object-scope, so its verdict
             # covers this kernel too -- reporting an em dash here read as "not checked"
             # and hid a gated kernel whose object had failed. Findings stay on the
             # covering row so the per-kernel column still sums to the case total.
-            covering = matched[covering_key]
+            # The Waitcheck-only view: the object scan is what covered this row, and
+            # a sibling sanitizer's outcome for the covering kernel says nothing here.
+            covering = _waitcheck_view(matched[covering_key])
             verdict = covering["verdict"]
             findings = 0
             covering_label = label_by_key.get(
