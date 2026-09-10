@@ -3036,7 +3036,16 @@ class TokenSpeedServeWorkload(Workload):
             r.doc["failed"] for r in records if type(r.doc.get("failed")) is int
         )
 
-        self._add_generated_length_metrics(metrics, records)
+        # Only where the lengths are a measurement rather than a restatement of
+        # the recipe -- see the docstring. Written as a condition here, rather
+        # than as an early return inside, because the reachability is the point:
+        # every configuration that ignores EOS, which is the default and what
+        # every `tokenspeed-serve-*` recipe on main sets, reports exactly the
+        # metric set it reported before this mode existed. A pinned-length
+        # benchmark whose published metric set grew would have to be re-baselined
+        # for a number that is `output_len` spelled differently.
+        if not self._ignore_eos:
+            self._add_generated_length_metrics(metrics, records)
 
         # Alias to the name AORTA's CI gating allowlist already knows, so a
         # nightly baseline can gate serving throughput without the allowlist
@@ -3058,8 +3067,10 @@ class TokenSpeedServeWorkload(Workload):
     ) -> None:
         """How long the completions actually were, and how spread out.
 
-        Under ``ignore_eos`` this is a constant the recipe already published, so
-        it says nothing. Once EOS is respected it is the measurement: an RL
+        Called only when EOS is respected, which the caller decides. Under
+        ``ignore_eos`` every completion is ``output_len`` long, so all of this
+        would be the recipe read back with a standard deviation of zero beside
+        it. Once EOS is respected it is the measurement: an RL
         rollout's cost per iteration is the number of tokens the policy chooses
         to generate, and the tail of that distribution is what sizes the KV
         cache and sets how long the slowest prompt in a batch holds the step
@@ -3113,7 +3124,12 @@ class TokenSpeedServeWorkload(Workload):
             return
 
         pooled.sort()
-        metrics["generated_tokens_count"] = float(len(pooled))
+        # An `int`, unlike its float-valued neighbours: it is a population size,
+        # not a measurement, and every other count this repo publishes
+        # (`completed_total` here, `rocprof_kernel_count`, `proton_kernel_count`)
+        # is an integer in the trial JSON. The perf aggregate floats it either
+        # way, so this only decides what a JSON consumer reads.
+        metrics["generated_tokens_count"] = len(pooled)
         metrics["generated_tokens_mean"] = _mean(pooled)
         metrics["generated_tokens_min"] = pooled[0]
         metrics["generated_tokens_max"] = pooled[-1]
