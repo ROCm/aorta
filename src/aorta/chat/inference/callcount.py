@@ -1,8 +1,20 @@
 """Per-query LLM call counting, for remote-provider cost visibility.
 
-One question fans out into many model calls: router, plan, up to
-``max_act_rounds_search`` act rounds, answer, and up to
-``max_retry_iterations`` critic retries -- roughly fifteen in the worst case.
+One question fans out into many model calls: router, plan, an act loop of up to
+``max_act_rounds_search`` rounds followed by a synthesis call, and a critic
+pass that can hand the answer back to the act loop up to
+``max_retry_iterations`` times.
+
+The retries are where the cost is, because each one re-runs the *whole* act
+loop rather than adding a round to it -- so the ceiling is roughly
+``max_retry_iterations * max_act_rounds_search`` and not their sum. On the
+shipped caps a search query the critic rejects every time costs 32 calls,
+measured, and 34 if it is also the query that escalates to the native tool
+protocol (the two extra text rounds that buy the diagnosis; see
+``docs/chat/providers.md``). An earlier version of this note said "roughly
+fifteen", which came from counting the retries as three calls instead of three
+loops.
+
 Against a metered endpoint that is real money, so the remote backends attach
 :class:`LLMCallCounter` to every chat model they build and ``invoke_agent``
 logs the total for the query at INFO.

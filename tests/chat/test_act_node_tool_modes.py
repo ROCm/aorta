@@ -2504,6 +2504,13 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
                 + (caps.max_retry_iterations - 1) * (search + 1)
                 + caps.max_retry_iterations
             ),
+            # The same turn on a query that never escalates, which is the
+            # figure the call counter's own docstring quotes.
+            "turn_unescalated": (
+                2
+                + caps.max_retry_iterations * (search + 1)
+                + caps.max_retry_iterations
+            ),
         }
 
     def test_the_caps_still_produce_the_numbers_measured(self):
@@ -2521,15 +2528,38 @@ class TestTheDocumentedCallCeilingsMatchTheCaps:
             "search": 13,
             "other": 10,
             "turn": 34,
+            "turn_unescalated": 32,
         }
 
     def test_the_page_states_each_ceiling(self):
         page = self._page()
-        for case, value in self._ceilings().items():
+        for case in ("silent", "search", "other", "turn"):
+            value = self._ceilings()[case]
             assert f"**{value}**" in page, (
                 f"providers.md no longer states the {case} ceiling of {value}; "
                 "the caps moved and the prose did not follow"
             )
+
+    def test_the_call_counter_docstring_states_its_own_ceilings(self):
+        """`callcount.py` is the module whose whole job is cost visibility.
+
+        It carried the same defect independently, and worse: "roughly fifteen
+        in the worst case", which came from counting the critic retries as
+        three extra calls rather than three extra act loops. A wrong ceiling is
+        least affordable in the file that exists to tell an operator what a
+        query will cost, so its two figures are pinned here as well rather than
+        left as a second uncovered copy.
+        """
+        from aorta.chat.inference import callcount
+
+        doc = callcount.__doc__ or ""
+        ceilings = self._ceilings()
+        for case in ("turn", "turn_unescalated"):
+            assert str(ceilings[case]) in doc, (
+                f"callcount.py no longer states the {case} ceiling of "
+                f"{ceilings[case]}"
+            )
+        assert "roughly fifteen in the worst case" not in doc
 
     def test_the_page_does_not_keep_the_old_undifferentiated_claim(self):
         """The wording that made one case's figure read as both.
