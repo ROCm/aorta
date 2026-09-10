@@ -383,6 +383,21 @@ def _probe_huggingface() -> bool:
         return False
 
 
+#: The shadow tables a ``vec0`` virtual table cannot answer a query without,
+#: as suffixes on the vector table's name.
+#:
+#: Public because it is a claim about sqlite-vec rather than about this module,
+#: and the tests pin it against the extension in both directions: every suffix
+#: here is one sqlite-vec creates, and every shadow table it creates whose
+#: removal stops the read path is one named here. So a version that renames a
+#: member, adds one, or stops needing one fails there rather than silently
+#: narrowing what :func:`_store_defect` checks.
+#:
+#: ``_info`` is absent on purpose -- the read path answers correctly without it,
+#: so requiring it would report a store that retrieves fine as broken.
+VEC0_STORAGE_SUFFIXES = ("_rowids", "_chunks", "_vector_chunks00")
+
+
 def _store_defect(index_file: Path, dimensions: int) -> str:
     """Why this install's collection cannot be read out of ``index_file``, or "".
 
@@ -445,6 +460,15 @@ def _store_defect(index_file: Path, dimensions: int) -> str:
     construction, so a column added to the read path fails the oracle until
     this probe has something to say about it.
 
+    The vec0 storage set went the same way for the same reason, one round
+    later. It was checked a member at a time -- ``_chunks``, but only where
+    ``_rowids`` was present -- so a store that had lost both read as healthy,
+    and the hand-measurement licensing that gate turned out to be wrong as
+    well. ``VEC0_STORAGE_SUFFIXES`` is now pinned against the tables sqlite-vec
+    creates and against the read path's survival when each is removed, which is
+    the same move as the columns: the enumeration stays in one place and
+    something else decides whether it is still right.
+
     The agreement required is one-directional: no state where retrieval fails
     may read as healthy here. The reverse is allowed and one case uses it --
     see the row-parity check in :func:`_collection_schema_defect`.
@@ -461,7 +485,8 @@ def _store_defect(index_file: Path, dimensions: int) -> str:
     for this install's collection, an empty one, a missing collection registry,
     an unregistered collection, absent ``content``/``metadata`` columns,
     content that is not text and metadata that is not a JSON object, a missing
-    or short vector table, and a registry width that is either not a number or
+    or short vector table, a vec0 table missing the shadow tables it stores its
+    rows in, and a registry width that is either not a number or
     not the one the index was built at. ``check_index`` never looks at any of them, because it
     compares a sidecar against a row count. So there is no behaviour to make
     this conditional on: after #465 the unopenable case short-circuits at the
@@ -729,17 +754,18 @@ def _collection_schema_defect(
         # so the name test alone reported a store as queryable that answers
         # nothing.
         #
-        # Asked as "is it virtual", not "is it vec0", on purpose -- and this is
-        # a judgement rather than a tested property, so it is worth being plain
-        # about: requiring the ``vec0`` module name passes the whole suite too,
-        # because nothing today builds a vector table any other way. It is
-        # written loose to match the decision in the next comment, where the
-        # shadow table's absence is deliberately not a defect so that a future
-        # sqlite-vec layout cannot make every healthy index read as broken. The
-        # same reasoning applies to the module name, which is sqlite-vec's to
-        # change. What this has to separate is an ordinary table from a virtual
-        # one, and an ordinary table can never answer ``MATCH`` whatever
-        # implements it.
+        # Asked as "is it virtual", not "is it vec0", on purpose. What this has
+        # to separate is an ordinary table from a virtual one, and an ordinary
+        # table can never answer ``MATCH`` whatever implements it -- so the
+        # looser test is the one that stays true if sqlite-vec is ever replaced
+        # by another vector module.
+        #
+        # The storage-set check further down *does* read the module name, and
+        # the two are not in tension: this one asks a question every vector
+        # module answers the same way, and that one asks about vec0's own
+        # storage layout, which is only meaningful once the module is known to
+        # be vec0. Recognising the layout is exactly what licenses that check
+        # to call a missing member a defect instead of staying quiet.
         #
         # ``fetchone()`` cannot be None: the name came from the ``tables`` read
         # above, which is this same catalogue. ``or ""`` covers a NULL ``sql``
@@ -788,35 +814,53 @@ def _collection_schema_defect(
                 "against it and every search is refused"
             )
 
-        # ``vec0`` keeps its rows in a shadow table, which is countable without
-        # loading the extension where the virtual table itself is not. Its
-        # absence is not reported as a defect: the vector table is already
-        # known to be there, and a future sqlite-vec layout would otherwise
-        # make every healthy index read as broken.
-        if f"{vectors}_rowids" in tables:
-            # Within the layout that shadow table identifies, the *other* member
-            # retrieval cannot do without. Review asked twice for ``_rowids``
-            # itself to be treated as a defect, on the reasoning that vec0
-            # fails when its storage is incomplete. Measured instead of
-            # reasoned, and the reasoning does not hold: with ``_rowids``
-            # dropped -- or ``_info`` -- ``embedding MATCH ?`` still returns the
-            # right rows through the join. With ``_chunks`` dropped it raises
-            # ``OperationalError: no such table: main.vec_<collection>_chunks``.
-            # The right family, the wrong member, and the member that matters
-            # was the one nobody named.
-            #
-            # Gated on ``_rowids`` rather than tested on its own so the
-            # fail-open property of the comment below survives: an index whose
-            # shadow layout this module does not recognise is still not called
-            # broken, and a future sqlite-vec rename cannot fail every healthy
-            # index. Inside a layout we do recognise, a missing member is a
-            # defect rather than a silence.
-            if f"{vectors}_chunks" not in tables:
+        # ``vec0`` keeps every row it stores in shadow tables, which are
+        # countable without loading the extension where the virtual table
+        # itself is not.
+        #
+        # Recognition comes from the DDL, which names the module, rather than
+        # from one shadow table's presence -- and that distinction is the whole
+        # of this round's finding. The previous version read ``_rowids`` as the
+        # signal that the layout was recognisable and asked about ``_chunks``
+        # only underneath it, so a store that had lost *both* skipped the
+        # branch entirely and reported healthy while the read path still
+        # raised on ``_chunks``. Using a member of the set as the test for
+        # whether the set applies cannot be made correct by adding members.
+        #
+        # The requirement is therefore the storage set rather than a member of
+        # it, and the set is not curated here: ``VEC0_STORAGE_SUFFIXES`` is
+        # pinned in the tests against the shadow tables sqlite-vec actually
+        # creates, and against whether the read path survives each one being
+        # removed. Both directions, so the constant can neither name a table
+        # the extension does not build -- which would fail every healthy index
+        # -- nor omit one the read path needs.
+        #
+        # That pinning is also how the last hand-measurement here was found to
+        # be wrong. This block used to record that dropping ``_rowids`` leaves
+        # the read path answering correctly. It does not: it segfaults
+        # sqlite-vec, which is why the necessity test runs the query in a child
+        # process rather than under ``except``.
+        #
+        # ``_info`` is deliberately not required. Dropping it leaves the read
+        # path answering, so demanding it would fail a store that retrieves
+        # fine -- the over-warning this probe replaced.
+        #
+        # Still fail-open for a virtual table that is *not* ``vec0``: an
+        # unrecognised storage engine is one this module has nothing to say
+        # about, and answering "broken" is how a future sqlite-vec layout would
+        # make every healthy index read as damaged.
+        if re.search(r"\bUSING\s+vec0\b", sql or "", re.IGNORECASE):
+            missing = [
+                f"{vectors}{suffix}"
+                for suffix in VEC0_STORAGE_SUFFIXES
+                if f"{vectors}{suffix}" not in tables
+            ]
+            if missing:
                 return (
-                    f"the {vectors} vector index in {index_file} is missing its "
-                    f"{vectors}_chunks storage table; retrieval matches the query "
-                    "vector against the index and raises on the missing table "
-                    "before it can return anything"
+                    f"the {vectors} vector index in {index_file} is missing "
+                    f"{', '.join(missing)}, where vec0 keeps the rows it stores; "
+                    "retrieval matches the query vector against the index and "
+                    "fails on the missing storage before it can return anything"
                 )
             rowids = f"{vectors}_rowids"
             embedded = conn.execute(f'SELECT COUNT(*) FROM "{rowids}"').fetchone()[0]

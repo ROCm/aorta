@@ -120,12 +120,39 @@ STRUCTURAL_DAMAGE = (
     "vec-table",
     "vec-table-not-virtual",
     "vec-table-width",
-    "vec-shadow-chunks",
     "vector-rows",
     "vector-rowids",
     "registry-width",
     "registry-width-text",
 )
+
+#: Shadow tables whose absence crashes the process rather than raising, so an
+#: in-process oracle cannot report them and would take the suite down instead.
+#:
+#: Exactly one member, and finding it is what corrected the record. The
+#: previous round measured this family by hand and wrote down that dropping
+#: ``_rowids`` leaves the read path answering correctly -- which is what
+#: licensed gating the ``_chunks`` check on it. Dropping ``_rowids`` segfaults
+#: sqlite-vec. The state is not skipped, only moved: it is covered by
+#: ``test_every_shadow_table_the_read_path_needs_is_one_the_probe_requires``,
+#: which runs the query in a child process for this reason.
+CRASHES_THE_READ_PATH = frozenset({"_rowids"})
+
+#: One damage state per shadow table the probe requires, taken from the probe's
+#: own constant rather than written beside it, plus the state review reported:
+#: all of them gone at once, which is what a partial copy leaves behind and
+#: what the ``_rowids``-gated version of the check waved through as healthy.
+#:
+#: Derived for the same reason the column states are. The storage set was
+#: checked a member at a time and the member that was checked was chosen by a
+#: measurement that turned out to be wrong; naming the states here from
+#: ``VEC0_STORAGE_SUFFIXES`` means the sweep cannot cover less than the probe
+#: claims to, and the two-way test above the constant keeps that claim honest.
+VEC0_SHADOW_DAMAGE = tuple(
+    f"vec-shadow{suffix.replace('_', '-')}"
+    for suffix in doctor.VEC0_STORAGE_SUFFIXES
+    if suffix not in CRASHES_THE_READ_PATH
+) + ("vec-shadow-all",)
 
 #: What each column ``_knn`` selects has to hold for a query to survive it, as
 #: the damage states that violate it.
@@ -196,7 +223,7 @@ def _read_path_columns() -> tuple[str, ...]:
 
 
 def _derive_store_damage() -> tuple[str, ...]:
-    """``STRUCTURAL_DAMAGE`` plus a value state per column the read path reads.
+    """``STRUCTURAL_DAMAGE``, the vec0 storage states, and a state per column read.
 
     Fails closed. A column ``COLUMN_DAMAGE`` has never heard of is one this
     oracle has no states for, so it raises here rather than sweeping the ones
@@ -214,7 +241,11 @@ def _derive_store_damage() -> tuple[str, ...]:
             "this oracle cannot vouch for, and every test below would otherwise "
             "pass without covering it."
         )
-    return STRUCTURAL_DAMAGE + tuple(state for column in columns for state in COLUMN_DAMAGE[column])
+    return (
+        STRUCTURAL_DAMAGE
+        + VEC0_SHADOW_DAMAGE
+        + tuple(state for column in columns for state in COLUMN_DAMAGE[column])
+    )
 
 
 #: Every way the store under a matching manifest can stop answering. Both the
@@ -223,6 +254,17 @@ def _derive_store_damage() -> tuple[str, ...]:
 #: it (see ``doctor._store_defect``), so the only thing keeping the model
 #: honest is a set neither side gets to curate.
 STORE_DAMAGE = _derive_store_damage()
+
+
+def _shadow_suffixes(how: str) -> list[str]:
+    """The shadow-table suffixes a ``vec-shadow-*`` state removes.
+
+    The inverse of the name ``VEC0_SHADOW_DAMAGE`` builds, so the state list
+    and the damage that implements it cannot describe different tables.
+    """
+    if how == "vec-shadow-all":
+        return list(doctor.VEC0_STORAGE_SUFFIXES)
+    return ["_" + how[len("vec-shadow-") :].replace("-", "_")]
 
 
 def _break_store(index: Path, collection: str, how: str) -> None:
@@ -325,14 +367,19 @@ def _break_store(index: Path, collection: str, how: str) -> None:
                 f'INSERT INTO "vec_{collection}" (rowid, embedding) VALUES (?, ?)',
                 [(n + 1, b"\x00" * 4) for n in range(rows)],
             )
-        elif how == "vec-shadow-chunks":
-            # The member of vec0's shadow set that retrieval actually needs.
-            # Review twice asked for a missing ``_rowids`` to be a defect;
-            # dropping ``_rowids`` or ``_info`` leaves the read path answering
-            # correctly, and this one makes it raise. A partially copied store
-            # is how it happens -- the virtual-table entry survives in
-            # ``sqlite_master`` while one of its storage tables does not.
-            conn.execute(f'DROP TABLE "vec_{collection}_chunks"')
+        elif how.startswith("vec-shadow-"):
+            # vec0 keeps the rows it stores in shadow tables beside the virtual
+            # one. A partially copied store is how they go missing: the
+            # ``sqlite_master`` entry for the virtual table survives while some
+            # of its storage does not.
+            #
+            # ``vec-shadow-all`` is the state review reported and the reason
+            # this family is swept rather than sampled. The check used to read
+            # ``_rowids``' presence as the signal that vec0's layout applied
+            # and only then ask about ``_chunks``, so a store that had lost
+            # both skipped the branch and read as healthy.
+            for suffix in _shadow_suffixes(how):
+                conn.execute(f'DROP TABLE "vec_{collection}{suffix}"')
         elif how == "vector-rows":
             conn.execute(
                 f'DELETE FROM "vec_{collection}" WHERE rowid = '
@@ -412,6 +459,12 @@ def _read_path_answers(index: Path) -> str:
     Returns "" when a query comes back with rows, and the failure otherwise. An
     empty result counts as answering: the read path did not refuse the index,
     and the probe being stricter about that is a documented one-way asymmetry.
+
+    Cannot report a state that *crashes* rather than raises, which is not
+    hypothetical -- a vec0 table missing its ``_rowids`` shadow table segfaults
+    sqlite-vec. States that do that are kept out of the sweeps this oracle
+    drives (see ``CRASHES_THE_READ_PATH``) and answered by
+    :func:`_read_path_survives_in_a_child` instead.
     """
     from aorta.chat.rag.embeddings.factory import get_provider
     from aorta.chat.rag.retriever import SqliteVecStore
@@ -427,6 +480,62 @@ def _read_path_answers(index: Path) -> str:
     finally:
         with suppress(Exception):
             store.close()
+
+
+#: A real ``similarity_search``, in a process of its own.
+#:
+#: The embedder is rebuilt here rather than imported from this module so the
+#: child does not have to import the test suite to answer a question about the
+#: read path. It matches :class:`FixedWidthEmbeddings`: 384 dimensions, which
+#: is the width the fixture manifest records.
+_CHILD_QUERY = """
+import sys
+from pathlib import Path
+
+from langchain_core.embeddings import Embeddings
+
+from aorta.chat.rag.retriever import SqliteVecStore
+
+
+class FixedWidth(Embeddings):
+    def embed_documents(self, texts):
+        return [[float(len(text))] * 384 for text in texts]
+
+    def embed_query(self, text):
+        return [float(len(text))] * 384
+
+
+store = SqliteVecStore(path=Path(sys.argv[1]), embedding=FixedWidth(), collection=sys.argv[2])
+store.similarity_search("chunk", k=3)
+"""
+
+
+def _read_path_survives_in_a_child(index: Path, collection: str) -> bool:
+    """Whether a real query against ``index`` completes in a fresh process.
+
+    The oracle :func:`_read_path_answers` cannot be. A missing shadow table can
+    take sqlite-vec down with a segfault instead of raising, and no ``except``
+    reports that -- the in-process version simply ends the test session. Asking
+    a child process turns every way the read path can fail, raise or crash,
+    into one observable answer.
+
+    Used only where that matters, because a subprocess per state would be a
+    real cost across the whole sweep. ``PYTHONPATH`` carries this process's
+    ``sys.path`` so the child resolves the same tree, including the ``src``
+    layout and whatever the runner put in front of it.
+    """
+    import os
+    import subprocess
+    import sys
+
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _CHILD_QUERY, str(index), collection],
+        capture_output=True,
+        timeout=120,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path)},
+        check=False,
+    )
+    return completed.returncode == 0
 
 
 @pytest.fixture(autouse=True)
@@ -1247,6 +1356,80 @@ class TestStoreProbeAgreesWithTheReadPath:
         assert listed - selected == {"id"}, (
             f"the probe requires {sorted(listed - selected)} which the read path does "
             "not select; only the join key id is expected to be in that position"
+        )
+
+    def test_every_shadow_table_the_read_path_needs_is_one_the_probe_requires(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """``VEC0_STORAGE_SUFFIXES`` held to sqlite-vec and to the read path.
+
+        The fourth round on this probe, and the third time the answer was that
+        a hand-kept list had drifted. Review asked for ``_rowids`` twice, was
+        answered with a measurement, and that measurement produced a check
+        gated on ``_rowids``' presence -- so a store that had lost *both*
+        shadow tables skipped it and read as healthy. Adding ``_rowids`` to the
+        list would buy the same fix a fourth time, so the list is pinned to
+        something that maintains itself instead.
+
+        Neither side is enumerated here. The shadow set comes from the tables
+        sqlite-vec actually creates, and necessity comes from running a real
+        query with each one removed. Both directions are asserted, because each
+        catches a different failure:
+
+        * a suffix the probe requires that the read path does not need would
+          report a store that retrieves fine as broken -- the over-warning this
+          probe exists to avoid;
+        * a shadow table the read path needs that the probe does not require is
+          this round's finding, repeated.
+
+        The query runs in a child process because dropping ``_rowids`` does not
+        raise, it segfaults -- which is also how the earlier measurement came
+        to record that the read path survives it.
+        """
+        from aorta.chat.rag.embeddings.factory import get_provider
+
+        collection = get_provider().collection_name()
+        reference = tmp_path / "reference"
+        reference.mkdir()
+        prefix = f"vec_{collection}"
+
+        conn = _vec_connection(_write_index(monkeypatch, reference))
+        try:
+            shadow = sorted(
+                name[len(prefix) :]
+                for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+                if name.startswith(f"{prefix}_")
+            )
+        finally:
+            conn.close()
+        assert shadow, "sqlite-vec built no shadow tables; this derivation has nothing to stand on"
+
+        needed = []
+        for suffix in shadow:
+            case = tmp_path / suffix.strip("_")
+            case.mkdir()
+            index = _write_index(monkeypatch, case)
+            conn = _vec_connection(index)
+            try:
+                conn.execute(f'DROP TABLE "{prefix}{suffix}"')
+                conn.commit()
+            finally:
+                conn.close()
+
+            survived = _read_path_survives_in_a_child(index, collection)
+            if not survived:
+                needed.append(suffix)
+            assert bool(_probe(index)) is (not survived), (
+                f"with {prefix}{suffix} dropped the read path "
+                f"{'answers' if survived else 'does not answer'} and the probe says "
+                f"{_probe(index)!r}; the two have to agree"
+            )
+
+        assert set(needed) == set(doctor.VEC0_STORAGE_SUFFIXES), (
+            f"the read path needs {sorted(needed)} of sqlite-vec's shadow tables and the "
+            f"probe requires {sorted(doctor.VEC0_STORAGE_SUFFIXES)}; a table missing from "
+            "the probe's list is one a partial copy can remove without the doctor "
+            "noticing, and one left over there fails an index that reads fine"
         )
 
     def test_a_healthy_store_satisfies_both(self, monkeypatch, tmp_path: Path):
