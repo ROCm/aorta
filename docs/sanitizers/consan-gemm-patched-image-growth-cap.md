@@ -245,8 +245,14 @@ Not a defect report. Filed as
    overlap (#10378) and a growth-ceiling rejection are different problems with
    different owners and different fixes, and they are indistinguishable from the
    status code, the exit code, and therefore from any dashboard built on them.
-   Only the human-readable line above the rejection separates them. The request
-   is a stable `cause=` token appended to the `load rejection` line — additive,
+   Only the human-readable line above the rejection separates them. The
+   dashboard's per-kernel `Detail` column does not close this gap: it surfaces
+   the backend's own refusal text where a check emits one (a Waitcheck
+   `waitcheck_backend_exit_N` quotes its `stderr` tail), but the exit-92
+   rejection reaches the report as the bare token
+   `consan_strict_load_rejection` with no prose and no `kernel_results`, so both
+   causes still render the same empty `Detail` and the same observation. The
+   request is a stable `cause=` token appended to the `load rejection` line — additive,
    no status renumbering, no change to any run's outcome. A distinct status per
    rejection class would also work but is behaviour-visible for anything already
    matching 4112, so it was explicitly offered as the non-preferred alternative.

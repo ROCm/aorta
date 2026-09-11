@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import importlib.util
 import json
 import os
@@ -117,6 +118,1915 @@ def test_summarize_waitcheck_reports_per_kernel_detail():
     assert case["finding_groups"][0]["code"] == "wait_hazard"
     assert case["finding_groups"][0]["count"] == 1
     assert case["finding_groups"][0]["example"].startswith("sol_1.hsaco:")
+
+
+def _waitcheck_daily_topology_report() -> dict:
+    """The real daily GEMM topology, with the shared object failing to scan.
+
+    Two NT shapes resolve to one code object (Waitcheck scans it once and reports it
+    under the first name) and one TT shape resolves to its own. The NT scan errors,
+    so the check rolls up to ``worklist_not_fully_checked`` while the TT scan still
+    produces findings -- the shape a real gate hit, where the only statement of the
+    actual cause is the errored kernel's own ``reason``.
+    """
+    nt_sha, tt_sha = "57c5d8efa4beef01", "aeb46fded1beef02"
+    finding = {
+        "sanitizer": "waitcheck", "severity": "warning", "code": "wait_hazard",
+        "message": "/a/b/sol_137678.hsaco:gfx950[0]:.text+0x4a4: missing s_waitcnt lgkmcnt(0)",
+        "kernel_name": None, "code_object": "/a/b/sol_137678.hsaco",
+        "entry_offset": None, "metadata": {},
+    }
+
+    def _entry(name: str, obj: str, sha: str, count: int) -> dict:
+        return {
+            "identity": {
+                "name": name, "target": "gfx950", "code_object": f"/a/b/{obj}",
+                "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+            },
+            "total_time_ms": 0.0, "dispatch_count": count, "sources": ["gemm_csv"],
+        }
+
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                _entry("gemm_NT_M256_N4096_K1024", "sol_126578.hsaco", nt_sha, 479),
+                _entry("gemm_NT_M128_N4096_K1280", "sol_175415.hsaco", nt_sha, 471),
+                _entry("gemm_TT_M64_N64_K1280", "sol_137678.hsaco", tt_sha, 440),
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None,
+            "findings": [finding],
+            "kernel_results": [
+                {
+                    "identity": {
+                        "name": "gemm_NT_M256_N4096_K1024", "target": "gfx950",
+                        "code_object": "/a/b/sol_126578.hsaco",
+                        "code_object_sha256": nt_sha, "code_object_index": 0,
+                    },
+                    "state": "error", "verdict": "error", "findings": [],
+                    "reason": (
+                        "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+                        "failed to parse input executable or code object"
+                    ),
+                    "returncode": 2,
+                },
+                {
+                    "identity": {
+                        "name": "gemm_TT_M64_N64_K1280", "target": "gfx950",
+                        "code_object": "/a/b/sol_137678.hsaco",
+                        "code_object_sha256": tt_sha, "code_object_index": 0,
+                    },
+                    "state": "ran", "verdict": "warn", "findings": [finding],
+                    "reason": None, "returncode": 4,
+                },
+            ],
+            "coverage": [],
+            "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+        }],
+    }
+
+
+def test_summarize_keeps_the_per_kernel_failure_reason():
+    # The check-level reason is only the rollup, so dropping the per-kernel reason
+    # left the page with no statement anywhere of why a kernel errored.
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+
+    assert case.get("verdict") == "error" and case.get("match") is False
+    assert (case.get("primary") or {}).get("reason") == "worklist_not_fully_checked"
+
+    errored = case["kernels"][0]
+    assert errored.get("name") == "gemm_NT_M256_N4096_K1024"
+    assert errored.get("verdict") == "error"
+    assert "failed to parse input executable or code object" in errored.get("detail", "")
+
+    assert case.get("kernel_reasons") == [
+        {
+            "kernel": "gemm_NT_M256_N4096_K1024",
+            # a unique name needs no identity qualifier
+            "label": "gemm_NT_M256_N4096_K1024",
+            "reason": "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+            "failed to parse input executable or code object",
+            "code_object": "/a/b/sol_126578.hsaco",
+            "code_object_sha256": "57c5d8efa4beef01",
+            "code_object_index": 0,
+            "entry_offset": None,
+        }
+    ]
+    # a successfully scanned kernel with no fail-closed reason carries no detail
+    assert case["kernels"][2].get("verdict") == "warn"
+    assert case["kernels"][2].get("detail") == ""
+
+
+def test_summarize_attributes_a_deduped_kernel_to_the_scan_that_covered_it():
+    # Waitcheck scans one object once, so the second NT shape has no kernel_result.
+    # Rendering it as an em dash read as "not checked" and hid that a *gated* kernel
+    # sat behind an object whose scan had failed.
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+    deduped = case["kernels"][1]
+
+    assert deduped.get("name") == "gemm_NT_M128_N4096_K1280"
+    assert deduped.get("verdict") == "error"
+    assert "same code object as gemm_NT_M256_N4096_K1024" in deduped.get("detail", "")
+    assert "failed to parse input executable or code object" in deduped.get("detail", "")
+    # findings stay on the covering row, so the column still sums to the case total
+    assert deduped.get("findings") == 0
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings")
+    # the covering scan is reported once, not once per kernel that shares its object
+    assert len(case.get("kernel_reasons") or []) == 1
+
+
+def test_observation_and_inline_message_name_the_cause_behind_a_rollup():
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+
+    # the one-liner still leads with the rollup, but no longer stops there
+    observation = case.get("observation", "")
+    assert "reason worklist_not_fully_checked" in observation
+    assert "gemm_NT_M256_N4096_K1024: waitcheck_backend_exit_2" in observation
+    assert "32 finding(s)" not in observation  # only one finding in the fixture
+
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert text.startswith("worklist_not_fully_checked")
+    assert "gemm_NT_M256_N4096_K1024" in text
+
+
+def _dedup_attribution_report(
+    *, sanitizer: str, code_object: str | None, sha: str | None, why: str
+) -> dict:
+    """Two rows on one object where only the first came back with a result.
+
+    The shape the dedup attribution exists for. Whether the second row may inherit the
+    first's verdict as "same code object; scanned once" turns on one conjunct of the
+    attribution predicate at a time, so each conjunct gets this fixture with exactly
+    one field changed.
+    """
+    def _identity(name: str) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": code_object,
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(name), "total_time_ms": 0.0,
+                 "dispatch_count": 1, "sources": ["gemm_csv"]}
+                for name in ("kern_A", "kern_B")
+            ],
+        },
+        "checks": [{
+            "sanitizer": sanitizer, "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [{
+                "identity": _identity("kern_A"), "state": "error", "verdict": "error",
+                "findings": [], "reason": why, "returncode": None,
+            }],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+
+def test_a_deduped_sibling_is_attributed_only_from_a_real_object_scan():
+    # Positive control for the three exclusion tests below: with all conjuncts
+    # satisfied, kern_B DOES inherit the scan that covered its object. Without this,
+    # a predicate that excluded everything would pass all three of them.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="waitcheck", code_object="/a/b/sol.hsaco", sha="beefaaa1",
+            why="waitcheck_backend_exit_2: refused the object",
+        ),
+        "pass",
+    )
+    covered, sibling = case["kernels"]
+    assert covered.get("detail") == "waitcheck_backend_exit_2: refused the object"
+    assert sibling.get("verdict") == "error"
+    assert "same code object as kern_A; scanned once" in sibling.get("detail", "")
+
+
+def test_digestless_kernels_are_never_attributed_to_each_other():
+    # Review (#479): this fixture used to be a ConSan check with code_object=None, so
+    # the sanitizer and code-object conjuncts each excluded the attribution before the
+    # digest was consulted -- it pinned the disjunction, not the conjunct it is named
+    # for. A waitcheck check with a real code object and no digest isolates it.
+    #
+    # Keying attribution on (sha, index) collapses every digest-less identity onto
+    # (None, None) and lets an unrelated sibling's verdict be reported as "the same
+    # code object" -- an object that cannot have been deduped, because dedup is keyed
+    # on the digest. Only a real digest may be attributed.
+    #
+    # The digest requirement is enforced on both sides of the index -- the producer
+    # asks for a real `row_sha`, the recipient for a real `entry_sha` -- and this test
+    # pins the pair. Relaxing either alone cannot change the output: both read the same
+    # field of the same object, so a covering row without a digest keys ("None", index)
+    # and can never match a recipient row that has one.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="waitcheck", code_object="/a/b/sol.hsaco", sha=None,
+            why="waitcheck_backend_exit_2: refused the object",
+        ),
+        "pass",
+    )
+    covered, uncovered = case["kernels"]
+    assert covered.get("detail") == "waitcheck_backend_exit_2: refused the object"
+    # kern_B has nothing that could have been deduped, so it stays silent
+    assert uncovered.get("verdict") == "\u2014"
+    assert uncovered.get("detail") == ""
+
+
+def test_an_objectless_kernel_is_never_attributed_to_a_sibling():
+    # The code-object conjunct on its own. A digest with no code object is not a scan
+    # of anything nameable -- "same code object as kern_A" would cite a file the report
+    # never identified, and ConSan identities reach here with exactly that shape.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="waitcheck", code_object=None, sha="beefaaa1",
+            why="waitcheck_backend_exit_2: refused the object",
+        ),
+        "pass",
+    )
+    covered, uncovered = case["kernels"]
+    assert covered.get("detail") == "waitcheck_backend_exit_2: refused the object"
+    assert uncovered.get("verdict") == "\u2014"
+    assert uncovered.get("detail") == ""
+
+
+def test_only_a_waitcheck_scan_covers_a_sibling_sharing_its_object():
+    # The sanitizer conjunct on its own: a full identity, digest and all, but the
+    # result came from ConSan. Whole-object dedup is Waitcheck's behaviour
+    # (run_waitcheck skips a repeated (sha, index) selection); ConSan runs the process
+    # once and attributes per kernel, so a ConSan result for kern_A says nothing about
+    # kern_B and "scanned once" would be a fabricated claim of coverage.
+    case = gen.summarize_case(
+        _dedup_attribution_report(
+            sanitizer="consan", code_object="/a/b/sol.hsaco", sha="beefaaa1",
+            why="consan_hook_not_found",
+        ),
+        "pass",
+    )
+    covered, uncovered = case["kernels"]
+    assert covered.get("detail") == "consan_hook_not_found"
+    assert uncovered.get("verdict") == "\u2014"
+    assert uncovered.get("detail") == ""
+
+
+def test_kernel_tables_render_the_reason_on_both_twins():
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+
+    html = gen._kernel_tables_html(case, report_rel=None)
+    assert "<th>Detail</th>" in html
+    assert "failed to parse input executable or code object" in html
+
+    rows = {
+        "waitcheck": case,
+        "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    md = gen.build_summary_md(
+        [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": False}]
+    )
+    assert "| SHA-256 | Detail |" in md
+    assert "failed to parse input executable or code object" in md
+
+
+def test_survey_md_twin_also_renders_the_reason():
+    # Three renderers consume row["kernels"]: the shared HTML table (both tabs) and
+    # a Markdown twin per tab. The survey twin is a separate function, so a column
+    # added to the other two silently skips it -- sweep every renderer, not just
+    # the one the guardrail tab uses.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [{
+            "name": "gemm-waitcheck", "label": "daily GEMM \u00b7 waitcheck",
+            "report": _waitcheck_daily_topology_report(),
+        }]}
+    )
+    md = "\n".join(gen._survey_section_md(entries))
+
+    assert "| SHA-256 | Detail |" in md
+    assert "failed to parse input executable or code object" in md
+    assert "same code object as gemm_NT_M256_N4096_K1024" in md
+    # a successfully scanned kernel with no fail-closed reason renders an em dash
+    assert "| `93f09ae670` | \u2014 |" not in md  # sha is the fixture's TT digest below
+    assert "| `aeb46fded1` | \u2014 |" in md
+
+
+def test_case_env_records_kernel_reasons_beside_the_rollup():
+    case = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+
+    observed = env.get("observed") or {}
+    assert observed.get("reason") == "worklist_not_fully_checked"
+    # the identity travels with the reason, so the manifest can say which object
+    # failed without reopening sanitizer_report.json
+    assert observed.get("kernel_reasons") == [
+        {
+            "kernel": "gemm_NT_M256_N4096_K1024",
+            "reason": (
+                "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+                "failed to parse input executable or code object"
+            ),
+            "code_object": "/a/b/sol_126578.hsaco",
+            "code_object_sha256": "57c5d8efa4beef01",
+            "code_object_index": 0,
+            "entry_offset": None,
+        }
+    ]
+    # "label" is a display concern and stays out of the manifest
+    assert "label" not in (observed.get("kernel_reasons") or [{}])[0]
+
+
+def _mixed_scope_waitcheck_report(*, exact_first: bool) -> dict:
+    """One object reached by an exact-entry scan AND a whole-object scan.
+
+    Waitcheck only dedups a whole-object scan, so an exact-entry selection always
+    produces its own result. Three kernels share ``sha``/index 0: one pinned to an
+    entry offset, one scanning the whole object, and one deduped away behind the
+    latter. ``exact_first`` puts the exact result ahead of the object result, which is
+    the order that made the deduped row inherit a scan that never covered it.
+    """
+    sha = "beef57c5d8efa401"
+
+    def _entry(name: str, offset: int | None) -> dict:
+        return {
+            "identity": {
+                "name": name, "target": "gfx950", "code_object": "/a/b/sol_9.hsaco",
+                "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+            },
+            "total_time_ms": 0.0, "dispatch_count": 10, "sources": ["gemm_csv"],
+        }
+
+    def _result(name: str, offset: int | None, verdict: str, reason: str | None) -> dict:
+        return {
+            "identity": {
+                "name": name, "target": "gfx950", "code_object": "/a/b/sol_9.hsaco",
+                "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+            },
+            "state": "ran" if reason is None else "error",
+            "verdict": verdict, "findings": [], "reason": reason,
+            "returncode": 0 if reason is None else 2,
+        }
+
+    exact = _result("gemm_pinned_entry", 0x100, "pass", None)
+    whole = _result(
+        "gemm_whole_object", None, "error",
+        "waitcheck_backend_exit_2: /a/b/sol_9.hsaco: failed to parse input executable",
+    )
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                _entry("gemm_pinned_entry", 0x100),
+                _entry("gemm_whole_object", None),
+                _entry("gemm_deduped_sibling", None),
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [exact, whole] if exact_first else [whole, exact],
+            "coverage": [],
+            "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+        }],
+    }
+
+
+def test_an_exact_entry_scan_never_covers_a_deduped_sibling():
+    # An exact-entry scan analyzes one entry, not the object, so it cannot stand in
+    # for a kernel that was deduped away. Keying every digest-carrying result by
+    # object let the exact result land on (sha, index) first and lend its clean
+    # verdict to a sibling it never looked at -- reporting `pass` for a kernel behind
+    # an object whose only whole-object scan had failed. Order must not matter.
+    for exact_first in (True, False):
+        case = gen.summarize_case(_mixed_scope_waitcheck_report(exact_first=exact_first), "warn")
+        pinned, whole, deduped = case["kernels"]
+
+        # both real scans keep their own result
+        assert pinned.get("verdict") == "pass" and pinned.get("detail") == ""
+        assert whole.get("verdict") == "error"
+
+        # the deduped row is attributed to the whole-object scan, never the entry one
+        assert deduped.get("name") == "gemm_deduped_sibling"
+        assert deduped.get("verdict") == "error"
+        assert "same code object as gemm_whole_object" in deduped.get("detail", "")
+        assert "failed to parse input executable" in deduped.get("detail", "")
+        assert "gemm_pinned_entry" not in deduped.get("detail", "")
+
+
+def _two_check_report(*, consan_reason: str | None, with_findings: bool = False) -> dict:
+    """One kernel scanned by both sanitizers, as the shipped survey recipes do.
+
+    ``tiny-vecadd-survey.yaml`` and friends select ``top_n: 1`` and request
+    ``[waitcheck, consan]``, so ``run_sanitizers`` emits one check per sanitizer over
+    the same worklist and ConSan attributes its result to that same identity.
+    """
+    identity = {
+        "name": "tiny_vecadd", "target": "gfx950", "code_object": "/a/b/vecadd.hsaco",
+        "code_object_sha256": "beefaeb46fded102", "code_object_index": 0,
+        "entry_offset": None,
+    }
+
+    def _finding(sanitizer: str, code: str) -> dict:
+        return {
+            "sanitizer": sanitizer, "severity": "race", "code": code,
+            "message": f"{sanitizer} diagnostic", "kernel_name": "tiny_vecadd",
+            "code_object": None, "entry_offset": None, "metadata": {},
+        }
+
+    wc_findings = [_finding("waitcheck", "wait_hazard")] if with_findings else []
+    cs_findings = [_finding("consan", "1")] if with_findings else []
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{
+                "identity": identity, "total_time_ms": 0.0,
+                "dispatch_count": 7, "sources": ["gemm_csv"],
+            }],
+        },
+        "checks": [
+            {
+                "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+                "reason": "worklist_not_fully_checked", "returncode": None,
+                "findings": wc_findings,
+                "kernel_results": [{
+                    "identity": identity, "state": "error", "verdict": "error",
+                    "findings": wc_findings, "returncode": 2,
+                    "reason": (
+                        "waitcheck_backend_exit_2: /a/b/vecadd.hsaco: "
+                        "failed to parse input executable or code object"
+                    ),
+                }],
+                "coverage": [],
+                "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+            },
+            {
+                "sanitizer": "consan",
+                "state": "ran" if consan_reason is None else "error",
+                "verdict": "fail" if with_findings else "pass",
+                "reason": consan_reason, "returncode": 0, "findings": cs_findings,
+                "kernel_results": [{
+                    "identity": identity,
+                    "state": "ran" if consan_reason is None else "error",
+                    "verdict": "fail" if with_findings else "pass",
+                    "findings": cs_findings, "reason": consan_reason, "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            },
+        ],
+    }
+
+
+def test_a_later_check_cannot_erase_an_earlier_checks_reason():
+    # Reducing every check's result for one kernel to the last one wrote ConSan's
+    # reasonless PASS over Waitcheck's errored result, so the reason this PR exists
+    # to surface vanished again on exactly the recipes that run both sanitizers.
+    case = gen.summarize_case(_two_check_report(consan_reason=None), "pass")
+    kernel = case["kernels"][0]
+
+    assert "failed to parse input executable or code object" in kernel.get("detail", "")
+    # and the badge cannot read cleaner than the detail beside it
+    assert kernel.get("verdict") == "error"
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("kernel") == "tiny_vecadd"
+    assert reasons[0].get("reason") == (
+        "waitcheck_backend_exit_2: /a/b/vecadd.hsaco: "
+        "failed to parse input executable or code object"
+    )
+    assert "tiny_vecadd: waitcheck_backend_exit_2" in case.get("observation", "")
+
+
+def test_two_reasons_for_one_kernel_are_labelled_by_sanitizer():
+    # With a reason from each check, an unlabelled concatenation would not say which
+    # sanitizer refused, so each is named. Findings sum across checks too, keeping
+    # the per-kernel column summing to the case total.
+    case = gen.summarize_case(
+        _two_check_report(consan_reason="consan_hook_not_found", with_findings=True), "pass"
+    )
+    kernel = case["kernels"][0]
+
+    assert "waitcheck: waitcheck_backend_exit_2" in kernel.get("detail", "")
+    assert "consan: consan_hook_not_found" in kernel.get("detail", "")
+    # fail outranks error in the report's own verdict ranking
+    assert kernel.get("verdict") == "fail"
+    assert kernel.get("findings") == 2
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings")
+
+
+def _report_with_two_objects_sharing_a_name() -> dict:
+    """One symbol name reached through two code objects: a clean scan and a failed one.
+
+    A valid worklist -- KernelWorklist only rejects duplicate stable_key, and that key
+    carries the digest rather than pinning the name.
+    """
+
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "gemm_shared_symbol", "target": "gfx950",
+            "code_object": f"/a/b/sol_{sha}.hsaco", "code_object_sha256": sha,
+            "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _finding(sha: str) -> dict:
+        return {
+            "sanitizer": "waitcheck", "severity": "warning", "code": "wait_hazard",
+            "message": f"sol_{sha}.hsaco: missing s_waitcnt", "kernel_name": None,
+            "code_object": f"/a/b/sol_{sha}.hsaco", "entry_offset": None, "metadata": {},
+        }
+
+    clean_sha, bad_sha = "beefaaa1", "beefbbb2"
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(clean_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(bad_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None,
+            "findings": [_finding(clean_sha)],
+            "kernel_results": [
+                {
+                    "identity": _identity(clean_sha), "state": "ran", "verdict": "warn",
+                    "findings": [_finding(clean_sha)], "reason": None, "returncode": 4,
+                },
+                {
+                    "identity": _identity(bad_sha), "state": "error", "verdict": "error",
+                    "findings": [], "returncode": 2,
+                    "reason": "waitcheck_backend_exit_2: refused the second object",
+                },
+            ],
+            "coverage": [],
+            "backend": {"path": "/tmp/build/tools/rj_waitcheck", "sha256": "a70945fb1135beef"},
+        }],
+    }
+
+
+def test_kernels_sharing_a_name_across_objects_stay_separate_rows():
+    # Joining results to rows by name merged the two scans -- each row took the other's
+    # verdict and reason, and their findings were summed onto both, double-counting
+    # against the case total.
+    report = _report_with_two_objects_sharing_a_name()
+    clean_sha, bad_sha = "beefaaa1", "beefbbb2"
+
+    case = gen.summarize_case(report, "warn")
+    clean, bad = case["kernels"]
+
+    # each row keeps its own object's result rather than the merger of both
+    assert clean.get("sha") == clean_sha and bad.get("sha") == bad_sha
+    assert clean.get("verdict") == "warn"
+    assert clean.get("findings") == 1
+    assert clean.get("detail") == ""
+    assert bad.get("verdict") == "error"
+    assert bad.get("findings") == 0
+    assert "refused the second object" in bad.get("detail", "")
+
+    # and the findings column still sums to the case total rather than doubling it
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings") == 1
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("kernel") == "gemm_shared_symbol"
+    assert reasons[0].get("code_object_sha256") == bad_sha
+    assert reasons[0].get("reason") == "waitcheck_backend_exit_2: refused the second object"
+    # only one of the two failed, but both are on the page: what makes the name
+    # ambiguous is what the reader can see, not which rows happen to carry a reason
+    assert reasons[0].get("label") == f"gemm_shared_symbol ({bad_sha})"
+
+
+def test_two_failing_kernels_sharing_a_name_are_told_apart():
+    # When both objects behind one symbol name fail, a bare-name label produces two
+    # indistinguishable reasons, and env.json cannot say which object failed without
+    # reopening the report. The label is qualified with the identity where — and only
+    # where — the name is actually ambiguous.
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "gemm_shared_symbol", "target": "gfx950",
+            "code_object": f"/a/b/sol_{sha}.hsaco", "code_object_sha256": sha,
+            "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _result(sha: str, why: str) -> dict:
+        return {
+            "identity": _identity(sha), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    first, second = "beefaaa1", "beefbbb2"
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(first), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(second), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(first, "waitcheck_backend_exit_2: refused the first object"),
+                _result(second, "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 2
+
+    # both keep the bare kernel name as data, but their labels are distinguishable
+    assert [e.get("kernel") for e in reasons] == ["gemm_shared_symbol"] * 2
+    labels = [e.get("label") for e in reasons]
+    assert labels == [f"gemm_shared_symbol ({first})", f"gemm_shared_symbol ({second})"]
+    assert len(set(labels)) == 2
+
+    # and the one-liner carries both, each attributable to its own object
+    observation = case.get("observation", "")
+    assert f"gemm_shared_symbol ({first}): waitcheck_backend_exit_2" in observation
+    assert f"gemm_shared_symbol ({second}): waitcheck_timeout" in observation
+
+    # the manifest records the identity for each, so neither needs the raw report
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+    recorded = (env.get("observed") or {}).get("kernel_reasons") or []
+    # unabridged: the label is display copy, but the manifest is what has to stay
+    # diagnosable, and a basename plus a digest prefix can tie where these do not
+    assert [e.get("code_object_sha256") for e in recorded] == [first, second]
+    assert [e.get("code_object") for e in recorded] == [
+        f"/a/b/sol_{first}.hsaco", f"/a/b/sol_{second}.hsaco"
+    ]
+
+
+def test_two_failing_kernels_bundled_in_one_object_are_told_apart():
+    # A digest identifies the *file*, not a code object: a bundle carries several
+    # objects under one digest, which is why Waitcheck dedups on
+    # (code_object_sha256, code_object_index) and why stable_key carries the index.
+    # Two same-named selections in one bundle therefore share every field the digest
+    # qualifier renders, so both labels came out identical and the observation could
+    # not say which of the two failed. The qualifier widens to the index — but only
+    # for the collision it has to resolve.
+    sha = "beefaaa1"
+
+    def _identity(index: int) -> dict:
+        return {
+            "name": "gemm_shared_symbol", "target": "gfx950",
+            "code_object": "/a/b/bundle.hsaco", "code_object_sha256": sha,
+            "code_object_index": index, "entry_offset": None,
+        }
+
+    def _result(index: int, why: str) -> dict:
+        return {
+            "identity": _identity(index), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(0), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(1), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(0, "waitcheck_backend_exit_2: refused the first object"),
+                _result(1, "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 2
+
+    labels = [e.get("label") for e in reasons]
+    assert labels == [
+        f"gemm_shared_symbol ({sha}#0)", f"gemm_shared_symbol ({sha}#1)"
+    ]
+    assert len(set(labels)) == 2
+    observation = case.get("observation", "")
+    assert f"gemm_shared_symbol ({sha}#0): waitcheck_backend_exit_2" in observation
+    assert f"gemm_shared_symbol ({sha}#1): waitcheck_timeout" in observation
+    # the index was already in the manifest; it is the display label that lost it
+    assert [e.get("code_object_index") for e in reasons] == [0, 1]
+
+
+def test_a_deduped_row_names_which_of_two_same_named_scans_covered_it():
+    # The same defect one renderer over: a deduped row's Detail names its covering
+    # scan by bare name, so where two worklist rows share that name the cell does not
+    # say which of them was scanned. Qualified only when the name actually repeats.
+    covering_sha, other_sha = "beefaaa1", "beefbbb2"
+
+    def _identity(name: str, sha: str) -> dict:
+        return {
+            "name": name, "target": "gfx950",
+            "code_object": f"/a/b/sol_{sha}.hsaco", "code_object_sha256": sha,
+            "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _result(name: str, sha: str, why: str | None) -> dict:
+        return {
+            "identity": _identity(name, sha), "state": "error" if why else "ran",
+            "verdict": "error" if why else "pass", "findings": [], "reason": why,
+            "returncode": 2 if why else 0,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                {"identity": _identity("gemm", covering_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                # deduped onto the row above: same object, no result of its own
+                {"identity": _identity("gemm_gated", covering_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 7, "sources": ["gemm_csv"]},
+                # a second, unrelated object publishing the same symbol name
+                {"identity": _identity("gemm", other_sha), "total_time_ms": 0.0,
+                 "dispatch_count": 5, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result("gemm", covering_sha, "waitcheck_backend_exit_2: refused it"),
+                _result("gemm", other_sha, None),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    covering, deduped, other = case["kernels"]
+    assert deduped.get("verdict") == "error"
+    # the cell says which "gemm" was scanned, not merely that some "gemm" was; the two
+    # objects differ by digest, so that is as far as the qualifier has to widen
+    assert f"same code object as gemm ({covering_sha})" in deduped.get("detail", "")
+    assert "refused it" in deduped.get("detail", "")
+    # and the rows that carry their own result are untouched by the qualification
+    assert covering.get("name") == other.get("name") == "gemm"
+    assert other.get("detail") == ""
+
+
+def test_two_failing_kernels_sharing_a_digest_prefix_are_told_apart():
+    # The qualifier renders a 10-character digest prefix, so two objects sharing that
+    # prefix and an index produced the same label at both widenings. Remote, but the
+    # widening is only worth having if it terminates in something that cannot tie:
+    # the last tier spends the whole digest.
+    shared = "0123456789"
+    first, second = f"{shared}aaaa", f"{shared}bbbb"
+
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "same", "target": "gfx950",
+            "code_object": "/a/b/sol.hsaco", "code_object_sha256": sha,
+            "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _result(sha: str, why: str) -> dict:
+        return {
+            "identity": _identity(sha), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(first), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(second), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(first, "waitcheck_backend_exit_2: refused the first object"),
+                _result(second, "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    labels = [e.get("label") for e in (case.get("kernel_reasons") or [])]
+    # the widenings are cumulative, so the widest carries the index it did not need
+    # as well as the digest it did — the alternative is a tier that can drop the one
+    # field a bundled collision needs
+    assert labels == [f"same ({first}#0)", f"same ({second}#0)"]
+    assert len(set(labels)) == 2
+
+
+def test_a_lone_failure_is_qualified_against_a_clean_same_named_sibling():
+    # Ambiguity is a property of the page, not of the failing subset: qualifying only
+    # where two *failing* rows share a name left a single failure labelled bare while
+    # a clean row of the same name sat beside it, so the observation could not say
+    # which of the two the reason belonged to.
+    report = _report_with_two_objects_sharing_a_name()
+    case = gen.summarize_case(report, "warn")
+
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("label") == "gemm_shared_symbol (beefbbb2)"
+    assert "gemm_shared_symbol (beefbbb2): waitcheck_backend_exit_2" in case.get(
+        "observation", ""
+    )
+
+
+def test_a_result_identity_missing_object_fields_still_reaches_its_row():
+    # Every code-object field is optional on the wire, and reports whose kernel
+    # results carry only {name, target} exist (see `_waitcheck_report`). Joining on
+    # the full identity dropped those results outright — the row rendered a verdict
+    # with an empty Detail, losing the one field this PR exists to surface.
+    report = _waitcheck_report()
+    result = report["checks"][0]["kernel_results"][0]
+    result["state"] = "error"
+    result["verdict"] = "error"
+    result["reason"] = "waitcheck_backend_exit_2: refused input"
+    result["returncode"] = 2
+
+    case = gen.summarize_case(report, "warn")
+    row = case["kernels"][0]
+    assert row.get("verdict") == "error"
+    assert "refused input" in row.get("detail", "")
+
+    # and the manifest names the object, taken from the worklist row the result matched
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("code_object") == "/a/b/sol_1.hsaco"
+    assert reasons[0].get("code_object_sha256") == "93f09ae670abcdef"
+
+
+def test_a_sparse_result_is_not_guessed_onto_one_of_two_same_named_rows():
+    # The fallback is only safe where it can mean one thing. Two rows sharing a name
+    # and a target must not have a name-matched result attributed to either of them.
+    report = _report_with_two_objects_sharing_a_name()
+    for result in report["checks"][0]["kernel_results"]:
+        result["identity"] = {"name": "gemm_shared_symbol", "target": "gfx950"}
+
+    case = gen.summarize_case(report, "warn")
+    # no row claims it: attributing it to either would be a guess
+    assert [k.get("detail") for k in case["kernels"]] == ["", ""]
+
+    # but the reason is not lost — it surfaces unattributed rather than silently, with
+    # a null object saying plainly that the report did not pin one
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("reason") == "waitcheck_backend_exit_2: refused the second object"
+    assert reasons[0].get("code_object") is None
+    assert "waitcheck_backend_exit_2" in case.get("observation", "")
+
+
+def test_the_manifest_does_not_invent_a_scope_the_report_never_claimed():
+    # Review (#479): presence is meaning. `_identity_compatible` reads an omitted
+    # entry_offset as an unknown scope and an explicit `entry_offset: null` as a claim
+    # of a whole-object scan, so filling the omission in with None made env.json —
+    # which drops the "scope unknown" label — assert a scope the report never stated.
+    report = _report_with_two_objects_sharing_a_name()
+    for result in report["checks"][0]["kernel_results"]:
+        result["identity"] = {"name": "gemm_shared_symbol", "target": "gfx950"}
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    # this result serialized no code-object field at all, so the omission is the only
+    # thing that can carry "the report did not say which object, or at what scope"
+    assert not any(f in reasons[0] for f in gen._IDENTITY_OBJECT_FIELDS)
+
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+    recorded = ((env.get("observed") or {}).get("kernel_reasons") or [{}])[0]
+    assert recorded.get("reason") == "waitcheck_backend_exit_2: refused the second object"
+    assert "entry_offset" not in recorded
+    assert not any(f in recorded for f in gen._IDENTITY_OBJECT_FIELDS)
+
+    # contrast: a result that *does* claim a whole-object scan keeps the explicit null,
+    # so the two cases stay distinguishable in the manifest
+    stated = gen.summarize_case(_waitcheck_daily_topology_report(), "warn")
+    stated_env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=stated, report=None, built_refs=[], inputs=[],
+    )
+    stated_reason = ((stated_env.get("observed") or {}).get("kernel_reasons") or [{}])[0]
+    assert "entry_offset" in stated_reason
+    assert stated_reason.get("entry_offset") is None
+
+
+def test_an_exact_entry_result_missing_its_offset_cannot_cover_a_sibling():
+    # Scan scope is a property of the *selection*, not of whichever fields a result
+    # serialized. An exact-entry result that omits only `entry_offset` reads as a
+    # whole-object scan, so it could win the dedup index over the real object scan and
+    # lend its verdict to a sibling it never analyzed.
+    sha = "beefaaa1"
+
+    def _identity(name: str, offset: int | None) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 3, "kernel_count": 3,
+            "kernels": [
+                # an exact-entry selection, listed first so it keys the index first
+                {"identity": _identity("gemm_entry", 0x100), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity("gemm_object", None), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+                # deduped onto the whole-object scan: no result of its own
+                {"identity": _identity("gemm_gated", None), "total_time_ms": 0.0,
+                 "dispatch_count": 7, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                {
+                    # the offset the selection pins is absent from the result
+                    "identity": _identity("gemm_entry", None), "state": "ran",
+                    "verdict": "pass", "findings": [], "reason": None, "returncode": 0,
+                },
+                {
+                    "identity": _identity("gemm_object", None), "state": "error",
+                    "verdict": "error", "findings": [], "returncode": 2,
+                    "reason": "waitcheck_backend_exit_2: refused the object",
+                },
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    entry_row, object_row, gated = case["kernels"]
+    # the result claims whole-object scope, which cannot describe an exact-entry
+    # selection, so it attributes to no row and the entry row falls back to what the
+    # object scan says — a clean verdict inherited from an unattributable result would
+    # be a guess, and the guess that hides a failure
+    assert entry_row.get("verdict") == "error"
+    assert "same code object as gemm_object" in entry_row.get("detail", "")
+    assert object_row.get("verdict") == "error"
+    # the gated row inherits the scan that actually covered its object
+    assert gated.get("verdict") == "error"
+    assert "same code object as gemm_object" in gated.get("detail", "")
+    assert "refused the object" in gated.get("detail", "")
+
+
+def test_a_clean_object_scan_does_not_speak_for_an_exact_entry_row():
+    # Review (#479): the other direction of the same fallback. run_waitcheck dedups a
+    # selection only when entry_offset is None, so an exact-entry row always gets its
+    # own scan task — a missing result there means the result was lost, not folded into
+    # the object scan. Letting a CLEAN scan stand in rendered the row `pass`, "scanned
+    # once", while its own backend error sat unattributed at case scope.
+    sha = "beefaaa1"
+
+    def _identity(name: str, offset: int | None) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity("gemm_entry", 0x100), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity("gemm_object", None), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                # the object scan came back clean
+                {"identity": _identity("gemm_object", None), "state": "ran",
+                 "verdict": "pass", "findings": [], "reason": None, "returncode": 0},
+                # the exact row's own result claims whole-object scope, so it cannot
+                # describe that row and stays unattributed
+                {"identity": _identity("gemm_entry", None), "state": "error",
+                 "verdict": "error", "findings": [], "returncode": 2,
+                 "reason": "waitcheck_backend_exit_2: refused the entry"},
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    entry_row, object_row = case["kernels"]
+
+    # the exact row is not claimed as covered, and above all is not reported clean
+    assert entry_row.get("verdict") != "pass"
+    assert "scanned once" not in entry_row.get("detail", "")
+    assert object_row.get("verdict") == "pass"
+
+    # and the error is not lost — it surfaces unattributed
+    reasons = case.get("kernel_reasons") or []
+    assert [e.get("reason") for e in reasons] == [
+        "waitcheck_backend_exit_2: refused the entry"
+    ]
+    assert "refused the entry" in case.get("observation", "")
+
+
+def test_a_deduped_sibling_inherits_only_the_waitcheck_scan():
+    # Review (#479): the accumulation folds every sanitizer's result for a kernel into
+    # one record, and the dedup attribution read that aggregate. A covering row with a
+    # Waitcheck `pass` and a ConSan `error` therefore rendered its sibling `error`,
+    # "scanned once — <ConSan reason>" — a claim no scan made, since ConSan reports per
+    # kernel and only the Waitcheck object scan covers the sibling.
+    sha = "beefaaa1"
+
+    def _identity(name: str) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _check(sanitizer: str, verdict: str, why: str | None) -> dict:
+        return {
+            "sanitizer": sanitizer, "state": "ran", "verdict": verdict,
+            "reason": "worklist_not_fully_checked", "returncode": 0, "findings": [],
+            "kernel_results": [{
+                "identity": _identity("kern_A"), "state": "ran", "verdict": verdict,
+                "findings": [], "reason": why, "returncode": 0,
+            }],
+            "coverage": [], "backend": {},
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(name), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]}
+                for name in ("kern_A", "kern_B")
+            ],
+        },
+        "checks": [
+            _check("waitcheck", "pass", None),
+            _check("consan", "error", "consan_hook_not_found"),
+        ],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    covering, sibling = case["kernels"]
+
+    # the covering row keeps the cross-sanitizer aggregate: it really did error
+    assert covering.get("verdict") == "error"
+    assert "consan_hook_not_found" in covering.get("detail", "")
+
+    # the sibling was covered by the object scan only, which passed
+    assert sibling.get("verdict") != "error"
+    assert "consan_hook_not_found" not in sibling.get("detail", "")
+
+
+def test_a_clean_object_scan_does_not_speak_for_an_objectless_row():
+    # Review (#479): the recipient side of the same rule. A row carrying a digest but
+    # no code object is not `KernelIdentity.code_object_scan`, so run_waitcheck would
+    # never have deduped it either — yet it matched the (sha, index) key and inherited
+    # a clean verdict as "scanned once". Only the objectless row differs from
+    # test_a_deduped_sibling_is_attributed_only_from_a_real_object_scan.
+    sha = "beefaaa1"
+
+    def _identity(name: str, code_object: str | None) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": code_object,
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _report(covering_verdict: str, why: str | None) -> dict:
+        return {
+            "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+            "overall_verdict": "error", "execution_status": "error",
+            "worklist": {
+                "schema": "aorta.kernel_worklist/0.1",
+                "requirement": "top_dispatch_count", "top_n": 2, "kernel_count": 2,
+                "kernels": [
+                    {"identity": _identity("kern_A", "/a/b/sol.hsaco"),
+                     "total_time_ms": 0.0, "dispatch_count": 9, "sources": ["gemm_csv"]},
+                    # same digest and index, but no object of its own
+                    {"identity": _identity("kern_B", None), "total_time_ms": 0.0,
+                     "dispatch_count": 8, "sources": ["gemm_csv"]},
+                ],
+            },
+            "checks": [{
+                "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+                "reason": "worklist_not_fully_checked", "returncode": None,
+                "findings": [],
+                "kernel_results": [{
+                    "identity": _identity("kern_A", "/a/b/sol.hsaco"), "state": "ran",
+                    "verdict": covering_verdict, "findings": [], "reason": why,
+                    "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            }],
+        }
+
+    clean = gen.summarize_case(_report("pass", None), "warn")
+    objectless = clean["kernels"][1]
+    assert objectless.get("verdict") != "pass"
+    assert "scanned once" not in objectless.get("detail", "")
+
+    # a failing scan still shows there: the object it shares did fail
+    failed = gen.summarize_case(
+        _report("error", "waitcheck_backend_exit_2: refused the object"), "warn"
+    )
+    assert failed["kernels"][1].get("verdict") == "error"
+    assert "scanned once" in failed["kernels"][1].get("detail", "")
+
+
+def test_a_sparse_result_merges_into_the_exact_one_for_the_same_row():
+    # One check can serialize the full identity while another serializes only
+    # {name, target}. The two land under different join keys, and taking the exact one
+    # alone dropped the other check's verdict, reason and findings off the row —
+    # the same cross-check loss the accumulation exists to stop.
+    identity = {
+        "name": "vecadd", "target": "gfx950", "code_object": "/a/b/vecadd.hsaco",
+        "code_object_sha256": "beefaaa1", "code_object_index": 0, "entry_offset": None,
+    }
+
+    def _finding(sanitizer: str, code: str) -> dict:
+        return {
+            "sanitizer": sanitizer, "severity": "warning", "code": code,
+            "message": f"{code} on vecadd", "kernel_name": "vecadd",
+            "code_object": "/a/b/vecadd.hsaco", "entry_offset": None, "metadata": {},
+        }
+
+    wait_finding, race_finding = _finding("waitcheck", "wait_hazard"), _finding("consan", "race")
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "fail", "execution_status": "ran",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": identity, "total_time_ms": 0.0,
+                         "dispatch_count": 9, "sources": ["gemm_csv"]}],
+        },
+        "checks": [
+            {
+                "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+                "reason": "worklist_not_fully_checked", "returncode": None,
+                "findings": [wait_finding],
+                "kernel_results": [{
+                    "identity": identity, "state": "error", "verdict": "error",
+                    "findings": [wait_finding], "returncode": 2,
+                    "reason": "waitcheck_backend_exit_2: refused input",
+                }],
+                "coverage": [], "backend": {},
+            },
+            {
+                "sanitizer": "consan", "state": "ran", "verdict": "fail",
+                "reason": None, "returncode": 0, "findings": [race_finding],
+                "kernel_results": [{
+                    # the same kernel, identified by name and target only
+                    "identity": {"name": "vecadd", "target": "gfx950"},
+                    "state": "ran", "verdict": "fail", "findings": [race_finding],
+                    "reason": "consan_race_detected", "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            },
+        ],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    assert len(case["kernels"]) == 1
+    row = case["kernels"][0]
+    # both checks' reasons survive, labelled, and the verdict is the least clean
+    assert "waitcheck: waitcheck_backend_exit_2" in row.get("detail", "")
+    assert "consan: consan_race_detected" in row.get("detail", "")
+    assert row.get("verdict") == "fail"
+    # and the column still sums to the case total rather than losing one check's finding
+    assert row.get("findings") == 2
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == case.get("findings") == 2
+    assert len(case.get("kernel_reasons") or []) == 1
+
+
+def test_multiple_sparse_representations_merge_into_their_only_compatible_row():
+    # Separate checks may serialize different optional subsets of one identity.
+    # Once each candidate is compatible with exactly one row, their count is not
+    # ambiguous: all of them belong on that row.
+    report = _waitcheck_report()
+    identity = report["worklist"]["kernels"][0]["identity"]
+
+    def _finding(sanitizer: str, code: str) -> dict:
+        return {
+            "sanitizer": sanitizer, "severity": "warning", "code": code,
+            "message": f"{code} on gemm_x", "kernel_name": "gemm_x",
+            "code_object": identity["code_object"], "entry_offset": None, "metadata": {},
+        }
+
+    wait_finding = _finding("waitcheck", "wait_hazard")
+    race_finding = _finding("consan", "race")
+    report["checks"] = [
+        {
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None,
+            "findings": [wait_finding], "coverage": [], "backend": {},
+            "kernel_results": [{
+                "identity": {"name": "gemm_x", "target": "gfx950"},
+                "state": "error", "verdict": "error", "findings": [wait_finding],
+                "reason": "waitcheck_backend_exit_2: refused input", "returncode": 2,
+            }],
+        },
+        {
+            "sanitizer": "consan", "state": "ran", "verdict": "fail",
+            "reason": None, "returncode": 0, "findings": [race_finding],
+            "coverage": [], "backend": {},
+            "kernel_results": [{
+                "identity": {
+                    "name": "gemm_x", "target": "gfx950",
+                    "code_object": identity["code_object"],
+                },
+                "state": "ran", "verdict": "fail", "findings": [race_finding],
+                "reason": "consan_race_detected", "returncode": 0,
+            }],
+        },
+    ]
+    report["overall_verdict"] = "fail"
+
+    case = gen.summarize_case(report, "fail")
+    row = case["kernels"][0]
+    assert "waitcheck: waitcheck_backend_exit_2" in row.get("detail", "")
+    assert "consan: consan_race_detected" in row.get("detail", "")
+    assert row.get("verdict") == "fail"
+    assert row.get("findings") == case.get("findings") == 2
+
+
+def test_a_result_naming_a_different_object_is_not_attributed_to_the_row():
+    # Only *omitted* fields are wildcards. A result whose identity is fully populated
+    # and disagrees with the row describes a different object, so attributing it would
+    # put one object's reason on another object's row — and then stamp the row's
+    # identity onto it, making env.json name an object that did not fail.
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "gemm", "target": "gfx950", "code_object": f"/a/b/sol_{sha}.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    listed, other = "beefaaa1", "beefbbb2"
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": _identity(listed), "total_time_ms": 0.0,
+                         "dispatch_count": 9, "sources": ["gemm_csv"]}],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [{
+                # same name and target, but a different object than the row lists
+                "identity": _identity(other), "state": "error", "verdict": "error",
+                "findings": [], "returncode": 2,
+                "reason": "waitcheck_backend_exit_2: refused the other object",
+            }],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    assert case["kernels"][0].get("detail") == ""
+
+    # the reason still surfaces, against the object that actually carries it
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("code_object_sha256") == other
+    assert reasons[0].get("code_object") == f"/a/b/sol_{other}.hsaco"
+
+
+def test_a_long_shared_kernel_name_keeps_its_identity_qualifier():
+    # The label budget has to fall on the name, not on the assembled label: right-
+    # truncating the label removes the (digest) suffix `_display_labels` appended, so
+    # two failures behind one long name render the same string again.
+    long_name = "gemm_" + "N" * 300
+    first, second = "beefaaa1", "beefbbb2"
+
+    def _identity(sha: str) -> dict:
+        return {
+            "name": long_name, "target": "gfx950", "code_object": f"/a/b/sol_{sha}.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _result(sha: str, why: str) -> dict:
+        return {
+            "identity": _identity(sha), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(first), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(second), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(first, "waitcheck_backend_exit_2: refused the first object"),
+                _result(second, "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    labels = [e.get("label", "") for e in (case.get("kernel_reasons") or [])]
+    assert len(set(labels)) == 2
+    assert labels[0].endswith(f"({first})") and labels[1].endswith(f"({second})")
+    # and the qualifier survives into the length-capped callout too
+    _, text = gen._survey_message_parts(case)
+    assert f"({first})" in text
+
+
+def test_two_long_names_agreeing_on_their_head_are_still_told_apart():
+    # Collisions have to be counted on the *rendered* names. Two distinct names that
+    # agree on their first characters each look unique before the budget is applied,
+    # then render as one string — as ambiguous to a reader as a repeated name, and
+    # without even the qualifier a repeated name would have earned.
+    shared = "gemm_" + "N" * 300
+    first, second = f"{shared}_AAA", f"{shared}_BBB"
+
+    def _identity(name: str, sha: str) -> dict:
+        return {
+            "name": name, "target": "gfx950", "code_object": f"/a/b/sol_{sha}.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    def _row(name: str, sha: str) -> dict:
+        return {"identity": _identity(name, sha), "total_time_ms": 0.0,
+                "dispatch_count": 9, "sources": ["gemm_csv"]}
+
+    def _result(name: str, sha: str, why: str) -> dict:
+        return {
+            "identity": _identity(name, sha), "state": "error", "verdict": "error",
+            "findings": [], "reason": why, "returncode": 2,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [_row(first, "beefaaa1"), _row(second, "beefbbb2")],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                _result(first, "beefaaa1", "waitcheck_backend_exit_2: refused the first"),
+                _result(second, "beefbbb2", "waitcheck_timeout"),
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    labels = [e.get("label", "") for e in (case.get("kernel_reasons") or [])]
+    assert len(labels) == 2
+    assert len(set(labels)) == 2
+
+
+def test_two_long_names_in_one_object_keep_their_distinguishing_tails():
+    # When the rendered names tie and the identities tie too — two long names in the
+    # same code object — no qualifier can separate them, so the only thing left is the
+    # part of the name the head budget cut off.
+    identity_a = {
+        "name": "gemm_" + "N" * 300 + "_AAA", "target": "gfx950",
+        "code_object": "/a/b/sol.hsaco", "code_object_sha256": "beefaaa1",
+        "code_object_index": 0, "entry_offset": None,
+    }
+    identity_b = dict(identity_a, name="gemm_" + "N" * 300 + "_BBB")
+
+    labels = gen._display_labels([("a", identity_a), ("b", identity_b)])
+    assert labels == ["a", "b"]  # short names need none of this
+
+    labels = gen._display_labels([
+        (identity_a["name"], identity_a), (identity_b["name"], identity_b)
+    ])
+    assert len(set(labels)) == 2
+    assert labels[0].endswith("_AAA") and labels[1].endswith("_BBB")
+    assert all(len(label) <= 64 for label in labels)
+
+
+def test_an_omitted_offset_does_not_merge_two_selections_of_one_object():
+    # An exact-entry and a whole-object selection over one object are both valid
+    # (their stable_key scopes differ). If the exact result omits its optional
+    # entry_offset, the two results serialize to the same fields — collapsing them
+    # before either is reconciled with a selection merges scans of different scopes,
+    # and the merged verdict then reaches the object scan's deduped siblings.
+    sha = "beefaaa1"
+
+    def _identity(offset: int | None) -> dict:
+        return {
+            "name": "gemm", "target": "gfx950", "code_object": "/a/b/sol.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": offset,
+        }
+
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(0x100), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(None), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [
+                {
+                    # the exact-entry scan, serialized without its offset
+                    "identity": {
+                        "name": "gemm", "target": "gfx950",
+                        "code_object": "/a/b/sol.hsaco", "code_object_sha256": sha,
+                        "code_object_index": 0,
+                    },
+                    "state": "error", "verdict": "error", "findings": [],
+                    "reason": "waitcheck_backend_exit_2: refused the entry",
+                    "returncode": 2,
+                },
+                {
+                    "identity": _identity(None), "state": "ran", "verdict": "pass",
+                    "findings": [], "reason": None, "returncode": 0,
+                },
+            ],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    exact_row, object_row = case["kernels"]
+    # the object scan keeps its own clean verdict rather than the merger of both
+    assert object_row.get("verdict") == "pass"
+    assert object_row.get("detail") == ""
+    # and the ambiguous result is not silently placed on either row
+    assert "refused the entry" not in exact_row.get("detail", "")
+    reasons = case.get("kernel_reasons") or []
+    assert [e.get("reason") for e in reasons] == [
+        "waitcheck_backend_exit_2: refused the entry"
+    ]
+    assert reasons[0].get("label") == "gemm (beefaaa1#0; scope unknown)"
+
+
+def test_an_omitted_index_is_labelled_unknown_beside_a_null_index_row():
+    # An omitted index is a wildcard, while an explicit null is a claim. With rows
+    # for null and zero, a result omitting only the index is compatible with both and
+    # must stay visibly unattributed rather than sharing the null-index row's label.
+    sha = "beefaaa1"
+
+    def _identity(index: int | None) -> dict:
+        return {
+            "name": "gemm", "target": "gfx950", "code_object": "/a/b/bundle.hsaco",
+            "code_object_sha256": sha, "code_object_index": index, "entry_offset": None,
+        }
+
+    ambiguous = _identity(None)
+    ambiguous.pop("code_object_index")
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 2, "kernel_count": 2,
+            "kernels": [
+                {"identity": _identity(None), "total_time_ms": 0.0,
+                 "dispatch_count": 9, "sources": ["gemm_csv"]},
+                {"identity": _identity(0), "total_time_ms": 0.0,
+                 "dispatch_count": 8, "sources": ["gemm_csv"]},
+            ],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [{
+                "identity": ambiguous, "state": "error", "verdict": "error",
+                "findings": [], "reason": "waitcheck_backend_exit_2: unknown object",
+                "returncode": 2,
+            }],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    assert reasons[0].get("label") == "gemm (beefaaa1; index unknown)"
+    assert "gemm (beefaaa1; index unknown)" in case.get("observation", "")
+
+
+def test_presence_widening_marks_every_omitted_optional_identity_field():
+    # Presence is part of the join key for every optional identity field, so the
+    # final display widening must preserve the same distinction for all four.
+    explicit = {
+        "name": "gemm", "target": "gfx950", "code_object": None,
+        "code_object_sha256": None, "code_object_index": None, "entry_offset": None,
+    }
+    for field, marker in (
+        ("code_object", "object unknown"),
+        ("code_object_sha256", "digest unknown"),
+        ("code_object_index", "index unknown"),
+        ("entry_offset", "scope unknown"),
+    ):
+        omitted = dict(explicit)
+        omitted.pop(field)
+        labels = gen._display_labels([("gemm", explicit), ("gemm", omitted)])
+        assert len(set(labels)) == 2, field
+        assert marker in labels[1]
+
+
+def test_two_long_names_differing_only_in_the_elided_middle_are_told_apart():
+    # Last resort. Two names can agree on both ends and differ only in the middle the
+    # budget elides, and if they share a code object no identity field separates them
+    # either — so the labels tied and the two reasons became unattributable.
+    head, tail = "gemm_" + "K" * 60, "L" * 60 + "_end"
+    identity_a = {
+        "name": f"{head}_AAA_{tail}", "target": "gfx950",
+        "code_object": "/a/b/sol.hsaco", "code_object_sha256": "beefaaa1",
+        "code_object_index": 0, "entry_offset": None,
+    }
+    identity_b = dict(identity_a, name=f"{head}_BBB_{tail}")
+
+    labels = gen._display_labels([
+        (identity_a["name"], identity_a), (identity_b["name"], identity_b)
+    ])
+    assert len(set(labels)) == 2
+
+
+def test_two_names_differing_only_in_whitespace_are_told_apart():
+    # Review (#479): the last-resort digest hashed the RENDERED name, and rendering
+    # collapses internal whitespace. Two whole-object selections in one code object
+    # named "a b" and "a  b" have distinct stable_keys, but every rendering tier
+    # showed the same text and the digest agreed too, so both labels tied.
+    head, tail = "gemm_" + "K" * 60, "L" * 60 + "_end"
+    identity_a = {
+        "name": f"{head} {tail}", "target": "gfx950",
+        "code_object": "/a/b/sol.hsaco", "code_object_sha256": "beefaaa1",
+        "code_object_index": 0, "entry_offset": None,
+    }
+    identity_b = dict(identity_a, name=f"{head}  {tail}")
+    assert identity_a.get("name") != identity_b.get("name")
+
+    labels = gen._display_labels([
+        (identity_a["name"], identity_a), (identity_b["name"], identity_b)
+    ])
+    assert len(set(labels)) == 2
+
+    # the digest is over the name as written, so it separates the two on its own
+    digests = {gen._hashed_clip_name(str(i.get("name"))) for i in (identity_a, identity_b)}
+    assert len(digests) == 2
+
+
+def test_the_last_resort_label_carries_the_whole_name_digest():
+    # Review (#479): an 8-hex prefix is 32 bits and can tie by itself, which would
+    # leave _display_labels' uniqueness claim false with no tier left to widen into.
+    # The widening therefore ends at the full digest; pin that it is not re-truncated.
+    render, rendering = gen._NAME_RENDERINGS[-1]
+    assert render is gen._hashed_clip_name and rendering == {"width": 64}
+
+    name = "gemm_" + "K" * 200
+    whole = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    assert gen._hashed_clip_name(name, width=64).endswith(f"~{whole}")
+    assert gen._hashed_clip_name(name).endswith(f"~{whole[:8]}")
+
+
+def test_an_unattributed_reason_is_not_labelled_like_a_visible_row():
+    # A reason no row claimed still renders on the page. Given a bare name that matches
+    # a visible row, it reads as an accusation against that row — while the object it
+    # came from is not on the page at all, and only env.json says so.
+    def _identity(sha: str) -> dict:
+        return {
+            "name": "gemm", "target": "gfx950", "code_object": f"/a/b/sol_{sha}.hsaco",
+            "code_object_sha256": sha, "code_object_index": 0, "entry_offset": None,
+        }
+
+    listed, other = "beefaaa1", "beefbbb2"
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": _identity(listed), "total_time_ms": 0.0,
+                         "dispatch_count": 9, "sources": ["gemm_csv"]}],
+        },
+        "checks": [{
+            "sanitizer": "waitcheck", "state": "error", "verdict": "error",
+            "reason": "worklist_not_fully_checked", "returncode": None, "findings": [],
+            "kernel_results": [{
+                "identity": _identity(other), "state": "error", "verdict": "error",
+                "findings": [], "returncode": 2,
+                "reason": "waitcheck_backend_exit_2: refused the other object",
+            }],
+            "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    reasons = case.get("kernel_reasons") or []
+    assert len(reasons) == 1
+    # qualified against the row it would otherwise be mistaken for
+    assert reasons[0].get("label") == f"gemm ({other})"
+    assert f"gemm ({other}): waitcheck_backend_exit_2" in case.get("observation", "")
+
+
+def test_a_long_kernel_name_cannot_truncate_its_own_reason_away():
+    # Kernel names are unbounded — a mangled template instantiation runs to hundreds of
+    # characters. Budgeting only the rollup still let the label spend the rest of the
+    # allowance before its reason began, leaving a callout that names a kernel and no
+    # cause at all.
+    long_name = "gemm_" + "N" * 300
+    report = json.loads(
+        json.dumps(_waitcheck_daily_topology_report()).replace(
+            "gemm_NT_M256_N4096_K1024", long_name
+        )
+    )
+
+    case = gen.summarize_case(report, "warn")
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert "waitcheck_backend_exit_2" in text
+
+
+def test_a_full_identity_label_cannot_truncate_the_backend_cause():
+    # A name-budgeted label can still be long when disambiguation needs the full
+    # digest and index. The rollup must yield space without dropping that qualifier
+    # or the backend explanation after it.
+    first = "0123456789" + "a" * 54
+    second = "0123456789" + "b" * 54
+    long_name = "gemm_" + "N" * 300
+    report = json.loads(
+        json.dumps(_report_with_two_objects_sharing_a_name())
+        .replace("beefaaa1", first)
+        .replace("beefbbb2", second)
+        .replace("gemm_shared_symbol", long_name)
+    )
+    report["checks"][0]["reason"] = "waitcheck_analysis_failed: " + "backend noise " * 40
+
+    case = gen.summarize_case(report, "warn")
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert text.startswith("waitcheck_analysis_failed:")
+    assert f"({second}#0)" in text
+    assert "refused the second object" in text
+    assert len(text) <= gen._MSG_LIMIT
+
+
+def test_preflight_findings_still_land_in_the_kernel_column():
+    # run_sanitizers appends the combined hook's Waitcheck preflight as a third check.
+    # `consan._relabel` keeps that check's findings and drops its kernel results, so
+    # its hazards count toward the case total with no per-kernel result to carry them
+    # — and the kernel column silently undercounted the case by exactly those.
+    identity = {
+        "name": "vecadd", "target": "gfx950", "code_object": "/a/b/vecadd.hsaco",
+        "code_object_sha256": "beefaaa1", "code_object_index": 0, "entry_offset": None,
+    }
+
+    def _finding(sanitizer: str, code: str, kernel_name: str | None) -> dict:
+        return {
+            "sanitizer": sanitizer, "severity": "warning", "code": code,
+            "message": f"{code} on vecadd", "kernel_name": kernel_name,
+            "code_object": "/a/b/vecadd.hsaco", "entry_offset": None, "metadata": {},
+        }
+
+    preflight_finding = _finding("waitcheck_preflight", "wait_hazard", "vecadd")
+    waitcheck_finding = _finding("waitcheck", "wait_hazard", "vecadd")
+    consan_finding = _finding("consan", "race", None)
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "fail", "execution_status": "ran",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": identity, "total_time_ms": 0.0,
+                         "dispatch_count": 9, "sources": ["gemm_csv"]}],
+        },
+        "checks": [
+            {
+                "sanitizer": "waitcheck", "state": "ran", "verdict": "warn",
+                "reason": None, "returncode": 0, "findings": [waitcheck_finding],
+                "kernel_results": [{
+                    "identity": identity, "state": "ran", "verdict": "warn",
+                    "findings": [waitcheck_finding], "reason": None, "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            },
+            {
+                "sanitizer": "consan", "state": "ran", "verdict": "fail",
+                "reason": None, "returncode": 0, "findings": [consan_finding],
+                "kernel_results": [{
+                    "identity": identity, "state": "ran", "verdict": "fail",
+                    "findings": [consan_finding], "reason": None, "returncode": 0,
+                }],
+                "coverage": [], "backend": {},
+            },
+            # relabelled out of the ConSan run: findings kept, kernel results dropped
+            {
+                "sanitizer": "waitcheck_preflight", "state": "ran", "verdict": "warn",
+                "reason": None, "returncode": 0, "findings": [preflight_finding],
+                "kernel_results": [], "coverage": [], "backend": {},
+            },
+        ],
+    }
+
+    case = gen.summarize_case(report, "warn")
+    assert case.get("findings") == 3
+    assert sum(k.get("findings", 0) for k in case["kernels"]) == 3
+
+
+def test_a_resultless_finding_is_credited_once_across_same_named_rows():
+    # A result-less finding names a kernel rather than an identity. Two uncovered,
+    # non-deduped rows can share that name, but crediting the finding to both makes
+    # the kernel column exceed the case total.
+    report = _report_with_two_objects_sharing_a_name()
+    report["checks"] = [{
+        "sanitizer": "waitcheck_preflight", "state": "ran", "verdict": "warn",
+        "reason": None, "returncode": 0,
+        "findings": [{
+            "sanitizer": "waitcheck_preflight", "severity": "warning",
+            "code": "wait_hazard", "message": "hazard on shared symbol",
+            "kernel_name": "gemm_shared_symbol", "code_object": None,
+            "entry_offset": None, "metadata": {},
+        }],
+        "kernel_results": [], "coverage": [], "backend": {},
+    }]
+    report["overall_verdict"] = "warn"
+
+    case = gen.summarize_case(report, "warn")
+    assert [row.get("findings") for row in case["kernels"]] == [1, 0]
+    assert sum(row.get("findings", 0) for row in case["kernels"]) == case.get("findings") == 1
+
+
+def test_an_uncovered_row_does_not_borrow_a_same_named_results_finding():
+    # Findings already carried by a kernel result belong to that identity. Falling
+    # back through the name-only index put the same finding on an earlier uncovered
+    # row as well, so the kernel column counted it twice.
+    report = _report_with_two_objects_sharing_a_name()
+    check = report["checks"][0]
+    finding = check["findings"][0]
+    finding["kernel_name"] = "gemm_shared_symbol"
+    matched_result = check["kernel_results"][1]
+    matched_result["findings"] = [finding]
+    check["kernel_results"] = [matched_result]
+
+    case = gen.summarize_case(report, "warn")
+    assert [row.get("findings") for row in case["kernels"]] == [0, 1]
+    assert sum(row.get("findings", 0) for row in case["kernels"]) == case.get("findings") == 1
+
+
+def test_a_long_rollup_cannot_truncate_the_kernel_reasons_away():
+    # The callout is one line and length-capped. Clamping only the concatenated
+    # string let a long check-level rollup spend the whole budget, so the per-kernel
+    # reasons were cut off the end — the callout kept the part that says nothing and
+    # dropped the part it exists to show. A rollup is not always short: ConSan builds
+    # `waitcheck_analysis_failed: <parser output>` out of tool text.
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["reason"] = "waitcheck_analysis_failed: " + "backend noise " * 40
+    case = gen.summarize_case(report, "warn")
+
+    label, text = gen._survey_message_parts(case)
+    assert label == "Reason"
+    assert text.startswith("waitcheck_analysis_failed:")
+    # the rollup is budgeted down so the kernel reason still lands
+    assert "gemm_NT_M256_N4096_K1024" in text
+    assert "waitcheck_backend_exit_2" in text
+    assert len(text) <= 240
+
+
+def test_a_long_reason_stays_within_the_detail_budget_on_both_rows():
+    # A backend reason quotes up to 300 characters of stderr tail, so a Detail cell
+    # can be pushed over its budget -- especially the deduped row, which spends part
+    # of it naming the scan that covered it. Neither row may exceed the cap, and the
+    # deduped row must still name its covering scan rather than being cut back to
+    # bare prefix.
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["kernel_results"][0]["reason"] = (
+        "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco: "
+        + "failed to parse segment; " * 12
+    )
+    case = gen.summarize_case(report, "warn")
+    covering, deduped = case["kernels"][0], case["kernels"][1]
+
+    assert len(covering.get("detail", "")) <= gen._DETAIL_LIMIT
+    assert len(deduped.get("detail", "")) <= gen._DETAIL_LIMIT
+    assert "same code object as gemm_NT_M256_N4096_K1024" in deduped.get("detail", "")
+    # the covering row carries the reason furthest, and is the row the cell points at
+    assert "waitcheck_backend_exit_2" in covering.get("detail", "")
+    assert "waitcheck_backend_exit_2" in deduped.get("detail", "")
+
+
+def test_a_multiline_backend_reason_stays_on_one_markdown_row():
+    # A Waitcheck backend reason quotes up to 300 characters of stderr tail, which is
+    # genuinely multi-line. Copied through unchanged it ended the table row mid-table
+    # and split the remaining cells into a stray paragraph.
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["kernel_results"][0]["reason"] = (
+        "waitcheck_backend_exit_2: /a/b/sol_126578.hsaco:\n"
+        "  failed to parse input executable\n\n  or code object\n"
+    )
+    case = gen.summarize_case(report, "warn")
+
+    for row in (case["kernels"][0], case["kernels"][1]):
+        assert "\n" not in row.get("detail", "")
+        assert "failed to parse input executable or code object" in row.get("detail", "")
+    assert "\n" not in case.get("observation", "")
+    assert all("\n" not in e["reason"] for e in case.get("kernel_reasons") or [])
+    assert "\n" not in gen._survey_message_parts(case)[1]
+
+    # the rendered table keeps one line per kernel and no stray continuation
+    entries = gen.survey_cases_from_spec(
+        {"cases": [{"name": "gemm", "label": "daily GEMM", "report": report}]}
+    )
+    md = "\n".join(gen._survey_section_md(entries)).splitlines()
+    heads = [i for i, line in enumerate(md) if line.endswith("| SHA-256 | Detail |")]
+    assert len(heads) == 1, f"expected one kernels table, got {heads}"
+    head = heads[0]
+    rows = md[head + 2 : head + 2 + len(case["kernels"])]
+    assert len(rows) == 3
+    assert all(line.startswith("| `") and line.endswith(" |") for line in rows)
+    # the row after the last kernel is the table's blank terminator, not a spill
+    assert md[head + 2 + len(case["kernels"])] == ""
 
 
 def test_summarize_consan_credits_process_findings_to_single_kernel():
@@ -1665,6 +3575,163 @@ def test_survey_message_error_reason_takes_precedence_over_partial_findings():
     assert "REGRESSION" not in html and "Regression" not in html
 
 
+def test_a_group_note_cannot_corrupt_the_survey_rollup_row():
+    # Review (#479): the last sink of the class this PR swept. The Note cell took the
+    # reason raw, unlike the sibling Detail and Example cells, so a backend reason —
+    # reachable today via "waitcheck_analysis_failed: <parser output>" — ended the row
+    # mid-table on its newline and shifted every later cell on its pipe.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "consan-obj", "group": "obj", "sanitizer": "consan",
+             "report": _errored_report_with_partial_findings(
+                 "waitcheck_analysis_failed: worklist_not_fully_checked\nwith | a pipe"
+             )},
+        ]}
+    )
+    groups = gen._group_survey_entries(entries)
+    lines = gen._survey_summary_md(groups)
+    rows = [line for line in lines if line.startswith("| ") and "---" not in line]
+    header, body = rows[0], rows[1:]
+    assert header == "| Kernel | waitcheck | ConSan | Findings | Note |"
+    assert len(body) == 1
+    row = body[0]
+
+    # the row stays one line with exactly the header's cell count
+    assert "\n" not in row
+    assert row.count("|") - row.count("\\|") == header.count("|")
+    # and the note is still readable, on one line, with its pipe escaped
+    assert "worklist_not_fully_checked with \\| a pipe" in row
+
+    # the HTML twin renders inside a <td> and needs neither, but must stay intact
+    assert "worklist_not_fully_checked" in gen._survey_group_note(groups[0][1])
+
+
+def _coverage_incomplete_reason(attribution: str) -> str:
+    # The real CoverageDecision.reasons shape: counts and mismatches first, then
+    # _failure_attributions LAST (consan_coverage.py builds it in that order). The
+    # attribution is the only part that says WHY coverage was rejected -- capacity
+    # (resource_failed) or a lowering/transform defect (placement_or_lowering_failed).
+    counts = "; ".join(
+        [
+            "verdict static_complete=false",
+            "verdict dynamic_complete=false",
+            "unsupported_code_objects=3",
+            "failed_code_objects=2",
+            "skipped_code_objects=1",
+            "access patched/supported mismatch: 0/14",
+            "barrier patched/supported mismatch: 0/9",
+            "atomic patched/supported mismatch: 0/6",
+        ]
+    )
+    sites = "; ".join(
+        f"{kind} sites {attribution} in gemm_kernel.hsaco: {n}"
+        for kind, n in (("access", 14), ("barrier", 9), ("atomic", 6))
+    )
+    return f"coverage incomplete: {counts}; {sites}"
+
+
+def test_the_observation_keeps_the_tail_that_discriminates_a_coverage_reason():
+    # Review (#479): the observation must not clamp primary.reason. A ConSan coverage
+    # reason carries its discriminator at the END, so a right-truncating cap keeps the
+    # counts -- identical between the two causes -- and drops the attribution that
+    # separates a capacity rejection from a lowering defect, collapsing them to one
+    # sentence. The whitespace normalization is kept; only the length cap is gone.
+    capacity, defect = (
+        gen.summarize_case(
+            _errored_report_with_partial_findings(_coverage_incomplete_reason(attribution)),
+            None,
+        )
+        for attribution in ("resource_failed", "placement_or_lowering_failed")
+    )
+
+    assert capacity.get("observation") != defect.get("observation")
+    assert "resource_failed" in capacity.get("observation", "")
+    assert "placement_or_lowering_failed" in defect.get("observation", "")
+    # no kernel_results on this path, so nothing else can carry the cause
+    assert (capacity.get("kernel_reasons") or []) == []
+
+    # normalization survives: a multi-line reason still renders on one line, whole
+    multiline = gen.summarize_case(
+        _errored_report_with_partial_findings(
+            "coverage incomplete:\n  access sites\tresource_failed in gemm.hsaco: 14\n"
+        ),
+        None,
+    )
+    observation = multiline.get("observation", "")
+    assert "\n" not in observation and "\t" not in observation
+    assert "access sites resource_failed in gemm.hsaco: 14" in observation
+
+
+def test_a_long_backend_tail_survives_into_the_observation_and_manifest():
+    # Review (#479): the same defect as the observation clamp, one layer upstream. The
+    # accumulation clamped the per-kernel reason to 300, and _run_one builds
+    # "waitcheck_backend_exit_N: " plus up to 300 characters of stderr tail -- so the
+    # cap cut the tail that carries the cause, for the sinks that are deliberately
+    # unbounded (the observation, env.json) as well as the bounded ones.
+    tail = "".join(f"frame{i:03d} " for i in range(40))[:300]
+    assert len(tail) == 300
+    reason = f"waitcheck_backend_exit_2: {tail}"
+    assert len(reason) > gen._DETAIL_LIMIT
+
+    report = _waitcheck_daily_topology_report()
+    report["checks"][0]["kernel_results"][0]["reason"] = reason
+    case = gen.summarize_case(report, "warn")
+
+    # the whole reason reaches the unbounded sinks, tail included
+    reasons = case.get("kernel_reasons") or []
+    assert [e.get("reason") for e in reasons] == [reason]
+    assert reason in case.get("observation", "")
+    assert tail[-40:] in case.get("observation", "")
+
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="daily-waitcheck-gemm",
+        command="aorta sanitize", meta={"run": "r", "gpu": "gfx950"},
+        summary=case, report=None, built_refs=[], inputs=[],
+    )
+    recorded = ((env.get("observed") or {}).get("kernel_reasons") or [{}])[0]
+    assert recorded.get("reason") == reason
+
+    # while the bounded display sinks still apply their own budget
+    for row in case["kernels"][:2]:
+        assert len(row.get("detail", "")) <= gen._DETAIL_LIMIT
+    assert len(gen._survey_message_parts(case)[1]) <= gen._MSG_LIMIT
+
+
+def test_a_lone_row_is_credited_both_finding_scopes_without_a_result():
+    # Review (#479): the mirror of the matched branch, which adds the process-scope
+    # count unconditionally for a lone row. Here it was gated on the named count being
+    # zero, so a check emitting one kernel-named AND one process-scope finding credited
+    # only the named one and the column fell one short of the case total.
+    def _finding(kernel_name):
+        return {
+            "sanitizer": "consan", "severity": "race", "code": "data_race",
+            "message": "conflict", "kernel_name": kernel_name,
+            "code_object": None, "entry_offset": None, "metadata": {},
+        }
+
+    identity = {"name": "gemm_f32_ss", "target": "gfx950"}
+    report = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "fail", "execution_status": "ok",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": identity, "total_time_ms": 0.0,
+                         "dispatch_count": 1, "sources": ["consan_repro"]}],
+        },
+        "checks": [{
+            "sanitizer": "consan", "state": "ran", "verdict": "fail", "reason": None,
+            "returncode": 0, "findings": [_finding("gemm_f32_ss"), _finding(None)],
+            "kernel_results": [], "coverage": [], "backend": {},
+        }],
+    }
+
+    case = gen.summarize_case(report, "fail")
+    assert case.get("findings") == 2
+    assert [k.get("findings") for k in case["kernels"]] == [2]
+    assert sum(k.get("findings") or 0 for k in case["kernels"]) == case.get("findings")
+
+
 def test_survey_informational_dir_isolates_malformed_nested_reports(tmp_path):
     # Review (#374): a top-level dict with a malformed NESTED shape (e.g.
     # {"checks": null}) passes the isinstance guard but makes the reduction raise
@@ -2206,9 +4273,9 @@ def test_kernel_tables_html_links_each_row_to_report():
     assert "javascript:alert(1)" not in unsafe
     assert ">report</a>" not in unsafe
 
-    # empty-kernel case spans the full (now 7-column) row
+    # empty-kernel case spans the full (now 8-column) row
     empty = gen._kernel_tables_html({**row, "kernels": []}, report_rel=rel)
-    assert "colspan=7>no kernels selected" in empty
+    assert "colspan=8>no kernels selected" in empty
 
 
 def test_build_html_kernel_rows_link_reports_on_both_tabs(tmp_path):

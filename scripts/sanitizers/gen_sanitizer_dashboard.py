@@ -8,7 +8,8 @@ emits, into ``--out-dir``:
   tabs (a pure CSS ``:checked`` radio toggle -- switching needs no network):
   **Expected behavior (guardrails)** -- the baseline-checked regression gate:
   baseline-health banner, latest per-recipe table, **per-kernel detail** (code
-  object / SHA-256 / dispatch count / observed sanitizer verdict / finding count),
+  object / SHA-256 / dispatch count / observed sanitizer verdict / finding count /
+  the kernel's fail-closed reason, em dash when it has none),
   and a cross-run history/trend table; and **Workload survey (observed-only)** --
   kernels drawn from multiple workloads (including aorta-internal-sourced kernels
   supplied via ``--survey`` and the caller-supplied ConSan cases from
@@ -70,11 +71,13 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import re
 import shutil
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from html import escape as _esc
 from pathlib import Path
@@ -584,14 +587,438 @@ def format_instant(value: Any) -> str:
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _clean_msg(message: str, limit: int = 160) -> str:
-    """Collapse a leading absolute path to its basename and clamp length."""
-    text = (message or "").strip()
+def _clean_msg(message: str, limit: int | None = 160) -> str:
+    """Collapse a leading absolute path to its basename and clamp length.
+
+    Internal whitespace collapses to single spaces first. Every caller renders into
+    a one-line context -- a Markdown table cell or a single-line callout -- and the
+    backend messages this carries are genuinely multi-line: a Waitcheck reason quotes
+    up to 300 characters of ``stderr`` tail, and a finding message is the tool's own
+    diagnostic. Either would end the table row mid-table and split the rest of the
+    cells into a stray paragraph. Only this display copy is normalized; the raw
+    ``sanitizer_report.json`` keeps the message as the backend emitted it.
+
+    ``limit=None`` normalizes without clamping, for the sinks that render onto a line
+    of their own. Truncation is from the right, which is destructive when the
+    discriminating part of a message is its tail -- a ``CoverageDecision`` reason
+    appends ``_failure_attributions`` (``resource_failed`` vs
+    ``placement_or_lowering_failed``) after its counts, so a clamp keeps the counts
+    and drops the only text that says *why* coverage was rejected.
+    """
+    text = " ".join((message or "").split())
     if text.startswith("/"):
         head, sep, rest = text.partition(":")
         if sep:
             text = head.rsplit("/", 1)[-1] + sep + rest
-    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+    if limit is None or len(text) <= limit:
+        return text
+    return text[: limit - 1] + "\u2026"
+
+
+# Mirrors ``rocjitsu_sanitizers.models._VERDICT_RANK``. The report reduces many
+# verdicts to one by taking the max of that rank, and ``CheckResult`` refuses a check
+# verdict cleaner than its own kernel results. The dashboard reads the serialized
+# strings, so it keeps the same order when it has to reduce several checks' results
+# for one kernel rather than inventing a second notion of "worse".
+_VERDICT_RANK: dict[str, int] = {
+    "pass": 0, "not_checked": 1, "warn": 2, "error": 3, "fail": 4,
+}
+
+
+def _worse_verdict(current: Any, candidate: Any) -> Any:
+    """The less clean of two observed verdicts (pure).
+
+    ``current`` of ``None`` means nothing has been observed yet, so the candidate
+    stands. An unrecognized verdict ranks below every known one rather than raising:
+    this is a renderer, and an unknown string is still worth displaying as-is.
+    """
+    if current is None:
+        return candidate
+    ranked = _VERDICT_RANK.get(str(candidate).strip().lower(), -1)
+    return candidate if ranked > _VERDICT_RANK.get(str(current).strip().lower(), -1) else current
+
+
+_IDENTITY_OBJECT_FIELDS = (
+    "code_object",
+    "code_object_sha256",
+    "code_object_index",
+    "entry_offset",
+)
+
+
+def _identity_projection(identity: Mapping[str, Any]) -> dict[str, Any]:
+    """An identity's code-object fields, kept present exactly where the report had them.
+
+    Presence is meaning here, not tidiness: ``_identity_compatible`` reads an omitted
+    ``entry_offset`` as an unknown scope and an explicit ``entry_offset: null`` as a
+    claim of a whole-object scan. A projection that filled in the omission with
+    ``None`` would make the manifest assert a scope the report never stated, which is
+    exactly the ambiguity these fields exist to remove.
+    """
+    return {field: identity[field] for field in _IDENTITY_OBJECT_FIELDS if field in identity}
+
+
+def _identity_compatible(row: dict[str, Any], result: dict[str, Any]) -> bool:
+    """Whether a result identity can describe this worklist row (pure).
+
+    Only *omitted* fields are wildcards -- omitted, not null. Every code-object field
+    is optional on the wire, so a result may carry a sparser view of the row it came
+    from, but a field it does serialize is a claim: ``entry_offset: null`` says this
+    was a whole-object scan and cannot describe an exact-entry selection, and a
+    disagreeing digest describes a different object entirely. Treating either as a
+    match would attach one selection's reason to another selection's row.
+    """
+    if row.get("name") != result.get("name") or row.get("target") != result.get("target"):
+        return False
+    return all(
+        field not in result or result.get(field) == row.get(field)
+        for field in _IDENTITY_OBJECT_FIELDS
+    )
+
+
+def _waitcheck_view(reduced: Mapping[str, Any]) -> dict[str, Any]:
+    """The Waitcheck-only part of an accumulated record (pure).
+
+    Only a Waitcheck whole-object scan covers a deduped sibling, but the accumulation
+    folds every sanitizer's result for a kernel into one record. Attributing that
+    aggregate would lend the sibling an outcome that was never about it: ConSan runs the
+    process once and reports per kernel, so a covering row carrying a Waitcheck ``pass``
+    beside a ConSan ``error`` covers its sibling with the ``pass`` alone -- rendering it
+    ``error`` with "scanned once -- <ConSan reason>" is a claim no scan made.
+    """
+    reasons = [(san, reason) for san, reason in reduced.get("reasons", ()) if san == "waitcheck"]
+    return {
+        "verdict": reduced.get("waitcheck_verdict"),
+        "reason": _kernel_reason_text(reasons),
+        "name": reduced.get("name"),
+    }
+
+
+def _dedup_covers(row: Mapping[str, Any], covering: Mapping[str, Any]) -> bool:
+    """Whether an object scan may speak for a row that has no result of its own (pure).
+
+    A whole-object scan disassembles every entry in the object, so a selection that was
+    deduped away is genuinely covered -- which is why an em dash there read as "not
+    checked" and hid a gated kernel whose object had failed.
+
+    But ``run_waitcheck`` dedups a selection only when it is a whole-object one, and
+    that is the full ``KernelIdentity.code_object_scan`` shape -- a real object, a real
+    digest, and no entry offset. An exact-entry selection, or one carrying a digest with
+    no object, always gets its own scan task. A missing result on such a row therefore
+    means the result was lost or unattributable, not that it was folded into this scan,
+    and a *clean* scan standing in for it would render "scanned once" over a row whose
+    own error is sitting unattributed at case scope. A non-clean scan is still worth
+    showing there -- the object it lives in did fail -- so only the clean direction is
+    withheld. The condition mirrors the producer's, applied to the recipient.
+    """
+    could_have_been_deduped = bool(
+        row.get("code_object")
+        and row.get("code_object_sha256")
+        and row.get("entry_offset") is None
+    )
+    if could_have_been_deduped:
+        return True
+    return str(covering.get("verdict") or "").strip().lower() not in {"pass", "not_checked"}
+
+
+def _with_sanitizer(previous: dict[str, Any] | None, sanitizer: str) -> list[str]:
+    """The sanitizers that have contributed a result for one kernel, in order (pure)."""
+    seen = list(previous["sanitizers"]) if previous else []
+    return seen if sanitizer in seen else [*seen, sanitizer]
+
+
+def _merge_reduced(primary: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
+    """Fold two accumulated records for the same kernel into one (pure).
+
+    Same arithmetic as the per-check accumulation: the least clean verdict, findings
+    summed so the column still sums to the case total, and every reason kept. Used
+    where one check serialized a full identity for a kernel and another serialized a
+    sparse one, so the two landed under different join keys.
+    """
+    reasons = [*primary["reasons"], *other["reasons"]]
+    return {
+        "verdict": _worse_verdict(primary["verdict"], other["verdict"]),
+        "waitcheck_verdict": _worse_verdict(
+            primary["waitcheck_verdict"], other["waitcheck_verdict"]
+        ),
+        "findings": primary["findings"] + other["findings"],
+        "state": primary["state"],
+        "reasons": reasons,
+        "reason": _kernel_reason_text(reasons),
+        "returncode": (
+            primary["returncode"] if primary["returncode"] is not None else other["returncode"]
+        ),
+        "name": primary["name"],
+        "identity": primary["identity"],
+        "sanitizers": [
+            *primary["sanitizers"],
+            *(s for s in other["sanitizers"] if s not in primary["sanitizers"]),
+        ],
+    }
+
+
+def _identity_key(identity: dict[str, Any]) -> tuple[Any, ...]:
+    """The join key from a kernel result to its worklist row (pure).
+
+    A kernel *name* is not an identity. ``KernelWorklist`` only rejects duplicate
+    ``KernelIdentity.stable_key``, and that key carries the digest (scan mode) or the
+    entry offset (exact mode) rather than pinning the name -- so two entries may share
+    a symbol name while addressing different code objects, or different entries of one
+    object, and both are valid. Joining on the name merged those distinct scans onto a
+    single row: each got the other's verdict and reasons, and their findings were
+    summed onto both, double-counting against the case total. Joining on every
+    serialized identity field keeps them separate; the name stays display text.
+
+    The key also records *which* optional fields the identity carries, because an
+    omitted field and an explicit null are different claims: a whole-object selection
+    states ``entry_offset: null``, while a result that simply did not serialize the
+    field says nothing about it. Reading them as equal collapsed an exact-entry result
+    that omitted its offset onto the whole-object result for the same object, before
+    either had been reconciled with a selection -- merging two scans of different
+    scopes and letting the merged verdict reach the deduped siblings of one of them.
+    """
+    return (
+        identity.get("target"),
+        identity.get("code_object"),
+        identity.get("code_object_sha256"),
+        identity.get("code_object_index"),
+        identity.get("entry_offset"),
+        identity.get("name"),
+        *(field in identity for field in _IDENTITY_OBJECT_FIELDS),
+    )
+
+
+# The per-kernel Detail cell's budget, applied to the kernel's own reason and again to
+# the whole cell. A deduped row spends part of it on the "same code object as ..."
+# prefix, so it carries its inherited reason less far than the covering row does;
+# that is inherent to a fixed-width cell with a prefix, and the cell names the
+# covering row, which carries the same reason in full.
+_DETAIL_LIMIT = 300
+
+# A kernel label's share of any length-capped line it appears in. Kernel names are
+# unbounded -- a mangled template instantiation runs to hundreds of characters -- so an
+# unbudgeted label can spend the whole allowance and push the reason beside it off the
+# end, which is the one thing these lines exist to carry.
+_LABEL_LIMIT = 60
+
+
+def _identity_qualifier(
+    identity: dict[str, Any],
+    *,
+    index: bool = False,
+    full: bool = False,
+    presence: bool = False,
+) -> str:
+    """The shortest identity fragment that tells two same-named kernels apart (pure).
+
+    Prefers the code-object digest, falling back to the object's basename, and appends
+    the entry offset when the identity pins one -- the same fields ``stable_key`` uses
+    to keep those selections distinct. Empty when the identity carries none of them,
+    in which case there is nothing to disambiguate with.
+
+    ``index`` widens the qualifier with the code-object index. A digest is the *file's*
+    digest, not an object's: a bundle holds several code objects under one digest, and
+    Waitcheck's own dedup key is ``(code_object_sha256, code_object_index)`` rather
+    than the digest alone -- so two same-named selections in one bundle share every
+    field this renders by default. It is off by default because selection stamps an
+    index on every identity carrying a code object and it is 0 on nearly all of them,
+    so rendering it always would pad the labels that are already unique.
+
+    ``full`` spends the whole digest rather than a 10-character prefix. Two objects
+    sharing a prefix *and* an index is the one collision the widened qualifier cannot
+    otherwise resolve; it is remote, which is why the prefix is what gets rendered
+    until a label actually ties.
+
+    ``presence`` is the final widening for identities that differ only in whether an
+    optional field was serialized. Omitted fields are unknown while explicit nulls
+    are claims, so their labels must not collapse either -- especially an omitted
+    offset, which must stay visibly unattributed instead of looking like a confirmed
+    whole-object row.
+    """
+    digest = identity.get("code_object_sha256")
+    parts = (
+        str(digest) if full and digest else _short(digest, 10)
+    ) or _basename(identity.get("code_object"))
+    object_index = identity.get("code_object_index")
+    if index and isinstance(object_index, int):
+        parts = f"{parts}#{object_index}" if parts else f"#{object_index}"
+    offset = identity.get("entry_offset")
+    if isinstance(offset, int):
+        parts = f"{parts}+0x{offset:x}" if parts else f"0x{offset:x}"
+    if presence:
+        unknown = [
+            label
+            for field, label in (
+                ("code_object", "object unknown"),
+                ("code_object_sha256", "digest unknown"),
+                ("code_object_index", "index unknown"),
+                ("entry_offset", "scope unknown"),
+            )
+            if field not in identity
+        ]
+        if unknown:
+            marker = ", ".join(unknown)
+            parts = f"{parts}; {marker}" if parts else marker
+    return parts
+
+
+def _clip_name(name: str) -> str:
+    """A kernel name budgeted for a length-capped line (pure)."""
+    return _clean_msg(name, _LABEL_LIMIT)
+
+
+def _middle_clip_name(name: str) -> str:
+    """The same budget spent on both ends of a kernel name (pure).
+
+    Two mangled instantiations of one template can share hundreds of leading characters
+    and differ only in a suffix, so a head-only budget renders them identically. Keeping
+    a tail costs readability, which is why it is the fallback rather than the default.
+    """
+    clean = " ".join(name.split())
+    if len(clean) <= _LABEL_LIMIT:
+        return clean
+    head = (_LABEL_LIMIT * 2) // 3
+    return f"{clean[:head]}\u2026{clean[head - _LABEL_LIMIT + 1:]}"
+
+
+def _hashed_clip_name(name: str, width: int = 8) -> str:
+    """A clipped kernel name with a digest of the whole one (pure).
+
+    The last resort. Two names can agree on both ends and differ only in the middle the
+    budget elides, and if they also share a code object no identity field can separate
+    them either. A digest of the full name always can, at the cost of a label nobody
+    can read back to a symbol -- which is why nothing reaches for it until every
+    readable discriminator has tied.
+
+    The digest is taken over the name as the report spelled it, not over the rendered
+    copy: rendering collapses internal whitespace, so ``foo bar`` and ``foo  bar`` are
+    two valid selections with distinct ``stable_key`` s that hash alike if normalized
+    first. ``width`` truncates it, and a truncated digest can itself tie -- see
+    ``_NAME_RENDERINGS`` for the widening that ends at the full digest.
+    """
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:width]
+    return f"{_middle_clip_name(name)} ~{digest}"
+
+
+def _clip_qualified_label(label: str, limit: int) -> str:
+    """Budget a display label without removing its identity qualifier (pure)."""
+    if len(label) <= limit:
+        return label
+    name, separator, qualifier = label.rpartition(" (")
+    suffix = f"{separator}{qualifier}" if separator else ""
+    if suffix and len(suffix) < limit:
+        return f"{_clean_msg(name, limit - len(suffix))}{suffix}"
+    return _clean_msg(label, limit)
+
+
+# The qualifier widens one field at a time, cheapest first. Everything past the short
+# digest exists for a collision the tier before it cannot resolve, so a label only pays
+# for the ambiguity it actually has.
+_QUALIFIER_WIDENINGS: tuple[dict[str, bool], ...] = (
+    {},
+    {"index": True},
+    {"index": True, "full": True},
+    {"index": True, "full": True, "presence": True},
+)
+
+# How a name is rendered, cheapest first, with the same "only pay for the ambiguity you
+# have" rule as the qualifiers. The head-only budget is what a reader wants; the tail
+# and then the digest exist for collisions the tier before cannot resolve. The last
+# tier carries the *full* SHA-256, which is what makes the uniqueness claim in
+# ``_display_labels`` true -- an 8-hex prefix is 32 bits and can tie on its own.
+_NAME_RENDERINGS: tuple[tuple[Callable[..., str], dict[str, int]], ...] = (
+    (_clip_name, {}),
+    (_middle_clip_name, {}),
+    (_hashed_clip_name, {"width": 8}),
+    (_hashed_clip_name, {"width": 64}),
+)
+
+
+def _display_labels(items: Sequence[tuple[Any, dict[str, Any]]]) -> list[str]:
+    """Labels for ``(name, identity)`` pairs, qualified only where a name repeats (pure).
+
+    Stops at the first widening that separates the colliding labels, so a unique name
+    renders bare and the common collisions do not pay for the rare ones. Collisions are
+    counted on the *rendered* names rather than the originals: names are budgeted (see
+    ``_LABEL_LIMIT``), so two distinct names agreeing on their first characters render
+    as one string and are as ambiguous to a reader as a genuinely repeated name. When
+    the qualifiers tie as well -- two long names in the same code object -- the names
+    are re-rendered keeping their tails, and then, if even those agree, carrying a
+    digest of the whole name (see ``_NAME_RENDERINGS``, which ends at the full digest).
+    Distinct names therefore cannot tie: the worklist rejects a duplicate
+    ``stable_key``, so any two items here differ somewhere, and the last tier hashes
+    the whole name untruncated.
+    """
+    labels: list[str] = []
+    for render, rendering in _NAME_RENDERINGS:
+        display = [render(str(name), **rendering) for name, _ in items]
+        counts: dict[str, int] = {}
+        for shown in display:
+            counts[shown] = counts.get(shown, 0) + 1
+        for widening in _QUALIFIER_WIDENINGS:
+            labels = [
+                f"{shown} ({qualifier})"
+                if counts[shown] > 1
+                and (qualifier := _identity_qualifier(identity, **widening))
+                else shown
+                for shown, (_, identity) in zip(display, items, strict=True)
+            ]
+            if len(set(labels)) == len(labels):
+                return labels
+    return labels
+
+
+def _kernel_reason_entries(
+    results: Sequence[dict[str, Any]], labels_by_key: Mapping[tuple[Any, ...], str]
+) -> list[dict[str, Any]]:
+    """The failing kernels' reasons, each carrying the identity behind it (pure).
+
+    A kernel name is not unique (see ``_identity_key``), so a bare name cannot say
+    *which* object failed when two selections share a symbol name -- and if both fail,
+    two identically-labelled reasons are indistinguishable. Every entry therefore
+    records the identity fields, so ``env.json`` can attribute a failure without
+    reopening ``sanitizer_report.json``.
+
+    The identity fields are recorded *unabridged*, and only where the report carried
+    them (see ``_identity_projection``). ``label`` is display copy and is abbreviated
+    (see ``_display_labels``); this projection is what makes ``env.json``
+    diagnosable, and a basename plus a digest prefix can tie where the full path and
+    digest do not -- which would put the ambiguity straight back into the manifest.
+
+    ``labels_by_key`` is built over both the whole worklist and unmatched results.
+    What makes a name ambiguous is what the *page* shows: one failure beside a
+    successfully scanned same-named sibling still leaves a reader unable to say which
+    row the reason belongs to, while an incompatible unmatched result sharing a
+    visible row's name must be qualified so it cannot appear to accuse that row.
+    """
+    entries: list[dict[str, Any]] = []
+    for result in results:
+        if not result["reason"]:
+            continue
+        identity = result["identity"]
+        label = labels_by_key.get(_identity_key(identity), str(result["name"]))
+        entries.append({
+            "kernel": str(result["name"]),
+            "label": label,
+            "reason": str(result["reason"]),
+            **_identity_projection(identity),
+        })
+    return entries
+
+
+def _kernel_reason_text(reasons: Sequence[tuple[str, str]]) -> str:
+    """One kernel's fail-closed reasons, for a one-line display context (pure).
+
+    A lone reason renders bare -- the common case, one check per kernel. Two or more
+    are labelled with the sanitizer that produced them, since a report can hold one
+    check per requested sanitizer over the same worklist and an unlabelled
+    concatenation would not say which check refused.
+    """
+    if len(reasons) == 1:
+        return reasons[0][1]
+    return "; ".join(
+        f"{sanitizer}: {reason}" if sanitizer else reason for sanitizer, reason in reasons
+    )
 
 
 def _primary_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -623,20 +1050,40 @@ def _observation_text(
     finding_groups: list[dict[str, Any]],
     *,
     present: bool = True,
+    kernel_reasons: Sequence[dict[str, Any]] = (),
 ) -> str:
     """A one-line human summary of what a case observed.
 
     Combines the primary sanitizer + verdict + fail-closed reason + a finding
     highlight into a compact string surfaced on both tabs (guardrail and survey).
     Observational only -- it never encodes a pass/fail health signal.
+
+    ``kernel_reasons`` are the ``_kernel_reason_entries`` of the kernels that did not
+    come back clean, rendered from each entry's identity-qualified ``label`` and its
+    ``reason``. A check-level reason is a rollup -- Waitcheck reports
+    ``worklist_not_fully_checked`` whenever any kernel is unhealthy -- which names
+    the failure but not its cause, so the observation would otherwise be a dead end
+    for the reader who has only this line. Appending the per-kernel reasons makes
+    the one-liner say what actually broke.
     """
     if not present:
         return "report missing"
     san, verdict = primary.get("sanitizer"), primary.get("verdict")
     head = f"{san or _DASH} {verdict or _DASH}" if (san or verdict) else "no sanitizer check ran"
     parts = [head]
-    if primary.get("reason"):
-        parts.append(f"reason {primary['reason']}")
+    # ``_clean_msg`` because a check-level reason is not always a bare constant: the
+    # combined ConSan hook builds ``waitcheck_analysis_failed: <parser output>`` from
+    # the tool's own text, and this one-liner is rendered as a single Markdown line.
+    # Normalized but *not* clamped: this text goes onto a line of its own rather than
+    # into a table cell, and a ConSan coverage reason carries its discriminator last
+    # (see ``_clean_msg``), so a length cap here would collapse a lowering defect and
+    # a capacity rejection into the same sentence.
+    if reason := _clean_msg(str(primary.get("reason") or ""), None):
+        parts.append(f"reason {reason}")
+    if kernel_reasons:
+        parts.append(
+            ", ".join(f"{e['label']}: {e['reason']}" for e in kernel_reasons)
+        )
     if findings:
         top = finding_groups[0]["code"] if finding_groups else None
         parts.append(f"{findings} finding(s)" + (f" ({top})" if top else ""))
@@ -667,6 +1114,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             "kernels": [], "finding_groups": [],
             "primary": {"sanitizer": None, "verdict": None, "reason": None, "preflight": None},
             "observation": "report missing",
+            "kernel_reasons": [],
         }
     checks = report.get("checks", [])
     findings_total = sum(len(c.get("findings", [])) for c in checks)
@@ -680,34 +1128,238 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             backend = {"name": _basename(raw.get("path")), "sha": _short(raw.get("sha256"), 12)}
             break
 
-    kr_by_name: dict[str, dict[str, Any]] = {}
+    # Keyed by full identity, not by name -- see ``_identity_key``.
+    kr_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
+    # A whole-code-object scan is deduped by (sha256, index), so the kernels that
+    # share an object with an earlier selection carry no kernel_result of their own.
+    # Map each scanned object to the identity whose result covered it, so those rows
+    # can be attributed to that scan instead of rendering as an em dash (see the
+    # kernels loop). Storing the key rather than the result keeps the attribution
+    # pointed at the fully-accumulated entry once every check has been folded in.
+    kr_by_object: dict[tuple[str, Any], tuple[Any, ...]] = {}
     findings_by_name: dict[str | None, int] = {}
+    # Findings from a check that produced no kernel results at all. The combined hook's
+    # mandatory Waitcheck preflight is relabelled out of the ConSan run with its
+    # findings kept and its kernel results dropped (``consan._relabel``), and
+    # ``run_sanitizers`` appends it as a third check -- so its hazards count toward the
+    # case total with no per-kernel result to carry them. A row that has a result of
+    # its own has to pick up the ones naming it, or the column undercounts the case.
+    unattributed_by_name: dict[str | None, int] = {}
     for check in checks:
+        sanitizer = str(check.get("sanitizer") or "")
         for result in check.get("kernel_results", []):
-            name = (result.get("identity") or {}).get("name")
-            kr_by_name[name] = {
-                "verdict": result.get("verdict"),
-                "findings": len(result.get("findings", [])),
+            identity = result.get("identity") or {}
+            name = identity.get("name")
+            key = _identity_key(identity)
+            # A report can hold more than one check over the same worklist -- the
+            # shipped waitcheck+consan survey recipes select a single kernel and scan
+            # it with both -- so this kernel may already carry a result from an
+            # earlier check. Reducing to the last one silently dropped an errored
+            # Waitcheck reason whenever the later ConSan result for that kernel had
+            # none, which is the very disappearance this row exists to prevent. So
+            # accumulate across checks instead: reasons kept per sanitizer, findings
+            # summed so the column still sums to the case total, and the verdict the
+            # least clean of them, ranked as ``models._VERDICT_RANK`` ranks the
+            # report's own rollup, so the badge can never read cleaner than the
+            # Detail column beside it.
+            previous = kr_by_identity.get(key)
+            reasons: list[tuple[str, str]] = list(previous["reasons"]) if previous else []
+            # The fail-closed detail. Waitcheck's ``CheckResult.reason`` only carries
+            # the rollup (``worklist_not_fully_checked``); the per-kernel reason is
+            # the only field that says what actually went wrong, so it must survive
+            # into the row the renderers read.
+            #
+            # Normalized but not clamped: this is the accumulation, upstream of every
+            # sink, and ``_run_one`` builds ``waitcheck_backend_exit_N: `` plus up to
+            # 300 characters of stderr tail -- so a cap here truncates the tail that
+            # carries the cause, for the unbounded sinks (the observation, ``env.json``)
+            # as well as the bounded ones. Each display sink applies its own budget:
+            # the Detail cell below, and ``_survey_message_parts`` for the callout.
+            if reason := _clean_msg(str(result.get("reason") or ""), None):
+                reasons.append((sanitizer, reason))
+            reduced = {
+                "verdict": _worse_verdict(
+                    previous["verdict"] if previous else None, result.get("verdict")
+                ),
+                # Folded separately, because only a Waitcheck object scan covers a
+                # deduped sibling -- see ``_waitcheck_view``.
+                "waitcheck_verdict": _worse_verdict(
+                    previous["waitcheck_verdict"] if previous else None,
+                    result.get("verdict"),
+                ) if sanitizer == "waitcheck" else (
+                    previous["waitcheck_verdict"] if previous else None
+                ),
+                "findings": (previous["findings"] if previous else 0)
+                + len(result.get("findings", [])),
+                "state": result.get("state"),
+                "reasons": reasons,
+                "reason": _kernel_reason_text(reasons),
+                "returncode": result.get("returncode"),
+                # Display text only; the join above is on the full identity.
+                "name": name,
+                # Kept so a reason can name *which* object failed when two selected
+                # kernels share a symbol name (see ``_kernel_reason_entries``).
+                "identity": identity,
+                # Which checks contributed, so the dedup index below can be built from
+                # Waitcheck results only without re-walking the checks.
+                "sanitizers": _with_sanitizer(previous, sanitizer),
             }
+            kr_by_identity[key] = reduced
+        resultless = not check.get("kernel_results")
         for finding in check.get("findings", []):
             key = finding.get("kernel_name")
             findings_by_name[key] = findings_by_name.get(key, 0) + 1
+            if resultless:
+                unattributed_by_name[key] = unattributed_by_name.get(key, 0) + 1
 
     worklist = report.get("worklist", {})
     kernel_entries = worklist.get("kernels", [])
+    # A result's identity can be sparser than the worklist row it describes: every
+    # code-object field is optional on the wire (``KernelIdentity.from_dict``), and
+    # reports whose results carry only ``{name, target}`` exist. The full-identity join
+    # is what keeps two same-named selections apart, so it stays first -- but where it
+    # finds nothing, dropping the result would lose exactly the per-kernel reason this
+    # dashboard exists to surface. Falling back to ``(name, target)`` is safe only when
+    # it can mean one thing: one worklist row and one unclaimed result.
+    claimed = {_identity_key(entry.get("identity", {})) for entry in kernel_entries}
+    unclaimed = [key for key in kr_by_identity if key not in claimed]
+    # An unmatched result is only a candidate for the rows it *cannot contradict*, and
+    # only where it can mean one of them: a populated field that disagrees describes a
+    # different object rather than a sparser view of this one, and attributing it here
+    # would put another object's reason on this row and then stamp this row's identity
+    # onto it -- a manifest that names the wrong object is worse than one that names none.
+    fallback_by_row: dict[tuple[Any, ...], list[tuple[Any, ...]]] = {}
+    for key in unclaimed:
+        sparse = kr_by_identity[key]["identity"]
+        rows = [
+            _identity_key(entry.get("identity", {}))
+            for entry in kernel_entries
+            if _identity_compatible(entry.get("identity", {}), sparse)
+        ]
+        if len(rows) == 1:
+            fallback_by_row.setdefault(rows[0], []).append(key)
+
+    # Resolve every row to its result *before* anything is attributed from one. Scan
+    # scope is a property of the selection, not of whichever fields a result happened
+    # to serialize, so the dedup index below is built from worklist identities: an
+    # exact-entry result that omits only ``entry_offset`` would otherwise read as a
+    # whole-object scan and lend its verdict to a sibling it never analyzed, and a
+    # ``{name, target}`` whole-object result would never be indexed at all.
+    matched: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for entry in kernel_entries:
+        identity = entry.get("identity", {})
+        row_key = _identity_key(identity)
+        result = kr_by_identity.get(row_key)
+        candidates = fallback_by_row.get(row_key, ())
+        for candidate in candidates:
+            # Sparse results compatible with exactly this row belong *with* any exact
+            # result and with one another: separate checks can serialize different
+            # subsets of the same identity, and keeping none when several candidates
+            # exist drops every verdict, reason and finding from the row.
+            sparse = kr_by_identity.pop(candidate)
+            result = _merge_reduced(result, sparse) if result is not None else sparse
+        if candidates:
+            kr_by_identity[row_key] = result
+        if result is not None:
+            # The row's identity is the fuller one and describes the same kernel, so
+            # the manifest and the labels can name the object the result did not.
+            result["identity"] = identity
+            matched[row_key] = result
+            # Only a Waitcheck whole-object scan is ever deduped, so only such a scan
+            # may stand in for a kernel with no result of its own. The selection has to
+            # be a whole-object one -- real object, real digest, no entry offset, i.e.
+            # ``KernelIdentity.code_object_scan`` -- because an exact-entry scan covers
+            # one entry and not the object. Demanding a real digest also keeps every
+            # digest-less ConSan selection off a shared ``(None, None)`` key, where an
+            # unrelated sibling's verdict would be reported as "the same code object".
+            row_sha = identity.get("code_object_sha256")
+            if (
+                "waitcheck" in result["sanitizers"]
+                and identity.get("code_object")
+                and row_sha
+                and identity.get("entry_offset") is None
+            ):
+                kr_by_object.setdefault(
+                    (str(row_sha), identity.get("code_object_index")), row_key
+                )
+
+    # A deduped row's Detail names the scan that covered it, and a reason names the
+    # kernel behind it, so both need a label that says *which* one. Built over the rows
+    # and the results no row claimed: an unattributed reason rendering a bare name that
+    # matches a visible row reads as an accusation against that row, when the object it
+    # actually came from is not on the page at all.
+    labelled: list[tuple[Any, dict[str, Any]]] = [
+        (entry.get("identity", {}).get("name"), entry.get("identity", {}))
+        for entry in kernel_entries
+    ]
+    labelled += [
+        (reduced["name"], reduced["identity"])
+        for key, reduced in kr_by_identity.items()
+        if key not in matched
+    ]
+    label_by_key = {
+        _identity_key(identity): label
+        for (_, identity), label in zip(labelled, _display_labels(labelled), strict=True)
+    }
+
     kernels: list[dict[str, Any]] = []
+    credited: set[Any] = set()
     for entry in kernel_entries:
         identity = entry.get("identity", {})
         name = identity.get("name")
-        result = kr_by_name.get(name)
+        result = matched.get(_identity_key(identity))
+        entry_sha = identity.get("code_object_sha256")
+        detail = ""
         if result is not None:
             verdict, findings = result["verdict"], result["findings"]
+            # Credited to the first row of that name only: two rows can share one, and
+            # a resultless finding names a kernel rather than an identity, so crediting
+            # both would double-count it against the case total. A process-scope
+            # finding (no kernel name) is attributable only to a lone kernel.
+            if name not in credited:
+                credited.add(name)
+                findings += unattributed_by_name.get(name, 0)
+                if len(kernel_entries) == 1:
+                    findings += unattributed_by_name.get(None, 0)
+            detail = str(result["reason"] or "")
+        elif entry_sha and (
+            covering_key := kr_by_object.get(
+                (str(entry_sha), identity.get("code_object_index"))
+            )
+        ) is not None and _dedup_covers(
+            identity, _waitcheck_view(matched[covering_key])
+        ):
+            # Deduped: this kernel's object WAS scanned, under the name of the first
+            # selection that resolved to it. The scan is object-scope, so its verdict
+            # covers this kernel too -- reporting an em dash here read as "not checked"
+            # and hid a gated kernel whose object had failed. Findings stay on the
+            # covering row so the per-kernel column still sums to the case total.
+            # The Waitcheck-only view: the object scan is what covered this row, and
+            # a sibling sanitizer's outcome for the covering kernel says nothing here.
+            covering = _waitcheck_view(matched[covering_key])
+            verdict = covering["verdict"]
+            findings = 0
+            covering_label = label_by_key.get(
+                covering_key, _clean_msg(str(covering["name"]), _LABEL_LIMIT)
+            )
+            detail = f"same code object as {covering_label}; scanned once"
+            if covering["reason"]:
+                detail = f"{detail} \u2014 {covering['reason']}"
         else:
-            findings = findings_by_name.get(name, 0)
-            # dynamic ConSan attributes race findings at process scope (kernel_name
-            # is null); with a single-kernel worklist, credit them to that kernel.
-            if findings == 0 and len(kernel_entries) == 1:
-                findings = findings_by_name.get(None, 0)
+            # A result-less finding names a kernel, not an identity. When several
+            # uncovered rows share that name, credit it once rather than once per row.
+            findings = 0
+            if name not in credited:
+                credited.add(name)
+                findings = unattributed_by_name.get(name, 0)
+                # dynamic ConSan attributes race findings at process scope
+                # (kernel_name is null); with one worklist row, credit it there. Added
+                # unconditionally, as in the matched branch above: a check can emit a
+                # kernel-named finding *and* a process-scope one, and gating this on
+                # there being no named finding dropped the process-scope count off the
+                # only row that could hold it.
+                if len(kernel_entries) == 1:
+                    findings += unattributed_by_name.get(None, 0)
             verdict = report.get("overall_verdict") if len(kernel_entries) == 1 or findings else "—"
         kernels.append({
             "name": name,
@@ -718,6 +1370,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
             "offset": identity.get("entry_offset"),
             "verdict": verdict,
             "findings": findings,
+            "detail": _clean_msg(detail, _DETAIL_LIMIT) if detail else "",
         })
 
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -735,7 +1388,12 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
 
     verdict = report.get("overall_verdict")
     primary = _primary_checks(checks)
-    observation = _observation_text(primary, findings_total, finding_groups)
+    # Only the kernels that carry their own fail-closed reason; a deduped row's
+    # detail restates its covering scan's reason, which would double it up here.
+    kernel_reasons = _kernel_reason_entries(list(kr_by_identity.values()), label_by_key)
+    observation = _observation_text(
+        primary, findings_total, finding_groups, kernel_reasons=kernel_reasons
+    )
     return {
         "present": True, "verdict": verdict, "execution": report.get("execution_status"),
         "findings": findings_total, "coverage": coverage, "backend": backend,
@@ -747,6 +1405,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
         },
         "kernels": kernels, "finding_groups": finding_groups,
         "primary": primary, "observation": observation,
+        "kernel_reasons": kernel_reasons,
     }
 
 
@@ -2286,6 +2945,21 @@ def build_case_env(
             "verdict": summary.get("verdict"),
             "execution": summary.get("execution"),
             "reason": (summary.get("primary") or {}).get("reason"),
+            # ``reason`` above is the check-level rollup, so on its own it cannot say
+            # which kernel failed or why. Record the per-kernel reasons beside it,
+            # each with the identity fields that tell two same-named kernels apart, so
+            # this manifest is diagnosable without re-reading sanitizer_report.json.
+            # Field presence is carried through rather than filled in: the display
+            # ``label`` is dropped here, so the omission is all that is left to say
+            # the source report did not state a scope (see ``_identity_projection``).
+            "kernel_reasons": [
+                {
+                    "kernel": entry["kernel"],
+                    "reason": entry["reason"],
+                    **{f: entry[f] for f in _IDENTITY_OBJECT_FIELDS if f in entry},
+                }
+                for entry in (summary.get("kernel_reasons") or [])
+            ],
             "findings": summary.get("findings", 0),
         },
         "inputs": inputs,
@@ -2963,6 +3637,12 @@ def _kernel_tables_html(
     Both tabs render the same tinted ``_verdict_html`` badge per kernel; verdict
     colour is descriptive on either tab (see ``_verdict_html``).
 
+    The **Detail** column carries the row's ``detail``: the kernel's own fail-closed
+    reason, or -- for a kernel whose object was deduped into an earlier scan -- the
+    scan that covered it. Without it an errored kernel row showed a badge and a zero
+    finding count with nothing anywhere on the page saying why, since the check-level
+    reason is only the ``worklist_not_fully_checked`` rollup.
+
     Numeric columns right-align the ``th`` as well as the ``td`` so each value
     sits directly under its own header rather than drifting to the far edge.
     """
@@ -2975,10 +3655,11 @@ def _kernel_tables_html(
             f"<td class=num>{_esc(str(k['findings']))}</td>"
             f"<td class=mono>{_esc(k['code_object']) or '&mdash;'}</td>"
             f"<td class=mono>{_esc(k['sha']) or '&mdash;'}</td>"
+            f"<td class='mono wrap-any'>{_esc(k.get('detail') or '') or '&mdash;'}</td>"
             f"<td>{link}</td></tr>"
             for k in row["kernels"]
         )
-        or '<tr><td class=empty colspan=7>no kernels selected</td></tr>'
+        or '<tr><td class=empty colspan=8>no kernels selected</td></tr>'
     )
     frows = (
         "".join(
@@ -2993,7 +3674,7 @@ def _kernel_tables_html(
         '<p class="cap">Kernels</p><div class="table-wrap"><table>'
         "<thead><tr><th>Kernel</th><th class=num>Dispatch</th>"
         "<th>Observed</th><th class=num>Findings</th>"
-        f"<th>Code object</th><th>SHA-256</th><th>Report</th></tr></thead>"
+        f"<th>Code object</th><th>SHA-256</th><th>Detail</th><th>Report</th></tr></thead>"
         f"<tbody>{krows}</tbody></table></div>"
         '<p class="cap">Findings</p><div class="table-wrap"><table>'
         "<thead><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th class=num>Count</th>"
@@ -3273,6 +3954,15 @@ def _survey_howto_html(entry: dict[str, Any]) -> str:
     )
 
 
+# The inline survey callout is one line, so its text is length-capped. When a
+# check-level rollup and the per-kernel reasons behind it share that line, the rollup
+# is capped separately at the smaller figure, which guarantees the reasons the rest of
+# the budget rather than letting a long rollup truncate them away.
+_MSG_LIMIT = 240
+_MSG_ROLLUP_LIMIT = 80
+_MSG_REASON_MIN = 64
+
+
 def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     """Pick the inline survey message as an ``(label, text)`` pair (pure).
 
@@ -3286,9 +3976,34 @@ def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
     """
     verdict = str(row.get("verdict") or "").strip().lower()
     reason = (row.get("primary") or {}).get("reason")
-    reason_text = _clean_msg(str(reason), 240) if reason else ""
+    reason_text = _clean_msg(str(reason), _MSG_LIMIT) if reason else ""
+    # Qualify a rollup reason with the kernel reasons behind it. ``primary.reason``
+    # alone ("worklist_not_fully_checked") tells the reader a kernel was not checked
+    # but never which one or why, which is the whole question this callout exists to
+    # answer for an errored case.
+    kernel_reasons = row.get("kernel_reasons") or []
+    if kernel_reasons:
+        # Reserve enough room for the first backend cause even when disambiguation
+        # needs a full digest/index/offset qualifier. Any label clipping falls on its
+        # name while preserving that qualifier.
+        detail_parts = []
+        for entry in kernel_reasons:
+            entry_reason = str(entry["reason"])
+            reason_reserve = min(len(entry_reason), _MSG_REASON_MIN)
+            label_limit = _MSG_LIMIT - len(": ") - reason_reserve
+            label = _clip_qualified_label(str(entry["label"]), label_limit)
+            detail_parts.append(f"{label}: {entry_reason}")
+        detail = "; ".join(detail_parts)
+        # Give the detail first claim on the line, then spend only its remaining
+        # budget on the rollup. A long rollup or full-identity label can no longer
+        # push the backend explanation off the end.
+        rollup_limit = min(_MSG_ROLLUP_LIMIT, _MSG_LIMIT - len(detail) - len(" — "))
+        rollup = _clean_msg(str(reason), rollup_limit) if reason and rollup_limit > 0 else ""
+        reason_text = _clean_msg(
+            f"{rollup} \u2014 {detail}" if rollup else detail, _MSG_LIMIT
+        )
     groups = row.get("finding_groups") or []
-    example = _clean_msg(str(groups[0].get("example", "")), 240) if groups else ""
+    example = _clean_msg(str(groups[0].get("example", "")), _MSG_LIMIT) if groups else ""
     if verdict == "error" and reason_text:
         return "Reason", reason_text
     if example:
@@ -3926,7 +4641,11 @@ def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[s
     ]
     for key, entries in groups:
         by_san = _survey_group_by_sanitizer(entries)
-        note = _survey_group_note(entries)
+        # Same treatment as the sibling Detail and Example cells: a group note is a
+        # backend reason (``waitcheck_analysis_failed: <parser output>``), so it can
+        # carry newlines that end the row mid-table and pipes that shift every cell
+        # after it. The HTML twin renders inside a ``<td>`` and needs neither.
+        note = _clean_msg(_survey_group_note(entries), _MSG_LIMIT).replace("|", "\\|")
         lines.append(
             f"| {_survey_group_label(key, entries)} | {cell(by_san.get('waitcheck'))} "
             f"| {cell(by_san.get('consan'))} | {_survey_group_findings(entries)} "
@@ -3973,13 +4692,15 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
             continue
         lines += [
             "",
-            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |",
-            "|---|--:|---|--:|---|---|",
+            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object "
+            "| SHA-256 | Detail |",
+            "|---|--:|---|--:|---|---|---|",
         ]
         for k in r["kernels"]:
+            detail = (k.get("detail") or "").replace("|", "\\|")
             lines.append(
                 f"| `{k['name']}` | {k['dispatch']} | `{k['verdict']}` | {k['findings']} | "
-                f"`{k['code_object'] or _DASH}` | `{k['sha'] or _DASH}` |"
+                f"`{k['code_object'] or _DASH}` | `{k['sha'] or _DASH}` | {detail or _DASH} |"
             )
         lines += ["", "</details>", ""]
     return lines
@@ -4064,15 +4785,17 @@ def build_summary_md(
         )
         lines += [
             "",
-            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |",
-            "|---|--:|---|--:|---|---|",
+            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object "
+            "| SHA-256 | Detail |",
+            "|---|--:|---|--:|---|---|---|",
         ]
         for k in r["kernels"]:
             code_object = k["code_object"] or _DASH
             sha = k["sha"] or _DASH
+            detail = (k.get("detail") or "").replace("|", "\\|")
             lines.append(
                 f"| `{k['name']}` | {k['dispatch']} | `{k['verdict']}` | {k['findings']} | "
-                f"`{code_object}` | `{sha}` |"
+                f"`{code_object}` | `{sha}` | {detail or _DASH} |"
             )
         if r["finding_groups"]:
             lines += [

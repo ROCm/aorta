@@ -408,19 +408,32 @@ def _run_one(
             verdict=Verdict.ERROR,
             reason=f"waitcheck_launch_error: {process.launch_error}",
         )
+    # Parse defensively so an unexpected exit code can still be reported with the
+    # backend's own message. When rj_waitcheck refuses an input it explains itself on
+    # stderr ("failed to parse input executable or code object", exit 2) and prints no
+    # analysis summary; returning the parse failure first replaced that explanation
+    # with "Waitcheck output did not contain an analysis summary", which names the
+    # symptom the refusal caused rather than the refusal. The exit-code branch below
+    # is the only one that quotes stderr, so it has to be reached first.
+    parse_error: Exception | None = None
+    findings: tuple[Finding, ...] = ()
+    diagnostics_truncated = False
     try:
         parsed = parse_waitcheck_text(
             f"{process.stdout}\n{process.stderr}",
             expected=identity,
         )
-    except (OSError, ValueError) as exc:
-        return KernelCheckResult(
-            identity=identity,
-            state=ExecutionState.ERROR,
-            verdict=Verdict.ERROR,
-            reason=f"waitcheck_diagnostics_error: {exc}",
-            returncode=process.returncode,
-        )
+        findings = parsed.findings
+        diagnostics_truncated = parsed.diagnostics_truncated
+    except Exception as exc:  # noqa: BLE001 - see below
+        # Deliberately broad. The point of parsing here is that an unexpected exit code
+        # reaches the branch below with the backend's own message; a parser raising
+        # anything outside (OSError, ValueError) -- an IndexError or TypeError off a
+        # malformed line -- would propagate and defeat exactly that. Nothing is
+        # swallowed: on an expected exit code the error becomes a fail-closed
+        # ERROR result quoting the exception, and KeyboardInterrupt / SystemExit are
+        # BaseException and still propagate.
+        parse_error = exc
     if process.returncode not in {WAITCHECK_CLEAN_EXIT, WAITCHECK_HAZARD_EXIT}:
         stderr_tail = process.stderr[-300:].strip()
         suffix = f": {stderr_tail}" if stderr_tail else ""
@@ -430,25 +443,35 @@ def _run_one(
             verdict=Verdict.ERROR,
             reason=f"waitcheck_backend_exit_{process.returncode}{suffix}",
             returncode=process.returncode,
-            findings=parsed.findings,
-            diagnostics_truncated=parsed.diagnostics_truncated,
+            findings=findings,
+            diagnostics_truncated=diagnostics_truncated,
         )
-    if process.returncode == WAITCHECK_HAZARD_EXIT and not parsed.findings:
+    if parse_error is not None:
+        # An expected exit code with unparsable output is a real identity/format
+        # mismatch, so it keeps reporting the parse failure verbatim.
+        return KernelCheckResult(
+            identity=identity,
+            state=ExecutionState.ERROR,
+            verdict=Verdict.ERROR,
+            reason=f"waitcheck_diagnostics_error: {parse_error}",
+            returncode=process.returncode,
+        )
+    if process.returncode == WAITCHECK_HAZARD_EXIT and not findings:
         return KernelCheckResult(
             identity=identity,
             state=ExecutionState.ERROR,
             verdict=Verdict.ERROR,
             reason="waitcheck_hazard_exit_without_structured_diagnostics",
             returncode=process.returncode,
-            diagnostics_truncated=parsed.diagnostics_truncated,
+            diagnostics_truncated=diagnostics_truncated,
         )
     return KernelCheckResult(
         identity=identity,
         state=ExecutionState.RAN,
-        verdict=Verdict.WARN if parsed.findings else Verdict.PASS,
+        verdict=Verdict.WARN if findings else Verdict.PASS,
         returncode=process.returncode,
-        findings=parsed.findings,
-        diagnostics_truncated=parsed.diagnostics_truncated,
+        findings=findings,
+        diagnostics_truncated=diagnostics_truncated,
     )
 
 
