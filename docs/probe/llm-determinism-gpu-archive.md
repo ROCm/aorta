@@ -57,8 +57,15 @@ axis-and-classifier templates. So the axis came from a new probe recipe
 passes, so the only honest reading of `tf32_off-none` passing is that it also
 passes — not that it fixed anything.
 
-The `DISABLE_TF32` value recorded on the `tf32_off` trials is the evidence that
-the mitigation actually crossed the container boundary. Without
+**CORRECTION (2026-09-11): `tf32_off` is not a mitigation axis on this stack.**
+`DISABLE_TF32` is read by nothing in the image, so this cell was a second
+baseline under another name and its pass carries no information about
+mitigation. Both cells passing is still the honest result; the axis was simply
+narrower than it looked.
+
+The `DISABLE_TF32` value recorded on the `tf32_off` trials remains evidence that
+the mitigation's env var actually crossed the container boundary — which is what
+that check was for, and which is unaffected by nothing reading the variable. Without
 `env_passthrough_mode: file` and `docker run --env-file` it would not have, and
 the cell would have been a second baseline wearing the label of a mitigation.
 
@@ -248,11 +255,13 @@ The gap is not tooling. It is a public, committed reproducer that genuinely
 fails, with a registered mitigation that genuinely fixes it. Candidates, in
 rough order of cost:
 
-1. **A numerics reproducer.** TF32 reduction ordering is the known axis and
-   `tf32_off` is already a registered mitigation, so the fix half would be
-   real the moment a configuration NaNs or diverges on a public image. This
-   needs a configuration that actually misbehaves with synthetic inputs — the
-   open ask.
+1. **A numerics reproducer.** ⚠ **Superseded 2026-09-11.** This item read "TF32
+   reduction ordering is the known axis and `tf32_off` is already a registered
+   mitigation". Both halves are wrong here: `DISABLE_TF32` is read by nothing,
+   and there is no TF32 precision axis on gfx950 at all. A reproducer was built
+   on a different axis instead — see `docs/probe/numerics-nan-reproducer.md`,
+   where the one registered mitigation that resolves a real NaN turns out to be
+   `pytorch_no_cuda_memory_caching`.
 2. **Widen the replay past one step in one process.** The current shape rules
    out most nondeterminism by construction. Divergence across *processes*, or
    with `use_deterministic_algorithms` off, is a different and much weaker
