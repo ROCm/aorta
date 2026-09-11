@@ -18,8 +18,8 @@ repeats them beyond what a decision needs.
 |---|---|---|
 | 1 | **Trainer: slime**, not verl | Dropping the requirement that aorta owns the engine process. verl is the better tool if the trainer is allowed to launch and own SGLang itself |
 | 2 | **Algorithm: GRPO** | Nothing in sight. No value network is the point, and it is slime's default |
-| 3 | **Base model: Qwen3-8B**, not GLM-5.3-Flash | Deciding that a LoRA adapter counts as the deliverable, or a second node. Full-parameter GLM-5.3-Flash on one node is arithmetically impossible, not merely tight |
-| 4 | **Topology: one node, all 8 GPUs, colocated with engine sleep/wake**; disaggregated 6 + 2 as the fallback | One measurement, described below. Both fit Qwen3-8B with room |
+| 3 | **Base model: two tiers — iterate on Qwen3-8B, train the deliverable on Qwen3.8-27B**, the model you named. Not GLM-5.3-Flash | Deciding that a LoRA adapter counts as the deliverable, or a second node. Full-parameter GLM-5.3-Flash on one node is arithmetically impossible, not merely tight |
+| 4 | **Topology: one node, all 8 GPUs, colocated with engine sleep/wake**; disaggregated 6 + 2 as the fallback | One measurement, described below. Both fit either tier with room — 147 GB at 8B, 500 GB at 27B, against 2,304 GB |
 | 5 | **The trainer lives in a separate repo that imports aorta as a library** | Nothing. Carried forward from the plan; recorded here because it is a decision you should see rather than one to revisit |
 
 Decision 5 is the one that keeps aorta clean: the reward functions call
@@ -33,8 +33,12 @@ framework.
    real model and we can serve it, but full-parameter post-training of it needs
    2.5 nodes' worth of HBM. The fallback condition you set — "if it is running
    out of memory, if it's too big" — is met on paper, before a node-hour is
-   spent. I want your agreement to start on Qwen3-8B rather than discovering
-   this by OOM.
+   spent. The model you named as the fallback, **Qwen3.8-27B, fits at 500 GB of
+   2,304**, and it is what the deliverable should be trained on. I want to
+   iterate the reward design and the harness on Qwen3-8B first, for the reasons
+   in [section 3](#3-base-model-two-tiers-qwen3-8b-to-iterate-qwen38-27b-to-ship);
+   that is a sequencing choice and it is the one thing here I would most like you
+   to push back on if you disagree.
 2. **Extend the eight failure categories, or tell me who owns them.** They
    contain no numerics slot and no nondeterminism slot, so two of the six
    prioritised use cases classify as `unknown` and cannot be trained at any
@@ -101,11 +105,14 @@ Point by point, on the axes that matter:
 | GLM family | Written by the GLM authors; GLM-5 and GLM-5.2 recipes in-tree | A GLM-4.1V example |
 
 **The honest cost of choosing slime is Megatron.** verl's FSDP backend would
-take a Hugging Face Qwen3-8B checkpoint and start; slime needs an HF→Megatron
-conversion, a TP/PP/EP configuration, and a heavier container. For an 8B dense
-model that is a known quantity rather than research — slime ships an AMD script
-for Qwen3-4B that is the same shape — but it is the largest single line item in
-the bring-up, and I would rather name it than discover it.
+take a Hugging Face checkpoint and start; slime needs an HF→Megatron conversion,
+a TP/PP/EP configuration, and a heavier container. It is the largest single line
+item in the bring-up, and I would rather name it than discover it. It is a known
+quantity rather than research for both tiers: slime ships an AMD script for
+Qwen3-4B of the same shape as tier 1, and for tier 2 it ships the `qwen3_5`
+converters in both directions plus a ready 27B config script — see
+[section 3](#3-base-model-two-tiers-qwen3-8b-to-iterate-qwen38-27b-to-ship) for
+why that is expectation rather than a tested claim.
 
 **What would change this recommendation:** if you would rather the trainer own
 the engine outright and treat `tokenspeed_serve` as a benchmarking tool only,
@@ -130,9 +137,12 @@ slime's external-engine discovery reads the engine's parallel topology from
 `/get_server_info`, looking for `tp_size` or `tensor_parallel_size`; TokenSpeed
 returns its server arguments, which carry `pipeline_parallel_size` flat but keep
 tensor-parallel width under a nested `mapping`. slime would therefore infer
-TP=1. Harmless at TP=1, which is what Qwen3-8B wants, and wrong above it. It is
-a few lines upstream or a few lines of shim, and it is the kind of thing worth
-finding before it presents as a mysterious sharding error.
+TP=1. Harmless at TP=1 and wrong above it — and TP=1 is what both tiers want:
+Qwen3-8B obviously, and TokenSpeed's own recipe for the 27B runs it at
+`--world-size 1`, since 56 GB of bf16 weights sit inside one 288 GB MI355X. So
+this stays latent rather than becoming a tier-2 problem, but it is a few lines
+upstream or a few lines of shim, and it is the kind of thing worth finding before
+it presents as a mysterious sharding error.
 
 ## 2. Single node: yes, and the reason it looked worse than it is
 
@@ -164,8 +174,10 @@ And there is a weight path that needs no collective at all.
 `/update_weights_from_disk` is implemented, and slime drives it as
 `--update-weight-transport disk`: the trainer writes an HF checkpoint to a
 shared path, the engine hot-reloads it without restarting. For Qwen3-8B that is
-a 16 GB write per sync, against the 189–319 s cold start it avoids. It is the
-slowest of the three transports and the only one that cannot fail silently.
+a 16 GB write per sync, against the 189–319 s cold start it avoids; at tier 2 the
+same write is **56 GB**, so this is one of the few numbers that scales with the
+model and it scales unhelpfully. It is the slowest of the three transports and the
+only one that cannot fail silently.
 
 So the topology question is now a choice rather than a constraint:
 
@@ -179,7 +191,10 @@ A is fastest and B is the plan's existing recommendation; **C is the one that
 cannot be blocked**, which makes it the right thing to bring up first and the
 right fallback to keep. Generation cost across these is the plan's existing
 arithmetic: roughly 2.5 hours across 8 GPUs for a 400-iteration run at the
-extrapolated 8B rate, 3.3 hours across 6.
+extrapolated 8B rate, 3.3 hours across 6. **Those are tier-1 numbers and they do
+not transfer to tier 2** — a dense model 3.4× larger decodes proportionally
+slower, so the honest statement is that the tier-2 figure is unmeasured rather
+than that it is 3.4× worse.
 
 **The one measurement that settles A versus B**, and it is cheap: drive
 `init_weights_update_group → update_weights_from_distributed` and the sleep/wake
@@ -207,27 +222,40 @@ weights, gradients and optimiser state. Activations for 512-token sequences add
 
 | Model | Params | Weights bf16 | Weights fp8 | Trainer, full-parameter | Share of one node |
 |---|---|---|---|---|---|
-| **Qwen3-8B** | 8.19 B | 16 GB | — | **147 GB** (+20–40 GB activations) | **7%** |
+| **Qwen3-8B** (tier 1) | 8.19 B | 16 GB | — | **147 GB** (+20–40 GB activations) | **6%** |
+| **Qwen3.8-27B** (tier 2) | 27.78 B | 56 GB | 28 GB | **500 GB** (+20–40 GB activations) | **22%** |
 | GLM-4.7-Flash | 31.2 B | 62 GB | — | 562 GB | 24% |
 | **GLM-5.3-Flash** | 321.3 B | 643 GB | 321 GB | **5,784 GB** | **251%** |
 | GLM-5.3 | 753.3 B | 1,507 GB | 753 GB | 13,560 GB | 589% |
+
+Parameter counts are the `safetensors` totals from each model's Hugging Face
+index, not model-card rounding: Qwen3-8B is 8,190,735,360, Qwen3.8-27B is
+27,781,427,952, GLM-5.3-Flash is 321,323,031,390.
+
+Qwen3.8-27B's 500 GB is computed on the **whole** checkpoint, vision tower
+included, so it is an upper bound — see
+[section 3](#3-base-model-two-tiers-qwen3-8b-to-iterate-qwen38-27b-to-ship) for
+why the tower is not actually trained.
 
 GLM-4.7-Flash is in the table because it is the only GLM whose arithmetic works
 on one node, not because it is an option: TokenSpeed ships model code for GLM-5
 and GLM-5.3-Flash and none for the GLM-4 family, so we could not serve it.
 
-The plan's 165–185 GB for the trainer checks out: 147 GB plus activations, and
-it does fit on a single 288 GB GPU on paper. Two GPUs remains the right
-recommendation — FSDP across a pair rather than betting a multi-hour run on a
-single-device fit — but under topology A the trainer shards across all 8 anyway
-and the question does not arise.
+The plan's 165–185 GB for the trainer checks out **for tier 1**: 147 GB plus
+activations, and it does fit on a single 288 GB GPU on paper. Two GPUs remains
+the right recommendation — FSDP across a pair rather than betting a multi-hour
+run on a single-device fit — but under topology A the trainer shards across all 8
+anyway and the question does not arise. Tier 2's 500 GB does **not** fit one
+device and must shard, which is topology A's default behaviour rather than a
+change to it.
 
-**Qwen3-8B is not close to the limit in any topology.** The engine wants 16 GB
-of weights plus 30–60 GB of KV cache per data-parallel replica; the trainer
-wants 187 GB at the top of the range. The binding constraint on this run is the
-correctness of the weight path, not memory.
+**Neither tier is close to the limit in any topology.** The engine wants 16 GB of
+weights at 8B or 56 GB at 27B, plus 30–60 GB of KV cache per data-parallel
+replica; the trainer wants 187 GB at the top of tier 1's range and 540 GB at the
+top of tier 2's. The binding constraint on this run is the correctness of the
+weight path, not memory.
 
-## 3. Base model: Qwen3-8B, and what happened to the GLM one
+## 3. Base model: two tiers, Qwen3-8B to iterate, Qwen3.8-27B to ship
 
 **"GLM 5.3 flash" resolves cleanly, and to something much larger than the name
 suggests.** It is `zai-org/GLM-5.3-Flash`, published 2026-08-25, nine days
@@ -242,23 +270,113 @@ image, and a validation pass, since our recipes have only ever exercised Qwen3
 
 **We cannot post-train it on one node.** It is a 321-billion-parameter
 mixture-of-experts model — 288 routed experts, 8 active per token, shipped in
-FP8, and multimodal, with a vision tower we have no use for — carrying roughly
-**16 billion active parameters**. "Flash" describes what it
-costs to *run*, not what it costs to *hold*. Its serving compute looks like a
-16B model; its storage looks like a 321B model, because every expert has to be
-resident. RL post-training memory scales with total parameters, not active ones:
-the optimiser carries state for every expert whether or not the router picked
-it. **5,784 GB against 2,304 GB of node.** That is 2.5 nodes for the trainer
-alone, before the engine gets a byte.
+FP8, and multimodal, with a vision tower we have no use for. Only **18 billion
+parameters are active per token**, and that is the trap: "Flash" describes what
+it costs to *run*, not what it costs to *hold*. Its serving compute looks like a
+mid-size model; its storage looks like a 321B model, because every expert has to
+be resident. RL post-training memory scales with total parameters, not active
+ones — the optimiser carries state for every expert whether or not the router
+picked it — so the figure that matters is the total. At the 18 bytes per
+parameter derived above, **5,784 GB against 2,304 GB of node**: 2.5 nodes for the
+trainer alone, before the engine gets a byte. (The two eighteens are unrelated:
+one is a count of active parameters, the other a per-parameter byte cost.)
 
-**So the fallback condition you set is already met.** You said to switch down to
-Qwen3-8B "if it is running out of memory, if it's too big". It is, and we can
-know that from the config file rather than from a crash at hour three.
+**So the fallback condition you set is already met.** You said to switch down
+"if it is running out of memory, if it's too big". It is, and we can know that
+from the config file rather than from a crash at hour three.
 
-**Recommendation: Qwen3-8B is the base model for the first run.** It is in the
-validated set, it clears the format gate, the memory is a rounding error against
-the node, and every throughput number we have is measured on it or on its
-smaller siblings.
+### The fallback you named is Qwen3.8-27B, and I had been reading it as Qwen3-8B
+
+Correcting this here because the rest of the section rests on it. The name came
+through the transcript as "QUIN 3.827B", I read it as Qwen3-8B, and I built on
+that. It resolves to **`Qwen/Qwen3.8-27B`**, one model rather than a model and a
+stray number, and three things settle it:
+
+- **There is no 27B anywhere in the Qwen3 line** (0.6/1.7/4/8/14/32B dense), so
+  the "27B" cannot be a sibling size offered alongside Qwen3-8B.
+- **`Qwen/Qwen3.8-27B` exists**, published 2026-08-05, 27,781,427,952 parameters,
+  and TokenSpeed ships a recipe pinning `Qwen/Qwen3.8-27B-FP8` on a single GPU.
+- **The Qwen3.8 family has no 8B member** — it is 27B, 2.4T-A95B and Flash-Next,
+  each with an FP8 twin — so the later bare "switch down to Quinn 3.8" is
+  unambiguous without a size attached, and reads as a back-reference to the model
+  already named rather than as a different, smaller one.
+
+Residual doubt is small but not zero: an ASR could render "Qwen3-8B" as "QUIN 3.8"
+*and* separately mishear something as "27B". Nothing in the sentence supplies a
+27B, so that needs two coincidences. If you did mean Qwen3-8B, one line from you
+settles it and the plan below barely changes — tier 1 simply becomes the whole of
+it.
+
+### Recommendation: two tiers
+
+**Iterate on Qwen3-8B. Train the deliverable on Qwen3.8-27B.**
+
+The case for iterating on the small model is the ordinary one and it would hold
+whatever you had named. What is being debugged first is not the model, it is the
+reward function and the harness: whether the proposal contract gates correctly,
+whether groups have non-zero advantage, whether the weight path actually moves a
+tensor, whether a sync costs what we think. Every one of those is exercised by
+the cheapest model that clears the format gate, and each iteration on it costs
+about a third of what tier 2 costs in memory and less in wall-clock. Getting the
+reward wrong is the expensive failure mode here — a reward that rewards
+abstention trains a model to abstain, and you find out at the end — so the
+iterations you want are many and cheap, not few and expensive. Tier 1 also
+happens to be the only size aorta has ever exercised and the only one we have
+throughput measured on, which is why it can start now.
+
+The case for shipping on tier 2 is that it is the model you asked for, it fits
+with room, and the deliverable is judged on the model rather than on the harness.
+
+**The transition criterion, so this is checkable rather than an intention.** Move
+to Qwen3.8-27B when all four of these hold on Qwen3-8B:
+
+1. **The weight path is proven**, by the round-trip test in section 2 — push
+   modified weights, push the originals back, assert the completion returns to
+   baseline — not by a perturbation check.
+2. **`schema_rate` is 1.0** across a full rollout set at the chosen sampling
+   temperature, so the format gate is not silently absorbing the reward.
+3. **Every group has non-zero advantage** on the rollout set. A group whose
+   samples all score alike teaches nothing, and this is the failure that presents
+   as a run that does not move rather than as an error.
+4. **One end-to-end run completes** — rollout, score, update, sync, repeat — for
+   at least 20 iterations without manual intervention, with the reward series
+   recorded.
+
+Until all four hold, moving up buys nothing except a more expensive way to find
+the same bugs. Once they hold, the remaining unknowns are model-specific and tier
+2 is where they should be found.
+
+**What tier 2 costs, stated before we spend it rather than after:**
+
+- **aorta has never run it.** Our recipes have only ever exercised Qwen3
+  0.6B/1.7B/4B/8B and gpt-oss-20b, so it needs a serving validation pass and a
+  newer engine image, the same task GLM-5.3-Flash would have needed.
+- **3.4× the trainer memory** — 500 GB against 147 GB, 22% of the node against
+  6%. Still not near the limit, but no longer a rounding error, and it must shard
+  rather than fitting one device.
+- **It is multimodal, and the vision tower is excluded rather than frozen.**
+  The checkpoint carries a 27-layer vision encoder at hidden size 1152 alongside
+  a 64-layer text model at hidden size 5120, so the tower is a small share of the
+  parameters — but the relevant point is that slime's shipped path for this size,
+  `scripts/models/qwen3.5-27B.sh`, selects the **text-only** plugin
+  (`slime_plugins.models.qwen3_5`), and the vision-language variant is a separate
+  opt-in that overrides the spec. So full-parameter GRPO here does not carry
+  optimiser state for a tower we do not want; the 500 GB above is computed on the
+  full checkpoint and is therefore an upper bound.
+- **Throughput and sync cost are unmeasured at this size.** See
+  [Numbers I do not have](#numbers-i-do-not-have); the 8B figures do not transfer.
+
+**On slime's support for it — this is inference, not a verified claim.** slime
+ships a `qwen3_5` model plugin, both HF↔Megatron converters, and a ready
+`scripts/models/qwen3.5-27B.sh` whose Megatron arguments match Qwen3.8-27B's
+config exactly on the four dimensions that would break a conversion: 64 layers,
+hidden size 5120, FFN hidden size 17408, vocab size 248320, untied embeddings.
+Qwen3.8-27B reports `model_type: qwen3_5` and the class
+`Qwen3_5ForConditionalGeneration`, identical to Qwen3.5-27B, and the two have
+identical parameter counts. **I therefore expect the Qwen3.8 checkpoint to work
+through the Qwen3.5-27B path unchanged, but I have not run it**, and slime's tree
+contains no reference to "Qwen3.8" by name. Treat it as the most likely outcome
+with a bring-up risk attached, not as settled.
 
 **If you want GLM-5.3-Flash specifically, there are two honest routes**, and I
 would want your steer before spending on either:
@@ -271,14 +389,15 @@ would want your steer before spending on either:
   "we post-trained the model" becomes "we trained an adapter", which may or may
   not be the claim you want.
 - **Serving-side comparison only.** Stand it up behind `tokenspeed_serve` and
-  use it as the strong general-purpose baseline that the post-trained Qwen3-8B
-  has to beat. That is cheap, it is useful regardless, and it needs no training
-  decision.
+  use it as the strong general-purpose baseline that the post-trained model has
+  to beat. That is cheap, it is useful regardless, and it needs no training
+  decision, and it is worth doing under either tier.
 
-A note on the other name: "QUIN 3.827B" does not resolve to a real identifier
-with confidence, but the later "switch down to Quinn 3.8" plus the presence of
-Qwen3-8B in our validated set makes the fallback unambiguous. I have read it as
-Qwen3-8B throughout.
+There is no smaller GLM to fall back to, which is worth recording so it is not
+re-asked: GLM-5.3 and GLM-5 are 753 B, larger rather than smaller, and Flash is
+the small member of the family. GLM-4.7-Flash at 31.2 B is the only GLM whose
+arithmetic works on one node and TokenSpeed ships no model code for the GLM-4
+family, so we could not serve it.
 
 ### Why size is not only a cost question
 
@@ -287,8 +406,12 @@ The proposal contract is the outer gate on both rewards, so a policy that cannot
 produce a parseable object scores a flat 0.2 on nearly every sample — and when
 every sample in a group scores the same, the group's advantage is zero and
 nothing is learned. The run does not fail loudly; it fails by not moving.
-Qwen3-8B clears this comfortably. Qwen3-0.6B is borderline, which is why it
-belongs in engine measurement and not in the demo.
+Qwen3-8B clears this comfortably and Qwen3.8-27B is a larger, later model on the
+same gate, so neither tier is at risk here; Qwen3-0.6B is borderline, which is why
+it belongs in engine measurement and not in the demo. This is also the reason the
+tier-1 model cannot be smaller than 8B: the point of iterating cheaply is lost if
+the cheap model fails the gate for reasons the real one would not, because then
+every reward reading is measuring the format gate instead of the reward.
 
 **A short supervised warm-up is cheap insurance, and it is also the honest
 baseline.** Fine-tuning on a few hundred proposals guarantees the format gate is
@@ -386,7 +509,9 @@ Not to be re-planned — listed so the asks above have context.
   sharpest number in the whole effort: 400 iterations × ~250 s of cold start is
   **27.8 hours of loading weights** against ~2.5 hours of generation. Any loop
   that restarts the engine per iteration spends 91% of its life doing nothing.
-  That, not throughput, is why the weight path is the thing to get right.
+  That, not throughput, is why the weight path is the thing to get right. Both
+  terms are tier-1 measurements, but the ratio is the point and it gets *worse*
+  at tier 2, since a larger checkpoint lengthens the cold start it is avoiding.
 
 ## Numbers I do not have
 
@@ -400,6 +525,14 @@ Not to be re-planned — listed so the asks above have context.
   tok/s is 1,625 tok/s measured at concurrency 8, scaled by a 3.52x factor
   measured on Qwen3-0.6B. Plan against the conservative 1,625 column until the
   rollout recipe is run at concurrency 32 on the 8B.
-- **The cost of a disk-transport weight sync.** A 16 GB checkpoint write plus an
-  engine-side reload, per iteration, measured rather than guessed. Falls out of
-  the same half-day as the transport round trip.
+- **Anything at all about Qwen3.8-27B on this hardware.** No throughput, no
+  time-to-first-token, no memory reading under load, and no confirmation that the
+  Megatron conversion completes. Every tier-2 number in this document is derived
+  from its parameter count rather than measured, which is fine for the memory
+  arithmetic and worthless for wall-clock. Scaling the tier-1 rate by 3.4× is a
+  planning placeholder, not an estimate. This is the first thing to measure once
+  the transition criterion is met, and it is the same two-hour recipe run as the
+  GLM item above.
+- **The cost of a disk-transport weight sync.** A 16 GB checkpoint write at tier 1
+  or 56 GB at tier 2, plus an engine-side reload, per iteration, measured rather
+  than guessed. Falls out of the same half-day as the transport round trip.
