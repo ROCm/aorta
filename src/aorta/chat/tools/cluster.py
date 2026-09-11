@@ -34,6 +34,7 @@ from langchain_core.tools import tool
 
 from aorta.chat.config import settings
 from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
+from aorta.chat.tools._sandbox import JOBS_ROOT_LABEL, resolve_within
 from aorta.chat.tools.cache import current_tool_cache
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
@@ -673,23 +674,15 @@ def read_autopsy_report(job_id: str) -> str:
     """Read the full Autopsy report for a cluster job.
 
     Args:
-        job_id: The CIA job id (e.g. cia-20260819-232554-6ec890), or an absolute
-            path to a job directory.
+        job_id: The CIA job id, e.g. cia-20260819-232554-6ec890.
 
     Returns:
         The report JSON, including category, confidence, rationale and evidence.
     """
-    # An absolute path is accepted because the other tools print job directories
-    # and a user pastes one back. It still has to be a job directory: resolved,
-    # it was any <path>/bundle/report.json on the machine, which is the bound
-    # every other read tool keeps and this one did not.
-    root = settings.jobs_root.resolve()
-    job_dir = (Path(job_id) if Path(job_id).is_absolute() else root / job_id).resolve()
-    if job_dir != root and root not in job_dir.parents:
-        return (
-            f"Error: {job_id} is not inside the jobs root ({root}). This tool "
-            "reads job directories, and only those."
-        )
+    try:
+        job_dir = resolve_within(settings.jobs_root, job_id, JOBS_ROOT_LABEL)
+    except ValueError as exc:
+        return f"Error: {exc}"
     report = job_dir / "bundle" / "report.json"
     if not report.is_file():
         return (f"Error: no report at {report}. "

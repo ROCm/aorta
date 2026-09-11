@@ -23,6 +23,7 @@ from pathlib import Path
 #: module exists to close.
 AORTA_ROOT_LABEL = "AORTA root"
 RUNS_ROOT_LABEL = "run root"
+JOBS_ROOT_LABEL = "jobs root"
 
 
 def resolve_within(root: Path, path: str, root_label: str) -> Path:
@@ -49,4 +50,9 @@ def resolve_within(root: Path, path: str, root_label: str) -> Path:
     return resolved
 
 
-__all__ = ["AORTA_ROOT_LABEL", "RUNS_ROOT_LABEL", "resolve_within"]
+__all__ = [
+    "AORTA_ROOT_LABEL",
+    "JOBS_ROOT_LABEL",
+    "RUNS_ROOT_LABEL",
+    "resolve_within",
+]

@@ -125,37 +125,63 @@ class TestTurningItOn:
 
 
 class TestReadingIsStillBounded:
-    """A read tool outside its root is the same breach, quieter."""
+    """A read tool outside its root is the same breach, quieter.
+
+    It took an absolute path unchecked, so a model-supplied one read any
+    ``<path>/bundle/report.json`` on the machine. It goes through the rule the
+    other file tools share now, rather than a fourth spelling of it -- which is
+    what ``_sandbox`` exists to prevent, having already been written three
+    times and drifted three ways.
+    """
+
+    @staticmethod
+    def _read(arg: str) -> str:
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
+        from aorta.chat.tools.cluster import read_autopsy_report
+
+        return read_autopsy_report.func(arg)
 
     def test_an_absolute_path_outside_the_jobs_root_is_refused(self, tmp_path):
-        pytest.importorskip("dspy", reason="needs the [cia] extra")
-        from aorta.chat.tools.cluster import read_autopsy_report
-
         outside = tmp_path / "elsewhere"
         (outside / "bundle").mkdir(parents=True)
-        (outside / "bundle" / "report.json").write_text('{"category":"x"}', encoding="utf-8")
+        (outside / "bundle" / "report.json").write_text(
+            '{"category":"leaked"}', encoding="utf-8"
+        )
 
-        answer = read_autopsy_report.func(str(outside))
+        answer = self._read(str(outside))
 
-        assert "not inside the jobs root" in answer
-        assert "category" not in answer
+        assert "escapes the jobs root" in answer
+        assert "leaked" not in answer
 
-    def test_a_traversal_out_of_the_jobs_root_is_refused(self):
-        pytest.importorskip("dspy", reason="needs the [cia] extra")
-        from aorta.chat.tools.cluster import read_autopsy_report
-
-        answer = read_autopsy_report.func(f"{settings.jobs_root}/../../etc")
-
-        assert "not inside the jobs root" in answer
+    @pytest.mark.parametrize(
+        "arg",
+        ["../../etc", "/etc", "../cia-jobs-old/x"],
+        ids=["traversal", "absolute", "sibling-prefix"],
+    )
+    def test_an_escape_is_refused(self, arg):
+        """The last one is why the rule resolves rather than compares prefixes:
+        ``cia-jobs-old`` starts with the characters of ``cia-jobs``."""
+        assert "escapes the jobs root" in self._read(arg)
 
     def test_a_job_id_still_resolves_under_the_root(self):
-        pytest.importorskip("dspy", reason="needs the [cia] extra")
-        from aorta.chat.tools.cluster import read_autopsy_report
+        answer = self._read("cia-does-not-exist")
 
-        answer = read_autopsy_report.func("cia-does-not-exist")
-
-        assert "not inside the jobs root" not in answer
+        assert "escapes" not in answer
         assert "no report at" in answer
+
+    def test_it_uses_the_shared_rule(self):
+        """A fifth copy would drift the same way the first three did."""
+        import inspect
+
+        from aorta.chat.tools import cluster
+
+        assert "resolve_within" in inspect.getsource(cluster.read_autopsy_report.func)
+
+    def test_and_no_longer_advertises_absolute_paths(self):
+        """The docstring is the tool description the model reads."""
+        from aorta.chat.tools import cluster
+
+        assert "absolute" not in (cluster.read_autopsy_report.func.__doc__ or "")
 
 
 class TestTheBoundIsWrittenDown:
