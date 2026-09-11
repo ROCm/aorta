@@ -1,0 +1,45 @@
+schema_version: 1
+mode: probe
+
+# A NaN that is not a numerics bug.
+#
+# The workload overflows an unscaled fp16 forward (real: peaks grow ~2.5x per
+# layer and pass 65504 at layer 11), frees the resulting +/-Inf block, and then
+# reads it back through a `torch.empty` workspace whose fill loop stops one
+# slot short. The loss goes NaN a long way from anything numeric.
+#
+# The mitigation axis is deliberately mostly decoys. Twenty-one registered
+# mitigations were measured against this mechanism and exactly one changes the
+# outcome, so a cell that passes here is evidence and not a coin flip. The
+# decoys are not arbitrary either: `tf32_off` is the mitigation the whole
+# numerics plan was built around, and its cell failing next to a passing
+# `pytorch_no_cuda_memory_caching` is the shortest statement of why that plan
+# needed re-founding on this stack -- DISABLE_TF32 is not read by anything
+# here, measured against a float64 reference.
+#
+# `env_passthrough_mode: file` is load-bearing rather than stylistic. The
+# workload runs in a container and `docker run` does not forward the host
+# environment, so the launch script forwards the per-trial `probe.env` with
+# --env-file. Without it every cell would be the baseline wearing a different
+# name, and the run would read as a clean negative instead of a broken
+# harness.
+ticket: PROBE-NAN-WS
+trials: 4
+
+mitigation_axis:
+  - none
+  - tf32_off
+  - hsa_no_sdma
+  - hip_launch_blocking
+  - xnack
+  - pytorch_alloc_expandable_segments
+  - pytorch_no_cuda_memory_caching
+  - gpu_max_hw_queues_2
+
+diagnostic_axis:
+  - none
+
+step_time_regex: null
+collect_paths: []
+timeout_per_trial: 900
+env_passthrough_mode: file
