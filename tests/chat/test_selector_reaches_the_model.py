@@ -102,3 +102,92 @@ def test_the_rationale_is_optional():
     text = _recommendation(_state(selection_rationale=""))
     assert "triage_kernel_source" in text
     assert "Why:" not in text
+
+
+# ── both protocols, not just the one that was checked ─────────────────────
+
+
+class TestEitherToolProtocol:
+    """The first fix reached ``_act_native`` and ``plan_node`` only.
+
+    ``_act_text`` built its own message list, so it never saw the ranking --
+    and it is the protocol ``llm_tool_mode`` defaults to, which is to say the
+    one that runs unless something says otherwise. The ranking reached the
+    screen and not the model in exactly the configuration nobody had changed.
+    """
+
+    @staticmethod
+    def _sent(mode: str, state: dict) -> list[str]:
+        """Everything the model is handed in *mode*, as text."""
+        from unittest.mock import MagicMock, patch
+
+        captured: list[str] = []
+
+        def fake_llm(*args, **kwargs):
+            llm = MagicMock()
+
+            async def ainvoke(messages, *a, **k):
+                captured.extend(str(getattr(m, "content", m)) for m in messages)
+                return AIMessage(content="FINAL: done")
+
+            llm.ainvoke = ainvoke
+            llm.bind_tools = lambda *a, **k: llm
+            return llm
+
+        with patch.object(nodes, "_get_llm", fake_llm), patch.object(
+            nodes.settings, "llm_tool_mode", mode
+        ):
+            try:
+                asyncio.run(nodes.act_node(dict(state)))
+            except Exception:  # noqa: BLE001 - the loop's own exits are not the subject
+                pass
+        return captured
+
+    @pytest.mark.parametrize("mode", ["native", "text"])
+    def test_the_ranking_is_sent(self, mode):
+        sent = self._sent(mode, _state())
+
+        assert any("triage_kernel_source" in m for m in sent)
+        assert any("Most likely tools" in m for m in sent)
+
+    @pytest.mark.parametrize("mode", ["native", "text"])
+    def test_the_reason_goes_with_it(self, mode):
+        sent = self._sent(mode, _state())
+
+        assert any("shared-memory race" in m for m in sent)
+
+    @pytest.mark.parametrize("mode", ["native", "text"])
+    def test_it_is_still_only_advice(self, mode):
+        sent = self._sent(mode, _state())
+
+        assert any("not a restriction" in m for m in sent)
+
+    @pytest.mark.parametrize("mode", ["native", "text"])
+    def test_nothing_is_said_when_the_selector_declined(self, mode):
+        sent = self._sent(mode, _state(candidate_tools=[], selection_rationale=""))
+
+        assert not any("Most likely tools" in m for m in sent)
+
+    def test_the_text_protocol_still_describes_the_tools(self):
+        """It has no tool-calling API, so the prompt is the only place they appear."""
+        sent = self._sent("text", _state())
+
+        assert any(nodes.TOOL_DESCRIPTIONS[:60] in m for m in sent)
+
+    def test_and_describes_them_before_ranking_them(self):
+        """A ranking of things the reader has not been shown yet reads oddly.
+
+        Measured inside the text rather than across the list: the system
+        messages are merged into one before the request goes out.
+        """
+        whole = "\n".join(self._sent("text", _state()))
+
+        assert whole.index(nodes.TOOL_DESCRIPTIONS[:60]) < whole.index("Most likely tools")
+
+    def test_the_two_protocols_share_one_framing(self):
+        """They drifted because there were two copies; this is the fix holding."""
+        import inspect
+
+        source = inspect.getsource(nodes._act_text)
+
+        assert "_act_messages(state)" in source

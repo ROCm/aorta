@@ -979,22 +979,14 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
     """ReAct-style loop: LLM outputs ACTION lines, we execute and feed back."""
     llm = _get_llm(temperature=0.1, streaming=False)
 
-    context = state.get("retrieved_context", "")
-    plan = state.get("plan", "")
-    critic_fb = state.get("critic_feedback", "")
-
-    system = _build_system_message(context)
-    messages = [system, SystemMessage(content=TOOL_DESCRIPTIONS)]
-
-    if plan:
-        messages.append(SystemMessage(content=f"PLAN:\n{plan}"))
-    if critic_fb:
-        messages.append(
-            SystemMessage(
-                content=f"PREVIOUS COMMAND FAILED:\n{critic_fb}\n"
-                "Analyze the error and retry with a corrected command."
-            )
-        )
+    # The same framing as the native protocol, rather than a second copy of it.
+    # They were built separately and drifted: the selector's ranking was added
+    # to one and not the other, so on the default tool mode the ranking reached
+    # the screen and never the model.
+    messages = _act_messages(state)
+    # This protocol has no tool-calling API, so the tools are described in the
+    # prompt. Before the ranking, which is a ranking *of* them.
+    messages.insert(1, SystemMessage(content=TOOL_DESCRIPTIONS))
 
     last_human = ""
     for msg in reversed(state["messages"]):
