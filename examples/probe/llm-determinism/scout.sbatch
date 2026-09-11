@@ -82,9 +82,12 @@ run_cell tf32off-bf16-24L \
   "{${BASE_KEYS}, \"dtype\": \"bf16\", \"num_layers\": 24, \"capture_dir\": \"/out/scout/tf32off-bf16-24L/cap\"}" \
   DISABLE_TF32=1
 
-# 3-4. fp32 is where TF32/xf32 reduction ordering can actually bite; bf16 never
-# takes the TF32 path at all, so a bf16-only scout could not distinguish
-# "tf32_off does nothing here" from "tf32_off is inapplicable here".
+# 3-4. fp32 is where TF32/xf32 reduction ordering could bite; bf16 never takes
+# the TF32 path at all, so a bf16-only scout could not distinguish "tf32_off
+# does nothing here" from "tf32_off is inapplicable here".
+# CORRECTION (2026-09-11): the answer turned out to be "does nothing", and for a
+# reason upstream of dtype -- DISABLE_TF32 is read by nothing, so no choice of
+# dtype could have made this cell differ from the baseline.
 run_cell fp32-24L \
   "{${BASE_KEYS}, \"dtype\": \"fp32\", \"num_layers\": 24, \"capture_dir\": \"/out/scout/fp32-24L/cap\"}"
 run_cell tf32off-fp32-24L \

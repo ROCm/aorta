@@ -30,6 +30,13 @@ would be a lie that looks like a result. The recipe therefore sets
 Check this rather than assume it: each `trial_*/result.json` carries the cell's
 `env`, and the `tf32_off-none` trials must show `{"DISABLE_TF32": "1"}`.
 
+⚠ **CORRECTION (2026-09-11): that check passes and the mitigation is still
+inert.** `DISABLE_TF32` is read by nothing in the image — the registry's
+"consumed by hipBLASLt itself" is wrong — so `tf32_off` here is a second `none`
+under another name. The passthrough check above is still worth doing, because it
+is what distinguishes "the variable arrived and did nothing" from "the variable
+never arrived"; on this axis the answer is the former.
+
 ## Files
 
 | File | Role |

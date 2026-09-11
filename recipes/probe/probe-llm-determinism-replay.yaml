@@ -36,9 +36,11 @@ ticket: PROBE-LLMDET-GPU
 trials: 2
 
 # Matches the mitigation axis the committed matrix recipe already uses.
-# `tf32_off` is the one registered mitigation with a stated mechanism against
-# replay nondeterminism: it sets DISABLE_TF32=1, which hipBLASLt consumes, and
-# changes matmul kernel selection away from the TF32/xf32 reduction ordering.
+# CORRECTION (2026-09-11): `tf32_off` sets DISABLE_TF32=1, and the registry's
+# claim that hipBLASLt consumes that variable is false -- nothing in the image
+# reads it, and on ROCm the TF32 path is selected through an in-process torch
+# API rather than any env var. So this cell is a second `none` under another
+# name, and the pass recorded for it below means nothing about mitigation.
 mitigation_axis:
   - none
   - tf32_off
