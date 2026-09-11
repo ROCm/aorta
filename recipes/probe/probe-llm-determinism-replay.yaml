@@ -1,0 +1,53 @@
+# Probe-mode recipe for the llm_determinism deterministic-replay workload.
+#
+# Why this file exists at all: `recipes/llm-determinism/example-llm-determinism.yaml`
+# carries the right mitigation axis (three `none` cells against one `tf32_off`)
+# but it is a MATRIX-mode recipe -- it has `workload: llm_determinism` and
+# `cells:`, and no `mode: probe`. `run_agent_loop` rejects any recipe whose
+# `recipe.probe_extras is None` (`agent/loop.py:104`), so the agent cannot be
+# pointed at it. The determinism *workload* is still the right thing to run; it
+# just has to arrive as the opaque user command, which is what probe mode is
+# for. This recipe supplies the axis and the classifier settings, and the
+# launch command supplies the workload.
+#
+# Usage (the command must exit non-zero on divergence -- see
+# scripts/det_launch.py in the run tree):
+#
+#   aorta agent mitigate \
+#       --recipe recipes/probe/probe-llm-determinism-replay.yaml \
+#       --output ./agent_results --ticket PROBE-LLMDET-GPU \
+#       -- ./launch_det.sh
+#
+# `env_passthrough_mode: file` rather than the `inherit` default is
+# load-bearing, not a preference: the workload runs inside a ROCm container and
+# `docker run` does not forward the host environment, so an inherited
+# mitigation bundle would be dropped at the container boundary and every cell
+# would silently be the baseline. `file` writes a 0600 probe.env per trial and
+# exports AORTA_ENV_FILE for `docker run --env-file` to pick up.
+schema_version: 1
+mode: probe
+
+ticket: PROBE-LLMDET-GPU
+
+# Two trials, because a determinism failure can be rate-based: one clean trial
+# is not evidence of a clean configuration. The replay count *within* a trial
+# is a workload knob (`steps`), so the total number of replay comparisons is
+# trials x steps, and both are reported.
+trials: 2
+
+# Matches the mitigation axis the committed matrix recipe already uses.
+# `tf32_off` is the one registered mitigation with a stated mechanism against
+# replay nondeterminism: it sets DISABLE_TF32=1, which hipBLASLt consumes, and
+# changes matmul kernel selection away from the TF32/xf32 reduction ordering.
+mitigation_axis:
+  - none
+  - tf32_off
+
+diagnostic_axis:
+  - none
+
+step_time_regex: null
+collect_paths: []
+timeout_per_trial: 1800
+
+env_passthrough_mode: file
