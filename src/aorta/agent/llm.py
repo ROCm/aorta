@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
@@ -17,18 +19,86 @@ StopReason = Literal[
     "agent_requested",
 ]
 
-AUTOPSY_CATEGORIES: frozenset[str] = frozenset(
+# The closed autopsy label set, each member carrying the one-line gloss the
+# proposer is told to route on. Set and glosses are one object deliberately:
+# several members are near neighbours (``checkpoint_race`` vs ``kernel_race``,
+# ``kernel_race`` vs ``nondeterminism``) and a bare list of names is not enough
+# to choose between them, so a member added without a gloss would be a member
+# the model has never been told how to use.
+#
+# Labels exist to route toward a *diagnostic*, so the granularity follows the
+# diagnostic rather than the symptom. That is why a race inside a kernel is its
+# own label and not a flavour of ``nondeterminism``: a race is localised to one
+# kernel and confirmed with ConSan/waitcheck, whereas nondeterminism is a
+# workload-level symptom whose triage starts with repeating the run.
+AUTOPSY_CATEGORY_GUIDANCE: Mapping[str, str] = MappingProxyType(
     {
-        "rccl_hang",
-        "thermal_throttle",
-        "illegal_mem",
-        "oom_fragment",
-        "checkpoint_race",
-        "launch_error",
-        "perf_regression",
-        "unknown",
+        "rccl_hang": (
+            "A collective stopped making progress -- ranks stuck in RCCL/NCCL, "
+            "watchdog timeout, no forward progress."
+        ),
+        "thermal_throttle": (
+            "Sustained clock or throughput loss attributable to thermal or power "
+            "limiting rather than to the workload itself."
+        ),
+        "illegal_mem": (
+            "Illegal or out-of-bounds device memory access -- HIP/CUDA fault, VM "
+            "protection fault, fault in device code."
+        ),
+        "oom_fragment": (
+            "Out of memory or allocator fragmentation, including an OOM kill."
+        ),
+        "checkpoint_race": (
+            "A concurrency defect around checkpoint I/O: a save or load racing "
+            "with training, with another rank, or with a filesystem barrier. This "
+            "label is about checkpointing, never about code inside a GPU kernel -- "
+            "for that use kernel_race."
+        ),
+        "kernel_race": (
+            "An unsynchronised access inside a single GPU kernel: an LDS or global "
+            "data race, or a missing wait-count hazard. Localised to one kernel and "
+            "confirmed by a sanitizer (ConSan, waitcheck) that names the offending "
+            "sites. Prefer this over nondeterminism whenever a specific kernel is "
+            "already implicated."
+        ),
+        "launch_error": (
+            "The workload failed at or before launch -- bad argv, missing "
+            "dependency, early non-zero exit before real work started."
+        ),
+        "perf_regression": (
+            "The workload produces correct results but is slower than its reference."
+        ),
+        "nondeterminism": (
+            "A workload that should be reproducible is not: results or verdicts "
+            "diverge run to run on identical inputs. A workload-level symptom with "
+            "many possible causes, triaged by repeating the run and diffing rather "
+            "than by pointing a sanitizer at one kernel. Use kernel_race instead "
+            "once a specific kernel's race is the evidence."
+        ),
+        "numeric_instability": (
+            "NaN, Inf, or a loss of numeric accuracy: training loss goes NaN "
+            "(``tier4:nan_signature``), values overflow, or results drift beyond "
+            "tolerance because of precision or accumulation order."
+        ),
+        "unknown": (
+            "The evidence does not support any label above. The honest answer when "
+            "nothing fits -- not a placeholder for a guess."
+        ),
     }
 )
+
+#: Closed set :class:`aorta.agent.policy.AgentPolicy` validates against, derived
+#: from the guidance so the two cannot drift apart.
+AUTOPSY_CATEGORIES: frozenset[str] = frozenset(AUTOPSY_CATEGORY_GUIDANCE)
+
+
+def format_category_guidance() -> str:
+    """Render the autopsy labels as one ``- name: gloss`` line each."""
+    return "\n".join(
+        f"- {name}: {AUTOPSY_CATEGORY_GUIDANCE[name]}"
+        for name in sorted(AUTOPSY_CATEGORY_GUIDANCE)
+    )
+
 
 _BASELINE_CELL = "none-none"
 
@@ -114,8 +184,17 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
         return "oom_fragment"
     if "hip_error" in joined or "illegal" in joined or "memory" in joined:
         return "illegal_mem"
-    if "checkpoint" in joined or "barrier" in joined:
+    if "nan_signature" in joined:
+        return "numeric_instability"
+    if "checkpoint" in joined:
         return "checkpoint_race"
+    # "barrier" used to land here, but in this codebase a barrier is a GPU-side
+    # object -- ConSan barrier sites, barrier patching -- not a checkpoint
+    # barrier, so the old branch routed intra-kernel evidence to a checkpoint-I/O
+    # label. Checked after "checkpoint" so a detector naming both still wins for
+    # checkpoint_race.
+    if "race" in joined or "consan" in joined or "barrier" in joined or "waitcnt" in joined:
+        return "kernel_race"
     if "tier1:exit" in joined or "launch" in joined:
         return "launch_error"
     return "unknown"
@@ -143,6 +222,14 @@ class FakeLLMProposer:
                 category = "illegal_mem"
             elif "oom" in low:
                 category = "oom_fragment"
+            elif "nan" in low:
+                category = "numeric_instability"
+            elif "nondetermin" in low:
+                category = "nondeterminism"
+            # Bare "race" would also match "traceback", a very plausible word in
+            # a free-text symptom, so this leg wants the phrase.
+            elif "data race" in low or "race condition" in low:
+                category = "kernel_race"
 
         # Baseline pass wins even when the allowlist has no further mitigations.
         for summary in cell_summaries:
@@ -224,7 +311,10 @@ def _build_prompt(
         "names from the candidate list. Never propose shell commands or argv. "
         "Return strict JSON with keys: category, hypothesis, next_mitigations "
         "(list of strings), confidence (0-1), stop (bool). "
-        f"category must be one of: {sorted(AUTOPSY_CATEGORIES)}."
+        "category must be exactly one of the labels below. Several are near "
+        "neighbours, so the gloss -- not the name -- is what tells them apart; "
+        "read it before choosing.\n"
+        f"{format_category_guidance()}"
     )
     user = json.dumps(
         {
@@ -464,6 +554,7 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
 
 __all__ = [
     "AUTOPSY_CATEGORIES",
+    "AUTOPSY_CATEGORY_GUIDANCE",
     "CHAT_PROVIDER_BACKENDS",
     "AgentStep",
     "ChatProviderProposer",
@@ -471,5 +562,6 @@ __all__ = [
     "LLMProposer",
     "LiteLLMProposer",
     "StopReason",
+    "format_category_guidance",
     "make_proposer",
 ]
