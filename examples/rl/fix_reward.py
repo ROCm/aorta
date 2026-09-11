@@ -55,12 +55,14 @@ cannot win. Scoring attribution by F1 while scoring the fix by containment is an
 internal inconsistency in one reward, and removing it is right whichever
 direction the resulting number moves.
 
-The conventions here are copied from ``triage_reward.score_answer`` rather than
-re-derived, for the same reason: two F1 terms in one reward that disagree about
-the empty case are two different terms wearing one name. An empty proposal earns
-0.0 -- it resolved nothing -- and a scenario with no resolvers is withheld
-before this is ever called, so the empty-empty case that scores 1.0 in the
-triage term is unreachable here.
+The consistency is structural rather than asserted: this calls
+``triage_reward.set_f1``, the same function the attribution term calls, so the
+two cannot drift and cannot disagree about the empty cases. That function was
+extracted from ``score_answer`` for this purpose and its arithmetic is
+unchanged, so no recorded triage number moves. An empty proposal earns 0.0 --
+it resolved nothing -- and the empty-empty case that scores 1.0 for attribution
+is unreachable here, because a scenario with no resolvers is withheld before
+fix credit is ever called.
 
 Breadth is now priced twice, and that is the intended reading. Precision falls
 as ``1/k`` here, and ``proposal_reward.precision_credit`` scales the tier 4-5
@@ -102,7 +104,7 @@ from aorta.agent.state import read_trial_results, winning_mitigation
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from triage_reward import find_probe_cells, label_trials  # noqa: E402
+from triage_reward import find_probe_cells, label_trials, set_f1  # noqa: E402
 
 # What the fix half is worth against the form half.
 #
@@ -212,18 +214,7 @@ def fix_credit(names: Iterable[str], resolution: Resolution) -> float:
     matching it is that one reward should not hold two different opinions about
     how to score a set against a set.
     """
-    predicted = {str(name) for name in names}
-    actual = set(resolution.resolvers)
-    if not actual and not predicted:
-        return 1.0
-    if not actual or not predicted:
-        return 0.0
-    overlap = len(predicted & actual)
-    if overlap == 0:
-        return 0.0
-    precision = overlap / len(predicted)
-    recall = overlap / len(actual)
-    return 2 * precision * recall / (precision + recall)
+    return set_f1(names, resolution.resolvers)
 
 
 def fix_credit_contained(names: Iterable[str], resolution: Resolution) -> float:

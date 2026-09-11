@@ -81,6 +81,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -274,6 +275,31 @@ def label_trials(docs: list[dict[str, Any]], source: str | None = None) -> Label
     )
 
 
+def set_f1(predicted: Iterable[str], actual: Iterable[str]) -> float:
+    """F1 of one set of names against another, with the empty cases settled.
+
+    Extracted so it can be shared. It was inline in :func:`score_answer` while
+    attribution was the only set-against-set term in the reward; the fix half
+    scores proposed mitigations against the ones that actually resolved the
+    failure, which is the same question, and two hand-written F1s that disagree
+    about the empty cases would be two different terms wearing one name.
+
+    Behaviour is unchanged: same arithmetic, same conventions, no number moves.
+    """
+    predicted_set = {str(name) for name in predicted}
+    actual_set = {str(name) for name in actual}
+    if not actual_set and not predicted_set:
+        return 1.0
+    if not actual_set or not predicted_set:
+        return 0.0
+    overlap = len(predicted_set & actual_set)
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(predicted_set)
+    recall = overlap / len(actual_set)
+    return 2 * precision * recall / (precision + recall)
+
+
 def score_answer(answer: Answer, label: Label) -> Score:
     """Reward one answer against the ground truth.
 
@@ -286,19 +312,7 @@ def score_answer(answer: Answer, label: Label) -> Score:
     score = Score()
     score.verdict_correct = answer.verdict == label.verdict
 
-    predicted, actual = set(answer.detectors), label.cited_detectors
-    if not actual and not predicted:
-        score.attribution_f1 = 1.0
-    elif not actual or not predicted:
-        score.attribution_f1 = 0.0
-    else:
-        overlap = len(predicted & actual)
-        if overlap == 0:
-            score.attribution_f1 = 0.0
-        else:
-            precision = overlap / len(predicted)
-            recall = overlap / len(actual)
-            score.attribution_f1 = 2 * precision * recall / (precision + recall)
+    score.attribution_f1 = set_f1(answer.detectors, label.cited_detectors)
 
     score.reward = (
         VERDICT_WEIGHT * (1.0 if score.verdict_correct else 0.0)

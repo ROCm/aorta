@@ -1998,8 +1998,18 @@ def test_every_mitigation_that_resolved_it_counts_not_just_the_first(
     resolution = fix_reward.resolution_from_matrix(root)
 
     assert resolution.resolvers == frozenset({"tf32_off", "xnack"})
-    assert fix_reward.fix_credit(["xnack"], resolution) == 1.0
+    # naming the second resolver scores exactly what naming the first does...
+    assert fix_reward.fix_credit(["xnack"], resolution) == fix_reward.fix_credit(
+        ["tf32_off"], resolution
+    )
+    # ...and a mitigation that did not resolve it earns nothing either way
     assert fix_reward.fix_credit(["hsa_no_sdma"], resolution) == 0.0
+    # Under F1 a single name is now *partial* credit against a two-resolver
+    # ground truth -- right but incomplete -- rather than the full marks
+    # containment gave it. The 4.3 requirement is about which answers count,
+    # and both still do; see the dedicated F1 test below for the arithmetic.
+    assert fix_reward.fix_credit(["xnack"], resolution) == pytest.approx(2 / 3)
+    assert fix_reward.fix_credit_contained(["xnack"], resolution) == 1.0
 
 
 def test_a_pass_that_is_not_attributable_to_the_mitigation_is_not_a_resolver(
@@ -2079,9 +2089,14 @@ def test_none_is_never_a_resolving_mitigation(fix_reward, tmp_path):
     assert fix_reward.resolution_from_matrix(root).resolvers == frozenset()
 
 
-def test_fix_credit_is_membership_and_an_empty_proposal_earns_nothing(
+def test_fix_credit_is_f1_so_padding_a_correct_answer_costs_something(
     fix_reward, tmp_path
 ):
+    """The point of the reformulation, in one assertion.
+
+    Under containment the last two lines were both 1.0, which is what let a
+    policy that reads nothing bank full credit by naming everything.
+    """
     root = _matrix(tmp_path, {
         "none-none": _failing("none-none"),
         "tf32_off-none": _passing("tf32_off-none"),
@@ -2090,7 +2105,149 @@ def test_fix_credit_is_membership_and_an_empty_proposal_earns_nothing(
 
     assert fix_reward.fix_credit([], resolution) == 0.0
     assert fix_reward.fix_credit(["xnack"], resolution) == 0.0
-    assert fix_reward.fix_credit(["xnack", "tf32_off"], resolution) == 1.0
+    assert fix_reward.fix_credit(["tf32_off"], resolution) == 1.0
+    # one resolver out of two names: precision 1/2, recall 1/1 -> F1 2/3
+    assert fix_reward.fix_credit(["xnack", "tf32_off"], resolution) == pytest.approx(
+        2 / 3
+    )
+    # and it keeps falling, which is the property containment lacked
+    assert fix_reward.fix_credit(
+        ["xnack", "hsa_no_sdma", "none", "tf32_off"], resolution
+    ) == pytest.approx(0.4)
+
+
+def test_fix_credit_rewards_finding_every_resolver_not_just_one(
+    fix_reward, tmp_path
+):
+    """Recall is half the term, so naming one of two resolvers is not full marks.
+
+    Separately this is the section 4.3 requirement -- any mitigation that made
+    the cell pass counts -- expressed as a score rather than a boolean.
+    """
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": _passing("tf32_off-none"),
+        "hsa_no_sdma-none": _passing("hsa_no_sdma-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+    assert resolution.resolvers == frozenset({"tf32_off", "hsa_no_sdma"})
+
+    assert fix_reward.fix_credit(["tf32_off", "hsa_no_sdma"], resolution) == 1.0
+    # precision 1/1, recall 1/2 -> F1 2/3: right but incomplete
+    assert fix_reward.fix_credit(["tf32_off"], resolution) == pytest.approx(2 / 3)
+    # precision 1/2, recall 1/2 -> F1 1/2: right, incomplete, and padded
+    assert fix_reward.fix_credit(["tf32_off", "xnack"], resolution) == pytest.approx(0.5)
+
+
+def test_fix_credit_agrees_with_the_attribution_term_on_every_edge_case(
+    fix_reward, tmp_path
+):
+    """The consistency claim, checked against the real attribution term.
+
+    The reason for F1 here is that `triage_reward` already scores a set against
+    a set this way one layer up. That argument is only honest if the two really
+    are the same term, so this drives the *attribution* half of `score_answer`
+    with the same pairs and requires the numbers to match -- rather than
+    trusting that two hand-written F1s agree about the awkward cases.
+    """
+    triage = _load("triage_reward")
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": _passing("tf32_off-none"),
+        "hsa_no_sdma-none": _passing("hsa_no_sdma-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+    actual = sorted(resolution.resolvers)
+
+    for predicted in (
+        [],
+        ["tf32_off"],
+        ["hsa_no_sdma"],
+        ["tf32_off", "hsa_no_sdma"],
+        ["xnack"],
+        ["xnack", "tf32_off"],
+        ["xnack", "none", "tf32_off", "hsa_no_sdma"],
+    ):
+        label = triage.Label(verdict="fail", failure_detectors=list(actual))
+        answer = triage.Answer(verdict="fail", detectors=list(predicted))
+        attribution = triage.score_answer(answer, label).attribution_f1
+        assert fix_reward.fix_credit(predicted, resolution) == pytest.approx(
+            attribution
+        ), predicted
+
+    # and it is one function shared, not two that happen to agree today. The
+    # loader gives each module its own object, so identity is not the check --
+    # provenance is.
+    assert fix_reward.set_f1.__module__ == "triage_reward"
+    assert fix_reward.set_f1.__code__.co_code == triage.set_f1.__code__.co_code
+
+
+def test_containment_is_retained_and_its_defect_is_pinned_to_it(
+    fix_reward, tmp_path
+):
+    """Why the superseded formulation is still in the module.
+
+    Not as a knob. Containment is monotone in list length, and that is the fact
+    the first measurement turned on; pinning it against the function it belongs
+    to makes it a documented property someone can find rather than a regression
+    waiting to be reintroduced under the name `fix_credit`.
+    """
+    offered = ["tf32_off", "xnack", "hsa_no_sdma", "none"]
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": _passing("tf32_off-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+
+    # naming everything is free under containment and costly under F1
+    assert fix_reward.fix_credit_contained(offered, resolution) == 1.0
+    assert fix_reward.fix_credit(offered, resolution) == pytest.approx(0.4)
+    # and containment never decreases as names are added, at any length
+    previous = 0.0
+    for k in range(1, len(offered) + 1):
+        current = fix_reward.fix_credit_contained(offered[:k], resolution)
+        assert current >= previous
+        previous = current
+
+    assert set(fix_reward.FORMULATIONS) == {"f1", "containment"}
+    assert fix_reward.FORMULATIONS["f1"] is fix_reward.fix_credit
+
+
+def test_the_iteration_budget_charges_one_unit_for_a_whole_proposal():
+    """A finding, not a desideratum. Read the docstring before "fixing" this.
+
+    `loop.py` appends every proposed name to the mitigation axis, and the probe
+    runs one cell per axis entry; then it charges the budget exactly once for
+    the cycle. So breadth is free in the production loop too, which is the same
+    defect the reward had -- a third location for it, after the form ladder and
+    the fix term.
+
+    Pinned here because the arithmetic is the whole finding, and because the
+    repair is a product decision rather than a reward experiment: charging cells
+    would change what `--max-iterations` means on the CLI. Worth recording that
+    the log already holds what a cell-correct budget would need -- one
+    `mitigation_tried` event per name -- so the resume path could reconstruct a
+    cell count without a schema change.
+    """
+    from aorta.agent.policy import AgentPolicy, PolicyViolation
+    from aorta.agent.state import AgentState
+
+    policy = AgentPolicy(max_iterations=2)
+    state = AgentState(ticket="BUDGET-1")
+    proposal = ["tf32_off", "xnack", "hsa_no_sdma", "none"]
+
+    axis: list[str] = []
+    for _ in range(2):
+        policy.check_iteration_budget(state.iterations_completed)
+        axis.extend(n for n in proposal if n not in axis)
+        state.iterations_completed += 1
+
+    with pytest.raises(PolicyViolation):
+        policy.check_iteration_budget(state.iterations_completed)
+
+    # two units bought four cells, and would have bought twenty just as cheaply
+    assert state.iterations_completed == 2
+    assert len(axis) == len(proposal) == 4
 
 
 def test_the_composite_has_exactly_one_weight_and_it_is_bounded(fix_reward):
@@ -2237,20 +2394,27 @@ def test_the_null_hypothesis_is_reported_rather_than_dropped(rescore_e2e):
     assert "withheld" in null["note"]
 
 
-def test_a_shotgun_earns_full_fix_credit_under_every_hypothesis(rescore_e2e):
-    """The structural reason the fix half did not break the degeneracy.
+def test_a_shotgun_no_longer_earns_full_fix_credit(rescore_e2e):
+    """The reformulation, measured through the harness rather than the function.
 
-    Fix credit is containment, and containment is monotone in list length: a
-    policy that names the whole offered set names every possible resolver by
-    construction. Pricing that is the form half's job, via `precision_credit`,
-    and on the recorded rollouts it did not price it enough. Pinned here so the
-    limitation is a property of the design someone can find, rather than a
-    surprise in a later measurement.
+    This is the test that changed sign. Under containment a policy naming the
+    whole offered set scored 1.0 under every hypothesis, by construction. Under
+    F1 it scores 2/(k+1) for a single resolver among k names, so the degeneracy
+    the first measurement ran into is gone from this term -- which is what makes
+    the remaining failure of criterion 1 on the recorded rollouts attributable
+    to something else.
     """
     offered = ["tf32_off", "xnack", "hsa_no_sdma"]
     doc = _one_scenario_each([_completion(mitigations=offered)], offered)
-    sweep = rescore_e2e.resolver_sweep(doc)
 
-    for row in sweep["hypotheses"]:
+    f1 = rescore_e2e.resolver_sweep(doc, formulation="f1")
+    contained = rescore_e2e.resolver_sweep(doc, formulation="containment")
+
+    scored = [r for r in f1["hypotheses"] if r.get("model_fix_rate") is not None]
+    assert len(scored) == len(offered)
+    for row in scored:
+        # 1 resolver among 3 names: precision 1/3, recall 1 -> F1 0.5
+        assert row["model_fix_rate"] == pytest.approx(0.5)
+    for row in contained["hypotheses"]:
         if row.get("model_fix_rate") is not None:
             assert row["model_fix_rate"] == 1.0

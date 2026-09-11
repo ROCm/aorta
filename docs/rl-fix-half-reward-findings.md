@@ -1,5 +1,14 @@
 # The execution-checked fix half: built, measured, and it does not flip the criteria
 
+> **Superseded in part. Read `rl-fix-half-reward-f1.md` next.** Everything below is
+> the measurement of fix credit as *containment*, and it stands as recorded. But the
+> diagnosis in "Why it does not flip the criteria" -- that containment is monotone in
+> list length -- turned out to be a property of the formulation rather than of
+> execution-checking, and reformulating fix credit as F1 over the resolvers removes
+> the shotgun from contention entirely. In particular this document's closing claim
+> that "breadth is underpriced" is too coarse after that change; the sequel locates
+> the remaining obstacle in the form half instead.
+
 **Result, up front.** The fix half is implemented, it recovers its ground truth
 offline from a real archived probe matrix, and it does **not** rescue the reward on
 the recorded rollouts. Under *every* hypothesis about which mitigation resolves the
