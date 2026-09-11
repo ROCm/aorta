@@ -37,21 +37,40 @@ mitigation cells has three right answers, and a policy that names the second is
 not wrong. :attr:`Resolution.resolvers` is therefore a set, and
 :func:`fix_credit` is membership in it.
 
-The term is binary, and that is deliberate
-------------------------------------------
-``fix_credit`` is 1.0 if the proposal names at least one resolver and 0.0
-otherwise. No partial credit, no length scaling, no tuning knob -- the one
-weight in this module is :data:`FIX_WEIGHT`, and it is set to the neutral 0.5
-("the contract has two halves") rather than fitted.
+F1 over the resolvers, for consistency with the attribution term
+----------------------------------------------------------------
+``fix_credit`` is the F1 of the proposed mitigations against the ones that
+actually resolved the failure. It **was** containment -- 1.0 if the list held at
+least one resolver -- and that formulation was measured and reported first (see
+``docs/rl-fix-half-reward-findings.md``); it is kept as
+:func:`fix_credit_contained` so the comparison stays reproducible.
 
-Pricing the *breadth* of a proposal here was considered and rejected: it is
-already priced, by ``proposal_reward.precision_credit``, which scales the tier
-4-5 block by ``min(1, 2/names)`` because the loop spends one probe cell per
-name. Charging for length in both halves would be the same preference expressed
-twice, and the second expression would be a free parameter chosen to move a
-number -- which is exactly the failure mode this whole exercise is about.
-Shotgunning therefore gets full fix credit and pays for it on the form side,
-where the cost model lives.
+The reason for the change is a correctness argument, not a number. Containment
+is *monotone in list length*: naming the whole candidate set names every
+possible resolver by construction, so a policy that reads nothing scores a
+perfect 1.0. That is precisely the hole ``triage_reward.py`` already closed one
+layer up, and it closed it this way -- ``0.4 * attribution-F1`` over the cited
+detector IDs, F1 rather than "cited at least one", so that citing everything
+cannot win. Scoring attribution by F1 while scoring the fix by containment is an
+internal inconsistency in one reward, and removing it is right whichever
+direction the resulting number moves.
+
+The conventions here are copied from ``triage_reward.score_answer`` rather than
+re-derived, for the same reason: two F1 terms in one reward that disagree about
+the empty case are two different terms wearing one name. An empty proposal earns
+0.0 -- it resolved nothing -- and a scenario with no resolvers is withheld
+before this is ever called, so the empty-empty case that scores 1.0 in the
+triage term is unreachable here.
+
+Breadth is now priced twice, and that is the intended reading. Precision falls
+as ``1/k`` here, and ``proposal_reward.precision_credit`` scales the tier 4-5
+block by ``min(1, 2/k)`` on the form side. Both are expressions of one fact --
+the loop spends one probe cell per proposed name -- and the earlier decision to
+price it only once rested on containment being the fix formulation. It is not a
+new free parameter: F1 introduces no coefficient.
+
+The one weight in this module remains :data:`FIX_WEIGHT`, set to the neutral 0.5
+("the contract has two halves") rather than fitted.
 
 When the term must be withheld rather than scored
 -------------------------------------------------
@@ -180,13 +199,53 @@ def resolution_from_matrix(root: Path, scenario_id: str | None = None) -> Resolu
 
 
 def fix_credit(names: Iterable[str], resolution: Resolution) -> float:
-    """1.0 if the proposal names a mitigation that resolved the failure.
+    """F1 of the proposed mitigations against the ones that resolved the failure.
 
     Pure and cheap: the archived matrix was read once, into
-    ``resolution.resolvers``, and this is a set membership test. Called once
-    per rollout sample.
+    ``resolution.resolvers``, and this is set arithmetic. Called once per
+    rollout sample.
+
+    Recall alone would be containment with extra steps -- it is maximised by
+    naming everything. Precision alone would reward a single lucky name over a
+    pair containing it. F1 is the combination the attribution term in
+    ``triage_reward.py`` already uses over cited detector IDs, and the point of
+    matching it is that one reward should not hold two different opinions about
+    how to score a set against a set.
     """
-    return 1.0 if resolution.resolvers.intersection(names) else 0.0
+    predicted = {str(name) for name in names}
+    actual = set(resolution.resolvers)
+    if not actual and not predicted:
+        return 1.0
+    if not actual or not predicted:
+        return 0.0
+    overlap = len(predicted & actual)
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(predicted)
+    recall = overlap / len(actual)
+    return 2 * precision * recall / (precision + recall)
+
+
+def fix_credit_contained(names: Iterable[str], resolution: Resolution) -> float:
+    """The superseded formulation: 1.0 if the list held any resolver at all.
+
+    Retained, and not as a knob. It is the formulation the first measurement was
+    taken under, so keeping it is what lets the before/after comparison be one
+    command rather than a checkout; and the property that condemned it --
+    monotone in list length, so a shotgun scores 1.0 for free -- is pinned by a
+    test against *this* function, where it is a documented fact rather than a
+    regression waiting to be reintroduced.
+    """
+    return 1.0 if resolution.resolvers.intersection(str(n) for n in names) else 0.0
+
+
+# The two formulations, by name, for the comparison harness. Not a search space:
+# `f1` is the formulation, `containment` is the superseded one kept so the
+# earlier measurement stays reproducible.
+FORMULATIONS = {
+    "f1": fix_credit,
+    "containment": fix_credit_contained,
+}
 
 
 def composite_reward(form: float, fix: float, fix_weight: float = FIX_WEIGHT) -> float:
@@ -218,16 +277,24 @@ def _demo(root: Path, fix_weight: float, as_json: bool) -> int:
         print("which is a degenerate term wearing the clothes of a measurement.")
         return 1
 
-    print("  what the term pays, for a form score of 1.00:")
+    # The rows that matter are the ones where the two formulations disagree:
+    # padding a correct answer with wrong ones is free under containment and
+    # costly under F1, which is the whole reason for the change.
+    resolver = sorted(resolution.resolvers)[:1]
+    padded = resolver + [n for n in ("none", "xnack", "hsa_no_sdma") if n not in resolver]
+    print(f"  what the term pays, for a form score of 1.00, weight {fix_weight:g}:")
+    print(f"    {'proposal':<34} {'F1':>6} {'containment':>12} {'composite (F1)':>16}")
     for label, names in (
-        ("names a resolver", sorted(resolution.resolvers)[:1]),
-        ("names a non-resolver", ["none"]),
-        ("names nothing", []),
+        ("exactly one resolver", resolver),
+        (f"one resolver plus {len(padded) - 1} wrong", padded),
+        ("one non-resolver", ["none"]),
+        ("nothing", []),
     ):
-        fix = fix_credit(names, resolution)
+        f1 = fix_credit(names, resolution)
+        contained = fix_credit_contained(names, resolution)
         print(
-            f"    {label:<22} fix {fix:.2f}  composite "
-            f"{composite_reward(1.0, fix, fix_weight):.4f}"
+            f"    {label:<34} {f1:>6.3f} {contained:>12.3f} "
+            f"{composite_reward(1.0, f1, fix_weight):>16.4f}"
         )
     return 0
 

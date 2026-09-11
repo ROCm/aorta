@@ -62,12 +62,19 @@ a single hypothesis that does, and in the opposite direction.
 for the same reason. `--matrix` is the real path, for a corpus built from probe
 runs.
 
+`--formulation` selects how fix credit scores a set against a set. There are
+two and there will not be a third: `f1` is the formulation, and `containment`
+is the superseded one, kept only so the first measurement stays reproducible
+from one command. It is a comparison affordance, not a search space.
+
 Usage
 -----
 
     python examples/rl/rescore_e2e.py results/faithful.json
     python examples/rl/rescore_e2e.py results/*.json --json
     python examples/rl/rescore_e2e.py results/*.json --resolver-sweep
+    python examples/rl/rescore_e2e.py results/*.json --resolver-sweep \
+        --formulation containment
     python examples/rl/rescore_e2e.py results/probe.json --matrix runs/TICKET
 """
 
@@ -84,9 +91,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fix_reward import (  # noqa: E402
     FIX_WEIGHT,
+    FORMULATIONS,
     Resolution,
     composite_reward,
-    fix_credit,
     resolution_from_matrix,
 )
 from proposal_reward import (  # noqa: E402
@@ -316,6 +323,7 @@ def analyse(
     resolution: Resolution | None = None,
     fix_weight: float = FIX_WEIGHT,
     form: FormPass | None = None,
+    formulation: str = "f1",
 ) -> dict[str, Any]:
     """Score the recorded rollouts, optionally with the execution-checked half.
 
@@ -330,6 +338,7 @@ def analyse(
     """
     form = form or form_pass(doc)
     meta, offered = form.meta, form.offered
+    fix_credit = FORMULATIONS[formulation]
 
     # Copied because the fix half stamps per-row keys onto them and a shared
     # FormPass is scored repeatedly; without this, hypothesis N+1 would read
@@ -340,7 +349,7 @@ def analyse(
         assert resolution is not None
         for row in rows:
             row["names_runnable"] = runnable_names(row["raw"], offered)
-            row["fix_credit"] = fix_credit(row["names_runnable"], resolution)
+            row["fix_credit"] = round(fix_credit(row["names_runnable"], resolution), 4)
             row["composite"] = round(
                 composite_reward(row["reward_after"], row["fix_credit"], fix_weight), 4
             )
@@ -359,7 +368,7 @@ def analyse(
     if fix_active:
         assert resolution is not None
         for name, raw in reference_raw.items():
-            credit = fix_credit(runnable_names(raw, offered), resolution)
+            credit = round(fix_credit(runnable_names(raw, offered), resolution), 4)
             reference_fix[name] = credit
             reference_means[name] = round(
                 composite_reward(reference_means[name], credit, fix_weight), 4
@@ -461,6 +470,7 @@ def analyse(
         "mean_mitigations": round(_mean([float(r["n_mitigations"]) for r in rows]), 4),
         "fix_half": {
             "active": fix_active,
+            "formulation": formulation if fix_active else None,
             "weight": fix_weight if fix_active else None,
             "resolution": resolution.as_dict() if resolution is not None else None,
             "model_form_mean": round(_mean([r["reward_after"] for r in rows]), 4),
@@ -530,7 +540,11 @@ def print_analysis(result: dict[str, Any]) -> None:
         print(f"           {row['detail']}")
 
 
-def resolver_sweep(doc: dict[str, Any], fix_weight: float = FIX_WEIGHT) -> dict[str, Any]:
+def resolver_sweep(
+    doc: dict[str, Any],
+    fix_weight: float = FIX_WEIGHT,
+    formulation: str = "f1",
+) -> dict[str, Any]:
     """Every hypothesis about which offered mitigation resolves the failure.
 
     The recorded rollouts have no archived matrix, so the fix half has no
@@ -581,7 +595,10 @@ def resolver_sweep(doc: dict[str, Any], fix_weight: float = FIX_WEIGHT) -> dict[
         }
     )
     for name in offered:
-        result = analyse(doc, hypothetical_resolution([name]), fix_weight, form=form)
+        result = analyse(
+            doc, hypothetical_resolution([name]), fix_weight, form=form,
+            formulation=formulation,
+        )
         criteria = result["criteria"]
         rows.append(
             {
@@ -591,13 +608,26 @@ def resolver_sweep(doc: dict[str, Any], fix_weight: float = FIX_WEIGHT) -> dict[
                 "model_fix_rate": result["fix_half"]["model_fix_rate"],
                 "criteria_passing": sum(1 for c in criteria.values() if c["holds"]),
                 "criterion_1": criteria["1_constants_below_model"]["holds"],
+                # Which constant is the one to beat. Named because the answer
+                # turns out to depend on whether the resolver is `offered[0]`,
+                # and that is a property of the sweep rather than of the reward.
+                "binding_constant": max(
+                    ("abstain_and_shotgun", "abstain_and_pick_first"),
+                    key=lambda c: criteria["1_constants_below_model"]["detail"][c],
+                ),
             }
         )
+    # The baseline row and the null hypothesis are not hypotheses about which
+    # mitigation resolves it, so they are not in the denominator.
+    real = rows[2:]
     return {
         "condition": meta.get("condition"),
         "offered": offered,
         "fix_weight": fix_weight,
-        "any_hypothesis_flips_criterion_1": any(r["criterion_1"] for r in rows[1:]),
+        "formulation": formulation,
+        "hypotheses_scored": len(real),
+        "hypotheses_flipping_criterion_1": sum(1 for r in real if r["criterion_1"]),
+        "any_hypothesis_flips_criterion_1": any(r["criterion_1"] for r in real),
         "hypotheses": rows,
     }
 
@@ -606,14 +636,14 @@ def print_sweep(sweep: dict[str, Any]) -> None:
     print()
     print("=" * 78)
     print(f"Resolver sweep: condition {sweep['condition']!r}, "
-          f"{len(sweep['offered'])} mitigations offered, "
-          f"fix weight {sweep['fix_weight']:g}")
+          f"{len(sweep['offered'])} mitigations offered")
+    print(f"  fix credit = {sweep['formulation']}, weight {sweep['fix_weight']:g}")
     print("=" * 78)
     print("  No ground truth exists for these scenarios, so every hypothesis about")
     print("  which mitigation resolves them is scored and none is chosen.")
     print()
     print(f"    {'hypothesis':<44} {'model':>7} {'best const':>11} {'fix':>6} "
-          f"{'crit 1':>7} {'of 4':>5}")
+          f"{'crit 1':>7} {'of 4':>5}  binding")
     for row in sweep["hypotheses"]:
         model = "  --   " if row["model"] is None else f"{row['model']:>7.4f}"
         const = "     --    " if row["best_constant"] is None else f"{row['best_constant']:>11.4f}"
@@ -622,16 +652,25 @@ def print_sweep(sweep: dict[str, Any]) -> None:
         passing = row["criteria_passing"]
         passing_s = "   --" if passing is None else f"{passing:>5}"
         mark = "PASS" if row["criterion_1"] else "fail"
-        print(f"    {row['hypothesis']:<44} {model} {const} {rate_s} {mark:>7} {passing_s}")
+        binding = row.get("binding_constant", "")
+        print(f"    {row['hypothesis']:<44} {model} {const} {rate_s} {mark:>7} "
+              f"{passing_s}  {binding}")
         if row.get("note"):
             print(f"      {row['note']}")
     print()
-    verdict = (
-        "at least one hypothesis flips criterion 1"
-        if sweep["any_hypothesis_flips_criterion_1"]
-        else "NO hypothesis flips criterion 1 -- the fix half does not rescue this set"
-    )
-    print(f"  Result: {verdict}.")
+    flipping = sweep["hypotheses_flipping_criterion_1"]
+    scored = sweep["hypotheses_scored"]
+    if flipping == 0:
+        print(f"  Result: criterion 1 fails under ALL {scored} hypotheses "
+              "-- this formulation does not rescue this set.")
+    elif flipping == scored:
+        print(f"  Result: criterion 1 holds under ALL {scored} hypotheses.")
+    else:
+        print(f"  Result: criterion 1 holds under {flipping} of {scored} hypotheses. "
+              "A partial flip:")
+        print("  read the `binding` column before calling it a result -- which "
+              "constant is")
+        print("  the one to beat is itself a function of the hypothesis.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -664,6 +703,12 @@ def main(argv: list[str] | None = None) -> int:
         "--fix-weight", type=float, default=FIX_WEIGHT,
         help=f"weight on the fix half (default {FIX_WEIGHT})",
     )
+    parser.add_argument(
+        "--formulation", choices=sorted(FORMULATIONS), default="f1",
+        help="how fix credit scores a proposal against the resolvers: `f1` is the "
+             "formulation, `containment` is the superseded one kept so the earlier "
+             "measurement stays reproducible",
+    )
     args = parser.parse_args(argv)
 
     if args.matrix and args.resolvers:
@@ -687,7 +732,7 @@ def main(argv: list[str] | None = None) -> int:
             if not doc.get("proposals"):
                 print(f"no proposals in {path}", file=sys.stderr)
                 continue
-            sweep = resolver_sweep(doc, args.fix_weight)
+            sweep = resolver_sweep(doc, args.fix_weight, args.formulation)
             sweep["source"] = str(path)
             sweeps.append(sweep)
         if not sweeps:
@@ -705,7 +750,7 @@ def main(argv: list[str] | None = None) -> int:
         if not doc.get("proposals"):
             print(f"no proposals in {path}", file=sys.stderr)
             continue
-        result = analyse(doc, resolution, args.fix_weight)
+        result = analyse(doc, resolution, args.fix_weight, formulation=args.formulation)
         result["source"] = str(path)
         results.append(result)
 
