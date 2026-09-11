@@ -356,6 +356,55 @@ class TestGraphChokepoint:
         sent = llm.ainvoke.await_args.args[0]
         assert "/home/cust7" not in sent[0].content
 
+    @pytest.mark.parametrize(
+        "node_name", ["selector_node", "router_node"], ids=["selector", "router"]
+    )
+    async def test_a_node_that_forwards_the_user_message_redacts_it(self, node_name):
+        """The structural check reads one method name; this reads the wire.
+
+        ``selector_node`` was the node the structural check was added for and
+        the one that failed it: it called ``ainvoke`` itself, so the user's
+        message -- for this package a pasted kernel and the paths and hosts
+        around it -- left the machine intact.
+        """
+        import json
+        from unittest.mock import MagicMock, patch
+
+        from aorta.chat.graph import nodes
+
+        seen: list[str] = []
+
+        def fake_llm(*args, **kwargs):
+            llm = MagicMock()
+
+            async def ainvoke(messages, *a, **k):
+                seen.extend(str(getattr(m, "content", m)) for m in messages)
+                return AIMessage(content=json.dumps({"tools": [], "why": "x"}))
+
+            llm.ainvoke = ainvoke
+            llm.bind_tools = lambda *a, **k: llm
+            return llm
+
+        state = {
+            "messages": [HumanMessage(content=CUSTOMER_TEXT)],
+            "retrieved_context": "",
+            "plan": "",
+            "critic_feedback": "",
+            "iteration": 0,
+            "candidate_tools": [],
+            "selection_rationale": "",
+        }
+        with patch.object(nodes, "_get_llm", fake_llm):
+            try:
+                await getattr(nodes, node_name)(dict(state))
+            except Exception:  # noqa: BLE001 - the node's own exits are not the subject
+                pass
+
+        blob = "\n".join(seen)
+        assert blob, f"{node_name} sent nothing"
+        assert "/home/cust7" not in blob
+        assert "<PATH:" in blob, "the path should be replaced, not dropped"
+
     def test_no_node_calls_ainvoke_directly(self):
         """The gate is only worth anything if it is the only way out.
 

@@ -584,7 +584,11 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
     why = ""
     try:
         llm = _get_llm(temperature=0.0, streaming=False)
-        response = await llm.ainvoke(
+        # Through _send, like every other node: this one carries the user's
+        # message verbatim, and for this package that message is pasted kernel
+        # source and the paths and hostnames around it.
+        response = await _send(
+            llm,
             [
                 SystemMessage(
                     content=_SELECTOR_PROMPT.format(
@@ -592,7 +596,7 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
                     )
                 ),
                 HumanMessage(content=text),
-            ]
+            ],
         )
         payload = _first_json_object(str(response.content or ""))
         if payload:
