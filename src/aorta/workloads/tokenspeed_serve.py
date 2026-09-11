@@ -60,6 +60,7 @@ import shutil
 import signal
 import socket
 import stat
+import statistics
 import subprocess
 import threading
 import time
@@ -137,6 +138,21 @@ _VRAM_LEAK_THRESHOLD_BYTES = 8 * 1024**3
 _VRAM_RELEASE_TIMEOUT_SEC = 300
 _VRAM_RELEASE_POLL_SEC = 5
 
+_DEFAULT_ROLLOUT_SAMPLES = 4
+_DEFAULT_ROLLOUT_TEMPERATURE = 1.0
+# Mirrors ts_bench_serve.sh's `require_uint TS_ROLLOUT_SAMPLES ... 1 1024`.
+_MAX_ROLLOUT_SAMPLES = 1024
+# The OpenAI sampling API's documented range, which is what the gateway
+# implements. A value outside it is rejected per-request by the server, so every
+# prompt fails and the trial reports a serving failure for a recipe error.
+_MAX_ROLLOUT_TEMPERATURE = 2.0
+# A rollout whose completions average fewer tokens than this did not roll
+# anything out -- see the audit in _build_result for the failure it catches. 8 is
+# far below any completion worth training on and far above the 1-2 tokens a
+# collapsed policy produces, so it separates the two without being a judgement
+# about what a good length is.
+_DEFAULT_MIN_MEAN_OUTPUT_TOKENS = 8
+
 _DEFAULT_DATASET = "random"
 # `random` generates its own prompts, so it is the only one that needs nothing
 # staged; `sharegpt` measures against real conversation lengths, which is what
@@ -168,6 +184,7 @@ _EXIT_REASONS: dict[int, str] = {
     53: "bench_step_failed",
     54: "result_json_unusable",
     55: "served_request_shortfall",
+    56: "rollout_output_too_short",
     64: "usage_error",
 }
 
@@ -188,6 +205,12 @@ _KNOWN_KEYS = frozenset(
         "request_rate",
         "num_warmups",
         "ignore_eos",
+        "rollout",
+        "rollout_samples",
+        "temperature",
+        "top_p",
+        "min_mean_output_tokens",
+        "save_detailed",
         "seed",
         "percentile_metrics",
         "metric_percentiles",
@@ -265,6 +288,19 @@ _PROTOCOL_ENV_KEYS = frozenset(
         "TS_OUTPUT_LEN",
         "TS_NUM_WARMUPS",
         "TS_IGNORE_EOS",
+        # The rollout family. Every one of these is either read back to label
+        # the result (`rollout_samples`, `temperature`, `top_p`) or decides a
+        # verdict the host also computes (`TS_MIN_MEAN_OUTPUT_TOKENS`), so a
+        # mitigation setting one would sample differently from what the trial
+        # reports, or audit against a floor the host does not know. `TS_ROLLOUT`
+        # and `TS_SAVE_DETAILED` are absent-when-off, which is the default, so
+        # the computed set cannot reach them.
+        "TS_ROLLOUT",
+        "TS_ROLLOUT_SAMPLES",
+        "TS_TEMPERATURE",
+        "TS_TOP_P",
+        "TS_MIN_MEAN_OUTPUT_TOKENS",
+        "TS_SAVE_DETAILED",
         # Absent when unbounded, which is the default -- so this is the one key
         # the computed set cannot reach on a default configuration.
         "TS_MAX_CONCURRENCY",
@@ -379,6 +415,25 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def _percentile(ordered: list[float], pct: float) -> float:
+    """Linear-interpolated percentile of an already-sorted list.
+
+    Interpolated rather than nearest-rank to match ``numpy.percentile``'s
+    default, which is what ``tokenspeed bench serve`` computes its own
+    ``p50``/``p90``/``p99`` with. Two conventions in one ``perf.md`` table would
+    make the generated-length percentiles differ from the latency percentiles
+    beside them by an artifact of this function.
+    """
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * pct / 100.0
+    low = math.floor(position)
+    high = math.ceil(position)
+    if low == high:
+        return ordered[low]
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
 class TokenSpeedServeWorkload(Workload):
     """Benchmark a TokenSpeed serving endpoint and report serving metrics.
 
@@ -411,11 +466,35 @@ class TokenSpeedServeWorkload(Workload):
             reach readiness (default: ``ready_timeout_sec``). TokenSpeed's own
             default is 60s, which a cold start exceeds.
         ignore_eos: hold OSL fixed so every cell does the same work
-            (default ``True``). ``False`` is only accepted for
-            ``dataset: sharegpt``: the bench CLI forces it back on for the
-            random dataset after parsing, so the setting could not have taken
-            effect. Use ``bench_args: ["--extra-body", '{"ignore_eos":
-            false}']`` to reach it on ``random``.
+            (default ``True``, or ``False`` under ``rollout``, where an
+            explicit ``True`` is rejected as a contradiction). Outside
+            ``rollout``, ``False`` is only accepted for ``dataset: sharegpt``:
+            the bench CLI forces it back on for the random dataset after
+            parsing, so the setting could not have taken effect. Use
+            ``bench_args: ["--extra-body", '{"ignore_eos": false}']`` to reach
+            it on ``random``. Under ``rollout`` the workload already sends that
+            payload itself, so ``False`` takes effect on ``random`` and is
+            reported truthfully.
+        rollout: shape the load like an RL rollout instead of like a serving
+            benchmark (default ``False``): ``rollout_samples`` sampled
+            completions per prompt at ``temperature``, stopping on EOS, with
+            the generated-length distribution reported and audited against
+            ``min_mean_output_tokens``. The four keys below require it.
+        rollout_samples: completions per prompt, the ``n`` of the sampling API
+            (default ``4``, max ``1024``).
+        temperature: sampling temperature, in ``(0, 2]`` (default ``1.0``).
+            Zero is rejected: it would draw the same greedy completion
+            ``rollout_samples`` times.
+        top_p: nucleus sampling mass in ``(0, 1]`` (default: unset, i.e. the
+            server's own).
+        min_mean_output_tokens: per-step floor on
+            ``total_output_tokens / completed``; ``0`` disables it (default
+            ``8``). Catches the policy that answers every request with an
+            immediate EOS, which passes every other guard here.
+        save_detailed: keep the export's per-request arrays (default ``False``,
+            or ``True`` under ``rollout``). ``output_lens`` is what the
+            ``generated_tokens_*`` distribution is computed from, and the
+            export omits it otherwise.
         seed: dataset/sampling seed (default ``0``).
         percentile_metrics: which metrics get percentiles
             (default ``"ttft,tpot,itl,e2el"``).
@@ -541,7 +620,9 @@ class TokenSpeedServeWorkload(Workload):
             cfg.get("request_rate", _DEFAULT_REQUEST_RATE)
         )
 
-        self._ignore_eos = self._bool("ignore_eos", True)
+        # Resolves `_rollout` and `_ignore_eos` together, so both are settled
+        # before the guard below reads them.
+        self._validated_rollout()
         # `random` pins the output length whatever the argv says. `tokenspeed
         # bench serve` sets `ignore_eos = True` for the random dataset on an
         # OpenAI-compatible backend *after* parsing, which is after it has
@@ -551,16 +632,28 @@ class TokenSpeedServeWorkload(Workload):
         # length: the reported configuration is not the one that ran, which is
         # the mislabelled pass the owned-flag guards exist to prevent. The
         # payload route does work -- `extra_body` is applied over the forced
-        # value, and `--extra-body` is not a flag this workload reserves -- so
-        # the message names it rather than only refusing.
-        if self._dataset == _DEFAULT_DATASET and not self._ignore_eos:
+        # value -- so the message names it rather than only refusing.
+        #
+        # Rollout is exempt because it *is* that payload route. It always sends
+        # an extra_body carrying `ignore_eos: false`, and it is the one mode
+        # that reserves `--extra-body` in the owned-flag set, so no `bench_args`
+        # copy can shadow it as a later occurrence. Under rollout the forced
+        # flag is overridden on every request, which makes the reported
+        # `ignore_eos: false` the setting that actually ran -- so here the guard
+        # would reject the one configuration where the value is truthful, and
+        # every rollout recipe would raise at setup().
+        if (
+            self._dataset == _DEFAULT_DATASET
+            and not self._ignore_eos
+            and not self._rollout
+        ):
             raise ValueError(
                 "tokenspeed_serve: ignore_eos: false cannot take effect with "
                 "dataset: random. The bench CLI forces EOS to be ignored for "
                 "that dataset after parsing its arguments, so the trial would "
                 "report a setting the run did not have. Use dataset: sharegpt, "
-                "or ask for it in the request payload with bench_args: "
-                "[\"--extra-body\", '{\"ignore_eos\": false}']."
+                "or rollout: true, or ask for it in the request payload with "
+                "bench_args: [\"--extra-body\", '{\"ignore_eos\": false}']."
             )
 
         self._run_as_current_user = self._bool("run_as_current_user", True)
@@ -847,6 +940,142 @@ class TokenSpeedServeWorkload(Workload):
         value = self.config.get(key, default)
         if not isinstance(value, bool):
             raise ValueError(f"tokenspeed_serve: {key} must be a bool, got {type(value).__name__}")
+        return value
+
+    def _validated_rollout(self) -> None:
+        """Resolve rollout mode, and ``ignore_eos`` along with it.
+
+        Rollout mode changes what the benchmark measures: several sampled
+        completions per prompt, at a temperature above zero, stopping on EOS.
+        The generated-token volume then depends on the policy rather than on the
+        recipe, which is the property an RL rollout loop is bounded by and the
+        reason the mode exists.
+
+        The sampling keys are rejected outside the mode rather than ignored.
+        Outside it this workload sends no sampling parameters at all, so a
+        ``temperature`` in the recipe would have no effect while the trial
+        published it as configuration -- a cell labelled with a sampling setting
+        that never reached the server, which is the same mislabelled result the
+        owned-flag guards exist to prevent, arriving from a key that reads as
+        supported.
+        """
+        cfg = self.config
+        self._rollout = self._bool("rollout", False)
+
+        rollout_only = ("rollout_samples", "temperature", "top_p", "min_mean_output_tokens")
+        if not self._rollout:
+            present = [key for key in rollout_only if key in cfg]
+            if present:
+                raise ValueError(
+                    f"tokenspeed_serve: {', '.join(present)} require rollout: true. "
+                    "Outside rollout mode no sampling parameters are sent to the "
+                    "server, so these would be reported as this cell's "
+                    "configuration without having affected the run."
+                )
+
+        # `ignore_eos` defaults the other way under rollout, and an explicit
+        # `true` is a contradiction rather than a preference: ignoring EOS pins
+        # every completion to `output_len`, so the run would have no length
+        # distribution and its token volume would be a function of the recipe.
+        # Publishing that as a rollout measurement is the failure; running it is
+        # only the cause.
+        ignore_eos_default = not self._rollout
+        self._ignore_eos = self._bool("ignore_eos", ignore_eos_default)
+        if self._rollout and self._ignore_eos:
+            raise ValueError(
+                "tokenspeed_serve: rollout: true is incompatible with "
+                "ignore_eos: true. A rollout's cost is the length distribution "
+                "EOS-respecting generation produces; holding every completion at "
+                "output_len removes it and measures a fixed-length benchmark "
+                "instead. Omit ignore_eos (it defaults to false under rollout)."
+            )
+
+        if not self._rollout:
+            self._rollout_samples = 1
+            self._temperature: float | None = None
+            self._top_p: float | None = None
+            self._min_mean_output_tokens = 0
+            self._save_detailed = self._bool("save_detailed", False)
+            return
+
+        self._rollout_samples = self._bounded_int(
+            "rollout_samples", _DEFAULT_ROLLOUT_SAMPLES, maximum=_MAX_ROLLOUT_SAMPLES
+        )
+        # Strictly above zero. At temperature 0 the `n` completions per prompt
+        # are the same greedy decode repeated, so the run reports a length
+        # distribution with no variance in it and a sample count that multiplies
+        # the work without diversifying it -- a benchmark of `n` identical
+        # decodes, published as a rollout.
+        self._temperature = self._validated_positive_float(
+            "temperature", _DEFAULT_ROLLOUT_TEMPERATURE, maximum=_MAX_ROLLOUT_TEMPERATURE
+        )
+        self._top_p = (
+            None
+            if cfg.get("top_p") is None
+            else self._validated_positive_float("top_p", 1.0, maximum=1.0)
+        )
+        self._min_mean_output_tokens = self._non_negative_int(
+            "min_mean_output_tokens", _DEFAULT_MIN_MEAN_OUTPUT_TOKENS
+        )
+        # `output_len` becomes the request's `max_tokens` cap, so a floor above
+        # it describes a length the server is not permitted to generate. Such a
+        # recipe cannot pass, and it would fail as `rollout_output_too_short` --
+        # reading as a collapsed policy rather than as the arithmetic error it
+        # is. Only checked for `random`, the one dataset whose lengths the recipe
+        # sets.
+        if (
+            self._dataset == _DEFAULT_DATASET
+            and self._min_mean_output_tokens > self._output_len
+        ):
+            raise ValueError(
+                f"tokenspeed_serve: min_mean_output_tokens "
+                f"({self._min_mean_output_tokens}) exceeds output_len "
+                f"({self._output_len}), which caps each completion's max_tokens. "
+                "No run could satisfy this floor, and the trial would fail as "
+                "though the policy had collapsed."
+            )
+        # Defaulted on under rollout: the per-request `output_lens` array the
+        # export only carries with `--save-detailed` is what the length
+        # distribution is computed from, and that distribution is most of what
+        # distinguishes a rollout measurement from a throughput one.
+        self._save_detailed = self._bool("save_detailed", True)
+
+    def _validated_positive_float(self, key: str, default: float, *, maximum: float) -> float:
+        """A float in ``(0, maximum]``, spelled the way the script will accept.
+
+        ``bool`` is excluded for the reason it is everywhere else in this file:
+        it is an ``int`` subclass, so ``temperature: true`` would run at 1.0 and
+        report it as though someone had written it.
+
+        Non-finite values are excluded because they reach the server as JSON
+        that strict readers reject, and because ``inf`` is not a temperature --
+        it would be rejected per-request and surface as every prompt failing.
+        """
+        raw = self.config.get(key, default)
+        if isinstance(raw, bool):
+            raise ValueError(
+                f"tokenspeed_serve: {key} must be a number, got the boolean "
+                f"{raw!r}; `bool` is an int subclass in Python, so this would "
+                "silently run as 1.0 or 0.0."
+            )
+        if not isinstance(raw, (int, float, str)):
+            raise ValueError(
+                f"tokenspeed_serve: {key} ({raw!r}) must be a number, got "
+                f"{type(raw).__name__}"
+            )
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"tokenspeed_serve: {key} ({raw!r}) must be a number") from exc
+        if not math.isfinite(value):
+            raise ValueError(
+                f"tokenspeed_serve: {key} ({raw!r}) must be a finite number in "
+                f"(0, {maximum}]"
+            )
+        if not 0 < value <= maximum:
+            raise ValueError(
+                f"tokenspeed_serve: {key} ({value}) must be in (0, {maximum}]"
+            )
         return value
 
     def _validated_request_rate(self, value: Any) -> str:
@@ -1263,6 +1492,21 @@ class TokenSpeedServeWorkload(Workload):
             env["TS_DATASET_PATH"] = _CONTAINER_DATASET_PATH
         if self._max_concurrency is not None:
             env["TS_MAX_CONCURRENCY"] = str(self._max_concurrency)
+        if self._save_detailed:
+            env["TS_SAVE_DETAILED"] = "1"
+        if self._rollout:
+            env["TS_ROLLOUT"] = "1"
+            env["TS_ROLLOUT_SAMPLES"] = str(self._rollout_samples)
+            # `format(..., "f")` rather than `str()` or `repr()`: those render a
+            # small value in exponent form (`str(1e-05)` is `'1e-05'`), and the
+            # script's `require_decimal` refuses that spelling so the two layers
+            # cannot disagree about the value the result is labelled with. A
+            # recipe passing the host and then exiting 64 in the container is the
+            # failure this avoids.
+            env["TS_TEMPERATURE"] = format(float(self._temperature or 0.0), "f")
+            if self._top_p is not None:
+                env["TS_TOP_P"] = format(float(self._top_p), "f")
+            env["TS_MIN_MEAN_OUTPUT_TOKENS"] = str(self._min_mean_output_tokens)
         # JSON, not a space-joined string. The recipe documents these as lists,
         # and joining them threw the boundaries away: one item containing a
         # space arrived as two arguments, and a `*` or `?` in a value was
@@ -2095,12 +2339,18 @@ class TokenSpeedServeWorkload(Workload):
         # average and an absent or zero value is correct, not a fault.
         #
         # Which source answers that depends on whether the configuration
-        # actually determines the output length. `random` does: the recipe pins
-        # the length and EOS is ignored -- forced on by the bench CLI and
-        # required to be so by validation above -- which holds it there, so
-        # `output_len` is exact. The `_ignore_eos` half of the condition is
-        # therefore redundant today and kept as the statement of what the branch
-        # depends on.
+        # actually determines the output length. `random` does *when EOS is
+        # ignored*: the recipe pins the length and the bench CLI forces EOS to be
+        # ignored, which holds it there, so `output_len` is exact.
+        #
+        # The `_ignore_eos` half of this condition used to be unreachable, and
+        # was kept only as a statement of what the branch depended on. Rollout
+        # makes it load-bearing: it runs on `random` with `_ignore_eos` false,
+        # reaching the forced flag through the request body, so its lengths come
+        # from the policy and not from `output_len`. Deciding from `output_len`
+        # there would require TPOT of a rollout whose completions may all be a
+        # single token. The condition already routes rollout to the export-based
+        # branch below, which is the correct source for it.
         #
         # ShareGPT does not. It takes its lengths from the conversations and the
         # bench CLI never sees `output_len` at all, and with `ignore_eos: false`
@@ -2561,6 +2811,66 @@ class TokenSpeedServeWorkload(Workload):
                         ),
                     }
                 )
+            # The rollout floor, re-checked here for the same reason the counts
+            # are: the script owns the fast verdict, but this class must not
+            # publish a rollout's throughput and length numbers on the strength
+            # of the script's exit code alone.
+            #
+            # This is the guard the served-request audit above stops being
+            # sufficient for once EOS is respected. `completed == num_prompts`
+            # and `failed == 0` say every request was answered; they say nothing
+            # about whether anything was generated. A policy that emits EOS
+            # immediately satisfies both, produces positive duration, TTFT and
+            # throughput, and so passes every other check in this file -- while
+            # having generated about one token per prompt. For a fixed-length
+            # serving benchmark that state is unreachable, which is why the
+            # audit did not cover it; for a rollout it is a routine RL failure
+            # (entropy collapse, an overshooting length penalty, a tokenizer
+            # whose EOS lands first) and the cell would go green calling it
+            # throughput.
+            if self._rollout and self._min_mean_output_tokens > 0:
+                total_output = record.doc.get("total_output_tokens")
+                # Only compare when there is a number to compare. Every other
+                # shape of `total_output_tokens` -- absent, non-numeric, boolean,
+                # zero, negative -- is already reported as `result_json_unusable`
+                # by `_missing_core_metrics` below, which requires this field
+                # unconditionally under rollout: rollout forces `_ignore_eos`
+                # false, and that is precisely the branch which adds it to the
+                # required set.
+                #
+                # Checking it here as well produced two failure_details for one
+                # broken export, and at zero it was worse than redundant -- the
+                # floor announced a policy that had stopped generating, when
+                # `total_output_tokens: 0` alongside completed requests is an
+                # unreadable measurement rather than a collapsed policy. The
+                # audit owns "we could not read it"; the floor owns "we read it
+                # and it is too short".
+                if (
+                    type(total_output) is int
+                    and total_output > 0
+                    and type(completed) is int
+                    and completed > 0
+                ):
+                    mean_output = total_output / completed
+                    if mean_output < self._min_mean_output_tokens:
+                        failure_details.append(
+                            {
+                                "reason": "rollout_output_too_short",
+                                "step": record.step,
+                                "detail": (
+                                    f"mean_output_tokens={mean_output:.3f} is below "
+                                    f"min_mean_output_tokens="
+                                    f"{self._min_mean_output_tokens} "
+                                    f"(total_output_tokens={total_output}, "
+                                    f"completed={completed}). Every request was "
+                                    "served, so this is a policy that stopped "
+                                    "generating rather than a serving failure."
+                                ),
+                                "mean_output_tokens": mean_output,
+                                "floor": self._min_mean_output_tokens,
+                            }
+                        )
+
             missing = self._missing_core_metrics(record)
             if missing:
                 failure_details.append(
@@ -2658,6 +2968,15 @@ class TokenSpeedServeWorkload(Workload):
             "request_rate": self._request_rate,
             "num_warmups": self._num_warmups,
             "ignore_eos": self._ignore_eos,
+            "rollout": self._rollout,
+            # `None` outside rollout rather than 1 and 0: the workload sends no
+            # sampling parameters there, so a number here would describe a
+            # setting the server was never told. `None` reads as not-applicable
+            # in the trial JSON and is skipped by the perf aggregate, the same
+            # convention `input_len` uses under ShareGPT.
+            "rollout_samples": self._rollout_samples if self._rollout else None,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
             "bench_steps": self._steps,
             "warmup_steps": self._warmup_steps,
             # Strings, deliberately. The matrix aggregates every numeric metric
@@ -2717,6 +3036,17 @@ class TokenSpeedServeWorkload(Workload):
             r.doc["failed"] for r in records if type(r.doc.get("failed")) is int
         )
 
+        # Only where the lengths are a measurement rather than a restatement of
+        # the recipe -- see the docstring. Written as a condition here, rather
+        # than as an early return inside, because the reachability is the point:
+        # every configuration that ignores EOS, which is the default and what
+        # every `tokenspeed-serve-*` recipe on main sets, reports exactly the
+        # metric set it reported before this mode existed. A pinned-length
+        # benchmark whose published metric set grew would have to be re-baselined
+        # for a number that is `output_len` spelled differently.
+        if not self._ignore_eos:
+            self._add_generated_length_metrics(metrics, records)
+
         # Alias to the name AORTA's CI gating allowlist already knows, so a
         # nightly baseline can gate serving throughput without the allowlist
         # having to learn TokenSpeed's spelling. Only this one aliases cleanly:
@@ -2731,6 +3061,82 @@ class TokenSpeedServeWorkload(Workload):
         metrics["steps"] = [_step_detail(r) for r in records]
         metrics["result_files"] = [str(r.path) for r in records]
         return metrics
+
+    def _add_generated_length_metrics(
+        self, metrics: dict[str, Any], records: list[_StepRecord]
+    ) -> None:
+        """How long the completions actually were, and how spread out.
+
+        Called only when EOS is respected, which the caller decides. Under
+        ``ignore_eos`` every completion is ``output_len`` long, so all of this
+        would be the recipe read back with a standard deviation of zero beside
+        it. Once EOS is respected it is the measurement: an RL
+        rollout's cost per iteration is the number of tokens the policy chooses
+        to generate, and the tail of that distribution is what sizes the KV
+        cache and sets how long the slowest prompt in a batch holds the step
+        open. A mean alone hides that -- a batch of short completions and one
+        4000-token outlier averages to something unremarkable.
+
+        Two sources, deliberately kept apart because they have different
+        reliability:
+
+        ``mean_output_tokens_per_request`` comes from ``total_output_tokens`` and
+        ``completed``, which every export version carries. It is the number to
+        trust. It is *per request*, not per sample, and that distinction is not
+        cosmetic under ``rollout_samples > 1``: the bench derives a request's
+        output length from the response's ``usage.completion_tokens``, and
+        whether the gateway reports that summed over all ``n`` choices or only
+        for the first is the server's decision, not something this workload can
+        read. Naming the metric per-request keeps it true either way. The
+        rollout recipe carries an ``n=1`` control cell so the ratio between the
+        two readings is measurable rather than assumed.
+
+        ``generated_tokens_*`` comes from the export's per-request ``output_lens``
+        array, which is only present with ``save_detailed``. Published only when
+        *every* measured step carries it, matching the rule the scalar aggregate
+        follows: a distribution pooled over whichever steps happened to have the
+        array would describe a subset while reading as the trial's.
+        """
+        per_request: list[float] = []
+        for record in records:
+            total_output = record.doc.get("total_output_tokens")
+            completed = record.doc.get("completed")
+            if _is_scalar(total_output) and type(completed) is int and completed > 0:
+                per_request.append(float(total_output) / completed)
+        if per_request and len(per_request) == len(records):
+            metrics["mean_output_tokens_per_request"] = _mean(per_request)
+
+        pooled: list[float] = []
+        for record in records:
+            lens = record.doc.get("output_lens")
+            if not isinstance(lens, list):
+                return
+            # A zero is what the bench records for a request that failed, and
+            # `failed == 0` is audited independently, so a zero here means the
+            # two disagree. Kept rather than filtered: silently dropping it
+            # would raise every percentile and make a partly-failed step read as
+            # a healthy one.
+            step_lens = [float(v) for v in lens if _is_scalar(v)]
+            if len(step_lens) != len(lens):
+                return
+            pooled.extend(step_lens)
+        if not pooled:
+            return
+
+        pooled.sort()
+        # An `int`, unlike its float-valued neighbours: it is a population size,
+        # not a measurement, and every other count this repo publishes
+        # (`completed_total` here, `rocprof_kernel_count`, `proton_kernel_count`)
+        # is an integer in the trial JSON. The perf aggregate floats it either
+        # way, so this only decides what a JSON consumer reads.
+        metrics["generated_tokens_count"] = len(pooled)
+        metrics["generated_tokens_mean"] = _mean(pooled)
+        metrics["generated_tokens_min"] = pooled[0]
+        metrics["generated_tokens_max"] = pooled[-1]
+        if len(pooled) > 1:
+            metrics["generated_tokens_std"] = statistics.stdev(pooled)
+        for pct in (50, 90, 99):
+            metrics[f"generated_tokens_p{pct}"] = _percentile(pooled, pct)
 
     def _check_gates(self, metrics: dict[str, Any]) -> list[dict[str, Any]]:
         failures: list[dict[str, Any]] = []

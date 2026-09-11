@@ -30,6 +30,7 @@
 #   53  a bench step failed or timed out
 #   54  a bench step exported no parseable result JSON
 #   55  a bench step served fewer requests than asked (the silent-pass guard)
+#   56  a rollout step generated fewer tokens per request than the floor
 #   64  usage / environment error (missing tokenspeed CLI, bad config)
 #
 # Two ports, for the reason `ts_serve_probe.sh` documents at length: `tokenspeed
@@ -61,6 +62,19 @@
 #   TS_REQUEST_RATE       arrival rate, req/s             (default inf = all at once)
 #   TS_NUM_WARMUPS        untimed warmup requests         (default 1)
 #   TS_IGNORE_EOS         1 to hold OSL fixed             (default 1)
+#   TS_ROLLOUT            1 for RL-rollout-shaped load: several sampled
+#                         completions per prompt at temperature > 0, stopping
+#                         on EOS. Sends the sampling parameters as
+#                         --extra-body and reserves that flag  (default 0)
+#   TS_ROLLOUT_SAMPLES    completions per prompt, the `n` of the OpenAI
+#                         sampling API                    (rollout only)
+#   TS_TEMPERATURE        sampling temperature            (rollout only)
+#   TS_TOP_P              nucleus sampling mass, omitted when unset
+#   TS_MIN_MEAN_OUTPUT_TOKENS  floor on total_output_tokens/completed per
+#                         step, 0 to disable. Guards the collapsed-policy case
+#                         described at the audit below     (default 0)
+#   TS_SAVE_DETAILED      1 to keep the export's per-request arrays, which is
+#                         what carries `output_lens`       (default 0)
 #   TS_SEED               dataset/sampling seed           (default 0)
 #   TS_PERCENTILE_METRICS which metrics get percentiles   (default ttft,tpot,itl,e2el)
 #   TS_METRIC_PERCENTILES which percentiles               (default 50,90,99)
@@ -269,12 +283,37 @@ reject_owned_flags TS_SERVE_ARGS "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"
 # `--max-concurrency` and `--request-rate` are omitted entirely at their
 # defaults, so reserving only what is currently appended would leave the default
 # unguarded -- and the default is what most cells run.
-reject_owned_flags TS_BENCH_ARGS "${BENCH_EXTRA_ARGS[@]+"${BENCH_EXTRA_ARGS[@]}"}" -- \
-  --base-url --output-file --num-prompts --label --request-id-prefix \
-  --random-input-len --random-output-len --model --tokenizer --backend \
-  --endpoint --dataset-name --dataset-path --percentile-metrics \
-  --metric-percentiles \
+ROLLOUT="${TS_ROLLOUT:-0}"
+
+# The bench flags this script owns unconditionally. `--extra-body` is appended
+# to the list below only under rollout, and that conditionality is deliberate --
+# see the comment where it happens.
+declare -a OWNED_BENCH_FLAGS=(
+  --base-url --output-file --num-prompts --label --request-id-prefix
+  --random-input-len --random-output-len --model --tokenizer --backend
+  --endpoint --dataset-name --dataset-path --percentile-metrics
+  --metric-percentiles
   --max-concurrency --request-rate --num-warmups --ignore-eos --seed
+  --save-detailed
+)
+# Reserved exactly where this script generates one, and not otherwise.
+#
+# Everything else on the list above is reserved whether or not it is currently
+# appended, because the workload's setting is sometimes absence and a guard
+# covering only the configured case leaves the default one open. `--extra-body`
+# is the one flag where that reasoning inverts. Outside rollout this script
+# sends no sampling parameters at all, so there is no value for a caller's
+# `--extra-body` to shadow, and reserving it would forbid the only way to reach
+# a sampling knob -- a documented use of `bench_args`. Under rollout the
+# sampling body *is* what the host reports as `rollout_samples` and
+# `temperature`, so a caller's copy winning as the last occurrence would change
+# the completions actually generated while the trial kept publishing the
+# configured ones: a green cell describing a run that did not happen.
+if [ "${ROLLOUT}" = "1" ]; then
+  OWNED_BENCH_FLAGS+=( --extra-body )
+fi
+reject_owned_flags TS_BENCH_ARGS "${BENCH_EXTRA_ARGS[@]+"${BENCH_EXTRA_ARGS[@]}"}" -- \
+  "${OWNED_BENCH_FLAGS[@]}"
 
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 BENCH_STEPS="${TS_BENCH_STEPS:-1}"
@@ -321,6 +360,9 @@ OUTPUT_LEN="${TS_OUTPUT_LEN:-128}"
 REQUEST_RATE="${TS_REQUEST_RATE:-inf}"
 NUM_WARMUPS="${TS_NUM_WARMUPS:-1}"
 IGNORE_EOS="${TS_IGNORE_EOS:-1}"
+ROLLOUT_SAMPLES="${TS_ROLLOUT_SAMPLES:-1}"
+MIN_MEAN_OUTPUT_TOKENS="${TS_MIN_MEAN_OUTPUT_TOKENS:-0}"
+SAVE_DETAILED="${TS_SAVE_DETAILED:-0}"
 SEED="${TS_SEED:-0}"
 PERCENTILE_METRICS="${TS_PERCENTILE_METRICS:-ttft,tpot,itl,e2el}"
 METRIC_PERCENTILES="${TS_METRIC_PERCENTILES:-50,90,99}"
@@ -338,11 +380,19 @@ CONTROL="http://127.0.0.1:${CONTROL_PORT}"
 # length while the caller believed EOS was being respected, and the export would
 # not say otherwise. Refuse instead, and name the one route that reaches it: the
 # request payload, since extra_body is merged over the forced value.
-if [ "${DATASET}" = "random" ] && [ "${IGNORE_EOS}" != "1" ]; then
+#
+# TS_ROLLOUT=1 is exempt because it takes that payload route itself: the body
+# built below always carries `"ignore_eos": false`, and rollout is the one mode
+# that reserves --extra-body against TS_BENCH_ARGS, so the value cannot be
+# shadowed. Under rollout the forced flag is overridden per request, so
+# TS_IGNORE_EOS=0 is the setting that ran rather than a mislabelling. Without
+# this exemption every rollout invocation would exit 64 here.
+if [ "${DATASET}" = "random" ] && [ "${IGNORE_EOS}" != "1" ] && [ "${ROLLOUT}" != "1" ]; then
   echo "TS_BENCH_FAIL: usage TS_IGNORE_EOS=${IGNORE_EOS} cannot take effect with TS_DATASET=random"
   echo "  The bench CLI forces ignore_eos on for the random dataset after it"
-  echo "  parses its arguments. Use TS_DATASET=sharegpt, or ask for it in the"
-  echo "  payload: TS_BENCH_ARGS='[\"--extra-body\",\"{\\\"ignore_eos\\\": false}\"]'"
+  echo "  parses its arguments. Use TS_DATASET=sharegpt, set TS_ROLLOUT=1, or"
+  echo "  ask for it in the payload:"
+  echo "  TS_BENCH_ARGS='[\"--extra-body\",\"{\\\"ignore_eos\\\": false}\"]'"
   exit 64
 fi
 
@@ -359,6 +409,75 @@ fi
 # once per second.
 require_uint TS_READY_TIMEOUT "${READY_TIMEOUT}" 1 86400
 require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 5 3600
+
+# Rollout mode, validated here for the same reason the dataset is: this is all
+# configuration, and a configuration error found after the model has loaded costs
+# minutes and reads as a bench failure. A malformed temperature in particular
+# reaches the server per-request, so it would come back as every prompt failing
+# -- reported as a broken engine.
+#
+# A plain decimal only. Bash cannot compare floats, so these are checked by
+# shape here and by value on the host; accepting `1e0` or `.5` would leave the
+# two layers with different notions of what was configured, and the host's
+# reported temperature is what a rollout result is labelled with.
+# `.*` is the leading-dot case the message claims to refuse and, without a
+# pattern of its own, did not: `.5` has no non-decimal character, no second dot,
+# is not a bare `.` and does not end in one, so every other branch here lets it
+# through. The host never emits that spelling -- `format(0.5, "f")` is
+# `0.500000` -- so this only bites a hand-run, which is the case the check is
+# for.
+require_decimal() {  # require_decimal <label> <value>
+  case "${2}" in
+    ''|*[!0-9.]*|*.*.*|.|*.|.*)
+      echo "TS_BENCH_FAIL: usage ${1} must be a plain decimal number, got '${2}'"
+      echo "  Exponent and leading-dot forms are refused so this script and the"
+      echo "  host agree on the value the result is labelled with."
+      exit 64
+      ;;
+  esac
+}
+for pair in "TS_ROLLOUT=${ROLLOUT}" "TS_SAVE_DETAILED=${SAVE_DETAILED}"; do
+  if [ "${pair#*=}" != "0" ] && [ "${pair#*=}" != "1" ]; then
+    echo "TS_BENCH_FAIL: usage ${pair%%=*} must be 0 or 1, got '${pair#*=}'"
+    exit 64
+  fi
+done
+case "${MIN_MEAN_OUTPUT_TOKENS}" in
+  ''|*[!0-9]*)
+    echo "TS_BENCH_FAIL: usage TS_MIN_MEAN_OUTPUT_TOKENS must be a non-negative integer, got '${MIN_MEAN_OUTPUT_TOKENS}'"
+    exit 64
+    ;;
+esac
+if [ "${ROLLOUT}" = "1" ]; then
+  require_uint TS_ROLLOUT_SAMPLES "${ROLLOUT_SAMPLES}" 1 1024
+  # Required rather than defaulted. A rollout at temperature 0 draws the same
+  # greedy completion n times, so it costs n decodes and reports a length
+  # distribution with no variance in it -- the shape the mode produces, with
+  # none of the sampling that makes it a rollout. Defaulting would hide that;
+  # the host always sets it, so absence here means someone is running the script
+  # by hand and should say what they meant.
+  if [ -z "${TS_TEMPERATURE:-}" ]; then
+    echo "TS_BENCH_FAIL: usage TS_ROLLOUT=1 requires TS_TEMPERATURE"
+    echo "  A rollout samples; at temperature 0 the n completions per prompt are"
+    echo "  identical and the length distribution is an artifact of the decode."
+    exit 64
+  fi
+  require_decimal TS_TEMPERATURE "${TS_TEMPERATURE}"
+  if [ -n "${TS_TOP_P:-}" ]; then
+    require_decimal TS_TOP_P "${TS_TOP_P}"
+  fi
+  # `--ignore-eos` pins every completion to TS_OUTPUT_LEN, which is the opposite
+  # of what a rollout measures: real rollouts stop on EOS and their cost is the
+  # length distribution that produces. Combining the two would run a
+  # fixed-length benchmark and publish it as a rollout.
+  if [ "${IGNORE_EOS}" = "1" ]; then
+    echo "TS_BENCH_FAIL: usage TS_ROLLOUT=1 is incompatible with TS_IGNORE_EOS=1"
+    echo "  Ignoring EOS holds every completion at TS_OUTPUT_LEN, so the run"
+    echo "  would have no length distribution to report and the generated-token"
+    echo "  volume would be a function of the recipe rather than of the policy."
+    exit 64
+  fi
+fi
 
 # Whether one word is that flag, in any spelling argparse would accept for it:
 # exact, `=`-attached, or an abbreviation. `reject_owned_flags` already fails
@@ -696,6 +815,14 @@ bench_args=(
   --metric-percentiles "${METRIC_PERCENTILES}"
   --disable-tqdm
 )
+# Per-request arrays -- `output_lens` among them -- are stripped from the export
+# unless this is passed, so the length *distribution* a rollout is characterised
+# by is unavailable without it. Off by default because it also writes every
+# generated completion into the export, which is a size and a content decision a
+# fixed-length serving benchmark has no reason to make.
+if [ "${SAVE_DETAILED}" = "1" ]; then
+  bench_args+=( --save-detailed )
+fi
 # ISL/OSL are `random`-only knobs: the bench CLI maps them onto
 # --random-input-len/--random-output-len, and sharegpt takes its lengths from the
 # conversations themselves. Passing them for sharegpt would advertise a shape the
@@ -717,6 +844,44 @@ fi
 # the matrix compares cells that did not run the same benchmark.
 if [ "${IGNORE_EOS}" = "1" ]; then
   bench_args+=( --ignore-eos )
+fi
+# Rollout sampling. `--extra-body` is the only route to the per-request sampling
+# parameters: the bench CLI's own flags cover the load shape, not what the model
+# is asked to do with each prompt, so `n` and `temperature` have to travel in the
+# request body. Built with python3 rather than string-concatenated because the
+# result has to be JSON the CLI can parse, and a hand-built body that is subtly
+# malformed comes back as every request failing -- which reads as a broken
+# engine.
+#
+# `ignore_eos: false` is in the body for a reason that is not obvious and is not
+# optional. `tokenspeed bench serve` forces `args.ignore_eos = True` whenever the
+# dataset is `random` and the backend is OpenAI-compatible -- unconditionally,
+# after parsing, so neither omitting `--ignore-eos` nor passing
+# `--disable-ignore-eos` reaches it. On the random dataset the flag is therefore
+# not a way to ask for EOS-respecting generation at all. The body is: the request
+# builder writes `payload["ignore_eos"]` from that forced flag and *then* applies
+# extra_body over the payload, so the value here is the one the server receives.
+# Without it a rollout cell would run at a pinned output length while reporting
+# itself as EOS-respecting -- the mislabelled pass this file is organised
+# against, arriving from upstream rather than from a recipe.
+if [ "${ROLLOUT}" = "1" ]; then
+  EXTRA_BODY="$(TS_ROLLOUT_SAMPLES="${ROLLOUT_SAMPLES}" python3 -c '
+import json, os
+body = {
+    "n": int(os.environ["TS_ROLLOUT_SAMPLES"]),
+    "temperature": float(os.environ["TS_TEMPERATURE"]),
+    "ignore_eos": False,
+}
+top_p = os.environ.get("TS_TOP_P")
+if top_p:
+    body["top_p"] = float(top_p)
+print(json.dumps(body, sort_keys=True))
+')" || {
+    echo "TS_BENCH_FAIL: cannot build the rollout --extra-body"
+    exit 64
+  }
+  bench_args+=( --extra-body "${EXTRA_BODY}" )
+  echo "TS_BENCH_INFO: rollout=1 extra_body=${EXTRA_BODY} min_mean_output_tokens=${MIN_MEAN_OUTPUT_TOKENS}"
 fi
 
 overall=0
@@ -750,11 +915,11 @@ run_bench_step() {
 # and require that it actually served what we asked for. Echoes one of
 # OK / SHORTFALL / UNPARSEABLE for the caller to classify.
 audit_result_json() {
-  python3 - "$1" "${NUM_PROMPTS}" <<'PY'
+  python3 - "$1" "${NUM_PROMPTS}" "${MIN_MEAN_OUTPUT_TOKENS}" <<'PY'
 import json
 import sys
 
-path, expected = sys.argv[1], int(sys.argv[2])
+path, expected, min_mean_output = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 try:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
@@ -783,6 +948,50 @@ if type(completed) is not int or type(failed) is not int:
 if failed != 0 or completed != expected:
     print(f"SHORTFALL completed={completed} failed={failed} expected={expected}")
     raise SystemExit(0)
+
+# The counts above are necessary and, once EOS is respected, no longer
+# sufficient. With --ignore-eos every completion is TS_OUTPUT_LEN long, so a
+# served request is a known amount of work; without it the model decides, and a
+# policy that emits EOS immediately serves every request, fails none, and takes
+# real time doing it. Duration, TTFT and all three throughputs are then finite
+# and positive, so every other guard here and on the host passes, and the cell
+# goes green having generated roughly one token per prompt -- which for a
+# rollout is not a fast run, it is no run at all. That state is reachable in RL
+# for ordinary reasons (entropy collapse, a length penalty that overshot, a
+# tokenizer mismatch putting EOS first), which is why it gets a check rather
+# than a footnote.
+#
+# Mean rather than minimum, and from total_output_tokens rather than from a
+# per-request array, because those two fields are the ones every export version
+# carries. `output_lens` is used for the distribution the host reports, but it
+# is not depended on for the verdict.
+#
+# Non-positive is UNPARSEABLE here, not SHORTLEN, and the boundary matters
+# because the two verdicts route differently: SHORTLEN says a policy stopped
+# generating and UNPARSEABLE says the export cannot be read. The host draws it
+# in exactly this place -- its floor requires `total_output_tokens > 0` and
+# leaves every other shape to `result_json_unusable` -- so drawing it anywhere
+# else here would make the container announce a collapsed policy for a step the
+# host is about to call unreadable, and a reader would have to reconcile two
+# names for one defect. Every request completing while zero tokens were
+# generated is not a short answer; an immediate EOS is still a token.
+if min_mean_output > 0:
+    total_output = doc.get("total_output_tokens")
+    if (
+        not isinstance(total_output, int)
+        or isinstance(total_output, bool)
+        or total_output <= 0
+    ):
+        print(f"UNPARSEABLE total_output_tokens={total_output!r}")
+        raise SystemExit(0)
+    mean_output = total_output / completed
+    if mean_output < min_mean_output:
+        print(
+            f"SHORTLEN mean_output_tokens={mean_output:.3f} "
+            f"floor={min_mean_output} total_output_tokens={total_output} "
+            f"completed={completed}"
+        )
+        raise SystemExit(0)
 
 thr = doc.get("output_throughput")
 ttft = doc.get("median_ttft_ms")
@@ -829,6 +1038,14 @@ for step in $(seq 1 "${WARMUP_STEPS}"); do
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       exit 55
       ;;
+    SHORTLEN*)
+      # Fatal in a warmup for the same reason a shortfall is: a step whose
+      # completions were one token long compiled and warmed almost none of the
+      # decode path the measured steps are about to be timed on.
+      echo "TS_BENCH_FAIL: warmup step ${step} rollout_output_too_short ${audit#SHORTLEN }"
+      tail -n 40 "${SERVER_LOG}" 2>/dev/null
+      exit 56
+      ;;
     *)
       echo "TS_BENCH_FAIL: warmup step ${step} result_json_unusable ${audit}"
       exit 54
@@ -873,6 +1090,11 @@ for step in $(seq 1 "${BENCH_STEPS}"); do
       echo "TS_BENCH_FAIL: step ${step} served_request_shortfall ${audit#SHORTFALL }"
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       overall=55
+      ;;
+    SHORTLEN*)
+      echo "TS_BENCH_FAIL: step ${step} rollout_output_too_short ${audit#SHORTLEN }"
+      tail -n 40 "${SERVER_LOG}" 2>/dev/null
+      overall=56
       ;;
     *)
       echo "TS_BENCH_FAIL: step ${step} result_json_unusable ${audit}"

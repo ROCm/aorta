@@ -1,0 +1,136 @@
+# Rollout-shaped serving load: several sampled completions per prompt, stopping
+# on EOS.
+#
+# This is the load an RL post-training loop puts on an inference engine during
+# its generation phase, which is where such a loop spends most of its wall
+# clock. It differs from the other tokenspeed-serve recipes in what the engine
+# is asked to do rather than in how hard it is pushed: `rollout: true` sends
+# `n` sampled completions per prompt at a temperature above zero and lets the
+# model stop where it wants, so the number of tokens generated is a property of
+# the policy instead of a number this file chose.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-rollout.yaml \
+#     --output-dir /tmp/ts-serve-rollout
+#
+# Reading the result: `output_throughput` and `total_token_throughput` in
+# `perf.md` are what bound a rollout iteration's duration, and the
+# `generated_tokens_p50` / `_p90` / `_p99` / `_max` columns are what size the KV
+# cache and set how long the slowest completion holds a batch open.
+# `mean_output_tokens_per_request` is the same quantity read from the always-
+# present counters, so it is the one to trust if the two disagree.
+#
+# The confound ratio in `matrix.md` is not meaningful here. Cells differ by
+# sample count and prompt shape, so they legitimately do different amounts of
+# work -- read `perf.md`.
+#
+# Two things to know before reading the numbers.
+#
+# On `dataset: random` the length distribution is not a property of the model.
+# The prompts are random tokens, so nothing induces an end-of-sequence token and
+# every completion runs to `output_len`; `generated_tokens_*` will read as a
+# constant at the cap. Throughput, the concurrency behaviour and the sample-count
+# comparison are all still valid -- those depend on the request shape rather than
+# on where generation stops. A distribution that means something needs prompts a
+# model would answer.
+#
+# The `samples-1` cell is a control, not a wasted one. The bench derives a
+# request's output length from the response's `usage.completion_tokens`, which
+# was measured on gfx950 to sum across all `n` choices -- so the throughput
+# figures here cover the whole rollout rather than one sample of it. That is one
+# gateway version's behaviour, and comparing `mean_output_tokens_per_request`
+# between this cell and `samples-4` is what keeps it observable if it changes.
+# The same comparison is also the per-completion cost of a larger group.
+schema_version: 1
+ticket: TOKENSPEED-SERVE-ROLLOUT
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  # Digest, not the :nightly-20260714 tag it came from: a moving tag would let
+  # the image change underneath a blessed baseline while the recipe still read
+  # as pinned.
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  # Qwen3-class, as named in the requirement, and the smallest of them: the
+  # point of this recipe is the load shape, and the shape is legible fastest on
+  # a model that loads in minutes rather than tens of them. Swap in a larger
+  # Qwen3 once the shape is trusted.
+  model: Qwen/Qwen3-0.6B
+
+  rollout: true
+  # 1.0 is the sampling temperature a GRPO-style rollout ordinarily draws at:
+  # the group of completions per prompt has to actually differ, or the advantage
+  # within the group is zero and the update carries no signal.
+  temperature: 1.0
+  top_p: 0.95
+
+  # Prompt shape. Short prompt, long allowance: a rollout's prompt is a task
+  # description and its completion is the work, which is the opposite of the
+  # prefill-heavy shape `tokenspeed-serve-load.yaml` measures.
+  input_len: 512
+  # An allowance, not a length. With EOS respected this is the `max_tokens` cap;
+  # the reported `generated_tokens_*` distribution is what the policy did with
+  # it, and a p99 sitting at this value means the cap is what truncated the
+  # rollout rather than the model.
+  output_len: 1024
+
+  # Concurrency 32 rather than the unbounded default. A rollout submits its
+  # whole batch of prompts at once and is bounded by aggregate throughput, so
+  # some cap is what keeps the engine in the regime the measurement is about --
+  # and 32 is on the part of the curve `tokenspeed-serve-load.yaml` measured as
+  # still returning throughput per unit of cap.
+  max_concurrency: 32
+
+  num_warmups: 1
+  warmup_steps: 1
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  # A rollout step generates far more tokens than a fixed 128-token benchmark
+  # step, so the per-step deadline has to cover it: 32 prompts x 4 samples x up
+  # to 1024 tokens is a different amount of decode from anything the other
+  # recipes ask for.
+  bench_timeout_sec: 3600
+  ready_timeout_sec: 1200
+
+cells:
+  # The control described in the header. Same prompts, same temperature, one
+  # completion each -- so the only difference from `samples-4` is `n`.
+  - name: samples-1
+    mitigations: [none]
+    environment: local
+    workload_config:
+      rollout_samples: 1
+      num_prompts: 32
+
+  # The rollout shape proper: a group of four sampled completions per prompt,
+  # which is the smallest group size a GRPO-style advantage is computed over.
+  - name: samples-4
+    mitigations: [none]
+    environment: local
+    workload_config:
+      rollout_samples: 4
+      num_prompts: 32
+
+  # Eight samples over half the prompts: the same number of completions as
+  # `samples-4`, reached with a larger group over fewer prompts. Which of the
+  # two costs less per completion is a scheduling question -- more samples per
+  # prompt share a prefill, more prompts do not -- and this is the pair that
+  # answers it.
+  - name: samples-8
+    mitigations: [none]
+    environment: local
+    workload_config:
+      rollout_samples: 8
+      num_prompts: 16
+
+  # Long-form generation, which is what a reasoning-style rollout produces. The
+  # 4096-token allowance is where the tail of the length distribution starts to
+  # matter to the KV cache rather than being absorbed by it.
+  - name: long-form
+    mitigations: [none]
+    environment: local
+    workload_config:
+      rollout_samples: 4
+      num_prompts: 16
+      input_len: 256
+      output_len: 4096
