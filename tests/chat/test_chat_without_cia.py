@@ -79,12 +79,12 @@ class TestChatStartsWithoutTheAgents:
 
 
 class TestWithTheAgentsInstalled:
-    def test_every_diagnostic_tool_is_registered(self):
+    def test_every_diagnostic_tool_is_registered(self, cluster_jobs_enabled):
         registry = load_chat_tools()
         for name in _DIAGNOSTIC_TOOL_NAMES:
             assert name in registry, name
 
-    def test_they_reach_the_act_registry(self):
+    def test_they_reach_the_act_registry(self, cluster_jobs_enabled):
         from aorta.chat.graph.nodes import TOOL_REGISTRY
 
         for name in _DIAGNOSTIC_TOOL_NAMES:

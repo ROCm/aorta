@@ -277,6 +277,16 @@ class Settings(BaseSettings):
     # is a deliberate act by the operator, not a default anyone inherits by
     # installing the extra.
     enable_shell_tool: bool = False
+    #: Register the tools that submit work to the cluster. Off by default, for
+    #: the same reason the shell tool is: they are outside the bound every other
+    #: tool keeps. They write under ``jobs_root`` rather than the source root,
+    #: reach a scheduler over SSH, and run source the user pasted on a GPU node
+    #: -- and a single chat turn can start a job that occupies one for minutes.
+    #: That is the product, but it is not something to inherit by installing an
+    #: extra. While off they are absent from the registry and the prompts, not
+    #: refused at call time, so nothing the model is told about can be talked
+    #: into reaching for them.
+    allow_cluster_jobs: bool = False
     # NoDecode turns off pydantic-settings' JSON decoding for this field so the
     # comma-separated form loads; the validator below accepts both that and a
     # JSON list.

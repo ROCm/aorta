@@ -87,7 +87,7 @@ class TestABadOrAbsentRankingCostsNothing:
         with_none = _act_messages(_state(candidate_tools=[], selection_rationale=""))
         assert not any("Most likely tools" in str(m.content) for m in with_none)
 
-    def test_a_ranking_never_removes_a_tool_from_the_prompt(self):
+    def test_a_ranking_never_removes_a_tool_from_the_prompt(self, cluster_jobs_enabled):
         """The full catalogue is still described whatever the selector said."""
         narrow = _framing(_state(candidate_tools=["search_code"], selection_rationale="r"))
         assert "triage_kernel_source" in nodes.TOOL_DESCRIPTIONS

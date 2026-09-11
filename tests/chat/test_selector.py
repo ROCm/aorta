@@ -55,7 +55,7 @@ def test_a_description_of_code_is_not_code():
 # ── reading the model's answer ────────────────────────────────────────────
 
 
-async def test_a_ranked_shortlist_is_kept_in_order():
+async def test_a_ranked_shortlist_is_kept_in_order(cluster_jobs_enabled):
     reply = json.dumps({"tools": ["triage_kernel_source", "search_code"], "why": "shared memory"})
     out = await _select(_HIP, reply)
     assert out["candidate_tools"] == ["triage_kernel_source", "search_code"]
@@ -110,7 +110,7 @@ async def test_an_unreachable_model_does_not_raise():
 # ── the one rule enforced in code ─────────────────────────────────────────
 
 
-async def test_a_source_reading_tool_is_dropped_when_nothing_was_pasted():
+async def test_a_source_reading_tool_is_dropped_when_nothing_was_pasted(cluster_jobs_enabled):
     """Not a judgement call: there is nothing for it to read."""
     reply = json.dumps({"tools": ["triage_kernel_source", "search_code"], "why": ""})
     out = await _select(_PROSE, reply)
@@ -118,13 +118,13 @@ async def test_a_source_reading_tool_is_dropped_when_nothing_was_pasted():
     assert "triage_kernel_source" in out["selection_rationale"]
 
 
-async def test_the_same_tool_survives_when_source_is_present():
+async def test_the_same_tool_survives_when_source_is_present(cluster_jobs_enabled):
     reply = json.dumps({"tools": ["triage_kernel_source", "search_code"], "why": ""})
     out = await _select(_HIP, reply)
     assert out["candidate_tools"] == ["triage_kernel_source", "search_code"]
 
 
-async def test_dropping_is_explained_rather_than_silent():
+async def test_dropping_is_explained_rather_than_silent(cluster_jobs_enabled):
     """A shortlist that quietly shortened is one nobody can debug."""
     reply = json.dumps({"tools": ["triage_assembly_source"], "why": "wait hazard"})
     out = await _select(_PROSE, reply)
@@ -136,7 +136,7 @@ async def test_dropping_is_explained_rather_than_silent():
     assert "nothing was pasted in this conversation" in rationale
 
 
-async def test_an_explanation_after_the_json_is_ignored():
+async def test_an_explanation_after_the_json_is_ignored(cluster_jobs_enabled):
     """The failure this guards, seen against a real model.
 
     Models answer and then justify themselves, and a justification containing a

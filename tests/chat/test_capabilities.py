@@ -88,7 +88,7 @@ def test_the_shortlist_is_short_enough_to_read_as_a_recommendation():
     assert 2 <= MAX_CANDIDATES <= 4
 
 
-def test_only_source_reading_tools_declare_a_requirement():
+def test_only_source_reading_tools_declare_a_requirement(cluster_jobs_enabled):
     """The filter must stay narrow: it overrides the model's judgement.
 
     Requiring something of a tool that does not need it silently removes a

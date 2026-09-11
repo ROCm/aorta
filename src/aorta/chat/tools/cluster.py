@@ -679,7 +679,17 @@ def read_autopsy_report(job_id: str) -> str:
     Returns:
         The report JSON, including category, confidence, rationale and evidence.
     """
-    job_dir = Path(job_id) if Path(job_id).is_absolute() else settings.jobs_root / job_id
+    # An absolute path is accepted because the other tools print job directories
+    # and a user pastes one back. It still has to be a job directory: resolved,
+    # it was any <path>/bundle/report.json on the machine, which is the bound
+    # every other read tool keeps and this one did not.
+    root = settings.jobs_root.resolve()
+    job_dir = (Path(job_id) if Path(job_id).is_absolute() else root / job_id).resolve()
+    if job_dir != root and root not in job_dir.parents:
+        return (
+            f"Error: {job_id} is not inside the jobs root ({root}). This tool "
+            "reads job directories, and only those."
+        )
     report = job_dir / "bundle" / "report.json"
     if not report.is_file():
         return (f"Error: no report at {report}. "

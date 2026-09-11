@@ -181,6 +181,7 @@ while the profile pointed another is the failure the shared name prevents.
 
 | Setting | Also reads | Default | Meaning |
 | --- | --- | --- | --- |
+| `allow_cluster_jobs` | — | `false` | Register the three tools that submit work: `triage_kernel_source`, `triage_assembly_source`, `triage_workload`. Off by default because they are outside the bound every other tool keeps — see [extending](extending.md#the-exception-and-why-it-is-one). While off they are absent from the registry and the prompts, not refused at call time. Reading past jobs does not need it. |
 | `jobs_path` | `CIA_JOBS_ROOT` | *(the agents' own default, `~/cia-jobs`)* | Where job records and bundles are written. Must be readable from every node that runs work, which on most clusters means a shared filesystem rather than `/tmp`. |
 | `gpu_arch` | `CIA_GPU_ARCH` | `gfx950` | The GPU the submitted work is built for. Used for the assembler target and passed to the agents as `--arch`, so both name the same chip. |
 | `cia_demo_node` | `CIA_DEMO_NODE` | *(empty)* | Pin work to one node. Empty lets the scheduler choose, which is correct everywhere except a demo. |
