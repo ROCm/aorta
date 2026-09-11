@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import tomllib
-from pydantic import Field, ValidationError, field_validator
+from pydantic import AliasChoices, Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -113,12 +113,33 @@ class _TomlProfileSource(PydanticBaseSettingsSource):
         raise NotImplementedError
 
 
+def _either(chat_name: str, agent_name: str | None = None) -> AliasChoices:
+    """Accept this setting under the chat prefix or the agents' own name.
+
+    These knobs name facts both halves need: where job records go, which node
+    to pin to, which GPU the work is built for. Naming them twice is how they
+    come to disagree -- a profile key that Launch never sees, or a CIA_* value
+    the chat tools ignore -- so one field answers to both spellings and there is
+    only one value to disagree about.
+
+    The chat name wins when both are set, being the more specific of the two.
+    *agent_name* defaults to *chat_name*, for a field already named after the
+    agents' variable.
+    """
+    return AliasChoices(f"{ENV_PREFIX}{chat_name}", agent_name or chat_name)
+
+
 class Settings(BaseSettings):
     """Every knob ``aorta chat`` reads. Construct via :func:`get_settings`."""
 
     model_config = SettingsConfigDict(
         env_prefix=ENV_PREFIX,
         extra="ignore",
+        # A field with a validation_alias is matched by that alias alone, so
+        # without this the profile key and the constructor argument -- both of
+        # which use the field's own name -- would be silently ignored for every
+        # aliased field below, and the value would come back as the default.
+        populate_by_name=True,
     )
 
     # --- LLM provider selector ---
@@ -156,10 +177,13 @@ class Settings(BaseSettings):
     # somewhere nobody meant and reports nothing useful.
     #: Where job records and bundles are written. Empty means the agents'
     #: own default. Must be readable from every node that runs work.
-    jobs_path: str = ""
+    jobs_path: str = Field("", validation_alias=_either("JOBS_PATH", "CIA_JOBS_ROOT"))
     #: Pin work to one node. Empty lets the scheduler choose, which is correct
     #: everywhere except a demo.
-    cia_demo_node: str = ""
+    cia_demo_node: str = Field("", validation_alias=_either("CIA_DEMO_NODE"))
+    #: Which GPU the submitted work is built for. Read by the chat tools for the
+    #: assembler target and handed to the agents as ``--arch``.
+    gpu_arch: str = Field("gfx950", validation_alias=_either("GPU_ARCH", "CIA_GPU_ARCH"))
     #: The sanitizer backend. Unset means the sweep will report that it could
     #: not run, which is the honest outcome -- not that it found nothing.
     rocjitsu_build: str = ""

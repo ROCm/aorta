@@ -38,7 +38,14 @@ from aorta.chat.tools.cache import current_tool_cache
 from aorta.chat.tools.harness.assembly import AsmHarnessError, prepare_asm
 from aorta.chat.tools.harness.kernel import WAVEFRONT, HarnessError, prepare_source
 
-_ARCH = os.environ.get("CIA_GPU_ARCH", "gfx950")
+def _arch() -> str:
+    """The GPU this cluster builds for.
+
+    Read per call rather than captured at import: the setting answers to both
+    AORTA_CHAT_GPU_ARCH and CIA_GPU_ARCH, and a module constant would freeze
+    whichever was in the environment when the first tool happened to load.
+    """
+    return settings.gpu_arch
 # The assembler lives with ROCm on the compute nodes, not on the login node.
 #
 # The default used to name one machine's installed patch release, which is
@@ -137,7 +144,7 @@ def _fmt_tools_used(result: dict) -> list[str]:
     lines = ["Tools used on this run:"]
     if result.get("compiled_from_source"):
         lines.append(
-            f"  - hipcc — compiled the submitted kernel for {_ARCH} on the GPU node"
+            f"  - hipcc — compiled the submitted kernel for {_arch()} on the GPU node"
         )
     lines.append(
         f"  - CIA Launch agent — submitted slurm job {result.get('slurm_job_id', '?')} "
@@ -234,7 +241,12 @@ def _run_triage(extra_args: list[str], label: str) -> str:
     so a wedged cluster job cannot hang the chat, and on expiry that thread is
     asked to stop rather than left running.
     """
-    argv = ["--jobs-root", str(settings.jobs_root), "--label", label, *extra_args]
+    argv = [
+        "--jobs-root", str(settings.jobs_root),
+        "--arch", _arch(),
+        "--label", label,
+        *extra_args,
+    ]
     if settings.cia_demo_node:
         argv += ["--node", settings.cia_demo_node]
     # Exported in the batch job rather than in this process: LD_PRELOAD would
@@ -417,7 +429,7 @@ def _assemble_command(asm_path: Path, obj_path: Path) -> str:
         f'CLANG={pinned}; '
         '[ -x "$CLANG" ] || CLANG="$(command -v clang || true)"; '
         f'if [ -z "$CLANG" ]; then echo {_NO_ASSEMBLER} >&2; exit 127; fi; '
-        f'"$CLANG" -target amdgcn-amd-amdhsa -mcpu={shlex.quote(_ARCH)} '
+        f'"$CLANG" -target amdgcn-amd-amdhsa -mcpu={shlex.quote(_arch())} '
         f'{shlex.quote(str(asm_path))} -o {shlex.quote(str(obj_path))}'
     )
 
@@ -481,7 +493,7 @@ def triage_assembly_source(source: str, label: str = "") -> str:
     try:
         # Must match the -mcpu below: the .amdgcn_target it writes and the
         # compiler's target are checked against each other at assemble time.
-        prepared = prepare_asm(source, arch=_ARCH)
+        prepared = prepare_asm(source, arch=_arch())
     except AsmHarnessError as exc:
         return f"Cannot analyse this assembly: {exc}"
 
@@ -534,7 +546,7 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         recipe_path=staging / f"{stem}.yaml",
         kernel_name=prepared.kernel,
         code_object=obj_path,
-        target=_ARCH,
+        target=_arch(),
         ticket=f"CHAT-{prepared.kernel}",
     )
     body = _run_triage(["--recipe", str(recipe)], label or f"{prepared.kernel} asm")

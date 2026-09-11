@@ -35,24 +35,16 @@ _ARCHES = ["gfx950", "gfx942", "gfx90a"]
 
 
 @pytest.fixture(autouse=True)
-def _restore_the_module_arch():
-    """Put the module back the way the rest of the session expects it.
+def _restore_the_arch():
+    """Leave the setting as this session found it.
 
-    _ARCH is read at import, so reloading under a set environment leaves the
-    new value latched in a module every later test shares. Restoring the
-    original environment and reloading once more is done here rather than
-    through monkeypatch because it has to happen after the variable is back,
-    and fixture teardown order does not guarantee that.
+    The value is read per call now rather than captured at import, so what has
+    to be put back is the cached settings object, not a reloaded module.
     """
-    import os
+    from aorta.chat.config import reset_settings
 
-    original = os.environ.get("CIA_GPU_ARCH")
     yield
-    if original is None:
-        os.environ.pop("CIA_GPU_ARCH", None)
-    else:
-        os.environ["CIA_GPU_ARCH"] = original
-    importlib.reload(importlib.import_module("aorta.chat.tools.cluster"))
+    reset_settings()
 
 
 def _target_of(program: str) -> str:
@@ -62,12 +54,20 @@ def _target_of(program: str) -> str:
 
 
 def _reload_cluster(monkeypatch, arch: str | None):
-    """The module reads the environment once, at import."""
+    """Point the settings at *arch*, under the agents' own spelling.
+
+    CIA_GPU_ARCH is one of the two names the setting answers to, and the one
+    the agents use, so it is worth being the one exercised here.
+    """
+    from aorta.chat.config import reset_settings
+
     if arch is None:
         monkeypatch.delenv("CIA_GPU_ARCH", raising=False)
+        monkeypatch.delenv("AORTA_CHAT_GPU_ARCH", raising=False)
     else:
         monkeypatch.setenv("CIA_GPU_ARCH", arch)
-    return importlib.reload(importlib.import_module("aorta.chat.tools.cluster"))
+    reset_settings()
+    return importlib.import_module("aorta.chat.tools.cluster")
 
 
 def _arch_the_tool_asks_for(cluster, monkeypatch) -> str:
@@ -109,15 +109,15 @@ def test_the_directive_and_the_compiler_flag_agree(monkeypatch, arch):
     cluster = _reload_cluster(monkeypatch, arch)
     requested = _arch_the_tool_asks_for(cluster, monkeypatch)
 
-    assert cluster._ARCH == arch
-    assert _target_of(prepare_asm(_FRAGMENT, arch=requested).program) == cluster._ARCH
+    assert cluster._arch() == arch
+    assert _target_of(prepare_asm(_FRAGMENT, arch=requested).program) == cluster._arch()
 
 
 def test_an_unset_environment_still_targets_the_default_fleet(monkeypatch):
     """Nothing changes for the common case of an MI355X node."""
     cluster = _reload_cluster(monkeypatch, None)
 
-    assert cluster._ARCH == "gfx950"
+    assert cluster._arch() == "gfx950"
     assert _arch_the_tool_asks_for(cluster, monkeypatch) == "gfx950"
 
 
