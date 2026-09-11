@@ -120,6 +120,23 @@ hw-queue-profiling = [
 ]
 
 # For aorta agent closed-loop (LiteLLM proposer)
+# The Cluster Intelligence Agents. DSPy is what Watch and Autopsy reach a model
+# through today; the shared chat provider layer is where that belongs, so this
+# extra is expected to shrink rather than grow -- see
+# docs/plans/cia-agents-port.md, finding F2.
+cia = [
+    # No python_version marker, unlike the chat extras below. Theirs is real --
+    # chat/config.py reads a profile with stdlib tomllib, which is 3.11. Nothing
+    # here needs 3.11, and dspy itself declares >=3.10, so a marker would only
+    # mean `pip install amd-aorta[cia]` succeeding on 3.10 having installed
+    # nothing, with the first import failing on a missing module instead.
+    "dspy-ai>=2.5",
+    # Used to point TLS verification at a bundle litellm's price-map fetch can
+    # verify against. It arrived transitively through litellm, which is not a
+    # promise litellm makes.
+    "certifi",
+]
+
 agent = [
     "litellm>=1.0.0",
 ]
@@ -239,6 +256,7 @@ all = [
     "amd-aorta[hw-queue]",
     "amd-aorta[hw-queue-profiling]",
     "amd-aorta[agent]",
+    "amd-aorta[cia]",
     "amd-aorta[dev]",
 ]
 
@@ -293,6 +311,11 @@ aorta = [
     # The retrieval eval question set (Decision 19b). Shipped so `aorta chat
     # index eval` works with no arguments on an installed wheel.
     "chat/rag/eval_questions.json",
+    # Watch loads this through Path(__file__).parent. Left out of the wheel it
+    # is not an error: the loader falls back to {} and the built-in defaults
+    # apply, so an installed Watch would poll on a different interval and hold
+    # a shorter list of expectations than the one shipped here, silently.
+    "cia/watch/watch_config.yaml",
     "ebpf/scripts/*.bt",
     "ebpf/scripts/PROVENANCE.md",
     "workloads/hrx_kernels/*.cpp",

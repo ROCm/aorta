@@ -17,18 +17,48 @@ StopReason = Literal[
     "agent_requested",
 ]
 
-AUTOPSY_CATEGORIES: frozenset[str] = frozenset(
+#: Reachable only from instrument evidence: a sanitizer that watched two waves
+#: collide, a debugger that read a stopped wave, or a tool that could not run at
+#: all. Nothing the probe agent does can establish one of these -- it reaches a
+#: category by trying mitigations and seeing what changes, which cannot observe
+#: a race or distinguish "the sanitizer found nothing" from "the sanitizer never
+#: ran".
+EVIDENCE_ONLY_CATEGORIES: frozenset[str] = frozenset(
     {
-        "rccl_hang",
-        "thermal_throttle",
-        "illegal_mem",
-        "oom_fragment",
-        "checkpoint_race",
-        "launch_error",
-        "perf_regression",
-        "unknown",
+        "gpu_race",
+        "numeric_silent",
+        "tooling_gap",
     }
 )
+
+#: Every category either front door may return. The probe agent reaches a
+#: category by trying mitigations; :mod:`aorta.cia` reaches one by reading
+#: instrument evidence. They answer different questions and share this
+#: vocabulary, so a verdict means the same thing whichever produced it -- and
+#: anything reading a report validates against this.
+AUTOPSY_CATEGORIES: frozenset[str] = (
+    frozenset(
+        {
+            "rccl_hang",
+            "thermal_throttle",
+            "illegal_mem",
+            "oom_fragment",
+            "checkpoint_race",
+            "launch_error",
+            "perf_regression",
+            "unknown",
+        }
+    )
+    | EVIDENCE_ONLY_CATEGORIES
+)
+
+#: What the probe agent may propose: the shared vocabulary less what only an
+#: instrument can establish.
+#:
+#: Derived rather than written out a second time. Listing it by hand is how the
+#: two drift, and the drift is silent -- offering the probe model a category it
+#: has no way to reach teaches it to guess one, and the guess validates.
+PROBE_CATEGORIES: frozenset[str] = AUTOPSY_CATEGORIES - EVIDENCE_ONLY_CATEGORIES
 
 _BASELINE_CELL = "none-none"
 
@@ -224,7 +254,7 @@ def _build_prompt(
         "names from the candidate list. Never propose shell commands or argv. "
         "Return strict JSON with keys: category, hypothesis, next_mitigations "
         "(list of strings), confidence (0-1), stop (bool). "
-        f"category must be one of: {sorted(AUTOPSY_CATEGORIES)}."
+        f"category must be one of: {sorted(PROBE_CATEGORIES)}."
     )
     user = json.dumps(
         {
@@ -464,6 +494,8 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
 
 __all__ = [
     "AUTOPSY_CATEGORIES",
+    "EVIDENCE_ONLY_CATEGORIES",
+    "PROBE_CATEGORIES",
     "CHAT_PROVIDER_BACKENDS",
     "AgentStep",
     "ChatProviderProposer",
