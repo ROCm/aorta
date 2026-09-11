@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
-"""Build the labelled RL corpus from a tree of real sanitizer runs.
+"""Build the labelled RL corpus from a tree of real runs.
 
-Turns `sanitizer_report.json` artifacts into JSONL that `triage_reward.py
---corpus` and `proposal_reward.py --corpus` read directly, so a generated
-corpus needs no conversion pass before it can be scored.
+Turns `sanitizer_report.json` and probe `trial_*/result.json` artifacts into
+JSONL that `triage_reward.py --corpus` and `proposal_reward.py --corpus` read
+directly, so a generated corpus needs no conversion pass before it can be
+scored.
 
-Two things this file is deliberate about.
+**Two artifact shapes, one row schema.** A results tree may hold sanitizer
+reports, probe cells, or both, and `collect` finds whichever are there. The
+shapes are labelled by different resolvers -- `SanitizerReport.from_dict` for
+one, `partition_detectors` for the other -- because they are different
+vocabularies and mapping them onto each other would invent a judgement the
+tools did not make. What they share is the row envelope, so a consumer that
+reads `label`, `scenario_id` and `workload_family` needs to know nothing about
+which it has, and `triage_reward.artifact_kind` is there for one that does.
+
+Sanitizer rows are byte-identical to what this wrote before probe support
+existed, including carrying no `artifact` key. The committed corpus was
+measured without one, and every recorded reward number is keyed to those exact
+rows.
+
+Two further things this file is deliberate about.
 
 **One example is one scenario, not one finding.** The two-wave LDS race
 reproducer emits 64 findings, and they are 64 lanes of the same race: same
@@ -38,7 +53,16 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from triage_reward import label_sanitizer_report  # noqa: E402
+from triage_reward import (  # noqa: E402
+    ARTIFACT_PROBE_RESULT,
+    ARTIFACT_SANITIZER_REPORT,
+    find_probe_cells,
+    label_run,
+    label_sanitizer_report,
+    label_trials,
+)
+
+from aorta.agent.state import read_trial_results  # noqa: E402
 
 CORPUS_SCHEMA = "aorta.rl_corpus/0.1"
 
@@ -80,7 +104,14 @@ BASELINE_KEYS: dict[str, str] = {
 
 @dataclass
 class Scenario:
-    """One sanitizer run: one report, one verdict, one or more findings."""
+    """One run, from either artifact shape.
+
+    A sanitizer scenario is one report: one verdict, one or more findings.
+    A probe scenario is one *cell*: one verdict over one or more trials of the
+    same configuration. `artifact` says which, and the two extra fields are
+    populated only for the shape that has them, so a sanitizer scenario is
+    exactly what it was before this became a union.
+    """
 
     case: str
     report_path: Path
@@ -88,6 +119,8 @@ class Scenario:
     workload_family: str
     baseline_key: str | None = None
     checks: list[dict[str, Any]] = field(default_factory=list)
+    artifact: str = ARTIFACT_SANITIZER_REPORT
+    trials: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _findings(check: dict[str, Any]) -> list[dict[str, Any]]:
@@ -171,7 +204,29 @@ def _field_population(scenario: Scenario) -> dict[str, Any]:
     return {"findings": total, "populated": counts}
 
 
-def collect(root: Path) -> list[Scenario]:
+def _family(case: str, families: dict[str, str] | None) -> str:
+    """Workload family for a case, with the caller's map layered over the built-in.
+
+    The built-in :data:`WORKLOAD_FAMILIES` is keyed on case-directory name,
+    which works for the sanitizer recipes because their directories *are* their
+    identity. It does not generalise to probe cells: a probe wraps an opaque
+    command, so its cell name encodes the mitigation and diagnostic axes
+    (``none-none``, ``tf32_off-none``) and says nothing about the workload. The
+    family is a property of the recipe, and the artifact does not carry it.
+
+    So rather than grow a hardcoded table of cell names -- which would be wrong
+    as often as right, and would need a code edit per scenario -- ``--families``
+    lets the run that knows the answer supply it. Absent an override this is
+    byte-for-byte the previous lookup.
+    """
+    if families and case in families:
+        return families[case]
+    return WORKLOAD_FAMILIES.get(case, "unknown")
+
+
+def collect_sanitizer_reports(
+    root: Path, families: dict[str, str] | None = None
+) -> list[Scenario]:
     """Every sanitizer report under a results tree, as a scenario."""
     scenarios: list[Scenario] = []
     for path in sorted(root.rglob("sanitizer_report.json")):
@@ -186,7 +241,7 @@ def collect(root: Path) -> list[Scenario]:
                 case=case,
                 report_path=path,
                 doc=doc,
-                workload_family=WORKLOAD_FAMILIES.get(case, "unknown"),
+                workload_family=_family(case, families),
                 baseline_key=BASELINE_KEYS.get(case),
                 checks=list(doc.get("checks") or []),
             )
@@ -194,7 +249,64 @@ def collect(root: Path) -> list[Scenario]:
     return scenarios
 
 
+def collect_probe_cells(
+    root: Path, families: dict[str, str] | None = None
+) -> list[Scenario]:
+    """Every probe cell under a results tree, as a scenario.
+
+    One cell, not one trial: see :func:`triage_reward.label_trials` for why.
+    The case name is taken from the trials' own ``cell_name`` when they agree on
+    it, falling back to the directory name -- the artifact is better provenance
+    than the path, but a tree that was moved or renamed still has to work.
+    """
+    scenarios: list[Scenario] = []
+    for cell in find_probe_cells(root):
+        trials = read_trial_results(cell)
+        if not trials:
+            print(f"  skipped {cell}: no readable trial results", file=sys.stderr)
+            continue
+        names = {
+            t.get("cell_name")
+            for t in trials
+            if isinstance(t, dict) and t.get("cell_name")
+        }
+        case = names.pop() if len(names) == 1 else cell.name
+        scenarios.append(
+            Scenario(
+                case=case,
+                report_path=cell,
+                doc={},
+                workload_family=_family(case, families),
+                baseline_key=BASELINE_KEYS.get(case),
+                artifact=ARTIFACT_PROBE_RESULT,
+                trials=trials,
+            )
+        )
+    return scenarios
+
+
+def collect(root: Path, families: dict[str, str] | None = None) -> list[Scenario]:
+    """Every scenario under a results tree, of either artifact shape.
+
+    Sanitizer scenarios are emitted first and in their previous order, so a
+    tree containing only sanitizer reports produces byte-identical output to
+    what this wrote before probe support existed.
+    """
+    return collect_sanitizer_reports(root, families) + collect_probe_cells(
+        root, families
+    )
+
+
 def triage_example(
+    scenario: Scenario, baselines: dict[str, Any], run_meta: dict[str, Any]
+) -> dict[str, Any] | None:
+    """One triage example, labelled through aorta's own resolver for its shape."""
+    if scenario.artifact == ARTIFACT_PROBE_RESULT:
+        return probe_triage_example(scenario, baselines, run_meta)
+    return sanitizer_triage_example(scenario, baselines, run_meta)
+
+
+def sanitizer_triage_example(
     scenario: Scenario, baselines: dict[str, Any], run_meta: dict[str, Any]
 ) -> dict[str, Any] | None:
     """One triage example, labelled through aorta's own report model."""
@@ -266,6 +378,132 @@ def triage_example(
     }
 
 
+# Which per-trial fields a probe row reports coverage of. The probe analogue of
+# the sanitizer path's attribution audit, and it exists for the same reason: a
+# trial that names no cell and no argv supports a verdict but not an
+# attribution, and a corpus cannot be assessed without knowing which.
+_PROBE_TRACKED_FIELDS = ("cell_name", "exit_code", "argv", "walltime_sec", "verdict")
+
+
+def _probe_field_population(trials: list[dict[str, Any]]) -> dict[str, Any]:
+    """How many trials actually populate each per-trial field."""
+    counts = dict.fromkeys(_PROBE_TRACKED_FIELDS, 0)
+    for trial in trials:
+        for name in _PROBE_TRACKED_FIELDS:
+            if trial.get(name) not in (None, ""):
+                counts[name] += 1
+    return {"trials": len(trials), "populated": counts}
+
+
+def probe_triage_example(
+    scenario: Scenario, baselines: dict[str, Any], run_meta: dict[str, Any]
+) -> dict[str, Any] | None:
+    """One triage example for a probe cell, labelled through aorta's own resolver.
+
+    Deliberately parallel to :func:`sanitizer_triage_example`: same envelope
+    keys, same ground-truth block, and `distinct_evidence` playing the same
+    role. What differs is what counts as one piece of evidence. For a sanitizer
+    that is a race *site*, because lanes of one race are one defect. For a probe
+    it is a *detector*, because the same detector firing in three trials is one
+    signal observed three times -- the identical inflation, one level up.
+
+    The per-trial split stays in the row rather than being reduced away. A
+    reproducer that fires in 2 of 8 trials and one that fires in 8 of 8 get the
+    same cell verdict and are not the same scenario, and the difference is
+    invisible from the verdict alone.
+    """
+    try:
+        label = label_trials(scenario.trials, source=str(scenario.report_path))
+        trial_labels = [label_run(trial) for trial in scenario.trials]
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f"  rejected {scenario.report_path}: {exc}", file=sys.stderr)
+        return None
+
+    # One entry per distinct detector, carrying which trials it fired in. The
+    # `kind` is read back off the cell label rather than re-derived, so it
+    # cannot disagree with the verdict it justifies.
+    failures = set(label.failure_detectors)
+    evidence: list[dict[str, Any]] = []
+    index_of: dict[str, int] = {}
+    for position, trial_label in enumerate(trial_labels):
+        for detector in (
+            *trial_label.failure_detectors,
+            *trial_label.error_detectors,
+        ):
+            if detector not in index_of:
+                index_of[detector] = len(evidence)
+                evidence.append(
+                    {
+                        "detector": detector,
+                        "kind": "failure" if detector in failures else "error",
+                        "trials": [],
+                        "first_trial": position,
+                    }
+                )
+            entry = evidence[index_of[detector]]
+            if position not in entry["trials"]:
+                entry["trials"].append(position)
+
+    verdicts = [trial_label.verdict for trial_label in trial_labels]
+    expected = baselines.get(scenario.baseline_key or "", {})
+    ground_truth = {
+        "source": "verdict_baselines.json" if expected else "none",
+        "baseline_key": scenario.baseline_key,
+        "expected_verdict": expected.get("overall_verdict"),
+        "expected_execution_status": expected.get("execution_status"),
+        "observed_verdict": label.verdict,
+        # The probe artifact has no execution-status field; the fail-vs-error
+        # split carries that distinction instead. Recorded as null rather than
+        # mapped onto the sanitizer vocabulary, which would be a judgement the
+        # tools did not make.
+        "observed_execution_status": None,
+        "agrees": (
+            expected.get("overall_verdict") == label.verdict if expected else None
+        ),
+        # No probe scenario is a by-construction control today. Left False
+        # rather than guessed from the cell name, which encodes the mitigation
+        # axis and not whether the outcome was designed.
+        "by_construction": False,
+    }
+
+    return {
+        "schema": CORPUS_SCHEMA,
+        "kind": "triage",
+        "artifact": ARTIFACT_PROBE_RESULT,
+        "example_id": f"triage:{scenario.case}",
+        "scenario_id": scenario.case,
+        "workload_family": scenario.workload_family,
+        "label": label.as_dict(),
+        "trials": [
+            {
+                "trial_index": trial.get("trial_index", position),
+                "verdict": trial_label.verdict,
+                "exit_code": trial.get("exit_code"),
+                "failure_detectors_fired": list(trial_label.failure_detectors),
+                "error_detectors_fired": list(trial_label.error_detectors),
+                "warn_detectors_fired": list(trial.get("warn_detectors_fired") or []),
+                "stale": trial_label.stale,
+            }
+            for position, (trial, trial_label) in enumerate(
+                # One label per trial by construction; `strict` makes that an
+                # assertion rather than a silent truncation if it stops holding.
+                zip(scenario.trials, trial_labels, strict=True)
+            )
+        ],
+        "distinct_evidence": evidence,
+        "trial_counts": {
+            "total": len(trial_labels),
+            "pass": verdicts.count("pass"),
+            "fail": verdicts.count("fail"),
+            "error": verdicts.count("error"),
+            "distinct_detectors": len(evidence),
+        },
+        "field_population": _probe_field_population(scenario.trials),
+        "ground_truth": ground_truth,
+        "provenance": {"cell": str(scenario.report_path), **run_meta},
+    }
+
+
 # The proposal ladder grades contract validity -- parseable, right schema, valid
 # category, registered name, still-available name -- which is a property of the
 # model's output and not of the run. So these proposals are synthesised, but
@@ -296,10 +534,16 @@ def proposal_examples(
 
     out: list[dict[str, Any]] = []
     for variant, detail, override in PROPOSAL_VARIANTS:
+        # "sanitizer verdict" is kept verbatim for sanitizer scenarios: this
+        # string is in the committed corpus and the proposal rows are graded
+        # against it. Probe scenarios get the accurate word instead.
+        source_word = (
+            "probe" if scenario.artifact == ARTIFACT_PROBE_RESULT else "sanitizer"
+        )
         body: dict[str, Any] = {
             "category": "illegal_mem",
             "hypothesis": (
-                f"{scenario.case}: sanitizer verdict {label_verdict}; "
+                f"{scenario.case}: {source_word} verdict {label_verdict}; "
                 f"suspect kernel-level memory ordering"
             ),
             "next_mitigations": [available[0]],
@@ -324,7 +568,15 @@ def proposal_examples(
                     "candidates": candidates,
                     "tried": tried,
                 },
-                "provenance": {"report": str(scenario.report_path), **run_meta},
+                # Keyed to match the triage row of the same shape: a sanitizer
+                # scenario points at a report file, a probe scenario at a cell
+                # directory, and calling both "report" would misname one.
+                "provenance": {
+                    ("cell" if source_word == "probe" else "report"): str(
+                        scenario.report_path
+                    ),
+                    **run_meta,
+                },
             }
         )
     return out
@@ -333,13 +585,17 @@ def proposal_examples(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, required=True,
-                        help="tree of sanitizer run outputs")
+                        help="tree of sanitizer reports and/or probe cells")
     parser.add_argument("--baselines", type=Path, required=True,
                         help="fixtures/expected/verdict_baselines.json")
     parser.add_argument("--out", type=Path, required=True,
                         help="corpus output directory")
     parser.add_argument("--run-meta", type=Path, default=None,
                         help="JSON of provenance shared by every example")
+    parser.add_argument("--families", type=Path, default=None,
+                        help="JSON mapping case name -> workload family, "
+                             "layered over the built-in map; needed for probe "
+                             "cells, whose artifacts do not name a workload")
     args = parser.parse_args(argv)
 
     baselines = json.loads(args.baselines.read_text(encoding="utf-8"))
@@ -348,10 +604,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.run_meta and args.run_meta.exists()
         else {}
     )
+    families = (
+        json.loads(args.families.read_text(encoding="utf-8"))
+        if args.families and args.families.exists()
+        else {}
+    )
 
-    scenarios = collect(args.results)
+    scenarios = collect(args.results, families)
     if not scenarios:
-        print(f"no sanitizer reports under {args.results}", file=sys.stderr)
+        print(
+            f"no sanitizer reports and no probe cells under {args.results}",
+            file=sys.stderr,
+        )
         return 1
 
     triage: list[dict[str, Any]] = []
@@ -373,20 +637,31 @@ def main(argv: list[str] | None = None) -> int:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
 
-    families: dict[str, int] = {}
+    # Renamed off `families` so it no longer shadows the CLI map of the same
+    # name; these are per-family example counts, not the name->family mapping.
+    family_counts: dict[str, int] = {}
     verdicts: dict[str, int] = {}
+    artifacts: dict[str, int] = {}
     disagreements: list[str] = []
     raw_findings = 0
     distinct_sites = 0
+    probe_trials = 0
     for example in triage:
-        families[example["workload_family"]] = (
-            families.get(example["workload_family"], 0) + 1
+        family_counts[example["workload_family"]] = (
+            family_counts.get(example["workload_family"], 0) + 1
         )
         verdicts[example["label"]["verdict"]] = (
             verdicts.get(example["label"]["verdict"], 0) + 1
         )
-        raw_findings += example["finding_counts"]["raw"]
-        distinct_sites += example["finding_counts"]["distinct_sites"]
+        kind = example.get("artifact", ARTIFACT_SANITIZER_REPORT)
+        artifacts[kind] = artifacts.get(kind, 0) + 1
+        # `findings` is the sanitizer shape's evidence count and `trial_counts`
+        # is the probe shape's; each row carries one of the two, so both
+        # totals are summed over the rows that have them.
+        finding_counts = example.get("finding_counts") or {}
+        raw_findings += finding_counts.get("raw", 0)
+        distinct_sites += finding_counts.get("distinct_sites", 0)
+        probe_trials += (example.get("trial_counts") or {}).get("total", 0)
         if example["ground_truth"]["agrees"] is False:
             disagreements.append(example["scenario_id"])
 
@@ -397,10 +672,16 @@ def main(argv: list[str] | None = None) -> int:
                      "total": len(triage) + len(proposals)},
         "rejected_reports": rejected,
         "findings": {"raw": raw_findings, "distinct_sites": distinct_sites},
-        "workload_families": families,
+        "workload_families": family_counts,
         "verdicts": verdicts,
         "ground_truth_disagreements": disagreements,
         "run_meta": run_meta,
+        # Appended rather than inserted: no scorer reads the manifest -- both
+        # `load_corpus` entry points read the JSONL -- so a new trailing key
+        # cannot move a reward number, and keeping the existing keys in place
+        # keeps a hand diff against an older manifest readable.
+        "artifacts": artifacts,
+        "probe_trials": probe_trials,
     }
     (args.out / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

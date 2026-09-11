@@ -82,8 +82,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from proposal_reward import MAX_TIER, Proposal, score_proposal  # noqa: E402
 from triage_reward import (  # noqa: E402
+    ARTIFACT_PROBE_RESULT,
     Answer,
     Label,
+    artifact_kind,
     load_corpus as load_triage_corpus,
     score_answer,
 )
@@ -281,8 +283,81 @@ def loop_state(row: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     """A scenario's symptom line and cell summaries, from its corpus row.
 
     Shaped like what `run_agent_loop` accumulates: one summary per executed
-    cell, carrying the verdict and the detectors that fired. The sanitizer
-    evidence is the cell's, so the model sees the same thing the loop would.
+    cell, carrying the verdict and the detectors that fired. The evidence is
+    the cell's, so the model sees the same thing the loop would.
+
+    Dispatches on the row's artifact shape. The sanitizer branch is the one
+    every reward number we hold was measured against, so its prompt text is
+    frozen -- `test_the_sanitizer_symptom_line_is_frozen` pins it -- and the
+    probe branch is additive. Rewording the sanitizer line would not fail any
+    scorer; it would silently make old and new runs incomparable, which is
+    worse.
+    """
+    if artifact_kind(row) == ARTIFACT_PROBE_RESULT:
+        return _probe_loop_state(row)
+    return _sanitizer_loop_state(row)
+
+
+def _probe_loop_state(row: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """The probe shape's symptom line and cell summary.
+
+    Deliberately not a reword of the sanitizer line into neutral language: the
+    two artifacts put different evidence in front of the model, and a prompt
+    that hid that would describe neither. No hardware is named, because unlike
+    the committed sanitizer corpus a probe cell does not come from a known
+    target -- inventing one would be a claim the row cannot support.
+
+    The per-trial split is stated rather than reduced to the cell verdict. A
+    reproducer that fired in 2 of 8 trials is a different diagnostic situation
+    from one that fired in 8 of 8, and that is exactly what a flaky scenario
+    needs the model to see.
+    """
+    scenario = row["scenario_id"]
+    label = row["label"]
+    counts = row.get("trial_counts") or {}
+    trials = row.get("trials") or []
+
+    total = counts.get("total", len(trials))
+    split = ", ".join(
+        f"{name}={counts[name]}"
+        for name in ("pass", "fail", "error")
+        if counts.get(name)
+    )
+    detectors = sorted(
+        {*(label.get("failure_detectors") or []), *(label.get("error_detectors") or [])}
+    )
+    symptom = (
+        f"Probe cell {scenario!r} returned overall verdict {label['verdict']!r} "
+        f"over {total} trial(s). Per-trial: {split or 'none'}. "
+        f"Detectors fired: {', '.join(detectors) or 'none'}. "
+        f"Workload family: {row.get('workload_family')}."
+    )
+
+    summaries = [
+        {
+            "cell_name": scenario,
+            "verdict": label["verdict"],
+            "failure_detectors_fired": list(label.get("failure_detectors") or []),
+            "error_detectors_fired": list(label.get("error_detectors") or []),
+            "kernel_names": [],
+            "distinct_evidence": [
+                {
+                    "detector": e.get("detector"),
+                    "kind": e.get("kind"),
+                    "trials": e.get("trials"),
+                }
+                for e in (row.get("distinct_evidence") or [])
+            ],
+            "trial_counts": counts,
+        }
+    ]
+    return symptom, summaries
+
+
+def _sanitizer_loop_state(row: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """The sanitizer shape's symptom line and cell summary.
+
+    The body below is unchanged and must stay so; see :func:`loop_state`.
     """
     scenario = row["scenario_id"]
     label = row["label"]

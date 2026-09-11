@@ -25,6 +25,12 @@ the corpus, since the labelling, scoring and degenerate-policy check are tested
 against synthetic ``result.json`` fixtures shaped like what
 ``SubprocessWorkload`` writes.
 
+``build_corpus.py`` can now read both, so "no corpus yet" is a statement about
+there being no archived probe *runs* to point it at, not about the pipeline
+refusing them. :func:`label_trials` is the cell-level entry point it uses;
+:func:`load_probe_cells` is the directory-level one, mirroring
+:func:`load_sanitizer_reports`.
+
 Labels are recomputed, not read
 -------------------------------
 Each fixture carries a ``verdict`` field, and this module ignores it. The label
@@ -79,6 +85,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from aorta.agent.state import read_trial_results
 from aorta.instrumentation.rocjitsu_sanitizers.models import SanitizerReport, Verdict
 from aorta.probe.classifier.verdict import (
     VALID_VERDICTS,
@@ -88,6 +95,25 @@ from aorta.probe.classifier.verdict import (
 
 VERDICT_WEIGHT = 0.6
 ATTRIBUTION_WEIGHT = 0.4
+
+# Which artifact a corpus row was built from. Named here rather than in
+# `build_corpus.py` because both the builder and `run_e2e.py` have to agree on
+# the discriminator, and both already import this module.
+#
+# A sanitizer row carries no `artifact` key at all. That is deliberate and not
+# an oversight: the committed corpus was measured without one, and adding a key
+# to those rows would change their bytes, which makes every reward number
+# recorded against them incomparable. Absence therefore *means*
+# `ARTIFACT_SANITIZER_REPORT`, and `artifact_kind` is the only place that
+# assumption is written down.
+ARTIFACT_SANITIZER_REPORT = "sanitizer_report"
+ARTIFACT_PROBE_RESULT = "probe_result"
+
+
+def artifact_kind(row: dict[str, Any]) -> str:
+    """Which artifact shape one corpus row came from."""
+    kind = row.get("artifact")
+    return kind if isinstance(kind, str) and kind else ARTIFACT_SANITIZER_REPORT
 
 # Every verdict a corpus example may carry: the probe's three-way split plus the
 # sanitizers' wider vocabulary. Taken from both enums rather than written out,
@@ -173,6 +199,81 @@ def label_run(doc: dict[str, Any], source: str | None = None) -> Label:
     )
 
 
+def per_trial_labels(docs: list[dict[str, Any]]) -> list[Label]:
+    """Label every trial in a probe cell, in the order given.
+
+    A non-mapping ``result.json`` raises rather than being coerced. It is valid
+    JSON and therefore survives the loader, so this is the only place left that
+    can refuse it, and refusing loudly is the whole point of the seam: a
+    scenario that cannot be labelled must not enter the corpus wearing a
+    plausible label.
+    """
+    out: list[Label] = []
+    for index, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            raise ValueError(
+                f"trial {index}: result.json must be a mapping, "
+                f"got {type(doc).__name__}"
+            )
+        out.append(label_run(doc))
+    return out
+
+
+def label_trials(docs: list[dict[str, Any]], source: str | None = None) -> Label:
+    """Label one probe *cell* -- a directory of ``trial_*/result.json`` -- as one scenario.
+
+    A cell is the unit a corpus row describes, for the same reason
+    ``build_corpus.py`` counts a 64-lane race as one example: the trials of one
+    cell are repeats of one configuration, and counting them separately would
+    train a model on one scenario N times over.
+
+    The cell's evidence is the union of the detector IDs its trials fired, in
+    first-firing order, re-split through :func:`partition_detectors` and
+    resolved by :func:`verdict_from_detectors`. Re-splitting an already-split
+    union cannot distort it -- ``partition_detectors`` is a membership test on
+    :data:`ERROR_DETECTOR_IDS`, so it is idempotent -- and routing through it
+    keeps one derivation path for every label this module produces.
+
+    That union gives the cell exactly the documented **fail > error > pass**
+    precedence across trials: one reproducing trial makes the cell a
+    reproduction even if the others were clean, and a cell whose only signals
+    are infra noise stays ``error``. It is also why a flaky reproducer is not
+    silently downgraded -- the thing that makes a scenario trainable is that it
+    *can* fire, and the per-trial split stays visible in the corpus row for a
+    consumer that wants the rate.
+
+    ``stored_verdict`` is aggregated the same way, over the trials' own stored
+    values, and used **only** to set ``stale``. It never becomes the label.
+    """
+    labels = per_trial_labels(docs)
+
+    recorded: list[str] = []
+    for label in labels:
+        for detector in (*label.failure_detectors, *label.error_detectors):
+            if detector not in recorded:
+                recorded.append(detector)
+    failures, errors = partition_detectors(recorded)
+    verdict = verdict_from_detectors(failures, errors)
+
+    # Only meaningful if every trial stored one; a partially-stamped cell has
+    # no aggregate to disagree with, so there is nothing to call stale.
+    stored: str | None = None
+    if labels and all(label.stored_verdict is not None for label in labels):
+        seen = {label.stored_verdict for label in labels}
+        stored = (
+            "fail" if "fail" in seen else "error" if "error" in seen else "pass"
+        )
+
+    return Label(
+        verdict=verdict,
+        failure_detectors=failures,
+        error_detectors=errors,
+        stored_verdict=stored,
+        stale=stored is not None and stored != verdict,
+        source=source,
+    )
+
+
 def score_answer(answer: Answer, label: Label) -> Score:
     """Reward one answer against the ground truth.
 
@@ -214,6 +315,49 @@ def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
             out.append((str(path), json.loads(path.read_text(encoding="utf-8"))))
         except (OSError, json.JSONDecodeError):
             continue
+    return out
+
+
+def find_probe_cells(root: Path) -> list[Path]:
+    """Every probe *cell* directory under a results tree, sorted.
+
+    A cell is a directory holding one or more ``trial_<N>/result.json``, which
+    is the layout ``SubprocessWorkload`` writes and the one
+    :func:`aorta.agent.state.read_trial_results` already knows how to walk.
+
+    A ``result.json`` that is *not* under a ``trial_*`` parent is ignored
+    rather than guessed at: it is not the probe artifact this reads, and
+    inventing a cell around it would put an unlabelled run into the corpus.
+    """
+    cells: list[Path] = []
+    for path in root.rglob("result.json"):
+        parent = path.parent
+        if not parent.name.startswith("trial_"):
+            continue
+        cell = parent.parent
+        if cell not in cells:
+            cells.append(cell)
+    return sorted(cells)
+
+
+def load_probe_cells(root: Path) -> list[tuple[str, Label]]:
+    """Every labellable probe cell under a directory, as one label each.
+
+    The probe analogue of :func:`load_sanitizer_reports`, and it fails the same
+    way: a cell whose trials cannot be labelled is skipped and named, never
+    coerced into a plausible verdict.
+    """
+    out: list[tuple[str, Label]] = []
+    for cell in find_probe_cells(root):
+        docs = read_trial_results(cell)
+        if not docs:
+            print(f"  skipped {cell}: no readable trial results", file=sys.stderr)
+            continue
+        try:
+            out.append((str(cell), label_trials(docs, source=str(cell))))
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            print(f"  skipped {cell}: rejected by the probe resolver ({exc})",
+                  file=sys.stderr)
     return out
 
 

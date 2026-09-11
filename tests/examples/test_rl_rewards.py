@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -1363,3 +1364,568 @@ def test_a_verdict_outside_the_vocabulary_is_rejected(triage_reward, tmp_path):
     }) + "\n")
     with pytest.raises(ValueError, match="outside this scorer's vocabulary"):
         triage_reward.load_corpus(corpus)
+
+
+# --------------------------------------------------------------------------- #
+# The second artifact shape: probe `trial_*/result.json` cells.
+#
+# `build_corpus.py` used to find one filename, which meant only sanitizer runs
+# could become scenarios at all. These pin the union: that both shapes are
+# found, that a tree of either or both works, that the labels stay *derived*
+# rather than read off the artifact, and -- hardest to notice if it broke --
+# that the sanitizer path is untouched down to the prompt bytes.
+# --------------------------------------------------------------------------- #
+
+
+def _trial(
+    cell: str,
+    verdict: str,
+    failures: list[str],
+    errors: list[str],
+    index: int = 0,
+    exit_code: int = 0,
+    warns: list[str] | None = None,
+) -> dict:
+    """One `result.json`, shaped like what `SubprocessWorkload` writes."""
+    return {
+        "verdict": verdict,
+        "exit_code": exit_code,
+        "walltime_sec": 12.5,
+        "peak_vram_mib": 4096,
+        "argv": ["bash", "run_repro.sh"],
+        "cell_name": cell,
+        "trial_index": index,
+        "failure_detectors_fired": failures,
+        "error_detectors_fired": errors,
+        "warn_detectors_fired": warns or [],
+        "capture": {},
+        "tier_durations_ms": {"tier1": 3.0},
+    }
+
+
+def _write_cell(root: Path, cell: str, trials: list[dict]) -> Path:
+    """Lay a probe cell out on disk the way the probe runner does."""
+    cell_dir = root / cell
+    for trial in trials:
+        trial_dir = cell_dir / f"trial_{trial['trial_index']}"
+        trial_dir.mkdir(parents=True, exist_ok=True)
+        (trial_dir / "result.json").write_text(json.dumps(trial), encoding="utf-8")
+    return cell_dir
+
+
+# A flaky reproducer plus its control: the shape the corpus has no scenario of
+# today, and the reason this pipeline change exists.
+_FLAKY = [
+    _trial("none-none", "pass", [], [], 0),
+    _trial("none-none", "fail", ["tier4:nan_signature"], [], 1, exit_code=1),
+    _trial("none-none", "pass", [], [], 2),
+    _trial("none-none", "error", [], ["tier1:timeout"], 3, exit_code=-9),
+]
+_CONTROL = [_trial("tf32_off-none", "pass", [], [], i) for i in range(4)]
+
+_PROBE_FAMILIES = {
+    "none-none": "synthetic_probe_nan",
+    "tf32_off-none": "synthetic_probe_nan",
+}
+
+
+def _build_with_families(build_corpus, tmp_path, results, families=None):
+    """`_build`, with the workload-family override a probe tree needs."""
+    out = tmp_path / "corpus"
+    argv = [
+        "--results", str(results),
+        "--baselines", str(
+            Path(__file__).resolve().parents[2]
+            / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+        ),
+        "--out", str(out),
+    ]
+    if families is not None:
+        path = tmp_path / "families.json"
+        path.write_text(json.dumps(families), encoding="utf-8")
+        argv += ["--families", str(path)]
+    assert build_corpus.main(argv) == 0
+    return out, json.loads((out / "manifest.json").read_text())
+
+
+def _rows(out: Path, name: str = "triage.jsonl") -> list[dict]:
+    return [json.loads(x) for x in (out / name).read_text().splitlines() if x]
+
+
+# --- the cell is the unit, and its label is derived ------------------------- #
+
+
+def test_one_cell_is_one_scenario_not_one_trial_each(build_corpus, tmp_path):
+    """Four trials of one configuration are one scenario, as 64 lanes are one site."""
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", _FLAKY)
+
+    out, manifest = _build_with_families(
+        build_corpus, tmp_path, results, _PROBE_FAMILIES
+    )
+    assert manifest["scenarios"] == 1
+    assert manifest["probe_trials"] == 4
+    assert manifest["artifacts"] == {"probe_result": 1}
+
+    (row,) = _rows(out)
+    assert row["trial_counts"] == {
+        "total": 4, "pass": 2, "fail": 1, "error": 1, "distinct_detectors": 2,
+    }
+
+
+def test_one_reproducing_trial_makes_the_cell_a_reproduction(build_corpus, tmp_path):
+    """fail > error > pass, applied across trials rather than within one.
+
+    Two of four trials were clean and one was infra noise. A cell that answered
+    `pass` here would train the model to call a flaky reproducer clean, which is
+    the single most expensive wrong answer in this domain.
+    """
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", _FLAKY)
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    (row,) = _rows(out)
+    assert row["label"]["verdict"] == "fail"
+    assert row["label"]["failure_detectors"] == ["tier4:nan_signature"]
+    assert row["label"]["error_detectors"] == ["tier1:timeout"]
+
+
+def test_an_all_clean_cell_is_a_pass_with_nothing_cited(build_corpus, tmp_path):
+    results = tmp_path / "results"
+    _write_cell(results, "tf32_off-none", _CONTROL)
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    (row,) = _rows(out)
+    assert row["label"]["verdict"] == "pass"
+    assert row["distinct_evidence"] == []
+
+
+def test_an_infra_only_cell_is_an_error_not_a_failure(build_corpus, tmp_path):
+    """No valid observation was made, so there is nothing to attribute a failure to."""
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", [
+        _trial("none-none", "error", [], ["tier1:timeout"], 0, exit_code=-9),
+        _trial("none-none", "error", [], ["tier1:exec_failed"], 1, exit_code=127),
+    ])
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    (row,) = _rows(out)
+    assert row["label"]["verdict"] == "error"
+    assert row["label"]["failure_detectors"] == []
+    assert {e["kind"] for e in row["distinct_evidence"]} == {"error"}
+
+
+def test_the_cell_label_is_recomputed_not_read_off_the_artifact(
+    build_corpus, tmp_path
+):
+    """The corpus-rot signal for this shape.
+
+    Every trial here *stores* `pass` while recording a detector that means
+    otherwise. A pipeline that trusted the stored field would emit a clean
+    scenario carrying failure evidence -- a label that is wrong in the one
+    direction that trains the model to ignore its own evidence.
+    """
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", [
+        _trial("none-none", "pass", ["tier4:nan_signature"], [], 0),
+        _trial("none-none", "pass", ["tier4:nan_signature"], [], 1),
+    ])
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    (row,) = _rows(out)
+    assert row["label"]["verdict"] == "fail", "the stored 'pass' was believed"
+    assert row["label"]["stored_verdict"] == "pass"
+    assert row["label"]["stale"] is True
+    assert row["ground_truth"]["observed_verdict"] == "fail"
+
+
+def test_a_cell_detector_on_the_wrong_side_is_re_partitioned(
+    build_corpus, tmp_path
+):
+    """`partition_detectors` owns the fail/error line, not the artifact.
+
+    The per-trial version of this is asserted further up against `label_run`;
+    this is the cell-level one, through the whole builder.
+    """
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", [
+        # `tier1:timeout` filed as a failure and `tier4:nan_signature` as an
+        # error -- both on the wrong side of the line.
+        _trial("none-none", "fail", ["tier1:timeout"], ["tier4:nan_signature"], 0),
+    ])
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    (row,) = _rows(out)
+    assert row["label"]["failure_detectors"] == ["tier4:nan_signature"]
+    assert row["label"]["error_detectors"] == ["tier1:timeout"]
+
+
+def test_one_detector_firing_in_many_trials_is_one_piece_of_evidence(
+    build_corpus, tmp_path
+):
+    """The probe analogue of collapsing 64 lanes of one race to one site."""
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", [
+        _trial("none-none", "fail", ["tier4:nan_signature"], [], i, exit_code=1)
+        for i in range(8)
+    ])
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    (row,) = _rows(out)
+    assert row["trial_counts"]["total"] == 8
+    assert len(row["distinct_evidence"]) == 1
+    assert row["distinct_evidence"][0]["trials"] == list(range(8))
+
+
+def test_the_per_trial_split_survives_into_the_row(build_corpus, tmp_path):
+    """A 1-in-4 reproducer and a 4-in-4 one are not the same scenario.
+
+    Both carry verdict `fail`, so the distinction exists only in the per-trial
+    record. Reducing it away is what would make a flaky scenario indistinguish-
+    able from a deterministic one.
+    """
+    results = tmp_path / "results"
+    _write_cell(results / "flaky", "none-none", _FLAKY)
+    _write_cell(results / "solid", "none-none", [
+        _trial("none-none", "fail", ["tier4:nan_signature"], [], i, exit_code=1)
+        for i in range(4)
+    ])
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    rows = _rows(out)
+    assert len(rows) == 2
+    verdicts = {r["label"]["verdict"] for r in rows}
+    assert verdicts == {"fail"}, "both are reproductions; only the rate differs"
+    assert sorted(r["trial_counts"]["fail"] for r in rows) == [1, 4]
+
+
+# --- trees: either shape, both, neither ------------------------------------ #
+
+
+def test_a_tree_of_both_shapes_yields_both(build_corpus, tmp_path):
+    """The union case, and the one that would regress silently.
+
+    The sanitizer reports are the committed ones, so this also checks the two
+    collectors do not interfere: six reports plus two cells, each labelled by
+    its own resolver.
+    """
+    results = tmp_path / "results"
+    shutil.copytree(_SURVEY / "reports", results / "reports")
+    _write_cell(results / "cells", "none-none", _FLAKY)
+    _write_cell(results / "cells", "tf32_off-none", _CONTROL)
+
+    out, manifest = _build_with_families(
+        build_corpus, tmp_path, results, _PROBE_FAMILIES
+    )
+    assert manifest["scenarios"] == 8
+    assert manifest["artifacts"] == {"sanitizer_report": 6, "probe_result": 2}
+    assert manifest["probe_trials"] == 8
+    # The sanitizer evidence total is unaffected by the probe rows sharing the
+    # tree, and vice versa.
+    assert manifest["findings"]["raw"] == 32
+    assert "unknown" not in manifest["workload_families"]
+
+    rows = _rows(out)
+    by_kind: dict[str, int] = {}
+    for row in rows:
+        by_kind.setdefault(row.get("artifact", "sanitizer_report"), 0)
+        by_kind[row.get("artifact", "sanitizer_report")] += 1
+    assert by_kind == {"sanitizer_report": 6, "probe_result": 2}
+
+
+def test_sanitizer_rows_in_a_mixed_tree_carry_no_artifact_key(
+    build_corpus, tmp_path
+):
+    """Absence is the discriminator, and it is load-bearing.
+
+    Stamping `artifact` onto sanitizer rows would be tidier and would change
+    their bytes, which is what makes every reward number recorded against the
+    committed corpus incomparable.
+    """
+    results = tmp_path / "results"
+    shutil.copytree(_SURVEY / "reports", results / "reports")
+    _write_cell(results / "cells", "none-none", _FLAKY)
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    for row in _rows(out):
+        if row["scenario_id"] == "none-none":
+            assert row["artifact"] == "probe_result"
+        else:
+            assert "artifact" not in row
+
+
+def test_a_tree_with_neither_shape_fails_loudly(build_corpus, tmp_path):
+    """An empty corpus is a build failure, not a zero-row success."""
+    empty = tmp_path / "results"
+    (empty / "nothing" / "here").mkdir(parents=True)
+    (empty / "nothing" / "here" / "notes.txt").write_text("no artifacts", "utf-8")
+    assert build_corpus.main([
+        "--results", str(empty),
+        "--baselines", str(
+            Path(__file__).resolve().parents[2]
+            / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+        ),
+        "--out", str(tmp_path / "corpus"),
+    ]) == 1
+
+
+def test_a_result_json_outside_a_trial_dir_is_not_mistaken_for_a_cell(
+    build_corpus, triage_reward, tmp_path
+):
+    """Only `trial_<N>/result.json` is the probe artifact.
+
+    A stray `result.json` is some other tool's output. Inventing a cell around
+    it would put a run into the corpus that no resolver ever labelled.
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "result.json").write_text(json.dumps(_trial("x", "fail", [], [])))
+    assert triage_reward.find_probe_cells(results) == []
+
+
+# --- malformed artifacts, one of each shape -------------------------------- #
+
+
+def test_a_malformed_probe_trial_is_rejected_rather_than_guessed(
+    build_corpus, triage_reward, tmp_path
+):
+    """Valid JSON of the wrong type survives the loader, so the seam must refuse it."""
+    results = tmp_path / "results"
+    cell = _write_cell(results, "none-none", _FLAKY)
+    (cell / "trial_1" / "result.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        triage_reward.label_trials([{"verdict": "pass"}, [1, 2, 3]])
+
+    # And the build drops that scenario, naming it, rather than aborting.
+    out, manifest = _build_with_families(
+        build_corpus, tmp_path, results, _PROBE_FAMILIES
+    )
+    assert manifest["scenarios"] == 0
+    assert manifest["rejected_reports"] == 1
+    assert _rows(out) == []
+
+
+def test_an_unreadable_probe_trial_is_skipped_and_the_cell_still_labels(
+    build_corpus, tmp_path
+):
+    """Truncated JSON is the interrupted-write case, not a corpus-rot case.
+
+    `read_trial_results` already skips it, so the cell is labelled from the
+    trials that do parse and the trial count says how many that was.
+    """
+    results = tmp_path / "results"
+    cell = _write_cell(results, "none-none", _FLAKY)
+    (cell / "trial_2" / "result.json").write_text('{"verdict": ', encoding="utf-8")
+
+    out, manifest = _build_with_families(
+        build_corpus, tmp_path, results, _PROBE_FAMILIES
+    )
+    assert manifest["scenarios"] == 1
+    (row,) = _rows(out)
+    assert row["trial_counts"]["total"] == 3
+    assert row["label"]["verdict"] == "fail"
+
+
+def test_a_malformed_sanitizer_report_is_still_rejected(build_corpus, tmp_path):
+    """The sanitizer shape's own rot check, unchanged by the union.
+
+    A report whose stored verdict contradicts its checks fails
+    `SanitizerReport.from_dict`, and a probe cell sharing the tree neither
+    rescues it nor is dragged down with it.
+    """
+    import copy
+
+    results = tmp_path / "results"
+    case = results / "reports" / "gemm_f32_waitcheck"
+    case.mkdir(parents=True)
+    doc = json.loads(
+        (_SURVEY / "reports" / "gemm_f32_waitcheck" / "sanitizer_report.json")
+        .read_text()
+    )
+    tampered = copy.deepcopy(doc)
+    tampered["overall_verdict"] = "pass"
+    (case / "sanitizer_report.json").write_text(json.dumps(tampered), encoding="utf-8")
+    _write_cell(results / "cells", "none-none", _FLAKY)
+
+    out, manifest = _build_with_families(
+        build_corpus, tmp_path, results, _PROBE_FAMILIES
+    )
+    assert manifest["rejected_reports"] == 1
+    assert manifest["artifacts"] == {"probe_result": 1}
+    assert [r["scenario_id"] for r in _rows(out)] == ["none-none"]
+
+
+def test_an_unreadable_sanitizer_report_is_skipped(build_corpus, tmp_path):
+    results = tmp_path / "results"
+    case = results / "reports" / "gemm_f32_waitcheck"
+    case.mkdir(parents=True)
+    (case / "sanitizer_report.json").write_text("{not json", encoding="utf-8")
+    _write_cell(results / "cells", "tf32_off-none", _CONTROL)
+
+    _, manifest = _build_with_families(
+        build_corpus, tmp_path, results, _PROBE_FAMILIES
+    )
+    assert manifest["artifacts"] == {"probe_result": 1}
+    assert manifest["rejected_reports"] == 0, "unreadable is skipped, not rejected"
+
+
+# --- the corpus stays consumable by both scorers --------------------------- #
+
+
+def test_probe_rows_score_through_the_triage_scorer_unchanged(
+    build_corpus, triage_reward, tmp_path
+):
+    """No conversion pass, and the oracle is perfect on both shapes."""
+    results = tmp_path / "results"
+    shutil.copytree(_SURVEY / "reports", results / "reports")
+    _write_cell(results / "cells", "none-none", _FLAKY)
+    _write_cell(results / "cells", "tf32_off-none", _CONTROL)
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    rows = triage_reward.load_corpus(out / "triage.jsonl")
+    assert len(rows) == 8
+    for _, label, family in rows:
+        assert family != "unknown"
+        oracle = triage_reward.Answer(label.verdict, sorted(label.cited_detectors))
+        assert triage_reward.score_answer(oracle, label).reward == pytest.approx(1.0)
+
+
+def test_probe_rows_get_the_same_proposal_ladder(
+    build_corpus, proposal_reward, tmp_path
+):
+    """The proposal contract is a property of the model's output, not the run.
+
+    So the ladder must land identically for a probe scenario -- if it did not,
+    the tier would be reporting the artifact shape rather than the proposal.
+    """
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", _FLAKY)
+    out, _ = _build_with_families(build_corpus, tmp_path, results, _PROBE_FAMILIES)
+
+    rows = proposal_reward.load_corpus(out / "proposal.jsonl")
+    assert len(rows) == len(build_corpus.PROPOSAL_VARIANTS)
+    tiers = {
+        proposal.name.rsplit(":", 1)[1]: proposal_reward.score_proposal(proposal).tier
+        for proposal, _ in rows
+    }
+    assert tiers["valid"] == 5
+    assert tiers["hallucinated_name"] == 3
+    assert tiers["invalid_category"] == 2
+    assert tiers["already_tried"] == 4
+
+
+def test_a_probe_cell_without_a_family_override_is_honestly_unknown(
+    build_corpus, tmp_path
+):
+    """A cell name encodes the mitigation axis, not the workload.
+
+    So there is nothing to infer a family from, and guessing one would make the
+    corpus look stratifiable when it is not.
+    """
+    results = tmp_path / "results"
+    _write_cell(results, "none-none", _FLAKY)
+    _, manifest = _build_with_families(build_corpus, tmp_path, results, None)
+    assert manifest["workload_families"] == {"unknown": 1}
+
+
+# --- the frozen prompt ----------------------------------------------------- #
+
+
+def test_the_sanitizer_symptom_line_is_frozen(run_e2e):
+    """The regression that would invalidate every reward number we hold.
+
+    Nothing would fail if this text were reworded -- no scorer reads it -- so
+    the only protection is an exact-match assertion. Pinned against a real
+    committed corpus row rather than a synthetic one, so a change to the row
+    schema that altered the rendering also trips this.
+    """
+    row = json.loads(
+        json.dumps({
+            "scenario_id": "waitcheck",
+            "workload_family": "tensile_gemm_object",
+            "label": {
+                "verdict": "warn",
+                "failure_detectors": ["waitcheck:wait_hazard"],
+                "error_detectors": [],
+            },
+            "checks": [{
+                "sanitizer": "waitcheck", "verdict": "warn",
+                "findings": 64, "kernel_names": ["Cijk_Ailk_Bljk"],
+            }],
+            "distinct_evidence": [],
+            "finding_counts": {"raw": 64, "distinct_sites": 2},
+        })
+    )
+    symptom, summaries = run_e2e.loop_state(row)
+    assert symptom == (
+        "Sanitizer run 'waitcheck' on gfx950 returned overall verdict 'warn'. "
+        "Per-sanitizer: waitcheck=warn (64 findings). "
+        "Workload family: tensile_gemm_object."
+    )
+    assert [s["cell_name"] for s in summaries] == ["none-none"]
+    assert summaries[0]["kernel_names"] == ["Cijk_Ailk_Bljk"]
+
+
+def test_real_built_rows_still_render_the_frozen_line(
+    build_corpus, run_e2e, tmp_path
+):
+    """Belt and braces: rows from the builder, not hand-built ones.
+
+    `examples/rl/corpus/*.jsonl` is generated and gitignored, so it cannot be
+    the fixture here -- it is absent on a clean checkout. The committed survey
+    reports are the durable input, and building from them exercises the whole
+    path, so a change to the row schema that altered the rendering trips this
+    even if the synthetic row above still matches.
+    """
+    out, _ = _build(build_corpus, tmp_path, _SURVEY)
+    rows = _rows(out)
+    assert len(rows) == 6
+    for row in rows:
+        symptom, _ = run_e2e.loop_state(row)
+        assert symptom.startswith("Sanitizer run '")
+        assert " on gfx950 returned overall verdict " in symptom
+        assert symptom.endswith(f"Workload family: {row['workload_family']}.")
+
+
+def test_a_probe_row_gets_its_own_symptom_line(run_e2e):
+    """Additive, and it names no hardware the row cannot vouch for."""
+    row = {
+        "artifact": "probe_result",
+        "scenario_id": "none-none",
+        "workload_family": "synthetic_probe_nan",
+        "label": {
+            "verdict": "fail",
+            "failure_detectors": ["tier4:nan_signature"],
+            "error_detectors": ["tier1:timeout"],
+        },
+        "trials": _FLAKY,
+        "trial_counts": {
+            "total": 4, "pass": 2, "fail": 1, "error": 1, "distinct_detectors": 2,
+        },
+        "distinct_evidence": [
+            {"detector": "tier4:nan_signature", "kind": "failure", "trials": [1]},
+            {"detector": "tier1:timeout", "kind": "error", "trials": [3]},
+        ],
+    }
+    symptom, summaries = run_e2e.loop_state(row)
+    assert symptom == (
+        "Probe cell 'none-none' returned overall verdict 'fail' over 4 trial(s). "
+        "Per-trial: pass=2, fail=1, error=1. "
+        "Detectors fired: tier1:timeout, tier4:nan_signature. "
+        "Workload family: synthetic_probe_nan."
+    )
+    assert "gfx950" not in symptom
+    assert "Sanitizer run" not in symptom
+    (summary,) = summaries
+    assert summary["failure_detectors_fired"] == ["tier4:nan_signature"]
+    assert summary["error_detectors_fired"] == ["tier1:timeout"]
+    assert summary["trial_counts"]["fail"] == 1
+
+
+def test_the_artifact_discriminator_defaults_to_the_sanitizer_shape(triage_reward):
+    """An older row, with no `artifact` key, must keep reading as a sanitizer row."""
+    assert triage_reward.artifact_kind({}) == "sanitizer_report"
+    assert triage_reward.artifact_kind({"artifact": None}) == "sanitizer_report"
+    assert triage_reward.artifact_kind({"artifact": ""}) == "sanitizer_report"
+    assert triage_reward.artifact_kind({"artifact": "probe_result"}) == "probe_result"
