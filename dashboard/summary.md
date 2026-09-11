@@ -1,8 +1,8 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `34476548600` (2026-09-10 12:49:39 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/34476548600)
+> ⚠️ **Stale** — latest sanitizer nightly run `34598790075` (2026-09-11 12:45:41 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/34598790075)
 
-Run `2026-09-10T124939-34476548600` · commit `6a8c70da0add` · 2026-09-10 12:49:39 UTC
+Run `2026-09-11T124542-34598790075` · commit `73409f79a56a` · 2026-09-11 12:45:42 UTC
 
 ❌ **REGRESSION** — investigate 1/3 sanitizer outcomes that do not match their baselines
 
@@ -21,14 +21,14 @@ Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate)
 <details><summary><b>daily-waitcheck-gemm</b> — ❌ **Unexpected outcome**</summary>
 
 Observed sanitizer verdict `error` · expected `warn`
-Observation: waitcheck error; reason worklist_not_fully_checked; 32 finding(s) (wait_hazard)
+Observation: waitcheck error; reason worklist_not_fully_checked; gemm_NT_M256_N4096_K1024: waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order); 32 finding(s) (wait_hazard)
 backend `rj_waitcheck` `a70945fb1135` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution ❌ **error**
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `gemm_NT_M256_N4096_K1024` | 479 | `error` | 0 | `sol_126578.hsaco` | `57c5d8efa4` |
-| `gemm_NT_M128_N4096_K1280` | 471 | `—` | 0 | `sol_175415.hsaco` | `57c5d8efa4` |
-| `gemm_TT_M64_N64_K1280` | 440 | `warn` | 32 | `sol_137678.hsaco` | `aeb46fded1` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `gemm_NT_M256_N4096_K1024` | 479 | `error` | 0 | `sol_126578.hsaco` | `57c5d8efa4` | waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order) |
+| `gemm_NT_M128_N4096_K1280` | 471 | `error` | 0 | `sol_175415.hsaco` | `57c5d8efa4` | same code object as gemm_NT_M256_N4096_K1024; scanned once — waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncer… |
+| `gemm_TT_M64_N64_K1280` | 440 | `warn` | 32 | `sol_137678.hsaco` | `aeb46fded1` | — |
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
@@ -42,9 +42,9 @@ Observed sanitizer verdict `pass` · expected `pass`
 Observation: consan pass; preflight pass
 backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `consan_lds_race` | 1 | `pass` | 0 | `—` | `—` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `consan_lds_race` | 1 | `pass` | 0 | `—` | `—` | — |
 
 </details>
 
@@ -54,13 +54,13 @@ Observed sanitizer verdict `fail` · expected `fail`
 Observation: consan fail; 64 finding(s) (1); preflight pass
 backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `consan_lds_race_2wave` | 1 | `fail` | 64 | `—` | `—` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `consan_lds_race_2wave` | 1 | `fail` | 64 | `—` | `—` | — |
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=96264269645120 index=0 kind=1 code_object=fnv1a64:3deb93883c6c6fa8 report_generation=2 generation… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=94803426684672 index=0 kind=1 code_object=fnv1a64:3deb93883c6c6fa8 report_generation=2 generation… |
 
 </details>
 
@@ -72,21 +72,21 @@ Surveyed 3 kernels across 6 sanitizer runs — 3 pass · 3 error
 
 | Kernel | waitcheck | ConSan | Findings | Note |
 |---|---|---|--:|---|
-| gemm | `error` | `error` | 0 | consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing |
+| gemm | `error` | `error` | 0 | consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_… |
 | lds dispatch | `pass` | `pass` | 0 | — |
 | tiny | `pass` | `error` | 0 | combined_hook_exit_86 |
 
 <details><summary><b>consan-gemm</b> — observed `error`</summary>
 
-Observation: consan error; reason consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; preflight error
+Observation: consan error; reason consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; gemm_f32_ss: consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; preflight error
 
-Reason: `consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_…`
+Reason: `gemm_f32_ss: consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement…`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placem… |
 
 </details>
 
@@ -96,37 +96,37 @@ Observation: consan pass; preflight pass
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `2826114b7b` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `daf9807ad2` | — |
 
 </details>
 
 <details><summary><b>consan-tiny</b> — observed `error`</summary>
 
-Observation: consan error; reason combined_hook_exit_86; preflight error
+Observation: consan error; reason combined_hook_exit_86; tiny_vecadd: combined_hook_exit_86; preflight error
 
-Reason: `combined_hook_exit_86`
+Reason: `combined_hook_exit_86 — tiny_vecadd: combined_hook_exit_86`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `02628914c7` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `4b895b3572` | combined_hook_exit_86 |
 
 </details>
 
 <details><summary><b>waitcheck-gemm</b> — observed `error`</summary>
 
-Observation: waitcheck error; reason worklist_not_fully_checked
+Observation: waitcheck error; reason worklist_not_fully_checked; gemm_f32_ss: waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)
 
-Reason: `worklist_not_fully_checked`
+Reason: `gemm_f32_ss: waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;…`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order) |
 
 </details>
 
@@ -136,9 +136,9 @@ Observation: waitcheck pass
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `2826114b7b` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `daf9807ad2` | — |
 
 </details>
 
@@ -148,9 +148,9 @@ Observation: waitcheck pass
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml`
 
-| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
-|---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `02628914c7` |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
+|---|--:|---|--:|---|---|---|
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `4b895b3572` | — |
 
 </details>
 
@@ -158,6 +158,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-09-11T124542-34598790075 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-10T124939-34476548600 | `6a8c70da0add` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-09T124656-34350894756 | `6a8c70da0add` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
 | 2026-09-08T124853-34225959457 | `d84bea127a2e` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Regression |
@@ -187,4 +188,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-08-17-32028590251 | `b4be48fdd6dd` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-16-31946286609 | `b4be48fdd6dd` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-15-31883858931 | `b4be48fdd6dd` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
-| 2026-08-14-31800000546 | `68c980aa449f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |

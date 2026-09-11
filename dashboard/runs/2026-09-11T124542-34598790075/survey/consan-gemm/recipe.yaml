@@ -1,0 +1,231 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-CONSAN-GEMM
+description: >
+  Informational (non-gating) gfx950 ConSan run over a real, heavy f32 Type_SS
+  hipBLASLt Tensile code object (generic public content extracted in CI from the
+  synthetic gemm_shapes_unique.csv), driven via the source.consan_command path
+  added in #347. consan_gemm_load only LOADS that object -- it never dispatches --
+  so under consan_policy: lenient what this case asserts is static instrumentation
+  coverage on a real production object: that ConSan reads it, patches it, and
+  reports how many of its discovered access sites it actually covered. It asserts
+  nothing about dynamic race evidence; daily-consan-lds-dispatch.yaml is the
+  end-to-end control for that.
+
+  A pass here therefore means "instrumented, and the coverage cross-check agrees",
+  never merely "ran without complaining" -- under lenient ConSan itself no longer
+  fails closed, so the coverage cross-check is what stands between an
+  uninstrumented object and a false pass.
+
+  STATUS ON THE CURRENT CI IMAGE: this case does NOT reach that assertion today.
+  On the digest-pinned ROCm 10 base the object is 169,996,560 bytes and ConSan
+  rejects it on the patched-image growth ceiling before instrumenting anything, so
+  the row is error with zero findings every night. That is a capacity limit, not
+  something consan_policy can change -- see the policy comment below and
+  docs/sanitizers/consan-gemm-patched-image-growth-cap.md. Rendered on the
+  dashboard's Workload survey tab (Tab 2) as an observed-only case; it does NOT
+  gate the nightly.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: gemm_f32_ss
+      code_object: fixtures/isa/consan_gemm_f32.hsaco
+      code_object_index: 0
+    consan_command: fixtures/bin/consan_gemm_load
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - consan
+  policy:
+    # lenient, not strict, because consan_gemm_load is a LOAD-ONLY driver: it calls
+    # hipModuleLoad/hipModuleUnload and never dispatches (consan_load.hip states the
+    # contract -- production StreamK GEMM kernels need hipBLASLt to launch). strict
+    # sets RJ_CONSAN_MOI_REQUIRE_RECORDS, which demands visible dynamic records, so a
+    # driver that never dispatches produces no dispatch packet and no records and
+    # strict fails closed with combined_hook_exit_86 no matter how healthy the run
+    # was. That is what #450 observed: error/error, zero findings, every single time.
+    #
+    # This is the same rule harvest_code_objects.py already applies to its own
+    # load-mode recipes, for the same reason. Under lenient this case verifies what a
+    # load-only run can actually verify -- static instrumentation coverage, i.e. that
+    # ConSan reads, patches and analyzes a real production Tensile object.
+    #
+    # WHAT THAT IS MEASURED ON, AND WHAT IT IS NOT. Two different objects are in
+    # play and the policy argument only closes on one of them:
+    #
+    #   * ROCm 7.0.2.2, 16,265,200-byte object, gfx950 Slurm node. lenient is a
+    #     real fix: the object transforms clean (outcome=modified-valid, 75978
+    #     patches over 68894 discovered access sites), consan=pass at
+    #     access=68894/68894, plus 32 genuine waitcheck "missing s_waitcnt"
+    #     findings. Under strict the identical run was thrown away on
+    #     require-records at exit 86. So the coverage signal was there all along
+    #     and only the policy discarded it.
+    #   * ROCm 10.0.0, 169,996,560-byte object -- the one CI actually scans.
+    #     lenient does NOT fix this case, and it was wrong of an earlier revision
+    #     of this comment to imply the 7.0.2 result generalised. Measured inside
+    #     the digest-pinned CI base image
+    #     (rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb70…)
+    #     on gfx950, against the byte-identical object the nightly extracts
+    #     (sha256 57c5d8ef…, matching run 34032862308):
+    #
+    #       strict   error/error, 0 findings, consan_strict_load_rejection (exit 92)
+    #       lenient  error/error, 0 findings, consan_coverage_incomplete,
+    #                access=0/719550, barriers 0/109497
+    #
+    #     Both fail for the SAME underlying reason, which is not the record
+    #     requirement: ConSan needs 1,721,958,400 bytes of patched image against a
+    #     419,430,400-byte ceiling (4.11x over), so the first-light probe rejects
+    #     the transform and patches=0. The 6000s ceiling below is not what bites --
+    #     the run ends in 859s.
+    #
+    #     What the policy DOES change there is who fails it. Under strict the hook
+    #     terminates itself (fail_closed=true, action=terminate, exit 92). Under
+    #     lenient it declines to (fail_closed=false), exits 0, and hands back an
+    #     object with none of its 719,550 access sites patched; only aorta's
+    #     coverage cross-check turns that into an error. Confirmed in isolation by
+    #     forcing the ceiling below what the small LDS fixture needs, where
+    #     RJ_CONSAN_POLICY=strict exits 92 with a load-rejection line and
+    #     RJ_CONSAN_POLICY=default exits 0 with the same growth rejection and no
+    #     load-rejection line at all. So lenient is necessary for a load-only
+    #     driver but not sufficient for this object, and on this object it also
+    #     makes the coverage cross-check load-bearing rather than a second opinion.
+    #
+    # lenient is kept because it is the right target state and a precondition for
+    # this case ever passing: the moment the growth ceiling admits the object,
+    # strict would fail it again on require-records -- the #450 defect -- whereas
+    # lenient would report the coverage it measured. Fixing the capacity limit is
+    # tracked below and in docs/sanitizers/consan-gemm-patched-image-growth-cap.md;
+    # note that document measures a 13.6 MiB per-chip sibling object that DOES
+    # clear the ceiling on ROCm >= 7.14, which the move to ROCm 10 has now made
+    # reachable, at the cost of representing an MI355X-class device.
+    #
+    # Dynamic race evidence over a dispatching GEMM is genuinely out of scope here and
+    # is tracked separately; daily-consan-lds-dispatch.yaml is the end-to-end control
+    # that proves the record/replay path works on a caller-supplied object.
+    consan_policy: lenient
+    on_missing_backend: fail
+    # Raised from the 300s cap of #364, which was chosen only because ROCm/rocm-systems#9964
+    # made MOI inventory non-terminating: every ceiling produced the same
+    # combined_hook_timeout, so a short one bought the identical row for a fraction of
+    # the nightly. #9964 is fixed, so a ceiling that clears the run is now meaningful.
+    #
+    # Sizing history, because the trap here is subtle and worth recording. Three runs
+    # on db0c47df measured 1283s, 1291s and 1416s, and an earlier revision of this
+    # file chose 2000s as ~40% over the slowest. Every one of those runs ended in the
+    # status=4112 transform rejection of ROCm/rocm-systems#10378 -- the object was
+    # never actually instrumented, so they measured a run that gave up early rather
+    # than the work this case represents. A budget measured against a failing run is
+    # a lower bound, not an estimate.
+    #
+    # #10378 is now fixed (dc7c8e04) and was published in bundle 4227d40fb5. The
+    # downloader selects the newest successful run, not that one, so the nightly has
+    # since moved past it -- run 32967422099 consumed 97c1640b. Re-measured against
+    # 4227d40fb5 on the 16,265,200-byte object, that object transforms cleanly
+    # (outcome=modified-valid, 75978 patches over 68894 access sites) and takes
+    # 3696s and 4152s across two runs -- ~62-69 min -- before ending on strict
+    # require-records at exit 86. 2000s would have guaranteed combined_hook_timeout:
+    # the exact failure this recipe change exists to remove.
+    #
+    # 6000s is ~45% over the slower of the two. That headroom absorbs the spread
+    # between them (both runs emitted an identical 508727 log lines, so the ~12%
+    # difference is host contention, not workload variance). It does NOT absorb the
+    # difference between the object those runs timed and the object CI extracts,
+    # and this is the part earlier revisions of this comment got wrong -- they said
+    # only that a different ROCm "may extract a differently sized object".
+    #
+    # Measured, one object per release, same layout (Ailk_Bjlk heavy SS) and the
+    # same unbundle this recipe consumes. These are POST-UNBUNDLE sizes, and are
+    # much larger than what hipBLASLt installs: on the 10.0 tree the shipped .co
+    # is a zlib-compressed offload bundle (CCOB magic, method 1) measuring
+    # 4,081,640 B, which the gfx950 unbundle inflates ~41.6x. Only that release's
+    # bundle was measured on disk; whether 7.0.2 and 7.2.4 shipped compressed
+    # bundles at all is unchecked (neither image is on the gate host), so do not
+    # carry the ratio back to those rows. What ConSan processes, and what this
+    # ceiling is about, is the expansion, not the shipped artifact.
+    #
+    #   ROCm 7.0.2   16,265,080 B  245 kernels    217,634 memory instructions
+    #   ROCm 7.2.4  191,935,808 B  777 kernels  2,583,251 memory instructions
+    #   ROCm 10.0   169,996,560 B  341 kernels  2,093,009 memory instructions
+    #
+    # Kernel counts corrected -- they were 2x here for several revisions, from
+    # counting .kd symbols across both .dynsym and .symtab (llvm-readelf
+    # --symbols prints both tables, 341 each, hence "682"). The 10.0 row is
+    # re-measured directly: 341 .kd in .dynsym, and unbundling that release's
+    # bundle yields 169,996,760 B, 200 B off the recorded figure. The 7.0.2 and
+    # 7.2.4 counts are the recorded numbers halved, NOT re-measured -- neither
+    # image is on the gate host -- so treat them as corrected-by-inference and
+    # re-measure if either becomes load-bearing. The byte and memory-instruction
+    # columns are unchanged; those were always right.
+    #
+    # The timing above was taken on ROCm 7.0.2.2, on an object of 16,265,200 B
+    # (docs/sanitizers/consan-4112-overlapping-anchor-patches.md records it),
+    # which the 7.0.2 row above matches to within 120 bytes. So the
+    # object CI feeds this case is ~10x the timed one on bytes and ~9.6x on the
+    # memory instructions ConSan discovers access sites from -- and it was ~12x on
+    # the old 7.2.4 base too. The gap is not something the ROCm 10 migration
+    # introduced; the migration is the favourable direction on every axis
+    # measurable off-GPU (ROCm 10 is 0.89x the bytes and 0.81x the memory
+    # instructions of 7.2.4, because 10 splits the libraries per device and CI
+    # selects the CU256/ID75a0 variant rather than one bundle covering every part).
+    #
+    # What that means for this ceiling, stated as the bound it is rather than as a
+    # budget: 4152s was dominated by per-site work -- ~76% hook debug logging, and
+    # 508727 log lines against 68894 discovered access sites is ~7.4 lines per site
+    # -- so a ~10x site count does not fit inside a 1.45x margin. This ceiling is
+    # therefore NOT established to clear the run; it is what stops a non-gating row
+    # burning the survey job. It is left at 6000s deliberately rather than raised:
+    # the sanitizers-survey job caps at timeout-minutes: 120 (7200s), so no ceiling
+    # that could plausibly fit ~10x the timed work also fits the job, and inventing
+    # one would replace a measured number with a guess. Re-sizing needs a real
+    # measurement on the gate host against a ROCm 10 object; until then the first
+    # combined_hook_timeout on this row is expected evidence, not a surprise, and
+    # ROCm/rocm-systems#10686 below is the change that would actually make the case
+    # fit.
+    #
+    # This case runs in the non-gating sanitizers-survey job, not on the gate job --
+    # a ~69-min observed-only row does not belong in front of the Tab 1 verdict.
+    #
+    # Worth knowing before anyone tunes this again: ~76% of that 4152s is the hook
+    # debug logging, not the instrumentation. The same object at RJ_CONSAN_LOG=1
+    # completes in 991s with byte-identical results (75978 patches, 68894 sites);
+    # the timed phases differ by ~3%. We cannot simply lower the level -- consan_log
+    # maps to kLogDebug because the coverage cross-check needs the per-site records,
+    # which no lower level emits -- so it is filed upstream as
+    # ROCm/rocm-systems#10686. If that lands, this ceiling can drop to roughly a
+    # quarter of its current value.
+    #
+    # !! STALE AS A BUDGET, re-confirmed against ROCm 10 on 2026-09-07 !! Everything
+    # above was measured against a 16,265,200-byte (15.5 MB) object on ROCm 7.0.2.2.
+    # The object CI extracts on the current ROCm 10 base is 169,996,560 bytes
+    # (~162 MiB) with 719,550 access sites and 109,497 barrier sites -- 10.5x the
+    # bytes and 10.4x the sites -- so these figures do not describe this case. See
+    # prepare_gemm_isa.py's docstring: the size is a per-release property of the
+    # shipped Tensile libraries, not something this repo pins. (The 7.2.4 base this
+    # block used to cite was 191,935,808 bytes with 637,823 access ranges; ROCm 10
+    # is smaller on both axes but still far over the ceiling.)
+    #
+    # The ceiling is currently NOT what limits this case. ConSan rejects the object
+    # before instrumenting it, on the patched-image growth policy: it needs
+    # 1,721,958,400 bytes against the 419,430,400-byte default, i.e. 4.11x over, a
+    # 10.1x expansion of the input. patches=0, so nothing is instrumented. Measured
+    # in the digest-pinned CI image, where the run ends in 595s under strict (exit
+    # 92) and 859s under lenient (exit 0, caught by the coverage cross-check) --
+    # both comfortably inside this 6000s ceiling, which is why raising it fixes
+    # nothing.
+    #
+    # Raising RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_PERCENT past ~1013 would let the
+    # transform proceed -- and 6000s would then very likely be too small, because
+    # 10.4x the sites is work no measurement here covers, and the survey job itself
+    # caps at timeout-minutes: 120. So raising the ceiling alone most likely trades
+    # this rejection for combined_hook_timeout. Re-measure before assuming either
+    # number means anything.
+    # See docs/sanitizers/consan-gemm-patched-image-growth-cap.md.
+    timeout_seconds: 6000
+  output:
+    report: sanitizer_report.json
