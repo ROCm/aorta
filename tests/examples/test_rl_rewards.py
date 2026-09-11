@@ -1929,3 +1929,328 @@ def test_the_artifact_discriminator_defaults_to_the_sanitizer_shape(triage_rewar
     assert triage_reward.artifact_kind({"artifact": None}) == "sanitizer_report"
     assert triage_reward.artifact_kind({"artifact": ""}) == "sanitizer_report"
     assert triage_reward.artifact_kind({"artifact": "probe_result"}) == "probe_result"
+
+
+# --------------------------------------------------------------------------- #
+# The fix half: did the proposed mitigation actually resolve the reproducer?
+#
+# The first reward term here that is checked by *execution* rather than by
+# inspection, so what these pin down is different in kind from the tiers above.
+# Two things matter and neither is a score. First, that the ground truth is
+# *recovered* from the archived matrix rather than asserted -- through the same
+# verdict resolver the triage label uses and the same `winning_mitigation`
+# attribution rule the agent loop uses -- because a fabricated ground truth
+# still trains. Second, that the term refuses to score a scenario where it
+# cannot discriminate, rather than paying everyone the same constant, which is
+# the degeneracy this whole term exists to escape.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def fix_reward():
+    return _load("fix_reward")
+
+
+def _matrix(tmp_path: Path, cells: dict[str, list[dict]]) -> Path:
+    """An archived probe run: one directory per `{mitigation}-{diagnostic}` cell."""
+    root = tmp_path / "run"
+    for cell, trials in cells.items():
+        _write_cell(root, cell, trials)
+    return root
+
+
+def _passing(cell: str, n: int = 2) -> list[dict]:
+    return [_trial(cell, "pass", [], [], i) for i in range(n)]
+
+
+def _failing(cell: str, n: int = 2) -> list[dict]:
+    return [
+        _trial(cell, "fail", ["tier1:exit_nonzero"], [], i, exit_code=1)
+        for i in range(n)
+    ]
+
+
+def test_the_resolver_is_recovered_from_the_archived_matrix(fix_reward, tmp_path):
+    """The whole cost argument: ground truth is a directory listing, not a GPU run."""
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": _passing("tf32_off-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+
+    assert resolution.resolvers == frozenset({"tf32_off"})
+    assert resolution.baseline_failed is True
+    assert resolution.scoreable is True
+    assert resolution.cells == 2
+
+
+def test_every_mitigation_that_resolved_it_counts_not_just_the_first(
+    fix_reward, tmp_path
+):
+    """`docs/tokenspeed-rl-post-training.md` 4.3: a matrix can have several right
+    answers, and a policy naming the second one is not wrong."""
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": _passing("tf32_off-none"),
+        "xnack-none": _passing("xnack-none"),
+        "hsa_no_sdma-none": _failing("hsa_no_sdma-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+
+    assert resolution.resolvers == frozenset({"tf32_off", "xnack"})
+    assert fix_reward.fix_credit(["xnack"], resolution) == 1.0
+    assert fix_reward.fix_credit(["hsa_no_sdma"], resolution) == 0.0
+
+
+def test_a_pass_that_is_not_attributable_to_the_mitigation_is_not_a_resolver(
+    fix_reward, tmp_path
+):
+    """A diagnostic-only cell and a mitigation+diagnostic cell both passed.
+
+    Neither pass is attributable to the mitigation alone, which is exactly what
+    `winning_mitigation` refuses, and the reason this reads through it rather
+    than scanning for any passing cell.
+    """
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "none-xnack": _passing("none-xnack"),
+        "tf32_off-xnack": _passing("tf32_off-xnack"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+
+    assert resolution.resolvers == frozenset()
+    assert resolution.scoreable is False
+
+
+def test_the_baseline_passing_means_there_was_nothing_to_resolve(fix_reward, tmp_path):
+    root = _matrix(tmp_path, {
+        "none-none": _passing("none-none"),
+        "tf32_off-none": _passing("tf32_off-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+
+    assert resolution.baseline_failed is False
+    assert resolution.scoreable is False
+    assert "nothing to resolve" in resolution.withheld_because
+
+
+def test_a_matrix_nothing_resolved_is_withheld_rather_than_scored_zero(
+    fix_reward, tmp_path
+):
+    """The trap this term exists to avoid, reappearing one level up.
+
+    If no mitigation resolved the failure, every policy earns 0.0 and the term
+    is a constant added to every reward -- no gradient, and a constant that
+    looks like a measurement. `scoreable` is how a caller is told to withhold it.
+    """
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": _failing("tf32_off-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+
+    assert resolution.resolvers == frozenset()
+    assert resolution.scoreable is False
+    assert "no mitigation" in resolution.withheld_because
+
+
+def test_the_verdict_is_recomputed_not_read_off_the_cell(fix_reward, tmp_path):
+    """An artifact claiming `pass` while its detectors say otherwise is not a win.
+
+    Same seam as the triage label: the stored verdict is ignored and the
+    detector IDs are re-resolved, so corpus rot cannot promote a failing cell
+    into a resolving one.
+    """
+    lying = [
+        _trial("tf32_off-none", "pass", ["tier1:exit_nonzero"], [], 0, exit_code=1),
+    ]
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": lying,
+    })
+
+    assert fix_reward.resolution_from_matrix(root).resolvers == frozenset()
+
+
+def test_none_is_never_a_resolving_mitigation(fix_reward, tmp_path):
+    """`none-none` passing is a baseline that did not reproduce, not a fix."""
+    root = _matrix(tmp_path, {"none-none": _passing("none-none")})
+
+    assert fix_reward.resolution_from_matrix(root).resolvers == frozenset()
+
+
+def test_fix_credit_is_membership_and_an_empty_proposal_earns_nothing(
+    fix_reward, tmp_path
+):
+    root = _matrix(tmp_path, {
+        "none-none": _failing("none-none"),
+        "tf32_off-none": _passing("tf32_off-none"),
+    })
+    resolution = fix_reward.resolution_from_matrix(root)
+
+    assert fix_reward.fix_credit([], resolution) == 0.0
+    assert fix_reward.fix_credit(["xnack"], resolution) == 0.0
+    assert fix_reward.fix_credit(["xnack", "tf32_off"], resolution) == 1.0
+
+
+def test_the_composite_has_exactly_one_weight_and_it_is_bounded(fix_reward):
+    assert fix_reward.composite_reward(1.0, 0.0, 0.5) == 0.5
+    assert fix_reward.composite_reward(0.0, 1.0, 0.5) == 0.5
+    assert fix_reward.composite_reward(0.8, 1.0, 0.0) == pytest.approx(0.8)
+    assert fix_reward.composite_reward(0.8, 1.0, 1.0) == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        fix_reward.composite_reward(1.0, 1.0, 1.5)
+
+
+# --- what the fix half scores is what the loop would actually run ----------- #
+
+
+def test_only_names_the_loop_would_run_can_earn_fix_credit(rescore_e2e):
+    """A hallucinated or unoffered name never becomes a probe cell.
+
+    `LiteLLMProposer.propose` filters it out before the loop sees it, so it
+    cannot resolve anything. Replaying that filter here is what makes the fix
+    half score the search rather than the sentence.
+    """
+    offered = ["tf32_off", "xnack"]
+    raw = json.dumps({
+        "category": "unknown",
+        "hypothesis": "",
+        "next_mitigations": ["tf32_off", "rccl_p2p_disable", "hsa_no_sdma"],
+        "confidence": 0.5,
+        "stop": False,
+    })
+    assert rescore_e2e.runnable_names(raw, offered) == ["tf32_off"]
+
+
+def test_an_unparseable_completion_runs_nothing(rescore_e2e):
+    assert rescore_e2e.runnable_names("not JSON at all", ["tf32_off"]) == []
+    assert rescore_e2e.runnable_names('["tf32_off"]', ["tf32_off"]) == []
+    assert rescore_e2e.runnable_names('{"next_mitigations": "tf32_off"}', ["tf32_off"]) == []
+
+
+# --- the fix half must not disturb the form-only numbers -------------------- #
+
+
+def _one_scenario_each(raws: list[str], offered: list[str]) -> dict:
+    """`_recorded`, with one scenario per completion and an explicit offered set."""
+    return _recorded(
+        {f"s{i}": [raw] for i, raw in enumerate(raws)},
+        candidates=[*offered, "none"],
+    )
+
+
+def test_without_a_resolution_the_reward_is_exactly_the_form_reward(rescore_e2e):
+    """The regression guard on every recorded number: the fix half is opt-in.
+
+    Every reward measured before this term existed was a form score, and they
+    stay comparable only if omitting the resolution changes nothing.
+    """
+    doc = _one_scenario_each([_completion(mitigations=["tf32_off"])], ["tf32_off", "xnack"])
+    result = rescore_e2e.analyse(doc)
+
+    assert result["fix_half"]["active"] is False
+    assert result["model_mean_after"] == result["fix_half"]["model_form_mean"]
+    assert result["references"]["abstain_and_pick_first"]["reward"] == 0.9
+
+
+def test_the_composite_moves_the_model_by_the_weighted_fix_credit(rescore_e2e):
+    doc = _one_scenario_each([_completion(mitigations=["tf32_off"])], ["tf32_off", "xnack"])
+    resolution = rescore_e2e.hypothetical_resolution(["tf32_off"])
+    result = rescore_e2e.analyse(doc, resolution, fix_weight=0.5)
+
+    assert result["fix_half"]["active"] is True
+    assert result["fix_half"]["model_fix_rate"] == 1.0
+    # form 0.9 (abstains, one name), fix 1.0, equal weights.
+    assert result["model_mean_after"] == pytest.approx(0.95)
+
+
+def test_a_withheld_resolution_leaves_the_form_reward_alone(rescore_e2e):
+    """`scoreable` is honoured by the caller, not just reported by the callee."""
+    doc = _one_scenario_each([_completion(mitigations=["tf32_off"])], ["tf32_off", "xnack"])
+    empty = rescore_e2e.hypothetical_resolution([])
+    result = rescore_e2e.analyse(doc, empty)
+
+    assert empty.scoreable is False
+    assert result["fix_half"]["active"] is False
+    assert result["model_mean_after"] == pytest.approx(0.9)
+
+
+def test_the_oracle_names_a_resolver_once_correctness_is_checked(rescore_e2e):
+    """Under a form-only reward the oracle could name anything available.
+
+    Once the reward checks whether the mitigation worked, an arbitrary name is
+    a coin flip, and criterion 2 would be measuring whether `offered[0]`
+    happened to be right rather than whether the ceiling is reachable.
+    """
+    offered = ["hip_launch_blocking", "tf32_off"]
+    form_only = rescore_e2e.reference_policies(offered)
+    assert json.loads(form_only["oracle_contract_perfect"])["next_mitigations"] == [
+        "hip_launch_blocking"
+    ]
+
+    aware = rescore_e2e.reference_policies(
+        offered, rescore_e2e.hypothetical_resolution(["tf32_off"])
+    )
+    assert json.loads(aware["oracle_contract_perfect"])["next_mitigations"] == ["tf32_off"]
+    # The constants are constants: they must not learn the answer too.
+    for name in ("abstain_and_pick_first", "abstain_and_shotgun", "honest_abstainer"):
+        assert aware[name] == form_only[name]
+
+
+# --- the sweep, which is how a term with no ground truth is reported -------- #
+
+
+def test_the_sweep_scores_every_hypothesis_and_selects_none(rescore_e2e):
+    offered = ["tf32_off", "xnack"]
+    doc = _one_scenario_each(
+        [_completion(mitigations=["tf32_off"]), _completion(mitigations=["xnack"])],
+        offered,
+    )
+    sweep = rescore_e2e.resolver_sweep(doc)
+
+    labels = [row["hypothesis"] for row in sweep["hypotheses"]]
+    assert labels == [
+        "(none: form half only)",
+        "nothing resolves it",
+        "tf32_off resolves it",
+        "xnack resolves it",
+    ]
+    # Half the samples name each, so each hypothesis pays half of them.
+    by_label = {row["hypothesis"]: row for row in sweep["hypotheses"]}
+    assert by_label["tf32_off resolves it"]["model_fix_rate"] == 0.5
+    assert by_label["xnack resolves it"]["model_fix_rate"] == 0.5
+
+
+def test_the_null_hypothesis_is_reported_rather_than_dropped(rescore_e2e):
+    """"Nothing resolves it" is live on this corpus and has to be visible.
+
+    The offered names there are diagnostic and serialisation toggles that
+    cannot repair a source-level race, so the honest sweep has to include the
+    case where the term simply has no right answer to pay for.
+    """
+    doc = _one_scenario_each([_completion(mitigations=["tf32_off"])], ["tf32_off"])
+    sweep = rescore_e2e.resolver_sweep(doc)
+
+    null = next(r for r in sweep["hypotheses"] if r["hypothesis"] == "nothing resolves it")
+    assert null["criterion_1"] is False
+    assert "withheld" in null["note"]
+
+
+def test_a_shotgun_earns_full_fix_credit_under_every_hypothesis(rescore_e2e):
+    """The structural reason the fix half did not break the degeneracy.
+
+    Fix credit is containment, and containment is monotone in list length: a
+    policy that names the whole offered set names every possible resolver by
+    construction. Pricing that is the form half's job, via `precision_credit`,
+    and on the recorded rollouts it did not price it enough. Pinned here so the
+    limitation is a property of the design someone can find, rather than a
+    surprise in a later measurement.
+    """
+    offered = ["tf32_off", "xnack", "hsa_no_sdma"]
+    doc = _one_scenario_each([_completion(mitigations=offered)], offered)
+    sweep = rescore_e2e.resolver_sweep(doc)
+
+    for row in sweep["hypotheses"]:
+        if row.get("model_fix_rate") is not None:
+            assert row["model_fix_rate"] == 1.0
