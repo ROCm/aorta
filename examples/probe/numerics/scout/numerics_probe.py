@@ -1,7 +1,10 @@
 """Scout the primitives a public TF32 NaN reproducer would need.
 
-Four independent questions, one process each, because hipBLASLt reads its env
-at first use and a knob flipped mid-process proves nothing:
+Four independent questions, one process each, because a library that reads its
+env does so at first use and a knob flipped mid-process proves nothing. (The
+registry's specific claim that hipBLASLt reads DISABLE_TF32 turned out to be
+false -- nothing reads it -- but one-process-per-question is still the right
+shape, and it is what let the wiring question below be answered cleanly.)
 
   wiring  -- is DISABLE_TF32 actually observed on this stack, and does
              torch's allow_tf32 knob change fp32 matmul numerics at all?

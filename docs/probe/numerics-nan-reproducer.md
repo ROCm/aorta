@@ -32,6 +32,39 @@ comment *"consumed by hipBLASLt itself"*. Against a float64 reference, a
 as a control precisely so "we set the wrong variable" could be ruled out. Only
 the in-process `torch.backends.cuda.matmul` knob changes anything at all.
 
+⚠ **One control is weaker than it looks, and the other is the load-bearing
+one.** `HIPBLASLT_ALLOW_TF32` was a real PyTorch-ROCm gate, but it was *removed
+upstream in September 2025*, so on this build it is itself a dead variable and
+its null result is uninformative. The control that actually carries the
+argument is `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE`, which **moved the number**
+(4.44e-06 against 4.49e-06): the harness can detect an env var having an
+effect, so the null for `DISABLE_TF32` is a property of the variable and not
+of the measurement.
+
+### 1a. Scoped from source: nothing reads it, on any architecture
+
+Added 2026-09-11, because "inert on gfx950" invites "works on our hardware" and
+the truth is stronger and simpler.
+
+- A whole-filesystem sweep of `/opt` and `/usr` in `rocm/primus:v26.4` (torch
+  2.12, ROCm 7.14) finds the literal string `DISABLE_TF32` in **no** binary,
+  library or Python source — not in `libhipblaslt`, not in `librocblas`, not in
+  `libtorch_hip`. The same sweep finds `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE`
+  present in `libtorch_cpu.so`, so the method detects env-var strings when they
+  are there.
+- The name belongs to a different project. `DISABLE_TF32` is a **Torch-TensorRT
+  Python constant** (`torch_tensorrt.dynamo._defaults.DISABLE_TF32`), the
+  default for its `disable_tf32` compile option — NVIDIA/TensorRT-side, and a
+  module constant rather than an environment variable.
+- On ROCm, TF32 **is** real, on gfx942 / MI300 via hipBLASLt. But it is selected
+  through `torch.backends.cuda.matmul.allow_tf32` / `fp32_precision`, an
+  **in-process API**. The only ROCm TF32 environment variable there has ever
+  been is `HIPBLASLT_ALLOW_TF32`, it *enabled* rather than disabled, and it was
+  removed in September 2025.
+
+⇒ There is no architecture on which setting an environment variable turns TF32
+off in PyTorch-on-ROCm. This is not a gfx950 finding.
+
 **And the knob is barely a precision axis either.** Calibrating the same
 measurement against references computed with the mantissa actually truncated:
 
