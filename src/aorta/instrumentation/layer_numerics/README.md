@@ -12,8 +12,9 @@ NaN-only check cannot see).
 It arms hooks on a torchrec `DistributedModelParallel` root and (optionally)
 every `torch.optim.Optimizer` the moment they are built — **no edit to the
 training/repro script is required**. All per-layer reductions run on the GPU and
-are drained to the host in **one batched transfer per step**, so no per-GEMM sync
-is introduced and timing-sensitive behavior is preserved.
+completed records are drained in a batched transfer per device. Incomplete timing-safe
+stage observations are deferred rather than blocking the next forward, so no per-GEMM
+sync is introduced.
 
 Provenance: used in anger to isolate a training-time NaN to a corrupted **input**
 arriving from upstream of the flagged layer (the layer's own weights/grads stayed
@@ -41,6 +42,38 @@ python -m aorta.instrumentation.layer_numerics /path/to/standalone_single_file.p
 ```
 
 Both forms are byte-equivalent (`__main__.py` just `runpy`-execs the script).
+
+#### Buck `.par` integration
+
+A Buck Python binary owns `__main__`, so the logger front-end cannot wrap it with
+`runpy`. Import the sidecar before constructing the model/pipeline and install it
+explicitly:
+
+```python
+import atexit
+import instrument_nan_logger as nanlog
+
+nanlog._install_autohook()
+nanlog._install_optimizer_autohook()
+nanlog._install_pipeline_hook()
+atexit.register(nanlog._write_summary)
+```
+
+Set `NANLOG_SPEC_FILE` / `NANLOG_SPEC` and `NANLOG_DIR` **before** importing the
+module; configuration is resolved at import time.
+
+For a C/C+ handoff, the 30-second artifact check is:
+
+```bash
+jq '{spec_applied,pipeline_installed,follow_mode,stage_evidence_valid,
+     stage_missing_phases,stage_skip_reasons,stage_phase_counts,
+     post_step_active,post_step_valid}' "$NANLOG_DIR/summary_rank0.json"
+```
+
+Do not interpret the phase unless `follow_mode` is
+`stage_wrappers_side_read`, `stage_evidence_valid` is true, required phases are
+present with trusted observations, and skip reasons are empty. C+ additionally
+requires active/valid post-step observations.
 
 ### 2. As the `layer_numerics` collector (sweeps)
 
@@ -93,9 +126,11 @@ blocks (and at forward entry) **without** installing the copy/sparse stage wrapp
 — the timing-safe mode for a cross-stream race the wrappers would otherwise suppress
 (requires a `scope`, incompatible with `stages: true`; summary records `follow_mode`);
 and a `follow` entry may set `"stage_reads": true` (with `pipeline: true`) to KEEP the
-stage wrappers but run each copy/sparse/forward stage read on a side CUDA stream, so
-the stage reads give timing-safe **stage** brackets without serializing the overlap
-(summary records `stage_reads_active` — `false` means it fell back to the inline read).
+stage wrappers. Copy/sparse observations use side streams after explicit TorchRec
+producer events; forward entry is compute-stream ordered before the model body, matching
+Pass A. Unresolved upstream CUDA observations are skipped and audited — they never fall
+back inline. Optional `"post_step": true` adds a default-off C+ observation of live
+prefetch buffers after a compute tick.
 
 Collector defaults (applied by [`build_env`](__init__.py)): all seven channels,
 `NANLOG_PRE_CONTEXT=10`, `NANLOG_SAMPLE_EVERY=50`. `NANLOG_DIR` is filled per-cell
@@ -103,16 +138,18 @@ so `aorta bundle` picks up the output; recipe/CLI overrides win.
 
 ## Design invariants (do not break)
 
-- **One host sync per step.** All per-layer reductions run on the GPU and drain in
-  a single batched transfer per step — no per-GEMM `.item()`. This is what keeps a
-  timing-sensitive repro reproducible; any change that adds a sync on the hot path
-  defeats the tool's purpose.
+- **Never wait for a live producer observation at forward entry.** The root pre-hook
+  queries side-read completion and defers incomplete records; shutdown forces the
+  remaining queue. Completed records drain in one batched transfer per device, with no
+  per-GEMM `.item()`.
 - **Standalone-runnable.** No imports of the rest of `aorta`; the engine reads
   config from `NANLOG_*` env vars only (the `--config` flag and `NANLOG_SPEC_FILE`
   are thin front-ends that resolve to those vars). The script is handed to partners
   as a bare file.
 - **Fail-soft.** A sidecar must never take the training job down: bad config warns
-  and falls back, hooks catch their own errors.
+  and falls back, hooks catch their own errors. Timing evidence is stricter:
+  unresolved producer/context/device/side-stream state skips the checkpoint and sets
+  `stage_evidence_valid=false` rather than silently using an inline read.
 
 ## Notes / limitations
 
@@ -120,6 +157,12 @@ so `aorta bundle` picks up the output; recipe/CLI overrides win.
   step's value (`value_is_from_prev_step=true`); `wgrad`/`bgrad` are read at the
   optimizer step boundary (current step) and need a `torch.optim.Optimizer`. If the
   update is fused into backward, a one-time warning is logged — use `weight`/`bias`.
-- A stage read runs on a non-default stream; a "clean at copy" is stream-ordering
-  dependent — treat it as suggestive until confirmed (see the module docstring).
+- Producer lookup currently supports the standard TorchRec `_memcpy_stream` and
+  `_data_dist_stream` contracts. Check `stage_evidence_valid`, per-phase counts, and
+  skip reasons on every customer artifact.
+- A stage observation is not an atomic snapshot. Use only `trusted` records; an
+  `overlapped_next_stage` record was still running when the next same-batch stage began.
+- Even a trusted phase is a wall-clock bracket, not proof that the writer logically
+  belongs to that stage: three pipeline batches overlap. Use `pipeline_tick`,
+  `compute_batch_id`, and optional post-step observations for that distinction.
 - `tf32_path` is printed on the "FIRST BAD" stderr line, not stored in the summary.

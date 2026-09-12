@@ -13,9 +13,12 @@ Skipped cleanly when torch is unavailable.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import os
+import sys
+import types
 
 import pytest
 
@@ -59,6 +62,19 @@ def _records(mod) -> list:
 
 def _summary(mod) -> dict:
     return json.loads((mod._OUT_DIR / "summary_rank0.json").read_text())
+
+
+def _publish_fake_torchrec(monkeypatch, pipeline_cls) -> None:
+    root = types.ModuleType("torchrec")
+    distributed = types.ModuleType("torchrec.distributed")
+    train_pipeline = types.ModuleType("torchrec.distributed.train_pipeline")
+    train_pipeline.TrainPipelineSparseDist = pipeline_cls
+    distributed.train_pipeline = train_pipeline
+    root.distributed = distributed
+    monkeypatch.setitem(sys.modules, "torchrec", root)
+    monkeypatch.setitem(sys.modules, "torchrec.distributed", distributed)
+    monkeypatch.setitem(
+        sys.modules, "torchrec.distributed.train_pipeline", train_pipeline)
 
 
 # ---------------------------------------------------------------------------
@@ -226,15 +242,883 @@ def test_pipeline_forward_stage_and_batch_id(monkeypatch, tmp_path_factory):
     assert copy_recs and all(r["batch_id"] is not None for r in copy_recs)
 
 
+def test_v6_pipeline_wrappers_resolve_context_and_keep_batch_external(
+    monkeypatch, tmp_path_factory
+):
+    """Exercise the real wrappers with modern `(batch, context)` / wait(context)."""
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self, value):
+            self.embedding_features = [torch.full((2, 3), value)]
+
+    class FakePipeline:
+        def __init__(self):
+            # None explicitly means these stages use the current/default stream.
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter), Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            batch, context = self.copy_batch_to_gpu(data_iter)
+            self.start_sparse_data_dist(batch=batch, context=context)
+            self.wait_sparse_data_dist(context=context)
+            nl._root_pre_hook(None, (batch,))
+            return batch
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    batch = Batch(5.0)
+    pipeline = FakePipeline()
+    result = pipeline.progress(iter([batch]))
+    assert result is batch
+    nl._write_summary()
+
+    records = [
+        r for r in _records(nl)
+        if r["role"] == "track" and r["layer_name"] == "embedding_features[0]"
+    ]
+    by_phase = {r["phase"]: r for r in records}
+    assert {"copy", "sparse_start", "sparse_wait", "forward"} <= set(by_phase)
+    batch_ids = {by_phase[p]["batch_id"] for p in (
+        "copy", "sparse_start", "sparse_wait", "forward")}
+    assert len(batch_ids) == 1 and None not in batch_ids
+    assert all(by_phase[p]["pipeline_tick"] == 1 for p in by_phase)
+    assert not hasattr(batch, "_nanlog_batch_id")
+    observer = nl._get_pipeline_observer(pipeline)
+    assert (
+        not observer.tokens
+        and not observer.by_batch
+        and not observer.by_context
+        and not observer.by_tensor_signature
+    )
+    smy = _summary(nl)
+    assert smy["stage_phase_counts"]["sparse_wait"]["inline_cpu"] == 1
+
+
+def test_v6_post_step_without_compute_token_fails_closed(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_POST_STEP": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter), Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            # This is a prefetch-only tick: the copied batch remains pre-forward.
+            batch, context = self.copy_batch_to_gpu(data_iter)
+            self.start_sparse_data_dist(batch, context)
+            self.wait_sparse_data_dist(context)
+            return batch
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    FakePipeline().progress(iter([Batch()]))
+    nl._write_summary()
+
+    post = [r for r in _records(nl) if r["phase"] == "post_step"]
+    assert not post
+    smy = _summary(nl)
+    assert smy["post_step"] is True
+    assert smy["post_step_active"] is False
+    assert smy["post_step_executions"] == 1
+    assert smy["post_step_valid"] is False
+    assert smy["stage_evidence_valid"] is False
+    assert smy["stage_skip_reasons"]["post_step:compute_batch_unresolved"] == 1
+
+
+def test_v6_post_step_links_prefetch_buffer_to_compute_batch(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_POST_STEP": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self, value):
+            self.embedding_features = [torch.full((2, 3), value)]
+
+    class FakePipeline:
+        def __init__(self, current, future):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+            self.current = current
+            self.future = future
+
+        def copy_batch_to_gpu(self, _data_iter):
+            return self.future, Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            self.copy_batch_to_gpu(data_iter)
+            nl._root_pre_hook(None, (self.current,))
+            return self.current
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    current, future = Batch(1.0), Batch(2.0)
+    pipeline = FakePipeline(current, future)
+    observer = nl._get_pipeline_observer(pipeline)
+    current_token = observer.token_for_batch(current, create=True)
+    pipeline.progress(iter(()))
+    nl._write_summary()
+
+    post = [r for r in _records(nl) if r["phase"] == "post_step"]
+    assert post
+    assert all(r["compute_batch_id"] == current_token.batch_id for r in post)
+    assert all(r["batch_id"] != current_token.batch_id for r in post)
+
+
+def test_v6_post_step_requires_an_emitted_prefetch_observation(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_POST_STEP": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    class FakePipeline:
+        def __init__(self, current):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+            self.current = current
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter)
+
+        def start_sparse_data_dist(self, batch):
+            return batch
+
+        def wait_sparse_data_dist(self, batch):
+            return batch
+
+        def progress(self, _data_iter):
+            nl._root_pre_hook(None, (self.current,))
+            return self.current
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    current = Batch()
+    pipeline = FakePipeline(current)
+    nl._get_pipeline_observer(pipeline).token_for_batch(current, create=True)
+    pipeline.progress(iter(()))
+    nl._write_summary()
+    smy = _summary(nl)
+    assert smy["post_step_executions"] == 1
+    assert smy["post_step_observations"] == 0
+    assert smy["post_step_active"] is False
+    assert smy["post_step_valid"] is False
+    assert smy["stage_evidence_valid"] is False
+
+
+def test_v6_unmet_flat_post_step_prerequisites_fail_closed(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {"NANLOG_POST_STEP": "1"},
+        monkeypatch,
+        tmp_path_factory,
+    )
+    nl._write_summary()
+    smy = _summary(nl)
+    assert smy["post_step_requested"] is True
+    assert smy["post_step"] is False
+    assert smy["post_step_prerequisites_valid"] is False
+    assert smy["post_step_valid"] is False
+    assert smy["stage_evidence_valid"] is False
+
+
+def test_v6_patches_concrete_subclass_overrides_and_autodiscovers_batch(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "missing_named_attr",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self):
+            self.payload = [torch.ones(2, 3)]
+
+    class BasePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter), Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            raise AssertionError("subclass override should run")
+
+    class CustomPipeline(BasePipeline):
+        def wait_sparse_data_dist(self):
+            return self._context
+
+        def progress(self, data_iter):
+            batch, context = self.copy_batch_to_gpu(data_iter)
+            self._context = context
+            self.start_sparse_data_dist(batch, context)
+            self.wait_sparse_data_dist()
+            nl._root_pre_hook(None, (batch,))
+            return batch
+
+    _publish_fake_torchrec(monkeypatch, BasePipeline)
+    nl._install_pipeline_hook()
+    CustomPipeline().progress(iter([Batch()]))
+    nl._write_summary()
+    phases = {r["phase"] for r in _records(nl) if r["role"] == "track"}
+    assert {"copy", "sparse_start", "sparse_wait", "forward"} <= phases
+
+
+def test_v6_nested_progress_override_counts_one_tick(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_TRACK_ATTR": "embedding_features"},
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class BasePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter)
+
+        def start_sparse_data_dist(self, batch):
+            return batch
+
+        def wait_sparse_data_dist(self, batch):
+            return batch
+
+        def progress(self, _data_iter):
+            return "base"
+
+    class CustomPipeline(BasePipeline):
+        def progress(self, data_iter):
+            return super().progress(data_iter)
+
+    _publish_fake_torchrec(monkeypatch, BasePipeline)
+    nl._install_pipeline_hook()
+    pipeline = CustomPipeline()
+    assert pipeline.progress(iter(())) == "base"
+    assert nl._get_pipeline_observer(pipeline).tick == 1
+
+
+def test_v6_outermost_stage_override_defines_observation_boundary(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.zeros(4)]
+
+    class BasePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter), Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return self.copy_batch_to_gpu(data_iter)
+
+    class CustomPipeline(BasePipeline):
+        def copy_batch_to_gpu(self, data_iter):
+            batch, context = super().copy_batch_to_gpu(data_iter)
+            batch.embedding_features[0].fill_(float("nan"))
+            return batch, context
+
+    _publish_fake_torchrec(monkeypatch, BasePipeline)
+    nl._install_pipeline_hook()
+    CustomPipeline().copy_batch_to_gpu(iter([Batch()]))
+    nl._write_summary()
+    copy = next(r for r in _records(nl) if r["phase"] == "copy")
+    assert copy["nan_count"] == 4
+
+
+def test_v6_copy_exhaustion_does_not_reuse_previous_queue_tail(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+            self.batches = [Batch()]
+            self.contexts = [Context()]
+
+        def copy_batch_to_gpu(self, _data_iter):
+            return None, Context()  # explicit exhaustion, not an in-place copy
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return self.copy_batch_to_gpu(data_iter)
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    pipeline = FakePipeline()
+    pipeline.copy_batch_to_gpu(iter(()))
+    nl._write_summary()
+    assert not _records(nl)
+    smy = _summary(nl)
+    assert smy["stage_skip_reasons"] == {}
+    assert smy["stage_phase_counts"]["copy"]["exhausted"] == 1
+
+
+def test_v6_inplace_copy_success_and_exhaustion_are_distinguished(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+            self.batches = []
+            self.contexts = []
+
+        def inplace_copy_batch_to_gpu(self, batch, context):
+            if batch is None:
+                return None, context
+            self.batches.append(batch)
+            self.contexts.append(context)
+            return None
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return None
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    pipeline = FakePipeline()
+    context = Context()
+    pipeline.inplace_copy_batch_to_gpu(Batch(), context)
+    # Current TorchRec uses this tuple to signal finite-pipeline exhaustion.
+    pipeline.inplace_copy_batch_to_gpu(None, Context())
+    nl._write_summary()
+    copy = [r for r in _records(nl) if r["phase"] == "copy"]
+    assert copy
+    assert _summary(nl)["stage_skip_reasons"] == {}
+    assert _summary(nl)["stage_phase_counts"]["copy"]["exhausted"] == 1
+
+
+def test_v6_copy_pair_unpacks_container_batch_before_context(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "missing_named_attr",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, _data_iter):
+            batch = (torch.ones(2, 3), torch.zeros(2, 3))
+            return batch, Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return self.copy_batch_to_gpu(data_iter)
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    FakePipeline().copy_batch_to_gpu(iter(()))
+    nl._write_summary()
+    copy = [r for r in _records(nl) if r["phase"] == "copy"]
+    assert len(copy) == 2
+    assert {r["layer_name"] for r in copy} == {"batch[0]", "batch[1]"}
+    assert len({r["batch_id"] for r in copy}) == 1
+
+
+def test_v6_threaded_copy_future_is_invalid_not_stale_queue_reuse(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Future:
+        def then(self, callback):
+            return callback
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+            self.batches = [Batch()]
+            self.contexts = [Context()]
+
+        def copy_batch_to_gpu(self, _data_iter):
+            return Future(), Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return self.copy_batch_to_gpu(data_iter)
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    pipeline = FakePipeline()
+    _future, context = pipeline.copy_batch_to_gpu(iter(()))
+    materialized = Batch()
+    pipeline.start_sparse_data_dist(materialized, context)
+    pipeline.wait_sparse_data_dist(context)
+    nl._root_pre_hook(None, (materialized,))
+    nl._write_summary()
+    records = _records(nl)
+    assert not [r for r in records if r["phase"] == "copy"]
+    recovered = [
+        r for r in records if r["phase"] in {"sparse_start", "sparse_wait", "forward"}
+    ]
+    assert recovered
+    assert len({r["batch_id"] for r in recovered}) == 1
+    smy = _summary(nl)
+    assert smy["stage_evidence_valid"] is False
+    assert smy["stage_skip_reasons"][
+        "copy:threaded_copy_future_unresolved"
+    ] == 1
+
+
+def test_v6_threaded_inplace_future_recovers_at_sparse_start(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Future:
+        def then(self, callback):
+            return callback
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def inplace_copy_batch_to_gpu(self, _batch, context):
+            return Future(), context
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return None
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    pipeline = FakePipeline()
+    context = Context()
+    pipeline.inplace_copy_batch_to_gpu(None, context)
+    materialized = Batch()
+    pipeline.start_sparse_data_dist(materialized, context)
+    pipeline.wait_sparse_data_dist(context)
+    nl._root_pre_hook(None, (materialized,))
+    nl._write_summary()
+    recovered = [
+        r for r in _records(nl) if r["phase"] in {"sparse_start", "sparse_wait", "forward"}
+    ]
+    assert recovered and len({r["batch_id"] for r in recovered}) == 1
+    assert _summary(nl)["stage_evidence_valid"] is False  # copy was unobserved
+
+
+def test_v6_rotates_token_when_batch_object_is_reused(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+
+    class Pipeline:
+        pass
+
+    class Batch:
+        pass
+
+    observer = nl._get_pipeline_observer(Pipeline())
+    batch = Batch()
+    first = observer.token_for_batch(batch, create=True)
+    first.forward_seen = True
+    second = observer.token_for_batch(batch, create=True)
+    assert second.batch_id != first.batch_id
+    assert observer.token_for_batch(batch) is second
+
+
+def test_v6_copy_wrapper_rotates_forwarded_reused_batch(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter), Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return self.copy_batch_to_gpu(data_iter)
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    pipeline = FakePipeline()
+    observer = nl._get_pipeline_observer(pipeline)
+    batch = Batch()
+    previous = observer.token_for_batch(batch, create=True)
+    previous.forward_seen = True
+    pipeline.copy_batch_to_gpu(iter([batch]))
+    current = observer.token_for_exact_batch(batch)
+    assert current is not None and current.batch_id != previous.batch_id
+
+
+def test_v6_resolves_rewrapped_batch_by_tracked_tensor_identity(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {"NANLOG_TRACK_ATTR": "embedding_features"},
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Pipeline:
+        pass
+
+    class Batch:
+        def __init__(self, tensor):
+            self.embedding_features = [tensor]
+
+    observer = nl._get_pipeline_observer(Pipeline())
+    tensor = torch.ones(2, 3)
+    original = Batch(tensor)
+    rewrapped = Batch(tensor)
+    token = observer.token_for_batch(original, create=True)
+    assert observer.token_for_batch(rewrapped, create=False) is token
+
+
+def test_v6_pipeline_reset_retires_unforwarded_tokens(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = None
+            self._data_dist_stream = None
+
+        def copy_batch_to_gpu(self, data_iter):
+            return next(data_iter), object()
+
+        def start_sparse_data_dist(self, batch, context):
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            return self.copy_batch_to_gpu(data_iter)
+
+        def reset(self):
+            return None
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(2, 3)]
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    pipeline = FakePipeline()
+    # object() is not recognized as a context, so create the token directly to isolate
+    # reset lifecycle behavior.
+    observer = nl._get_pipeline_observer(pipeline)
+    token = observer.token_for_batch(Batch(), create=True)
+
+    class IncompleteEvent:
+        def query(self):
+            return False
+
+    record = {"observation_status": "scheduled"}
+    observation = {
+        "phase": "copy",
+        "done_event": IncompleteEvent(),
+        "records": [record],
+        "closed": False,
+    }
+    token.open_observations.append(observation)
+    assert observer.tokens
+    pipeline.reset()
+    assert not observer.tokens and not observer.by_batch
+    assert record["observation_status"] == "overlapped_next_stage"
+    assert record["closed_by_phase"] == "reset"
+
+
+def test_v6_summary_keeps_tick_counters_after_pipeline_gc(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+
+    class Pipeline:
+        pass
+
+    pipeline = Pipeline()
+    key = id(pipeline)
+    observer = nl._get_pipeline_observer(pipeline)
+    for _ in range(20):
+        observer.begin_tick()
+    assert nl._pipeline_observers_created == 1
+    assert nl._pipeline_tick_high_watermark == 20
+
+    del pipeline
+    gc.collect()
+    assert key not in nl._pipeline_observers
+
+    nl._write_summary()
+    smy = _summary(nl)
+    assert smy["pipeline_observer_count"] == 1
+    assert smy["pipeline_ticks"] == 20
+
+
 def test_stage_reads_still_capture_all_stages(monkeypatch, tmp_path_factory):
     """With NANLOG_STAGE_READS=1 the copy/sparse/forward stage reads still produce the
     same records (the side stream only changes WHERE the reduction runs, not WHAT is
     captured). The tracked tensors are put on the SAME device the side stream needs
     (cuda when available, else cpu), so the summary assertions below actually reflect
     which path ran -- the side stream only engages for a CUDA tensor (t.is_cuda), so a
-    CPU tensor on a CUDA box would (correctly) fall back to inline, not exercise the
-    feature. On a CPU box this exercises the inline fallback: capture must be identical
-    either way and the run must not crash."""
+    CPU tensor on a CUDA box would use the explicitly labelled CPU-only inline path, not
+    exercise CUDA timing evidence. On a CPU box capture must remain functional."""
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     nl = _load_logger(
         {"NANLOG_PIPELINE": "1", "NANLOG_STAGE_READS": "1",
@@ -252,9 +1136,13 @@ def test_stage_reads_still_capture_all_stages(monkeypatch, tmp_path_factory):
 
     for _ in range(2):
         b = Batch()
-        nl._checkpoint(b, "copy")
-        nl._checkpoint(b, "sparse_start")
-        nl._checkpoint(b, "sparse_wait")
+        source = torch.cuda.current_stream() if dev == "cuda" else None
+        nl._checkpoint(
+            b, "copy", source_stream=source, source_kind="test_producer")
+        nl._checkpoint(
+            b, "sparse_start", source_stream=source, source_kind="test_producer")
+        nl._checkpoint(
+            b, "sparse_wait", source_stream=source, source_kind="test_producer")
         nl._root_pre_hook(None, (b,))
     nl._root_pre_hook(None, (Batch(),))
     nl._write_summary()
@@ -274,8 +1162,43 @@ def test_stage_reads_still_capture_all_stages(monkeypatch, tmp_path_factory):
         assert smy["follow_mode"] == "stage_wrappers_side_read"
         assert smy["stage_read_count"] > 0
     else:
-        assert smy["stage_reads_active"] is False   # fell back to inline, honestly
-        assert smy["follow_mode"] == "stage_wrappers"
+        assert smy["stage_reads_active"] is False
+        assert smy["stage_evidence_valid"] is False
+        assert smy["follow_mode"] == "stage_wrappers_side_read_invalid"
+
+
+def test_v6_forward_entry_stats_precede_model_body_mutation(
+    monkeypatch, tmp_path_factory
+):
+    """Forward entry is intentionally compute-stream ordered like Pass A."""
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+    tensor = torch.zeros(8)
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [tensor]
+
+    nl._checkpoint(
+        Batch(),
+        "forward",
+        source_stream="current",
+        source_kind="compute_current",
+        relative_slot="forward_entry",
+    )
+    tensor.fill_(float("nan"))  # represents the model body after the pre-hook
+    nl._write_summary()
+    forward = next(r for r in _records(nl) if r["phase"] == "forward")
+    assert forward["nan_count"] == 0
+    assert forward["observation_status"] == "trusted"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for side stream")
@@ -303,7 +1226,12 @@ def test_stage_reads_drain_reads_side_stream_values_correctly(
         def __init__(self):
             self.embedding_features = ef
 
-    nl._checkpoint(Batch(), "copy")     # reduction runs on the side stream
+    nl._checkpoint(
+        Batch(),
+        "copy",
+        source_stream=torch.cuda.current_stream(),
+        source_kind="test_producer",
+    )  # reduction runs on the side stream
     nl._root_pre_hook(None, (Batch(),))  # drain the step (device-side wait then read-back)
     nl._write_summary()
 
@@ -346,7 +1274,14 @@ def test_stage_reads_cross_device_ambient_differs_from_stream(
 
     # Ambient device deliberately 0 (!= the tensor's device 1) for the whole flow.
     with torch.cuda.device(0):
-        nl._checkpoint(Batch(), "copy")
+        with torch.cuda.device(1):
+            producer = torch.cuda.current_stream()
+        nl._checkpoint(
+            Batch(),
+            "copy",
+            source_stream=producer,
+            source_kind="test_producer",
+        )
         nl._root_pre_hook(None, (Batch(),))
     nl._write_summary()
 
@@ -359,6 +1294,293 @@ def test_stage_reads_cross_device_ambient_differs_from_stream(
     assert smy["stage_reads_active"] is True
     # the side stream lives on the tensor's device, not the ambient device
     assert nl._stage_stream_device == 1
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not hasattr(torch.cuda, "_sleep"),
+    reason="CUDA _sleep required for deterministic producer delay",
+)
+def test_v6_stage_read_waits_for_delayed_producer_write(
+    monkeypatch, tmp_path_factory
+):
+    """The explicit producer event must catch a write current_stream() could miss."""
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_BOUNDS": "embedding_features:0:60",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
+
+    tensor = torch.zeros(128, device="cuda")
+    producer = torch.cuda.Stream()
+    with torch.cuda.stream(producer):
+        torch.cuda._sleep(100_000_000)
+        tensor.fill_(float("nan"))
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [tensor]
+
+    nl._checkpoint(
+        Batch(),
+        "copy",
+        source_stream=producer,
+        source_kind="_memcpy_stream",
+    )
+    nl._write_summary()
+    copy_records = [r for r in _records(nl) if r["phase"] == "copy"]
+    assert copy_records and copy_records[0]["nan_count"] == tensor.numel()
+    assert copy_records[0]["observation_status"] == "trusted"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not hasattr(torch.cuda, "_sleep"),
+    reason="CUDA _sleep required for deterministic producer delay",
+)
+def test_v6_wrappers_use_real_memcpy_and_data_dist_streams(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_BOUNDS": "embedding_features:0:60",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Context:
+        pass
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.zeros(64, device="cuda")]
+
+    class FakePipeline:
+        def __init__(self):
+            self._memcpy_stream = torch.cuda.Stream()
+            self._data_dist_stream = torch.cuda.Stream()
+
+        def copy_batch_to_gpu(self, data_iter):
+            batch = next(data_iter)
+            with torch.cuda.stream(self._memcpy_stream):
+                torch.cuda._sleep(100_000_000)
+                batch.embedding_features[0].fill_(float("nan"))
+            return batch, Context()
+
+        def start_sparse_data_dist(self, batch, context):
+            self._data_dist_stream.wait_stream(self._memcpy_stream)
+            return context
+
+        def wait_sparse_data_dist(self, context):
+            return context
+
+        def progress(self, data_iter):
+            batch, context = self.copy_batch_to_gpu(data_iter)
+            self.start_sparse_data_dist(batch, context)
+            self.wait_sparse_data_dist(context)
+            nl._root_pre_hook(None, (batch,))
+            return batch
+
+    _publish_fake_torchrec(monkeypatch, FakePipeline)
+    nl._install_pipeline_hook()
+    FakePipeline().progress(iter([Batch()]))
+    nl._write_summary()
+
+    copy_record = next(r for r in _records(nl) if r["phase"] == "copy")
+    assert copy_record["nan_count"] == 64
+    assert copy_record["source_stream_kind"] == "_memcpy_stream"
+    sparse = [r for r in _records(nl) if r["phase"].startswith("sparse")]
+    assert sparse and all(r["source_stream_kind"] == "_data_dist_stream" for r in sparse)
+
+
+def test_v6_root_pre_hook_does_not_drain_current_tick_producer(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+
+    class IncompleteEvent:
+        def query(self):
+            return False
+
+    record = {"step": 0}
+    observation = {
+        "phase": "copy",
+        "done_event": IncompleteEvent(),
+        "records": [record],
+        "closed": False,
+    }
+    record["_stage_observation"] = observation
+    nl._pending.append((record, {}, None))
+
+    nl._root_pre_hook(None, None)
+    assert nl._step == 1
+    assert len(nl._pending) == 1  # incomplete producer evidence was deferred
+    nl._step = nl._MAX_STAGE_DEFERRAL_STEPS + 1
+    nl._root_pre_hook(None, None)
+    assert not nl._pending
+    assert nl._stage_skip_reasons["copy:completion_timeout"] == 1
+
+
+def test_v6_root_pre_hook_drains_all_ready_backlog_steps(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {"NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch,
+        tmp_path_factory,
+    )
+
+    class Event:
+        def __init__(self, ready):
+            self.ready = ready
+
+        def query(self):
+            return self.ready
+
+    for step, ready in ((0, True), (1, True), (2, False)):
+        nl._step = step
+        record = nl._stash(
+            f"tracked[{step}]", "pipeline", torch.ones(1), role="track")
+        observation = {
+            "phase": "copy",
+            "done_event": Event(ready),
+            "records": [record],
+            "closed": False,
+            "remaining_records": 1,
+            "token": None,
+        }
+        record["_stage_observation"] = observation
+        nl._stage_observations.append(observation)
+
+    nl._root_pre_hook(None, None)
+    assert [item[0]["step"] for item in nl._pending] == [2]
+    assert len(_records(nl)) == 2
+
+
+def test_v6_marks_read_overlapping_next_stage_without_blocking_producer(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+
+    class Pipeline:
+        pass
+
+    class Batch:
+        pass
+
+    class IncompleteEvent:
+        def query(self):
+            return False
+
+    observer = nl._get_pipeline_observer(Pipeline())
+    observer.begin_tick()
+    batch = Batch()
+    token = observer.token_for_batch(batch, create=True)
+    record = {"observation_status": "scheduled"}
+    observation = {
+        "phase": "copy",
+        "done_event": IncompleteEvent(),
+        "records": [record],
+        "closed": False,
+    }
+    token.open_observations.append(observation)
+    nl._close_token_observations(token, "sparse_start")
+    assert record["observation_status"] == "overlapped_next_stage"
+    assert record["closed_by_phase"] == "sparse_start"
+
+
+def test_v6_event_query_error_invalidates_evidence(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+
+    class Pipeline:
+        pass
+
+    class Batch:
+        pass
+
+    class BrokenEvent:
+        def query(self):
+            raise RuntimeError("event query failed")
+
+    observer = nl._get_pipeline_observer(Pipeline())
+    token = observer.token_for_batch(Batch(), create=True)
+    record = {"observation_status": "scheduled"}
+    token.open_observations.append({
+        "phase": "copy",
+        "done_event": BrokenEvent(),
+        "records": [record],
+        "closed": False,
+    })
+
+    nl._close_token_observations(token, "sparse_start")
+    assert record["observation_status"] == "poll_error"
+    assert record["closed_by_phase"] == "sparse_start"
+    assert nl._stage_evidence_valid is False
+    assert nl._stage_skip_reasons[
+        "copy:completion_event_query_error:RuntimeError"
+    ] == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_v6_unresolved_producer_skips_instead_of_inline_read(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_TRACK_ATTR": "embedding_features",
+            "NANLOG_SAMPLE_EVERY": "1",
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.ones(4, device="cuda")]
+
+    assert nl._checkpoint(
+        Batch(), "copy", source_stream=None, source_kind="_memcpy_stream:missing"
+    ) == 0
+    nl._write_summary()
+    assert not _records(nl)
+    smy = _summary(nl)
+    assert smy["stage_evidence_valid"] is False
+    assert smy["stage_skip_reasons"]["copy:producer_stream_unresolved"] == 1
+
+
+def test_v6_summary_requires_complete_trusted_phase_coverage(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_STAGE_READS": "1"},
+        monkeypatch,
+        tmp_path_factory,
+    )
+    nl._pipeline_installed = True
+    for phase in ("copy", "forward"):
+        nl._stage_phase_counts[phase]["scheduled"] = 1
+        nl._stage_phase_counts[phase]["trusted"] = 1
+    nl._write_summary()
+    smy = _summary(nl)
+    assert smy["stage_evidence_valid"] is False
+    assert smy["stage_missing_phases"] == ["sparse_start", "sparse_wait"]
 
 
 def test_pipeline_requested_but_wrappers_not_installed_mints_at_forward(

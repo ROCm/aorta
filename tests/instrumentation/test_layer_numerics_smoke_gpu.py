@@ -105,12 +105,18 @@ def _watch(tensors, scope):
     return json.dumps({"watch": [{"scope": scope, "tensors": tensors}], "sample_every": 1})
 
 
-def _follow(at, scope=None, bounds=None):
-    entry = {"tensor": _FOLLOW_TENSOR, "at": at}
+def _follow(*, stages=False, scope=None, stride=None, bounds=None, stage_reads=False):
+    entry = {"tensor": _FOLLOW_TENSOR}
+    if stages:
+        entry["stages"] = True
     if scope:
         entry["scope"] = scope
+    if stride is not None:
+        entry["stride"] = stride
     if bounds:
         entry["bounds"] = bounds
+    if stage_reads:
+        entry["stage_reads"] = True
     return json.dumps({"follow": [entry], "sample_every": 1})
 
 
@@ -123,13 +129,18 @@ def _scenarios() -> dict:
         out["watch_types_all_tensors"] = (
             _watch(["input", "output", "weight", "bias", "grad"], types_scope), True)
         out["watch_types_grad_umbrella"] = (_watch(["output", "grad"], types_scope), True)
-        out["follow_stride_types"] = (_follow("stride:1", types_scope), False)
+        out["follow_stride_types"] = (
+            _follow(scope=types_scope, stride=1), False)
     # watch by name (needs AORTA_LN_SCOPE_NAMES)
     if _SCOPE_NAMES:
         out["watch_names_io"] = (_watch(["input", "output"], names_scope), False)
-        out["follow_stride_names"] = (_follow("stride:8", names_scope), False)
+        out["follow_stride_names"] = (
+            _follow(scope=names_scope, stride=8), False)
     # follow at pipeline stages (no scope needed)
-    out["follow_stage"] = (_follow("stage", bounds=[0, 60]), False)
+    out["follow_stage"] = (
+        _follow(stages=True, bounds=[0, 60]), False)
+    out["follow_stage_reads"] = (
+        _follow(stages=True, stage_reads=True, bounds=[0, 60]), False)
     return out
 
 
@@ -188,6 +199,14 @@ def test_standalone_scenario(label, tmp_path):
     smy = _summary(tmp_path)
     assert smy["spec_applied"] is True, f"{label}: spec not applied ({smy.get('spec_error')})"
     assert _record_count(tmp_path) > 0, f"{label}: no records written"
+    if label == "follow_stage_reads":
+        assert smy["stage_reads"] is True
+        assert smy["stage_reads_active"] is True
+        assert smy["stage_evidence_valid"] is True, smy.get("stage_skip_reasons")
+        counts = smy.get("stage_phase_counts", {})
+        for phase in ("copy", "sparse_start", "sparse_wait", "forward"):
+            assert counts.get(phase, {}).get("trusted", 0) > 0, \
+                f"{label}: no trusted observation for {phase}: {counts}"
     if is_grad:
         # the `grad` umbrella must produce PARAM grads too, not just igrad
         assert smy.get("grad_records_stashed", 0) > 0, \

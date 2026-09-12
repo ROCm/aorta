@@ -357,6 +357,66 @@ def test_spec_clears_stale_flat_stage_reads(monkeypatch, tmp_path_factory):
     assert nl._STAGE_READS is False
 
 
+def test_follow_post_step_requires_and_enables_timing_safe_reads(
+    monkeypatch, tmp_path_factory
+):
+    spec = {
+        "follow": [{
+            "tensor": "ef",
+            "stages": True,
+            "stage_reads": True,
+            "post_step": True,
+        }]
+    }
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._PIPELINE is True
+    assert nl._STAGE_READS is True
+    assert nl._POST_STEP_REQUESTED is True
+    assert nl._POST_STEP is True
+
+
+@pytest.mark.parametrize("follow_entry", [
+    {"tensor": "ef", "stages": True, "post_step": True},
+    {"tensor": "ef", "stages": True, "stage_reads": True, "post_step": "yes"},
+    {
+        "tensor": "ef",
+        "pipeline": False,
+        "scope": {"types": ["MLP"]},
+        "post_step": True,
+    },
+])
+def test_follow_post_step_invalid_rolls_back(
+    follow_entry, monkeypatch, tmp_path_factory
+):
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps({"follow": [follow_entry]})},
+        monkeypatch,
+        tmp_path_factory,
+    )
+    assert nl._SPEC_APPLIED is False
+    assert nl._POST_STEP is False
+    assert nl._STAGE_READS is False
+
+
+def test_spec_clears_stale_flat_post_step(monkeypatch, tmp_path_factory):
+    nl = _load_logger(
+        {
+            "NANLOG_POST_STEP": "1",
+            "NANLOG_STAGE_READS": "1",
+            "NANLOG_PIPELINE": "1",
+            "NANLOG_SPEC": json.dumps(
+                {"follow": [{"tensor": "ef", "stages": True}]}
+            ),
+        },
+        monkeypatch,
+        tmp_path_factory,
+    )
+    assert nl._POST_STEP_REQUESTED is False
+    assert nl._POST_STEP is False
+
+
 def test_follow_pipeline_true_is_default_and_unchanged(monkeypatch, tmp_path_factory):
     """Omitting `pipeline` keeps the historical behavior: stage wrappers ON."""
     spec = {"follow": [{"tensor": "ef", "scope": {"types": ["MLP"]}, "stride": 5}]}
