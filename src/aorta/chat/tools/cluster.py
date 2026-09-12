@@ -147,9 +147,15 @@ def _fmt_tools_used(result: dict) -> list[str]:
         lines.append(
             f"  - hipcc — compiled the submitted kernel for {_arch()} on the GPU node"
         )
+    # The node named here used to be a constant, so every run claimed an MI355X
+    # whatever the scheduler picked -- a hardware claim in an evidence summary,
+    # made without checking. Slurm is asked, and where it will not say, this
+    # says that instead of naming something.
+    node = result.get("node") or ""
+    where = f"to {node}" if node else "to a node the scheduler chose"
     lines.append(
         f"  - CIA Launch agent — submitted slurm job {result.get('slurm_job_id', '?')} "
-        f"to an MI355X node"
+        f"{where}"
     )
     lines.append(
         f"  - CIA Watch agent — monitored the job log "
@@ -319,7 +325,7 @@ def _wrong_tool_hint(source: str) -> str:
     return (
         " This is a PyTorch model, not a HIP kernel, and ConSan needs a __global__ "
         "function to compile. If you are chasing a NaN or a non-finite loss, call "
-        "triage_workload instead: it runs this code on an MI355X and Watch reads "
+        "triage_workload instead: it runs this code on a GPU node and Watch reads "
         "the log it produces, which is where a non-finite loss shows up. Do not ask "
         "the user for kernel source -- call triage_workload with what they pasted."
     )

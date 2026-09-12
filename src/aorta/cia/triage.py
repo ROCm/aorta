@@ -100,6 +100,28 @@ def sacct_state(slurm_id: str) -> str:
     return "UNKNOWN"
 
 
+def sacct_nodelist(slurm_id: str) -> str:
+    """Which node Slurm actually ran *slurm_id* on, or "" if it will not say.
+
+    The requested node is not the answer: --node may be empty, in which case the
+    scheduler chose, and a caller that reports the request as though it were the
+    outcome is reporting hardware nobody verified.
+    """
+    try:
+        r = subprocess.run(
+            ["sacct", "-j", slurm_id, "--format=NodeList", "--noheader", "--parsable2", "-X"],
+            capture_output=True, text=True, timeout=30,
+        )
+        for line in (r.stdout or "").strip().splitlines():
+            node = line.strip()
+            # Slurm writes "None assigned" while a job is still queued.
+            if node and not node.lower().startswith("none"):
+                return node
+    except Exception as exc:
+        log.info(f"could not read the node for slurm {slurm_id}: {exc}")
+    return ""
+
+
 def wait_for_job(slurm_id: str, timeout: int, interval: int = 5, *, stop: Stop = None) -> str:
     deadline = time.time() + timeout
     state = "UNKNOWN"
@@ -558,6 +580,9 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         "label": args.label,
         "recipe": str(recipe) if recipe else "(raw command)",
         "slurm_state": state,
+        # What ran it, not what was asked for: args.node is often empty.
+        "node": sacct_nodelist(slurm_id) or args.node,
+        "arch": args.arch,
         "job_dir": str(job_dir),
         "bundle": str(bundle),
         "log_path": log_path,
