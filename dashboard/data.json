@@ -4,6 +4,524 @@
     "meta": {
       "commit": "73409f79a56a",
       "commit_full": "73409f79a56ac10ae5374b419e5737221daadc34",
+      "date": "2026-09-12T12:42:42+00:00",
+      "gate": false,
+      "gpu": "gfx950",
+      "run": "2026-09-12T124242-34693445702",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/34693445702"
+    },
+    "rel": "runs/2026-09-12T124242-34693445702",
+    "rows": {
+      "consan-clean": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 0,
+            "name": "consan_lds_race",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "pass"
+          }
+        ],
+        "match": true,
+        "observation": "consan pass; preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
+        "report_rel": "runs/2026-09-12T124242-34693445702/consan-clean/sanitizer_report.json",
+        "verdict": "pass",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "consan-racy": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "fail",
+        "finding_groups": [
+          {
+            "code": "1",
+            "count": 64,
+            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=103678626699472 index=0 kind=1 code_object=fnv1a64:3deb93883c6c6fa8 report_generation=2 generatio\u2026",
+            "sanitizer": "consan",
+            "severity": "race"
+          }
+        ],
+        "findings": 64,
+        "kernel_reasons": [],
+        "kernels": [
+          {
+            "code_object": "",
+            "detail": "",
+            "dispatch": 1,
+            "findings": 64,
+            "name": "consan_lds_race_2wave",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "fail"
+          }
+        ],
+        "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
+        "report_rel": "runs/2026-09-12T124242-34693445702/consan-racy/sanitizer_report.json",
+        "verdict": "fail",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "waitcheck": {
+        "backend": {
+          "name": "rj_waitcheck",
+          "sha": "a70945fb1135"
+        },
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "error",
+        "expected": "warn",
+        "finding_groups": [
+          {
+            "code": "wait_hazard",
+            "count": 32,
+            "example": "sol_137678.hsaco:gfx950[0]:.text+0x4a4: missing s_waitcnt lgkmcnt(0) before def of s45",
+            "sanitizer": "waitcheck",
+            "severity": "warning"
+          }
+        ],
+        "findings": 32,
+        "kernel_reasons": [
+          {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+            "entry_offset": null,
+            "kernel": "gemm_NT_M256_N4096_K1024",
+            "label": "gemm_NT_M256_N4096_K1024",
+            "reason": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)"
+          }
+        ],
+        "kernels": [
+          {
+            "code_object": "sol_126578.hsaco",
+            "detail": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)",
+            "dispatch": 479,
+            "findings": 0,
+            "name": "gemm_NT_M256_N4096_K1024",
+            "offset": null,
+            "sha": "57c5d8efa4",
+            "time_ms": 0.0,
+            "verdict": "error"
+          },
+          {
+            "code_object": "sol_175415.hsaco",
+            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once \u2014 waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncer\u2026",
+            "dispatch": 471,
+            "findings": 0,
+            "name": "gemm_NT_M128_N4096_K1280",
+            "offset": null,
+            "sha": "57c5d8efa4",
+            "time_ms": 0.0,
+            "verdict": "error"
+          },
+          {
+            "code_object": "sol_137678.hsaco",
+            "detail": "",
+            "dispatch": 440,
+            "findings": 32,
+            "name": "gemm_TT_M64_N64_K1280",
+            "offset": null,
+            "sha": "aeb46fded1",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          }
+        ],
+        "match": false,
+        "observation": "waitcheck error; reason worklist_not_fully_checked; gemm_NT_M256_N4096_K1024: waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order); 32 finding(s) (wait_hazard)",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": "worklist_not_fully_checked",
+          "sanitizer": "waitcheck",
+          "verdict": "error"
+        },
+        "report_rel": "runs/2026-09-12T124242-34693445702/waitcheck/sanitizer_report.json",
+        "verdict": "error",
+        "worklist": {
+          "kernel_count": 3,
+          "requirement": "top_dispatch_count",
+          "top_n": 3
+        }
+      }
+    },
+    "survey": [
+      {
+        "backend": "\u2014",
+        "cls": "survey",
+        "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml",
+        "group": "gemm",
+        "label": "consan-gemm",
+        "name": "consan-gemm",
+        "report_rel": "runs/2026-09-12T124242-34693445702/survey/consan-gemm/sanitizer_report.json",
+        "sanitizer": "consan",
+        "staged": true,
+        "summary": {
+          "backend": null,
+          "coverage": "0/719550",
+          "execution": "error",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "kernel_reasons": [
+            {
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "code_object_index": 0,
+              "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+              "entry_offset": null,
+              "kernel": "gemm_f32_ss",
+              "label": "gemm_f32_ss",
+              "reason": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing"
+            }
+          ],
+          "kernels": [
+            {
+              "code_object": "consan_gemm_f32.hsaco",
+              "detail": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placem\u2026",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "gemm_f32_ss",
+              "offset": null,
+              "sha": "57c5d8efa4",
+              "time_ms": 0.0,
+              "verdict": "error"
+            }
+          ],
+          "match": true,
+          "observation": "consan error; reason consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; gemm_f32_ss: consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; preflight error",
+          "present": true,
+          "primary": {
+            "preflight": "error",
+            "reason": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing",
+            "sanitizer": "consan",
+            "verdict": "error"
+          },
+          "verdict": "error",
+          "worklist": {
+            "kernel_count": 1,
+            "requirement": "top_dispatch_count",
+            "top_n": 1
+          }
+        },
+        "workload": null
+      },
+      {
+        "backend": "\u2014",
+        "cls": "survey",
+        "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml",
+        "group": "lds-dispatch",
+        "label": "consan-lds-dispatch",
+        "name": "consan-lds-dispatch",
+        "report_rel": "runs/2026-09-12T124242-34693445702/survey/consan-lds-dispatch/sanitizer_report.json",
+        "sanitizer": "consan",
+        "staged": true,
+        "summary": {
+          "backend": null,
+          "coverage": "5/5, 0/0",
+          "execution": "complete",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "kernel_reasons": [],
+          "kernels": [
+            {
+              "code_object": "lds.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "lds_reduce",
+              "offset": null,
+              "sha": "4ff5c45d79",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            }
+          ],
+          "match": true,
+          "observation": "consan pass; preflight pass",
+          "present": true,
+          "primary": {
+            "preflight": "pass",
+            "reason": null,
+            "sanitizer": "consan",
+            "verdict": "pass"
+          },
+          "verdict": "pass",
+          "worklist": {
+            "kernel_count": 1,
+            "requirement": "top_dispatch_count",
+            "top_n": 1
+          }
+        },
+        "workload": null
+      },
+      {
+        "backend": "\u2014",
+        "cls": "survey",
+        "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml",
+        "group": "tiny",
+        "label": "consan-tiny",
+        "name": "consan-tiny",
+        "report_rel": "runs/2026-09-12T124242-34693445702/survey/consan-tiny/sanitizer_report.json",
+        "sanitizer": "consan",
+        "staged": true,
+        "summary": {
+          "backend": null,
+          "coverage": "",
+          "execution": "error",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "kernel_reasons": [
+            {
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
+              "code_object_index": 0,
+              "code_object_sha256": "49d51bdd003dc2ff7ea26dcb263dc8d81d50c8ddc2b04f3823aae62667b51a19",
+              "entry_offset": null,
+              "kernel": "tiny_vecadd",
+              "label": "tiny_vecadd",
+              "reason": "combined_hook_exit_86"
+            }
+          ],
+          "kernels": [
+            {
+              "code_object": "tiny.hsaco",
+              "detail": "combined_hook_exit_86",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "tiny_vecadd",
+              "offset": null,
+              "sha": "49d51bdd00",
+              "time_ms": 0.0,
+              "verdict": "error"
+            }
+          ],
+          "match": true,
+          "observation": "consan error; reason combined_hook_exit_86; tiny_vecadd: combined_hook_exit_86; preflight error",
+          "present": true,
+          "primary": {
+            "preflight": "error",
+            "reason": "combined_hook_exit_86",
+            "sanitizer": "consan",
+            "verdict": "error"
+          },
+          "verdict": "error",
+          "worklist": {
+            "kernel_count": 1,
+            "requirement": "top_dispatch_count",
+            "top_n": 1
+          }
+        },
+        "workload": null
+      },
+      {
+        "backend": "rj_waitcheck",
+        "cls": "survey",
+        "command": "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml",
+        "group": "gemm",
+        "label": "waitcheck-gemm",
+        "name": "waitcheck-gemm",
+        "report_rel": "runs/2026-09-12T124242-34693445702/survey/waitcheck-gemm/sanitizer_report.json",
+        "sanitizer": "waitcheck",
+        "staged": true,
+        "summary": {
+          "backend": {
+            "name": "rj_waitcheck",
+            "sha": "a70945fb1135"
+          },
+          "coverage": "",
+          "execution": "error",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "kernel_reasons": [
+            {
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "code_object_index": 0,
+              "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+              "entry_offset": null,
+              "kernel": "gemm_f32_ss",
+              "label": "gemm_f32_ss",
+              "reason": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)"
+            }
+          ],
+          "kernels": [
+            {
+              "code_object": "consan_gemm_f32.hsaco",
+              "detail": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "gemm_f32_ss",
+              "offset": null,
+              "sha": "57c5d8efa4",
+              "time_ms": 0.0,
+              "verdict": "error"
+            }
+          ],
+          "match": true,
+          "observation": "waitcheck error; reason worklist_not_fully_checked; gemm_f32_ss: waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)",
+          "present": true,
+          "primary": {
+            "preflight": null,
+            "reason": "worklist_not_fully_checked",
+            "sanitizer": "waitcheck",
+            "verdict": "error"
+          },
+          "verdict": "error",
+          "worklist": {
+            "kernel_count": 1,
+            "requirement": "top_dispatch_count",
+            "top_n": 1
+          }
+        },
+        "workload": null
+      },
+      {
+        "backend": "rj_waitcheck",
+        "cls": "survey",
+        "command": "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml",
+        "group": "lds-dispatch",
+        "label": "waitcheck-lds-dispatch",
+        "name": "waitcheck-lds-dispatch",
+        "report_rel": "runs/2026-09-12T124242-34693445702/survey/waitcheck-lds-dispatch/sanitizer_report.json",
+        "sanitizer": "waitcheck",
+        "staged": true,
+        "summary": {
+          "backend": {
+            "name": "rj_waitcheck",
+            "sha": "a70945fb1135"
+          },
+          "coverage": "",
+          "execution": "complete",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "kernel_reasons": [],
+          "kernels": [
+            {
+              "code_object": "lds.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "lds_reduce",
+              "offset": null,
+              "sha": "4ff5c45d79",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            }
+          ],
+          "match": true,
+          "observation": "waitcheck pass",
+          "present": true,
+          "primary": {
+            "preflight": null,
+            "reason": null,
+            "sanitizer": "waitcheck",
+            "verdict": "pass"
+          },
+          "verdict": "pass",
+          "worklist": {
+            "kernel_count": 1,
+            "requirement": "top_dispatch_count",
+            "top_n": 1
+          }
+        },
+        "workload": null
+      },
+      {
+        "backend": "rj_waitcheck",
+        "cls": "survey",
+        "command": "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml",
+        "group": "tiny",
+        "label": "waitcheck-tiny",
+        "name": "waitcheck-tiny",
+        "report_rel": "runs/2026-09-12T124242-34693445702/survey/waitcheck-tiny/sanitizer_report.json",
+        "sanitizer": "waitcheck",
+        "staged": true,
+        "summary": {
+          "backend": {
+            "name": "rj_waitcheck",
+            "sha": "a70945fb1135"
+          },
+          "coverage": "",
+          "execution": "complete",
+          "expected": null,
+          "finding_groups": [],
+          "findings": 0,
+          "kernel_reasons": [],
+          "kernels": [
+            {
+              "code_object": "tiny.hsaco",
+              "detail": "",
+              "dispatch": 1,
+              "findings": 0,
+              "name": "tiny_vecadd",
+              "offset": null,
+              "sha": "49d51bdd00",
+              "time_ms": 0.0,
+              "verdict": "pass"
+            }
+          ],
+          "match": true,
+          "observation": "waitcheck pass",
+          "present": true,
+          "primary": {
+            "preflight": null,
+            "reason": null,
+            "sanitizer": "waitcheck",
+            "verdict": "pass"
+          },
+          "verdict": "pass",
+          "worklist": {
+            "kernel_count": 1,
+            "requirement": "top_dispatch_count",
+            "top_n": 1
+          }
+        },
+        "workload": null
+      }
+    ]
+  },
+  {
+    "gate": false,
+    "meta": {
+      "commit": "73409f79a56a",
+      "commit_full": "73409f79a56ac10ae5374b419e5737221daadc34",
       "date": "2026-09-11T12:45:42+00:00",
       "gate": false,
       "gpu": "gfx950",
@@ -180,342 +698,7 @@
           "top_n": 3
         }
       }
-    },
-    "survey": [
-      {
-        "backend": "\u2014",
-        "cls": "survey",
-        "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml",
-        "group": "gemm",
-        "label": "consan-gemm",
-        "name": "consan-gemm",
-        "report_rel": "runs/2026-09-11T124542-34598790075/survey/consan-gemm/sanitizer_report.json",
-        "sanitizer": "consan",
-        "staged": true,
-        "summary": {
-          "backend": null,
-          "coverage": "0/719550",
-          "execution": "error",
-          "expected": null,
-          "finding_groups": [],
-          "findings": 0,
-          "kernel_reasons": [
-            {
-              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
-              "code_object_index": 0,
-              "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
-              "entry_offset": null,
-              "kernel": "gemm_f32_ss",
-              "label": "gemm_f32_ss",
-              "reason": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing"
-            }
-          ],
-          "kernels": [
-            {
-              "code_object": "consan_gemm_f32.hsaco",
-              "detail": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placem\u2026",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "gemm_f32_ss",
-              "offset": null,
-              "sha": "57c5d8efa4",
-              "time_ms": 0.0,
-              "verdict": "error"
-            }
-          ],
-          "match": true,
-          "observation": "consan error; reason consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; gemm_f32_ss: consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; preflight error",
-          "present": true,
-          "primary": {
-            "preflight": "error",
-            "reason": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing",
-            "sanitizer": "consan",
-            "verdict": "error"
-          },
-          "verdict": "error",
-          "worklist": {
-            "kernel_count": 1,
-            "requirement": "top_dispatch_count",
-            "top_n": 1
-          }
-        },
-        "workload": null
-      },
-      {
-        "backend": "\u2014",
-        "cls": "survey",
-        "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml",
-        "group": "lds-dispatch",
-        "label": "consan-lds-dispatch",
-        "name": "consan-lds-dispatch",
-        "report_rel": "runs/2026-09-11T124542-34598790075/survey/consan-lds-dispatch/sanitizer_report.json",
-        "sanitizer": "consan",
-        "staged": true,
-        "summary": {
-          "backend": null,
-          "coverage": "5/5, 0/0",
-          "execution": "complete",
-          "expected": null,
-          "finding_groups": [],
-          "findings": 0,
-          "kernel_reasons": [],
-          "kernels": [
-            {
-              "code_object": "lds.hsaco",
-              "detail": "",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "lds_reduce",
-              "offset": null,
-              "sha": "daf9807ad2",
-              "time_ms": 0.0,
-              "verdict": "pass"
-            }
-          ],
-          "match": true,
-          "observation": "consan pass; preflight pass",
-          "present": true,
-          "primary": {
-            "preflight": "pass",
-            "reason": null,
-            "sanitizer": "consan",
-            "verdict": "pass"
-          },
-          "verdict": "pass",
-          "worklist": {
-            "kernel_count": 1,
-            "requirement": "top_dispatch_count",
-            "top_n": 1
-          }
-        },
-        "workload": null
-      },
-      {
-        "backend": "\u2014",
-        "cls": "survey",
-        "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml",
-        "group": "tiny",
-        "label": "consan-tiny",
-        "name": "consan-tiny",
-        "report_rel": "runs/2026-09-11T124542-34598790075/survey/consan-tiny/sanitizer_report.json",
-        "sanitizer": "consan",
-        "staged": true,
-        "summary": {
-          "backend": null,
-          "coverage": "",
-          "execution": "error",
-          "expected": null,
-          "finding_groups": [],
-          "findings": 0,
-          "kernel_reasons": [
-            {
-              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
-              "code_object_index": 0,
-              "code_object_sha256": "4b895b3572d93a2b275352e84dcf2c62abfccb796ea614ea0e24c9627ed17c53",
-              "entry_offset": null,
-              "kernel": "tiny_vecadd",
-              "label": "tiny_vecadd",
-              "reason": "combined_hook_exit_86"
-            }
-          ],
-          "kernels": [
-            {
-              "code_object": "tiny.hsaco",
-              "detail": "combined_hook_exit_86",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "tiny_vecadd",
-              "offset": null,
-              "sha": "4b895b3572",
-              "time_ms": 0.0,
-              "verdict": "error"
-            }
-          ],
-          "match": true,
-          "observation": "consan error; reason combined_hook_exit_86; tiny_vecadd: combined_hook_exit_86; preflight error",
-          "present": true,
-          "primary": {
-            "preflight": "error",
-            "reason": "combined_hook_exit_86",
-            "sanitizer": "consan",
-            "verdict": "error"
-          },
-          "verdict": "error",
-          "worklist": {
-            "kernel_count": 1,
-            "requirement": "top_dispatch_count",
-            "top_n": 1
-          }
-        },
-        "workload": null
-      },
-      {
-        "backend": "rj_waitcheck",
-        "cls": "survey",
-        "command": "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml",
-        "group": "gemm",
-        "label": "waitcheck-gemm",
-        "name": "waitcheck-gemm",
-        "report_rel": "runs/2026-09-11T124542-34598790075/survey/waitcheck-gemm/sanitizer_report.json",
-        "sanitizer": "waitcheck",
-        "staged": true,
-        "summary": {
-          "backend": {
-            "name": "rj_waitcheck",
-            "sha": "a70945fb1135"
-          },
-          "coverage": "",
-          "execution": "error",
-          "expected": null,
-          "finding_groups": [],
-          "findings": 0,
-          "kernel_reasons": [
-            {
-              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
-              "code_object_index": 0,
-              "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
-              "entry_offset": null,
-              "kernel": "gemm_f32_ss",
-              "label": "gemm_f32_ss",
-              "reason": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)"
-            }
-          ],
-          "kernels": [
-            {
-              "code_object": "consan_gemm_f32.hsaco",
-              "detail": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "gemm_f32_ss",
-              "offset": null,
-              "sha": "57c5d8efa4",
-              "time_ms": 0.0,
-              "verdict": "error"
-            }
-          ],
-          "match": true,
-          "observation": "waitcheck error; reason worklist_not_fully_checked; gemm_f32_ss: waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)",
-          "present": true,
-          "primary": {
-            "preflight": null,
-            "reason": "worklist_not_fully_checked",
-            "sanitizer": "waitcheck",
-            "verdict": "error"
-          },
-          "verdict": "error",
-          "worklist": {
-            "kernel_count": 1,
-            "requirement": "top_dispatch_count",
-            "top_n": 1
-          }
-        },
-        "workload": null
-      },
-      {
-        "backend": "rj_waitcheck",
-        "cls": "survey",
-        "command": "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml",
-        "group": "lds-dispatch",
-        "label": "waitcheck-lds-dispatch",
-        "name": "waitcheck-lds-dispatch",
-        "report_rel": "runs/2026-09-11T124542-34598790075/survey/waitcheck-lds-dispatch/sanitizer_report.json",
-        "sanitizer": "waitcheck",
-        "staged": true,
-        "summary": {
-          "backend": {
-            "name": "rj_waitcheck",
-            "sha": "a70945fb1135"
-          },
-          "coverage": "",
-          "execution": "complete",
-          "expected": null,
-          "finding_groups": [],
-          "findings": 0,
-          "kernel_reasons": [],
-          "kernels": [
-            {
-              "code_object": "lds.hsaco",
-              "detail": "",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "lds_reduce",
-              "offset": null,
-              "sha": "daf9807ad2",
-              "time_ms": 0.0,
-              "verdict": "pass"
-            }
-          ],
-          "match": true,
-          "observation": "waitcheck pass",
-          "present": true,
-          "primary": {
-            "preflight": null,
-            "reason": null,
-            "sanitizer": "waitcheck",
-            "verdict": "pass"
-          },
-          "verdict": "pass",
-          "worklist": {
-            "kernel_count": 1,
-            "requirement": "top_dispatch_count",
-            "top_n": 1
-          }
-        },
-        "workload": null
-      },
-      {
-        "backend": "rj_waitcheck",
-        "cls": "survey",
-        "command": "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml",
-        "group": "tiny",
-        "label": "waitcheck-tiny",
-        "name": "waitcheck-tiny",
-        "report_rel": "runs/2026-09-11T124542-34598790075/survey/waitcheck-tiny/sanitizer_report.json",
-        "sanitizer": "waitcheck",
-        "staged": true,
-        "summary": {
-          "backend": {
-            "name": "rj_waitcheck",
-            "sha": "a70945fb1135"
-          },
-          "coverage": "",
-          "execution": "complete",
-          "expected": null,
-          "finding_groups": [],
-          "findings": 0,
-          "kernel_reasons": [],
-          "kernels": [
-            {
-              "code_object": "tiny.hsaco",
-              "detail": "",
-              "dispatch": 1,
-              "findings": 0,
-              "name": "tiny_vecadd",
-              "offset": null,
-              "sha": "4b895b3572",
-              "time_ms": 0.0,
-              "verdict": "pass"
-            }
-          ],
-          "match": true,
-          "observation": "waitcheck pass",
-          "present": true,
-          "primary": {
-            "preflight": null,
-            "reason": null,
-            "sanitizer": "waitcheck",
-            "verdict": "pass"
-          },
-          "verdict": "pass",
-          "worklist": {
-            "kernel_count": 1,
-            "requirement": "top_dispatch_count",
-            "top_n": 1
-          }
-        },
-        "workload": null
-      }
-    ]
+    }
   },
   {
     "gate": false,
@@ -5452,179 +5635,6 @@
           "verdict": "warn"
         },
         "report_rel": "runs/2026-08-16-31946286609/waitcheck/sanitizer_report.json",
-        "verdict": "warn",
-        "worklist": {
-          "kernel_count": 3,
-          "requirement": "top_dispatch_count",
-          "top_n": 3
-        }
-      }
-    }
-  },
-  {
-    "gate": true,
-    "meta": {
-      "commit": "b4be48fdd6dd",
-      "commit_full": "b4be48fdd6dd7e12056a6141c93377feed9f1688",
-      "date": "2026-08-15",
-      "gate": true,
-      "gpu": "gfx950",
-      "run": "2026-08-15-31883858931",
-      "run_url": "https://github.com/ROCm/aorta/actions/runs/31883858931"
-    },
-    "rel": "runs/2026-08-15-31883858931",
-    "rows": {
-      "consan-clean": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
-        "expected": "pass",
-        "finding_groups": [],
-        "findings": 0,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "pass"
-          }
-        ],
-        "match": true,
-        "observation": "consan pass; preflight pass",
-        "present": true,
-        "primary": {
-          "preflight": "pass",
-          "reason": null,
-          "sanitizer": "consan",
-          "verdict": "pass"
-        },
-        "report_rel": "runs/2026-08-15-31883858931/consan-clean/sanitizer_report.json",
-        "verdict": "pass",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "consan-racy": {
-        "backend": null,
-        "cls": "guardrail",
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
-        "expected": "fail",
-        "finding_groups": [
-          {
-            "code": "1",
-            "count": 64,
-            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=32008816 index=0 kind=1 code_object=fnv1a64:7db8350dfcf3fedf report_generation=2 generation=2 epo\u2026",
-            "sanitizer": "consan",
-            "severity": "race"
-          }
-        ],
-        "findings": 64,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "",
-            "dispatch": 1,
-            "findings": 64,
-            "name": "consan_lds_race_2wave",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "fail"
-          }
-        ],
-        "match": true,
-        "observation": "consan fail; 64 finding(s) (1); preflight pass",
-        "present": true,
-        "primary": {
-          "preflight": "pass",
-          "reason": null,
-          "sanitizer": "consan",
-          "verdict": "fail"
-        },
-        "report_rel": "runs/2026-08-15-31883858931/consan-racy/sanitizer_report.json",
-        "verdict": "fail",
-        "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
-        }
-      },
-      "waitcheck": {
-        "backend": {
-          "name": "rj_waitcheck",
-          "sha": "47bcf0f888f9"
-        },
-        "cls": "guardrail",
-        "coverage": "",
-        "execution": "complete",
-        "expected": "warn",
-        "finding_groups": [
-          {
-            "code": "wait_hazard",
-            "count": 64,
-            "example": "sol_126578.hsaco:gfx950[0]:.text+0x28f8: missing s_waitcnt lgkmcnt(14) before use of v88",
-            "sanitizer": "waitcheck",
-            "severity": "warning"
-          }
-        ],
-        "findings": 64,
-        "kernel_reasons": [],
-        "kernels": [
-          {
-            "code_object": "sol_126578.hsaco",
-            "detail": "",
-            "dispatch": 479,
-            "findings": 32,
-            "name": "gemm_NT_M256_N4096_K1024",
-            "offset": null,
-            "sha": "5bd40b78d1",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_175415.hsaco",
-            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once",
-            "dispatch": 471,
-            "findings": 0,
-            "name": "gemm_NT_M128_N4096_K1280",
-            "offset": null,
-            "sha": "5bd40b78d1",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_137678.hsaco",
-            "detail": "",
-            "dispatch": 440,
-            "findings": 32,
-            "name": "gemm_TT_M64_N64_K1280",
-            "offset": null,
-            "sha": "7ea836fe29",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          }
-        ],
-        "match": true,
-        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
-        "present": true,
-        "primary": {
-          "preflight": null,
-          "reason": null,
-          "sanitizer": "waitcheck",
-          "verdict": "warn"
-        },
-        "report_rel": "runs/2026-08-15-31883858931/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
           "kernel_count": 3,
