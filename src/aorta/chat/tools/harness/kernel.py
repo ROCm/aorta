@@ -27,6 +27,18 @@ MIN_ELEMENTS = 4096
 _KERNEL_SIG = re.compile(r"__global__\s+(?:[\w:]+\s+)*?void\s+(\w+)\s*\(", re.MULTILINE)
 _SHARED_DECL = re.compile(r"__shared__\s+[\w:]+\s+\w+\s*\[\s*([^\]]+?)\s*\]")
 _DEFINE = re.compile(r"^\s*#\s*define\s+(\w+)\s+(\w+)\s*$", re.MULTILINE)
+#: A kernel that reads threadIdx.y is written for a two-dimensional block, and
+#: launching it one-dimensionally does not fail -- it runs with that index
+#: pinned at zero, touching a different set of addresses than the author wrote.
+_USES_DIM = {
+    "y": re.compile(r"\b(?:threadIdx|blockDim|blockIdx)\.y\b"),
+    "z": re.compile(r"\b(?:threadIdx|blockDim|blockIdx)\.z\b"),
+}
+
+
+def dims_used(source: str) -> list[str]:
+    """Which of y and z the kernel indexes, in order."""
+    return [axis for axis, pattern in _USES_DIM.items() if pattern.search(source)]
 _MAIN = re.compile(r"\bint\s+main\s*\(", re.MULTILINE)
 _IDENT = re.compile(r"[A-Za-z_]\w*$")
 
@@ -140,8 +152,28 @@ def infer_block_size(source: str) -> int:
     return best or DEFAULT_BLOCK
 
 
+def _block_arg(block: int, block_y: int, block_z: int) -> str:
+    """The block argument, as dim3 only when more than one dimension is in use.
+
+    A scalar where a scalar will do: <<<1, 256>>> is what someone reading the
+    generated harness expects, and dim3(256, 1, 1) invites the question of what
+    the other two are for.
+    """
+    if block_z:
+        return f"dim3({block}, {max(block_y, 1)}, {block_z})"
+    if block_y:
+        return f"dim3({block}, {block_y})"
+    return str(block)
+
+
 def build_harness(
-    source: str, *, block: int = 0, grid: int = 0, elements: int = 0
+    source: str,
+    *,
+    block: int = 0,
+    grid: int = 0,
+    elements: int = 0,
+    block_y: int = 0,
+    block_z: int = 0,
 ) -> str:
     """Wrap a bare kernel in a main() that launches it once."""
     name = kernel_name(source)
@@ -150,7 +182,13 @@ def build_harness(
     grid = grid or DEFAULT_GRID
     if not 1 <= block <= 1024:
         raise HarnessError(f"block size {block} is outside the valid range 1..1024.")
-    count = elements or max(block * grid * 4, MIN_ELEMENTS)
+    threads = block * max(block_y, 1) * max(block_z, 1)
+    if threads > 1024:
+        raise HarnessError(
+            f"a block of {block}x{max(block_y, 1)}x{max(block_z, 1)} is "
+            f"{threads} threads, past the 1024 a block may have."
+        )
+    count = elements or max(threads * grid * 4, MIN_ELEMENTS)
 
     prologue = "" if "hip_runtime.h" in source else "#include <hip/hip_runtime.h>\n"
     prologue += "" if "cstdio" in source or "stdio.h" in source else "#include <cstdio>\n"
@@ -184,7 +222,8 @@ def build_harness(
             f"  constexpr size_t kElements = {count};",
             *setup,
             "",
-            f"  {name}<<<{grid}, {block}>>>({', '.join(args)});",
+            f"  {name}<<<{grid}, {_block_arg(block, block_y, block_z)}>>>"
+            f"({', '.join(args)});",
             "  const hipError_t launch = hipGetLastError();",
             "  const hipError_t sync = hipDeviceSynchronize();",
             "",
@@ -211,6 +250,13 @@ class Prepared:
     wrapped: bool
     block: int
     grid: int
+    block_y: int = 0
+    block_z: int = 0
+
+    @property
+    def threads(self) -> int:
+        """Threads per block across every dimension the launch uses."""
+        return self.block * max(self.block_y, 1) * max(self.block_z, 1)
 
     @property
     def single_wave(self) -> bool:
@@ -218,12 +264,22 @@ class Prepared:
 
         ConSan finds conflicts between waves, so this geometry can only ever
         return a clean result and must not be read as proof the kernel is safe.
+
+        Counted across the block rather than its first dimension: 32x32 is a
+        thousand threads and sixteen waves, and reading the 32 alone would have
+        warned about a launch that is nothing like single-wave.
         """
-        return self.wrapped and self.block <= WAVEFRONT
+        return self.wrapped and self.threads <= WAVEFRONT
 
 
 def prepare_source(
-    source: str, *, block: int = 0, grid: int = 0, elements: int = 0
+    source: str,
+    *,
+    block: int = 0,
+    grid: int = 0,
+    elements: int = 0,
+    block_y: int = 0,
+    block_z: int = 0,
 ) -> Prepared:
     """Turn a pasted kernel or program into something ConSan can run."""
     source = source.strip()
@@ -240,9 +296,37 @@ def prepare_source(
         prefix = "#include <hip/hip_runtime.h>\n" if needs_include else ""
         return Prepared(prefix + source + "\n", name, False, 0, 0)
 
+    # A kernel indexing threadIdx.y launched one-dimensionally does not fail.
+    # It runs with that index pinned at zero, over a different set of addresses
+    # than the author wrote -- so a race between rows cannot occur, and the
+    # clean result that follows is about a kernel nobody asked to check. There
+    # is nothing in the source that says how wide the second dimension should
+    # be, so this asks rather than guessing.
+    missing = [
+        axis
+        for axis in dims_used(source)
+        if not (block_y if axis == "y" else block_z)
+    ]
+    if missing:
+        named = " and ".join(f"threadIdx.{axis}" for axis in missing)
+        wanted = ", ".join(f"block_{axis}" for axis in missing)
+        raise HarnessError(
+            f"this kernel indexes {named}, so it needs a block with that many "
+            f"dimensions. Pass {wanted} -- a 32x32 tile is block_size=32, "
+            "block_y=32. Launched one-dimensionally the index would be zero "
+            "throughout and the run would not exercise what you pasted."
+        )
+
     resolved_block = block or infer_block_size(source)
     resolved_grid = grid or DEFAULT_GRID
     program = build_harness(
-        source, block=resolved_block, grid=resolved_grid, elements=elements
+        source,
+        block=resolved_block,
+        grid=resolved_grid,
+        elements=elements,
+        block_y=block_y,
+        block_z=block_z,
     )
-    return Prepared(program, name, True, resolved_block, resolved_grid)
+    return Prepared(
+        program, name, True, resolved_block, resolved_grid, block_y, block_z
+    )

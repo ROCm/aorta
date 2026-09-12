@@ -337,6 +337,8 @@ def triage_kernel_source(
     label: str = "",
     block_size: int = 0,
     grid_size: int = 0,
+    block_y: int = 0,
+    block_z: int = 0,
     force: bool = False,
 ) -> str:
     """Compile a HIP kernel the user supplied and run it under a sanitizer.
@@ -352,9 +354,13 @@ def triage_kernel_source(
     Args:
         source: The HIP kernel source to analyse, exactly as the user pasted it.
         label: Short human label for the run, e.g. "user reduction kernel".
-        block_size: Threads per block. Leave 0 to infer from the kernel's
+        block_size: Threads per block in x. Leave 0 to infer from the kernel's
             __shared__ array size.
         grid_size: Blocks to launch. Leave 0 for a single block.
+        block_y: Threads per block in y. Required for a kernel that indexes
+            threadIdx.y -- a 32x32 tile is block_size=32, block_y=32. Leave 0
+            for a one-dimensional kernel.
+        block_z: Threads per block in z, for a kernel that indexes threadIdx.z.
         force: Re-run on hardware even if this exact kernel was already triaged
             in this conversation. Leave false; the cached verdict is the same run.
 
@@ -362,12 +368,18 @@ def triage_kernel_source(
         The sanitizer findings, the tools that ran, and the Autopsy verdict.
     """
     try:
-        prepared = prepare_source(source, block=block_size, grid=grid_size)
+        prepared = prepare_source(
+            source,
+            block=block_size,
+            grid=grid_size,
+            block_y=block_y,
+            block_z=block_z,
+        )
     except HarnessError as exc:
         return f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
 
     cache = current_tool_cache().triage
-    cache_key = (source.strip(), block_size, grid_size)
+    cache_key = (source.strip(), block_size, grid_size, block_y, block_z)
     cached = None if force else cache.get(cache_key)
     if cached is not None:
         return (
@@ -396,7 +408,7 @@ def triage_kernel_source(
 
     if prepared.single_wave:
         lines.append(
-            f"WARNING — geometry caveat: the harness launched {prepared.block} "
+            f"WARNING — geometry caveat: the harness launched {prepared.threads} "
             f"threads, which is a single {WAVEFRONT}-lane wavefront. "
             f"ConSan only reports conflicts BETWEEN waves, so this run cannot "
             f"show a cross-wave race and a 'pass' here does NOT mean the kernel "
