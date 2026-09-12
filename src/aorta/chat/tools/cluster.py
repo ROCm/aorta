@@ -570,7 +570,12 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         "the kernel was tested."
     )
     result = "\n".join([body, "", *note])
-    cache.put(cache_key, result)
+    # The same rule the kernel path keeps: a timeout, a launch failure or an
+    # Autopsy that produced no report is worth retrying, and caching one means
+    # the next attempt replays it instead -- for the rest of the conversation,
+    # since the key is the paste and the paste has not changed.
+    if "Autopsy verdict:" in result:
+        cache.put(cache_key, result)
     return result
 
 @tool

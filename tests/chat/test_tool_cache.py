@@ -170,6 +170,53 @@ class TestReuseStillWorksWhereItShould:
         assert len(cluster.triage_calls) == 2
         assert "Reusing" not in forced
 
+    def test_a_failed_assembly_run_is_not_remembered_either(self, cluster, monkeypatch):
+        """The assembly path cached everything, including its own errors.
+
+        The key is the paste, so a timeout cached against it was replayed for
+        the rest of the conversation -- the user re-asks, the cluster has since
+        freed up, and they are handed the old timeout.
+        """
+        attempts = []
+
+        def flaky(extra_args, label):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return "Error: triage exceeded 1800s."
+            return "Autopsy verdict:\n  category: gpu_race"
+
+        monkeypatch.setattr(cluster, "_run_triage", flaky)
+        monkeypatch.setattr(cluster, "_assemble", lambda build: None)
+        monkeypatch.setattr(cluster.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(cluster, "write_asm_recipe", lambda **kwargs: "/tmp/r.yaml")
+
+        with use_tool_cache(ToolCache()):
+            cluster.triage_assembly_source.func(_ASM)
+            second = cluster.triage_assembly_source.func(_ASM)
+
+        assert len(attempts) == 2, "the timeout was replayed instead of retried"
+        assert "gpu_race" in second
+
+    def test_a_completed_assembly_run_is_still_reused(self, cluster, monkeypatch):
+        """The guard must not switch the caching off altogether."""
+        attempts = []
+
+        def ok(extra_args, label):
+            attempts.append(1)
+            return "Autopsy verdict:\n  category: gpu_race"
+
+        monkeypatch.setattr(cluster, "_run_triage", ok)
+        monkeypatch.setattr(cluster, "_assemble", lambda build: None)
+        monkeypatch.setattr(cluster.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(cluster, "write_asm_recipe", lambda **kwargs: "/tmp/r.yaml")
+
+        with use_tool_cache(ToolCache()):
+            cluster.triage_assembly_source.func(_ASM)
+            second = cluster.triage_assembly_source.func(_ASM)
+
+        assert len(attempts) == 1
+        assert "Reusing" in second
+
     def test_a_failed_run_is_not_remembered(self, cluster, monkeypatch):
         """A transient launch failure should be retried, not cached."""
         monkeypatch.setattr(
