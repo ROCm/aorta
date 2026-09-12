@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any
 
 from langchain_core.messages import (
@@ -54,6 +56,11 @@ RULES:
 10. When multiple files are relevant, list ALL of them with file paths.
 11. A run artifact that reports a field as "unknown" or "NOT RECORDED" did not \
    record it. That is not zero and not a pass -- say the run did not record it.
+12. When the user pastes a kernel, an assembly listing or a workload together with a \
+   symptom, run the matching diagnostic tool on it before you answer, however clearly \
+   you think you can see the bug by reading it. Reading produces a guess, and a guess \
+   that happens to be right is indistinguishable, to the person reading your answer, \
+   from one that is not. Only say a thing was observed if a tool observed it.
 
 RETRIEVED CONTEXT:
 {context}
@@ -91,11 +98,18 @@ ROUTER_PROMPT = """\
 Classify the user's latest message into one of two categories:
 - "question": a simple, specific question that can be answered with retrieved context \
   alone (e.g. "What does function X do?", "How is class Y structured?")
-- "action": requires using tools to search, list, read files, run commands, or find \
-  multiple items (e.g. "Find all functions that ...", "Search for ...", "List all ...", \
-  "How do I run ...", "Show me the files in ...")
+- "action": requires using tools to search, list, read files, run commands, find \
+  multiple items, or diagnose a workload on the cluster (e.g. "Find all functions that ...", \
+  "Search for ...", "List all ...", "How do I run ...", "Show me the files in ...")
 
 If the message asks to find, search, list, or enumerate multiple items, classify as action.
+
+If the message carries pasted source, assembly, a log or a stack trace along with a symptom \
+-- wrong or non-deterministic results, a crash, a hang, a loss that stops being a number -- \
+classify as action, whether or not it names a tool. Answering it means compiling that code \
+and running it under a sanitizer on a GPU, which no amount of retrieved context substitutes \
+for: retrieved context can only produce a guess that reads like a diagnosis.
+
 If in doubt, classify as action.
 
 Reply with ONLY the single word: question or action
@@ -179,29 +193,41 @@ def _summary_line(tool: BaseTool) -> str:
     return lines[0].strip() if lines else "no description"
 
 
-def _plugin_tool_help(tools: dict[str, ChatTool]) -> str:
-    """Advertise plugin-contributed tools, or return "" when there are none.
+def _undocumented_tool_help(tools: dict[str, ChatTool], documented_in: str) -> str:
+    """Describe the registered tools *documented_in* does not already cover.
 
-    The hand-written lists above cover the built-ins; a tool discovered from the
-    ``aorta.chat_tools`` entry-point group has to describe itself. Only the text
-    protocol needs this -- ``bind_tools()`` sends every tool's real schema, so
-    the native protocol offers plugin tools whether or not the prompt says so.
+    The ACTION: protocol can only reach a tool the prompt lists, so anything
+    missing here is invisible to it however well it is registered -- the model
+    answers from its own knowledge instead, plausibly, without ever running
+    anything. ``bind_tools()`` sends every tool's real schema, so the native
+    protocol is unaffected either way.
 
-    Returns the empty string when nothing is installed, so both prompts stay
+    This used to select by origin: everything from outside the ``aorta``
+    package, on the assumption that aorta's own tools were all hand-written
+    into the lists above. Tools added to the package later were then documented
+    nowhere and reachable only through the native protocol. Selecting by what
+    the prompt actually says keeps that from depending on where a tool lives.
+
+    Returns the empty string when nothing is missing, so both prompts stay
     byte-identical to what a user with no plugins had before.
     """
-    extra = [entry for entry in tools.values() if entry.source_package != "aorta"]
-    if not extra:
+    missing = [e for e in tools.values() if f"{e.name}(" not in documented_in]
+    if not missing:
         return ""
+
+    already = len(re.findall(r"^\d+\.", documented_in, re.MULTILINE))
     lines = [
-        f"{index}. {entry.name}(...) - {_summary_line(entry.tool)} "
-        f"[from {entry.source_package}]"
-        # Counted from the built-ins actually registered, not from
-        # BUILTIN_CHAT_TOOLS, whose length stopped saying how many the prompt
-        # listed once the shell tool became conditional.
-        for index, entry in enumerate(extra, start=len(enabled_builtins()) + 1)
+        f"{index}. {entry.name}(...) - {_summary_line(entry.tool)}"
+        # The origin is worth naming for a third party's tool and noise for
+        # one of ours.
+        + (f" [from {entry.source_package}]" if entry.source_package != "aorta" else "")
+        # Counted from the numbered entries the prompt actually shows, which is
+        # what len(enabled_builtins()) was reaching for: the conditional shell
+        # tool is described in an unnumbered bullet, so counting the registry
+        # would leave a gap in the sequence the model reads.
+        for index, entry in enumerate(missing, start=already + 1)
     ]
-    return "\nAdditional tools contributed by installed plugins:\n\n" + "\n".join(lines) + "\n"
+    return "\nAdditional tools:\n\n" + "\n".join(lines) + "\n"
 
 
 #: Appended to the prompts only when the shell tool is registered. Keeping it
@@ -228,20 +254,50 @@ def _shell_tool_help(fragment: str) -> str:
     return fragment if settings.enable_shell_tool else ""
 
 
-TOOL_DESCRIPTIONS = (
-    _BUILTIN_TOOL_DESCRIPTIONS
-    + _shell_tool_help(_SHELL_TOOL_ACT_HELP)
-    + _plugin_tool_help(CHAT_TOOLS)
+def _tool_help(documented: str) -> str:
+    """*documented* plus a description of anything registered it leaves out.
+
+    Composed rather than concatenated because the two questions are the same
+    one: a tool is missing from the prompt if the prompt does not describe it,
+    whoever shipped it and whether or not it is switched on. Passing the
+    already-composed text means the conditional shell tool, described in its
+    own bullet above, is not then listed a second time as undescribed.
+    """
+    return documented + _undocumented_tool_help(CHAT_TOOLS, documented)
+
+
+TOOL_DESCRIPTIONS = _tool_help(
+    _BUILTIN_TOOL_DESCRIPTIONS + _shell_tool_help(_SHELL_TOOL_ACT_HELP)
 )
-PLAN_PROMPT = (
-    _BUILTIN_PLAN_PROMPT
-    + _shell_tool_help(_SHELL_TOOL_PLAN_HELP)
-    + _plugin_tool_help(CHAT_TOOLS)
+PLAN_PROMPT = _tool_help(
+    _BUILTIN_PLAN_PROMPT + _shell_tool_help(_SHELL_TOOL_PLAN_HELP)
 )
 
 
 def _get_llm(**kwargs):
     return get_chat_llm(**kwargs)
+
+
+def _system_first(messages: list[Any]) -> list[Any]:
+    """Collapse the system messages into a single leading one.
+
+    Some providers reject a conversation whose system message is anywhere but
+    the front -- AMD's on-prem gateway answers ``System message must be at the
+    beginning`` and refuses the call, which takes out every model served from
+    it. The act nodes add a second system message ahead of the history to force
+    a behaviour for one turn: fine for the providers that allow it, fatal for
+    the ones that do not.
+
+    Merging preserves the order the instructions were added in, so the forcing
+    message still reads as an amendment to the standing prompt.
+    """
+    system = [m for m in messages if isinstance(m, SystemMessage)]
+    if not system or (len(system) == 1 and messages[0] is system[0]):
+        return messages
+
+    bodies = [str(m.content).strip() for m in system]
+    merged = SystemMessage(content="\n\n".join(b for b in bodies if b))
+    return [merged, *(m for m in messages if not isinstance(m, SystemMessage))]
 
 
 async def _send(llm: Any, messages: list[Any]) -> Any:
@@ -251,7 +307,7 @@ async def _send(llm: Any, messages: list[Any]) -> Any:
     the gate cannot be bypassed by a node added later. It takes the already-
     bound model, so the tool-calling path is covered too.
     """
-    return await llm.ainvoke(redact_for_send(messages))
+    return await llm.ainvoke(_system_first(redact_for_send(messages)))
 
 
 def _build_system_message(context: str = "") -> SystemMessage:
@@ -431,6 +487,138 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     return {"route": route}
 
 
+# ──────────────────── Select ─────────────────────
+
+_SELECTOR_PROMPT = """\
+You help engineers debug GPU workloads. Below is every tool available, with
+what it does and what evidence it returns.
+
+{catalogue}
+
+Given the user's problem, choose the {limit} tools most likely to identify the
+cause, best first.
+
+Judge only on this: would the evidence that tool returns actually answer this
+problem?
+
+If nothing fits, return fewer tools, or none. A wrong tool costs a cluster job
+and sends the engineer down the wrong path.
+
+Reply as JSON and nothing else:
+{{"tools": ["first", "second"], "why": "one sentence naming the evidence that decided it"}}
+"""
+
+#: Markers that do not occur in a sentence about code. A fence is a fence, and
+#: nobody writes ``__global__`` in prose. Anywhere in the text is enough.
+_CODE_MARKERS = ("```", "__global__", "__shared__", "s_load", "v_mov")
+
+#: Keywords that are also ordinary English: "I import the model and define a
+#: class for it" is a description, not a paste. They count only at the start of
+#: a line, which is where they fall in code and almost never in a sentence.
+_LINE_START_MARKERS = ("def ", "class ", "import ")
+
+#: How many of the recent human turns to look back over for a paste. Long
+#: enough to cover a clarifying exchange about the code, short enough that a
+#: kernel from far earlier in a long session is not still deciding what the
+#: current question is allowed to reach for.
+_SOURCE_LOOKBACK = 6
+
+
+def _looks_like_pasted_source(text: str) -> bool:
+    """Whether the message carries code, as opposed to describing some."""
+    if any(marker in text for marker in _CODE_MARKERS):
+        return True
+    return any(line.lstrip().startswith(_LINE_START_MARKERS) for line in text.splitlines())
+
+
+def _conversation_has_source(messages: list) -> bool:
+    """Whether the user has pasted code in the recent part of this conversation.
+
+    The paste and the instruction to act on it are usually different turns: a
+    kernel arrives, the agent asks what block size to launch it with, and the
+    reply is "yes, run the sanitizer on it". Reading only the newest message
+    finds no code in that reply and withdraws the source tools from precisely
+    the turn that asked for them.
+
+    Only the human turns count. The requirement is that the *user* supplied
+    something to analyse, and the tool is going to be handed that text.
+    """
+    human = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+    return any(_looks_like_pasted_source(text) for text in human[-_SOURCE_LOOKBACK:])
+
+
+def _first_json_object(text: str) -> dict | None:
+    """The first JSON object in *text*, ignoring anything around it.
+
+    Models answer the question and then explain themselves, and an explanation
+    containing a brace defeats slicing between the first "{" and the last "}"
+    -- the slice then spans JSON plus prose and fails to parse as either.
+    ``raw_decode`` reads one value and stops, which is what "reply as JSON" was
+    always asking for.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+async def selector_node(state: AgentState) -> dict[str, Any]:
+    """Rank the tools by what evidence each returns.
+
+    Not a routing table. The model is shown what each tool produces and asked
+    whether that would answer this question, so a problem described in words
+    nobody anticipated still reaches the right instrument.
+
+    Advisory: on any failure the act node still sees every tool. The only thing
+    enforced is structural -- a tool that reads pasted source cannot run when
+    nothing was pasted.
+    """
+    from aorta.chat.tools.capabilities import MAX_CANDIDATES, catalogue, enforce_requirements
+
+    text = str(state["messages"][-1].content)
+    proposed: list[str] = []
+    why = ""
+    try:
+        llm = _get_llm(temperature=0.0, streaming=False)
+        # Through _send, like every other node: this one carries the user's
+        # message verbatim, and for this package that message is pasted kernel
+        # source and the paths and hostnames around it.
+        response = await _send(
+            llm,
+            [
+                SystemMessage(
+                    content=_SELECTOR_PROMPT.format(
+                        catalogue=catalogue(), limit=MAX_CANDIDATES
+                    )
+                ),
+                HumanMessage(content=text),
+            ],
+        )
+        payload = _first_json_object(str(response.content or ""))
+        if payload:
+            tools = payload.get("tools")
+            proposed = [t for t in tools if t in TOOL_REGISTRY] if isinstance(tools, list) else []
+            why = str(payload.get("why", ""))
+    except Exception as exc:
+        logger.warning("Selector unavailable (%s); the agent will see every tool.", exc)
+
+    candidates, dropped = enforce_requirements(
+        proposed[:MAX_CANDIDATES],
+        has_pasted_source=_conversation_has_source(state["messages"]),
+    )
+    if dropped:
+        why = (
+            f"{why} Dropped {', '.join(dropped)}: "
+            "nothing was pasted in this conversation."
+        ).strip()
+    logger.info("Selector: %s", candidates or "no candidate")
+    return {"candidate_tools": candidates, "selection_rationale": why}
+
+
 # ──────────────────── Plan ───────────────────────
 
 
@@ -440,12 +628,15 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
     repo_map = load_repo_map()
     last_msg = state["messages"][-1]
 
+    recommendation = _recommendation(state)
+    system = PLAN_PROMPT + f"\n\nREPOSITORY MAP:\n{repo_map}"
+    if recommendation:
+        system += f"\n\n{recommendation}"
+
     response = await _send(
         llm,
         [
-            SystemMessage(
-                content=PLAN_PROMPT + f"\n\nREPOSITORY MAP:\n{repo_map}"
-            ),
+            SystemMessage(content=system),
             HumanMessage(content=last_msg.content),
         ]
     )
@@ -606,6 +797,38 @@ async def act_node(state: AgentState) -> dict[str, Any]:
     )
 
 
+def _recommendation(state: AgentState) -> str:
+    """The selector's ranking, phrased so it can only widen the choice.
+
+    Without this the ranking reached the screen and nothing else:
+    ``candidate_tools`` was written by ``selector_node``, kept in state, shown
+    in the UI, and read by no node -- so the selector cost a model call per turn
+    and changed nothing about which tool ran. A ranking that does not reach the
+    model is not advisory, it is decorative.
+
+    It is advice and says so. The full tool list is still bound, and a tool the
+    selector left out is still allowed, so a bad ranking loses nothing that was
+    previously available -- which is the property that makes it safe to act on
+    an LLM's opinion of an LLM's options.
+    """
+    candidates = [c for c in (state.get("candidate_tools") or []) if c]
+    if not candidates:
+        # The selector declined, or its output could not be parsed. Saying
+        # nothing leaves the model exactly where it was before this node ran.
+        return ""
+
+    lines = [f"Most likely tools for this request, best first: {', '.join(candidates)}."]
+    why = (state.get("selection_rationale") or "").strip()
+    if why:
+        lines.append(f"Why: {why}")
+    lines.append(
+        "This is a ranking, not a restriction. Every registered tool is still "
+        "available, and one that is not listed is still the right call if the "
+        "request needs it."
+    )
+    return "\n".join(lines)
+
+
 def _act_messages(state: AgentState) -> list[Any]:
     """System framing shared by both protocols."""
     context = state.get("retrieved_context", "")
@@ -613,6 +836,9 @@ def _act_messages(state: AgentState) -> list[Any]:
     critic_fb = state.get("critic_feedback", "")
 
     messages: list[Any] = [_build_system_message(context)]
+    recommendation = _recommendation(state)
+    if recommendation:
+        messages.append(SystemMessage(content=recommendation))
     if plan:
         messages.append(SystemMessage(content=f"PLAN:\n{plan}"))
     if critic_fb:
@@ -757,22 +983,14 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
     """ReAct-style loop: LLM outputs ACTION lines, we execute and feed back."""
     llm = _get_llm(temperature=0.1, streaming=False)
 
-    context = state.get("retrieved_context", "")
-    plan = state.get("plan", "")
-    critic_fb = state.get("critic_feedback", "")
-
-    system = _build_system_message(context)
-    messages = [system, SystemMessage(content=TOOL_DESCRIPTIONS)]
-
-    if plan:
-        messages.append(SystemMessage(content=f"PLAN:\n{plan}"))
-    if critic_fb:
-        messages.append(
-            SystemMessage(
-                content=f"PREVIOUS COMMAND FAILED:\n{critic_fb}\n"
-                "Analyze the error and retry with a corrected command."
-            )
-        )
+    # The same framing as the native protocol, rather than a second copy of it.
+    # They were built separately and drifted: the selector's ranking was added
+    # to one and not the other, so on the default tool mode the ranking reached
+    # the screen and never the model.
+    messages = _act_messages(state)
+    # This protocol has no tool-calling API, so the tools are described in the
+    # prompt. Before the ranking, which is a ranking *of* them.
+    messages.insert(1, SystemMessage(content=TOOL_DESCRIPTIONS))
 
     last_human = ""
     for msg in reversed(state["messages"]):

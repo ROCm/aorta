@@ -1,7 +1,8 @@
 """End-to-end graph tests: full router -> plan -> retrieve -> act -> critic flow.
 
 Every node in the action path asks for its own chat model, so each test scripts
-one fake LLM per node in visit order. ``make_llm_sequence`` reports a shortfall
+one fake LLM per node in visit order -- including ``select``, which runs
+between the router and the plan and asks for a tool shortlist. ``make_llm_sequence`` reports a shortfall
 as a readable AssertionError; a bare iterator surfaces it as ``RuntimeError:
 coroutine raised StopIteration`` from deep inside asyncio instead.
 
@@ -13,12 +14,19 @@ retry ceiling untouched.
 
 from __future__ import annotations
 
+import json
+
 from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from tests.chat.conftest import make_fake_llm, make_llm_sequence
+
+
+def _selector_llm(*tools: str):
+    """Fake the select node's one call, which returns a ranked shortlist."""
+    return make_fake_llm([json.dumps({"tools": list(tools), "why": "scripted"})])
 
 
 def _patch_settings(
@@ -41,6 +49,7 @@ class TestEndToEndGraph:
     async def test_full_flow_direct_answer(self, fake_retriever):
         """Full graph: router -> plan -> retrieve -> act answers -> critic passes."""
         router_llm = make_fake_llm(["action"])
+        selector_llm = _selector_llm("list_files")
         plan_llm = make_fake_llm(["1. Read src/main.py to find the entry point."])
         act_llm = make_fake_llm(["The AORTA main entry point is src/main.py."])
         critic_llm = make_fake_llm(["VALID"])
@@ -50,7 +59,7 @@ class TestEndToEndGraph:
             patch(
                 "aorta.chat.graph.nodes._get_llm",
                 side_effect=make_llm_sequence(
-                    router_llm, plan_llm, act_llm, critic_llm
+                    router_llm, selector_llm, plan_llm, act_llm, critic_llm
                 ),
             ),
             patch("aorta.chat.graph.nodes.load_repo_map", return_value="(test map)"),
@@ -85,6 +94,7 @@ class TestEndToEndGraph:
     async def test_full_flow_with_tool_call(self, fake_retriever):
         """Full graph: act calls a tool, then answers, and the critic passes."""
         router_llm = make_fake_llm(["action"])
+        selector_llm = _selector_llm("list_files")
         plan_llm = make_fake_llm(['1. list_files(path=".")'])
         act_llm = make_fake_llm([
             'ACTION: list_files(path=".")',
@@ -97,7 +107,7 @@ class TestEndToEndGraph:
             patch(
                 "aorta.chat.graph.nodes._get_llm",
                 side_effect=make_llm_sequence(
-                    router_llm, plan_llm, act_llm, critic_llm
+                    router_llm, selector_llm, plan_llm, act_llm, critic_llm
                 ),
             ),
             patch("aorta.chat.graph.nodes.load_repo_map", return_value="(test map)"),
@@ -131,6 +141,7 @@ class TestEndToEndGraph:
     async def test_critic_rejection_triggers_retry(self, fake_retriever):
         """Full graph: critic rejects the answer, act runs a second time."""
         router_llm = make_fake_llm(["action"])
+        selector_llm = _selector_llm("list_files")
         plan_llm = make_fake_llm(["1. Find the scenario runner."])
         act_llm_first = make_fake_llm(["Run: bash experiment.sh --gpu 0"])
         critic_llm_first = make_fake_llm([
@@ -145,6 +156,7 @@ class TestEndToEndGraph:
                 "aorta.chat.graph.nodes._get_llm",
                 side_effect=make_llm_sequence(
                     router_llm,
+                    selector_llm,
                     plan_llm,
                     act_llm_first,
                     critic_llm_first,
@@ -182,6 +194,7 @@ class TestEndToEndGraph:
         ``src.graph.nodes.settings`` never controls it.
         """
         router_llm = make_fake_llm(["action"])
+        selector_llm = _selector_llm("list_files")
         plan_llm = make_fake_llm(["1. Find the scenario runner."])
         act_llm = make_fake_llm(["Run: bash experiment.sh --gpu 0"])
         critic_llm = make_fake_llm(["experiment.sh was never found."])
@@ -191,7 +204,7 @@ class TestEndToEndGraph:
             patch(
                 "aorta.chat.graph.nodes._get_llm",
                 side_effect=make_llm_sequence(
-                    router_llm, plan_llm, act_llm, critic_llm
+                    router_llm, selector_llm, plan_llm, act_llm, critic_llm
                 ),
             ),
             patch("aorta.chat.graph.nodes.load_repo_map", return_value="(test map)"),

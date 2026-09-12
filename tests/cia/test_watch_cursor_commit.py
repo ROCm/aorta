@@ -60,7 +60,9 @@ def job_root(tmp_path, monkeypatch):
         "aorta.cia.watch.bundle_writer.write_bundle",
         lambda job, jd, ev, sig: jd / "bundle",
     )
-    monkeypatch.setattr("aorta.cia.watch.trigger.trigger_autopsy", lambda b, j, r: None)
+    monkeypatch.setattr(
+        "aorta.cia.watch.trigger.trigger_autopsy", lambda b, j, r, stop=None: None
+    )
     return root, job_dir
 
 

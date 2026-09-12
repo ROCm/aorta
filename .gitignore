@@ -134,3 +134,9 @@ buck-out/
 # (`tests/instrumentation/fixtures/proton/`), and an unanchored pattern would
 # silently ignore the next one somebody adds.
 /*.hatchet
+
+# Site-specific launchers: these name one machine's venv, proxy and
+# sanitizer paths, which is the thing tests/cia/test_settings_neutral.py
+# keeps out of the package.
+start-chat.sh
+chainlit.md

@@ -11,6 +11,7 @@ from typing import Any, TextIO
 import yaml
 
 from aorta.cia.autopsy.adapters.stderr_watch import scan_stderr_text
+from aorta.cia.cancellation import Stop, pause, stopped
 from aorta.cia.launch.job import JobRecord
 from aorta.cia.launch.registry import scan_active_jobs
 from aorta.cia.watch.cursors import load_cursors, read_new_bytes, save_cursors
@@ -102,6 +103,7 @@ def poll_jobs(
     *,
     config_path: Path | None = None,
     max_rounds: int | None = None,
+    stop: Stop = None,
 ) -> None:
     """Main watch loop: discover active jobs and monitor their logs with LLM."""
     cfg = _load_watch_config(config_path)
@@ -134,6 +136,9 @@ def poll_jobs(
     print(f"[watch] polling {jobs_root} every {interval}s")
 
     while max_rounds is None or rounds < max_rounds:
+        if stopped(stop):
+            print("[watch] caller gave up; ending the poll loop")
+            return
         rounds += 1
         active = scan_active_jobs(jobs_root)
 
@@ -279,7 +284,7 @@ def poll_jobs(
                 from aorta.cia.watch.bundle_writer import write_bundle
                 from aorta.cia.watch.trigger import trigger_autopsy
                 bundle = write_bundle(job, job_dir, evidence or new_content[:4000], signal)
-                trigger_autopsy(bundle, job, jobs_root)
+                trigger_autopsy(bundle, job, jobs_root, stop=stop)
                 # continue, not break: break left the whole round, so a job that
                 # alerted every round starved every job listed after it. And the
                 # set above is what actually makes this once per job -- the
@@ -287,7 +292,9 @@ def poll_jobs(
                 alerted.add(job.job_id)
                 continue
 
-        time.sleep(interval)
+        if pause(stop, interval):
+            print("[watch] caller gave up; ending the poll loop")
+            return
 
 
 @dataclass
