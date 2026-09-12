@@ -647,8 +647,12 @@ def list_cluster_jobs(limit: int = 10) -> str:
     if not root.is_dir():
         return f"Error: jobs root {root} does not exist."
 
+    # A job is a directory with a job.json in it. The tools above also write
+    # under this root -- chat-kernels, chat-asm, staged -- and those are touched
+    # on every paste, so without this they sort to the top as recipe=? entries
+    # and push the jobs the user asked for out of the list entirely.
     dirs = sorted(
-        (d for d in root.iterdir() if d.is_dir()),
+        (d for d in root.iterdir() if d.is_dir() and (d / "job.json").is_file()),
         key=lambda d: d.stat().st_mtime,
         reverse=True,
     )[: max(1, min(limit, 50))]
