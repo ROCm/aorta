@@ -1,25 +1,28 @@
 # Automated dependency bumps (Phase 4 of docs/ci-plan.md).
 #
-# Dependabot opens PRs for newer versions; a human reviews (and, for stack-moving
-# bumps, runs the Refresh baselines workflow so the baseline diff shows the
-# numeric/perf impact). No auto-merge.
+# pip: Dependabot opens one grouped, auto-merging PR weekly (see
+# .github/workflows/dependabot-auto-merge.yml). The docker base image is NOT
+# tracked here -- the ROCm/Ubuntu OS image is bumped manually so an OS change
+# never lands unreviewed. github-actions bumps are weekly and human-merged.
 version: 2
 updates:
-  # Python deps (pyproject.toml extras + requirements*.txt).
+  # Python deps (requirements*.txt; pyproject.toml extras stay as >= floors).
   - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: weekly           # weekly bump PR (revisit cadence later)
+    # Caps version-update PRs so a still-open/failing bump blocks the next one.
+    # NOTE: Dependabot exempts security-update PRs from this limit and from the
+    # version-update group below, so more than one pip PR can be open at once
+    # (see docs/ci-nightly-eval.md).
+    open-pull-requests-limit: 1
     labels: ["dependencies", "python"]
+    groups:
+      python-deps:
+        applies-to: version-updates
+        patterns: ["*"]          # one combined PR for all pip version updates
 
-  # ROCm base image + other pinned images (bumps the FROM ... @sha256 digests).
-  - package-ecosystem: docker
-    directory: "/docker"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels: ["dependencies", "docker", "rocm"]
+  # (docker ecosystem intentionally omitted -- OS/base image is bumped manually)
 
   # GitHub Actions used by the workflows.
   - package-ecosystem: github-actions
