@@ -621,10 +621,12 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
     stem = _STAGED_STEM_RE.sub("_", name).strip("._")[:60] or "workload"
     script = staged / f"{stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.py"
     script.write_text(source, encoding="utf-8")
-    # {bundle} is substituted by the driver, so a workload that writes
-    # artifacts puts them where Autopsy will look.
+    # Run exactly as the user would run it. The bundle directory used to be
+    # appended here, which changed the program's argument contract: a training
+    # script with an argparse parser and no positional exits 2 rather than
+    # running. It arrives as AORTA_BUNDLE in the job environment instead.
     return _run_triage(
-        ["--command", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {{bundle}}"],
+        ["--command", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"],
         name,
     )
 

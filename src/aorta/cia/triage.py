@@ -334,8 +334,9 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     ap.add_argument("--command", help=(
         "Raw command to launch instead of a sanitizer sweep, for workloads that "
         "are not expressible as a recipe. '{bundle}' is replaced with the job's "
-        "bundle directory so the workload can drop artifacts where Autopsy reads "
-        "them."
+        "bundle directory, for a command that wants it as an argument; every job "
+        "also gets AORTA_BUNDLE in its environment, which costs the program "
+        "nothing."
     ))
     ap.add_argument("--kernel-name", default="",
                     help="Kernel to analyse (auto-detected from --source when omitted)")
@@ -369,6 +370,12 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     kernel_name = args.kernel_name
     compiled_from_source = bool(args.source)
     job_env_vars: dict[str, str] = {}
+    # Where a workload should drop anything it wants Autopsy to read. Exported
+    # for every job rather than appended to the command, because appending it
+    # changes the program's own argument contract: a training script with an
+    # argparse parser and no positional exits 2 on "unrecognized arguments"
+    # instead of running, and what the user asked to reproduce never ran.
+    job_env_vars["AORTA_BUNDLE"] = str(job_dir / "bundle")
     for pair in args.env:
         key, _, value = pair.partition("=")
         if key and value:
