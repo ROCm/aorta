@@ -42,7 +42,7 @@ from aorta.cia.cancellation import Stop, pause, stopped
 # is a branch in one place rather than an edit at every call site, and the only
 # production submitter calling submit_sbatch directly is how that stops being
 # true. An unused abstraction rots.
-from aorta.cia.launch import launch
+from aorta.cia.launch import cancel, launch
 from aorta.cia.watch.poll import poll_jobs
 from aorta.cia.launch.job import (
     JobRecord, _utc_now, new_job_id, read_job_json, update_job_status, write_job_json,
@@ -513,6 +513,30 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     watcher.start()
 
     state = wait_for_job(slurm_id, timeout=args.job_timeout, stop=stop)
+
+    # Giving up on the answer has to give back the node. The allocation outlives
+    # this process otherwise -- until its own time limit, four hours by default
+    # -- so a chat turn that timed out would leave a GPU occupied by a run whose
+    # result nobody will read, and the next person queues behind it.
+    if state.startswith("ABANDONED"):
+        cancelled, why = cancel(slurm_id)
+        if cancelled:
+            log.info(f"cancelled slurm {slurm_id}; the allocation is released")
+        else:
+            log.warning(
+                f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
+                "node until its time limit"
+            )
+        update_job_status(jobs_root, job_id, "cancelled")
+        return {
+            "ok": False,
+            "stage": "wait",
+            "error": "abandoned by caller",
+            "job_id": job_id,
+            "slurm_job_id": slurm_id,
+            "cancelled": cancelled,
+            "job_dir": str(job_dir),
+        }
 
     # Give Watch a bounded window to notice the finished log, alert, assemble the
     # bundle and trigger Autopsy before falling back to doing it directly.

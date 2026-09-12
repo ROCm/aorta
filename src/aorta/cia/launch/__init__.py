@@ -8,6 +8,19 @@ here rather than at every call site, which is why callers should not reach for
 from pathlib import Path
 
 
+def cancel(job_id: str) -> tuple[bool, str]:
+    """Release the allocation *job_id* holds. Returns ``(cancelled, error)``.
+
+    The other half of :func:`launch`, and here for the same reason: a
+    scheduler-less backend branches once rather than at every call site. A
+    caller that stops waiting owes the cluster this -- the job it submitted
+    holds a node until its own time limit otherwise.
+    """
+    from aorta.cia.launch.cluster import cancel_sbatch
+
+    return cancel_sbatch(job_id)
+
+
 def launch(
     *,
     command: str,

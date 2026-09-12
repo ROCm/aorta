@@ -314,6 +314,33 @@ def build_sbatch_script(
     return "\n".join(["#!/bin/bash", *directives, "", *body, ""])
 
 
+def cancel_sbatch(slurm_id: str) -> tuple[bool, str]:
+    """Release the allocation for *slurm_id*. Returns ``(cancelled, error)``.
+
+    A job nobody is waiting for still holds a GPU node until its own time limit
+    -- four hours by default -- so abandoning the wait without this leaks the
+    scarcest thing in the cluster, and the next user of that node waits behind
+    a run whose answer was thrown away.
+
+    Cancelling a job that has already finished is not an error: scancel says so
+    and exits zero, and the race between a job ending and this call is ordinary
+    rather than exceptional.
+    """
+    if not slurm_id:
+        return False, "no scheduler job id to cancel"
+    try:
+        done = subprocess.run(
+            ["scancel", slurm_id], capture_output=True, text=True, timeout=30
+        )
+    except FileNotFoundError:
+        return False, "scancel not found on PATH -- is this a Slurm cluster?"
+    except Exception as exc:  # noqa: BLE001 - the caller is already giving up
+        return False, f"{type(exc).__name__}: {exc}"
+    if done.returncode != 0:
+        return False, (done.stderr or done.stdout or "scancel failed").strip()
+    return True, ""
+
+
 def submit_sbatch(
     *,
     command: str,
