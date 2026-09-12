@@ -65,6 +65,7 @@ python -m aorta.hw_queue_eval profile hetero_kernels --streams 8
 
 | Workload | Description |
 | --- | --- |
+| `simple_transformer` | GPT-2-style transformer training with pipelined forward pass |
 | `async_dataload` | Async data loading with GPU preprocessing |
 | `zero_offload` | ZeRO-style memory offload patterns |
 | `torch_compile` | Multi-region execution under torch.compile |
@@ -143,6 +144,82 @@ torchrun --nproc_per_node=8 -m aorta.hw_queue_eval run comms_compute_overlap \
     --mm-dim 4096,4096,4096 --num-compute 10 --comm-size 128M \
     --profile --profile-dir traces/
 ```
+
+## Running the Simple Transformer Workload
+
+The `simple_transformer` workload implements a GPT-2-style decoder-only transformer with multi-stream pipelined training. Layers are split into groups, each assigned to a different CUDA stream. The forward pass is pipelined (stream K+1 waits on stream K), loss and backward run on a dedicated stream, and the optimizer step overlaps with the next iteration's data prep.
+
+### Running locally
+
+```bash
+# Single run with 4 streams (recommended)
+python -m aorta.hw_queue_eval run simple_transformer --streams 4
+
+# Sweep across stream counts
+python -m aorta.hw_queue_eval sweep simple_transformer --streams 2,4,8,16
+
+# With profiling enabled
+python -m aorta.hw_queue_eval run simple_transformer --streams 4 --profile --profile-dir traces/
+
+# Save results to JSON
+python -m aorta.hw_queue_eval run simple_transformer --streams 4 -o results/simple_transformer.json
+```
+
+### Running on a SLURM cluster node with Docker
+
+When running on a cluster node (e.g. via an interactive SLURM allocation), use Docker with GPU passthrough:
+
+```bash
+srun --jobid=<JOB_ID> --nodelist=<NODE> --nodes=1 --ntasks=1 bash -c \
+  "docker run --rm \
+    --device=/dev/kfd --device=/dev/dri --group-add video \
+    -v /path/to/aorta-main:/workspace/aorta \
+    -w /workspace/aorta \
+    -e PYTHONPATH=/workspace/aorta/src \
+    <docker-image> \
+    python -m aorta.hw_queue_eval run simple_transformer --streams 4"
+```
+
+To run a stream count sweep:
+
+```bash
+srun --jobid=<JOB_ID> --nodelist=<NODE> --nodes=1 --ntasks=1 bash -c \
+  "docker run --rm \
+    --device=/dev/kfd --device=/dev/dri --group-add video \
+    -v /path/to/aorta-main:/workspace/aorta \
+    -w /workspace/aorta \
+    -e PYTHONPATH=/workspace/aorta/src \
+    <docker-image> \
+    python -m aorta.hw_queue_eval sweep simple_transformer --streams 2,4,8,16"
+```
+
+### Stream assignment
+
+With `--streams 4` (the default/recommended):
+
+| Stream | Role |
+| --- | --- |
+| 0 | Data preparation, optimizer step |
+| 1 | Forward layers 0–1 |
+| 2 | Forward layers 2–3 |
+| 3 | Forward layers 4–5, loss, backward |
+
+### Configurable parameters
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `hidden_size` | 512 | Transformer hidden dimension |
+| `num_layers` | 6 | Number of transformer layers |
+| `num_heads` | 8 | Attention heads |
+| `batch_size` | 8 | Training batch size |
+| `seq_length` | 128 | Sequence length |
+| `vocab_size` | 32000 | Vocabulary size |
+
+### What to look for
+
+- **Throughput scaling**: Should remain flat or slightly degrade with more streams, since forward layers are sequentially dependent.
+- **Queue switch overhead**: At high stream counts (16+), watch for increased latency indicating hardware queue contention.
+- **P99/P50 ratio**: Values close to 1.0 indicate stable scheduling; values above 2.0 suggest queue contention.
 
 ## Analysis
 

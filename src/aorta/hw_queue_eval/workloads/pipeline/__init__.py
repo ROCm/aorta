@@ -5,14 +5,17 @@ These workloads simulate data pipeline and memory offload patterns:
 - Async data loading with GPU preprocessing
 - ZeRO-offload memory management patterns
 - torch.compile multi-region execution
+- Simple transformer training with pipelined forward pass
 """
 
 from aorta.hw_queue_eval.workloads.pipeline.async_dataload import AsyncDataLoadWorkload
+from aorta.hw_queue_eval.workloads.pipeline.simple_transformer import SimpleTransformerWorkload
 from aorta.hw_queue_eval.workloads.pipeline.torch_compile import TorchCompileWorkload
 from aorta.hw_queue_eval.workloads.pipeline.zero_offload import ZeROOffloadWorkload
 
 __all__ = [
     "AsyncDataLoadWorkload",
+    "SimpleTransformerWorkload",
     "ZeROOffloadWorkload",
     "TorchCompileWorkload",
 ]
