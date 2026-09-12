@@ -290,7 +290,7 @@ jobs:
           echo "routes ok: / /docs/ /ci/ /data.json /ci/data.json /status.json /sanitizers/"
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
