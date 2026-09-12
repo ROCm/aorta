@@ -88,7 +88,15 @@ class TestABadOrAbsentRankingCostsNothing:
         assert not any("Most likely tools" in str(m.content) for m in with_none)
 
     def test_a_ranking_never_removes_a_tool_from_the_prompt(self, cluster_jobs_enabled):
-        """The full catalogue is still described whatever the selector said."""
+        """The full catalogue is still described whatever the selector said.
+
+        Asked for directly twice in review: make the shortlist gate what the act
+        nodes can call. It does not, and that is the design rather than an
+        oversight -- a shortlist is one model's opinion of another's options,
+        and one that dropped the tool the turn needed would dead-end it with no
+        way back, since the model would not know the tool existed. The ranking
+        reaches the prompt instead, which steers the choice without removing it.
+        """
         narrow = _framing(_state(candidate_tools=["search_code"], selection_rationale="r"))
         assert "triage_kernel_source" in nodes.TOOL_DESCRIPTIONS
         assert "search_code" in narrow

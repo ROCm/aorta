@@ -60,6 +60,15 @@ def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     graph.add_node("router", router_node)
+    # "select" ranks the tools; it does not gate them. What it writes to
+    # candidate_tools is read by _recommendation and put in the act and plan
+    # prompts, so it steers which tool the model reaches for while leaving every
+    # registered tool bound and described. That is deliberate: the ranking is one
+    # model's opinion of another's options, and a shortlist that removed a tool
+    # would dead-end the turn that needed it -- with no way for the model to
+    # recover, since it would not know the tool existed. The one narrowing that
+    # does happen is structural rather than a judgement: enforce_requirements
+    # drops a tool that reads pasted source when nothing was pasted.
     graph.add_node("select", selector_node)
     graph.add_node("plan", plan_node)
     graph.add_node("retrieve", retrieve_node)
