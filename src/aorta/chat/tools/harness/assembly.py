@@ -15,6 +15,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from aorta.chat.tools.harness._fences import extract_fenced
+
 WAVEFRONT = 64
 
 # s5, s[10:11], v2, v[0:3] -- capture the highest index each one implies.
@@ -24,8 +26,6 @@ _VGPR = re.compile(r"\bv\[(\d+):(\d+)\]|\bv(\d+)\b")
 _COMPLETE = ("amdhsa_kernel", ".amdgcn_target")
 # Lines that are directives or labels rather than instructions.
 _NOT_AN_INSTRUCTION = re.compile(r"^\s*(\.|//|;|#|\w+:)")
-# ```asm ... ``` or a bare fence, non-greedy so several blocks stay separate.
-_FENCED = re.compile(r"```[a-zA-Z]*\n(.*?)```", re.S)
 # What AMD GCN/CDNA instruction names begin with. A line starting with one of
 # these is assembly and nothing else; no English sentence opens with "v_mov_b32".
 _MNEMONIC_PREFIXES = (
@@ -134,10 +134,7 @@ def extract_code(text: str) -> tuple[str, bool]:
     a fence is the user pointing at the code, and without one the whole message
     is only a guess at where the code was.
     """
-    for block in _FENCED.findall(text):
-        if _looks_like_instructions(block):
-            return block.strip("\n"), True
-    return text, False
+    return extract_fenced(text, _looks_like_instructions)
 
 
 def prepare_asm(source: str, *, kernel_name: str = "pasted_kernel", arch: str = "gfx950") -> PreparedAsm:

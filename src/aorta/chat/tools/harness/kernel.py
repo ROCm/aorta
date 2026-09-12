@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from aorta.chat.tools.harness._fences import extract_fenced
+
 DEFAULT_BLOCK = 256
 DEFAULT_GRID = 1
 # gfx950 executes 64 lanes per wavefront; conflicts are only visible between waves.
@@ -52,6 +54,28 @@ class Param:
     base_type: str
     name: str
     is_pointer: bool
+
+
+def looks_like_hip(block: str) -> bool:
+    """Whether a fenced block is the kernel rather than a log or a diff.
+
+    A message often carries several: the kernel, the error it produced, the
+    launch line someone tried. What identifies this one is a device function or
+    a program entry point -- the two things this harness knows how to build.
+    """
+    return bool(_KERNEL_SIG.search(block) or _MAIN.search(block))
+
+
+def extract_source(text: str) -> str:
+    """The HIP out of a message that also explains the problem.
+
+    The assembly harness has done this since it was written; this one had the
+    same messages pasted into it and none of the extraction, so a fenced paste
+    reached hipcc with the backticks and the prose still attached and the
+    compile failed on the English.
+    """
+    code, _fenced = extract_fenced(text, looks_like_hip)
+    return code
 
 
 def has_main(source: str) -> bool:
@@ -282,7 +306,7 @@ def prepare_source(
     block_z: int = 0,
 ) -> Prepared:
     """Turn a pasted kernel or program into something ConSan can run."""
-    source = source.strip()
+    source = extract_source(source).strip()
     if not source:
         raise HarnessError("no source was provided.")
     if "template" in source and "__global__" in source:
