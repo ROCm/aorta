@@ -19,6 +19,11 @@ from pathlib import Path
 
 import pytest
 
+# These reach aorta.chat.tools.cluster, which imports the agents and therefore
+# DSPy. The chat lane installs [chat-cli] without [cia], so an import at module
+# scope fails collection for the file rather than skipping it.
+pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
+
 from aorta.chat.tools.cluster import _STAGED_STEM_RE
 
 STAGED = Path("/jobs/staged")

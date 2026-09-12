@@ -259,6 +259,11 @@ def cluster_jobs_enabled(monkeypatch):
     from aorta.chat.graph import nodes
     from aorta.chat.plugins import ChatTool, diagnostic_tools
 
+    # The tools themselves need the agents, which are in [cia]. The chat lane
+    # installs [chat-cli] without it, so a test about the full tool surface has
+    # nothing to be about there -- skip rather than fail on an empty registry.
+    pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
+
     monkeypatch.setattr(settings, "allow_cluster_jobs", True)
     for name, tool in diagnostic_tools().items():
         monkeypatch.setitem(nodes.TOOL_REGISTRY, name, tool)

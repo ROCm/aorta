@@ -109,6 +109,7 @@ class TestBothHalvesGetTheSameValue:
 
     def test_the_arch_the_tools_use_is_the_arch_the_agents_get(self, monkeypatch):
         """They were read from two places and could name different chips."""
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
         import aorta.chat.tools.cluster as cluster
 
         monkeypatch.setenv("CIA_GPU_ARCH", "gfx90a")

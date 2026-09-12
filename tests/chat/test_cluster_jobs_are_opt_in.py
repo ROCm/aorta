@@ -172,6 +172,7 @@ class TestReadingIsStillBounded:
     def test_it_uses_the_shared_rule(self):
         """A fifth copy would drift the same way the first three did."""
         import inspect
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
 
         from aorta.chat.tools import cluster
 
@@ -179,6 +180,7 @@ class TestReadingIsStillBounded:
 
     def test_and_no_longer_advertises_absolute_paths(self):
         """The docstring is the tool description the model reads."""
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
         from aorta.chat.tools import cluster
 
         assert "absolute" not in (cluster.read_autopsy_report.func.__doc__ or "")

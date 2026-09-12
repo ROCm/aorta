@@ -23,6 +23,10 @@ import importlib
 
 import pytest
 
+# Every case here reaches aorta.chat.tools.cluster, which imports the agents
+# and therefore DSPy. The chat lane installs [chat-cli] without [cia].
+pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
+
 from aorta.chat.tools.harness.assembly import prepare_asm
 
 _FRAGMENT = """\

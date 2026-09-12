@@ -125,6 +125,7 @@ class TestTheBundleArrivesInTheEnvironment:
 
     def test_the_driver_sets_it_from_the_job_directory(self, tmp_path, monkeypatch):
         """Not the caller's to compute: the job directory is made inside run_triage."""
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
         from aorta.cia import triage as triage_mod
 
         seen: dict = {}
@@ -147,6 +148,7 @@ class TestTheBundleArrivesInTheEnvironment:
 
     def test_a_caller_supplied_value_still_wins(self, tmp_path, monkeypatch):
         """--env is the explicit instruction; the default should not override it."""
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
         from aorta.cia import triage as triage_mod
 
         seen: dict = {}
@@ -175,6 +177,7 @@ class TestTheCommandSubstitutionStillExists:
     """A --command caller that does want it as an argument keeps that route."""
 
     def test_the_placeholder_is_still_substituted(self, tmp_path, monkeypatch):
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
         from aorta.cia import triage as triage_mod
 
         seen: dict = {}
@@ -193,6 +196,7 @@ class TestTheCommandSubstitutionStillExists:
 
     def test_the_help_names_the_environment_variable_too(self):
         """Someone reading --help should learn the route that costs nothing."""
+        pytest.importorskip("dspy", reason="needs the [cia] extra")
         from pathlib import Path
 
         from aorta.cia import triage as triage_mod
