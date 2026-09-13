@@ -1,0 +1,37 @@
+{
+  "waitcheck_gemm": {
+    "overall_verdict": "warn",
+    "execution_status": "complete",
+    "checks": {
+      "waitcheck": "warn"
+    },
+    "finding_shape": {
+      "waitcheck": "missing s_waitcnt"
+    }
+  },
+  "consan_clean": {
+    "overall_verdict": "pass",
+    "execution_status": "complete",
+    "checks": {
+      "consan": "pass"
+    }
+  },
+  "consan_racy": {
+    "overall_verdict": "fail",
+    "execution_status": "complete",
+    "checks": {
+      "consan": "fail"
+    },
+    "finding_shape": {
+      "consan": "auto replay diagnostic"
+    }
+  },
+  "consan_tiny": {
+    "expected_error": {
+      "execution_status": "error",
+      "overall_verdict": "error",
+      "reasons": ["combined_hook_exit_86"],
+      "why": "Intended negative control, not a misconfiguration. tiny_vecadd's only memory operations are ordinary global loads/stores, which ConSan reports as supported-synchronization-only and does not admit as MOI sites, so it has no instrumentable sites at all (access=0/0, applicable=false). Giving it a dispatching driver was measured in #409 and does not change the verdict, only the record-buffer count in the message. Under consan_policy: strict the run therefore fails closed at exit 86 rather than emitting a false pass, and that fail-closed behaviour is what this case asserts. Declared here so the vacuity sweep added for #450 does not flag it, while still failing if this case ever errors for any OTHER reason. Every field is matched exactly, including the complete reason set. Confirmed on the environment that runs the nightly rather than only on a dev node: the real ROCm 10 survey trees of runs 33755195031, 33872660689, 33965800908 and 34032862308 all report exactly error/error with combined_hook_exit_86 on both checks and zero findings, and a direct re-run of this recipe inside the digest-pinned ROCm 10 CI image on gfx950 reproduced the same. Under lenient the same case reports consan_coverage_incomplete at access=0/0 instead, which this declaration deliberately does NOT admit."
+    }
+  }
+}
