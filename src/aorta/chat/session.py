@@ -112,6 +112,11 @@ async def invoke_agent(
             # tool announcing itself; "values" is the accumulated state, so the
             # last one matches what ainvoke would have returned.
             result = {}
+            #: Whether the stream ever carried state. "values" is the only mode
+            #: that does, and without it ``result`` is still the empty dict it
+            #: started as -- which reads downstream as a turn where the model
+            #: said nothing, rather than as a graph that produced nothing.
+            state_seen = False
             #: Progress failures seen this turn, so the warning is logged once
             #: rather than per chunk. A dead session fails every one of them.
             failed: list[BaseException] = []
@@ -125,5 +130,21 @@ async def invoke_agent(
                     await _announce(on_step, "tool", chunk, failed=failed)
                 else:
                     result = chunk
+                    state_seen = True
+            if not state_seen:
+                # Distinguishable from a turn the model answered badly, which
+                # is what falling through as an empty dict made this look like:
+                # extract_reply would hand back "I couldn't generate a
+                # response. Please try rephrasing.", and rephrasing cannot fix
+                # a graph that streamed without ever yielding state. Raising
+                # rather than returning that text keeps the failed turn out of
+                # the transcript, which is what the copied history above is
+                # for.
+                raise RuntimeError(
+                    "the agent graph streamed to completion without producing "
+                    "any state, so there is no answer to return. This is a "
+                    "malfunction rather than an unanswerable question."
+                )
+
     reply = extract_reply(result.get("messages", []))
     return reply, [*pending, AIMessage(content=reply)], result

@@ -161,3 +161,80 @@ class TestTheOrdinaryPathIsUnchanged:
 
         assert called == ["ainvoke"]
         assert reply == "answered"
+
+
+# ── a stream that never carried state ─────────────────────────────────────
+
+
+class TestAStreamWithNoStateIsAFailure:
+    """``result`` started as ``{}`` and fell through as one.
+
+    "values" is the only stream mode carrying accumulated state, so a stream
+    that yields updates and customs but never a values chunk left ``result``
+    empty. extract_reply then returned its fallback -- "I couldn't generate a
+    response. Please try rephrasing." -- which is what a turn looks like when
+    the model had nothing useful to say. So a malfunction was presented as an
+    unanswerable question, recorded in the transcript as an answer, and the
+    user was advised to do the one thing that could not help.
+
+    Only reachable through the streaming branch: the awaited path returns
+    whatever ainvoke produced.
+    """
+
+    @staticmethod
+    def _graph(chunks):
+        async def astream(initial, stream_mode=None):
+            for chunk in chunks:
+                yield chunk
+
+        return type("FakeGraph", (), {"astream": staticmethod(astream)})()
+
+    @staticmethod
+    async def _noop(name, payload):
+        return None
+
+    async def test_it_raises_rather_than_answering(self, monkeypatch):
+        monkeypatch.setattr(
+            session,
+            "agent_graph",
+            self._graph([("updates", {"router": {}}), ("custom", {"tool": "x"})]),
+        )
+
+        with pytest.raises(RuntimeError, match="without producing any state"):
+            await session.invoke_agent("q", [], on_step=self._noop)
+
+    async def test_an_empty_stream_raises_too(self, monkeypatch):
+        monkeypatch.setattr(session, "agent_graph", self._graph([]))
+
+        with pytest.raises(RuntimeError):
+            await session.invoke_agent("q", [], on_step=self._noop)
+
+    async def test_the_message_says_it_is_a_malfunction(self, monkeypatch):
+        """So nobody reads it as the model having nothing to say."""
+        monkeypatch.setattr(session, "agent_graph", self._graph([("updates", {"a": {}})]))
+
+        with pytest.raises(RuntimeError, match="malfunction"):
+            await session.invoke_agent("q", [], on_step=self._noop)
+
+    async def test_the_fallback_text_is_not_returned(self, monkeypatch):
+        """"Please try rephrasing" is advice that cannot work here."""
+        monkeypatch.setattr(session, "agent_graph", self._graph([("updates", {"a": {}})]))
+
+        try:
+            reply, _history, _result = await session.invoke_agent(
+                "q", [], on_step=self._noop
+            )
+        except RuntimeError:
+            return
+        pytest.fail(f"returned {reply!r} instead of raising")
+
+    async def test_a_values_chunk_is_enough_even_if_empty(self, monkeypatch):
+        """An empty state is a graph that ran; no state is a graph that did not."""
+        monkeypatch.setattr(
+            session, "agent_graph", self._graph([("values", {"messages": []})])
+        )
+
+        reply, history, _result = await session.invoke_agent("q", [], on_step=self._noop)
+
+        assert "couldn't generate a response" in reply
+        assert len(history) == 2
