@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import chainlit as cl
 
@@ -47,6 +48,23 @@ _NODE_TITLES = {
 }
 
 
+def _as_code_block(text: str) -> str:
+    """Fence tool output so that none of it can escape the block.
+
+    Tool output is arbitrary -- ``read_file`` on any of this repository's
+    Markdown returns fences of its own -- and a fixed ``` opener ends at the
+    first one inside the content, leaving the rest to render as Markdown. The
+    fence has to be longer than the longest run the content contains.
+
+    An indented block would also contain it, but consecutive ones separated by
+    a blank line are a single block in CommonMark, which would run each tool's
+    output into the next.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}\n{text}\n{fence}"
+
+
 def _node_reasoning(node: str, delta: dict) -> str:
     """What a node recorded, in the words it recorded it."""
     if node == "router":
@@ -62,7 +80,7 @@ def _node_reasoning(node: str, delta: dict) -> str:
         return str(delta.get("plan") or "")
     if node == "act":
         trace = delta.get("tool_trace") or []
-        return "\n\n".join(f"```\n{entry[:1500]}\n```" for entry in trace)
+        return "\n\n".join(_as_code_block(entry[:1500]) for entry in trace)
     if node == "critic":
         return str(delta.get("critic_feedback") or "Accepted.")
     return ""
