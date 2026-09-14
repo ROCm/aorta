@@ -529,7 +529,12 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     the one that says nothing.
     """
     try:
-        get_stream_writer()({"tool": _normalise_tool_name(tool_name), "args": kwargs})
+        # The name, and nothing else. The arguments used to ride along, and for
+        # triage_kernel_source those arguments are the user's entire pasted
+        # kernel -- pushed through the stream on every tool call, for a consumer
+        # that reads the name and drops the rest. Anything wanting more than the
+        # name should be added back when there is something rendering it.
+        get_stream_writer()({"tool": _normalise_tool_name(tool_name)})
     except RuntimeError:
         pass  # not being streamed; nothing to announce to
     # An executor of our own, sized for these tools. asyncio.to_thread would

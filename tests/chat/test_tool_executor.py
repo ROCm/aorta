@@ -183,3 +183,72 @@ class TestItStillRunsOffTheLoop:
     async def test_the_result_is_returned_unchanged(self):
         with patch.object(nodes, "_execute_tool", lambda n, k: "the tool said this"):
             assert await nodes._execute_tool_async("t", {}) == "the tool said this"
+
+
+# ── what the announcement carries ─────────────────────────────────────────
+
+
+class TestTheAnnouncementIsJustTheName:
+    """The arguments rode along and nothing read them.
+
+    ``show_step`` renders ``delta.get("tool")`` and drops the rest, while
+    ``kwargs`` for ``triage_kernel_source`` is the user's entire pasted kernel.
+    So every tool call pushed the whole paste through the custom stream for a
+    consumer that wanted eighteen characters of it.
+    """
+
+    @staticmethod
+    async def _announced(tool_name: str, kwargs: dict) -> dict:
+        sent: list[dict] = []
+
+        with patch.object(nodes, "_execute_tool", lambda n, k: "ok"), patch.object(
+            nodes, "get_stream_writer", lambda: sent.append
+        ):
+            await nodes._execute_tool_async(tool_name, kwargs)
+        return sent[0] if sent else {}
+
+    async def test_the_name_is_there(self):
+        payload = await self._announced("triage_kernel_source", {"source": "__global__"})
+
+        assert payload["tool"] == "triage_kernel_source"
+
+    async def test_the_arguments_are_not(self):
+        kernel = "__global__ void k(float* o) { o[0] = 1; }" * 40
+        payload = await self._announced("triage_kernel_source", {"source": kernel})
+
+        assert "args" not in payload
+        assert kernel not in str(payload)
+
+    async def test_the_payload_stays_small(self):
+        """Independent of how much the user pasted."""
+        import json
+
+        big = await self._announced("triage_kernel_source", {"source": "x" * 20_000})
+
+        assert len(json.dumps(big)) < 100
+
+    async def test_it_is_still_announced_before_the_tool_blocks(self):
+        """Dropping the payload must not drop the announcement."""
+        order: list[str] = []
+
+        def slow(name, kwargs):
+            order.append("tool ran")
+            return "ok"
+
+        with patch.object(nodes, "_execute_tool", slow), patch.object(
+            nodes, "get_stream_writer", lambda: lambda p: order.append("announced")
+        ):
+            await nodes._execute_tool_async("triage_kernel_source", {})
+
+        assert order == ["announced", "tool ran"]
+
+    async def test_not_being_streamed_is_not_an_error(self):
+        """The CLI passes no callback, so there is no writer to announce to."""
+
+        def no_writer():
+            raise RuntimeError("not in a stream")
+
+        with patch.object(nodes, "_execute_tool", lambda n, k: "ok"), patch.object(
+            nodes, "get_stream_writer", no_writer
+        ):
+            assert await nodes._execute_tool_async("t", {}) == "ok"
