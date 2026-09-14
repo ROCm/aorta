@@ -389,7 +389,11 @@ def triage_kernel_source(
 
     staging = settings.jobs_root / "chat-kernels"
     staging.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Microseconds, not seconds. Two turns staging a kernel of the same name in
+    # the same second wrote the same path, and one overwrote the other's source
+    # while it was still being read on the node. Rare while the event loop
+    # serialised tool calls; ordinary now that four run at once.
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     src_path = staging / f"{prepared.kernel}-{stamp}.hip"
     src_path.write_text(prepared.program, encoding="utf-8")
 
@@ -527,7 +531,9 @@ def triage_assembly_source(source: str, label: str = "") -> str:
 
     staging = settings.jobs_root / "chat-asm"
     staging.mkdir(parents=True, exist_ok=True)
-    stem = f"{prepared.kernel}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    # Microseconds for the same reason the kernel path uses them: concurrent
+    # turns assembling a paste that wraps to the same kernel name collided.
+    stem = f"{prepared.kernel}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
     asm_path = staging / f"{stem}.s"
     obj_path = staging / f"{stem}.hsaco"
     asm_path.write_text(prepared.program, encoding="utf-8")
