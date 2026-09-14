@@ -1213,15 +1213,36 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
             ]
         )
         verdict = validation.content.strip()
-        # Exact match, not a substring test: "INVALID" contains "VALID", and so
-        # does "not valid", so the substring form passed every rejection the
-        # critic exists to catch. The prompt asks for exactly "VALID", which
-        # makes anything else -- including an explanation -- a retry.
-        if verdict.upper() != "VALID":
+        # The first word, not the whole string and not a substring.
+        #
+        # A substring test passed every rejection the critic exists to catch,
+        # since "INVALID" contains "VALID" and so does "not valid". Requiring
+        # the whole reply to be "VALID" fixed that and broke the other side: a
+        # model asked to approve usually approves *and says why*, and every one
+        # of those explained approvals was read as a rejection. The answer then
+        # burned the whole retry budget and reached the user headed "I could not
+        # verify this answer" -- an answer the critic had in fact just passed.
+        #
+        # The first word separates them. "INVALID ..." and "not valid ..." do
+        # not begin with VALID; "VALID, because ..." does.
+        if not _critic_approved(verdict):
             logger.info("Critic rejected response, iteration %d: %s", iteration, verdict[:200])
             return {"iteration": iteration, "critic_feedback": verdict}
 
     return {"iteration": iteration, "critic_feedback": None}
+
+
+def _critic_approved(verdict: str) -> bool:
+    """Whether the critic passed the answer.
+
+    Reads the leading word so an approval that explains itself still counts,
+    and strips the punctuation and emphasis a model puts around it -- "VALID."
+    and "**VALID**" are the same verdict as "VALID".
+    """
+    words = verdict.strip().split()
+    if not words:
+        return False
+    return words[0].strip("*_`.,:;!-").upper() == "VALID"
 
 
 # ──────────────────── Exhausted retries ─────────
