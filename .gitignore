@@ -140,3 +140,5 @@ buck-out/
 # keeps out of the package.
 start-chat.sh
 chainlit.md
+.chainlit/
+.files/
