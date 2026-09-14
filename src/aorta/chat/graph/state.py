@@ -25,3 +25,6 @@ class AgentState(TypedDict):
     # returns just its final answer. Keeping it out of `messages` also avoids
     # replaying every tool result to the model on a retry.
     tool_trace: list[str] | None
+    #: Tools the selector ranked, best first, and the reason it gave.
+    candidate_tools: list[str] | None
+    selection_rationale: str | None

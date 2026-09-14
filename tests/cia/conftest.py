@@ -7,10 +7,26 @@ test add exactly the evidence it is about.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
 import pytest
+
+# The agents reach their model through DSPy, which every module here imports
+# transitively -- llm, the Autopsy router, the Watch log finder. DSPy is in the
+# [cia] extra, and the CPU lane installs [tests,hw-queue] and then collects the
+# whole tree, so without this the directory raises twenty-odd collection errors
+# rather than skipping. Skipping is right: a base install genuinely cannot run
+# these, and that is a shipped configuration rather than a fault.
+#
+# Same shape as tests/chat/conftest.py, which skips itself when the chat extra
+# is absent. The import-boundary tests live in tests/cli/ for the same reason
+# they do there: they are pure AST and must run everywhere.
+CIA_EXTRA_INSTALLED = importlib.util.find_spec("dspy") is not None
+
+if not CIA_EXTRA_INSTALLED:  # pragma: no cover - exercised on a base install
+    collect_ignore_glob = ["test_*.py"]
 
 _MANIFEST = """\
 schema_version: '0.1'

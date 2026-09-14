@@ -244,3 +244,38 @@ def fake_retriever():
         ),
     ]
     return mock
+
+
+@pytest.fixture()
+def cluster_jobs_enabled(monkeypatch):
+    """Register the tools that submit work, for a test that needs them present.
+
+    They are off by default -- see ``allow_cluster_jobs`` -- so a test about the
+    full tool surface has to say it wants them, the same way one about the shell
+    tool does. The registries in ``graph.nodes`` are built at import, so the
+    setting alone is not enough for anything reading those.
+    """
+    from aorta.chat.config import settings
+    from aorta.chat.graph import nodes
+    from aorta.chat.plugins import ChatTool, diagnostic_tools
+
+    # The tools themselves need the agents, which are in [cia]. The chat lane
+    # installs [chat-cli] without it, so a test about the full tool surface has
+    # nothing to be about there -- skip rather than fail on an empty registry.
+    pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
+
+    monkeypatch.setattr(settings, "allow_cluster_jobs", True)
+    for name, tool in diagnostic_tools().items():
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, name, tool)
+        monkeypatch.setitem(
+            nodes.CHAT_TOOLS, name, ChatTool(name=name, tool=tool, source_package="aorta")
+        )
+    # The prompts list the registry, so they were rendered from it at import too.
+    monkeypatch.setattr(
+        nodes,
+        "TOOL_DESCRIPTIONS",
+        nodes._tool_help(
+            nodes._BUILTIN_TOOL_DESCRIPTIONS + nodes._shell_tool_help(nodes._SHELL_TOOL_ACT_HELP)
+        ),
+    )
+    return nodes.TOOL_REGISTRY

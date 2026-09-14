@@ -40,6 +40,21 @@ class _Probe(RedactingLM, _Wire):
     pass
 
 
+@pytest.fixture(autouse=True)
+def redaction_on(monkeypatch):
+    """Pin the switch these tests are about.
+
+    ``settings`` is a process-wide singleton and ``apply_cli_overrides`` mutates
+    it, so an in-process ``aorta chat --no-redact`` anywhere earlier in the
+    session leaves redaction off for everything after it. A test asserting that
+    redaction happens should say which setting it is assuming rather than
+    inherit whatever ran before it.
+    """
+    from aorta.chat.config import settings
+
+    monkeypatch.setattr(settings, "redact", True)
+
+
 @pytest.fixture
 def lm() -> _Probe:
     return _Probe(model="openai/x", api_base="http://proxy/v1", api_key="k")

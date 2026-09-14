@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""Run one sanitizer recipe end to end: Launch -> Watch -> Autopsy.
+
+Two callers, and the difference matters. ``run_triage`` is a function that
+returns a dict, and the chat tools call it directly on a worker thread inside
+the chat server's own process -- there is no separate agent virtualenv and
+nothing shells out. ``main`` wraps it for the command line, where the same dict
+is printed to stdout as JSON and progress goes to stderr.
+
+Progress goes through :mod:`logging` rather than straight to stderr, because in
+the library case that stream belongs to the chat server and is not this
+module's to write on. ``main`` configures a handler so the command line still
+shows the running commentary it always did.
+
+Launch here is the deterministic path: the recipe, node constraints and the
+ConSan environment are passed in explicitly rather than discovered by the
+planner LLM, because a demo cannot tolerate a run that silently omits
+LD_PRELOAD and then reports a clean guardrail it never actually exercised.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import yaml
+
+
+from aorta.cia.autopsy.orchestrator import run_autopsy
+from aorta.cia.cancellation import Stop, pause, stopped
+# Through the seam, not around it: launch() exists so a scheduler-less backend
+# is a branch in one place rather than an edit at every call site, and the only
+# production submitter calling submit_sbatch directly is how that stops being
+# true. An unused abstraction rots.
+from aorta.cia.launch import cancel, launch
+from aorta.cia.watch.poll import poll_jobs
+from aorta.cia.launch.job import (
+    JobRecord, _utc_now, new_job_id, read_job_json, update_job_status, write_job_json,
+)
+
+log = logging.getLogger(__name__)
+
+TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"}
+
+
+def _default_aorta_root() -> str:
+    """The directory the AORTA CLI resolves recipes against.
+
+    Not the package directory: in a source checkout ``recipes/`` sits beside
+    ``src/``, so the package's own parent is one level too deep and the sweep
+    finds no recipes. Walk up until the directory holding them appears, and
+    fall back to the package when it does not -- an installed wheel carries
+    its recipes inside the distribution.
+    """
+    import aorta
+
+    package = Path(aorta.__file__).resolve().parent
+    for candidate in (package, *package.parents):
+        if (candidate / "recipes").is_dir():
+            return str(candidate)
+    return str(package)
+
+
+def venv_bin(name: str) -> str:
+    """Absolute path to a console script in the venv running this driver.
+
+    The batch job activates whichever virtualenv submitted it, which is the
+    chatbot's rather than the agents'. Naming these tools bare would leave them
+    resolved by an inherited PATH: it works from a shell that once activated the
+    agents' venv and fails with 'command not found' from a clean one.
+    """
+    candidate = Path(sys.prefix) / "bin" / name
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which(name) or name
+
+
+def sacct_state(slurm_id: str) -> str:
+    """Terminal-or-running state of a Slurm job, tolerating a lagging accounting DB."""
+    try:
+        r = subprocess.run(
+            ["sacct", "-j", slurm_id, "--format=State", "--noheader", "--parsable2", "-X"],
+            capture_output=True, text=True, timeout=30,
+        )
+        line = (r.stdout or "").strip().splitlines()
+        if line:
+            return line[0].strip().split()[0]
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
+def sacct_nodelist(slurm_id: str) -> str:
+    """Which node Slurm actually ran *slurm_id* on, or "" if it will not say.
+
+    The requested node is not the answer: --node may be empty, in which case the
+    scheduler chose, and a caller that reports the request as though it were the
+    outcome is reporting hardware nobody verified.
+    """
+    try:
+        r = subprocess.run(
+            ["sacct", "-j", slurm_id, "--format=NodeList", "--noheader", "--parsable2", "-X"],
+            capture_output=True, text=True, timeout=30,
+        )
+        for line in (r.stdout or "").strip().splitlines():
+            node = line.strip()
+            # Slurm writes "None assigned" while a job is still queued.
+            if node and not node.lower().startswith("none"):
+                return node
+    except Exception as exc:
+        log.info(f"could not read the node for slurm {slurm_id}: {exc}")
+    return ""
+
+
+def wait_for_job(slurm_id: str, timeout: int, interval: int = 5, *, stop: Stop = None) -> str:
+    deadline = time.time() + timeout
+    state = "UNKNOWN"
+    while time.time() < deadline:
+        state = sacct_state(slurm_id)
+        if state in TERMINAL_STATES:
+            log.info(f"slurm {slurm_id} reached {state}")
+            return state
+        log.info(f"slurm {slurm_id} state={state} ...")
+        # This is where the wait actually spends its time: up to fifteen
+        # minutes of five-second sleeps, and the caller may have given up
+        # during any one of them.
+        if pause(stop, interval):
+            log.info(f"slurm {slurm_id} still {state}; caller gave up, so we stop waiting")
+            return f"ABANDONED({state})"
+    return f"TIMEOUT_WAITING({state})"
+
+
+_KERNEL_RE = re.compile(r'__global__\s+[\w\s:<>,*&]*?\b(\w+)\s*\(', re.MULTILINE)
+
+
+def detect_kernel_name(source: str) -> str:
+    """First __global__ function in the source, so the caller need not name it."""
+    match = _KERNEL_RE.search(source)
+    return match.group(1) if match else ""
+
+
+def write_kernel_recipe(
+    *, recipe_path: Path, kernel_name: str, command: Path, target: str, ticket: str
+) -> Path:
+    """Emit a sanitizer recipe for a single user-supplied kernel.
+
+    Uses the 'kernel' source kind rather than the built-in consan_repro variants,
+    since those hardcode the two fixture kernels. ConSan runs the program named by
+    'command' and scopes its analysis to the one selected identity.
+    """
+    recipe = {
+        "schema_version": 1,
+        "mode": "sanitizer",
+        "ticket": ticket,
+        "description": f"Chat-submitted kernel {kernel_name} triaged on {target}.",
+        "sanitizer_plan": {
+            "target": target,
+            "source": {
+                "kind": "kernel",
+                "kernel": {"name": kernel_name},
+                # `consan_command`, not `command`: for every source kind except
+                # consan_repro the recipe loader reads the former and ignores
+                # the latter, so naming it `command` leaves ConSan unprovisioned
+                # and it fails closed as not_checked -- a run that proves
+                # nothing, reported without an error.
+                "consan_command": str(command),
+                "consan_log": True,
+            },
+            "scope": {"kind": "kernel"},
+            "selection": {"requirement": "top_dispatch_count", "top_n": 1},
+            "sanitizers": ["consan"],
+            "policy": {"consan_policy": "strict", "on_missing_backend": "fail"},
+            "output": {"report": "sanitizer_report.json"},
+        },
+    }
+    recipe_path.write_text(yaml.safe_dump(recipe, sort_keys=False), encoding="utf-8")
+    return recipe_path
+
+
+def write_asm_recipe(
+    *, recipe_path: Path, kernel_name: str, code_object: Path, target: str, ticket: str
+) -> Path:
+    """Emit a waitcheck recipe for an already-assembled code object.
+
+    ``kernel_list`` rather than ``kernel``: waitcheck reads a code object and
+    never runs it, so there is no command to provision. The loader hashes the
+    object itself, which is what pins the identity a finding is reported
+    against.
+    """
+    recipe = {
+        "schema_version": 1,
+        "mode": "sanitizer",
+        "ticket": ticket,
+        "description": f"Chat-submitted assembly {kernel_name} checked on {target}.",
+        "sanitizer_plan": {
+            "target": target,
+            "source": {
+                "kind": "kernel_list",
+                "kernels": [{"name": kernel_name, "code_object": str(code_object)}],
+            },
+            "scope": {"kind": "kernel"},
+            "selection": {"requirement": "top_dispatch_count", "top_n": 1},
+            "sanitizers": ["waitcheck"],
+            "policy": {"consan_policy": "strict", "on_missing_backend": "fail"},
+            "output": {"report": "sanitizer_report.json"},
+        },
+    }
+    recipe_path.write_text(yaml.safe_dump(recipe, sort_keys=False), encoding="utf-8")
+    return recipe_path
+
+
+def reconcile_stale_jobs(jobs_root: Path) -> int:
+    """Mark finished jobs whose record still claims 'running' as terminal.
+
+    Watch only monitors jobs the registry considers active, so a record left
+    'running' by an earlier interrupted run makes it spend every round tailing a
+    dead job instead of the one we just launched.
+    """
+    fixed = 0
+    for job_json in jobs_root.glob("*/job.json"):
+        try:
+            record = read_job_json(job_json)
+        except Exception:
+            continue
+        if record.status != "running" or not record.scheduler_job_id:
+            continue
+        state = sacct_state(record.scheduler_job_id)
+        if state in TERMINAL_STATES:
+            update_job_status(jobs_root, record.job_id,
+                              "completed" if state == "COMPLETED" else "failed")
+            fixed += 1
+    if fixed:
+        log.info(f"reconciled {fixed} stale job record(s) to terminal")
+    return fixed
+
+
+def read_watch_events(job_dir: Path) -> list[dict]:
+    """Watch's structured alerts: its signal, confidence and stated reasoning.
+
+    Read from the events file rather than the loop's stdout, which is no longer
+    a separate process to capture, and which only ever carried a prose tail of
+    what these records hold as fields.
+    """
+    path = job_dir / "events.jsonl"
+    if not path.is_file():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.strip():
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return events
+
+
+def summarize_sanitizer(report: dict) -> dict:
+    """Flatten the sanitizer report into the few facts that explain a race."""
+    checks = report.get("checks") or []
+    summary: dict = {
+        "overall_verdict": report.get("overall_verdict"),
+        "execution_status": report.get("execution_status"),
+        "target": report.get("target"),
+        "checks": [],
+        "total_findings": 0,
+    }
+
+    kernels = ((report.get("worklist") or {}).get("kernels") or [])
+    if kernels:
+        summary["kernel"] = ((kernels[0].get("identity") or {}).get("name"))
+
+    for check in checks:
+        findings = check.get("findings") or []
+        summary["total_findings"] += len(findings)
+        entry = {
+            "sanitizer": check.get("sanitizer"),
+            "state": check.get("state"),
+            "verdict": check.get("verdict"),
+            "findings": len(findings),
+            "reason": check.get("reason"),
+            "returncode": check.get("returncode"),
+        }
+        backend = check.get("backend") or {}
+        if backend.get("selected_kernel"):
+            entry["kernel"] = backend["selected_kernel"]
+        # One representative conflict carries the wave/LDS detail an engineer
+        # needs; the other 63 are the same race seen from other lanes.
+        if findings:
+            meta = findings[0].get("metadata") or {}
+            first = findings[0]
+            if first.get("message"):
+                entry["message"] = str(first["message"])
+            entry["context"] = [
+                str(meta[k]) for k in ("context_1", "context_2") if meta.get(k)
+            ]
+            entry["example"] = {
+                k: meta[k]
+                for k in ("first_owner", "second_owner", "first_lds", "second_lds",
+                          "first_kind", "second_kind", "first_inst", "second_inst")
+                if k in meta
+            }
+            entry["example_message"] = findings[0].get("message", "")[:400]
+        summary["checks"].append(entry)
+    return summary
+
+
+def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
+    """Run a triage and return what happened, as a dict, always.
+
+    Three early exits used to print JSON and ``return 1``. Callers read the
+    result with ``.get()``, so an int arrived as
+    ``AttributeError: 'int' object has no attribute 'get'`` -- caught by a broad
+    except in the chat tool and shown to the user as "triage failed", which
+    turned "source not found" into a mystery. ``main()`` did the same on its own
+    return value.
+
+    They also printed to stdout, which was a subprocess pipe when this was a
+    script and is the chat server's stdout now that it is called in-process.
+    Reporting is ``main()``'s job; this returns.
+    """
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--recipe", help="Path to an existing aorta sanitizer recipe YAML")
+    ap.add_argument("--source", help="Path to a .hip file to compile and triage")
+    ap.add_argument("--command", help=(
+        "Raw command to launch instead of a sanitizer sweep, for workloads that "
+        "are not expressible as a recipe. '{bundle}' is replaced with the job's "
+        "bundle directory, for a command that wants it as an argument; every job "
+        "also gets AORTA_BUNDLE in its environment, which costs the program "
+        "nothing."
+    ))
+    ap.add_argument("--kernel-name", default="",
+                    help="Kernel to analyse (auto-detected from --source when omitted)")
+    ap.add_argument("--arch", default=os.environ.get("CIA_GPU_ARCH", "gfx950"))
+    ap.add_argument("--jobs-root", default=os.environ.get("CIA_JOBS_ROOT", ""))
+    ap.add_argument("--node", default=os.environ.get("CIA_DEMO_NODE", ""))
+    ap.add_argument("--aorta-root", default=os.environ.get("AORTA_PATH", _default_aorta_root()))
+    ap.add_argument("--job-timeout", type=int, default=900)
+    ap.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                    help="Extra variable to export in the batch job. The sanitizers "
+                         "need ROCJITSU_BUILD and LD_PRELOAD, which used to reach the "
+                         "job by being set in a subprocess this driver no longer runs in.")
+    ap.add_argument("--watch-rounds", type=int, default=20)
+    ap.add_argument("--watch-grace", type=int, default=180,
+                    help="Seconds to let Watch alert after the job ends")
+    ap.add_argument("--label", default="", help="Human label for this run (racy / fixed)")
+    args = ap.parse_args(argv)
+
+    if not args.recipe and not args.source and not args.command:
+        return {"ok": False, "error": "pass either --recipe or --source"}
+
+    jobs_root = Path(args.jobs_root or (Path.home() / "cia-jobs")).expanduser().resolve()
+    jobs_root.mkdir(parents=True, exist_ok=True)
+
+    job_id = new_job_id()
+    job_dir = jobs_root / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    log_path = str(job_dir / "watch.log")
+    aorta_output = str(job_dir / "bundle" / "aorta")
+
+    kernel_name = args.kernel_name
+    compiled_from_source = bool(args.source)
+    job_env_vars: dict[str, str] = {}
+    # Where a workload should drop anything it wants Autopsy to read. Exported
+    # for every job rather than appended to the command, because appending it
+    # changes the program's own argument contract: a training script with an
+    # argparse parser and no positional exits 2 on "unrecognized arguments"
+    # instead of running, and what the user asked to reproduce never ran.
+    job_env_vars["AORTA_BUNDLE"] = str(job_dir / "bundle")
+    for pair in args.env:
+        key, _, value = pair.partition("=")
+        if key and value:
+            job_env_vars[key] = value
+
+    # Watch reads the job log, but a sanitizer verdict lands in a JSON report, so
+    # a hazard never reaches the stream Watch is tailing and the job looks
+    # healthy. Echo the findings after the sweep, with ';' rather than '&&' so it
+    # still runs when the guardrail exits non-zero, and '|| true' so a broken
+    # summary can never fail the run.
+    echo_findings = (
+        f"; {shlex.quote(venv_bin('python'))} "
+        f"{shlex.quote(str(Path(__file__).resolve().parent / 'echo_findings.py'))} "
+        f"{shlex.quote(str(Path(aorta_output) / 'sanitizer_report.json'))} || true"
+    )
+
+    if compiled_from_source:
+        src = Path(args.source).expanduser().resolve()
+        if not src.is_file():
+            return {"ok": False, "stage": "source", "error": f"source not found: {src}"}
+        source_text = src.read_text(encoding="utf-8", errors="replace")
+        kernel_name = kernel_name or detect_kernel_name(source_text)
+        if not kernel_name:
+            return {
+                "ok": False,
+                "stage": "source",
+                "error": "could not find a __global__ kernel in the source; "
+                         "pass --kernel-name explicitly",
+            }
+
+        # Keep the source with the job so the bundle is self-describing.
+        staged = job_dir / "kernel.hip"
+        staged.write_text(source_text, encoding="utf-8")
+        binary = job_dir / "kernel.bin"
+        recipe = write_kernel_recipe(
+            recipe_path=job_dir / "recipe.yaml",
+            kernel_name=kernel_name,
+            command=binary,
+            target=args.arch,
+            ticket=f"CHAT-{kernel_name}",
+        )
+        # Compile on the compute node: hipcc lives with ROCm on the GPU nodes, not
+        # on the login node where the chatbot runs.
+        command = (
+            f"hipcc --offload-arch={shlex.quote(args.arch)} "
+            f"-o {shlex.quote(str(binary))} {shlex.quote(str(staged))} && "
+            f"{shlex.quote(venv_bin('aorta'))} sweep run "
+            f"--recipe {shlex.quote(str(recipe))} "
+            f"--output {shlex.quote(aorta_output)}"
+            + echo_findings
+        )
+        # ConSan samples workgroups with a large default stride, so a small repro
+        # grid can be skipped entirely: every site gets patched but nothing is
+        # recorded, and the run exits 86 with zero findings that look like a pass.
+        # Pasted kernels are small by nature, so record every workgroup.
+        job_env_vars["RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE"] = os.environ.get(
+            "RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE", "1"
+        )
+        log.info(f"kernel={kernel_name} arch={args.arch} source={src.name}")
+    elif args.command:
+        # A raw workload: no recipe, no sanitizer sweep. Watch still tails the
+        # log and Autopsy still classifies whatever artifacts the workload leaves
+        # in the bundle, which is how a training run gets the same treatment as a
+        # kernel sweep.
+        recipe = None
+        command = args.command.replace("{bundle}", str(job_dir / "bundle"))
+        log.info(f"raw command: {command[:160]}")
+    else:
+        recipe = Path(args.recipe).expanduser().resolve()
+        if not recipe.is_file():
+            return {"ok": False, "stage": "recipe", "error": f"recipe not found: {recipe}"}
+        command = (
+            f"{shlex.quote(venv_bin('aorta'))} sweep run "
+            f"--recipe {shlex.quote(str(recipe))} "
+            f"--output {shlex.quote(aorta_output)}"
+            + echo_findings
+        )
+
+    record = JobRecord(
+        job_id=job_id,
+        node=args.node,
+        recipe=recipe.stem if recipe else (args.label or "raw-command"),
+        launched_at=_utc_now(),
+        log_path=log_path,
+        aorta_output=aorta_output,
+        status="running",
+        launch_command=command,
+        working_dir=args.aorta_root,
+        scheduler="slurm",
+        launcher="sbatch",
+        env_vars=job_env_vars,
+    )
+
+    log.info(
+        f"job_id={job_id} recipe={recipe.name if recipe else '(raw command)'} "
+        f"label={args.label or '-'}"
+    )
+    reconcile_stale_jobs(jobs_root)
+    log.info("── Launch ──")
+
+    slurm_id, err = launch(
+        command=command,
+        job_name=job_id,
+        log_path=log_path,
+        script_path=job_dir / "launch.sbatch",
+        working_dir=args.aorta_root,
+        env_vars=record.env_vars,
+        node=args.node,
+        # The sanitizer positive control exits non-zero by design ("guardrail
+        # not clean"), so the batch script swallows the code and the verdict
+        # comes from the sanitizer report. Per call, not per process: triages
+        # run concurrently and share one environment.
+        tolerate_nonzero=True,
+    )
+
+    if err:
+        return {"ok": False, "stage": "launch", "error": err, "job_id": job_id}
+
+    record.scheduler_job_id = slurm_id
+    write_job_json(record, jobs_root)
+    log.info(f"submitted slurm job {slurm_id}")
+
+    bundle = job_dir / "bundle"
+    report_path = bundle / "report.json"
+
+    # Watch has to start while the record still says 'running', because the job
+    # registry is what makes it eligible for monitoring at all.
+    log.info("── Watch ──")
+    log.info(f"poll_jobs(rounds={args.watch_rounds})")
+    watcher = threading.Thread(
+        target=poll_jobs,
+        kwargs={"jobs_root": jobs_root, "max_rounds": args.watch_rounds, "stop": stop},
+        daemon=True,
+    )
+    watcher.start()
+
+    state = wait_for_job(slurm_id, timeout=args.job_timeout, stop=stop)
+
+    # Giving up on the answer has to give back the node. The allocation outlives
+    # this process otherwise -- until its own time limit, four hours by default
+    # -- so a chat turn that timed out would leave a GPU occupied by a run whose
+    # result nobody will read, and the next person queues behind it.
+    if state.startswith("ABANDONED"):
+        cancelled, why = cancel(slurm_id)
+        if cancelled:
+            log.info(f"cancelled slurm {slurm_id}; the allocation is released")
+        else:
+            log.warning(
+                f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
+                "node until its time limit"
+            )
+        update_job_status(jobs_root, job_id, "cancelled")
+        return {
+            "ok": False,
+            "stage": "wait",
+            "error": "abandoned by caller",
+            "job_id": job_id,
+            "slurm_job_id": slurm_id,
+            "cancelled": cancelled,
+            "job_dir": str(job_dir),
+        }
+
+    # Give Watch a bounded window to notice the finished log, alert, assemble the
+    # bundle and trigger Autopsy before falling back to doing it directly.
+    grace = args.watch_grace
+    log.info(f"waiting up to {grace}s for Watch to alert and assemble the bundle")
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if report_path.is_file() or not watcher.is_alive():
+            break
+        if pause(stop, 5):
+            log.info("caller gave up; not waiting out the rest of the grace window")
+            break
+
+    watcher.join(timeout=30)
+    watch_events = read_watch_events(job_dir)
+    watch_tail = [
+        f"{e.get('signal')} @ {e.get('confidence')}: {e.get('assessment', '')[:160]}"
+        for e in watch_events
+    ]
+    for line in watch_tail:
+        log.info(f"watch| {line}")
+
+    # Watch only assembles a bundle after it raises an alert, so the bundle
+    # existing before the fallback runs is the reliable signal that it fired.
+    watch_alerted = report_path.is_file() or (bundle / "manifest.yaml").is_file()
+
+    update_job_status(jobs_root, job_id, "completed" if state == "COMPLETED" else "failed")
+
+    # Watch normally assembles the bundle and triggers Autopsy on alert. Do it
+    # directly otherwise so the caller always gets a verdict rather than silence.
+    if not report_path.is_file():
+        if not (bundle / "manifest.yaml").is_file():
+            log.info("── Bundle (direct) ──")
+            try:
+                from aorta.cia.watch.bundle_writer import write_bundle
+                evidence = ""
+                if Path(log_path).is_file():
+                    evidence = "\n".join(
+                        Path(log_path).read_text(errors="replace").splitlines()[-200:]
+                    )
+                write_bundle(record, job_dir, evidence, "sanitizer_guardrail_not_clean")
+                log.info(f"assembled bundle at {bundle}")
+            except Exception as exc:
+                log.info(f"bundle assembly failed: {exc}")
+
+        log.info("── Autopsy (direct) ──")
+        # The bundle above is worth assembling either way -- a caller that gave
+        # up is told where to find it. The verdict is not: it is an unbounded
+        # model call whose answer has nowhere left to go.
+        if stopped(stop):
+            log.info("caller gave up; skipping the autopsy rather than paying for a verdict")
+            return {
+                "ok": False,
+                "stage": "autopsy",
+                "error": "abandoned by caller",
+                "job_dir": str(job_dir),
+            }
+        try:
+            report = run_autopsy(bundle, kb_version="kb-static-poc")
+            report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            log.info(f"autopsy category={report.get('category')} "
+                f"confidence={report.get('confidence')}")
+        except Exception as exc:
+            log.info(f"autopsy failed: {exc}")
+    else:
+        log.info("── Autopsy (via Watch) ──")
+
+    result: dict = {
+        "ok": True,
+        "job_id": job_id,
+        "slurm_job_id": slurm_id,
+        "label": args.label,
+        "recipe": str(recipe) if recipe else "(raw command)",
+        "slurm_state": state,
+        # What ran it, not what was asked for: args.node is often empty.
+        "node": sacct_nodelist(slurm_id) or args.node,
+        "arch": args.arch,
+        "job_dir": str(job_dir),
+        "bundle": str(bundle),
+        "log_path": log_path,
+        "watch_alerted": watch_alerted,
+        "watch_tail": watch_tail,
+        "kernel": kernel_name,
+        "compiled_from_source": compiled_from_source,
+    }
+
+    # A compile failure short-circuits the sweep, which otherwise looks like a
+    # silent no-report run. Report it as such so the caller can show the diagnostics
+    # instead of guessing at a sanitizer verdict that was never produced.
+    if compiled_from_source and not binary.is_file():
+        diagnostics = []
+        if Path(log_path).is_file():
+            diagnostics = [
+                ln for ln in Path(log_path).read_text(errors="replace").splitlines()
+                if "error:" in ln or "warning:" in ln
+            ][:20]
+        result["ok"] = False
+        result["stage"] = "compile"
+        result["error"] = "hipcc failed to build the submitted kernel"
+        result["compile_diagnostics"] = diagnostics
+        return result
+
+    if report_path.is_file():
+        report = json.loads(report_path.read_text())
+        result["report_path"] = str(report_path)
+        result["autopsy"] = {
+            k: report.get(k)
+            for k in ("category", "confidence", "rationale", "evidence",
+                      "next_probes", "tooling_gaps", "signals")
+            if k in report
+        }
+    else:
+        result["autopsy"] = None
+        result["warning"] = "no report.json produced"
+
+    san = bundle / "aorta" / "sanitizer_report.json"
+    if san.is_file():
+        s = json.loads(san.read_text())
+        result["sanitizer_report_path"] = str(san)
+        result["sanitizer"] = summarize_sanitizer(s)
+
+    return result
+
+
+def main() -> int:
+    """CLI wrapper: the chatbot calls run_triage() directly instead.
+
+    Configuring the handler is what keeps the running commentary the command
+    line has always shown. A library caller does not reach this, so the chat
+    server's own logging setup stands.
+    """
+    logging.basicConfig(level=logging.INFO, format="[triage] %(message)s", stream=sys.stderr)
+    result = run_triage()
+    print(json.dumps(result, indent=2))
+    return 0 if result.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

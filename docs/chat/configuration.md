@@ -166,6 +166,36 @@ directory cannot be pip-upgraded cleanly.
 | `command_timeout` | `60` | Seconds before a `run_terminal_command` command is killed. |
 | `redact` | `true` | Rewrite filesystem paths and IP addresses out of outbound LLM requests. Does not cover the remote-embedding path. Read [redaction](redaction.md) before turning this off — and read it anyway for what it does **not** cover. |
 
+### The cluster diagnostic tools
+
+These only apply where the `cia` extra is installed and the chat server can
+reach a Slurm cluster. Without it the diagnostic tools are not registered and
+none of this is read.
+
+Each of these names something the chat tools and the agents both need to agree
+on, so a single setting answers to two environment variables: the chat prefix,
+and the name the agents use on their own. Setting either configures both halves
+— the chat name wins if you set both. This is the one place `AORTA_CHAT_*` is
+not the only spelling, and it is deliberate: `CIA_JOBS_ROOT` pointing one way
+while the profile pointed another is the failure the shared name prevents.
+
+| Setting | Also reads | Default | Meaning |
+| --- | --- | --- | --- |
+| `allow_cluster_jobs` | — | `false` | Register the three tools that submit work: `triage_kernel_source`, `triage_assembly_source`, `triage_workload`. Off by default because they are outside the bound every other tool keeps — see [extending](extending.md#the-exception-and-why-it-is-one). While off they are absent from the registry and the prompts, not refused at call time. Reading past jobs does not need it. |
+| `jobs_path` | `CIA_JOBS_ROOT` | *(the agents' own default, `~/cia-jobs`)* | Where job records and bundles are written. Must be readable from every node that runs work, which on most clusters means a shared filesystem rather than `/tmp`. |
+| `gpu_arch` | `CIA_GPU_ARCH` | `gfx950` | The GPU the submitted work is built for. Used for the assembler target and passed to the agents as `--arch`, so both name the same chip. |
+| `cia_demo_node` | `CIA_DEMO_NODE` | *(empty)* | Pin work to one node. Empty lets the scheduler choose, which is correct everywhere except a demo. |
+| `rocjitsu_build` | — | *(empty)* | The sanitizer backend. Unset means a sweep reports that it could not run, which is the honest outcome rather than reporting it found nothing. |
+| `rocjitsu_preload` | — | *(empty)* | Preloaded into the sanitized process. ConSan's hook is dlopened into one that has already loaded the host libstdc++, so without a newer one the tool library fails to load and the run reports a guardrail it never exercised. |
+| `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this is the backstop that keeps a wedged cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
+| `waitcheck_timeout` | — | `300` | Seconds for one static assembly analysis, which needs no GPU and no queue. |
+
+The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMIT`,
+`CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, `CIA_CONTAINER_IMAGE`,
+`CIA_SBATCH_EXTRA` — have no chat setting. They describe the cluster rather than
+the assistant, and are read from the environment the chat server runs in.
+
+
 ## Configuring a remote embedding provider by hand
 
 `embedding_provider = "remote"` is supported but selected by nothing: no

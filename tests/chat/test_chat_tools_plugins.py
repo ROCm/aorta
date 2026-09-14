@@ -16,6 +16,7 @@ model, so a mismatch is a tool that fails on every call.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,7 +78,7 @@ def fake_chat_tool_eps(monkeypatch):
 def test_builtins_load_with_no_plugins_installed(fake_chat_tool_eps):
     fake_chat_tool_eps([])
     registry = load_chat_tools()
-    assert set(registry) == set(BUILTIN_CHAT_TOOLS)
+    assert set(registry) == set(enabled_builtins())
     assert all(entry.source_package == "aorta" for entry in registry.values())
 
 
@@ -113,7 +114,7 @@ class TestShellToolIsOptIn:
 
         monkeypatch.setattr(settings, "enable_shell_tool", False)
         fake_chat_tool_eps([])
-        assert set(load_chat_tools()) == set(BUILTIN_CHAT_TOOLS)
+        assert set(load_chat_tools()) == set(enabled_builtins())
 
 
 def test_every_builtin_key_matches_the_tools_own_name():
@@ -222,24 +223,27 @@ def test_plugin_tools_are_advertised_to_the_text_protocol():
     # Native tool calling sends every tool's schema, so it needs nothing here.
     # The ACTION: protocol has only the prompt, so a plugin tool absent from it
     # is a tool the model never calls.
-    from aorta.chat.graph.nodes import _plugin_tool_help
+    from aorta.chat.graph.nodes import _BUILTIN_TOOL_DESCRIPTIONS, _undocumented_tool_help
     from aorta.chat.plugins import ChatTool
 
-    text = _plugin_tool_help(
+    text = _undocumented_tool_help(
         {
             "read_fabric_counters": ChatTool(
                 name="read_fabric_counters",
                 tool=read_fabric_counters,
                 source_package="amd-fabric-tools",
             )
-        }
+        },
+        _BUILTIN_TOOL_DESCRIPTIONS,
     )
     assert "read_fabric_counters" in text
     assert "Read the fabric performance counters" in text
     assert "amd-fabric-tools" in text
-    # Numbering continues from the hand-written built-in list above it, whose
-    # length depends on whether the opt-in shell tool is registered.
-    assert f"{len(enabled_builtins()) + 1}. read_fabric_counters" in text
+    # Numbering continues from the numbered entries the prompt actually shows.
+    # Counting the registry instead -- enabled_builtins() -- leaves a gap when
+    # the opt-in shell tool is on, because its bullet is deliberately unnumbered.
+    documented = len(re.findall(r"^\d+\.", _BUILTIN_TOOL_DESCRIPTIONS, re.MULTILINE))
+    assert f"{documented + 1}. read_fabric_counters" in text
 
 
 def test_a_tool_with_no_description_still_renders():
@@ -252,28 +256,41 @@ def test_a_tool_with_no_description_still_renders():
     assert _summary_line(blank) == "no description"
 
 
-def test_no_plugins_leaves_both_prompts_byte_identical():
-    # A user with no plugins installed must get exactly the prompts they had
-    # before this extension point existed, which is why the helper returns ""
-    # rather than an empty heading.
+def test_nothing_undocumented_leaves_both_prompts_byte_identical():
+    # A user whose registry holds only tools the hand-written lists already
+    # describe must get exactly the prompts they had before this extension
+    # point existed, which is why the helper returns "" rather than an empty
+    # heading.
     from aorta.chat.graph.nodes import (
         _BUILTIN_PLAN_PROMPT,
         _BUILTIN_TOOL_DESCRIPTIONS,
-        PLAN_PROMPT,
-        TOOL_DESCRIPTIONS,
-        _plugin_tool_help,
+        _undocumented_tool_help,
     )
     from aorta.chat.plugins import ChatTool
 
-    builtins_only = {
-        name: ChatTool(name=name, tool=builtin, source_package="aorta")
-        for name, builtin in BUILTIN_CHAT_TOOLS.items()
-    }
-    assert _plugin_tool_help(builtins_only) == ""
-    # This test environment has no chat-tool plugins installed, so the module's
-    # own prompts must also be untouched.
-    assert TOOL_DESCRIPTIONS == _BUILTIN_TOOL_DESCRIPTIONS
-    assert PLAN_PROMPT == _BUILTIN_PLAN_PROMPT
+    def already_in(text: str) -> dict:
+        return {
+            name: ChatTool(name=name, tool=builtin, source_package="aorta")
+            for name, builtin in BUILTIN_CHAT_TOOLS.items()
+            if f"{name}(" in text
+        }
+
+    assert _undocumented_tool_help(already_in(_BUILTIN_TOOL_DESCRIPTIONS), _BUILTIN_TOOL_DESCRIPTIONS) == ""
+    assert _undocumented_tool_help(already_in(_BUILTIN_PLAN_PROMPT), _BUILTIN_PLAN_PROMPT) == ""
+    assert _undocumented_tool_help({}, _BUILTIN_TOOL_DESCRIPTIONS) == ""
+
+
+def test_a_tool_this_package_added_later_is_advertised_too():
+    """Selecting by origin left aorta's own new tools documented nowhere.
+
+    The ACTION: protocol reaches only what the prompt lists, so a diagnostic
+    tool missing from it is one the model never calls -- it answers from its
+    own knowledge instead, and nothing runs.
+    """
+    from aorta.chat.graph.nodes import TOOL_DESCRIPTIONS, TOOL_REGISTRY
+
+    undocumented = [name for name in TOOL_REGISTRY if f"{name}(" not in TOOL_DESCRIPTIONS]
+    assert not undocumented, f"unreachable from the text protocol: {undocumented}"
 
 
 # ── `aorta chat tools`, which is how a plugin author checks their work ─────
@@ -302,5 +319,5 @@ def test_chat_tools_json_is_machine_readable(fake_chat_tool_eps):
     result = CliRunner().invoke(chat, ["tools", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert set(payload) == set(BUILTIN_CHAT_TOOLS)
+    assert set(payload) == set(enabled_builtins())
     assert payload["read_file"]["source_package"] == "aorta"

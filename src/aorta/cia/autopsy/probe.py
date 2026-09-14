@@ -10,6 +10,7 @@ from pathlib import Path
 
 from aorta.cia.launch.cluster import ssh_user
 from aorta.cia.launch.planner import check_recipe_mode
+from aorta.cia.cancellation import Stop, pause
 from aorta.cia.launch.job import JobRecord
 
 # How long to wait for the production sweep (4 h)
@@ -79,7 +80,9 @@ def resolve_recipe(bundle_root: Path, job: JobRecord) -> tuple[str, str]:
     return "", ""
 
 
-def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "") -> Path | None:
+def run_aorta_probe(
+    bundle_root: Path, job: JobRecord, head_node: str = "", *, stop: Stop = None
+) -> Path | None:
     """SSH to job node, run production Aorta sweep, wait for matrix.json.
 
     *head_node* falls back to the job's own and then to CIA_SSH_HOST. With
@@ -133,7 +136,11 @@ def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "") -> P
             break
         elapsed = int(time.time() - (deadline - PROBE_TIMEOUT_SEC))
         print(f"[probe] waiting for matrix.json... ({elapsed}s elapsed)")
-        time.sleep(POLL_INTERVAL_SEC)
+        # Four hours of thirty-second sleeps: by far the longest wait in the
+        # pipeline, and the one most likely to outlive whoever asked for it.
+        if pause(stop, POLL_INTERVAL_SEC):
+            print("[probe] caller gave up; stopping the wait for matrix.json")
+            return None
     else:
         print(f"[probe] timed out after {PROBE_TIMEOUT_SEC}s waiting for matrix.json")
         return None
