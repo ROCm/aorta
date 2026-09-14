@@ -41,6 +41,43 @@ Both drive an LLM, and the line between them is whether you sit and watch.
 | [Redaction](redaction.md) | What leaves the machine, what is rewritten first, and what is **not** |
 | [Adding a tool](extending.md) | Contributing an agent tool from your own package |
 
+## What a turn looks like
+
+The answer is delivered the same way in both front doors and has not changed:
+one complete reply per question. In the browser a `Thinking...` placeholder is
+posted and then replaced by the finished answer; nothing is streamed token by
+token, and there is no partial text to read while the model is still deciding.
+
+What is new is what happens *between* those two moments, and only in the
+browser.
+
+A turn that calls a diagnostic tool can run for several minutes while a cluster
+job compiles, queues and runs. Previously nothing was shown for that whole time
+— steps are reported when a graph node finishes, so the one node that takes real
+time was the one that said nothing, and a browser with no traffic for five
+minutes reports the backend as unreachable rather than busy. So the UI now shows
+a step as each node completes, and a tool announces itself *before* it blocks
+rather than after it returns.
+
+| | Browser (`aorta chat ui`) | CLI (`aorta chat`, `aorta chat ask`) |
+| --- | --- | --- |
+| Progress during the turn | A step per node, and one when a tool starts | None |
+| The answer | Replaces the placeholder, complete | Rendered when it is ready |
+| Token-by-token streaming | No | No |
+
+The tool announcement carries the tool's name and nothing else. It deliberately
+does not carry the arguments: for `triage_kernel_source` those are the user's
+entire pasted kernel, and the step renders the name.
+
+Progress is best-effort. If the browser has gone — a closed tab during a
+five-minute job — reporting fails, the failure is logged once, and the run
+continues to completion rather than being abandoned along with the session.
+
+Mechanically: `invoke_agent` awaits the graph when no progress callback is
+passed, which is what the CLI does, and streams it when one is. The CLI path is
+byte-for-byte the one that was there before.
+
+
 ## Commands
 
 | Command | Description |
