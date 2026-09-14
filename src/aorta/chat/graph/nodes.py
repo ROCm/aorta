@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import re
@@ -491,6 +494,28 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     return {"route": route}
 
 
+#: Threads for tool execution. Explicit rather than the loop's default
+#: executor: these run for minutes, so the number that may be in flight is a
+#: decision rather than something inherited from the CPU count. Four is more
+#: than the two triage jobs the cluster pool will run at once, leaving room for
+#: the quick tools -- reading a file, searching the codebase -- to answer while
+#: a triage is out.
+_TOOL_WORKERS = 4
+_TOOL_POOL_LOCK = threading.Lock()
+_TOOL_POOL: ThreadPoolExecutor | None = None
+
+
+def _tool_pool() -> ThreadPoolExecutor:
+    """The executor tool calls run on, created on first use."""
+    global _TOOL_POOL
+    with _TOOL_POOL_LOCK:
+        if _TOOL_POOL is None:
+            _TOOL_POOL = ThreadPoolExecutor(
+                max_workers=_TOOL_WORKERS, thread_name_prefix="aorta-tool"
+            )
+        return _TOOL_POOL
+
+
 async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     """Run a tool off the event loop, announcing it before it blocks.
 
@@ -507,7 +532,22 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
         get_stream_writer()({"tool": _normalise_tool_name(tool_name), "args": kwargs})
     except RuntimeError:
         pass  # not being streamed; nothing to announce to
-    return await asyncio.to_thread(_execute_tool, tool_name, kwargs)
+    # An executor of our own, sized for these tools. asyncio.to_thread would
+    # use the loop's default one, which is min(32, cpu+4) -- thirty-two here,
+    # and not a bound anyone chose for work that runs for minutes. It is also
+    # shared with every other to_thread in the process, so a burst of tool
+    # calls and unrelated work starve each other.
+    #
+    # The context is copied across by hand because run_in_executor, unlike
+    # to_thread, does not. Without it the per-conversation ToolCache and the
+    # redaction notice would be unbound inside the worker, and the cache would
+    # silently fall back to the process-wide one -- which is the cross-session
+    # bug it was introduced to fix.
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    return await loop.run_in_executor(
+        _tool_pool(), lambda: context.run(_execute_tool, tool_name, kwargs)
+    )
 
 
 
