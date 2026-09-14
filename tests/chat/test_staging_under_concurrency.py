@@ -5,20 +5,21 @@ any more -- four run at once on their own executor -- so process-global state
 that was previously safe by accident is reachable.
 
 Staging is where that bites. Each triage writes the user's source under
-``jobs_root`` before submitting it, and the filename is the kernel name and a
-timestamp. At second resolution two turns staging a kernel of the same name in
-the same second produce the same path, and one overwrites the other's source
-while the first is still being read on the node. The user gets a verdict about
-somebody else's code, with nothing anywhere saying so.
+``jobs_root`` before submitting it. When the filename was the kernel name and a
+timestamp, two turns staging a kernel of the same name produced the same path,
+and one overwrote the other's source while the first was still being read on
+the node. The user gets a verdict about somebody else's code, with nothing
+anywhere saying so.
 
-The workload path was already stamped to the microsecond. The kernel and
-assembly paths were not.
+A finer timestamp narrowed that window without closing it, because the write
+stayed last-one-wins. Each call now stages into a directory of its own, created
+with ``O_EXCL``, so a clash is impossible rather than unlikely -- and the writes
+inside it are exclusive too, so if that reasoning is ever wrong it raises
+instead of silently replacing a sibling call's source.
 """
 
 from __future__ import annotations
 
-import re
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -31,42 +32,61 @@ _CLUSTER = (
 class TestEveryStagedPathIsUniquePerCall:
     """Read off the source, because the alternative is a real cluster job."""
 
-    def test_every_stamp_carries_microseconds(self):
-        stamps = re.findall(r'strftime\("([^"]+)"\)|strftime\(\'([^\']+)\'\)',
-                            _CLUSTER.read_text(encoding="utf-8"))
-        formats = [a or b for a, b in stamps]
+    def test_all_three_sites_stage_into_their_own_directory(self):
+        """Kernel, assembly and workload each write somewhere only they own."""
+        source = _CLUSTER.read_text(encoding="utf-8")
 
-        assert formats, "no timestamps found; has the staging moved?"
-        assert all("%f" in f for f in formats), formats
+        assert source.count("_stage_dir(") == 4, "three call sites and the helper"
 
-    def test_there_are_three_of_them(self):
-        """Kernel, assembly and workload each stage a file."""
-        formats = re.findall(r"strftime\(", _CLUSTER.read_text(encoding="utf-8"))
+    def test_the_directory_is_created_exclusively(self):
+        """mkdtemp retries on a clash rather than handing back a shared path."""
+        source = _CLUSTER.read_text(encoding="utf-8")
 
-        assert len(formats) == 3
+        assert "tempfile.mkdtemp(" in source
+
+    def test_nothing_stages_by_timestamp_alone(self):
+        """A stamp narrows the window; it does not close it."""
+        source = _CLUSTER.read_text(encoding="utf-8")
+
+        assert ".write_text(prepared.program" not in source
+        assert "script.write_text(source" not in source
+
+    def test_the_writes_are_exclusive(self):
+        """So a latent collision is loud rather than silent."""
+        source = _CLUSTER.read_text(encoding="utf-8")
+
+        assert 'open(path, "x"' in source
 
 
 class TestTheCollisionItself:
-    @staticmethod
-    def _stamp(fmt: str) -> str:
-        return datetime.now().strftime(fmt)
+    def test_two_calls_never_share_a_directory(self, tmp_path):
+        from aorta.chat.tools.cluster import _stage_dir
 
-    def test_second_resolution_collides(self):
-        """What the kernel and assembly paths did."""
-        fmt = "%Y%m%d-%H%M%S"
+        made = {_stage_dir(tmp_path, "reduce_sum") for _ in range(200)}
 
-        assert self._stamp(fmt) == self._stamp(fmt), "the premise of the fix"
+        assert len(made) == 200
 
-    def test_microsecond_resolution_does_not(self):
-        fmt = "%Y%m%d-%H%M%S-%f"
+    def test_a_burst_under_threads_stays_distinct(self, tmp_path):
+        """The case that matters: the same name, at the same moment."""
+        from concurrent.futures import ThreadPoolExecutor
 
-        assert self._stamp(fmt) != self._stamp(fmt)
+        from aorta.chat.tools.cluster import _stage_dir
 
-    def test_a_burst_of_them_stays_distinct(self):
-        fmt = "%Y%m%d-%H%M%S-%f"
-        stamps = {self._stamp(fmt) for _ in range(200)}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            made = list(pool.map(lambda _: _stage_dir(tmp_path, "same"), range(200)))
 
-        assert len(stamps) == 200
+        assert len(set(made)) == 200, "two calls were handed the same directory"
+
+    def test_an_overwrite_raises_rather_than_replacing(self, tmp_path):
+        """What last-one-wins did silently."""
+        from aorta.chat.tools.cluster import _write_new
+
+        target = tmp_path / "kernel.hip"
+        _write_new(target, "first")
+
+        with pytest.raises(FileExistsError):
+            _write_new(target, "second")
+        assert target.read_text(encoding="utf-8") == "first"
 
 
 class TestTheOtherGlobalStateIsGone:
@@ -138,4 +158,7 @@ class TestConcurrentStagingWritesDistinctFiles:
 
         assert len(staged) == 4, f"only {len(staged)} reached the cluster"
         assert len(set(staged)) == 4, f"two turns shared a path: {staged}"
-        assert all("reduce_sum-" in Path(p).name for p in staged), staged
+        # The kernel names the directory now; the file inside it is plain.
+        assert all(Path(p).name == "reduce_sum.hip" for p in staged), staged
+        assert all("reduce_sum-" in Path(p).parent.name for p in staged), staged
+        assert len({Path(p).parent for p in staged}) == 4, "a directory was shared"

@@ -124,3 +124,47 @@ class TestTheToolFreePathSaysWhyItCannot:
         """It has none; naming any would be the run_nan_demo failure again."""
         for tool in _TRIAGE:
             assert tool not in ANSWER_PROMPT
+
+
+def _identity(text: str) -> str:
+    """The sentence before the rules: what the assistant says it is."""
+    return " ".join(text.split("RULES:")[0].split())
+
+
+class TestTheIdentityAgreesWithTheRules:
+    """The prompt has to introduce itself as the product it then describes.
+
+    Rule 1 was widened to take pasted GPU code while the sentence above it
+    still said "the AORTA codebase" and nothing else. A model reading the two
+    in order is introduced to one product and then given the rules of another,
+    and the identity sentence is the one it leans on when the rules are
+    ambiguous -- which is how a diagnostic request gets politely refused by
+    the assistant built to diagnose it.
+    """
+
+    def test_it_says_it_diagnoses_when_it_can(self, prompt):
+        assert "diagnoses" in _identity(prompt(cluster_jobs=True))
+
+    def test_it_names_what_it_diagnoses(self, prompt):
+        identity = _identity(prompt(cluster_jobs=True))
+        for subject in ("kernels", "assembly", "workloads"):
+            assert subject in identity, f"{subject} missing from {identity!r}"
+
+    def test_it_claims_nothing_extra_when_it_cannot(self, prompt):
+        """Without the extra there is no GPU node to run anything on."""
+        assert "diagnoses" not in _identity(prompt(cluster_jobs=False))
+
+    def test_the_codebase_half_survives_both_ways(self, prompt):
+        for enabled in (True, False):
+            assert "AORTA codebase" in _identity(prompt(cluster_jobs=enabled))
+
+    def test_the_identity_and_rule_one_agree(self, prompt):
+        """Neither may offer what the other refuses."""
+        for enabled in (True, False):
+            text = prompt(cluster_jobs=enabled)
+            offered = "diagnoses" in _identity(text)
+            admitted = "pastes for diagnosis" in _rule(text, 1)
+            assert offered == admitted, (
+                f"identity says {offered}, rule 1 says {admitted}, with "
+                f"cluster_jobs={enabled}"
+            )

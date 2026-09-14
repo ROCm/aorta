@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are the AORTA Codebase Assistant, an AI agent that helps \
-developers understand, navigate, and work with the AORTA codebase.
+developers understand, navigate, and work with the AORTA codebase{diagnosis_identity}.
 
 RULES:
 1. Answer questions about the AORTA codebase, about the AORTA runs on this \
@@ -328,6 +328,17 @@ async def _send(llm: Any, messages: list[Any]) -> Any:
 #: wins.
 _DIAGNOSIS_SCOPE = ", and about GPU code the user pastes for diagnosis"
 
+#: The same admission, made in the sentence that says what this assistant is.
+#: Rule 1 was widened to take pasted code while the line above it still said
+#: "the AORTA codebase" and nothing else -- so the prompt introduced itself as
+#: one product and then listed the rules of another. A model reading the two
+#: in order has been told to refuse the thing it was just told to do, and the
+#: identity sentence is the one it weights when the rules are ambiguous.
+_DIAGNOSIS_IDENTITY = (
+    ", and diagnoses GPU kernels, assembly and workloads that developers paste"
+    " by building and running them on a GPU node"
+)
+
 #: Added to rule 3 alongside it, so the tools rules 12 and 13 lean on are named
 #: rather than assumed. Rule 3 listed the sandboxed tools only, so the three that
 #: do the work this product is for appeared nowhere in the prompt asking for it.
@@ -354,6 +365,7 @@ def _build_system_message(context: str = "") -> SystemMessage:
     return SystemMessage(
         content=SYSTEM_PROMPT.format(
             context=context,
+            diagnosis_identity=_DIAGNOSIS_IDENTITY if available else "",
             diagnosis_scope=_DIAGNOSIS_SCOPE if available else "",
             diagnostic_tools=_DIAGNOSTIC_TOOLS if available else "",
         )
