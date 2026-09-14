@@ -66,21 +66,49 @@ rather than after it returns.
 
 | | Browser (`aorta chat ui`) | CLI (`aorta chat`, `aorta chat ask`) |
 | --- | --- | --- |
-| Progress during the turn | A step per node, and one when a tool starts | None |
+| Progress during the turn | A step per node, and one held open while a tool runs | None |
 | The answer | Replaces the placeholder, complete | Rendered when it is ready |
 | Token-by-token streaming | No | No |
 
-The tool announcement carries the tool's name and nothing else. It deliberately
-does not carry the arguments: for `triage_kernel_source` those are the user's
-entire pasted kernel, and the step renders the name.
+A tool announces itself twice: once before it blocks, and once when it returns.
+The step opens on the first and is held until the second, so a job that takes
+five minutes reads as running for five minutes. Closing it on the announcement
+alone — which is what rendering a step per event gets you — stamped it finished
+the instant it began, and the wait the announcement exists to explain was the
+part the UI showed as over. The completion is emitted from a `finally`, because
+a step retained until it arrives is only safe if it always arrives.
+
+Each announcement carries the tool's name, an id tying the pair together, and on
+the completion how long the call took. It deliberately does not carry the
+arguments: for `triage_kernel_source` those are the user's entire pasted kernel,
+and the step renders the name. The id is there because one turn can call the
+same tool more than once, and closing by name alone would end the wrong step.
 
 Progress is best-effort. If the browser has gone — a closed tab during a
 five-minute job — reporting fails, the failure is logged once, and the run
 continues to completion rather than being abandoned along with the session.
 
-Mechanically: `invoke_agent` awaits the graph when no progress callback is
-passed, which is what the CLI does, and streams it when one is. The CLI path is
-byte-for-byte the one that was there before.
+### What changed against the integration's contract
+
+The `aorta_llm` architecture notes describe `invoke_agent` as the single point
+both front doors converge on, awaiting the graph and returning one complete
+answer. That is still what the CLI gets, byte for byte: with no progress
+callback `invoke_agent` awaits `ainvoke` exactly as it did.
+
+Passing a callback now streams the graph instead. This is a real change to that
+contract and worth stating plainly, because the part of it people remember —
+"not streamed token by token" — is *not* what changed:
+
+| Stream mode | Carries | Rendered as |
+| --- | --- | --- |
+| `updates` | the delta from each node as it finishes | a step per node |
+| `custom` | the tool announcements described above | a step held open for the tool |
+| `values` | the accumulated state; the last one is the answer | the replacement message |
+
+`messages` is the mode that would emit tokens, and it is deliberately not
+requested. The answer is still assembled once, at the end, and still arrives as
+one message replacing the placeholder. What the stream added is progress
+*between* those two moments, not partial text within the answer.
 
 
 ## Commands
