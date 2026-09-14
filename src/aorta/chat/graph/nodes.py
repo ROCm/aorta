@@ -36,14 +36,14 @@ You are the AORTA Codebase Assistant, an AI agent that helps \
 developers understand, navigate, and work with the AORTA codebase.
 
 RULES:
-1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
-   this machine. Politely refuse anything else.
+1. Answer questions about the AORTA codebase, about the AORTA runs on this \
+   machine{diagnosis_scope}. Politely refuse work that is none of those.
 2. When referencing code, always cite file paths and line numbers.
 3. You have tools to explore the codebase: list_files, read_file, search_code, \
    grep_code and search_repo_map. You also have tools for this machine's own \
    AORTA run results: list_runs, read_run_matrix, read_run_env, and \
    search_run_artifacts. Use those when the question is about what a run did \
-   rather than what the code says.
+   rather than what the code says.{diagnostic_tools}
 4. NEVER fabricate or guess commands. Before suggesting any command, you MUST first \
    use search_code or read_file to find the actual scripts, entry points, or \
    configuration in the codebase. Only generate commands that are grounded in real \
@@ -86,8 +86,10 @@ You have NO tools available. Answer using only the RETRIEVED CONTEXT below \
 and the conversation so far.
 
 RULES:
-1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
-   this machine. Politely refuse anything else.
+1. Answer questions about the AORTA codebase and about the AORTA runs on \
+   this machine. If the user pasted code of their own and wants it diagnosed, \
+   say that needs a diagnostic run and this answer was reached without one. \
+   Politely refuse work that is none of those.
 2. When referencing code, always cite file paths and line numbers.
 3. NEVER fabricate file paths, commands, flags, or behaviour. Everything you \
    state must be visible in the RETRIEVED CONTEXT.
@@ -317,9 +319,42 @@ async def _send(llm: Any, messages: list[Any]) -> Any:
     return await llm.ainvoke(_system_first(redact_for_send(messages)))
 
 
+#: Added to rule 1 where the diagnostic tools are registered. Without it rule 1
+#: refuses everything that is not the AORTA codebase or an AORTA run -- which is
+#: what a user's own pasted kernel is -- while rules 12 and 13 tell the model to
+#: diagnose exactly that. Two products in one prompt, and nothing says which one
+#: wins.
+_DIAGNOSIS_SCOPE = ", and about GPU code the user pastes for diagnosis"
+
+#: Added to rule 3 alongside it, so the tools rules 12 and 13 lean on are named
+#: rather than assumed. Rule 3 listed the sandboxed tools only, so the three that
+#: do the work this product is for appeared nowhere in the prompt asking for it.
+_DIAGNOSTIC_TOOLS = (
+    " For a kernel, an assembly listing or a workload the user pastes, you also"
+    " have triage_kernel_source, triage_assembly_source and triage_workload,"
+    " which build and run it on a GPU node under a sanitizer. Those take minutes"
+    " and submit real cluster work, so run one when the user is asking what is"
+    " wrong with code they supplied."
+)
+
+
 def _build_system_message(context: str = "") -> SystemMessage:
+    """The prompt, describing the tools this deployment actually has.
+
+    The diagnostic clauses are conditional because the tools are: they register
+    only when ``allow_cluster_jobs`` is set. Naming them unconditionally would
+    promise a model tools it cannot call, which is what the removed run_nan_demo
+    redirect did -- a turn that dead-ends on a hallucinated call.
+    """
+    from aorta.chat.plugins import diagnostic_tools
+
+    available = "triage_kernel_source" in diagnostic_tools()
     return SystemMessage(
-        content=SYSTEM_PROMPT.format(context=context)
+        content=SYSTEM_PROMPT.format(
+            context=context,
+            diagnosis_scope=_DIAGNOSIS_SCOPE if available else "",
+            diagnostic_tools=_DIAGNOSTIC_TOOLS if available else "",
+        )
     )
 
 
