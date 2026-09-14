@@ -70,6 +70,23 @@ rather than after it returns.
 | The answer | Replaces the placeholder, complete | Rendered when it is ready |
 | Token-by-token streaming | No | No |
 
+These are the steps, and the placeholder is gone by the time the first one
+appears — until then it is all there is to show, because the router has to
+finish before anything can be reported and that is an LLM call. A node that
+records nothing renders no step and does not retire the placeholder, so the
+screen is never empty while the first real node runs.
+
+| Node | Shown as |
+| --- | --- |
+| `router` | Deciding whether this needs a job |
+| `select` | Choosing a diagnostic tool |
+| `plan` | Planning the steps |
+| `act` | Running tools |
+| `critic` | Checking the answer |
+
+Nodes not listed here render nothing: plumbing like `retrieve` stays out of the
+way rather than reporting itself as progress.
+
 A tool announces itself twice: once before it blocks, and once when it returns.
 The step opens on the first and is held until the second, so a job that takes
 five minutes reads as running for five minutes. Closing it on the announcement

@@ -126,3 +126,37 @@ class TestTheStreamingChangeIsDocumented:
         """Nobody should read "streamed" as partial text arriving."""
         flat = readme
         assert "assembled once" in flat or "one message" in flat
+
+
+class TestTheStepListIsDocumented:
+    """A reader of the architecture notes expects one placeholder and one reply.
+
+    What a turn actually renders now is a stack of steps between them, and
+    "a step per node" does not tell anyone which ones they will see. The list
+    is checked against the code rather than transcribed, because a step added
+    later is exactly the kind of change that leaves prose behind.
+    """
+
+    @staticmethod
+    def _titles() -> dict[str, str]:
+        import re
+
+        app = (
+            Path(__file__).resolve().parents[2]
+            / "src" / "aorta" / "chat" / "ui" / "app.py"
+        ).read_text(encoding="utf-8")
+        block = re.search(r"_NODE_TITLES = \{(.*?)\n\}", app, re.S).group(1)
+        return dict(re.findall(r'"(\w+)":\s*"([^"]+)"', block))
+
+    def test_every_step_the_ui_can_render_is_listed(self, readme):
+        missing = {n for n in self._titles() if f"`{n}`" not in readme}
+        assert not missing, f"rendered but undocumented: {missing}"
+
+    def test_the_titles_match_what_is_shown(self, readme):
+        """The wording a user sees, not a paraphrase of it."""
+        wrong = {n: t for n, t in self._titles().items() if t not in readme}
+        assert not wrong, f"documented under a different name: {wrong}"
+
+    def test_it_says_silent_nodes_render_nothing(self, readme):
+        """Otherwise the absence of a step reads as a node that failed."""
+        assert "render nothing" in readme or "renders no step" in readme
