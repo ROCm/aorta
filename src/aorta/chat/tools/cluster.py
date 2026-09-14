@@ -643,8 +643,30 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
         )
 
     name = label or "workload"
+    # The kernel and assembly paths have reused a finished run since the cache
+    # was introduced; this one did not, and it is the one that runs longest. A
+    # critic that rejects an answer sends the agent round again, and without
+    # this the second pass submitted a second cluster job for a question
+    # already answered -- another GPU allocation and another two minutes to
+    # arrive at the verdict already in hand.
+    # .triage rather than .asm: this costs minutes on a GPU node, and the two
+    # are bounded separately so a run of cheap pastes cannot evict it.
+    cache = current_tool_cache().triage
+    cache_key = ("workload", source.strip(), command.strip())
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return (
+            "(Reusing the triage already run for this exact workload in this "
+            "conversation — no second cluster job was submitted.)\n\n" + cached
+        )
+
     if command.strip():
-        return _run_triage(["--command", command.strip()], name)
+        result = _run_triage(["--command", command.strip()], name)
+        # Same rule as the other two: a completed run is worth reusing, a
+        # transient launch failure is worth retrying.
+        if "Autopsy verdict:" in result:
+            cache.put(cache_key, result)
+        return result
 
     # The label is model-supplied and became the filename directly, so
     # `../../../../.bashrc` wrote the user's pasted source outside staged/.
@@ -658,10 +680,18 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
     # appended here, which changed the program's argument contract: a training
     # script with an argparse parser and no positional exits 2 rather than
     # running. It arrives as AORTA_BUNDLE in the job environment instead.
-    return _run_triage(
-        ["--command", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"],
+    # The server's own interpreter only if nothing better was named. It is the
+    # one serving chat, so it has langchain and Chainlit in it and need not
+    # have a GPU build of torch -- and a workload that cannot reach the GPU
+    # exits before the bug it was submitted to find.
+    runner = settings.workload_python or sys.executable
+    result = _run_triage(
+        ["--command", f"{shlex.quote(runner)} {shlex.quote(str(script))}"],
         name,
     )
+    if "Autopsy verdict:" in result:
+        cache.put(cache_key, result)
+    return result
 
 
 @tool
