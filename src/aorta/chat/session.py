@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+import asyncio
 import logging
 
 from langchain_core.messages import AIMessage, BaseMessage
@@ -24,6 +25,41 @@ async def wait_for_vllm(timeout: int = 300, interval: int = 5) -> None:
     from aorta.chat.inference.providers.local_vllm import LocalVLLMBackend
 
     await LocalVLLMBackend().preflight(timeout=timeout, interval=interval)
+
+
+async def _announce(
+    on_step: Callable[[str, dict], Awaitable[None]],
+    name: str,
+    payload: dict,
+    *,
+    failed: list[BaseException],
+) -> None:
+    """Tell the caller a step happened, and carry on if it cannot hear it.
+
+    Progress is not the answer. The awaits here were unguarded, so anything the
+    callback raised came out of ``astream`` and ended the query -- and the
+    callback the UI passes talks to Chainlit, which fails once the session is
+    gone. A user closing the tab during a five-minute cluster job took the run
+    down with it, leaving the job burning with nobody to receive the verdict.
+    The ``ainvoke`` path this replaced had no such coupling, so anyone passing a
+    callback was worse off than before.
+
+    Cancellation is not swallowed: it is how the caller stops this on purpose,
+    and catching it here would make the run unstoppable.
+    """
+    try:
+        await on_step(name, payload)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any callback, any failure
+        if not failed:
+            logger.warning(
+                "Progress reporting failed at step %r (%s: %s); the query "
+                "continues and the answer is unaffected. Later steps this turn "
+                "are not reported again.",
+                name, type(exc).__name__, exc,
+            )
+        failed.append(exc)
 
 
 def extract_reply(messages: list[BaseMessage]) -> str:
@@ -76,14 +112,17 @@ async def invoke_agent(
             # tool announcing itself; "values" is the accumulated state, so the
             # last one matches what ainvoke would have returned.
             result = {}
+            #: Progress failures seen this turn, so the warning is logged once
+            #: rather than per chunk. A dead session fails every one of them.
+            failed: list[BaseException] = []
             async for mode, chunk in agent_graph.astream(
                 initial, stream_mode=["updates", "values", "custom"]
             ):
                 if mode == "updates":
                     for node, delta in chunk.items():
-                        await on_step(node, delta or {})
+                        await _announce(on_step, node, delta or {}, failed=failed)
                 elif mode == "custom":
-                    await on_step("tool", chunk)
+                    await _announce(on_step, "tool", chunk, failed=failed)
                 else:
                     result = chunk
     reply = extract_reply(result.get("messages", []))
