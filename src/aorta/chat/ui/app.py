@@ -122,11 +122,25 @@ async def on_message(message: cl.Message):
     thinking_msg = cl.Message(content="Thinking...")
     await thinking_msg.send()
 
+    #: Whether "Thinking..." is still on screen. It is the indicator until the
+    #: first step renders, and redundant afterwards -- a step says what is
+    #: happening, which is strictly more than "Thinking...". Retiring it then,
+    #: rather than at the start, is what keeps the gap before the first node
+    #: finishes from looking like a chat that has frozen.
+    thinking_shown = True
+
+    async def _retire_thinking() -> None:
+        nonlocal thinking_shown
+        if thinking_shown:
+            thinking_shown = False
+            await thinking_msg.remove()
+
     async def show_step(node: str, delta: dict) -> None:
         # A tool announces itself before it runs. Showing that immediately is
         # the difference between a visible five-minute cluster job and a chat
         # that looks frozen.
         if node == "tool":
+            await _retire_thinking()
             async with cl.Step(name=f"Running {delta.get('tool')}") as step:
                 step.output = (
                     f"`{delta.get('tool')}`\n\nWork on the cluster can take "
@@ -136,7 +150,9 @@ async def on_message(message: cl.Message):
         title = _NODE_TITLES.get(node)
         body = _node_reasoning(node, delta) if title else ""
         if not title or not body:
+            # Nothing rendered, so nothing has replaced the placeholder yet.
             return
+        await _retire_thinking()
         async with cl.Step(name=title) as step:
             step.output = body
 
@@ -147,7 +163,7 @@ async def on_message(message: cl.Message):
             )
     except Exception:
         logger.exception("Agent graph error")
-        await thinking_msg.remove()
+        await _retire_thinking()
         await cl.Message(
             content="An error occurred while processing your request. Please try again."
         ).send()
@@ -157,7 +173,7 @@ async def on_message(message: cl.Message):
         await _deliver_notice(notice_state)
         return
 
-    await thinking_msg.remove()
+    await _retire_thinking()
     cl.user_session.set("history", history)
     await cl.Message(content=reply).send()
     await _deliver_notice(notice_state)

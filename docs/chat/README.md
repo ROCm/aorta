@@ -48,6 +48,11 @@ one complete reply per question. In the browser a `Thinking...` placeholder is
 posted and then replaced by the finished answer; nothing is streamed token by
 token, and there is no partial text to read while the model is still deciding.
 
+The placeholder now steps aside as soon as there is something better to show.
+It is what you see until the first step appears — the router has to finish
+before anything can be reported, and that is an LLM call — and it is removed at
+that point rather than sitting above the steps until the answer lands.
+
 What is new is what happens *between* those two moments, and only in the
 browser.
 
