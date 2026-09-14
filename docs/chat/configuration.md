@@ -196,6 +196,29 @@ The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMI
 the assistant, and are read from the environment the chat server runs in.
 
 
+## The web UI's own settings
+
+`aorta chat ui` is a Chainlit app, and Chainlit keeps its own configuration in
+`.chainlit/config.toml` beside the app rather than in your profile. It writes
+that file itself the first time it runs, with defaults chosen for a demo. Two
+of them matter here, and both are committed set rather than left to be
+regenerated.
+
+| Setting | Shipped as | Why |
+| --- | --- | --- |
+| `allow_origins` | `["http://localhost:8010", "http://127.0.0.1:8010"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
+| `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
+
+**Serving anywhere other than `localhost:8010` means editing `allow_origins`.**
+`aorta chat ui --port` and the `PORT` variable in a launcher both move the port,
+and neither reaches into that file, so the browser will connect and then fail on
+the socket with nothing in the page to say why.
+
+The rest of the file is Chainlit's own defaults. If you delete it, Chainlit
+regenerates it — with `allow_origins = ["*"]` and `mask_user_env = false` — so
+it is committed rather than ignored.
+
+
 ## Configuring a remote embedding provider by hand
 
 `embedding_provider = "remote"` is supported but selected by nothing: no

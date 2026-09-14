@@ -17,10 +17,25 @@ persist_user_env = false
 
 # Whether to mask user environment variables (API keys) in the UI with password type
 # Set to true to show API keys as ***, false to show them as plain text
-mask_user_env = false
+#
+# On: the keys this server holds reach a model provider and a Slurm cluster, and
+# plain text is one screen-share away from being somebody else's.
+mask_user_env = true
 
 # Authorized origins
-allow_origins = ["*"]
+#
+# The origins this UI is actually served from, not "*". The tools behind it
+# submit cluster jobs, compile pasted HIP and can run shell commands, so a
+# wildcard means any page a developer happens to have open can talk to a
+# local instance and start work on a GPU node.
+#
+# Serving on another host or port means adding it here. `aorta chat ui --port`
+# and the PORT variable in the launcher both change the port, and neither can
+# reach into this file.
+allow_origins = [
+    "http://localhost:8010",
+    "http://127.0.0.1:8010",
+]
 
 [features]
 # Process and display HTML in messages. This can be a security risk (see https://stackoverflow.com/questions/19603097/why-is-it-dangerous-to-render-user-generated-html-or-javascript)
