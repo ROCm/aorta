@@ -160,7 +160,12 @@ chat-cli = [
     "langchain-openai>=0.2.0; python_version >= '3.11'",
     "langchain-community>=0.3.0; python_version >= '3.11'",
     "langchain-text-splitters>=0.3.0; python_version >= '3.11'",
-    "langgraph>=0.2.0; python_version >= '3.11'",
+    # 0.2.69 is the first release carrying langgraph.config.get_stream_writer
+    # and the "custom" stream mode, which graph/nodes.py imports at module
+    # scope and session.py asks for by name. On 0.2.0 -- which the old floor
+    # admitted -- importing the chat graph fails outright, so neither the UI
+    # nor the CLI starts.
+    "langgraph>=0.2.69; python_version >= '3.11'",
     "openai>=1.50.0; python_version >= '3.11'",
     "pydantic>=2.0; python_version >= '3.11'",
     # >=2.3 is load-bearing: aorta/chat/config.py imports NoDecode, added in 2.3.
