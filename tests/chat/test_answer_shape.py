@@ -61,3 +61,60 @@ def test_the_prompt_still_names_no_tool_for_a_symptom():
     lowered = SYSTEM_PROMPT.lower()
     for coupling in ("if the user mentions nan", "for nan", "for a race", "if it is a race"):
         assert coupling not in lowered
+
+
+
+# ── where the instruction sits, not just that it exists ───────────────────
+
+
+class TestItSitsWhereTheModelWillRead:
+    """Presence is not placement, and this file only checked presence.
+
+    The instruction was appended after ``RETRIEVED CONTEXT:`` and the
+    ``{context}`` interpolation, so it arrived below however many kilobytes of
+    retrieved code chunks the turn had gathered -- numbered into a rules list it
+    was nowhere near. Every assertion above is a substring check, which passes
+    wherever the text sits, so the suite reported the instruction as present the
+    whole time it was in the worst place in the prompt for one.
+    """
+
+    def test_it_comes_before_the_retrieved_context(self):
+        assert SYSTEM_PROMPT.index("three labelled parts") < SYSTEM_PROMPT.index(
+            "RETRIEVED CONTEXT"
+        )
+
+    def test_and_before_the_context_is_interpolated(self):
+        """The marker and the interpolation are separate places to land after."""
+        assert SYSTEM_PROMPT.index("three labelled parts") < SYSTEM_PROMPT.index(
+            "{context}"
+        )
+
+    def test_it_sits_inside_the_numbered_list(self):
+        """A rule numbered into a list the reader has already left is not a rule."""
+        rules = SYSTEM_PROMPT[
+            SYSTEM_PROMPT.index("RULES:") : SYSTEM_PROMPT.index("RETRIEVED CONTEXT")
+        ]
+
+        assert "three labelled parts" in rules
+
+    def test_it_carries_a_number_of_its_own(self):
+        """So a reader can see it belongs to the list rather than trailing it."""
+        import re
+
+        rules = SYSTEM_PROMPT[
+            SYSTEM_PROMPT.index("RULES:") : SYSTEM_PROMPT.index("RETRIEVED CONTEXT")
+        ]
+        line_start = rules.rindex("\n", 0, rules.index("three labelled parts")) + 1
+
+        assert re.match(r"\s*\d+\.", rules[line_start:]), rules[line_start:line_start + 40]
+
+    def test_the_rules_run_without_a_gap_in_the_numbering(self):
+        """A rule appended elsewhere shows up as a number missing from here."""
+        import re
+
+        rules = SYSTEM_PROMPT[
+            SYSTEM_PROMPT.index("RULES:") : SYSTEM_PROMPT.index("RETRIEVED CONTEXT")
+        ]
+        numbers = [int(n) for n in re.findall(r"^\s*(\d+)\.", rules, re.MULTILINE)]
+
+        assert numbers == list(range(1, len(numbers) + 1)), numbers
