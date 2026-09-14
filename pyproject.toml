@@ -313,6 +313,12 @@ include = ["aorta*"]
 aorta = [
     "py.typed",
     "chat/ui/chainlit.md",
+    # The Chainlit settings that matter -- the CORS origins and the key
+    # masking. Chainlit resolves .chainlit/config.toml under CHAINLIT_APP_ROOT
+    # or the working directory, so without shipping this and pointing the child
+    # at it, an installed wheel generates one with Chainlit's own defaults:
+    # allow_origins = ["*"] on a UI whose tools run pasted code on GPU nodes.
+    "chat/ui/chainlit_config.toml",
     # The retrieval eval question set (Decision 19b). Shipped so `aorta chat
     # index eval` works with no arguments on an installed wheel.
     "chat/rag/eval_questions.json",
