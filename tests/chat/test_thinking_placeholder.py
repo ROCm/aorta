@@ -42,8 +42,17 @@ class _Step:
         self.name = name
         self.output = ""
 
-    async def __aenter__(self):
+    async def send(self):
+        # What puts a step on screen. The context manager does this on the way
+        # in, and a tool step -- which outlives any block -- does it directly.
         _Message.events.append(f"step:{self.name}")
+        return self
+
+    async def update(self):
+        return self
+
+    async def __aenter__(self):
+        await self.send()
         return self
 
     async def __aexit__(self, *exc):

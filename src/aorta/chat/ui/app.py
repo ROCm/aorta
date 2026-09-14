@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import datetime, timezone
 
 import chainlit as cl
 
@@ -86,6 +87,76 @@ def _node_reasoning(node: str, delta: dict) -> str:
     return ""
 
 
+def utc_now() -> str:
+    """A step timestamp in the form Chainlit writes.
+
+    The same two lines as ``chainlit.utils.utc_now``, rather than an import of
+    it: that is a private module, and importing it would also mean the tests
+    that stand a stub in for ``chainlit`` could no longer load this one.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+
+
+class _ToolSteps:
+    """Holds a step open for each tool that is still running.
+
+    Chainlit renders a step as completed once it carries an end timestamp, and
+    ``async with cl.Step`` stamps one on the way out of the block. Wrapping
+    only the announcement in that block closed the step before the tool had
+    started, so a five-minute cluster job rendered as already finished for the
+    whole of the wait -- the opposite of what announcing it was for.
+
+    A step therefore spans two events, and the lifecycle is split the way
+    Chainlit's own context manager splits it: send on the way in, stamp
+    ``end`` and update on the way out.
+    """
+
+    def __init__(self) -> None:
+        self._open: dict[str, cl.Step] = {}
+
+    async def handle(self, delta: dict) -> None:
+        """Open a step on a tool's announcement, close it on its completion."""
+        name = delta.get("tool")
+        # Keyed by call rather than name: a turn runs the same tool more than
+        # once with different arguments, and closing by name would end the
+        # wrong one.
+        call = str(delta.get("id") or name)
+        if delta.get("done"):
+            await self._finish(call, name, delta.get("seconds"))
+            return
+        step = cl.Step(name=f"Running {name}", type="tool")
+        step.start = utc_now()
+        step.output = f"`{name}`\n\nWork on the cluster can take several minutes."
+        await step.send()
+        self._open[call] = step
+
+    async def _finish(self, call: str, name, seconds) -> None:
+        step = self._open.pop(call, None)
+        if step is None:
+            return  # a completion with nothing open; nothing to close
+        took = f" in {seconds:g}s" if isinstance(seconds, (int, float)) else ""
+        step.output = f"`{name}` finished{took}."
+        step.end = utc_now()
+        await step.update()
+
+    async def close_all(self) -> None:
+        """Leave nothing rendering as running once the turn is over.
+
+        The graph ends its own announcements in a ``finally``, so this is for
+        the turn that never got that far: a graph that died between the two
+        events, or progress reporting that failed partway. A step left open
+        spins until the session is reloaded.
+        """
+        while self._open:
+            _, step = self._open.popitem()
+            step.end = utc_now()
+            step.output = f"{step.output}\n\n_Interrupted._"
+            try:
+                await step.update()
+            except Exception:  # noqa: BLE001 - a dead session must not mask why
+                logger.debug("Could not close step %r", step.name, exc_info=True)
+
+
 @cl.on_chat_start
 async def on_start():
     """Initialise per-session state and check the LLM backend is usable."""
@@ -153,17 +224,15 @@ async def on_message(message: cl.Message):
             thinking_shown = False
             await thinking_msg.remove()
 
+    running = _ToolSteps()
+
     async def show_step(node: str, delta: dict) -> None:
         # A tool announces itself before it runs. Showing that immediately is
         # the difference between a visible five-minute cluster job and a chat
         # that looks frozen.
         if node == "tool":
             await _retire_thinking()
-            async with cl.Step(name=f"Running {delta.get('tool')}") as step:
-                step.output = (
-                    f"`{delta.get('tool')}`\n\nWork on the cluster can take "
-                    "several minutes."
-                )
+            await running.handle(delta)
             return
         title = _NODE_TITLES.get(node)
         body = _node_reasoning(node, delta) if title else ""
@@ -181,6 +250,7 @@ async def on_message(message: cl.Message):
             )
     except Exception:
         logger.exception("Agent graph error")
+        await running.close_all()
         await _retire_thinking()
         await cl.Message(
             content="An error occurred while processing your request. Please try again."
@@ -191,6 +261,7 @@ async def on_message(message: cl.Message):
         await _deliver_notice(notice_state)
         return
 
+    await running.close_all()
     await _retire_thinking()
     cl.user_session.set("history", history)
     await cl.Message(content=reply).send()

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import itertools
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
@@ -551,6 +553,19 @@ def _tool_pool() -> ThreadPoolExecutor:
         return _TOOL_POOL
 
 
+#: Numbers the tool calls in a process so a completion can be matched to the
+#: announcement it belongs to.
+_tool_calls = itertools.count(1)
+
+
+def _announce_tool(payload: dict) -> None:
+    """Put a tool progress event on the stream, if anything is listening."""
+    try:
+        get_stream_writer()(payload)
+    except RuntimeError:
+        pass  # not being streamed; nothing to announce to
+
+
 async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     """Run a tool off the event loop, announcing it before it blocks.
 
@@ -563,15 +578,17 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     appear only when a node finishes, so the one node that takes real time is
     the one that says nothing.
     """
-    try:
-        # The name, and nothing else. The arguments used to ride along, and for
-        # triage_kernel_source those arguments are the user's entire pasted
-        # kernel -- pushed through the stream on every tool call, for a consumer
-        # that reads the name and drops the rest. Anything wanting more than the
-        # name should be added back when there is something rendering it.
-        get_stream_writer()({"tool": _normalise_tool_name(tool_name)})
-    except RuntimeError:
-        pass  # not being streamed; nothing to announce to
+    name = _normalise_tool_name(tool_name)
+    #: Ties the completion event to its announcement. A turn calls the same
+    #: tool more than once with different arguments, so the name alone does
+    #: not say which of them has finished.
+    call = f"{name}:{next(_tool_calls)}"
+    # The name, and nothing else. The arguments used to ride along, and for
+    # triage_kernel_source those arguments are the user's entire pasted
+    # kernel -- pushed through the stream on every tool call, for a consumer
+    # that reads the name and drops the rest. Anything wanting more than the
+    # name should be added back when there is something rendering it.
+    _announce_tool({"tool": name, "id": call})
     # An executor of our own, sized for these tools. asyncio.to_thread would
     # use the loop's default one, which is min(32, cpu+4) -- thirty-two here,
     # and not a bound anyone chose for work that runs for minutes. It is also
@@ -585,9 +602,24 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     # bug it was introduced to fix.
     loop = asyncio.get_running_loop()
     context = contextvars.copy_context()
-    return await loop.run_in_executor(
-        _tool_pool(), lambda: context.run(_execute_tool, tool_name, kwargs)
-    )
+    started = time.monotonic()
+    try:
+        return await loop.run_in_executor(
+            _tool_pool(), lambda: context.run(_execute_tool, tool_name, kwargs)
+        )
+    finally:
+        # In a finally because the consumer is holding a step open on the
+        # strength of the announcement above. A tool that raises, or a turn
+        # that is cancelled, would otherwise leave "Running ..." on screen
+        # with nothing ever arriving to end it.
+        _announce_tool(
+            {
+                "tool": name,
+                "id": call,
+                "done": True,
+                "seconds": round(time.monotonic() - started, 1),
+            }
+        )
 
 
 

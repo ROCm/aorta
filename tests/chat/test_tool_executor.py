@@ -235,12 +235,17 @@ class TestTheAnnouncementIsJustTheName:
             order.append("tool ran")
             return "ok"
 
+        def record(payload):
+            order.append("finished" if payload.get("done") else "announced")
+
         with patch.object(nodes, "_execute_tool", slow), patch.object(
-            nodes, "get_stream_writer", lambda: lambda p: order.append("announced")
+            nodes, "get_stream_writer", lambda: record
         ):
             await nodes._execute_tool_async("triage_kernel_source", {})
 
-        assert order == ["announced", "tool ran"]
+        # The completion lands after the tool returns, which is what lets a
+        # consumer stop rendering the step as running.
+        assert order == ["announced", "tool ran", "finished"]
 
     async def test_not_being_streamed_is_not_an_error(self):
         """The CLI passes no callback, so there is no writer to announce to."""

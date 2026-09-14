@@ -44,7 +44,8 @@ async def test_a_tool_is_announced_before_it_runs():
     order: list[str] = []
 
     def _writer(payload: dict) -> None:
-        order.append(f"announced:{payload['tool']}")
+        phase = "finished" if payload.get("done") else "announced"
+        order.append(f"{phase}:{payload['tool']}")
 
     def _slow(name: str, kwargs: dict) -> str:
         order.append(f"ran:{name}")
@@ -56,7 +57,13 @@ async def test_a_tool_is_announced_before_it_runs():
     ):
         await _execute_tool_async("triage_workload", {"source": "x"})
 
-    assert order == ["announced:triage_workload", "ran:triage_workload"]
+    # The completion is what lets the UI stop showing it as running, so it has
+    # to land after the tool returns rather than alongside the announcement.
+    assert order == [
+        "announced:triage_workload",
+        "ran:triage_workload",
+        "finished:triage_workload",
+    ]
 
 
 async def test_a_tool_runs_off_the_event_loop():
