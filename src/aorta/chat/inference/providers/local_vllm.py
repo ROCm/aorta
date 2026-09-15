@@ -88,6 +88,19 @@ class LocalVLLMBackend:
         base = settings.vllm_base_url.rstrip("/").removesuffix("/v1")
         return base + "/health"
 
+    def _health_headers(self) -> dict[str, str]:
+        """Credentials for the readiness probe, the same the chat client uses.
+
+        This asked anonymously. A bare vLLM does not mind, but a gateway in
+        front of one does: LiteLLM answers an unauthenticated ``/health`` with
+        500, which is indistinguishable here from a server that is not up. So
+        the poll failed every time against a proxy that was serving perfectly,
+        spent the whole budget, and the session started late having learned
+        nothing -- the one failure mode the budget was meant to cover.
+        """
+        key = settings.vllm_api_key
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
     async def _await_health(self, timeout: float, interval: float) -> bool:
         """Poll ``/health`` until it answers 200. Returns whether it ever did.
 
@@ -98,7 +111,7 @@ class LocalVLLMBackend:
         logger.info("Waiting for vLLM at %s ...", url)
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=self._health_headers()) as client:
             while (remaining := deadline - loop.time()) > 0:
                 try:
                     resp = await client.get(url, timeout=min(_REQUEST_TIMEOUT, remaining))
