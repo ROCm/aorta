@@ -1,0 +1,79 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race",
+        "command_sha256": "6a418d14a630011b94fae38a5acac5cfda2258b58c8627af27d60df7dad78660",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "176f11c07cf5e310ffe2207132bde42aceee44eb86454635ba2ff7ced6cd2cc5",
+        "selected_identity_sha256": "c309b9bffe94b6e47f08114af5391a49a508c70461bbd6d90b40356298da06f0",
+        "selected_kernel": "consan_lds_race"
+      },
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": null,
+            "code_object_index": null,
+            "code_object_sha256": null,
+            "entry_offset": null,
+            "name": "consan_lds_race",
+            "target": "gfx950"
+          },
+          "reason": "consan_output_parse_error: reader 96096924592912 access site count mismatch",
+          "returncode": 0,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "consan_output_parse_error: reader 96096924592912 access site count mismatch",
+      "returncode": 0,
+      "sanitizer": "consan",
+      "state": "error",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [],
+      "reason": "consan_output_parse_error: reader 96096924592912 access site count mismatch",
+      "returncode": 0,
+      "sanitizer": "waitcheck_preflight",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": null,
+          "code_object_index": null,
+          "code_object_sha256": null,
+          "entry_offset": null,
+          "name": "consan_lds_race",
+          "target": "gfx950"
+        },
+        "sources": [
+          "consan_repro:clean"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
