@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -218,12 +219,18 @@ async def on_start():
     await cl.Message(content=welcome_message(backend.describe())).send()
 
 
-#: What an attachment may carry before it is refused. A listing is text and
-#: text is small; anything at this size is a whole disassembled code object,
-#: which does not fit a context window and would not be a fair question
-#: anyway. Refused rather than truncated: half a listing assembles into a
-#: different program, and a verdict on that is worse than no verdict.
-_MAX_ATTACHMENT_BYTES = 256 * 1024
+#: Above this an attachment is staged and named rather than folded into the
+#: prompt. Not a size the tools cannot handle -- the assembler is happy with a
+#: whole code object -- but the size the *model* cannot handle: ``source``
+#: travels as a tool argument, so anything sent that way has to be written out
+#: again in full by the model to make the call. A listing too big to paste is
+#: exactly the one worth attaching, so it goes to disk and the model is given
+#: its name.
+_INLINE_ATTACHMENT_BYTES = 32 * 1024
+
+#: The ceiling on staging too. Text, so generous; a disassembled GEMM code
+#: object is about 9 MB and should still be analysable.
+_MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024
 
 #: Read as source. Everything else is refused by name so the user learns why
 #: rather than watching their file be ignored.
@@ -268,10 +275,8 @@ def _attached_source(message: cl.Message) -> tuple[str, list[str]]:
             continue
         if len(raw) > _MAX_ATTACHMENT_BYTES:
             notes.append(
-                f"`{name}` is {len(raw) // 1024} KB, over the "
-                f"{_MAX_ATTACHMENT_BYTES // 1024} KB limit. Attach the kernel "
-                "you care about rather than a whole code object -- a verdict on "
-                "a truncated listing would describe a different program."
+                f"`{name}` is {len(raw) // (1024 * 1024)} MB, past what this "
+                "will stage."
             )
             continue
         try:
@@ -285,8 +290,50 @@ def _attached_source(message: cl.Message) -> tuple[str, list[str]]:
         if not text.strip():
             notes.append(f"`{name}` is empty.")
             continue
+        if len(raw) > _INLINE_ATTACHMENT_BYTES:
+            # Too big to travel as a tool argument, which is what folding it
+            # into the prompt would commit it to. Staged instead, and the model
+            # is handed the name: the tool reads the file itself, so the size
+            # of the listing stops being a limit on asking about it.
+            try:
+                staged = _stage_attachment(candidate)
+            except OSError as exc:
+                notes.append(
+                    f"`{name}` could not be staged ({type(exc).__name__})."
+                )
+                continue
+            blocks.append(
+                # Backticked, and the argument spelled out. Written bare it
+                # ran into the sentence's full stop, and a name the model
+                # copies with a trailing "." is a name that does not resolve.
+                f"The user attached `{name}` ({len(raw) // 1024} KB of "
+                f"assembly), staged as `{staged}`\n\n"
+                f"It is too large to quote. Call the triage tool with "
+                f"source_file=`{staged}` and no source argument. Do not try to "
+                "reproduce its contents."
+            )
+            continue
         blocks.append(f"Attached file `{name}`:\n\n```\n{text.strip()}\n```")
     return "\n\n".join(blocks), notes
+
+
+def _stage_attachment(source: Path) -> str:
+    """Copy *source* under the jobs root and return the name the tools take.
+
+    Under the jobs root because that is the sandbox the triage tools resolve
+    within, so a staged name can be handed to a model without giving it a way
+    to name anything else. The returned value is relative for the same reason:
+    an absolute path would be refused by the containment check on the way back
+    in, and it keeps the model from reading a layout it has no use for.
+    """
+    from aorta.chat.config import settings
+
+    root = Path(settings.jobs_root) / "chat-uploads"
+    root.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="upload-", dir=root))
+    target = work / source.name
+    target.write_bytes(source.read_bytes())
+    return str(target.relative_to(Path(settings.jobs_root)))
 
 
 @cl.on_message

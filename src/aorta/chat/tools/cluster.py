@@ -521,7 +521,9 @@ def _no_assembler_message() -> str:
 
 
 @tool
-def triage_assembly_source(source: str, label: str = "") -> str:
+def triage_assembly_source(
+    source: str = "", label: str = "", source_file: str = ""
+) -> str:
     """Assemble AMD GPU assembly the user supplied and analyse it for wait hazards.
 
     Wraps the pasted instructions in a minimal kernel if they are a fragment,
@@ -532,12 +534,42 @@ def triage_assembly_source(source: str, label: str = "") -> str:
     involved, plus waits stronger than the dependency requires.
 
     Args:
-        source: The assembly text, exactly as the user pasted it.
+        source: The assembly text, exactly as the user pasted it. Leave empty
+            when the user attached a file and pass *source_file* instead.
         label: Human label for the run.
+        source_file: A listing already staged for this conversation, named in
+            the message as "staged as <name>". Prefer this whenever it is
+            offered: *source* travels as an argument you have to write out in
+            full, so a real kernel does not fit there, while this is a name and
+            the file is read from disk. Never invent one -- pass exactly what
+            the message gave you.
 
     Returns:
         The hazards found in the supplied assembly, or a clean result.
     """
+    if source_file.strip():
+        try:
+            staged = resolve_within(
+                settings.jobs_root, source_file.strip(), JOBS_ROOT_LABEL
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
+        if not staged.is_file():
+            return (
+                f"Error: no staged listing called {source_file!r}. Pass the name "
+                "exactly as the message gave it."
+            )
+        try:
+            source = staged.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return f"Error: could not read {source_file!r}: {type(exc).__name__}"
+
+    if not source.strip():
+        return (
+            "Error: pass either source (the assembly text) or source_file (a "
+            "listing staged for this conversation)."
+        )
+
     try:
         # Must match the -mcpu below: the .amdgcn_target it writes and the
         # compiler's target are checked against each other at assemble time.

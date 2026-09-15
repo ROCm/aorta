@@ -87,7 +87,11 @@ reaction_on_message_received = false
     # user waits for an upload that is then declined.
     accept = { "text/plain" = [".s", ".asm", ".isa", ".disasm", ".txt", ".hip", ".cpp", ".cc", ".c", ".cu", ".h", ".hpp", ".py"] }
     max_files = 4
-    max_size_mb = 1
+    # A disassembled GEMM code object is about 9 MB. A listing that large is
+    # precisely the one worth attaching rather than pasting, so the browser
+    # has to accept it: above the inline threshold the handler stages it and
+    # passes the tool a name instead of the bytes.
+    max_size_mb = 64
 
 [features.audio]
     # Enable audio features
