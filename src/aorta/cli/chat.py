@@ -662,6 +662,7 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
     spec = importlib.util.find_spec("aorta.chat.ui.app")
     if spec is None or spec.origin is None:
         raise click.ClickException("could not locate aorta.chat.ui.app on disk")
+    child_env["CHAINLIT_APP_ROOT"] = str(_chainlit_app_root())
     raise SystemExit(
         subprocess.call(
             [
@@ -679,6 +680,38 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
             env=child_env,
         )
     )
+
+
+def _chainlit_app_root() -> Path:
+    """A writable directory holding the Chainlit settings we intend to ship.
+
+    Chainlit reads ``.chainlit/config.toml`` under ``CHAINLIT_APP_ROOT``, or
+    under the working directory when that is unset -- and creates one with its
+    own defaults if there is none. Setting neither, as this did, meant the
+    settings that applied were whatever directory the operator happened to be
+    standing in: the repository's hardened file from a checkout, and a freshly
+    generated ``allow_origins = ["*"]`` from anywhere else. On a wheel there is
+    no repository file at all, so the permissive pair was what every install
+    got, on a UI whose tools run pasted code on GPU nodes.
+
+    Under the user's config directory rather than the package, because Chainlit
+    writes here -- ``.files`` for uploads, translations, the config itself --
+    and site-packages is the wrong place for that and often read-only.
+
+    The shipped file seeds it once. An operator editing the copy keeps their
+    edits; upgrading does not overwrite them, which is the tradeoff that goes
+    with making it theirs.
+    """
+    from aorta._user_paths import config_home
+
+    root = config_home() / "aorta" / "chat-ui"
+    settings = root / ".chainlit" / "config.toml"
+    if not settings.is_file():
+        shipped = Path(__file__).resolve().parents[1] / "chat" / "ui" / "chainlit_config.toml"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        if shipped.is_file():
+            settings.write_text(shipped.read_text(encoding="utf-8"), encoding="utf-8")
+    return root
 
 
 def _ui_env(options: _GroupOptions) -> dict[str, str]:

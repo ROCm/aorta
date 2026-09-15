@@ -24,6 +24,7 @@ import re
 import shlex
 import sys
 import subprocess
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -331,6 +332,36 @@ def _wrong_tool_hint(source: str) -> str:
     )
 
 
+def _stage_dir(parent: Path, name: str) -> Path:
+    """A staging directory this call alone owns.
+
+    Two turns staging a kernel of the same name raced for one path. A
+    timestamp narrowed that window without closing it: the write stayed
+    last-one-wins, so a collision replaced the source between staging it and
+    the node reading it, and the job compiled whichever arrived second without
+    anything saying so. Wrong answers from a diagnostic tool are worse than no
+    answer, and concurrency here is ordinary rather than exotic now that four
+    tool calls run at once.
+
+    ``mkdtemp`` creates with ``O_EXCL`` and retries on a clash, so the
+    directory is this call's or the call raises. Names inside it cannot
+    collide, which is what makes the plain filenames below safe.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path(tempfile.mkdtemp(prefix=f"{name}-{stamp}-", dir=parent))
+
+
+def _write_new(path: Path, text: str) -> None:
+    """Write a file that must not already exist.
+
+    Exclusive creation so that if the containment above is ever wrong, it
+    fails here rather than silently overwriting a sibling call's source.
+    """
+    with open(path, "x", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 @tool
 def triage_kernel_source(
     source: str,
@@ -387,11 +418,9 @@ def triage_kernel_source(
             "conversation — no second cluster job was submitted.)\n\n" + cached
         )
 
-    staging = settings.jobs_root / "chat-kernels"
-    staging.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    src_path = staging / f"{prepared.kernel}-{stamp}.hip"
-    src_path.write_text(prepared.program, encoding="utf-8")
+    work = _stage_dir(settings.jobs_root / "chat-kernels", prepared.kernel)
+    src_path = work / f"{prepared.kernel}.hip"
+    _write_new(src_path, prepared.program)
 
     lines = [f"Analysing kernel '{prepared.kernel}' from {src_path}."]
     if prepared.wrapped:
@@ -525,12 +554,10 @@ def triage_assembly_source(source: str, label: str = "") -> str:
             "conversation.)\n\n" + cached
         )
 
-    staging = settings.jobs_root / "chat-asm"
-    staging.mkdir(parents=True, exist_ok=True)
-    stem = f"{prepared.kernel}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    asm_path = staging / f"{stem}.s"
-    obj_path = staging / f"{stem}.hsaco"
-    asm_path.write_text(prepared.program, encoding="utf-8")
+    work = _stage_dir(settings.jobs_root / "chat-asm", prepared.kernel)
+    asm_path = work / f"{prepared.kernel}.s"
+    obj_path = work / f"{prepared.kernel}.hsaco"
+    _write_new(asm_path, prepared.program)
 
     try:
         proc = _assemble(_assemble_command(asm_path, obj_path))
@@ -562,7 +589,7 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         )
 
     recipe = write_asm_recipe(
-        recipe_path=staging / f"{stem}.yaml",
+        recipe_path=work / f"{prepared.kernel}.yaml",
         kernel_name=prepared.kernel,
         code_object=obj_path,
         target=_arch(),
@@ -616,31 +643,55 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
         )
 
     name = label or "workload"
-    if command.strip():
-        return _run_triage(["--command", command.strip()], name)
+    # The kernel and assembly paths have reused a finished run since the cache
+    # was introduced; this one did not, and it is the one that runs longest. A
+    # critic that rejects an answer sends the agent round again, and without
+    # this the second pass submitted a second cluster job for a question
+    # already answered -- another GPU allocation and another two minutes to
+    # arrive at the verdict already in hand.
+    # .triage rather than .asm: this costs minutes on a GPU node, and the two
+    # are bounded separately so a run of cheap pastes cannot evict it.
+    cache = current_tool_cache().triage
+    cache_key = ("workload", source.strip(), command.strip())
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return (
+            "(Reusing the triage already run for this exact workload in this "
+            "conversation — no second cluster job was submitted.)\n\n" + cached
+        )
 
-    staged = settings.jobs_root / "staged"
-    staged.mkdir(parents=True, exist_ok=True)
+    if command.strip():
+        result = _run_triage(["--command", command.strip()], name)
+        # Same rule as the other two: a completed run is worth reusing, a
+        # transient launch failure is worth retrying.
+        if "Autopsy verdict:" in result:
+            cache.put(cache_key, result)
+        return result
+
     # The label is model-supplied and became the filename directly, so
     # `../../../../.bashrc` wrote the user's pasted source outside staged/.
     # Keeping only characters a filename is made of leaves nothing that means
     # "somewhere else" -- a separator, a parent reference, or a leading dot.
-    #
-    # The timestamp is not decoration either: two runs sharing a label wrote the
-    # same path, so a second triage overwrote the first one's script while it
-    # was still being read on the node. The kernel and assembly paths already
-    # stamp their stems; this one did not.
     stem = _STAGED_STEM_RE.sub("_", name).strip("._")[:60] or "workload"
-    script = staged / f"{stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.py"
-    script.write_text(source, encoding="utf-8")
+    work = _stage_dir(settings.jobs_root / "staged", stem)
+    script = work / f"{stem}.py"
+    _write_new(script, source)
     # Run exactly as the user would run it. The bundle directory used to be
     # appended here, which changed the program's argument contract: a training
     # script with an argparse parser and no positional exits 2 rather than
     # running. It arrives as AORTA_BUNDLE in the job environment instead.
-    return _run_triage(
-        ["--command", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"],
+    # The server's own interpreter only if nothing better was named. It is the
+    # one serving chat, so it has langchain and Chainlit in it and need not
+    # have a GPU build of torch -- and a workload that cannot reach the GPU
+    # exits before the bug it was submitted to find.
+    runner = settings.workload_python or sys.executable
+    result = _run_triage(
+        ["--command", f"{shlex.quote(runner)} {shlex.quote(str(script))}"],
         name,
     )
+    if "Autopsy verdict:" in result:
+        cache.put(cache_key, result)
+    return result
 
 
 @tool
