@@ -19,10 +19,19 @@ from aorta.chat.inference.unreachable import BackendUnreachableError
 
 logger = logging.getLogger(__name__)
 
-#: ``preflight``'s budget. Minutes, because a large model on a cold page cache
-#: legitimately takes that long to start serving and the interactive path would
-#: rather wait than refuse.
-PREFLIGHT_TIMEOUT = 300
+#: ``preflight``'s budget. It was 300s, on the reasoning that a large model on
+#: a cold page cache legitimately takes that long to start serving. True, but
+#: it does not follow that the session should wait for it: preflight starts the
+#: session whatever the outcome, so the whole budget buys a later welcome
+#: message and nothing else. A backend still warming up is discovered by the
+#: first request either way, and one that answers at 61s is not worse off than
+#: one that answers at 299s -- both are ready before anybody has finished
+#: typing a question.
+#:
+#: Sixty covers a proxy restart and most warm-ups. What made the old value
+#: expensive was that the wait sat in ``on_chat_start``, so a down backend cost
+#: it once per browser tab; the UI now waits once per process.
+PREFLIGHT_TIMEOUT = 60
 PREFLIGHT_INTERVAL = 5
 
 #: ``probe``'s budget, which is a diagnostic's budget rather than a session's:

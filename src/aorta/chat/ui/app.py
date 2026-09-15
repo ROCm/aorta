@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -157,6 +158,37 @@ class _ToolSteps:
                 logger.debug("Could not close step %r", step.name, exc_info=True)
 
 
+#: Whether this process has already waited for the backend. Reachability is a
+#: property of the server, not of one conversation, and this wait was in
+#: ``on_chat_start`` -- so every browser tab paid it again. With the backend
+#: down that was the full timeout per tab, spent arriving at the same answer,
+#: and the session then started regardless.
+_preflight_done = False
+_preflight_lock = asyncio.Lock()
+
+
+async def _preflight_once(backend) -> None:
+    """Wait for the backend at most once per process.
+
+    Under the lock and checked twice, because several browsers reconnecting
+    together -- which is what a restarted server looks like -- would otherwise
+    each start their own wait before any of them had finished one.
+
+    Set after the await whatever happened: ``preflight`` does not raise, it
+    gives up and logs, and repeating a wait that already gave up once only
+    delays the next session by the same amount to learn the same thing. A
+    backend that comes up later needs no wait at all; the next request works.
+    """
+    global _preflight_done
+    if _preflight_done:
+        return
+    async with _preflight_lock:
+        if _preflight_done:
+            return
+        await backend.preflight()
+        _preflight_done = True
+
+
 @cl.on_chat_start
 async def on_start():
     """Initialise per-session state and check the LLM backend is usable."""
@@ -175,7 +207,7 @@ async def on_start():
     try:
         backend = get_backend()
         if not _SKIP_PREFLIGHT:
-            await backend.preflight()
+            await _preflight_once(backend)
     except (ImportError, ValueError) as exc:
         logger.error("LLM backend unavailable: %s", exc)
         cl.user_session.set("backend_error", str(exc))
