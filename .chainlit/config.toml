@@ -81,9 +81,13 @@ reaction_on_message_received = false
     # 3. For specific file extensions:
     #    accept = { "application/octet-stream" = [".xyz", ".pdb"] }
     # Note: Using "*/*" is not recommended as it may cause browser warnings
-    accept = ["*/*"]
-    max_files = 20
-    max_size_mb = 500
+    # Source and listings, which is what the diagnostic tools take. "*/*" at
+    # 500 MB invited a whole disassembled code object to be dropped in, and
+    # the handler refuses those anyway -- better the browser says so than the
+    # user waits for an upload that is then declined.
+    accept = { "text/plain" = [".s", ".asm", ".isa", ".disasm", ".txt", ".hip", ".cpp", ".cc", ".c", ".cu", ".h", ".hpp", ".py"] }
+    max_files = 4
+    max_size_mb = 1
 
 [features.audio]
     # Enable audio features

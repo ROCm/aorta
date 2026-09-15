@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+from pathlib import Path
 from datetime import datetime, timezone
 
 import chainlit as cl
@@ -217,6 +218,77 @@ async def on_start():
     await cl.Message(content=welcome_message(backend.describe())).send()
 
 
+#: What an attachment may carry before it is refused. A listing is text and
+#: text is small; anything at this size is a whole disassembled code object,
+#: which does not fit a context window and would not be a fair question
+#: anyway. Refused rather than truncated: half a listing assembles into a
+#: different program, and a verdict on that is worse than no verdict.
+_MAX_ATTACHMENT_BYTES = 256 * 1024
+
+#: Read as source. Everything else is refused by name so the user learns why
+#: rather than watching their file be ignored.
+_SOURCE_SUFFIXES = (
+    ".s", ".asm", ".S", ".isa", ".disasm", ".txt",
+    ".hip", ".cpp", ".cc", ".c", ".cu", ".h", ".hpp", ".py",
+)
+
+
+def _attached_source(message: cl.Message) -> tuple[str, list[str]]:
+    """Fold any attached text files into the prompt, and say what was skipped.
+
+    Chainlit's upload button is on -- and until this existed, what it did was
+    discard the file: ``on_message`` read ``content`` and nothing else, so an
+    attached listing was answered from the covering sentence alone, with
+    nothing anywhere saying the file had not been read.
+
+    Folded in as a fenced block rather than routed anywhere new, so the paste
+    path handles it: a fence is what the harness reads as "the user is
+    pointing at this", and tool selection already knows what to do with a
+    message carrying code.
+    """
+    notes: list[str] = []
+    blocks: list[str] = []
+    for element in getattr(message, "elements", None) or []:
+        name = getattr(element, "name", None) or "attachment"
+        path = getattr(element, "path", None)
+        if not path:
+            notes.append(f"`{name}` arrived without a readable path, so it was skipped.")
+            continue
+        candidate = Path(path)
+        if candidate.suffix not in _SOURCE_SUFFIXES:
+            notes.append(
+                f"`{name}` is not a source or listing file "
+                f"({candidate.suffix or 'no suffix'}), so it was not read."
+            )
+            continue
+        try:
+            raw = candidate.read_bytes()
+        except OSError as exc:
+            notes.append(f"`{name}` could not be read ({exc.__class__.__name__}).")
+            continue
+        if len(raw) > _MAX_ATTACHMENT_BYTES:
+            notes.append(
+                f"`{name}` is {len(raw) // 1024} KB, over the "
+                f"{_MAX_ATTACHMENT_BYTES // 1024} KB limit. Attach the kernel "
+                "you care about rather than a whole code object -- a verdict on "
+                "a truncated listing would describe a different program."
+            )
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            notes.append(
+                f"`{name}` is not text. A .hsaco has to be disassembled first; "
+                "attach the listing."
+            )
+            continue
+        if not text.strip():
+            notes.append(f"`{name}` is empty.")
+            continue
+        blocks.append(f"Attached file `{name}`:\n\n```\n{text.strip()}\n```")
+    return "\n\n".join(blocks), notes
+
+
 @cl.on_message
 async def on_message(message: cl.Message):
     """Handle each user message by invoking the LangGraph agent."""
@@ -227,6 +299,15 @@ async def on_message(message: cl.Message):
     if backend_error:
         await cl.Message(content=_unavailable_message(backend_error)).send()
         return
+
+    attached, skipped = _attached_source(message)
+    if skipped:
+        # Said before the answer, not after: a user who attached the wrong
+        # thing should learn that before reading a reply that did not use it.
+        await cl.Message(
+            content="\n".join(f"_{note}_" for note in skipped)
+        ).send()
+    question = f"{message.content}\n\n{attached}" if attached else message.content
 
     history: list = cl.user_session.get("history", [])
     # A session that predates this key (or a reconnect) still gets its own
@@ -280,7 +361,7 @@ async def on_message(message: cl.Message):
     try:
         with redaction.use_notice_state(notice_state), use_tool_cache(tool_cache):
             reply, history, _result = await invoke_agent(
-                message.content, history, on_step=show_step
+                question, history, on_step=show_step
             )
     except Exception:
         logger.exception("Agent graph error")
