@@ -164,7 +164,9 @@ async def on_start():
     cl.user_session.set("backend_error", None)
     # One state per browser session, not one per process: the notice is a
     # per-session disclosure and this server serves many at once.
-    cl.user_session.set(_NOTICE_STATE_KEY, redaction.NoticeState())
+    cl.user_session.set(
+        _NOTICE_STATE_KEY, redaction.NoticeState(opt_out=redaction.UI_OPT_OUT)
+    )
     # Same reason, and the reuse it controls is reported to the user as having
     # happened "in this conversation": a shared cache would answer one user's
     # paste from another user's cluster run and say so.
@@ -200,7 +202,7 @@ async def on_message(message: cl.Message):
     # one browser session consume another's disclosure.
     notice_state = cl.user_session.get(_NOTICE_STATE_KEY)
     if notice_state is None:
-        notice_state = redaction.NoticeState()
+        notice_state = redaction.NoticeState(opt_out=redaction.UI_OPT_OUT)
         cl.user_session.set(_NOTICE_STATE_KEY, notice_state)
 
     tool_cache = cl.user_session.get(_TOOL_CACHE_KEY)

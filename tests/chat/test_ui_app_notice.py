@@ -367,7 +367,13 @@ class TestTwoSessionsInOneProcess:
         assert "IPv4" in _the_notice(bob)
 
     async def test_both_are_told_how_to_turn_it_off(self, app, monkeypatch):
-        """Decision 16's second half, in the same words as the CLI line."""
+        """Decision 16's second half, in terms that work in a browser.
+
+        This asserted the CLI's wording, which named ``--no-redact`` -- a flag
+        ``aorta chat ui`` does not have. Naming the removal without a usable
+        way out leaves people stuck, and naming an unusable one is worse: it
+        sends them to a command line that is not there.
+        """
         self._install(app, monkeypatch, self._overlapping_turn())
         alice, bob = _Browser(), _Browser()
 
@@ -378,8 +384,10 @@ class TestTwoSessionsInOneProcess:
 
         for browser in (alice, bob):
             notice = _the_notice(browser)
-            assert "--no-redact" in notice
             assert "redact = false" in notice
+            assert "--no-redact" not in notice, (
+                "the browser has no command line to pass that on"
+            )
 
     async def test_each_session_is_told_once_across_its_own_turns(self, app, monkeypatch):
         """Once per session, not once per redacting turn, with sessions overlapping."""
