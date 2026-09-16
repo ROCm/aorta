@@ -203,6 +203,28 @@ class _MitigateCommand(click.Command):
     help="Restrict search to these registered mitigation names (repeatable).",
 )
 @click.option(
+    "--diagnostic",
+    "diagnostic_allowlist",
+    multiple=True,
+    help=(
+        "Offer these registered names on the DIAGNOSTIC axis, so the agent can "
+        "buy evidence as well as test causes (repeatable). Off by default: the "
+        "probe grid is the cross product of the two axes, so one diagnostic "
+        "re-runs every mitigation under it. Use --max-cells with this."
+    ),
+)
+@click.option(
+    "--max-cells",
+    "max_probe_cells",
+    default=None,
+    type=int,
+    help=(
+        "Cap the probe cells the whole run may execute. --max-iterations bounds "
+        "proposal cycles, not cells, and the two differ by the width of the "
+        "matrix; this is the budget denominated in what costs GPU."
+    ),
+)
+@click.option(
     "--mitigations-file",
     "mitigation_files",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -242,6 +264,8 @@ def mitigate(
     llm_backend: str,
     llm_model: str | None,
     mitigation_allowlist: tuple[str, ...],
+    diagnostic_allowlist: tuple[str, ...],
+    max_probe_cells: int | None,
     mitigation_files: tuple[Path, ...],
     require_approval: bool,
     dry_run: bool,
@@ -258,6 +282,7 @@ def mitigate(
             max_walltime_sec=max_walltime_sec,
             require_approval=require_approval,
             sidecar_files=tuple(mitigation_files),
+            max_probe_cells=max_probe_cells,
         )
         config = AgentConfig(
             output_dir=output,
@@ -268,6 +293,7 @@ def mitigate(
             llm_backend=llm_backend,
             llm_model=llm_model,
             mitigations_allowlist=mitigation_allowlist or None,
+            diagnostics_allowlist=diagnostic_allowlist or None,
             recipe_path=recipe,
             dry_run=dry_run,
             run_bundle=run_bundle,

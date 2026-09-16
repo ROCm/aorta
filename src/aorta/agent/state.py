@@ -60,6 +60,12 @@ class AgentState:
     iterations_completed: int = 0
     winning_mitigation: str | None = None
     converged: bool = False
+    tried_diagnostics: list[str] = field(default_factory=list)
+    #: Probe cells the run has executed. Replayed from ``axis_growth`` events
+    #: and reconciled against the cell directories actually on disk, so a
+    #: resumed run does not re-charge cells it already paid for, and a run
+    #: whose log predates those events still gets a true count from the disk.
+    probe_cells_spent: int = 0
 
 
 def agent_log_path(run_dir: Path) -> Path:
@@ -185,6 +191,10 @@ def wake(run_dir: Path, *, ticket: str) -> AgentState:
             name = event.get("mitigation")
             if isinstance(name, str) and name not in state.tried_mitigations:
                 state.tried_mitigations.append(name)
+        elif etype == "diagnostic_tried":
+            name = event.get("diagnostic")
+            if isinstance(name, str) and name not in state.tried_diagnostics:
+                state.tried_diagnostics.append(name)
         elif etype == "llm_step":
             cat = event.get("category")
             if isinstance(cat, str):
@@ -192,6 +202,13 @@ def wake(run_dir: Path, *, ticket: str) -> AgentState:
             hyp = event.get("hypothesis")
             if isinstance(hyp, str):
                 state.last_hypothesis = hyp
+        elif etype == "axis_growth":
+            # cells_total, not a running sum of cells_added: it is the size of
+            # the cross product after the growth, so replaying it is
+            # idempotent and a resumed run cannot double-charge.
+            total = event.get("cells_total")
+            if isinstance(total, int) and total > state.probe_cells_spent:
+                state.probe_cells_spent = total
         elif etype == "iteration_complete":
             state.iterations_completed += 1
         elif etype == "converged":
@@ -204,13 +221,22 @@ def wake(run_dir: Path, *, ticket: str) -> AgentState:
     for cell_name, verdict in verdicts.items():
         if "-" not in cell_name:
             continue
-        mitigation = cell_name.rsplit("-", 1)[0]
+        mitigation, diagnostic = cell_name.rsplit("-", 1)
         if mitigation != _BASELINE_NAME and mitigation not in state.tried_mitigations:
             state.tried_mitigations.append(mitigation)
+        if diagnostic != _BASELINE_NAME and diagnostic not in state.tried_diagnostics:
+            state.tried_diagnostics.append(diagnostic)
         win = winning_mitigation(cell_name, verdict)
         if win is not None and state.winning_mitigation is None:
             state.winning_mitigation = win
             state.converged = True
+
+    # The cells on disk are the payment record, and they outrank the log: a
+    # cell directory with trial results exists iff GPU was spent on it. The
+    # log's own count is used only when it is higher, which happens when a
+    # cell was charged and its trials did not land (crash, timeout, kill) --
+    # that GPU was still spent.
+    state.probe_cells_spent = max(state.probe_cells_spent, len(verdicts))
 
     return state
 

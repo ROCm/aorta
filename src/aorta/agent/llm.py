@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
@@ -35,7 +35,16 @@ _BASELINE_CELL = "none-none"
 
 @dataclass(frozen=True)
 class AgentStep:
-    """Structured output from one agent decision step."""
+    """Structured output from one agent decision step.
+
+    ``next_diagnostics`` is the second probe axis. A probe recipe has always
+    had both (``mitigation_axis`` x ``diagnostic_axis``), but only the
+    mitigation axis was ever an *action*: the diagnostic was fixed by whoever
+    wrote the recipe, so the policy could buy a causal test and never buy
+    information. It defaults to empty, and an empty list is exactly the old
+    behaviour -- see ``loop._list_candidate_diagnostics`` for why nothing is
+    offered on that axis unless the operator asks.
+    """
 
     category: str
     hypothesis: str
@@ -43,6 +52,7 @@ class AgentStep:
     confidence: float
     stop: bool
     stop_reason: StopReason | None = None
+    next_diagnostics: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentStep:
@@ -68,6 +78,13 @@ class AgentStep:
         next_mitigations = (
             [str(m) for m in raw_mitigations] if isinstance(raw_mitigations, list) else []
         )
+        # Same rule, same reason, for the diagnostic axis: a bare string must
+        # not become list("xnack"). Absent key -> [], which is what makes a
+        # reply written against the old schema behave exactly as before.
+        raw_diagnostics = raw.get("next_diagnostics")
+        next_diagnostics = (
+            [str(d) for d in raw_diagnostics] if isinstance(raw_diagnostics, list) else []
+        )
         try:
             confidence = float(raw.get("confidence", 0.0))
         except (TypeError, ValueError):
@@ -90,11 +107,18 @@ class AgentStep:
             confidence=confidence,
             stop=stop,
             stop_reason=stop_reason,
+            next_diagnostics=next_diagnostics,
         )
 
 
 class LLMProposer(Protocol):
-    """Protocol for agent step proposers."""
+    """Protocol for agent step proposers.
+
+    ``diagnostic_candidates`` / ``tried_diagnostics`` default to None so a
+    proposer written against the single-axis protocol keeps type-checking; the
+    loop passes them on every call, and None reads as "no diagnostic action
+    offered", which is the pre-joint-axis behaviour.
+    """
 
     def propose(
         self,
@@ -103,6 +127,8 @@ class LLMProposer(Protocol):
         cell_summaries: list[dict[str, Any]],
         candidates: list[str],
         tried: list[str],
+        diagnostic_candidates: list[str] | None = None,
+        tried_diagnostics: list[str] | None = None,
     ) -> AgentStep: ...
 
 
@@ -122,7 +148,12 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
 
 
 class FakeLLMProposer:
-    """Deterministic proposer: heuristic category + round-robin mitigations."""
+    """Deterministic proposer: heuristic category + round-robin mitigations.
+
+    It takes the diagnostic axis one name at a time, in registry order, and
+    only when the caller offers one -- so the offline default stays exactly
+    the single-axis walk it was whenever nothing is offered.
+    """
 
     def propose(
         self,
@@ -131,6 +162,8 @@ class FakeLLMProposer:
         cell_summaries: list[dict[str, Any]],
         candidates: list[str],
         tried: list[str],
+        diagnostic_candidates: list[str] | None = None,
+        tried_diagnostics: list[str] | None = None,
     ) -> AgentStep:
         last = cell_summaries[-1] if cell_summaries else {}
         detectors = list(last.get("failure_detectors_fired") or [])
@@ -168,15 +201,21 @@ class FakeLLMProposer:
             )
 
         next_m = remaining[0]
+        remaining_d = _remaining_candidates(
+            list(diagnostic_candidates or []), list(tried_diagnostics or [])
+        )
+        next_d = remaining_d[:1]
         return AgentStep(
             category=category,
             hypothesis=(
                 f"Try mitigation {next_m!r} based on detectors {detectors!r}."
+                + (f" Diagnostic {next_d[0]!r} for evidence." if next_d else "")
                 + (f" Symptom: {symptom}" if symptom else "")
             ),
             next_mitigations=[next_m],
             confidence=0.5,
             stop=False,
+            next_diagnostics=next_d,
         )
 
 
@@ -213,12 +252,20 @@ def _build_prompt(
     cell_summaries: list[dict[str, Any]],
     remaining: list[str],
     tried: list[str],
+    remaining_diagnostics: list[str] | None = None,
+    tried_diagnostics: list[str] | None = None,
 ) -> tuple[str, str]:
     """The system and user messages, shared by every real proposer.
 
     One definition so the two backends cannot drift into asking for different
     JSON, which is the failure a shared provider layer is supposed to prevent.
+
+    The diagnostic axis is described only when something is offered on it. A
+    prompt that names a ``next_diagnostics`` key with an empty candidate list
+    invites a reply the loop would then have to discard, and it would also
+    change the bytes of every existing single-axis prompt.
     """
+    offered_diagnostics = list(remaining_diagnostics or [])
     system = (
         "You are an AORTA probe agent. Propose ONLY registered mitigation "
         "names from the candidate list. Never propose shell commands or argv. "
@@ -226,15 +273,34 @@ def _build_prompt(
         "(list of strings), confidence (0-1), stop (bool). "
         f"category must be one of: {sorted(AUTOPSY_CATEGORIES)}."
     )
-    user = json.dumps(
-        {
-            "symptom": symptom,
-            "cell_summaries": cell_summaries,
-            "candidates": remaining,
-            "already_tried": tried,
-        },
-        indent=2,
-    )
+    payload: dict[str, Any] = {
+        "symptom": symptom,
+        "cell_summaries": cell_summaries,
+        "candidates": remaining,
+        "already_tried": tried,
+    }
+    if offered_diagnostics:
+        system = (
+            "You are an AORTA probe agent localising the root cause of a GPU "
+            "failure at minimum cost. You have two actions, and you may use "
+            "either or both in one step. next_mitigations tests a causal "
+            "hypothesis: a mitigation that makes the repro pass names the "
+            "cause. next_diagnostics buys evidence: it switches on an "
+            "observability knob that does not change the outcome but makes "
+            "the mechanism visible. Propose ONLY names from the matching "
+            "candidate list. Never propose shell commands or argv.\n"
+            "Cost matters and the two axes multiply, not add: the probe runs "
+            "the cross product of the two axes, so adding one diagnostic "
+            "re-runs every mitigation under it. Propose the smallest set that "
+            "would discriminate between your hypotheses.\n"
+            "Return strict JSON with keys: category, hypothesis, "
+            "next_mitigations (list of strings), next_diagnostics (list of "
+            "strings), confidence (0-1), stop (bool). "
+            f"category must be one of: {sorted(AUTOPSY_CATEGORIES)}."
+        )
+        payload["diagnostic_candidates"] = offered_diagnostics
+        payload["already_tried_diagnostics"] = list(tried_diagnostics or [])
+    user = json.dumps(payload, indent=2)
     return system, user
 
 
@@ -255,12 +321,22 @@ def _strip_code_fence(content: str) -> str:
     return "\n".join(body).strip()
 
 
-def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
+def _step_from_content(
+    content: str | None,
+    remaining: list[str],
+    remaining_diagnostics: list[str] | None = None,
+) -> AgentStep:
     """Parse a model reply into an :class:`AgentStep`, failing safe.
 
     Providers return malformed or partial JSON, a non-object, or nothing at all
     even when asked for strict JSON. Every one of those becomes a stop rather
     than an exception, so the loop still writes a report.
+
+    ``remaining_diagnostics`` defaults to None, and None filters every
+    proposed diagnostic away. That is deliberate rather than lenient: the
+    filter below exists so the model cannot widen its own allowlist, and a
+    caller that did not say what is on the diagnostic axis has not authorised
+    anything on it.
     """
     if not content or not content.strip():
         return _safe_stop("Empty LLM response")
@@ -276,6 +352,10 @@ def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
     # but a name outside `remaining` is a mitigation already tried or never
     # registered, and running it is not the agent's call.
     filtered = [m for m in step.next_mitigations if m in remaining]
+    offered_diagnostics = remaining_diagnostics or []
+    filtered_diagnostics = [
+        d for d in step.next_diagnostics if d in offered_diagnostics
+    ]
     stop_reason = step.stop_reason
     if step.stop and stop_reason is None:
         stop_reason = "agent_requested"
@@ -286,6 +366,7 @@ def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
         confidence=step.confidence,
         stop=step.stop,
         stop_reason=stop_reason,
+        next_diagnostics=filtered_diagnostics,
     )
 
 
@@ -308,8 +389,16 @@ class LiteLLMProposer:
         cell_summaries: list[dict[str, Any]],
         candidates: list[str],
         tried: list[str],
+        diagnostic_candidates: list[str] | None = None,
+        tried_diagnostics: list[str] | None = None,
     ) -> AgentStep:
         remaining = _remaining_candidates(candidates, tried)
+        remaining_d = _remaining_candidates(
+            list(diagnostic_candidates or []), list(tried_diagnostics or [])
+        )
+        # Exhaustion is still judged on the mitigation axis alone: a run with
+        # diagnostics left but no mitigations left can buy evidence it has no
+        # remaining causal test to spend it on, which is not a search.
         if not remaining:
             return _exhausted_step()
 
@@ -325,7 +414,9 @@ class LiteLLMProposer:
                 "distribution is stale — reinstall from this repo with -e '.[agent]'."
             ) from exc
 
-        system, user = _build_prompt(symptom, cell_summaries, remaining, tried)
+        system, user = _build_prompt(
+            symptom, cell_summaries, remaining, tried, remaining_d, tried_diagnostics
+        )
         response = litellm.completion(
             model=self._model,
             messages=[
@@ -334,7 +425,9 @@ class LiteLLMProposer:
             ],
             response_format={"type": "json_object"},
         )
-        return _step_from_content(response.choices[0].message.content, remaining)
+        return _step_from_content(
+            response.choices[0].message.content, remaining, remaining_d
+        )
 
 
 #: Backends resolved through the shared chat provider layer (Decision 7a). The
@@ -403,18 +496,27 @@ class ChatProviderProposer:
         cell_summaries: list[dict[str, Any]],
         candidates: list[str],
         tried: list[str],
+        diagnostic_candidates: list[str] | None = None,
+        tried_diagnostics: list[str] | None = None,
     ) -> AgentStep:
         remaining = _remaining_candidates(candidates, tried)
+        remaining_d = _remaining_candidates(
+            list(diagnostic_candidates or []), list(tried_diagnostics or [])
+        )
         # Checked before the import, so an exhausted loop neither spends tokens
         # nor requires the extra to be installed. Mirrors both siblings.
         if not remaining:
             return _exhausted_step()
 
-        system, user = _build_prompt(symptom, cell_summaries, remaining, tried)
+        system, user = _build_prompt(
+            symptom, cell_summaries, remaining, tried, remaining_d, tried_diagnostics
+        )
         # Role tuples rather than langchain message classes: one fewer import on
         # a path that only needs to say who said what.
         response = self._chat_model().invoke([("system", system), ("human", user)])
-        return _step_from_content(getattr(response, "content", None), remaining)
+        return _step_from_content(
+            getattr(response, "content", None), remaining, remaining_d
+        )
 
 
 def _chat_layer_available() -> bool:

@@ -21,7 +21,7 @@ from aorta.agent.state import (
     wake,
     winning_mitigation,
 )
-from aorta.probe.recipe_builder import build_probe_recipe_from_dict
+from aorta.probe.recipe_builder import _safe_cell_segment, build_probe_recipe_from_dict
 from aorta.registry import load_mitigations
 from aorta.registry.errors import UnknownMitigationError
 from aorta.triage.output import NO_TICKET_SLUG, safe_slug
@@ -48,6 +48,10 @@ class AgentConfig:
     # standalone litellm path applies its own gpt-4o-mini default.
     llm_model: str | None = None
     mitigations_allowlist: tuple[str, ...] | None = None
+    #: What the agent may put on the *diagnostic* axis. ``None`` means the
+    #: diagnostic action is not offered at all, which is the shipped
+    #: behaviour -- see :func:`_list_candidate_diagnostics`.
+    diagnostics_allowlist: tuple[str, ...] | None = None
     recipe_path: Path | None = None
     dry_run: bool = False
     run_bundle: bool = False
@@ -143,20 +147,195 @@ def _list_candidate_mitigations(
     return [n for n in names if n != _BASELINE_MITIGATION]
 
 
+def _list_candidate_diagnostics(config: AgentConfig) -> list[str]:
+    """What the agent may add to the diagnostic axis. Empty unless asked.
+
+    Deliberately *not* symmetrical with :func:`_list_candidate_mitigations`,
+    which falls back to the recipe's axis order and then to the whole
+    registry. Two reasons, and both are about not changing what existing runs
+    do:
+
+    A recipe's own ``diagnostic_axis`` is not a candidate list -- it is the
+    operator's choice of diagnostics to run *from the first cycle*, and
+    ``_build_probe_recipe_dict`` has always passed it straight through.
+    Re-reading it as something the agent grows into would delay cells the
+    operator asked for.
+
+    And falling back to the registry would arm the diagnostic action on every
+    existing recipe at once. Because the cell grid is a cross product (see
+    :func:`plan_axis_growth`), that would multiply the cells of runs whose
+    authors never asked for a second axis. So: empty by default, and the
+    operator opts in with ``--diagnostic``.
+    """
+    if config.diagnostics_allowlist:
+        return [
+            str(d) for d in config.diagnostics_allowlist if d != _BASELINE_DIAGNOSTIC
+        ]
+    return []
+
+
+def _recipe_diagnostic_axis(recipe_template: dict[str, Any]) -> list[str]:
+    """The recipe's diagnostic axis, with the baseline guaranteed present.
+
+    Always include the baseline diagnostic so a canonical none-none baseline
+    cell exists; baseline-pass / winner detection both key off it. A recipe
+    diagnostic_axis that omits "none" would otherwise have no no-op baseline.
+    """
+    axis = list(recipe_template.get("diagnostic_axis", [_BASELINE_DIAGNOSTIC]))
+    if _BASELINE_DIAGNOSTIC not in axis:
+        axis = [_BASELINE_DIAGNOSTIC, *axis]
+    return axis
+
+
+@dataclass(frozen=True)
+class AxisGrowth:
+    """The result of widening one or both probe axes, and what it costs.
+
+    ``cells_added`` is the honest number: the count of cell directories that
+    do not exist yet and will therefore be executed.
+    """
+
+    mitigation_axis: list[str]
+    diagnostic_axis: list[str]
+    added_mitigations: list[str]
+    added_diagnostics: list[str]
+    rejected_mitigations: list[str]
+    rejected_diagnostics: list[str]
+    cells_before: int
+    cells_after: int
+
+    @property
+    def cells_added(self) -> int:
+        return self.cells_after - self.cells_before
+
+    @property
+    def grew(self) -> bool:
+        return bool(self.added_mitigations or self.added_diagnostics)
+
+
+def probe_cell_names(
+    mitigation_axis: list[str], diagnostic_axis: list[str]
+) -> list[str]:
+    """The cell names ``build_probe_recipe_from_dict`` will synthesise.
+
+    Enumerated through the builder's own ``_safe_cell_segment`` rather than
+    recomputed, so the cost accounting cannot drift from the cells that get
+    run. ``policy.validate_step`` already rejects any axis name that does not
+    round-trip through that slug, so the list is collision-free in practice
+    and the builder rejects the pathological case up front anyway.
+    """
+    return [
+        f"{_safe_cell_segment(m)}-{_safe_cell_segment(d)}"
+        for m in mitigation_axis
+        for d in diagnostic_axis
+    ]
+
+
+def plan_axis_growth(
+    mitigation_axis: list[str],
+    diagnostic_axis: list[str],
+    new_mitigations: list[str],
+    new_diagnostics: list[str],
+    *,
+    cells_affordable: int | None = None,
+) -> AxisGrowth:
+    """Widen the two axes and price the result in probe cells.
+
+    **The cost of a joint proposal is not the number of names in it.** A probe
+    recipe's cells are the cartesian product of the two axes
+    (``probe/recipe_builder.py``, "Synthesise the cartesian product"), and the
+    loop cannot ask for a single cell -- it can only widen an axis. So
+    admitting ``a`` mitigations and ``b`` diagnostics onto axes currently
+    sized ``M x D`` runs::
+
+        (M + a) * (D + b) - M * D  ==  a*D + b*M + a*b     new cells
+
+    One mitigation plus one diagnostic onto a 4 x 1 grid is **9** new cells,
+    not 2: the diagnostic re-runs every mitigation already on the axis. This
+    function returns that number and the loop charges it, rather than charging
+    per name or once per cycle.
+
+    That matters because the already-characterised defect here is the other
+    way round: the loop appends every proposed name and charges the iteration
+    budget exactly once, so a wide-candidate run can spend 160 cells against a
+    budget of 8. Adding a second axis to a cost model that already
+    under-counts would make it under-count multiplicatively.
+
+    ``cells_affordable`` is the remaining cell budget (None = unbounded).
+    Names are admitted one at a time **in the order the policy proposed
+    them** -- mitigations then diagnostics, as the schema lists them -- and
+    the first name that would breach the budget, and every name after it, is
+    rejected rather than run. The total for a fully admitted proposal does not
+    depend on that order, but which subset survives a trim does, and the
+    policy's own stated order is the only ranking available.
+    """
+    grown_m = list(mitigation_axis)
+    grown_d = list(diagnostic_axis)
+    cells_before = len(probe_cell_names(mitigation_axis, diagnostic_axis))
+    cells_now = cells_before
+    added_m: list[str] = []
+    added_d: list[str] = []
+    rejected_m: list[str] = []
+    rejected_d: list[str] = []
+    budget_hit = False
+
+    for axis, name, added, rejected in [
+        *((grown_m, m, added_m, rejected_m) for m in new_mitigations),
+        *((grown_d, d, added_d, rejected_d) for d in new_diagnostics),
+    ]:
+        if name in axis:
+            # Already on the axis: its cells exist, so it is free and is not a
+            # rejection either. Same skip the single-axis loop always did.
+            continue
+        if budget_hit:
+            rejected.append(name)
+            continue
+        candidate_cost = (
+            len(probe_cell_names(grown_m + ([name] if axis is grown_m else []),
+                                 grown_d + ([name] if axis is grown_d else [])))
+            - cells_now
+        )
+        if cells_affordable is not None and cells_now - cells_before + candidate_cost > cells_affordable:
+            # Trim from here on. Not "skip this one and try the next": a
+            # cheaper later name would reorder the policy's own preferences,
+            # and on a cross product the cheapest name is whichever axis is
+            # currently shorter, which is an artefact of history rather than a
+            # judgement about the failure.
+            budget_hit = True
+            rejected.append(name)
+            continue
+        axis.append(name)
+        added.append(name)
+        cells_now += candidate_cost
+
+    return AxisGrowth(
+        mitigation_axis=grown_m,
+        diagnostic_axis=grown_d,
+        added_mitigations=added_m,
+        added_diagnostics=added_d,
+        rejected_mitigations=rejected_m,
+        rejected_diagnostics=rejected_d,
+        cells_before=cells_before,
+        cells_after=cells_now,
+    )
+
+
 def _build_probe_recipe_dict(
     ticket: str | None,
     mitigation_axis: list[str],
     recipe_template: dict[str, Any],
+    diagnostic_axis: list[str] | None = None,
 ) -> dict[str, Any]:
     # ``ticket`` is the already-resolved raw operator ID (see
     # _resolve_raw_ticket). Passing it verbatim keeps the probe's
     # resolve_run_dir slug aligned with the agent's log/report dir.
-    # Always include the baseline diagnostic so a canonical none-none baseline
-    # cell exists; baseline-pass / winner detection both key off it. A recipe
-    # diagnostic_axis that omits "none" would otherwise have no no-op baseline.
-    diagnostic_axis = list(recipe_template.get("diagnostic_axis", [_BASELINE_DIAGNOSTIC]))
-    if _BASELINE_DIAGNOSTIC not in diagnostic_axis:
-        diagnostic_axis = [_BASELINE_DIAGNOSTIC, *diagnostic_axis]
+    # diagnostic_axis defaults to the recipe's own (baseline forced in); the
+    # loop passes a grown one once the agent has proposed diagnostics.
+    diagnostic_axis = (
+        list(diagnostic_axis)
+        if diagnostic_axis is not None
+        else _recipe_diagnostic_axis(recipe_template)
+    )
     data: dict[str, Any] = {
         "schema_version": 1,
         "mode": "probe",
@@ -293,9 +472,12 @@ def _execute_probe_matrix(
     ticket: str | None,
     mitigation_axis: list[str],
     recipe_template: dict[str, Any],
+    diagnostic_axis: list[str] | None = None,
 ) -> Path:
     """Run (or dry-run) probe recipe; return ticket run directory."""
-    recipe_dict = _build_probe_recipe_dict(ticket, mitigation_axis, recipe_template)
+    recipe_dict = _build_probe_recipe_dict(
+        ticket, mitigation_axis, recipe_template, diagnostic_axis
+    )
     sidecar = config.policy.sidecar_files or None
     recipe = build_probe_recipe_from_dict(
         recipe_dict,
@@ -330,10 +512,18 @@ def run_agent_loop(
         proposer = make_proposer(config.llm_backend, model=config.llm_model)
 
     candidates = _list_candidate_mitigations(config, recipe_template)
+    diagnostic_candidates = _list_candidate_diagnostics(config)
     mitigation_axis: list[str] = [_BASELINE_MITIGATION]
     for m in state.tried_mitigations:
         if m != _BASELINE_MITIGATION and m not in mitigation_axis:
             mitigation_axis.append(m)
+    # Same reconstruction on the diagnostic axis, and the same invariant: the
+    # baseline diagnostic is always present, so a none-none cell always
+    # exists for baseline-pass and winner detection to key off.
+    diagnostic_axis: list[str] = _recipe_diagnostic_axis(recipe_template)
+    for d in state.tried_diagnostics:
+        if d != _BASELINE_DIAGNOSTIC and d not in diagnostic_axis:
+            diagnostic_axis.append(d)
 
     if config.dry_run:
         # Dry-run is filesystem-free: print the planned probe matrix and return
@@ -342,7 +532,9 @@ def run_agent_loop(
         # dir (otherwise log/report writes land in the caller's cwd). run_dir
         # below is the planned path, kept only for the result -- nothing is
         # written there.
-        _execute_probe_matrix(config, raw_ticket, mitigation_axis, recipe_template)
+        _execute_probe_matrix(
+            config, raw_ticket, mitigation_axis, recipe_template, diagnostic_axis
+        )
         return AgentLoopResult(
             run_dir=run_dir,
             state=state,
@@ -364,6 +556,8 @@ def run_agent_loop(
             "argv": list(config.subprocess_argv),
             "symptom": config.symptom,
             "llm_backend": config.llm_backend,
+            "diagnostic_candidates": list(diagnostic_candidates),
+            "max_probe_cells": config.policy.max_probe_cells,
         },
     )
 
@@ -383,9 +577,16 @@ def run_agent_loop(
                     break
 
             run_dir = _execute_probe_matrix(
-                config, raw_ticket, mitigation_axis, recipe_template
+                config, raw_ticket, mitigation_axis, recipe_template, diagnostic_axis
             )
             summaries = _read_cell_summaries(run_dir)
+            # The cells that now exist are what has been paid for. Read it off
+            # the grid rather than accumulating a counter, so a resumed run
+            # inherits the true figure and cannot double-charge.
+            state.probe_cells_spent = max(
+                state.probe_cells_spent,
+                len(probe_cell_names(mitigation_axis, diagnostic_axis)),
+            )
 
             # Baseline-pass is fully deterministic from probe results: if the
             # none-none baseline cell passes, the repro succeeds without any
@@ -425,12 +626,20 @@ def run_agent_loop(
             # the next mitigation -- so the most recently appended mitigation
             # always gets a chance to run (and converge) before we stop.
             config.policy.check_iteration_budget(state.iterations_completed)
+            # The cell budget is opt-in (None = off) and is checked in the
+            # same place, so both budgets stop the run the same way. Checked
+            # before the proposer is called: with nothing affordable there is
+            # no action to take, and asking for one would spend tokens on a
+            # proposal that cannot be run.
+            config.policy.check_cell_budget(state.probe_cells_spent)
 
             step = proposer.propose(
                 symptom=config.symptom,
                 cell_summaries=summaries,
                 candidates=candidates,
                 tried=state.tried_mitigations,
+                diagnostic_candidates=diagnostic_candidates,
+                tried_diagnostics=state.tried_diagnostics,
             )
             step = config.policy.validate_step(step)
             state.last_category = step.category
@@ -442,13 +651,19 @@ def run_agent_loop(
                     "category": step.category,
                     "hypothesis": step.hypothesis,
                     "next_mitigations": step.next_mitigations,
+                    "next_diagnostics": step.next_diagnostics,
                     "confidence": step.confidence,
                     "stop": step.stop,
                     "stop_reason": step.stop_reason,
                 },
             )
 
-            if step.stop or not step.next_mitigations:
+            # A diagnostic-only step is a real action under the joint-axis
+            # policy: buying evidence without testing a cause is what the
+            # first move of a minimum-cost localisation often is. Adding the
+            # second clause cannot change any existing run, because
+            # next_diagnostics is empty unless the operator offered the axis.
+            if step.stop or not (step.next_mitigations or step.next_diagnostics):
                 outcome, recommended, resolved_reason = _resolve_stop_outcome(
                     step, summaries
                 )
@@ -472,6 +687,18 @@ def run_agent_loop(
                     f"candidate set: {sorted(disallowed)}. "
                     f"Allowed: {sorted(candidates)}."
                 )
+            # Same guardrail on the diagnostic axis. With no --diagnostic the
+            # candidate list is empty, so any proposed diagnostic is
+            # disallowed -- which is right: the operator did not arm that axis.
+            disallowed_d = [
+                d for d in step.next_diagnostics if d not in diagnostic_candidates
+            ]
+            if disallowed_d:
+                raise PolicyViolation(
+                    f"proposer returned diagnostics outside the allowed "
+                    f"candidate set: {sorted(disallowed_d)}. "
+                    f"Allowed: {sorted(diagnostic_candidates)}."
+                )
 
             pending = config.policy.pending_approvals(step.next_mitigations)
             if pending:
@@ -487,16 +714,64 @@ def run_agent_loop(
                 )
                 break
 
-            for mitigation in step.next_mitigations:
-                if mitigation in mitigation_axis:
-                    continue
-                mitigation_axis.append(mitigation)
+            # Widen both axes in one planned step and price it in cells. The
+            # loop used to append names and charge the iteration budget once;
+            # the cells are the cross product, so with two axes the gap
+            # between "names proposed" and "cells run" becomes multiplicative.
+            # plan_axis_growth returns the exact count and the trim.
+            growth = plan_axis_growth(
+                mitigation_axis,
+                diagnostic_axis,
+                step.next_mitigations,
+                step.next_diagnostics,
+                cells_affordable=config.policy.cells_affordable(
+                    state.probe_cells_spent
+                ),
+            )
+            mitigation_axis = growth.mitigation_axis
+            diagnostic_axis = growth.diagnostic_axis
+            for mitigation in growth.added_mitigations:
                 state.tried_mitigations.append(mitigation)
                 append_log_event(
                     run_dir,
                     "mitigation_tried",
                     {"mitigation": mitigation},
                 )
+            for diagnostic in growth.added_diagnostics:
+                state.tried_diagnostics.append(diagnostic)
+                append_log_event(
+                    run_dir,
+                    "diagnostic_tried",
+                    {"diagnostic": diagnostic},
+                )
+            append_log_event(
+                run_dir,
+                "axis_growth",
+                {
+                    "added_mitigations": growth.added_mitigations,
+                    "added_diagnostics": growth.added_diagnostics,
+                    "rejected_mitigations": growth.rejected_mitigations,
+                    "rejected_diagnostics": growth.rejected_diagnostics,
+                    "cells_added": growth.cells_added,
+                    "cells_total": growth.cells_after,
+                    "mitigation_axis": list(mitigation_axis),
+                    "diagnostic_axis": list(diagnostic_axis),
+                },
+            )
+            if not growth.grew:
+                # Every name was already on an axis or trimmed by the cell
+                # budget. Running the same grid again would spend nothing and
+                # learn nothing, and looping would not terminate.
+                outcome = "policy_stop"
+                recommended = (
+                    "No axis could be widened: every proposed name was "
+                    "already on an axis or would exceed the probe cell "
+                    f"budget ({config.policy.max_probe_cells} max, "
+                    f"{state.probe_cells_spent} spent). Raise --max-cells or "
+                    "inspect the cells already run."
+                )
+                append_log_event(run_dir, "policy_stop", {"reason": recommended})
+                break
 
             state.iterations_completed += 1
             append_log_event(
@@ -579,4 +854,11 @@ def run_agent_loop(
     )
 
 
-__all__ = ["AgentConfig", "AgentLoopResult", "run_agent_loop"]
+__all__ = [
+    "AgentConfig",
+    "AgentLoopResult",
+    "AxisGrowth",
+    "plan_axis_growth",
+    "probe_cell_names",
+    "run_agent_loop",
+]
