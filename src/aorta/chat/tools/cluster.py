@@ -643,6 +643,25 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
     )
 
 
+def _within_jobs_root(job_dir: Path, relative: str) -> Path | None:
+    """*relative* under *job_dir*, or None when it leaves the jobs root.
+
+    The listing walks directories that are genuinely under the root, which is
+    what makes this easy to skip: the directory is fine, and the file inside it
+    is still whatever the job wrote. A bundle is workload-writable, so a
+    symlink there points wherever the workload liked.
+
+    None rather than an exception because a listing should survive one bad job
+    and say so, where a single read should refuse outright.
+    """
+    try:
+        return resolve_within(
+            settings.jobs_root, f"{job_dir.name}/{relative}", JOBS_ROOT_LABEL
+        )
+    except ValueError:
+        return None
+
+
 @tool
 def list_cluster_jobs(limit: int = 10) -> str:
     """List recent Cluster Intelligence jobs and whether they have a verdict.
@@ -675,8 +694,13 @@ def list_cluster_jobs(limit: int = 10) -> str:
     lines = [f"Recent jobs under {root}:"]
     for job_dir in dirs:
         recipe, status = "?", "?"
-        job_json = job_dir / "job.json"
-        if job_json.is_file():
+        # Contained for the same reason the single-report read is: the
+        # directory came from iterdir and is genuinely under the root, and the
+        # file inside it is still whatever the job put there. A listing reads
+        # less of each file than read_autopsy_report does, which changes how
+        # much escapes rather than whether anything does.
+        job_json = _within_jobs_root(job_dir, "job.json")
+        if job_json is not None and job_json.is_file():
             try:
                 data = json.loads(job_json.read_text())
                 recipe = data.get("recipe", "?")
@@ -685,8 +709,10 @@ def list_cluster_jobs(limit: int = 10) -> str:
                 pass
 
         verdict = "no report"
-        report = job_dir / "bundle" / "report.json"
-        if report.is_file():
+        report = _within_jobs_root(job_dir, "bundle/report.json")
+        if report is None:
+            verdict = "report outside the jobs root"
+        elif report.is_file():
             try:
                 data = json.loads(report.read_text())
                 verdict = f"{data.get('category', '?')} @ {data.get('confidence', '?')}"
@@ -708,11 +734,20 @@ def read_autopsy_report(job_id: str) -> str:
     Returns:
         The report JSON, including category, confidence, rationale and evidence.
     """
+    # The whole path, not the directory it starts in. Checking job_id alone
+    # left the last two components unchecked, and the job writes its own
+    # bundle -- so a workload that drops a symlink at bundle/report.json sends
+    # this read anywhere it likes, and read_text follows it.
+    #
+    # The reply is what makes that quiet: it names the path it asked for, which
+    # is inside the jobs root, while showing the contents of a file that is
+    # not. Nothing in the answer says the two differ.
     try:
-        job_dir = resolve_within(settings.jobs_root, job_id, JOBS_ROOT_LABEL)
+        report = resolve_within(
+            settings.jobs_root, f"{job_id}/bundle/report.json", JOBS_ROOT_LABEL
+        )
     except ValueError as exc:
         return f"Error: {exc}"
-    report = job_dir / "bundle" / "report.json"
     if not report.is_file():
         return (f"Error: no report at {report}. "
                 f"Use list_cluster_jobs to see jobs that have a verdict.")
