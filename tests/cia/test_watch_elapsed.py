@@ -90,7 +90,9 @@ class TestWhatThePollLoopSends:
 
         import aorta.cia.watch.poll as poll_mod
 
-        return inspect.getsource(poll_mod.poll_jobs)
+        return inspect.getsource(poll_mod.poll_jobs) + inspect.getsource(
+            poll_mod._poll_rounds
+        )
 
     def test_the_loop_no_longer_sends_the_wall_clock(self):
         assert "elapsed_sec={int(time.time())}" not in self._poll_source()
