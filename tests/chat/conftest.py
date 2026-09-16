@@ -9,6 +9,16 @@ from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# LiteLLM downloads its model-price table from GitHub the first time it is
+# asked about a model it does not recognise, and the test models here are all
+# made up. That download is once per process, so under xdist it lands in
+# whichever test happens to be first on each worker -- and if that test holds
+# the no_network fixture, it fails while the identical test on another worker
+# passes. This is the documented way to tell LiteLLM to use the copy it ships
+# with. It has to be set before litellm is imported, which is why it is here
+# and not in a fixture.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # These tests exercise real langchain/langgraph objects, so they need the
 # chat-cli extra. A base install (pyyaml + click) is a supported and common
 # configuration -- it is what `pip install amd-aorta` gives a customer -- so the
