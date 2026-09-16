@@ -104,6 +104,25 @@ def _emit_skipped(events_path: Path, job, content: str, error: str) -> None:
 #: let one bad round start one per job on the cluster at the same time.
 AUTOPSY_WORKERS = 2
 
+#: How long a queued or running Autopsy may sit before a later round treats it
+#: as lost. Longer than the production sweep's own four-hour limit, because
+#: finishing slowly is not the same as dying, and re-queueing a live one wastes
+#: a node.
+AUTOPSY_STALE_AFTER_SEC = 5 * 60 * 60
+
+#: How many times a job may be sent for Autopsy before Watch stops trying. A
+#: crash loop that re-queues for ever would spend every round on one job.
+AUTOPSY_MAX_ATTEMPTS = 2
+
+#: States that mean this job is settled and must not be queued again.
+#:
+#: "failed" is deliberately not among them. A failed Autopsy is the case the
+#: attempt counter exists for -- a transient LLM or network error should be
+#: retried, and a persistent one becomes "gave_up" on its own once the
+#: attempts run out. Treating failure as terminal would have made the counter
+#: decorative.
+_AUTOPSY_TERMINAL = frozenset({"done", "gave_up"})
+
 #: Written beside the job the moment it alerts, before the work is queued.
 #: "Diagnosed once" used to live in a set inside poll_jobs, so a watcher that
 #: restarted re-diagnosed everything it had already alerted on, and nothing
@@ -117,6 +136,52 @@ def autopsy_state(job_dir: Path) -> dict:
         return json.loads((job_dir / _AUTOPSY_STATE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def _stale(recorded: dict) -> bool:
+    """Whether a queued/running record is old enough to have been lost.
+
+    Time rather than a liveness check: the worker is a thread in a process that
+    may no longer exist, and a pid on a shared filesystem says nothing about
+    whether *this* host still runs it.
+    """
+    stamped = recorded.get("ts")
+    if not isinstance(stamped, str):
+        return True
+    try:
+        when = datetime.fromisoformat(stamped.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    age = (datetime.now(timezone.utc) - when).total_seconds()
+    return age > AUTOPSY_STALE_AFTER_SEC
+
+
+def autopsy_is_settled(job_dir: Path) -> bool:
+    """Whether this job needs no further Autopsy.
+
+    Settled means finished, failed, or given up on. A record still claiming
+    "queued" or "running" long after anything could still be running it is a
+    watcher that died holding it, and the job goes back in the queue -- the
+    persistence exists to stop duplicate work, not to suppress work that never
+    happened.
+    """
+    recorded = autopsy_state(job_dir)
+    state = recorded.get("state")
+    if not state:
+        return False
+    if state in _AUTOPSY_TERMINAL:
+        return True
+    if state in {"queued", "running"} and not _stale(recorded):
+        return True
+    return False
+
+
+def autopsy_attempts(job_dir: Path) -> int:
+    """How many times this job has been sent for Autopsy."""
+    try:
+        return int(autopsy_state(job_dir).get("attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> None:
@@ -145,14 +210,18 @@ def _run_autopsy_off_the_loop(
     """Run one Autopsy and keep its state on disk. Never raises into the pool."""
     from aorta.cia.watch.trigger import trigger_autopsy
 
-    record_autopsy_state(job_dir, "running", job_id=job.job_id)
+    attempts = autopsy_attempts(job_dir)
+    record_autopsy_state(job_dir, "running", job_id=job.job_id, attempts=attempts)
     try:
         trigger_autopsy(bundle, job, jobs_root, stop=stop)
     except Exception as exc:  # noqa: BLE001 - a worker that raises is silent
         print(f"[watch] autopsy for {job.job_id} failed: {type(exc).__name__}: {exc}")
-        record_autopsy_state(job_dir, "failed", job_id=job.job_id, error=str(exc)[:200])
+        record_autopsy_state(
+            job_dir, "failed", job_id=job.job_id, attempts=attempts,
+            error=str(exc)[:200],
+        )
     else:
-        record_autopsy_state(job_dir, "done", job_id=job.job_id)
+        record_autopsy_state(job_dir, "done", job_id=job.job_id, attempts=attempts)
 
 
 def poll_jobs(
@@ -243,10 +312,44 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
             # re-diagnosed what it had already paid for.
             if job.job_id in alerted:
                 continue
-            recorded = autopsy_state(jobs_root / job.job_id).get("state")
-            if recorded and recorded != "abandoned":
+            job_state_dir = jobs_root / job.job_id
+            if autopsy_is_settled(job_state_dir):
                 alerted.add(job.job_id)
                 continue
+
+            # A retry does not wait for the job to say something new. Alerting
+            # is driven by fresh log bytes, which is right for deciding whether
+            # a job is in trouble and wrong for re-running an Autopsy that
+            # failed: the failure was in the diagnosis, not in the log. A job
+            # that alerted and then went quiet -- which a crashed one does --
+            # would otherwise keep its failed state for ever while the counter
+            # that was meant to retry it never advanced.
+            pending = autopsy_state(job_state_dir)
+            if pending.get("state") in {"failed", "abandoned", "queued", "running"}:
+                bundle = job_state_dir / "bundle"
+                if bundle.exists():
+                    attempts = autopsy_attempts(job_state_dir) + 1
+                    if attempts > AUTOPSY_MAX_ATTEMPTS:
+                        print(
+                            f"[watch] {job.job_id}: autopsy failed "
+                            f"{AUTOPSY_MAX_ATTEMPTS} times; not trying again"
+                        )
+                        record_autopsy_state(
+                            job_state_dir, "gave_up", job_id=job.job_id,
+                            attempts=attempts - 1,
+                        )
+                    else:
+                        print(f"[watch] {job.job_id}: retrying autopsy ({attempts})")
+                        record_autopsy_state(
+                            job_state_dir, "queued", job_id=job.job_id,
+                            attempts=attempts,
+                        )
+                        queued[job.job_id] = pool.submit(
+                            _run_autopsy_off_the_loop,
+                            bundle, job, jobs_root, job_state_dir, stop,
+                        )
+                    alerted.add(job.job_id)
+                    continue
             job_dir = jobs_root / job.job_id
             events_path = job_dir / "events.jsonl"
             job_context = (
@@ -387,9 +490,24 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
                 bundle = write_bundle(job, job_dir, evidence or new_content[:4000], signal)
                 # Marked before it is queued, so a crash between the two costs
                 # a duplicate rather than losing the record entirely.
+                attempts = autopsy_attempts(job_dir) + 1
+                if attempts > AUTOPSY_MAX_ATTEMPTS:
+                    # Said out loud rather than quietly skipped: a job that
+                    # cannot be diagnosed is a thing the operator should know,
+                    # and a silent give-up looks like a job nobody alerted on.
+                    print(
+                        f"[watch] {job.job_id}: autopsy failed "
+                        f"{AUTOPSY_MAX_ATTEMPTS} times; not trying again"
+                    )
+                    record_autopsy_state(
+                        job_dir, "gave_up", job_id=job.job_id,
+                        attempts=attempts - 1, signal=signal,
+                    )
+                    alerted.add(job.job_id)
+                    continue
                 record_autopsy_state(
                     job_dir, "queued", job_id=job.job_id, signal=signal,
-                    confidence=confidence,
+                    confidence=confidence, attempts=attempts,
                 )
                 # Off this thread. Autopsy is an LLM ReAct loop that can
                 # escalate to a production sweep with a four-hour limit, and it

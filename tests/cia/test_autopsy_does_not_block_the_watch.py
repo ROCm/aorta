@@ -69,9 +69,16 @@ def alerting(monkeypatch):
     monkeypatch.setattr(poll_mod, "LogWatcher", lambda *a, **k: FakeWatcher())
     monkeypatch.setattr(poll_mod, "LogFinder", lambda *a, **k: object())
     monkeypatch.setattr(poll_mod.time, "sleep", lambda _: None)
+    def fake_write_bundle(job, job_dir, evidence, signal):
+        # The real one creates the directory, and the retry path checks for it
+        # before re-queueing -- a bundle that was never written is nothing to
+        # re-run.
+        bundle = job_dir / "bundle"
+        bundle.mkdir(parents=True, exist_ok=True)
+        return bundle
+
     monkeypatch.setattr(
-        "aorta.cia.watch.bundle_writer.write_bundle",
-        lambda job, job_dir, evidence, signal: job_dir / "bundle",
+        "aorta.cia.watch.bundle_writer.write_bundle", fake_write_bundle
     )
 
 
@@ -209,3 +216,104 @@ class TestThePoolIsBounded:
         poll_jobs(tmp_path, max_rounds=1)
 
         assert seen and "cia-autopsy" in seen[0]
+
+
+class TestAWatcherThatDiedHoldingOne:
+    """Persistence must not become a way to suppress work that never happened.
+
+    The first version of this recorded "queued" before enqueueing and treated
+    anything but "abandoned" as settled. That stops duplicate work, which was
+    the point -- and it also meant a watcher killed mid-Autopsy left the record
+    saying "running" for ever, so no later watcher would ever pick the job up.
+    The state that existed to prevent waste became a way to lose the diagnosis
+    entirely.
+    """
+
+    @staticmethod
+    def _write_state(job_dir: Path, state: str, age_hours: float, attempts: int = 1):
+        from datetime import datetime, timedelta, timezone
+
+        stamped = (
+            datetime.now(timezone.utc) - timedelta(hours=age_hours)
+        ).isoformat().replace("+00:00", "Z")
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "autopsy.state.json").write_text(
+            json.dumps({"state": state, "ts": stamped, "attempts": attempts}),
+            encoding="utf-8",
+        )
+
+    @pytest.mark.parametrize("state", ["queued", "running"])
+    def test_a_fresh_one_is_left_alone(self, tmp_path, state):
+        """Finishing slowly is not dying; re-queueing a live one wastes a node."""
+        self._write_state(tmp_path, state, age_hours=0.5)
+
+        assert poll_mod.autopsy_is_settled(tmp_path) is True
+
+    @pytest.mark.parametrize("state", ["queued", "running"])
+    def test_a_stale_one_goes_back_in_the_queue(self, tmp_path, state):
+        self._write_state(tmp_path, state, age_hours=9)
+
+        assert poll_mod.autopsy_is_settled(tmp_path) is False
+
+    def test_the_window_outlasts_the_production_sweep(self):
+        """Four hours is the sweep's own limit; reclaiming sooner kills live work."""
+        assert poll_mod.AUTOPSY_STALE_AFTER_SEC > 4 * 60 * 60
+
+    def test_an_unparseable_timestamp_is_treated_as_lost(self, tmp_path):
+        """A record we cannot date is not evidence that something is running."""
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "autopsy.state.json").write_text(
+            json.dumps({"state": "running", "ts": "not a date"}), encoding="utf-8"
+        )
+
+        assert poll_mod.autopsy_is_settled(tmp_path) is False
+
+
+class TestFailureIsRetriedAndThenGivenUpOn:
+    def test_a_failed_autopsy_is_not_settled(self, tmp_path):
+        """The case the attempt counter exists for."""
+        poll_mod.record_autopsy_state(tmp_path, "failed", attempts=1)
+
+        assert poll_mod.autopsy_is_settled(tmp_path) is False
+
+    def test_a_failing_autopsy_is_tried_again(self, tmp_path, alerting, monkeypatch):
+        calls: list[str] = []
+
+        def boom(bundle, job, jobs_root, stop=None):
+            calls.append(job.job_id)
+            raise RuntimeError("autopsy exploded")
+
+        monkeypatch.setattr("aorta.cia.watch.trigger.trigger_autopsy", boom)
+        _write_job(tmp_path, "cia-aaa")
+
+        poll_jobs(tmp_path, max_rounds=1)
+        poll_jobs(tmp_path, max_rounds=1)
+
+        assert len(calls) == 2, f"a failed autopsy was retried {len(calls) - 1} times"
+
+    def test_it_stops_after_the_attempt_limit(self, tmp_path, alerting, monkeypatch):
+        """A crash loop must not spend every round on one job."""
+        calls: list[str] = []
+
+        def boom(bundle, job, jobs_root, stop=None):
+            calls.append(job.job_id)
+            raise RuntimeError("autopsy exploded")
+
+        monkeypatch.setattr("aorta.cia.watch.trigger.trigger_autopsy", boom)
+        job_dir = _write_job(tmp_path, "cia-aaa")
+
+        for _ in range(5):
+            poll_jobs(tmp_path, max_rounds=1)
+
+        assert len(calls) == poll_mod.AUTOPSY_MAX_ATTEMPTS, calls
+        assert autopsy_state(job_dir)["state"] == "gave_up"
+
+    def test_giving_up_is_terminal(self, tmp_path):
+        poll_mod.record_autopsy_state(tmp_path, "gave_up", attempts=2)
+
+        assert poll_mod.autopsy_is_settled(tmp_path) is True
+
+    def test_a_successful_one_is_not_repeated(self, tmp_path):
+        poll_mod.record_autopsy_state(tmp_path, "done", attempts=1)
+
+        assert poll_mod.autopsy_is_settled(tmp_path) is True
