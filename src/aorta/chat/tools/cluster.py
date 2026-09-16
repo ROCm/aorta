@@ -369,6 +369,7 @@ def triage_kernel_source(
     grid_size: int = 0,
     block_y: int = 0,
     block_z: int = 0,
+    fill: int = 0,
     force: bool = False,
 ) -> str:
     """Compile a HIP kernel the user supplied and run it under a sanitizer.
@@ -391,6 +392,12 @@ def triage_kernel_source(
             threadIdx.y -- a 32x32 tile is block_size=32, block_y=32. Leave 0
             for a one-dimensional kernel.
         block_z: Threads per block in z, for a kernel that indexes threadIdx.z.
+        fill: The byte every generated input buffer is filled with. 0 is the
+            default and is right for a kernel that only writes its buffers.
+            Use 1 when the kernel branches on an input -- with zeros, a path
+            behind `if (input[i] > 0)` never executes, and the sanitizer
+            cannot find a race in code that did not run. The result says so
+            when it applies. Ignored when the paste contains its own main().
         force: Re-run on hardware even if this exact kernel was already triaged
             in this conversation. Leave false; the cached verdict is the same run.
 
@@ -404,12 +411,13 @@ def triage_kernel_source(
             grid=grid_size,
             block_y=block_y,
             block_z=block_z,
+            fill_byte=fill,
         )
     except HarnessError as exc:
         return f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
 
     cache = current_tool_cache().triage
-    cache_key = (source.strip(), block_size, grid_size, block_y, block_z)
+    cache_key = (source.strip(), block_size, grid_size, block_y, block_z, fill)
     cached = None if force else cache.get(cache_key)
     if cached is not None:
         return (
@@ -433,6 +441,18 @@ def triage_kernel_source(
         ["--source", str(src_path), "--kernel-name", prepared.kernel],
         label or f"user kernel {prepared.kernel}",
     )
+
+    if prepared.data_dependent:
+        guarded = ", ".join(f"`{name}`" for name in prepared.input_guards)
+        lines.append(
+            f"WARNING — input caveat: this kernel branches on {guarded}, and the "
+            f"generated harness filled every buffer with the byte {fill}. A path guarded "
+            f"by an input does not execute, so ConSan cannot report a conflict "
+            f"inside it and a 'pass' here does NOT mean the kernel is race-free "
+            f"— it means the guarded path was never reached. Re-run with a "
+            f"fill that enters the branch (fill=1 gives non-zero bytes), or "
+            f"paste a main() of your own that supplies representative input.\n"
+        )
 
     if prepared.single_wave:
         lines.append(

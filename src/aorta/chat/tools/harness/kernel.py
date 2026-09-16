@@ -198,8 +198,14 @@ def build_harness(
     elements: int = 0,
     block_y: int = 0,
     block_z: int = 0,
+    fill_byte: int = 0,
 ) -> str:
-    """Wrap a bare kernel in a main() that launches it once."""
+    """Wrap a bare kernel in a main() that launches it once.
+
+    *fill_byte* is the byte every input buffer is filled with. Zero is right
+    for a buffer the kernel writes and wrong for one it branches on, which is
+    why it is a parameter rather than a constant.
+    """
     name = kernel_name(source)
     params = parse_params(source)
     block = block or infer_block_size(source)
@@ -226,8 +232,12 @@ def build_harness(
                 f"  if (hipMalloc(&{var}, kElements * sizeof({param.base_type})) != hipSuccess)\n"
                 f"    return 1;"
             )
+            # Zero is the safe default for a buffer a kernel writes, and the
+            # wrong one for a buffer it branches on: `if (input[i] > 0)` never
+            # runs, so a race behind it cannot be reported. fill lets the
+            # caller say so; the caveat in the result says when it matters.
             setup.append(
-                f"  if (hipMemset({var}, 0, kElements * sizeof({param.base_type})) != hipSuccess)\n"
+                f"  if (hipMemset({var}, {fill_byte}, kElements * sizeof({param.base_type})) != hipSuccess)\n"
                 f"    return 1;"
             )
             args.append(var)
@@ -276,11 +286,25 @@ class Prepared:
     grid: int
     block_y: int = 0
     block_z: int = 0
+    #: Pointer parameters the kernel reads inside a branch condition. Empty
+    #: when it has none, or when the caller supplied their own main().
+    input_guards: tuple[str, ...] = ()
 
     @property
     def threads(self) -> int:
         """Threads per block across every dimension the launch uses."""
         return self.block * max(self.block_y, 1) * max(self.block_z, 1)
+
+    @property
+    def data_dependent(self) -> bool:
+        """Whether a clean result here proves less than it appears to.
+
+        The harness this generates fills inputs with zeros, so a branch
+        guarded by an input never executes. ConSan cannot report a conflict in
+        code that did not run, and a sweep of the unguarded path alone returns
+        "pass".
+        """
+        return self.wrapped and bool(self.input_guards)
 
     @property
     def single_wave(self) -> bool:
@@ -296,6 +320,33 @@ class Prepared:
         return self.wrapped and self.threads <= WAVEFRONT
 
 
+#: A branch whose condition reads one of the kernel's own inputs. Not an
+#: exhaustive parse -- it wants the shape ``if (input[i] > 0)``, which is what
+#: makes a race data-dependent, and would rather name a kernel that turns out
+#: to be fine than stay quiet about one that is not.
+_GUARD = re.compile(r"\b(?:if|while)\s*\(([^)]*)\)", re.S)
+
+
+def branches_on_input(source: str, params: list[Param]) -> list[str]:
+    """Names of pointer parameters this kernel reads inside a condition.
+
+    The generated harness fills every buffer with zeros, so a branch guarded
+    by one of them never runs. ConSan then reports a clean sweep of code it
+    never reached -- and the report says "pass", not "the guarded path was not
+    executed". A kernel with a race behind ``if (input[i] > 0)`` comes back
+    clean and looks diagnosed.
+    """
+    pointers = [p.name for p in params if p.is_pointer]
+    if not pointers:
+        return []
+    found: list[str] = []
+    for condition in _GUARD.findall(source):
+        for name in pointers:
+            if name not in found and re.search(rf"\b{re.escape(name)}\s*\[", condition):
+                found.append(name)
+    return found
+
+
 def prepare_source(
     source: str,
     *,
@@ -304,6 +355,7 @@ def prepare_source(
     elements: int = 0,
     block_y: int = 0,
     block_z: int = 0,
+    fill_byte: int = 0,
 ) -> Prepared:
     """Turn a pasted kernel or program into something ConSan can run."""
     source = extract_source(source).strip()
@@ -350,7 +402,9 @@ def prepare_source(
         elements=elements,
         block_y=block_y,
         block_z=block_z,
+        fill_byte=fill_byte,
     )
     return Prepared(
-        program, name, True, resolved_block, resolved_grid, block_y, block_z
+        program, name, True, resolved_block, resolved_grid, block_y, block_z,
+        tuple(branches_on_input(source, parse_params(source))),
     )
