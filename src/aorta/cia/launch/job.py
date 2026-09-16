@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -64,10 +65,57 @@ def read_job_json(path: Path) -> JobRecord:
     return JobRecord(**{k: v for k, v in data.items() if k in JobRecord.__dataclass_fields__})
 
 
-def update_job_status(jobs_root: Path, job_id: str, status: str) -> None:
+def _write_atomic(path: Path, payload: dict) -> None:
+    """Replace *path* with *payload* in one step, or not at all.
+
+    Watch re-reads job.json every round, and on a shared filesystem that read
+    can land in the middle of a write. A truncated record does not read as a
+    damaged job, it reads as no job: the record fails to parse, the job drops
+    out of the active scan, and monitoring stops for a run that is still going.
+
+    The temporary file is made in the same directory so the replace is a rename
+    within one filesystem, which is the part that makes it atomic.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _update_job_field(jobs_root: Path, job_id: str, **fields: object) -> None:
+    """Change *fields* on a job record, leaving the rest as found.
+
+    Read-modify-write rather than dumping an in-memory record: the copy on
+    disk may have been changed by another process since this one loaded it,
+    and rewriting the whole thing would put those changes back to what this
+    process last saw.
+    """
     path = jobs_root / job_id / "job.json"
     if not path.is_file():
         return
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data["status"] = status
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    data.update(fields)
+    _write_atomic(path, data)
+
+
+def update_job_status(jobs_root: Path, job_id: str, status: str) -> None:
+    _update_job_field(jobs_root, job_id, status=status)
+
+
+def record_watch_files(jobs_root: Path, job_id: str, files: list[str]) -> None:
+    """Remember which files Watch resolved for this job.
+
+    Discovery runs once per job rather than once per round. The record was
+    only ever updated in memory, and every round loads a fresh one from disk,
+    so a job whose log path had to be discovered re-ran that discovery for the
+    life of the run -- including the model call inside it.
+    """
+    if not files:
+        return
+    _update_job_field(jobs_root, job_id, watch_files=list(files))
