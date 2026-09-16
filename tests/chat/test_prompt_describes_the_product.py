@@ -21,12 +21,22 @@ is what the removed run_nan_demo redirect did.
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from aorta.chat.config import reset_settings
 from aorta.chat.graph.nodes import ANSWER_PROMPT, _build_system_message
 
 _TRIAGE = ("triage_kernel_source", "triage_assembly_source", "triage_workload")
+
+# The identity only names diagnosis when the triage tools actually register,
+# and they need dspy from the cia extra. The rules are in the prompt either
+# way, so only the identity assertions carry this.
+_needs_cluster_tools = pytest.mark.skipif(
+    importlib.util.find_spec("dspy") is None,
+    reason="the identity names diagnosis only when the tools register, which needs the cia extra",
+)
 
 
 @pytest.fixture()
@@ -142,9 +152,11 @@ class TestTheIdentityAgreesWithTheRules:
     the assistant built to diagnose it.
     """
 
+    @_needs_cluster_tools
     def test_it_says_it_diagnoses_when_it_can(self, prompt):
         assert "diagnoses" in _identity(prompt(cluster_jobs=True))
 
+    @_needs_cluster_tools
     def test_it_names_what_it_diagnoses(self, prompt):
         identity = _identity(prompt(cluster_jobs=True))
         for subject in ("kernels", "assembly", "workloads"):

@@ -20,9 +20,19 @@ instead of silently replacing a sibling call's source.
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
+
+# Importing the cluster tools pulls in aorta.cia.triage, which needs dspy from
+# the cia extra. The classes that read cluster.py as text do not, and they are
+# the ones worth keeping on a minimal install, so the guard sits on the class
+# that imports rather than on the module.
+_needs_cluster_tools = pytest.mark.skipif(
+    importlib.util.find_spec("dspy") is None,
+    reason="staging behaviour needs the cluster tools, which need the cia extra",
+)
 
 _CLUSTER = (
     Path(__file__).resolve().parents[2] / "src" / "aorta" / "chat" / "tools" / "cluster.py"
@@ -58,6 +68,7 @@ class TestEveryStagedPathIsUniquePerCall:
         assert 'open(path, "x"' in source
 
 
+@_needs_cluster_tools
 class TestTheCollisionItself:
     def test_two_calls_never_share_a_directory(self, tmp_path):
         from aorta.chat.tools.cluster import _stage_dir
