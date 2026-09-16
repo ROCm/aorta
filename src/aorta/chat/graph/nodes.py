@@ -1271,6 +1271,20 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
     }
 
 
+def _last_human_message(state: AgentState) -> str:
+    """The user's own words this turn, for a node that needs to check them.
+
+    Truncated, because a pasted disassembly can be megabytes and the critic is
+    checking claims rather than reading the listing. The head is what carries a
+    learning rate, a launch config or a missing barrier.
+    """
+    for message in reversed(state.get("messages") or []):
+        if isinstance(message, HumanMessage) and isinstance(message.content, str):
+            text = message.content
+            return text if len(text) <= 4000 else text[:4000] + "\n... (truncated)"
+    return "(the user's message is not available)"
+
+
 # ──────────────────── Critic ─────────────────────
 
 _EXIT_CODE_PREFIX = "Exit code: "
@@ -1369,12 +1383,22 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 
     if command_output:
         tool_context = "\n---\n".join(tool_results[:10]) if tool_results else "(no tool results gathered)"
+        # The question, and whatever the user pasted with it. Without this the
+        # critic had only the tools and the answer, so a claim about the user's
+        # own code was unverifiable by construction and it rejected every one:
+        # "invented specific learning rate value" on a turn where lr=5.0 sat
+        # four lines from the optimiser in the paste. Telling the critic that
+        # pasted code counts as evidence does nothing while the paste is not in
+        # front of it.
+        asked = _last_human_message(state)
         validation = await _send(
             llm,
             [
                 SystemMessage(content=_CRITIC_VALIDATION_PROMPT),
                 HumanMessage(
                     content=(
+                        f"WHAT THE USER ASKED (including any code they pasted):\n"
+                        f"{asked}\n\n"
                         f"TOOL RESULTS:\n{tool_context}\n\n"
                         f"GENERATED RESPONSE:\n{command_output}"
                     )
