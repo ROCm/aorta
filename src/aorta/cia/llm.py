@@ -114,9 +114,11 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] 
     them: a user who has run ``aorta chat config init --profile openai`` should
     not then have a Watch and an Autopsy quietly talking somewhere else.
 
-    Only the settings are read, not the provider layer. ``aorta.chat.config``
-    imports pydantic and stdlib and nothing from the chat extras, so this keeps
-    the agents runnable on a base install.
+    Only the settings are read, not the provider layer, so this keeps the
+    agents runnable without the chat extras. What it does need is pydantic and
+    pydantic-settings, which ``[cia]`` declares: they were arriving two hops
+    out through dspy-ai to litellm, and a package that happens to install
+    something is not a package that promises to.
 
     With *configured_only*, None also means "nothing here was actually set".
     Every field has a default, so answering with one would silently outrank a
@@ -128,14 +130,32 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] 
     except ImportError as exc:
         if not _warned_no_settings:
             _warned_no_settings = True
+            # The reason is reported, not assumed. This used to state the 3.10
+            # one whatever had actually happened, so an install failing because
+            # a package was missing was told it needed Python 3.11 -- on 3.13.
+            # A diagnostic that names the wrong cause is worse than none: it is
+            # followed.
+            if sys.version_info < (3, 11):
+                why = (
+                    "On Python %d.%d it cannot be imported at all: it reads "
+                    "chat.toml with stdlib tomllib, which is 3.11."
+                    % (sys.version_info[0], sys.version_info[1])
+                )
+            else:
+                why = (
+                    "This is Python %d.%d, so tomllib is present and the import "
+                    "failed for the reason above -- most likely a package the "
+                    "[cia] extra should have installed. Reinstall with "
+                    "`pip install 'amd-aorta[cia]'` and report it if it "
+                    "persists; the agents are meant to read the same profile as "
+                    "the rest of aorta chat."
+                    % (sys.version_info[0], sys.version_info[1])
+                )
             log.warning(
-                "Reading the chat settings from the environment only: %s. On "
-                "Python %d.%d, aorta.chat.config cannot be imported -- it reads "
-                "chat.toml with stdlib tomllib, which is 3.11. AORTA_CHAT_* is "
-                "still honoured; the profile file is not.",
+                "Reading the chat settings from the environment only: %s. %s "
+                "AORTA_CHAT_* is still honoured; the profile file is not.",
                 exc,
-                sys.version_info[0],
-                sys.version_info[1],
+                why,
             )
         return _settings_from_env()
 
