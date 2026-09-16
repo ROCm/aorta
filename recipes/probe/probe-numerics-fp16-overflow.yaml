@@ -1,0 +1,32 @@
+schema_version: 1
+mode: probe
+
+# The honest negative companion to probe-numerics-uninit-workspace.yaml.
+#
+# Same workload, phase 1 only: an unscaled fp16 forward whose activations grow
+# ~2.5x per layer and pass 65504 at layer 11. Just as real a NaN, and nothing
+# in the registry resolves it -- overflow is an exponent problem and the
+# registry's levers are queues, transports and allocators. Twenty-one
+# mitigations were measured against it and all twenty-one fail.
+#
+# That is worth archiving rather than discarding. `fix_reward` withholds the
+# fix half from a scenario nothing resolved, and a real scenario that
+# exercises the withhold path is better evidence than trusting it untested.
+# It is also the honest counterweight to the uninit-workspace result: the
+# registry has one live lever, not a numerics story.
+ticket: PROBE-NAN-FP16
+trials: 2
+
+mitigation_axis:
+  - none
+  - tf32_off
+  - pytorch_no_cuda_memory_caching
+  - hsa_no_sdma
+
+diagnostic_axis:
+  - none
+
+step_time_regex: null
+collect_paths: []
+timeout_per_trial: 900
+env_passthrough_mode: file

@@ -1,0 +1,24 @@
+{
+  "schema": "aorta.scenario_labels/0.1",
+  "source_matrix": "PROBE-NAN-WS-MATRIX",
+  "recipe": "recipes/probe/probe-numerics-uninit-workspace.yaml",
+  "category_set": "the 8-name AUTOPSY_CATEGORIES on this branch (pre-#484)",
+  "labels": {
+    "none-none": "unknown",
+    "tf32_off-none": "unknown",
+    "hsa_no_sdma-none": "unknown",
+    "hip_launch_blocking-none": "unknown",
+    "xnack-none": "unknown",
+    "pytorch_alloc_expandable_segments-none": "unknown",
+    "pytorch_no_cuda_memory_caching-none": "unknown",
+    "gpu_max_hw_queues_2-none": "unknown"
+  },
+  "coverage_note": "Every row is honestly `unknown`, and that is a finding rather than a gap in the labelling effort. The symptom is a NaN loss; the root cause is a read of device memory nobody wrote. Under the 8-name set on this branch the nearest candidate is `illegal_mem`, which means a memory *fault* -- an uninitialised read is legal, silent, and produces a wrong number rather than a trap, so that label would be wrong. Under the 11-name set PR #484 adds, `numeric_instability` is the nearest candidate and is worse: it names the symptom and asserts a cause the matrix contradicts, because the resolving mitigation is an allocator flag and every numeric lever in the registry was measured not to move it. Training on that label would teach the model to route uninitialised-memory bugs to numerics, which is the specific kind of false attribution the reward work exists to avoid.",
+  "taxonomy_gap": "Neither the 8-name set nor #484's 11-name set has a slot for `uninitialised_memory` / stale-buffer reuse. That is a real gap and this scenario is the evidence for it; it is recorded here rather than papered over with the nearest-sounding name.",
+  "fix_half": {
+    "baseline_failed": true,
+    "resolvers": ["pytorch_no_cuda_memory_caching"],
+    "non_resolvers_measured": 20,
+    "note": "Six decoys are in the archived matrix; the other fourteen were measured in the registry sweep (examples/probe/numerics/scout_numerics2.sbatch) and are recorded in docs/probe/numerics-nan-reproducer.md section 2."
+  }
+}
