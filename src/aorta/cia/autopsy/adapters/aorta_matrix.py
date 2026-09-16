@@ -12,6 +12,54 @@ from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext
 MITIGATION_ISOLATION = frozenset({"tf32_off", "deterministic"})
 NAN_HINTS = re.compile(r"nan|residual|non.?finite|inf", re.I)
 
+#: Failures that are plainly not numeric corruption. A cell matching one of
+#: these has said what went wrong, and it was not the arithmetic.
+OOM_HINTS = re.compile(r"out of memory|\boom\b|cuda error: out of memory|hip.*out of memory", re.I)
+LAUNCH_HINTS = re.compile(
+    r"launch fail|no such file|command not found|module.*not found|"
+    r"importerror|modulenotfounderror|permission denied|exit code 127",
+    re.I,
+)
+
+
+def _numeric_evidence(cell: dict[str, Any]) -> bool:
+    """Whether this cell says its failure was numeric.
+
+    Required before ``numeric_silent`` because "the cell failed" was the whole
+    test before: any non-zero exit satisfied it, so an OOM, a missing module
+    and a killed process all came back as silent numeric corruption at 0.88.
+    The check that was meant to catch this was written and then not used --
+    ``if is_repro and not NAN_HINTS.search(...): pass`` -- so it read like a
+    guard and did nothing.
+
+    Hints or the cell's own name, plus the structured fields a matrix carries
+    when the harness recorded what it saw.
+    """
+    hints = " ".join(cell.get("failure_hints") or [])
+    if NAN_HINTS.search(hints) or NAN_HINTS.search(cell.get("name", "")):
+        return True
+    counts = cell.get("exit_status_counts") or {}
+    if int(counts.get("numeric_nan") or 0) > 0:
+        return True
+    return bool(cell.get("nan_detected") or cell.get("non_finite_count"))
+
+
+def _named_failure(cells: list[dict[str, Any]]) -> tuple[str, str] | None:
+    """A category these cells name outright, and the evidence for it.
+
+    Only for failures that said what they were. Anything else stays unknown
+    rather than being given the nearest-looking label.
+    """
+    blob = " ".join(
+        " ".join(c.get("failure_hints") or []) + " " + str(c.get("name", ""))
+        for c in cells
+    )
+    if OOM_HINTS.search(blob):
+        return "oom_fragment", "the cells report running out of memory"
+    if LAUNCH_HINTS.search(blob):
+        return "launch_error", "the cells report the workload failing to start"
+    return None
+
 
 @dataclass(frozen=True)
 class MatrixClassification:
@@ -150,12 +198,42 @@ def classify_matrix(matrix: dict[str, Any]) -> MatrixClassification:
         if failure_rate == 0 and failed == 0 and mitigations & MITIGATION_ISOLATION:
             clean_mitigations.append(cell)
 
-        if is_repro and not NAN_HINTS.search(hints) and not NAN_HINTS.search(name):
-            # Numeric silent often lacks explicit hint text; repro cell name is enough.
-            pass
+    # numeric_silent is a claim about arithmetic, so it needs a cell that said
+    # something about arithmetic. Without one the pattern below -- repro cells
+    # failing, mitigation cells clean -- is equally consistent with a repro
+    # configuration that runs out of memory and a mitigation configuration that
+    # does not.
+    numeric = [c for c in repro_failures if _numeric_evidence(c)]
 
-    if repro_failures and clean_mitigations:
+    if repro_failures and not numeric:
+        named = _named_failure(repro_failures)
         repro_names = ", ".join(c["name"] for c in repro_failures[:3])
+        if named:
+            category, because = named
+            return MatrixClassification(
+                category=category,
+                confidence=0.6,
+                rationale=(
+                    f"Aorta matrix reports failures in repro cells "
+                    f"({repro_names}), and {because}. This is not a numeric "
+                    "signature."
+                ),
+                signals=["AORTA_MATRIX_REPRO"],
+            )
+        return MatrixClassification(
+            category="unknown",
+            confidence=0.3,
+            rationale=(
+                f"Aorta matrix reports failures in repro cells ({repro_names}), "
+                "but nothing in them says what failed: no NaN or non-finite "
+                "signature, and no recognised launch or memory error. A "
+                "non-zero exit on its own does not identify a cause."
+            ),
+            signals=["AORTA_MATRIX_REPRO"],
+        )
+
+    if numeric and clean_mitigations:
+        repro_names = ", ".join(c["name"] for c in numeric[:3])
         clean_names = ", ".join(c["name"] for c in clean_mitigations[:3])
         mit = sorted(
             m for c in clean_mitigations for m in (c.get("mitigations") or []) if m in MITIGATION_ISOLATION
@@ -172,8 +250,8 @@ def classify_matrix(matrix: dict[str, Any]) -> MatrixClassification:
             signals=["AORTA_MATRIX_REPRO", "AORTA_MITIGATION_CLEAN"],
         )
 
-    if repro_failures and not clean_mitigations:
-        repro_names = ", ".join(c["name"] for c in repro_failures[:3])
+    if numeric and not clean_mitigations:
+        repro_names = ", ".join(c["name"] for c in numeric[:3])
         return MatrixClassification(
             category="numeric_silent",
             confidence=0.72,
