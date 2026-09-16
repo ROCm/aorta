@@ -108,7 +108,7 @@ class TestItLeavesTheCallerAlone:
 class TestTheGateIsOnEveryAgentLM:
     def test_build_lm_returns_one(self, monkeypatch):
         """Not a convention each module has to remember."""
-        monkeypatch.setattr(llm_mod, "chat_provider", lambda **_: ("http://p/v1", "k", "m"))
+        monkeypatch.setattr(llm_mod, "chat_provider", lambda **_: ("http://p/v1", "k", "m", "vllm"))
         built = llm_mod.build_lm()
         assert isinstance(built, RedactingLM)
 

@@ -55,13 +55,15 @@ class TestTheEnvironmentIsStillRead:
     def test_a_configured_vllm_endpoint_survives(self, as_310, monkeypatch):
         monkeypatch.setenv("AORTA_CHAT_VLLM_BASE_URL", "http://configured:4000/v1")
         monkeypatch.setenv("AORTA_CHAT_VLLM_MODEL", "qwen3-35b")
-        assert llm_mod.chat_provider() == ("http://configured:4000/v1", "", "qwen3-35b")
+        assert llm_mod.chat_provider() == (
+            "http://configured:4000/v1", "", "qwen3-35b", "vllm",
+        )
 
     def test_a_remote_provider_is_read_from_its_own_fields(self, as_310, monkeypatch):
         monkeypatch.setenv("AORTA_CHAT_LLM_PROVIDER", "openai")
         monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_MODEL", "gpt-4o-mini")
         monkeypatch.setenv("AORTA_CHAT_REMOTE_LLM_API_KEY", "sk-remote")
-        assert llm_mod.chat_provider() == ("", "sk-remote", "gpt-4o-mini")
+        assert llm_mod.chat_provider() == ("", "sk-remote", "gpt-4o-mini", "openai")
 
     def test_nothing_set_still_means_nothing(self, as_310):
         """An empty environment is not a configuration."""

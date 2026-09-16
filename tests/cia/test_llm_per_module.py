@@ -46,7 +46,7 @@ def built(monkeypatch):
     # These tests are about which argument wins, not about where the endpoint
     # comes from -- that is tests/cia/test_shared_provider.py. Pin the resolved
     # provider so the chat settings on the developer's machine cannot decide it.
-    monkeypatch.setattr(llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", ""))
+    monkeypatch.setattr(llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "", "vllm"))
     return calls
 
 
@@ -59,7 +59,7 @@ class TestExplicitArgumentsWin:
 
     def test_the_configuration_supplies_a_model_when_none_is_named(self, built, monkeypatch):
         monkeypatch.setattr(
-            llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "qwen3-35b")
+            llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "qwen3-35b", "vllm")
         )
         build_lm()
         assert built[0]["model"] == "openai/qwen3-35b"
@@ -125,7 +125,7 @@ class TestTheRouterKeepsItsOwnSettings:
     def test_the_router_follows_the_model_the_operator_configured(self, built, monkeypatch):
         """Pinning a model in code would override the deployment's choice."""
         monkeypatch.setattr(
-            llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "qwen3-35b")
+            llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "qwen3-35b", "vllm")
         )
         router_mod, bound = self._bind(monkeypatch)
 
