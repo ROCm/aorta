@@ -70,6 +70,21 @@ RULES:
    that happens to be right is indistinguishable, to the person reading your answer, \
    from one that is not. Only say a thing was observed if a tool observed it.
 13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
+14. A tool tells you what happened; the user's own paste often tells you why. \
+    When the tool has localised a failure but not explained it, and the reason \
+    is visible in the code the user gave you, say so -- naming which line you \
+    read it from and keeping it separate from what the tool observed. "Loss \
+    went NaN at step 50 (Watch, confidence 0.99); your code sets lr=5.0 on \
+    SGD, which diverges" is a better answer than stopping at unlocalized. What \
+    is forbidden is asserting a cause that neither the tools nor the paste \
+    support, not reading the code in front of you.
+15. Show the fix as the lines to add or change, not as a rewritten copy of the \
+    user's code. Reproducing assembly or a kernel from memory rewrites it: \
+    register pairs come back as v[2:3] where the user wrote v[3:4], and someone \
+    who pastes that back has taken a working program and broken the addressing \
+    to fix a wait. If you must show surrounding lines for context, copy them \
+    character for character from what the user gave you, and never from what \
+    you remember of it.
 
 RETRIEVED CONTEXT:
 {context}
@@ -1272,11 +1287,17 @@ Check for these problems:
 2. Invented flags, arguments, or paths not present in the actual codebase
 3. Commands that contradict what the tools revealed about the codebase
 
+Code the user supplied is evidence too, and reading it is not inventing. If the
+response points at something visible in the user's own paste -- a learning rate,
+a missing barrier, an index -- and says that is where it read it, that is
+grounded. Reject it only if the paste does not say what the response claims, or
+if a read is dressed up as something a tool observed.
+
 If the response is well-grounded in the tool results, reply with exactly: VALID
 
 If there are problems, explain what is wrong and what the correct command should \
 be based on the tool results. Do NOT invent information yourself -- only use what \
-the tools found.
+the tools found, or what the user's own code plainly shows.
 """
 
 _CRITIC_FAILURE_PROMPT = """\
