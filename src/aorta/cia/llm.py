@@ -78,7 +78,7 @@ _REMOTE_FIELDS = ("remote_llm_base_url", "remote_llm_api_key", "remote_llm_model
 _warned_no_settings = False
 
 
-def _settings_from_env() -> tuple[str, str, str] | None:
+def _settings_from_env() -> tuple[str, str, str, str] | None:
     """The chat settings as far as the environment gives them, or None.
 
     ``aorta.chat.config`` reads ``chat.toml`` with stdlib ``tomllib``, which is
@@ -93,11 +93,19 @@ def _settings_from_env() -> tuple[str, str, str] | None:
     provider = os.environ.get(f"{_ENV_PREFIX}LLM_PROVIDER", "vllm")
     fields = _VLLM_FIELDS if provider == "vllm" else _REMOTE_FIELDS
     values = tuple(os.environ.get(f"{_ENV_PREFIX}{f.upper()}", "") for f in fields)
-    return values if any(values) else None  # type: ignore[return-value]
+    # The provider travels with them: it decides how the model name is
+    # qualified, and rebuilding everything as openai/<model> was how a litellm
+    # profile ended up addressing the wrong backend.
+    return (*values, provider) if any(values) else None  # type: ignore[return-value]
 
 
-def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str] | None:
-    """(base_url, api_key, model) from the chat configuration, or None.
+def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] | None:
+    """(base_url, api_key, model, provider) from the chat configuration, or None.
+
+    The provider travels with the rest because dropping it was a way to route a
+    model to the wrong backend: everything here used to be rebuilt as
+    ``openai/<model>``, so a litellm profile pointing at Anthropic became
+    ``openai/anthropic/claude-...``.
 
     The rest of this package reaches a model through ``get_chat_llm()``,
     selected by ``llm_provider`` and configured in ``~/.config/aorta/chat.toml``
@@ -140,10 +148,13 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str] | Non
 
     if configured_only and not ({*fields, "llm_provider"} & settings.model_fields_set):
         return None
-    return tuple(getattr(settings, f) for f in fields)  # type: ignore[return-value]
+    return (
+        *(getattr(settings, f) for f in fields),
+        getattr(settings, "llm_provider", "") or "vllm",
+    )  # type: ignore[return-value]
 
 
-def _legacy_env() -> tuple[str, str, str] | None:
+def _legacy_env() -> tuple[str, str, str, str] | None:
     """The LITELLM_* variables, which predate reading the chat settings."""
     base = os.environ.get("LITELLM_API_BASE")
     if not base:
@@ -158,6 +169,9 @@ def _legacy_env() -> tuple[str, str, str] | None:
         base,
         os.environ.get("LITELLM_API_KEY", ""),
         os.environ.get("LITELLM_MODEL", DEFAULT_MODEL),
+        # These name a proxy endpoint, which speaks the OpenAI protocol
+        # whatever it routes to behind itself.
+        "openai",
     )
 
 
@@ -308,16 +322,40 @@ def build_lm(
             "init`, or set AORTA_CHAT_VLLM_BASE_URL. On Python 3.10 the profile "
             "file cannot be read at all -- only AORTA_CHAT_* is honoured there."
         )
-    settings_base, settings_key, settings_model = resolved or ("", "", "")
+    settings_base, settings_key, settings_model, provider = resolved or ("", "", "", "vllm")
 
     _use_certifi_bundle()
     return RedactingLM(
-        model=f"openai/{model or settings_model or DEFAULT_MODEL}",
+        model=_qualified_model(
+            model or settings_model or DEFAULT_MODEL,
+            provider,
+            bool(api_base or settings_base),
+        ),
         api_base=(api_base or settings_base) or None,
         api_key=api_key or settings_key or "EMPTY",
         max_tokens=max_tokens,
         cache=False,
     )
+
+
+def _qualified_model(model: str, provider: str, has_endpoint: bool) -> str:
+    """The model name in the form the LM layer routes on.
+
+    Everything used to be prefixed ``openai/``. That is right for vLLM and for
+    a proxy -- both speak the OpenAI protocol whatever is behind them -- and
+    wrong for a litellm profile addressing a vendor directly, whose model names
+    carry their own vendor: ``anthropic/claude-3-5-sonnet`` became
+    ``openai/anthropic/claude-3-5-sonnet`` and went to the wrong backend.
+
+    A name that already names its vendor is left alone. Otherwise an endpoint
+    is what decides: with one, the request goes to something OpenAI-shaped; a
+    litellm profile without one is routed by litellm's own rules.
+    """
+    if "/" in model:
+        return model
+    if provider == "litellm" and not has_endpoint:
+        return model
+    return f"openai/{model}"
 
 
 def configure_dspy(
