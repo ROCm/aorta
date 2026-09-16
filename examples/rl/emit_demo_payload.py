@@ -191,6 +191,42 @@ def _observed_for_axes(
     return rows
 
 
+def terminal_observed(run_dir: Path) -> list[dict[str, Any]]:
+    """Every cell the episode ran, with the verdict it ended with.
+
+    ``steps[].observed`` is the evidence the policy had *when it chose*, so a
+    cell's result lands on the following step and the last step's results land
+    nowhere. On a converging episode that hides the punchline: the run reports
+    a winner while no ``observed`` entry anywhere shows a cell passing.
+
+    Enumerated from the **run directory's own cell directories**, which is the
+    direct statement of "cells this episode genuinely ran and paid for" -- a
+    cell directory holding ``trial_*/result.json`` exists if and only if the
+    workload was executed there. Deliberately *not* the archived matrix and
+    deliberately not the axes: padding this out with cells the policy never
+    bought would make the search look more thorough than it was, and the
+    grid's meaning is "squares this policy chose to spend on".
+
+    Same element shape as ``steps[].observed``, and the verdict is recomputed
+    through ``label_trials`` -- aorta's own resolver -- rather than read off
+    the artifact, which is the same seam the rewards use.
+    """
+    rows: list[dict[str, Any]] = []
+    for cell in find_probe_cells(run_dir):
+        docs = read_trial_results(cell)
+        if not docs:
+            continue
+        label = label_trials(docs, source=str(cell))
+        rows.append(
+            {
+                "cell": cell.name,
+                "verdict": label.verdict,
+                "detectors": sorted(label.cited_detectors),
+            }
+        )
+    return rows
+
+
 def build_episode(run_dir: Path, scenario_id: str) -> dict[str, Any] | None:
     """Reconstruct one episode from an ``agent_log.jsonl`` the loop wrote.
 
@@ -261,6 +297,9 @@ def build_episode(run_dir: Path, scenario_id: str) -> dict[str, Any] | None:
         "steps": steps,
         "outcome": outcome,
         "winning_mitigation": winner,
+        # Built here rather than by the caller so `episode` and
+        # `control_episode` cannot drift in shape.
+        "terminal_observed": terminal_observed(run_dir),
     }
 
 
@@ -311,6 +350,39 @@ def find_episode() -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
             extras["episode_run_dir"] = str(run_dir)
             return episode, backend, extras
     return None, "fake", extras
+
+
+#: What the control run is, in the payload's own voice. The renderer shows it
+#: beside the real episode, so it has to say for itself that it is not one.
+CONTROL_LABEL = (
+    "CONTROL, not a model: the `fake` backend (FakeLLMProposer), which walks "
+    "both axes in registry order rather than reading the evidence. Same "
+    "reproducer, same 10-cell budget, same two diagnostics offered. It bought "
+    "both diagnostics early, reached a 3x3 grid, and stopped on the cell "
+    "budget without ever proposing the resolver -- so its terminal grid has "
+    "no passing cell. The contrast with the real episode is the argument for "
+    "the cost term: the same budget either finds the cause or is spent on "
+    "evidence, depending on the policy."
+)
+
+
+def find_control_episode(
+    scenario_id: str, episode_run_dir: str | None
+) -> dict[str, Any] | None:
+    """The ``fake``-backend run, as a second episode of identical shape.
+
+    Returns None when the control run does not exist, or when it *is* the
+    episode. That second case is the one worth guarding: if the live run never
+    produced steps, ``find_episode`` falls back to the fake one, and emitting
+    the same run twice would stage a comparison between a policy and itself.
+    """
+    run_dir = EPISODE_ROOT / "fake" / "DEMO-JOINT-FAKE"
+    if episode_run_dir and Path(episode_run_dir) == run_dir:
+        return None
+    episode = build_episode(run_dir, scenario_id)
+    if not episode or not episode["steps"]:
+        return None
+    return {**episode, "label": CONTROL_LABEL}
 
 
 # ---------------------------------------------------------------------------
@@ -593,10 +665,32 @@ def build_payload() -> dict[str, Any]:
     )
     scenarios = build_scenarios()
     episode, backend, extras = find_episode()
+    control = find_control_episode(
+        "uninit_workspace_nan", extras.get("episode_run_dir")
+    )
     policies, today, audit = build_policies(doc)
 
     episode_caveats: list[str] = []
     if episode is not None:
+        # Reconciliation is asserted, not assumed. terminal_observed is
+        # enumerated from the cell directories and cells_cumulative is
+        # replayed from the log's axis_growth events -- two independent
+        # sources for one quantity, so they can disagree (a cell charged whose
+        # trials never landed, or a resumed run inheriting cells). When they
+        # do, the discrepancy is explained on screen rather than noticed.
+        for label, ep in (("episode", episode), ("control_episode", control)):
+            if ep is None:
+                continue
+            charged = ep["steps"][-1]["cells_cumulative"] if ep["steps"] else 0
+            ran = len(ep["terminal_observed"])
+            if ran != charged:
+                episode_caveats.append(
+                    f"COUNT MISMATCH in {label}: terminal_observed holds {ran} "
+                    f"cells but the log charged {charged}. terminal_observed "
+                    "lists only cells whose trials are on disk, so the "
+                    "difference is cells charged whose workload did not "
+                    "complete. cells_cumulative remains the cost of record."
+                )
         episode_caveats.append(
             f"EPISODE PROVENANCE, separate from provenance.slurm_job: the "
             f"episode ran as Slurm job {extras.get('slurm_job')} on "
@@ -688,6 +782,9 @@ def build_payload() -> dict[str, Any]:
             "diagnostics": list(DIAGNOSTICS),
         },
         "episode": episode,
+        # Additive, and null when there is no control run to show. Same shape
+        # as `episode` plus `label`.
+        "control_episode": control,
         "policies": policies,
         "weights": {"triage": W_TRIAGE, "fix": W_FIX, "cost": W_COST},
         "caveats": caveats,
@@ -707,10 +804,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  scenarios      {[s['id'] for s in payload['scenarios']]}")
     print(f"  action space   {len(payload['action_space']['mitigations'])} mitigations, "
           f"{len(payload['action_space']['diagnostics'])} diagnostics")
-    ep = payload["episode"]
-    print(f"  episode        backend={payload['provenance']['episode_backend']} "
-          f"steps={len(ep['steps']) if ep else 0} "
-          f"outcome={ep['outcome'] if ep else None}")
+    for key in ("episode", "control_episode"):
+        ep = payload[key]
+        if ep is None:
+            print(f"  {key:<14} (none)")
+            continue
+        observed = ep["terminal_observed"]
+        passing = [r["cell"] for r in observed if r["verdict"] == "pass"]
+        charged = ep["steps"][-1]["cells_cumulative"] if ep["steps"] else 0
+        print(
+            f"  {key:<14} steps={len(ep['steps'])} outcome={ep['outcome']} "
+            f"terminal_observed={len(observed)} charged={charged} "
+            f"{'RECONCILES' if len(observed) == charged else 'MISMATCH'}"
+        )
+        print(f"                 passing cells: {passing or '(none)'}")
     print(f"  autopsy set    {len(AUTOPSY_CATEGORIES)} categories")
     print()
     print(f"  {'policy':<24} {'reads':>5} {'cells':>5} "

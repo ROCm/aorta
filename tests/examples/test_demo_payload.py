@@ -24,6 +24,7 @@ if str(EXAMPLES) not in sys.path:
     sys.path.insert(0, str(EXAMPLES))
 
 import emit_demo_payload as emit  # noqa: E402
+from triage_reward import find_probe_cells  # noqa: E402
 
 PAYLOAD_KEYS = {
     "generated_at",
@@ -31,10 +32,22 @@ PAYLOAD_KEYS = {
     "scenarios",
     "action_space",
     "episode",
+    # Additive, and null when there is no control run. The dashboard renders
+    # it beside `episode`.
+    "control_episode",
     "policies",
     "weights",
     "caveats",
 }
+EPISODE_KEYS = {
+    "scenario_id",
+    "budget_cells",
+    "steps",
+    "outcome",
+    "winning_mitigation",
+    "terminal_observed",
+}
+OBSERVED_KEYS = {"cell", "verdict", "detectors"}
 PROVENANCE_KEYS = {
     "slurm_job",
     "node",
@@ -152,6 +165,222 @@ def test_a_concluding_step_is_kept_even_though_it_grows_no_axis(tmp_path):
 
 def test_a_missing_log_is_no_episode_rather_than_an_empty_one(tmp_path):
     assert emit.build_episode(tmp_path / "nope", "s") is None
+
+
+# ---------------------------------------------------------------------------
+# terminal_observed -- the final state of the grid, including the passing cell
+# ---------------------------------------------------------------------------
+
+
+def _write_cell(root: Path, cell: str, verdict: str, detectors: list[str],
+                trials: int = 1) -> None:
+    for index in range(trials):
+        trial = root / cell / f"trial_{index}"
+        trial.mkdir(parents=True, exist_ok=True)
+        (trial / "result.json").write_text(
+            json.dumps(
+                {
+                    "cell_name": cell,
+                    "verdict": verdict,
+                    "failure_detectors_fired": detectors,
+                    "error_detectors_fired": [],
+                    "warn_detectors_fired": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+
+def test_terminal_observed_shows_the_passing_cell_that_no_step_could(tmp_path):
+    """The defect this field closes.
+
+    ``steps[].observed`` is the evidence the policy had when it chose, so the
+    last step's results land nowhere -- a converging episode reports a winner
+    while nothing on screen shows a cell passing.
+    """
+    _write_cell(tmp_path, "none-none", "fail", ["tier4:nan_signature"])
+    _write_cell(tmp_path, "pytorch_no_cuda_memory_caching-none", "pass", [])
+    _write_log(
+        tmp_path,
+        [
+            {
+                "type": "llm_step",
+                "category": "unknown",
+                "hypothesis": "h",
+                "next_mitigations": ["pytorch_no_cuda_memory_caching"],
+                "confidence": 0.6,
+                "stop": False,
+            },
+            {
+                "type": "axis_growth",
+                "cells_added": 1,
+                "cells_total": 2,
+                "mitigation_axis": ["none", "pytorch_no_cuda_memory_caching"],
+                "diagnostic_axis": ["none"],
+            },
+            {"type": "converged",
+             "winning_mitigation": "pytorch_no_cuda_memory_caching"},
+        ],
+    )
+    episode = emit.build_episode(tmp_path, "s")
+
+    # The step the winner was proposed at saw only the failing baseline.
+    assert [r["verdict"] for r in episode["steps"][0]["observed"]] == ["fail"]
+    # The terminal grid is where the pass becomes visible.
+    passing = [
+        r["cell"] for r in episode["terminal_observed"] if r["verdict"] == "pass"
+    ]
+    assert passing == ["pytorch_no_cuda_memory_caching-none"]
+
+
+def test_terminal_observed_has_the_same_element_shape_as_step_observed(tmp_path):
+    """The renderer prefers it over the per-step lists, so it has to be
+    substitutable element for element."""
+    _write_cell(tmp_path, "none-none", "fail", ["tier4:nan_signature"])
+    _write_log(
+        tmp_path,
+        [
+            {"type": "llm_step", "category": "unknown", "hypothesis": "h",
+             "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False},
+            {"type": "axis_growth", "cells_added": 1, "cells_total": 2,
+             "mitigation_axis": ["none", "tf32_off"],
+             "diagnostic_axis": ["none"]},
+        ],
+    )
+    episode = emit.build_episode(tmp_path, "s")
+    assert set(episode["terminal_observed"][0]) == OBSERVED_KEYS
+    assert set(episode["steps"][0]["observed"][0]) == OBSERVED_KEYS
+
+
+def test_terminal_observed_holds_only_cells_the_episode_actually_ran(tmp_path):
+    """It must not be padded out of the archived matrix.
+
+    The grid's meaning is "squares this policy chose to spend on", so a cell
+    the episode never bought must not appear -- adding one would make the
+    search look more thorough than it was. A cell directory with trial
+    results exists if and only if the workload ran there, which is why this
+    enumerates directories rather than axes or the matrix.
+    """
+    _write_cell(tmp_path, "none-none", "fail", ["tier4:nan_signature"])
+    _write_cell(tmp_path, "tf32_off-none", "fail", ["tier4:nan_signature"])
+    _write_log(
+        tmp_path,
+        [
+            {"type": "llm_step", "category": "unknown", "hypothesis": "h",
+             "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False},
+            # The log claims a wider axis than the cells on disk: two more
+            # mitigations were charged but never ran.
+            {"type": "axis_growth", "cells_added": 3, "cells_total": 4,
+             "mitigation_axis": ["none", "tf32_off", "xnack", "hsa_no_sdma"],
+             "diagnostic_axis": ["none"]},
+        ],
+    )
+    observed = emit.build_episode(tmp_path, "s")["terminal_observed"]
+    assert {r["cell"] for r in observed} == {"none-none", "tf32_off-none"}
+
+
+def test_a_cell_directory_with_no_trial_results_is_not_a_ran_cell(tmp_path):
+    (tmp_path / "xnack-none").mkdir(parents=True)
+    _write_cell(tmp_path, "none-none", "fail", [])
+    _write_log(
+        tmp_path,
+        [
+            {"type": "llm_step", "category": "unknown", "hypothesis": "h",
+             "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False},
+            {"type": "axis_growth", "cells_added": 1, "cells_total": 2},
+        ],
+    )
+    observed = emit.build_episode(tmp_path, "s")["terminal_observed"]
+    assert [r["cell"] for r in observed] == ["none-none"]
+
+
+def test_the_verdict_is_recomputed_across_every_trial_not_read_off_trial_zero(tmp_path):
+    """A cell is a pass only if every trial passed -- same rule the rewards
+    use, because it comes from the same resolver."""
+    _write_cell(tmp_path, "flaky-none", "pass", [], trials=2)
+    # Overwrite the second trial with a failure.
+    (tmp_path / "flaky-none" / "trial_1" / "result.json").write_text(
+        json.dumps(
+            {
+                "cell_name": "flaky-none",
+                "verdict": "fail",
+                "failure_detectors_fired": ["tier4:nan_signature"],
+                "error_detectors_fired": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    observed = emit.terminal_observed(tmp_path)
+    assert observed == [
+        {
+            "cell": "flaky-none",
+            "verdict": "fail",
+            "detectors": ["tier4:nan_signature"],
+        }
+    ]
+
+
+def test_terminal_observed_is_empty_rather_than_absent_when_no_cell_ran(tmp_path):
+    assert emit.terminal_observed(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# control_episode
+# ---------------------------------------------------------------------------
+
+
+def _fake_control(tmp_path: Path) -> None:
+    run_dir = tmp_path / "fake" / "DEMO-JOINT-FAKE"
+    _write_cell(run_dir, "none-none", "fail", ["tier4:nan_signature"])
+    _write_log(
+        run_dir,
+        [
+            {"type": "llm_step", "category": "launch_error", "hypothesis": "h",
+             "next_mitigations": ["tf32_off"], "next_diagnostics": ["amd_log_level_4"],
+             "confidence": 0.5, "stop": False},
+            {"type": "axis_growth", "cells_added": 3, "cells_total": 4,
+             "mitigation_axis": ["none", "tf32_off"],
+             "diagnostic_axis": ["none", "amd_log_level_4"]},
+            {"type": "policy_stop", "reason": "cell budget"},
+        ],
+    )
+
+
+def test_the_control_episode_has_the_same_shape_as_the_episode_plus_a_label(
+    tmp_path, monkeypatch
+):
+    _fake_control(tmp_path)
+    monkeypatch.setattr(emit, "EPISODE_ROOT", tmp_path)
+    control = emit.find_control_episode("s", str(tmp_path / "live" / "X"))
+    assert set(control) - {"label"} == EPISODE_KEYS
+    assert isinstance(control["label"], str) and control["label"]
+
+
+def test_the_control_label_says_it_is_the_fake_backend(tmp_path, monkeypatch):
+    """It is rendered beside a real-model episode, so it has to say for itself
+    that it is not one."""
+    _fake_control(tmp_path)
+    monkeypatch.setattr(emit, "EPISODE_ROOT", tmp_path)
+    label = emit.find_control_episode("s", None)["label"]
+    assert "fake" in label.lower()
+    assert "control" in label.lower()
+
+
+def test_the_control_is_not_emitted_when_it_IS_the_episode(tmp_path, monkeypatch):
+    """If the live run produced no steps, find_episode falls back to the fake
+    one -- and emitting the same run twice would stage a comparison between a
+    policy and itself."""
+    _fake_control(tmp_path)
+    monkeypatch.setattr(emit, "EPISODE_ROOT", tmp_path)
+    same = str(tmp_path / "fake" / "DEMO-JOINT-FAKE")
+    assert emit.find_control_episode("s", same) is None
+
+
+def test_a_missing_control_run_is_null_rather_than_an_empty_episode(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(emit, "EPISODE_ROOT", tmp_path)
+    assert emit.find_control_episode("s", None) is None
 
 
 def test_every_step_carries_the_frozen_keys(tmp_path):
@@ -370,6 +599,106 @@ def test_the_shotgun_spends_more_cells_than_the_budget_and_is_punished(payload):
     shotgun = by_name["abstain_and_shotgun"]
     assert shotgun["cells_spent"] > payload["policies"][0].get("cells_spent", 0)
     assert shotgun["proposed"]["cost_penalty"] == pytest.approx(1.0)
+
+
+@needs_artifacts
+def test_the_real_episode_carries_the_frozen_keys_including_the_terminal_grid(payload):
+    assert set(payload["episode"]) == EPISODE_KEYS
+
+
+@needs_artifacts
+def test_the_real_episodes_terminal_grid_reconciles_with_what_it_was_charged(payload):
+    """Two independent sources for one quantity: terminal_observed is
+    enumerated from cell directories, cells_cumulative is replayed from the
+    log. They agree, so no explanatory caveat is needed."""
+    episode = payload["episode"]
+    charged = episode["steps"][-1]["cells_cumulative"]
+    assert charged == episode["budget_cells"] == 10
+    assert len(episode["terminal_observed"]) == charged
+    assert not any("COUNT MISMATCH" in c for c in payload["caveats"])
+
+
+@needs_artifacts
+def test_the_real_episodes_terminal_grid_shows_the_winner_passing(payload):
+    """The demo's punchline, which no per-step list could show."""
+    episode = payload["episode"]
+    winner = episode["winning_mitigation"]
+    assert winner == "pytorch_no_cuda_memory_caching"
+    passing = {
+        r["cell"] for r in episode["terminal_observed"] if r["verdict"] == "pass"
+    }
+    assert f"{winner}-none" in passing
+    # Every per-step list is failures only -- the reason this field exists.
+    assert all(
+        r["verdict"] == "fail"
+        for step in episode["steps"]
+        for r in step["observed"]
+    )
+
+
+@needs_artifacts
+def test_the_real_episode_bought_no_cell_outside_its_own_run(payload):
+    """The archived matrix has 8 cells on a single-diagnostic axis; this
+    episode ran 10 across two. Neither is a subset of the other, so a grid
+    padded from the matrix would be visible here."""
+    matrix_cells = {c.name for c in find_probe_cells(emit.NAN_MATRIX)}
+    grid = {r["cell"] for r in payload["episode"]["terminal_observed"]}
+    assert grid - matrix_cells, "the grid should hold cells the matrix does not"
+    assert all("-" in cell for cell in grid)
+
+
+@needs_artifacts
+def test_the_control_episode_is_present_and_never_reached_the_resolver(payload):
+    """The argument for the cost term, shown rather than asserted: same
+    reproducer, same budget, every cell failing."""
+    control = payload["control_episode"]
+    assert control is not None
+    assert set(control) - {"label"} == EPISODE_KEYS
+    assert control["budget_cells"] == payload["episode"]["budget_cells"]
+    assert control["scenario_id"] == payload["episode"]["scenario_id"]
+    assert control["outcome"] == "budget_exhausted"
+    assert control["winning_mitigation"] is None
+    assert control["terminal_observed"]
+    assert all(r["verdict"] == "fail" for r in control["terminal_observed"])
+
+
+@needs_artifacts
+def test_the_control_episode_reconciles_too(payload):
+    control = payload["control_episode"]
+    charged = control["steps"][-1]["cells_cumulative"]
+    assert len(control["terminal_observed"]) == charged
+
+
+@needs_artifacts
+def test_the_control_is_a_different_run_from_the_episode(payload):
+    """Not a comparison between a policy and itself."""
+    grids = [
+        {r["cell"] for r in payload[key]["terminal_observed"]}
+        for key in ("episode", "control_episode")
+    ]
+    assert grids[0] != grids[1]
+
+
+@needs_artifacts
+def test_the_two_score_columns_and_the_weights_did_not_move(payload):
+    """Pinned because terminal_observed and control_episode were added to a
+    payload that was already on screen: adding them must not have disturbed a
+    single number."""
+    assert payload["weights"] == {"triage": 0.3, "fix": 0.5, "cost": 0.2}
+    assert {p["name"]: p["proposed"]["total"] for p in payload["policies"]} == {
+        "qwen3-8b": 0.0788,
+        "oracle": 0.74,
+        "abstain_and_shotgun": 0.0,
+        "abstain_and_pick_first": 0.0075,
+        "always_prose": 0.0,
+    }
+    assert {p["name"]: p["today"]["total"] for p in payload["policies"]} == {
+        "qwen3-8b": 0.4543,
+        "oracle": 1.0,
+        "abstain_and_shotgun": 0.3176,
+        "abstain_and_pick_first": 0.45,
+        "always_prose": 0.0,
+    }
 
 
 @needs_artifacts

@@ -323,6 +323,44 @@ read, which is legal and silent). It found the right *fix* without ever naming
 the right *cause* — which is the labelling gap, showing through on live
 traffic.
 
+### `terminal_observed`: why the per-step evidence is not enough
+
+`steps[].observed` is the evidence the policy had **when it chose**, so a
+cell's result lands on the *following* step and the last step's results land
+nowhere. On a converging episode that hides the punchline: the run reports
+`outcome: resolved` and a winner while every one of its 8 per-step observed
+entries is `fail`. A page rendered from the steps alone shows a search finding
+a fix with nothing on screen showing a fix working.
+
+`episode.terminal_observed` is the final state of the grid — every cell the
+episode ran, with the verdict it ended with, same element shape as
+`steps[].observed`. It is enumerated from the **run directory's own cell
+directories**, because a directory holding `trial_*/result.json` exists if and
+only if the workload ran there. Deliberately not the archived matrix and not
+the axes: the grid's meaning is "squares this policy chose to spend on", and
+padding it with unbought cells would make the search look more thorough than it
+was. The archived matrix has 8 cells on a one-diagnostic axis and this episode
+ran 10 across two, so neither is a subset of the other and a padded grid would
+be visible — a test asserts exactly that.
+
+Both counts reconcile against two independent sources: `terminal_observed`
+comes from the cell directories, `cells_cumulative` is replayed from the log's
+`axis_growth` events. Live 10 = 10, control 9 = 9. An explanatory caveat is
+emitted only on a mismatch, and does not fire.
+
+**Two cells pass in the live episode, not one:**
+`pytorch_no_cuda_memory_caching-none` *and*
+`pytorch_no_cuda_memory_caching-amd_log_level_4`. Only the first is the
+attributed win — `winning_mitigation` requires the baseline diagnostic,
+because a pass with a diagnostic switched on is not attributable to the
+mitigation alone. But the pair is itself a result: the mitigation resolved the
+failure with the diagnostic both off and on, which is the evidence that
+`amd_log_level_4` is inert with respect to the outcome. That is what a
+diagnostic is supposed to be, and it had not been checked before.
+
+The control's terminal grid is 9 cells and **every one fails.** That is the
+cost-term argument as a picture rather than a number.
+
 ### Two things that cost time and are worth recording
 
 **The compute nodes have python3.9 and python3.11; the head node has 3.10.**
