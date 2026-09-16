@@ -12,7 +12,7 @@ from typing import Any, TextIO
 import yaml
 
 from aorta.cia.autopsy.adapters.stderr_watch import scan_stderr_text
-from aorta.cia.launch.job import JobRecord
+from aorta.cia.launch.job import JobRecord, record_watch_files
 from aorta.cia.launch.registry import scan_active_jobs
 from aorta.cia.watch.cursors import load_cursors, read_new_bytes, save_cursors
 from aorta.cia.watch.log_finder import LogFinder
@@ -366,6 +366,12 @@ def _poll_rounds(*, pool, jobs_root, finder, watcher, interval,
                     ]
                 if job.watch_files:
                     print(f"[watch] {job.job_id}: watching {[Path(p).name for p in job.watch_files]}")
+                    # Written back, because the record this loop reads is
+                    # reloaded from disk every round. Without this the
+                    # discovery above ran again on every pass for the whole
+                    # life of the job, model call included, and each pass was
+                    # free to land somewhere different from the last.
+                    record_watch_files(jobs_root, job.job_id, job.watch_files)
 
             if not job.watch_files:
                 continue
