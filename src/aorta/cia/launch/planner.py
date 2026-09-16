@@ -92,18 +92,36 @@ def check_aorta_install(host: str, recipe: str = "") -> dict[str, Any]:
     found = run_probe(host, rf"find {roots} -maxdepth 6 -name {shlex.quote(pattern)} 2>/dev/null | head -3")
     recipe_path = next((l.strip() for l in found.splitlines() if l.strip().endswith((".yaml", ".yml"))), "")
 
+    # Two searches, and which one found a candidate is the thing that decides
+    # whether it may be used unattended. Beside the recipe is a claim of
+    # ownership; anywhere under the search roots is only a claim that a file
+    # with "sidecar" in its name exists on this machine.
     candidates: list[str] = []
+    owned = False
     if recipe_path:
         beside = run_probe(host, rf"ls {shlex.quote(str(Path(recipe_path).parent))}/*sidecar*.json 2>/dev/null")
         candidates = [l.strip() for l in beside.splitlines() if l.strip().endswith(".json")]
+        owned = bool(candidates)
     if not candidates:
         anywhere = run_probe(host, rf"find {roots} -maxdepth 6 -name '*sidecar*.json' 2>/dev/null | head -5")
         candidates = [l.strip() for l in anywhere.splitlines() if l.strip().endswith(".json")]
 
     ticket = stem.removesuffix("-smoke")
     sidecar_path = next((c for c in candidates if ticket and Path(c).name.startswith(ticket)), "")
-    if not sidecar_path and candidates:
+    if not sidecar_path and owned and len(candidates) == 1:
+        # The only sidecar sitting beside the recipe. Not proof, but it is the
+        # pairing the layout asserts, and the docstring above says that layout
+        # is what to trust.
         sidecar_path = candidates[0]
+
+    # Nothing else is guessed at. This used to fall through to candidates[0],
+    # which on the wide search is whichever unrelated file `find` happened to
+    # list first -- so a recipe was paired with a stranger's environments and
+    # the job failed at load with the UnknownEnvironmentError this function's
+    # own docstring warns about. Manufacturing the failure it warns against is
+    # worse than returning nothing, because nothing is visible to the planner
+    # and a wrong pairing is not.
+    needs_confirmation = not sidecar_path and bool(candidates)
 
     return {
         "available": available,
@@ -112,6 +130,17 @@ def check_aorta_install(host: str, recipe: str = "") -> dict[str, Any]:
         "recipe_path": recipe_path,
         "sidecar_path": sidecar_path,
         "sidecar_candidates": candidates,
+        "sidecar_owned": owned,
+        "sidecar_needs_confirmation": needs_confirmation,
+        "sidecar_note": (
+            "No sidecar could be matched to this recipe. Candidates were found "
+            "but none is named for the recipe's ticket, and none sits alone "
+            "beside it. Ask which to use, or run a recipe that carries its own "
+            "environments -- pairing a recipe with the wrong sidecar fails at "
+            "load with UnknownEnvironmentError."
+            if needs_confirmation
+            else ""
+        ),
     }
 
 
@@ -177,6 +206,12 @@ class LaunchPlan(dspy.Signature):
       recipe name to it, and use the sidecar_path it returns — a sidecar from some
       other directory will not define this recipe's environments and the run dies
       with UnknownEnvironmentError. Ignore sidecar_path for sanitizer recipes.
+    - If check_aorta_install reports sidecar_needs_confirmation=true it found
+      sidecars but none belongs to this recipe. Do not pick one from
+      sidecar_candidates: leave the --mitigations-file off, set
+      needs_confirmation=true, and ask which sidecar to use. A sidecar that
+      does not define this recipe's environments fails at load, and a job that
+      dies that way has still queued, waited and taken a node.
     - If check_aorta_install reports available=false the aorta CLI is not
       installed. Do not emit an 'aorta ...' command in that case: leave command
       empty, set needs_confirmation=true, and ask how the workload should be
