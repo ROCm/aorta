@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -97,6 +98,62 @@ def _emit_skipped(events_path: Path, job, content: str, error: str) -> None:
         )
 
 
+#: How many Autopsies may run at once. Bounded because each is an LLM ReAct
+#: loop that can escalate to a production sweep, and an unbounded pool would
+#: let one bad round start one per job on the cluster at the same time.
+AUTOPSY_WORKERS = 2
+
+#: Written beside the job the moment it alerts, before the work is queued.
+#: "Diagnosed once" used to live in a set inside poll_jobs, so a watcher that
+#: restarted re-diagnosed everything it had already alerted on, and nothing
+#: outside the process could see an Autopsy was in flight.
+_AUTOPSY_STATE = "autopsy.state.json"
+
+
+def autopsy_state(job_dir: Path) -> dict:
+    """What is known about this job's Autopsy, or ``{}`` if it has not alerted."""
+    try:
+        return json.loads((job_dir / _AUTOPSY_STATE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> None:
+    """Note that this job is queued for, running, or finished with Autopsy.
+
+    Written before the work is enqueued rather than after it finishes: the
+    point is to survive a crash *during* an Autopsy, which is exactly when the
+    in-memory version forgot. A job already carrying a state is skipped, so a
+    four-hour escalation is started once however many rounds run over it.
+    """
+    payload = {"state": state, "ts": _utc_now(), **fields}
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / _AUTOPSY_STATE).write_text(
+            json.dumps(payload) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        # Losing the marker costs a duplicate Autopsy next round, which is
+        # better than losing the round.
+        print(f"[watch] could not record autopsy state for {job_dir.name}: {exc}")
+
+
+def _run_autopsy_off_the_loop(
+    bundle: Path, job: JobRecord, jobs_root: Path, job_dir: Path
+) -> None:
+    """Run one Autopsy and keep its state on disk. Never raises into the pool."""
+    from aorta.cia.watch.trigger import trigger_autopsy
+
+    record_autopsy_state(job_dir, "running", job_id=job.job_id)
+    try:
+        trigger_autopsy(bundle, job, jobs_root)
+    except Exception as exc:  # noqa: BLE001 - a worker that raises is silent
+        print(f"[watch] autopsy for {job.job_id} failed: {type(exc).__name__}: {exc}")
+        record_autopsy_state(job_dir, "failed", job_id=job.job_id, error=str(exc)[:200])
+    else:
+        record_autopsy_state(job_dir, "done", job_id=job.job_id)
+
+
 def poll_jobs(
     jobs_root: Path,
     *,
@@ -133,12 +190,42 @@ def poll_jobs(
 
     print(f"[watch] polling {jobs_root} every {interval}s")
 
+    pool = ThreadPoolExecutor(
+        max_workers=AUTOPSY_WORKERS, thread_name_prefix="cia-autopsy"
+    )
+    try:
+        _poll_rounds(
+            pool=pool, jobs_root=jobs_root, finder=finder, watcher=watcher,
+            interval=interval, confidence_threshold=confidence_threshold,
+            expectations=expectations, max_rounds=max_rounds,
+            alerted=alerted, failures=failures, rounds=rounds,
+        )
+    finally:
+        # Waited for: the rounds running out is not a request to drop work
+        # already accepted, and a job whose record says "queued" must either
+        # be diagnosed or be marked otherwise. A caller that gives up part way
+        # wants the opposite, and gets it once a cancellation flag reaches
+        # this loop.
+        pool.shutdown(wait=True)
+
+
+def _poll_rounds(*, pool, jobs_root, finder, watcher, interval,
+                 confidence_threshold, expectations, max_rounds,
+                 alerted, failures, rounds) -> None:
+    """The rounds themselves, so the pool above owns its own lifetime."""
     while max_rounds is None or rounds < max_rounds:
         rounds += 1
         active = scan_active_jobs(jobs_root)
 
         for job in active:
+            # Both halves matter: the set covers this process, the file covers
+            # a restart. Only the set existed, so a watcher that came back
+            # re-diagnosed what it had already paid for.
             if job.job_id in alerted:
+                continue
+            recorded = autopsy_state(jobs_root / job.job_id).get("state")
+            if recorded and recorded != "abandoned":
+                alerted.add(job.job_id)
                 continue
             job_dir = jobs_root / job.job_id
             events_path = job_dir / "events.jsonl"
@@ -277,9 +364,22 @@ def poll_jobs(
             if should_alert(healthy, confidence, confidence_threshold):
                 print(f"[watch] {job.job_id}: ALERT {signal} — triggering autopsy")
                 from aorta.cia.watch.bundle_writer import write_bundle
-                from aorta.cia.watch.trigger import trigger_autopsy
                 bundle = write_bundle(job, job_dir, evidence or new_content[:4000], signal)
-                trigger_autopsy(bundle, job, jobs_root)
+                # Marked before it is queued, so a crash between the two costs
+                # a duplicate rather than losing the record entirely.
+                record_autopsy_state(
+                    job_dir, "queued", job_id=job.job_id, signal=signal,
+                    confidence=confidence,
+                )
+                # Off this thread. Autopsy is an LLM ReAct loop that can
+                # escalate to a production sweep with a four-hour limit, and it
+                # ran here -- inside the serial job loop -- so one alert stopped
+                # every other active job being watched for as long as it took.
+                # The jobs that most need watching are the ones running beside
+                # a failure.
+                pool.submit(
+                    _run_autopsy_off_the_loop, bundle, job, jobs_root, job_dir
+                )
                 # continue, not break: break left the whole round, so a job that
                 # alerted every round starved every job listed after it. And the
                 # set above is what actually makes this once per job -- the
