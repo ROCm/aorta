@@ -177,7 +177,7 @@ def _fmt_tools_used(result: dict) -> list[str]:
     return lines
 
 
-def _format_result(result: dict, label: str) -> str:
+def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) -> str:
     lines = [
         f"Job {result['job_id']} (slurm {result.get('slurm_job_id', '?')}) — {label}",
         f"Recipe:   {result.get('recipe')}",
@@ -196,6 +196,21 @@ def _format_result(result: dict, label: str) -> str:
         lines.append("")
         lines += _fmt_sanitizer(san)
         lines.append(f"Sanitizer report: {result.get('sanitizer_report_path')}")
+    elif expect_sanitizer:
+        # A run that asked for a sanitizer and came back without one did not
+        # find nothing -- it did not look. Said plainly, because the two are
+        # otherwise indistinguishable from here: the section above is simply
+        # absent, Autopsy explains an empty bundle, and the answer reports a
+        # clean analysis of a kernel that nothing analysed. That happened -- the
+        # interpreter failed to resolve on the compute node and the reply was
+        # "no wait hazards found".
+        lines.append("")
+        lines.append(
+            "Sanitizer verdict: DID NOT RUN. This job was submitted to run a "
+            "sanitizer and produced no report, so nothing was checked. This is "
+            "not a clean result and must not be reported as one: say the run "
+            "failed, and cite the job log."
+        )
 
     autopsy = result.get("autopsy")
     if autopsy:
@@ -302,7 +317,11 @@ def _run_triage(extra_args: list[str], label: str) -> str:
         return (f"Triage failed at stage {result.get('stage', '?')}: "
                 f"{result.get('error', 'unknown error')}")
 
-    return _format_result(result, label)
+    # A --recipe run is a sanitizer run by construction: write_asm_recipe asks
+    # for waitcheck and sets on_missing_backend=fail. So a report is owed, and
+    # its absence is a failure rather than a clean sheet.
+    expect_sanitizer = "--recipe" in extra_args
+    return _format_result(result, label, expect_sanitizer=expect_sanitizer)
 
 
 _PYTORCH_MARKERS = ("import torch", "nn.Module", "def forward", "torch.nn", "@torch")
