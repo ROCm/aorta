@@ -9,6 +9,7 @@ from typing import Any
 import dspy
 
 from aorta.cia.launch.cluster import ssh_user
+from aorta.cia.autopsy.adapters.base import resolve_in_bundle
 from aorta.cia.llm import ensure_configured
 
 # Extensions considered log files by default
@@ -223,8 +224,8 @@ class LogFinder(dspy.Module):
             )
             result = []
             for p_str in (pred.relevant_files or []):
-                p = Path(p_str.strip())
-                if p.is_file() and not self._excluded(p):
+                p = self._within_job(p_str.strip(), job_dir)
+                if p is not None and p.is_file() and not self._excluded(p):
                     result.append(p)
             if result:
                 return result[: self.max_files]
@@ -232,6 +233,25 @@ class LogFinder(dspy.Module):
             pass
 
         return by_ext[: self.max_files]
+
+    def _within_job(self, candidate: str, job_dir: Path) -> Path | None:
+        """*candidate* as a path inside *job_dir*, or None when it is not.
+
+        These come from the model: it is shown a directory listing and asked
+        which files are logs, and it can answer with anything. Only is_file()
+        and the exclude list stood between that answer and being watched, so
+        an absolute path it invented was accepted whenever the file happened
+        to exist.
+
+        That does not stop at reading the wrong file. Watch grants the parent
+        of every watched path as a root for its own file tools, so one
+        hallucinated /etc/passwd would have handed it /etc.
+
+        The check is the one the adapters use rather than a second copy of it,
+        because two containment checks is how one of them ends up without the
+        symlink case.
+        """
+        return resolve_in_bundle(job_dir, candidate)
 
     def _scan_by_extension(self, job_dir: Path) -> list[Path]:
         candidates: list[tuple[float, Path]] = []
@@ -242,6 +262,10 @@ class LogFinder(dspy.Module):
                 if SKIP_DIR_PARTS & set(p.parts):
                     continue
                 if self._excluded(p):
+                    continue
+                # Rooted at job_dir, but rglob walks into symlinked
+                # directories, so a link inside the job still leads out.
+                if self._within_job(str(p), job_dir) is None:
                     continue
                 if p.suffix.lower() not in self.extensions:
                     continue
