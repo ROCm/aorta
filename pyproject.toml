@@ -135,6 +135,17 @@ cia = [
     # verify against. It arrived transitively through litellm, which is not a
     # promise litellm makes.
     "certifi",
+    # The agents read the same profile as the rest of aorta chat, which is what
+    # makes configuring chat configure them -- and aorta/chat/config.py needs
+    # these to parse it. They were reaching this extra two hops out, through
+    # dspy-ai to litellm, for exactly the reason certifi above is listed: a
+    # package that happens to install something is not a package that promises
+    # to. Without them the profile silently stops being readable and the agents
+    # fall back to environment variables, which is a quieter failure than it
+    # sounds -- the answer is wrong rather than absent, because every setting
+    # has a default.
+    "pydantic>=2.0",
+    "pydantic-settings>=2.3",
 ]
 
 agent = [
