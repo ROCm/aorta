@@ -354,6 +354,7 @@ def _wrong_tool_hint(source: str) -> str:
 def _stage_dir(parent: Path, name: str) -> Path:
     """A staging directory this call alone owns.
 
+<<<<<<< HEAD
     Two turns staging a kernel of the same name raced for one path. A
     timestamp narrowed that window without closing it: the write stayed
     last-one-wins, so a collision replaced the source between staging it and
@@ -365,6 +366,18 @@ def _stage_dir(parent: Path, name: str) -> Path:
     ``mkdtemp`` creates with ``O_EXCL`` and retries on a clash, so the
     directory is this call's or the call raises. Names inside it cannot
     collide, which is what makes the plain filenames below safe.
+=======
+    Two sessions triaging a kernel of the same name built the same path, and
+    the write was last-one-wins: the second replaced the first's source
+    between staging it and the node reading it, and the job compiled whichever
+    landed second with nothing saying so. A verdict about somebody else's code
+    is worse than no verdict.
+
+    A finer timestamp narrows that window without closing it. ``mkdtemp``
+    creates with ``O_EXCL`` and retries on a clash, so the directory is this
+    call's or the call raises, and the plain filenames inside it cannot
+    collide because nothing else can reach them.
+>>>>>>> feat/cia-tools
     """
     parent.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -374,8 +387,13 @@ def _stage_dir(parent: Path, name: str) -> Path:
 def _write_new(path: Path, text: str) -> None:
     """Write a file that must not already exist.
 
+<<<<<<< HEAD
     Exclusive creation so that if the containment above is ever wrong, it
     fails here rather than silently overwriting a sibling call's source.
+=======
+    Exclusive creation, so that if the reasoning above is ever wrong it fails
+    here rather than silently overwriting a sibling call's source.
+>>>>>>> feat/cia-tools
     """
     with open(path, "x", encoding="utf-8") as handle:
         handle.write(text)
