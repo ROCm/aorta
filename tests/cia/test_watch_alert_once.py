@@ -143,12 +143,16 @@ class TestOnePerJob:
         """It used to be a comment on a break, and nothing else."""
         import inspect
 
-        source = inspect.getsource(poll_mod.poll_jobs)
+        source = inspect.getsource(poll_mod.poll_jobs) + inspect.getsource(
+            poll_mod._poll_rounds
+        )
         assert "alerted" in source
         assert "alerted.add" in source
 
     def test_the_alert_branch_no_longer_breaks_the_loop(self):
         import inspect
 
-        source = inspect.getsource(poll_mod.poll_jobs)
+        source = inspect.getsource(poll_mod.poll_jobs) + inspect.getsource(
+            poll_mod._poll_rounds
+        )
         assert "break  # one alert per job per session" not in source
