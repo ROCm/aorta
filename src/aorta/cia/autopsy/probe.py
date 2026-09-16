@@ -111,9 +111,21 @@ def run_aorta_probe(bundle_root: Path, job: JobRecord, head_node: str = "") -> P
         sweep.append(f"--mitigations-file {shlex.quote(sidecar)}")
     sweep.append(f"--output {shlex.quote(aorta_output)}")
 
+    # Quoted for the compute node's shell, which is a second shell: this whole
+    # string is quoted again below for the head node, and that outer quoting is
+    # what made the inner gap easy to miss. --output above was quoted and the
+    # redirection was not, so a path carrying shell characters was safe as an
+    # argument and ran as a command one token later:
+    #
+    #     --output '/out;id;#'  > /out;id;#/aorta_sweep.log
+    #
+    # aorta_output comes from the job record, which is written from a plan the
+    # model produced, so this is model-influenced text reaching a shell on a
+    # GPU node.
+    sweep_log = shlex.quote(str(Path(aorta_output) / "aorta_sweep.log"))
     cmd = (
         f"ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no {shlex.quote(job.node)} "
-        + shlex.quote(" ".join(sweep) + f" > {aorta_output}/aorta_sweep.log 2>&1 &")
+        + shlex.quote(" ".join(sweep) + f" > {sweep_log} 2>&1 &")
     )
     print(f"[probe] launching production sweep on {job.node}")
     print(f"[probe]   recipe:  {recipe}")
