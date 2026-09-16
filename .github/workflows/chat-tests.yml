@@ -170,11 +170,16 @@ jobs:
             extras: chat-cli
           - python-version: "3.12"
             extras: chat-cli
-          # One leg carries the full stack -- Chainlit and LiteLLM -- at the top
-          # of Chainlit's supported range, which is where a `Requires-Python`
-          # bump on its side will show up first.
+          # One leg carries the full stack -- Chainlit, LiteLLM and the cluster
+          # agents -- at the top of Chainlit's supported range, which is where a
+          # `Requires-Python` bump on its side will show up first.
+          #
+          # cia is here because the chat tools import through aorta.cia, so
+          # without it the staging and prompt tests fail on a missing dspy
+          # rather than on anything they are about. Skipping them instead would
+          # mean the staging-collision fix has no lane that runs it.
           - python-version: "3.13"
-            extras: chat-all
+            extras: chat-all,cia
             litellm: "yes"
           - python-version: "3.14"
             extras: chat-cli
@@ -308,7 +313,7 @@ jobs:
           PY
           )
           echo "declared floor: ${floor}"
-          python -m pip install -e '.[chat-cli]' "langgraph==${floor}"
+          python -m pip install -e '.[chat-cli,tests]' "langgraph==${floor}"
           python - <<'PY'
           import importlib.metadata as md
           for pkg in ("langgraph", "langchain-core", "langchain-openai"):
