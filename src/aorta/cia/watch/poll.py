@@ -344,9 +344,9 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
                             job_state_dir, "queued", job_id=job.job_id,
                             attempts=attempts,
                         )
-                        pool.submit(
+                        queued[job.job_id] = pool.submit(
                             _run_autopsy_off_the_loop,
-                            bundle, job, jobs_root, job_state_dir,
+                            bundle, job, jobs_root, job_state_dir, stop,
                         )
                     alerted.add(job.job_id)
                     continue
