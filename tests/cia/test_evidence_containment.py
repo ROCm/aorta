@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from aorta.cia.autopsy.router import read_evidence_file, resolve_in_bundle
+from aorta.cia.autopsy.router import evidence_reader, resolve_in_bundle
 
 
 @pytest.fixture
@@ -31,18 +31,18 @@ def bundle(tmp_path):
 
 class TestWhatItReads:
     def test_a_file_in_the_bundle(self, bundle):
-        assert "loss=nan" in read_evidence_file("logs/watch.stderr.log", str(bundle))
+        assert "loss=nan" in evidence_reader(bundle)("logs/watch.stderr.log")
 
     def test_a_file_at_the_bundle_root(self, bundle):
-        assert "schema_version" in read_evidence_file("manifest.yaml", str(bundle))
+        assert "schema_version" in evidence_reader(bundle)("manifest.yaml")
 
     def test_a_path_that_stays_inside_while_looking_like_it_leaves(self, bundle):
         """logs/../manifest.yaml is inside; containment is not string matching."""
-        assert "schema_version" in read_evidence_file("logs/../manifest.yaml", str(bundle))
+        assert "schema_version" in evidence_reader(bundle)("logs/../manifest.yaml")
 
     def test_a_missing_file_is_reported_as_missing_not_refused(self, bundle):
         """The two are different, and a reader should be told which."""
-        assert "not found" in read_evidence_file("logs/absent.log", str(bundle))
+        assert "not found" in evidence_reader(bundle)("logs/absent.log")
 
 
 class TestWhatItRefuses:
@@ -57,7 +57,7 @@ class TestWhatItRefuses:
         ],
     )
     def test_a_path_that_walks_out(self, uri, bundle):
-        out = read_evidence_file(uri, str(bundle))
+        out = evidence_reader(bundle)(uri)
         assert "refused" in out
         assert "NOT_EVIDENCE_SECRET" not in out
         assert "root:x:0:0" not in out
@@ -65,16 +65,16 @@ class TestWhatItRefuses:
     @pytest.mark.parametrize("uri", ["/etc/passwd", "/etc/hostname", "/tmp"])
     def test_an_absolute_path_skips_the_bundle_entirely(self, uri, bundle):
         """Path(root) / "/etc/passwd" is "/etc/passwd"; no traversal needed."""
-        assert "refused" in read_evidence_file(uri, str(bundle))
+        assert "refused" in evidence_reader(bundle)(uri)
 
     def test_a_symlink_pointing_out_is_out(self, bundle, tmp_path):
         """Resolving both sides settles links, not just dot-dots."""
         (bundle / "logs" / "escape.log").symlink_to(tmp_path / "outside.txt")
-        out = read_evidence_file("logs/escape.log", str(bundle))
+        out = evidence_reader(bundle)("logs/escape.log")
         assert "NOT_EVIDENCE_SECRET" not in out
 
     def test_an_empty_uri_reads_nothing(self, bundle):
-        assert "refused" in read_evidence_file("", str(bundle))
+        assert "refused" in evidence_reader(bundle)("")
 
 
 class TestTheResolver:
