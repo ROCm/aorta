@@ -100,7 +100,16 @@ class TestTheNameStaysReadable:
         assert _staged_path(label).name.startswith(f"{expected}-")
 
 
-def test_the_other_two_paths_already_stamped_theirs():
-    """This finding was the odd one out, not a new policy."""
+def test_all_three_paths_stage_into_their_own_directory():
+    """A stamp was the first attempt; it narrowed the window without closing it.
+
+    Two sessions staging a kernel of the same name in the same second built
+    the same path, and the write was last-one-wins. Each of the kernel,
+    assembly and workload paths now stages into a directory created for that
+    call alone, so the filename no longer has to keep two calls apart.
+    """
     source = Path("src/aorta/chat/tools/cluster.py").read_text(encoding="utf-8")
-    assert source.count("strftime") >= 3, "kernel, assembly and workload should each stamp"
+
+    assert source.count("_stage_dir(") == 4, "three call sites and the helper"
+    assert "tempfile.mkdtemp(" in source
+    assert 'open(path, "x"' in source, "writes must be exclusive"

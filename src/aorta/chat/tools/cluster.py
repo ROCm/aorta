@@ -24,6 +24,7 @@ import re
 import shlex
 import sys
 import subprocess
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -331,6 +332,35 @@ def _wrong_tool_hint(source: str) -> str:
     )
 
 
+def _stage_dir(parent: Path, name: str) -> Path:
+    """A staging directory this call alone owns.
+
+    Two sessions triaging a kernel of the same name built the same path, and
+    the write was last-one-wins: the second replaced the first's source
+    between staging it and the node reading it, and the job compiled whichever
+    landed second with nothing saying so. A verdict about somebody else's code
+    is worse than no verdict.
+
+    A finer timestamp narrows that window without closing it. ``mkdtemp``
+    creates with ``O_EXCL`` and retries on a clash, so the directory is this
+    call's or the call raises, and the plain filenames inside it cannot
+    collide because nothing else can reach them.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path(tempfile.mkdtemp(prefix=f"{name}-{stamp}-", dir=parent))
+
+
+def _write_new(path: Path, text: str) -> None:
+    """Write a file that must not already exist.
+
+    Exclusive creation, so that if the reasoning above is ever wrong it fails
+    here rather than silently overwriting a sibling call's source.
+    """
+    with open(path, "x", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 @tool
 def triage_kernel_source(
     source: str,
@@ -387,11 +417,9 @@ def triage_kernel_source(
             "conversation — no second cluster job was submitted.)\n\n" + cached
         )
 
-    staging = settings.jobs_root / "chat-kernels"
-    staging.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    src_path = staging / f"{prepared.kernel}-{stamp}.hip"
-    src_path.write_text(prepared.program, encoding="utf-8")
+    work = _stage_dir(settings.jobs_root / "chat-kernels", prepared.kernel)
+    src_path = work / f"{prepared.kernel}.hip"
+    _write_new(src_path, prepared.program)
 
     lines = [f"Analysing kernel '{prepared.kernel}' from {src_path}."]
     if prepared.wrapped:
@@ -525,12 +553,10 @@ def triage_assembly_source(source: str, label: str = "") -> str:
             "conversation.)\n\n" + cached
         )
 
-    staging = settings.jobs_root / "chat-asm"
-    staging.mkdir(parents=True, exist_ok=True)
-    stem = f"{prepared.kernel}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    asm_path = staging / f"{stem}.s"
-    obj_path = staging / f"{stem}.hsaco"
-    asm_path.write_text(prepared.program, encoding="utf-8")
+    work = _stage_dir(settings.jobs_root / "chat-asm", prepared.kernel)
+    asm_path = work / f"{prepared.kernel}.s"
+    obj_path = work / f"{prepared.kernel}.hsaco"
+    _write_new(asm_path, prepared.program)
 
     try:
         proc = _assemble(_assemble_command(asm_path, obj_path))
@@ -562,7 +588,7 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         )
 
     recipe = write_asm_recipe(
-        recipe_path=staging / f"{stem}.yaml",
+        recipe_path=work / f"{prepared.kernel}.yaml",
         kernel_name=prepared.kernel,
         code_object=obj_path,
         target=_arch(),
@@ -619,8 +645,6 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
     if command.strip():
         return _run_triage(["--command", command.strip()], name)
 
-    staged = settings.jobs_root / "staged"
-    staged.mkdir(parents=True, exist_ok=True)
     # The label is model-supplied and became the filename directly, so
     # `../../../../.bashrc` wrote the user's pasted source outside staged/.
     # Keeping only characters a filename is made of leaves nothing that means
@@ -631,8 +655,9 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
     # was still being read on the node. The kernel and assembly paths already
     # stamp their stems; this one did not.
     stem = _STAGED_STEM_RE.sub("_", name).strip("._")[:60] or "workload"
-    script = staged / f"{stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.py"
-    script.write_text(source, encoding="utf-8")
+    work = _stage_dir(settings.jobs_root / "staged", stem)
+    script = work / f"{stem}.py"
+    _write_new(script, source)
     # Run exactly as the user would run it. The bundle directory used to be
     # appended here, which changed the program's argument contract: a training
     # script with an argparse parser and no positional exits 2 rather than
