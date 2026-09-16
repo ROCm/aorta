@@ -109,10 +109,11 @@ def run_autopsy(
     if use_llm and all_evidence:
         try:
             from aorta.cia.autopsy.router import TriageRouter
-            router = TriageRouter()
+            # The root goes to the constructor, not into the call the model
+            # can influence: the evidence tool is bound to it there.
+            router = TriageRouter(bundle_root)
             pred = router(
                 evidence=all_evidence,
-                bundle_root=str(bundle_root),
                 job_context=ctx.job_id,
             )
             category = getattr(pred, "category", classification.category)

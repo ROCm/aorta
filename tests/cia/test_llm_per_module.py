@@ -112,7 +112,7 @@ class TestTheRouterKeepsItsOwnSettings:
         router_mod, bound = self._bind(monkeypatch)
 
         ensure_configured()  # Watch, arriving first with the cheap default.
-        router_mod.TriageRouter()
+        router_mod.TriageRouter("/tmp")
 
         assert bound, "the router must bind an LM of its own"
         assert bound[0].kwargs["max_tokens"] == router_mod.TriageRouter.MAX_TOKENS
@@ -129,7 +129,7 @@ class TestTheRouterKeepsItsOwnSettings:
         )
         router_mod, bound = self._bind(monkeypatch)
 
-        router_mod.TriageRouter()
+        router_mod.TriageRouter("/tmp")
 
         assert bound[0].kwargs["model"] == "openai/qwen3-35b"
 

@@ -81,19 +81,39 @@ def resolve_in_bundle(uri: str, bundle_root: str) -> Path | None:
     return _resolve_in_bundle(Path(bundle_root), uri)
 
 
-def read_evidence_file(uri: str, bundle_root: str) -> str:
-    """Read a specific evidence file from the bundle by its URI.
-    Returns up to 200 lines of the file content."""
-    try:
-        p = resolve_in_bundle(uri, bundle_root)
-        if p is None:
-            return f"[refused: {uri} is outside the bundle]"
-        if not p.is_file():
-            return f"[file not found: {uri}]"
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        return "\n".join(lines[:200])
-    except Exception as e:
-        return f"[error: {e}]"
+def evidence_reader(bundle_root: Path):
+    """A ``read_evidence_file`` tool bound to *bundle_root*.
+
+    The root is captured here rather than taken as an argument. It used to be
+    a parameter of the tool itself, and the tool is one the ReAct model calls
+    with arguments it writes -- so the fence and the thing being fenced came
+    from the same place. ``read_evidence_file("/etc/passwd", bundle_root="/")``
+    passed the containment check, because the path genuinely was inside the
+    root it had been handed. What came back went into the router's context and
+    could be quoted into a rationale, which is written to the report and sent
+    to a model.
+
+    A closure is the whole fix: the model can still name any URI it likes, and
+    every one of them is resolved against the root the orchestrator opened the
+    bundle with.
+    """
+    root = Path(bundle_root).resolve()
+
+    def read_evidence_file(uri: str) -> str:
+        """Read a specific evidence file from the bundle by its URI.
+        Returns up to 200 lines of the file content."""
+        try:
+            target = _resolve_in_bundle(root, uri)
+            if target is None:
+                return f"[refused: {uri} is outside the bundle]"
+            if not target.is_file():
+                return f"[file not found: {uri}]"
+            lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            return "\n".join(lines[:200])
+        except Exception as e:
+            return f"[error: {e}]"
+
+    return read_evidence_file
 
 
 def list_signals(evidence_json: str) -> list[str]:
@@ -166,7 +186,6 @@ class TriageDecision(dspy.Signature):
     - next_probe must be exactly 'aorta sweep run' or 'none'.
     """
     evidence_json: str = dspy.InputField(desc="JSON list of adapter evidence items with signals and URIs")
-    bundle_root: str = dspy.InputField(desc="Absolute path to the bundle directory")
     job_context: str = dspy.InputField(desc="job_id, node, recipe")
 
     category: str = dspy.OutputField(desc=_CATEGORY_DESC)
@@ -189,20 +208,29 @@ class TriageRouter(dspy.Module):
     #: agents follow it.
     MAX_TOKENS = 8192
 
-    def __init__(self):
+    def __init__(self, bundle_root: Path | str):
+        # Built here, per bundle, because one of the tools is bound to a root
+        # and a module shared across jobs would carry the first job's root into
+        # the second. Autopsy runs once per failure, so this costs nothing that
+        # matters.
         self.react = dspy.ReAct(
             TriageDecision,
-            tools=[classify_matrix, scan_stderr, scan_sanitizer, read_evidence_file, list_signals],
+            tools=[
+                classify_matrix,
+                scan_stderr,
+                scan_sanitizer,
+                evidence_reader(Path(bundle_root)),
+                list_signals,
+            ],
             max_iters=6,
         )
         # Bound to this module rather than configured globally: whichever agent
         # reached DSPy first would otherwise decide what Autopsy reasons with.
         self.react.set_lm(build_lm(max_tokens=self.MAX_TOKENS))
 
-    def forward(self, evidence: list[dict[str, Any]], bundle_root: str, job_context: str) -> dspy.Prediction:
+    def forward(self, evidence: list[dict[str, Any]], job_context: str) -> dspy.Prediction:
         prediction = self.react(
             evidence_json=json.dumps(evidence),
-            bundle_root=bundle_root,
             job_context=job_context,
         )
         prediction.category = coerce_category(getattr(prediction, "category", ""))
