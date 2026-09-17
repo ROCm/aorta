@@ -480,6 +480,90 @@ def test_inconsistent_sampled_summary_never_passes(broken: str) -> None:
     assert str(consan.reason).startswith("consan_output_parse_error:")
 
 
+def test_sampled_summary_truncated_before_its_counters_never_passes() -> None:
+    # Truncated between the first Sampled field and the conflict counters. The
+    # coverage and verdict records are independent of the report line and stay
+    # healthy, so a reader that goes unrecognized here is a silent PASS -- the
+    # counters are the only place a conflict with no logged example appears.
+    report = _sampled_report(conflicts=2, examples=1, pairs_without_example=1)
+    output = "\n".join(
+        (
+            report[: report.index(" sampled_conflicts=")],
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert str(consan.reason).startswith("consan_output_parse_error:")
+
+
+def test_sampled_report_plan_line_is_not_mistaken_for_a_summary() -> None:
+    # ``auto report`` also prefixes the allocation plan, which names
+    # sampled_banks/sampled_watchpoints and carries no conflict counters. Reading
+    # it as a summary would make every healthy Sampled run fail closed on
+    # counters that line never had.
+    plan = (
+        f"{_PREFIX} MOI auto report plan reader=1 outcome=complete reason=none "
+        "required_bytes=2744 cap_bytes=134217728 access_ranges=2 barriers=0 "
+        "atomics=0 fences=0 diagnostics=0 sampled_banks=16 sampled_watchpoints=16 "
+        "inline_lds_bytes=0 inline_releases=0 inline_snapshots=0 inline_tokens=0"
+    )
+    output = "\n".join((plan, _sampled_report(), _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.RAN
+    assert consan.verdict is Verdict.PASS
+
+
+def test_sampled_run_without_any_report_summary_never_passes() -> None:
+    # The whole report line lost rather than truncated. An applicable Sampled
+    # code object always publishes one, so its absence is missing evidence.
+    output = "\n".join((_sampled_evidence(), _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert "reader" in str(consan.reason)
+    assert str(consan.reason).startswith("consan_output_parse_error:")
+
+
+def test_sampled_reader_with_no_discovered_site_needs_no_summary() -> None:
+    # Runtime helper objects load alongside the repro, discover nothing, and are
+    # never instrumented, so they publish no report. Requiring one from them
+    # would fail every real run: both nightly controls carry such an object.
+    helper = (
+        f"{_PREFIX} coverage reader=2 load=2 flavor=moi engine=sampled "
+        "analysis_complete=true expert_limit=false "
+        f"{_zero_counts('access')} {_zero_counts('barrier')} "
+        f"{_zero_counts('atomic')} {_zero_counts('fence')}"
+    )
+    output = "\n".join((_sampled_report(), helper, _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.RAN
+    assert consan.verdict is Verdict.PASS
+
+
+def test_legacy_record_replay_logs_need_no_sampled_summary() -> None:
+    # The reconciliation is keyed on the Sampled engine, so replaying a log from
+    # before the migration must not start demanding counters it never had.
+    output = "\n".join(
+        (
+            f"{_PREFIX} MOI auto replay diagnostics=0 conflict=false",
+            _healthy_evidence(),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.RAN
+    assert consan.verdict is Verdict.PASS
+
+
 def test_legacy_and_sampled_evidence_do_not_cross_contaminate() -> None:
     # One log, both engines -- the shape of a saved log from before the
     # migration replayed next to a current one. The Sampled detail record must
@@ -1089,6 +1173,7 @@ def test_run_consan_pins_sampled_mode_and_the_max_preset(
 # failure, not a silent reopening of the weakening vector.
 _SAMPLED_GATE_OVERRIDES = (
     "RJ_CONSAN_MOI_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES",
+    "RJ_CONSAN_MOI_EPOCH_ANALYSIS",
     "RJ_CONSAN_MOI_SAMPLE_STRIDE",
     "RJ_CONSAN_MOI_SAMPLE_OFFSET",
     "RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE",

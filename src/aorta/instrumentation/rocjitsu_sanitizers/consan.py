@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path
 
 from ..rocm_paths import resolve_rocm_roots, safe_is_dir
-from .consan_coverage import CoverageDecision, parse_coverage_decision
+from .consan_coverage import CoverageDecision, CoverageRecord, parse_coverage_decision
 from .execution import ProcessResult, run_argv
 from .models import (
     CheckResult,
@@ -38,10 +38,19 @@ _AUTO_REPLAY_DIAGNOSTIC = re.compile(r"\bauto\s+replay\s+diagnostic(?:\s|$)", re
 _AUTO_SAMPLED_CONFLICT = re.compile(r"\bauto\s+sampled\s+conflict(?:\s|$)", re.IGNORECASE)
 # The Sampled mode appends its counters to the shared per-reader
 # ``ConSan MOI auto report`` line. Both halves are required: ``auto report`` also
-# prefixes allocation/cleanup/plan lines that carry no counters, and
-# ``sampled_conflicts=`` also appears in the RJ_CONSAN_MOI_REQUIRE_DIAGNOSTICS
+# prefixes allocation/cleanup/plan lines that carry no counters, and the
+# ``sampled_*`` names also appear in the RJ_CONSAN_MOI_REQUIRE_DIAGNOSTICS
 # rejection message, which is not a per-reader report.
-_AUTO_SAMPLED_SUMMARY = re.compile(r"\bauto\s+report\b.*\bsampled_conflicts=", re.IGNORECASE)
+#
+# Keyed on ``visible_sampled``, which the renderer writes second, rather than on
+# a conflict counter near the end of the line: a line truncated between the two
+# then still reports as a Sampled summary and fails closed on the missing
+# counters instead of going unrecognized. It cannot key on the first field
+# (``sampled_watchpoints``) because the ``auto report plan`` allocation line
+# carries that name too and no counters, so every healthy run would fail. Any
+# truncation earlier still than this is caught by the reconciliation against the
+# coverage records in _require_sampled_summaries.
+_AUTO_SAMPLED_SUMMARY = re.compile(r"\bauto\s+report\b.*\bvisible_sampled=", re.IGNORECASE)
 _SAMPLED_SUMMARY_COUNTS = (
     "sampled_conflict_examples",
     "sampled_conflict_pairs_without_example",
@@ -77,15 +86,24 @@ class ConSanMode(str, Enum):
 # known race as a clean pass.
 _CONSAN_SAMPLED_PRESET = "max"
 
-# A Sampled preset supplies DEFAULTS for the selection knobs only, so inherited
-# selectors can silently thin ``max`` back out; mixing coupled and per-axis
-# selectors is also a hard hook config error. The same-value opt-in suppresses
-# a class of conflicts. Scrub both kinds of override so the gate contract is
-# deterministic.
+# Everything inherited from the caller's shell that could weaken the gate, of
+# which there are three kinds. A preset supplies DEFAULTS for the selection
+# knobs only, so an inherited selector silently thins ``max`` back out, and
+# mixing the coupled with the per-axis selectors is a hard hook config error.
+# The same-value opt-in suppresses a class of conflicts outright. The epoch
+# selector decides which epochs are analysed at all. Scrub all three so the
+# pinned mode and preset are the whole contract.
 _SAMPLED_GATE_OVERRIDES = (
     "RJ_CONSAN_MOI_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES",
     "RJ_CONSAN_MOI_CELL_SAMPLE_OFFSET",
     "RJ_CONSAN_MOI_CELL_SAMPLE_STRIDE",
+    # Only the default ``every`` analyses each synchronized epoch. ``nth:N`` and
+    # ``periodic:N`` reset an unselected epoch's report without decoding it, and
+    # ``manual`` analyses nothing at all unless the harness opens a window
+    # through the hook's exported API -- which run_consan never does. An
+    # inherited value could therefore drop the positive control's race even at
+    # the max preset.
+    "RJ_CONSAN_MOI_EPOCH_ANALYSIS",
     "RJ_CONSAN_MOI_RUNTIME_SAMPLE_OFFSET",
     "RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE",
     "RJ_CONSAN_MOI_SAMPLED_BANKS",
@@ -263,8 +281,33 @@ def _sampled_totals(summaries: list[dict[str, str]]) -> dict[str, dict[str, int]
     return totals
 
 
+def _require_sampled_summaries(
+    coverage: tuple[CoverageRecord, ...], totals: dict[str, dict[str, int]]
+) -> None:
+    """Every applicable Sampled code object must have reported its counters.
+
+    The conflict counters are the only place a Sampled race with no logged
+    example is visible, so a log that lost them cannot be distinguished from a
+    clean run by the coverage records alone -- those describe static
+    instrumentation and stay healthy either way. Reconciling against coverage
+    keeps the absence itself fatal rather than silently unaccounted for. Only
+    applicable readers are required: a loaded object with no discovered site is
+    never instrumented and publishes no report, which is the ordinary shape of
+    the runtime helper objects that accompany a repro.
+    """
+    missing = sorted(
+        str(record.reader)
+        for record in coverage
+        if record.engine == "sampled" and record.applicable and str(record.reader) not in totals
+    )
+    if missing:
+        raise ValueError(
+            "ConSan Sampled report summary is missing for reader(s) " + ", ".join(missing)
+        )
+
+
 def _sampled_summary_findings(
-    summaries: list[dict[str, str]], itemized_by_reader: dict[str, int]
+    totals_by_reader: dict[str, dict[str, int]], itemized_by_reader: dict[str, int]
 ) -> list[Finding]:
     """At most one shortfall and one immediate-conflict finding per reader.
 
@@ -278,7 +321,7 @@ def _sampled_summary_findings(
     can tell a host-analysis shortfall from a device-side detection.
     """
     findings: list[Finding] = []
-    for reader, totals in sorted(_sampled_totals(summaries).items()):
+    for reader, totals in sorted(totals_by_reader.items()):
         itemized = itemized_by_reader.get(reader, 0)
         conflicts = totals["sampled_conflicts"]
         immediate = totals["sampled_immediate_conflicts"]
@@ -394,11 +437,13 @@ def parse_consan_output(output: str) -> ParsedCombinedOutput:
                     metadata=tuple(sorted(summary.items())),
                 )
             )
+    sampled_totals = _sampled_totals(sampled_summaries)
     findings.extend(
-        _sampled_summary_findings(sampled_summaries, _itemized_by_reader(sampled_details))
+        _sampled_summary_findings(sampled_totals, _itemized_by_reader(sampled_details))
     )
 
     decision = parse_coverage_decision(output)
+    _require_sampled_summaries(decision.coverage, sampled_totals)
     object_coverage = tuple(
         ObjectCoverage(
             object_id=(
