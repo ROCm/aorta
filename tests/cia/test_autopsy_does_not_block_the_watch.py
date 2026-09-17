@@ -242,22 +242,41 @@ class TestAWatcherThatDiedHoldingOne:
             encoding="utf-8",
         )
 
-    @pytest.mark.parametrize("state", ["queued", "running"])
-    def test_a_fresh_one_is_left_alone(self, tmp_path, state):
+    @pytest.mark.parametrize(
+        ("state", "age_hours"),
+        [
+            ("queued", 0.01),
+            ("running", 0.5),
+        ],
+    )
+    def test_a_fresh_one_is_left_alone(self, tmp_path, state, age_hours):
         """Finishing slowly is not dying; re-queueing a live one wastes a node."""
-        self._write_state(tmp_path, state, age_hours=0.5)
+        self._write_state(tmp_path, state, age_hours=age_hours)
 
         assert poll_mod.autopsy_is_settled(tmp_path) is True
 
-    @pytest.mark.parametrize("state", ["queued", "running"])
-    def test_a_stale_one_goes_back_in_the_queue(self, tmp_path, state):
-        self._write_state(tmp_path, state, age_hours=9)
+    @pytest.mark.parametrize(
+        ("state", "age_hours"),
+        [
+            ("queued", 0.5),
+            ("running", 9),
+        ],
+    )
+    def test_a_stale_one_goes_back_in_the_queue(self, tmp_path, state, age_hours):
+        self._write_state(tmp_path, state, age_hours=age_hours)
 
         assert poll_mod.autopsy_is_settled(tmp_path) is False
 
     def test_the_window_outlasts_the_production_sweep(self):
         """Four hours is the sweep's own limit; reclaiming sooner kills live work."""
         assert poll_mod.AUTOPSY_STALE_AFTER_SEC > 4 * 60 * 60
+
+    def test_a_queued_task_has_a_shorter_lease_than_running_work(self):
+        """Queued means no external work started, so five hours was indefensible."""
+        assert (
+            poll_mod.AUTOPSY_QUEUED_STALE_AFTER_SEC
+            < poll_mod.AUTOPSY_STALE_AFTER_SEC
+        )
 
     def test_an_unparseable_timestamp_is_treated_as_lost(self, tmp_path):
         """A record we cannot date is not evidence that something is running."""

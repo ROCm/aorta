@@ -85,7 +85,17 @@ class TestOneJobDoesNotSilenceTheOthers:
 
         poll_jobs(tmp_path, max_rounds=1)
 
-        assert sorted(always_alerts) == ["cia-aaa", "cia-bbb", "cia-ccc"]
+        # Backpressure may defer an Autopsy once both workers are occupied; it
+        # must not defer assessment of the remaining jobs. The event is written
+        # before admission is attempted, so it is the evidence this test's
+        # "examined" claim is about.
+        examined = [
+            job_id
+            for job_id in ("cia-aaa", "cia-bbb", "cia-ccc")
+            if (tmp_path / job_id / "events.jsonl").is_file()
+        ]
+
+        assert examined == ["cia-aaa", "cia-bbb", "cia-ccc"]
 
     def test_a_job_that_keeps_writing_does_not_starve_the_rest(
         self, tmp_path, always_alerts
