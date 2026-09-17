@@ -29,12 +29,22 @@ mask_user_env = true
 # wildcard means any page a developer happens to have open can talk to a
 # local instance and start work on a GPU node.
 #
-# Serving on another host or port means adding it here. `aorta chat ui --port`
-# and the PORT variable in the launcher both change the port, and neither can
-# reach into this file.
+# These are `aorta chat ui`'s own defaults, and they have to stay that way:
+# Chainlit reads allow_origins from this file and nowhere else -- there is no
+# environment override -- so an origin listed here that the launcher never
+# serves on rejects the browser of every default install. That is what 8010
+# did while the command defaulted to 8000.
+#
+# Kept in step with src/aorta/chat/ui/chainlit_config.toml, which is the copy
+# a wheel installs; this one is what a source checkout runs against.
+#
+# Serving on another host or port means adding it here. `aorta chat ui --host`
+# and `--port` cannot reach into this file, so the command checks the two
+# against each other at startup and says what to add rather than failing in
+# the browser as a socket that will not open.
 allow_origins = [
-    "http://localhost:8010",
-    "http://127.0.0.1:8010",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
 ]
 
 [features]

@@ -662,7 +662,9 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
     spec = importlib.util.find_spec("aorta.chat.ui.app")
     if spec is None or spec.origin is None:
         raise click.ClickException("could not locate aorta.chat.ui.app on disk")
-    child_env["CHAINLIT_APP_ROOT"] = str(_chainlit_app_root())
+    app_root = _chainlit_app_root()
+    child_env["CHAINLIT_APP_ROOT"] = str(app_root)
+    _warn_if_origin_not_allowed(app_root, host, port)
     raise SystemExit(
         subprocess.call(
             [
@@ -679,6 +681,70 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
             ],
             env=child_env,
         )
+    )
+
+
+def origins_for(host: str, port: int) -> list[str]:
+    """The browser origins a UI bound to *host*:*port* is reached through.
+
+    A bind address and an origin are not the same thing. ``127.0.0.1`` is
+    typed as ``localhost`` as often as not, and both have to be listed or the
+    socket is refused for whichever one the operator used. ``0.0.0.0`` is not
+    an origin at all -- it means every interface, and the browser will send
+    whatever name it dialled -- so the loopback pair is the most that can be
+    said for it.
+    """
+    if host in ("0.0.0.0", "::", ""):
+        hosts = ["localhost", "127.0.0.1"]
+    elif host in ("localhost", "127.0.0.1"):
+        hosts = ["localhost", "127.0.0.1"]
+    else:
+        hosts = [host]
+    return [f"http://{name}:{port}" for name in hosts]
+
+
+def _configured_origins(app_root: Path) -> list[str] | None:
+    """``allow_origins`` from the config in force, or None if unreadable."""
+    settings = app_root / ".chainlit" / "config.toml"
+    try:
+        import tomllib
+
+        with settings.open("rb") as handle:
+            loaded = tomllib.load(handle)
+    except (OSError, ValueError, ImportError):
+        return None
+    origins = loaded.get("project", {}).get("allow_origins")
+    return [str(o) for o in origins] if isinstance(origins, list) else None
+
+
+def _warn_if_origin_not_allowed(app_root: Path, host: str, port: int) -> None:
+    """Say so now if the browser will be refused, rather than in the browser.
+
+    The origin policy lives in a file Chainlit reads and the bind address
+    arrives as an argument, so the two can disagree and nothing notices. What
+    the operator sees when they do is a page that loads and a websocket that
+    never opens, which reads as the UI being broken rather than as a setting
+    being one line short.
+
+    A warning and not an error. Binding ``0.0.0.0`` and reaching the box by
+    hostname is an ordinary deployment, and the origin the browser sends is
+    then a name this process cannot know -- refusing to start would break a
+    setup that works.
+    """
+    allowed = _configured_origins(app_root)
+    if allowed is None or "*" in allowed:
+        return
+    wanted = origins_for(host, port)
+    if any(origin in allowed for origin in wanted):
+        return
+    settings = app_root / ".chainlit" / "config.toml"
+    listed = ", ".join(allowed) or "(none)"
+    click.echo(
+        f"Warning: this UI will serve on {wanted[0]}, which is not in the "
+        f"origin policy, so the browser's connection will be refused.\n"
+        f"  allowed: {listed}\n"
+        f"  add it to allow_origins in {settings}",
+        err=True,
     )
 
 

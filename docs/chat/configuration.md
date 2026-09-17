@@ -206,13 +206,19 @@ regenerated.
 
 | Setting | Shipped as | Why |
 | --- | --- | --- |
-| `allow_origins` | `["http://localhost:8010", "http://127.0.0.1:8010"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
+| `allow_origins` | `["http://localhost:8000", "http://127.0.0.1:8000"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
 | `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
 
-**Serving anywhere other than `localhost:8010` means editing `allow_origins`.**
-`aorta chat ui --port` and the `PORT` variable in a launcher both move the port,
-and neither reaches into that file, so the browser will connect and then fail on
-the socket with nothing in the page to say why.
+**Serving anywhere other than `localhost:8000` means editing `allow_origins`.**
+Those two are `aorta chat ui`'s own defaults, and they have to stay in step with
+it: Chainlit reads `allow_origins` from the file and has no environment
+override, so a port listed here that the command never serves on refuses the
+browser of every default install.
+
+`aorta chat ui --host` and `--port`, and the `PORT` variable in a launcher, all
+move the socket without reaching into that file. The command compares the two at
+startup and prints what to add, because the failure otherwise is a page that
+loads and a websocket that never opens, with nothing on screen to say why.
 
 The rest of the file is Chainlit's own defaults. If you delete it, Chainlit
 regenerates it — with `allow_origins = ["*"]` and `mask_user_env = false` — so

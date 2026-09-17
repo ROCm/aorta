@@ -33,16 +33,43 @@ def project() -> dict:
     return tomllib.loads(_CONFIG.read_text(encoding="utf-8"))["project"]
 
 
+def _ui_defaults() -> tuple[str, int]:
+    """The host and port `aorta chat ui` binds when told nothing."""
+    from aorta.cli.chat import ui
+
+    params = {p.name: p.default for p in ui.params}
+    return params["host"], params["port"]
+
+
 class TestWhoMayTalkToIt:
     def test_the_origins_are_not_a_wildcard(self, project):
         assert "*" not in project["allow_origins"]
 
     def test_they_are_the_origins_it_is_served_from(self, project):
-        assert "http://localhost:8010" in project["allow_origins"]
+        """Derived from the command, not written out again.
+
+        These read 8010 while `aorta chat ui` defaulted to 8000, so the shipped
+        policy refused the browser of every default install -- and the test
+        agreed, because it was asserting the same literal the file contained
+        rather than the port anything actually serves on.
+        """
+        host, port = _ui_defaults()
+
+        assert f"http://localhost:{port}" in project["allow_origins"]
 
     def test_both_spellings_of_local(self, project):
         """A browser sent to 127.0.0.1 does not send localhost as its origin."""
-        assert "http://127.0.0.1:8010" in project["allow_origins"]
+        _host, port = _ui_defaults()
+
+        assert f"http://127.0.0.1:{port}" in project["allow_origins"]
+
+    def test_the_default_bind_is_covered(self, project):
+        """The contract itself: what the command serves, the policy admits."""
+        from aorta.cli.chat import origins_for
+
+        host, port = _ui_defaults()
+
+        assert any(o in project["allow_origins"] for o in origins_for(host, port))
 
     def test_the_list_is_not_empty(self, project):
         """Empty would be tighter and would also stop the UI connecting."""
