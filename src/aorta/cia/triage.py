@@ -520,9 +520,20 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # registry is what makes it eligible for monitoring at all.
     log.info("── Watch ──")
     log.info(f"poll_jobs(rounds={args.watch_rounds})")
+    # Scoped to the job this call submitted. Unscoped, every concurrent triage
+    # started another watcher over every active job: four chat turns meant four
+    # watchers each assessing all four jobs, paying for four model calls per log
+    # chunk, and any of them could alert and trigger an Autopsy on a job it had
+    # nothing to do with. The standalone `aorta cia watch` still takes them all,
+    # which is what it is for.
     watcher = threading.Thread(
         target=poll_jobs,
-        kwargs={"jobs_root": jobs_root, "max_rounds": args.watch_rounds, "stop": stop},
+        kwargs={
+            "jobs_root": jobs_root,
+            "max_rounds": args.watch_rounds,
+            "stop": stop,
+            "only": job_id,
+        },
         daemon=True,
     )
     watcher.start()
