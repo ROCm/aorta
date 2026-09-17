@@ -118,11 +118,16 @@ def test_an_unoffered_diagnostic_is_filtered_out():
 def test_diagnostics_are_dropped_entirely_when_the_caller_offered_none():
     """Not leniency: a caller that named no diagnostic axis authorised none.
 
-    This is also what keeps the single-axis call sites behaving exactly as
-    before -- ``remaining_diagnostics`` defaults to None.
+    The policy is unchanged; only how the caller says it has. This used to
+    rely on ``remaining_diagnostics`` defaulting to None, which made "offering
+    nothing" indistinguishable from omitting the argument, so the empty list
+    is now passed explicitly and the drop is recorded rather than silent.
     """
-    step = _step_from_content(_reply(next_diagnostics=["xnack"]), remaining=[])
+    step = _step_from_content(
+        _reply(next_diagnostics=["xnack"]), remaining=[], remaining_diagnostics=[]
+    )
     assert step.next_diagnostics == []
+    assert step.unresolved_diagnostics == ["xnack"]
 
 
 # ---------------------------------------------------------------------------

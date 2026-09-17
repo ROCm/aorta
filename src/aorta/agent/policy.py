@@ -151,6 +151,11 @@ class AgentPolicy:
             stop=step.stop,
             stop_reason=step.stop_reason,
             next_diagnostics=cleaned_diagnostics,
+            # Carried through untouched. These names never reach the checks
+            # above -- the proposer dropped them precisely because they are
+            # not on the offered axis -- but the log needs them, so validation
+            # must not be the thing that loses them.
+            unresolved_diagnostics=list(step.unresolved_diagnostics),
         )
 
     def needs_approval(self, mitigation: str) -> bool:

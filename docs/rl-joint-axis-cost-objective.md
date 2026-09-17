@@ -388,3 +388,33 @@ almost entirely the model server, not the reproducer.
   emits one `mitigation_tried` (and now `diagnostic_tried` and `axis_growth`)
   event per name, so `wake()` can reconstruct an exact cell count with no
   schema change — but it changes what a shipped CLI flag means.
+
+## Two ways a proposed diagnostic fails to reach the axis
+
+They have separate log keys because they are separate facts, and a reward
+computed over the episode has to tell them apart.
+
+| Key | Event | Meaning | In `next_diagnostics`? |
+|---|---|---|---|
+| `unresolved_diagnostics` | `llm_step`, `search_stopped` | The name was not on the offered set — never registered, already tried, or on an axis the operator did not arm. Dropped by the filter in `_step_from_content`, before the axis is planned. | **No** |
+| `rejected_diagnostics` | `axis_growth` | The name was good and the cell budget had no room, or it was already on the axis. Decided by `plan_axis_growth`. | **Yes** |
+
+So: *unresolved* means the name resolved to nothing; *rejected* means the name
+was fine and we said no. A rejected name still appears in the step's
+`diagnostics`, which is why `refused_names()` exists to point at it; an
+unresolved one appears nowhere else at all, which is why
+`unresolved_diagnostics` had to be recorded — without it, terminal credit
+computed from `steps[]` scores a proposal the policy did not make. This is
+the diagnostic-axis form of [aorta#449](https://github.com/ROCm/aorta/issues/449).
+
+`unresolved_diagnostics` is written **only when something was dropped** — the
+key is absent, not empty — so a run with no drops emits the log it emitted
+before the key existed, and the archived episodes stay byte-comparable.
+
+⚠ **Still open, deliberately.** The loop's stop check is `step.stop or not
+(next_mitigations or next_diagnostics)`, so a *diagnostics-only* proposal
+whose every name was dropped stops the search and is recorded as
+`stop_reason: agent_requested` — the model said `stop: false`. That is the
+#449 misattribution on this axis. It is recorded but not yet re-attributed:
+the names now appear on the `search_stopped` event, so the stop is
+diagnosable, but giving it a stop reason of its own is a separate decision.

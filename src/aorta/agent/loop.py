@@ -644,19 +644,27 @@ def run_agent_loop(
             step = config.policy.validate_step(step)
             state.last_category = step.category
             state.last_hypothesis = step.hypothesis
-            append_log_event(
-                run_dir,
-                "llm_step",
-                {
-                    "category": step.category,
-                    "hypothesis": step.hypothesis,
-                    "next_mitigations": step.next_mitigations,
-                    "next_diagnostics": step.next_diagnostics,
-                    "confidence": step.confidence,
-                    "stop": step.stop,
-                    "stop_reason": step.stop_reason,
-                },
-            )
+            llm_step_payload: dict[str, Any] = {
+                "category": step.category,
+                "hypothesis": step.hypothesis,
+                "next_mitigations": step.next_mitigations,
+                "next_diagnostics": step.next_diagnostics,
+                "confidence": step.confidence,
+                "stop": step.stop,
+                "stop_reason": step.stop_reason,
+            }
+            # Written only when the diagnostic filter actually dropped
+            # something, so a run with no drops emits the bytes it emitted
+            # before this key existed and the archived episodes stay
+            # comparable. Deliberately NOT named rejected_diagnostics: that
+            # key already exists on axis_growth for a name the cell budget
+            # refused, which is a different event about a name that survived
+            # the filter and does appear in next_diagnostics.
+            if step.unresolved_diagnostics:
+                llm_step_payload["unresolved_diagnostics"] = list(
+                    step.unresolved_diagnostics
+                )
+            append_log_event(run_dir, "llm_step", llm_step_payload)
 
             # A diagnostic-only step is a real action under the joint-axis
             # policy: buying evidence without testing a cause is what the
@@ -667,11 +675,21 @@ def run_agent_loop(
                 outcome, recommended, resolved_reason = _resolve_stop_outcome(
                     step, summaries
                 )
-                append_log_event(
-                    run_dir,
-                    "search_stopped",
-                    {"outcome": outcome, "stop_reason": resolved_reason},
-                )
+                stopped_payload: dict[str, Any] = {
+                    "outcome": outcome,
+                    "stop_reason": resolved_reason,
+                }
+                # Recorded, not attributed: `resolved_reason` is untouched.
+                # A diagnostic-only proposal filtered to empty reaches this
+                # branch through the second clause of the condition above, and
+                # without the names the terminal event carries no trace of
+                # why. Whether that stop deserves a reason of its own is still
+                # open -- see docs/rl-joint-axis-cost-objective.md.
+                if step.unresolved_diagnostics:
+                    stopped_payload["unresolved_diagnostics"] = list(
+                        step.unresolved_diagnostics
+                    )
+                append_log_event(run_dir, "search_stopped", stopped_payload)
                 break
 
             # validate_step() only enforces registry membership + category. The

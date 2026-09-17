@@ -326,6 +326,33 @@ def refused_names(run_dir: Path) -> list[str]:
     return sorted(refused)
 
 
+def unresolved_names(run_dir: Path) -> list[str]:
+    """Diagnostics the proposer's filter dropped, off the ``llm_step`` events.
+
+    The counterpart to :func:`refused_names`, and the distinction is the whole
+    reason both exist. A *refused* name was good and the cell budget had no
+    room, so it still appears in ``step.diagnostics``. An *unresolved* name
+    was never on the offered axis, so it is absent from ``step.diagnostics``
+    and the episode would otherwise read as though the policy never proposed
+    it. Reading one key and calling it the other would merge a cost decision
+    with a name-resolution failure.
+    """
+    log = run_dir / "agent_log.jsonl"
+    if not log.is_file():
+        return []
+    unresolved: set[str] = set()
+    for line in log.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("type") not in ("llm_step", "search_stopped"):
+            continue
+        unresolved.update(
+            str(n) for n in (event.get("unresolved_diagnostics") or [])
+        )
+    return sorted(unresolved)
+
+
 def find_episode() -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
     """Prefer a real-model episode; fall back to fake and say so.
 
@@ -708,6 +735,17 @@ def build_payload() -> dict[str, Any]:
                 "and contributes nothing to cells_this_step -- in this episode "
                 f"the diagnostic(s) {refused} were proposed and refused. "
                 "cells_this_step is the authoritative cost."
+            )
+        unresolved = unresolved_names(Path(extras.get("episode_run_dir", "")))
+        if unresolved:
+            episode_caveats.append(
+                "episode.steps[].diagnostics is what SURVIVED the proposer's "
+                f"filter. The policy also proposed {unresolved}, which was not "
+                "on the offered diagnostic axis and was dropped before the "
+                "axis was planned -- so it appears in NEITHER "
+                "steps[].diagnostics NOR the refused list above. Terminal "
+                "credit computed from steps[] alone would score a proposal "
+                "the policy did not make."
             )
 
     caveats = _margin_caveats(audit) + episode_caveats + [

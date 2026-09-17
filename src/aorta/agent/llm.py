@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
+
+log = logging.getLogger(__name__)
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
 StopReason = Literal[
@@ -53,6 +56,16 @@ class AgentStep:
     stop: bool
     stop_reason: StopReason | None = None
     next_diagnostics: list[str] = field(default_factory=list)
+    #: Diagnostics the model proposed that the filter in
+    #: :func:`_step_from_content` dropped, because they were not on the
+    #: offered set: never registered, already tried, or on an axis the
+    #: operator did not arm. Set by the proposer, never read from the model's
+    #: reply. Distinct from ``AxisGrowth.rejected_diagnostics``, which is a
+    #: *good* name the cell budget had no room for -- a rejected name still
+    #: appears in ``next_diagnostics``, an unresolved one never does, so
+    #: without this field it is retained nowhere and the trajectory records a
+    #: proposal the model did not make.
+    unresolved_diagnostics: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentStep:
@@ -324,7 +337,7 @@ def _strip_code_fence(content: str) -> str:
 def _step_from_content(
     content: str | None,
     remaining: list[str],
-    remaining_diagnostics: list[str] | None = None,
+    remaining_diagnostics: list[str],
 ) -> AgentStep:
     """Parse a model reply into an :class:`AgentStep`, failing safe.
 
@@ -332,11 +345,18 @@ def _step_from_content(
     even when asked for strict JSON. Every one of those becomes a stop rather
     than an exception, so the loop still writes a report.
 
-    ``remaining_diagnostics`` defaults to None, and None filters every
-    proposed diagnostic away. That is deliberate rather than lenient: the
-    filter below exists so the model cannot widen its own allowlist, and a
-    caller that did not say what is on the diagnostic axis has not authorised
-    anything on it.
+    An empty ``remaining_diagnostics`` filters every proposed diagnostic away,
+    and that policy is unchanged: the filter below exists so the model cannot
+    widen its own allowlist, and a caller that named no diagnostic axis has
+    authorised nothing on it.
+
+    What changed is that ``remaining_diagnostics`` is now **required**. It used
+    to default to None, so "I am deliberately offering nothing" and "I forgot
+    to pass this" produced the same silent 100% discard -- one recorded
+    nowhere, on the argument that decides whether the model's entire
+    diagnostic proposal survives. Requiring it turns the second case into a
+    TypeError at the call site, and the drops the first case makes are now
+    recorded on ``unresolved_diagnostics``.
     """
     if not content or not content.strip():
         return _safe_stop("Empty LLM response")
@@ -352,10 +372,27 @@ def _step_from_content(
     # but a name outside `remaining` is a mitigation already tried or never
     # registered, and running it is not the agent's call.
     filtered = [m for m in step.next_mitigations if m in remaining]
-    offered_diagnostics = remaining_diagnostics or []
     filtered_diagnostics = [
-        d for d in step.next_diagnostics if d in offered_diagnostics
+        d for d in step.next_diagnostics if d in remaining_diagnostics
     ]
+    # Keep what the diagnostic filter dropped. A dropped name is retained
+    # nowhere else: it never reaches plan_axis_growth, so it cannot appear in
+    # axis_growth.rejected_diagnostics, and the loop-level allowlist guard
+    # that would have raised on it sits after this filter has already removed
+    # it. So the trajectory records a proposal the model did not make, and
+    # the discarded half cannot be reconstructed -- only discarded. Not
+    # de-duplicated: this is the audit trail of what the model emitted.
+    unresolved_diagnostics = [
+        d for d in step.next_diagnostics if d not in remaining_diagnostics
+    ]
+    if unresolved_diagnostics:
+        log.warning(
+            "proposer named %d diagnostic(s) that are not on the offered set "
+            "and were dropped: %s (offered: %s)",
+            len(unresolved_diagnostics),
+            sorted(set(unresolved_diagnostics)),
+            sorted(remaining_diagnostics),
+        )
     stop_reason = step.stop_reason
     if step.stop and stop_reason is None:
         stop_reason = "agent_requested"
@@ -367,6 +404,7 @@ def _step_from_content(
         stop=step.stop,
         stop_reason=stop_reason,
         next_diagnostics=filtered_diagnostics,
+        unresolved_diagnostics=unresolved_diagnostics,
     )
 
 
