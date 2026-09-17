@@ -1,18 +1,16 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `35221004771` (2026-09-17 13:24:39 UTC) did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/35221004771)
+Run `2026-09-17T162056-35237696462` · commit `d2fa5f1645c2` · 2026-09-17 16:20:56 UTC
 
-Run `2026-09-17T132440-35221004771` · commit `73409f79a56a` · 2026-09-17 13:24:40 UTC
-
-❌ **REGRESSION** — investigate 2/3 sanitizer outcomes that do not match their baselines
+✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
 Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. Baseline status is the regression-health signal.
 
 | Recipe | Backend | Baseline status | Observed | Expected | Execution | Findings | Coverage |
 |---|---|---|---|---|---|--:|---|
 | daily-waitcheck-gemm | waitcheck (static) | ✅ **Expected outcome** | `warn` | `warn` | complete | 64 | — |
-| daily-consan-clean | consan (dynamic) | ❌ **Unexpected outcome** | `error` | `pass` | ❌ **error** | 0 | — |
-| daily-consan-racy | consan (dynamic) | ❌ **Unexpected outcome** | `error` | `fail` | ❌ **error** | 0 | — |
+| daily-consan-clean | consan (dynamic) | ✅ **Expected outcome** | `pass` | `pass` | complete | 0 | 0/0, 2/2 |
+| daily-consan-racy | consan (dynamic) | ✅ **Expected outcome** | `fail` | `fail` | complete | 64 | 0/0, 2/2 |
 
 Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate) and **Workload survey (observed-only)** (non-gating).
 
@@ -36,27 +34,31 @@ backend `rj_waitcheck` `6c7c2baa6a99` · selection `top_dispatch_count` top-3 ·
 
 </details>
 
-<details><summary><b>daily-consan-clean</b> — ❌ **Unexpected outcome**</summary>
+<details><summary><b>daily-consan-clean</b> — ✅ **Expected outcome**</summary>
 
-Observed sanitizer verdict `error` · expected `pass`
-Observation: consan error; reason consan_output_parse_error: reader 109000702941984 access site count mismatch; consan_lds_race: consan_output_parse_error: reader 109000702941984 access site count mismatch; preflight error
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution ❌ **error**
+Observed sanitizer verdict `pass` · expected `pass`
+Observation: consan pass; preflight pass
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `consan_lds_race` | 1 | `error` | 0 | `—` | `—` | consan_output_parse_error: reader 109000702941984 access site count mismatch |
+| `consan_lds_race` | 1 | `pass` | 0 | `—` | `—` | — |
 
 </details>
 
-<details><summary><b>daily-consan-racy</b> — ❌ **Unexpected outcome**</summary>
+<details><summary><b>daily-consan-racy</b> — ✅ **Expected outcome**</summary>
 
-Observed sanitizer verdict `error` · expected `fail`
-Observation: consan error; reason consan_output_parse_error: reader 103046398364096 access site count mismatch; consan_lds_race_2wave: consan_output_parse_error: reader 103046398364096 access site count mismatch; preflight error
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution ❌ **error**
+Observed sanitizer verdict `fail` · expected `fail`
+Observation: consan fail; 64 finding(s) (1); preflight pass
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `consan_lds_race_2wave` | 1 | `error` | 0 | `—` | `—` | consan_output_parse_error: reader 103046398364096 access site count mismatch |
+| `consan_lds_race_2wave` | 1 | `fail` | 64 | `—` | `—` | — |
+
+| Sanitizer | Code | Severity | Count | Example |
+|---|---|---|--:|---|
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=100057256981296 index=0 kind=1 code_object=fnv1a64:3deb93883c6c6fa8 report_generation=1 generatio… |
 
 </details>
 
@@ -64,39 +66,37 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 How real GPU kernels behave under AMD's sanitizers — **waitcheck** (static `s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where both produced a report the kernel is shown under each, and a scan that was skipped or whose report is missing still appears, marked report missing with no verdict. **No expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here is an observation of how the kernel behaved, not a regression. Each case lists a copy-paste command to reproduce the run.
 
-Surveyed 3 kernels across 6 sanitizer runs — 2 pass · 1 warn · 3 error
+Surveyed 3 kernels across 6 sanitizer runs — 3 pass · 1 warn · 2 error
 
 | Kernel | waitcheck | ConSan | Findings | Note |
 |---|---|---|--:|---|
-| gemm | `warn` | `error` | 32 | consan_output_parse_error: reader 102132391194464 atomic site count mismatch |
-| lds dispatch | `pass` | `error` | 0 | consan_output_parse_error: reader 95906335076368 access site count mismatch |
+| gemm | `warn` | `error` | 64 | consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_… |
+| lds dispatch | `pass` | `pass` | 0 | — |
 | tiny | `pass` | `error` | 0 | combined_hook_exit_86 |
 
 <details><summary><b>consan-gemm</b> — observed `error`</summary>
 
-Observation: consan error; reason consan_output_parse_error: reader 102132391194464 atomic site count mismatch; gemm_f32_ss: consan_output_parse_error: reader 102132391194464 atomic site count mismatch; preflight error
+Observation: consan error; reason consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; gemm_f32_ss: consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing; 32 finding(s) (wait_hazard); preflight warn
 
-Reason: `consan_output_parse_error: reader 102132391194464 atomic site count mismatch — gemm_f32_ss: consan_output_parse_error: reader 102132391194464 atomic site count mismatch`
+Reason: `gemm_f32_ss: consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement…`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | consan_output_parse_error: reader 102132391194464 atomic site count mismatch |
+| `gemm_f32_ss` | 1 | `error` | 32 | `consan_gemm_f32.hsaco` | `57c5d8efa4` | consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placem… |
 
 </details>
 
-<details><summary><b>consan-lds-dispatch</b> — observed `error`</summary>
+<details><summary><b>consan-lds-dispatch</b> — observed `pass`</summary>
 
-Observation: consan error; reason consan_output_parse_error: reader 95906335076368 access site count mismatch; lds_reduce: consan_output_parse_error: reader 95906335076368 access site count mismatch; preflight error
-
-Reason: `consan_output_parse_error: reader 95906335076368 access site count mismatch — lds_reduce: consan_output_parse_error: reader 95906335076368 access site count mismatch`
+Observation: consan pass; preflight pass
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `fc7ec48c27` | consan_output_parse_error: reader 95906335076368 access site count mismatch |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `461c28a3e5` | — |
 
 </details>
 
@@ -110,7 +110,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `151f434acb` | combined_hook_exit_86 |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `a89bb39c1e` | combined_hook_exit_86 |
 
 </details>
 
@@ -136,7 +136,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `fc7ec48c27` | — |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `461c28a3e5` | — |
 
 </details>
 
@@ -148,7 +148,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 | Detail |
 |---|--:|---|--:|---|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `151f434acb` | — |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `a89bb39c1e` | — |
 
 </details>
 
@@ -156,6 +156,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-09-17T162056-35237696462 | `d2fa5f1645c2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-09-17T132440-35221004771 | `73409f79a56a` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-09-17T112050-35210422045 | `73409f79a56a` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-09-17T074922-35189763335 | `73409f79a56a` | ❌ **Mismatch**<br>Observed: `error`; expected `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
@@ -185,4 +186,3 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 | 2026-08-25-32846400271 | `905b1f9e3e16` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-24-32725903878 | `78d1ae686dc3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-23-32638584704 | `78d1ae686dc3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
-| 2026-08-22-32572213077 | `78d1ae686dc3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |

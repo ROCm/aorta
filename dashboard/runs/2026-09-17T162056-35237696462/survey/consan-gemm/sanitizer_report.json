@@ -1,0 +1,514 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_gemm_load",
+        "command_sha256": "6e4ff7c53fcf007e3c6604ec6093510cbff56ae83337fbb1a6057aa245be39ad",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "35e793caddd1966afc7071334ba7484b5c28c73a9fd9203249267337373b92da",
+        "selected_identity_sha256": "acd50ca2bb450f4fb8144de0b24d11a502038583bf296d9e36f32091c5fbe079",
+        "selected_kernel": "gemm_f32_ss"
+      },
+      "coverage": [
+        {
+          "access": "0/719550",
+          "analysis_complete": false,
+          "applicable": true,
+          "complete": false,
+          "dynamic_complete": true,
+          "fields": {
+            "access_discovered": "719550",
+            "access_expert_limit_omitted": "0",
+            "access_patched": "0",
+            "access_placement_or_lowering_failed": "719550",
+            "access_resource_failed": "0",
+            "access_selected": "719550",
+            "access_supported": "719550",
+            "access_unsupported": "0",
+            "atomic_discovered": "0",
+            "atomic_expert_limit_omitted": "0",
+            "atomic_patched": "0",
+            "atomic_placement_or_lowering_failed": "0",
+            "atomic_resource_failed": "0",
+            "atomic_selected": "0",
+            "atomic_supported": "0",
+            "atomic_unsupported": "0",
+            "barrier_discovered": "109497",
+            "barrier_expert_limit_omitted": "0",
+            "barrier_patched": "0",
+            "barrier_placement_or_lowering_failed": "109497",
+            "barrier_resource_failed": "0",
+            "barrier_selected": "109497",
+            "barrier_supported": "109497",
+            "barrier_unsupported": "0",
+            "engine": "record_replay",
+            "fence_discovered": "0",
+            "fence_expert_limit_omitted": "0",
+            "fence_patched": "0",
+            "fence_placement_or_lowering_failed": "0",
+            "fence_resource_failed": "0",
+            "fence_selected": "0",
+            "fence_supported": "0",
+            "fence_unsupported": "0",
+            "flavor": "moi",
+            "load": "1",
+            "reader": "110758386610016"
+          },
+          "incomplete_code_objects": 1,
+          "object_id": "reader=110758386610016,load=1",
+          "static_complete": false,
+          "unsupported": 829047
+        }
+      ],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+            "entry_offset": null,
+            "name": "gemm_f32_ss",
+            "target": "gfx950"
+          },
+          "reason": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing",
+          "returncode": 0,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "consan_coverage_incomplete: verdict analysis_complete=false; verdict static_complete=false; incomplete_code_objects=1; access patched/supported mismatch: 0/719550; barrier patched/supported mismatch: 0/109497; access placement_or_lowering_failed: 719550 instrumentation_patch_missing; barrier placement_or_lowering_failed: 109497 instrumentation_patch_missing",
+      "returncode": 0,
+      "sanitizer": "consan",
+      "state": "error",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x1804: missing s_waitcnt lgkmcnt(14) before use of v42; producer .text+0x15fc: ds_read_b32 v42, v15 offset:5632",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[0:3], v42, v20, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v42; producer .text+0x27ac: ds_read_b32 v42, v15 offset:5632",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[0:3], v42, v20, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2954: missing s_waitcnt lgkmcnt(14) before use of v42; producer .text+0x27ac: ds_read_b32 v42, v15 offset:5632",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[4:7], v42, v21, acc[4:7]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x295c: missing s_waitcnt lgkmcnt(14) before use of v43; producer .text+0x27bc: ds_read_b32 v43, v15 offset:5760",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[8:11], v43, v20, acc[8:11]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2964: missing s_waitcnt lgkmcnt(14) before use of v43; producer .text+0x27bc: ds_read_b32 v43, v15 offset:5760",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[12:15], v43, v21, acc[12:15]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x296c: missing s_waitcnt lgkmcnt(14) before use of v44; producer .text+0x27c4: ds_read_b32 v44, v15 offset:5888",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[16:19], v44, v20, acc[16:19]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2974: missing s_waitcnt lgkmcnt(14) before use of v44; producer .text+0x27c4: ds_read_b32 v44, v15 offset:5888",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[20:23], v44, v21, acc[20:23]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x297c: missing s_waitcnt lgkmcnt(14) before use of v45; producer .text+0x27d4: ds_read_b32 v45, v15 offset:6016",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[24:27], v45, v20, acc[24:27]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2984: missing s_waitcnt lgkmcnt(14) before use of v45; producer .text+0x27d4: ds_read_b32 v45, v15 offset:6016",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[28:31], v45, v21, acc[28:31]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x298c: missing s_waitcnt lgkmcnt(14) before use of v46; producer .text+0x27dc: ds_read_b32 v46, v15 offset:6144",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[32:35], v46, v20, acc[32:35]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2994: missing s_waitcnt lgkmcnt(14) before use of v46; producer .text+0x27dc: ds_read_b32 v46, v15 offset:6144",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[36:39], v46, v21, acc[36:39]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29a0: missing s_waitcnt lgkmcnt(14) before use of v47; producer .text+0x27f4: ds_read_b32 v47, v15 offset:8448",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[0:3], v47, v22, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29a8: missing s_waitcnt lgkmcnt(14) before use of v47; producer .text+0x27f4: ds_read_b32 v47, v15 offset:8448",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[4:7], v47, v23, acc[4:7]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29b0: missing s_waitcnt lgkmcnt(14) before use of v48; producer .text+0x2804: ds_read_b32 v48, v15 offset:8576",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[8:11], v48, v22, acc[8:11]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29b8: missing s_waitcnt lgkmcnt(14) before use of v48; producer .text+0x2804: ds_read_b32 v48, v15 offset:8576",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[12:15], v48, v23, acc[12:15]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29c0: missing s_waitcnt lgkmcnt(14) before use of v49; producer .text+0x280c: ds_read_b32 v49, v15 offset:8704",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[16:19], v49, v22, acc[16:19]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29c8: missing s_waitcnt lgkmcnt(14) before use of v49; producer .text+0x280c: ds_read_b32 v49, v15 offset:8704",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[20:23], v49, v23, acc[20:23]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29d0: missing s_waitcnt lgkmcnt(14) before use of v50; producer .text+0x281c: ds_read_b32 v50, v15 offset:8832",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[24:27], v50, v22, acc[24:27]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29d8: missing s_waitcnt lgkmcnt(14) before use of v50; producer .text+0x281c: ds_read_b32 v50, v15 offset:8832",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[28:31], v50, v23, acc[28:31]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29e0: missing s_waitcnt lgkmcnt(14) before use of v51; producer .text+0x2824: ds_read_b32 v51, v15 offset:8960",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[32:35], v51, v22, acc[32:35]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29e8: missing s_waitcnt lgkmcnt(14) before use of v51; producer .text+0x2824: ds_read_b32 v51, v15 offset:8960",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[36:39], v51, v23, acc[36:39]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29f4: missing s_waitcnt lgkmcnt(14) before use of v52; producer .text+0x283c: ds_read_b32 v52, v15 offset:11264",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[0:3], v52, v24, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x29fc: missing s_waitcnt lgkmcnt(14) before use of v52; producer .text+0x283c: ds_read_b32 v52, v15 offset:11264",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[4:7], v52, v25, acc[4:7]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a04: missing s_waitcnt lgkmcnt(14) before use of v53; producer .text+0x2850: ds_read_b32 v53, v15 offset:11392",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[8:11], v53, v24, acc[8:11]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a0c: missing s_waitcnt lgkmcnt(14) before use of v53; producer .text+0x2850: ds_read_b32 v53, v15 offset:11392",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[12:15], v53, v25, acc[12:15]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a14: missing s_waitcnt lgkmcnt(14) before use of v54; producer .text+0x2858: ds_read_b32 v54, v15 offset:11520",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[16:19], v54, v24, acc[16:19]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a1c: missing s_waitcnt lgkmcnt(14) before use of v54; producer .text+0x2858: ds_read_b32 v54, v15 offset:11520",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[20:23], v54, v25, acc[20:23]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a24: missing s_waitcnt lgkmcnt(14) before use of v55; producer .text+0x2868: ds_read_b32 v55, v15 offset:11648",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[24:27], v55, v24, acc[24:27]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a2c: missing s_waitcnt lgkmcnt(14) before use of v55; producer .text+0x2868: ds_read_b32 v55, v15 offset:11648",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[28:31], v55, v25, acc[28:31]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a34: missing s_waitcnt lgkmcnt(14) before use of v56; producer .text+0x2870: ds_read_b32 v56, v15 offset:11776",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[32:35], v56, v24, acc[32:35]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x2a3c: missing s_waitcnt lgkmcnt(14) before use of v56; producer .text+0x2870: ds_read_b32 v56, v15 offset:11776",
+          "metadata": {
+            "context_1": "consumer: v_mfma_f32_16x16x4_f32 acc[36:39], v56, v25, acc[36:39]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": null,
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": ".text+0x498: missing s_waitcnt lgkmcnt(0) before def of s45; producer .text+0x480: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+          "metadata": {
+            "context_1": "consumer: s_load_dword s45, s[0:1], 0x88"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        }
+      ],
+      "kernel_results": [],
+      "reason": null,
+      "returncode": 0,
+      "sanitizer": "waitcheck_preflight",
+      "state": "ran",
+      "verdict": "warn"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+          "entry_offset": null,
+          "name": "gemm_f32_ss",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
