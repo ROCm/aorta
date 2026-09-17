@@ -16,180 +16,81 @@
         "backend": null,
         "cls": "guardrail",
         "coverage": "",
-        "execution": "error",
+        "execution": "missing",
         "expected": "pass",
         "finding_groups": [],
         "findings": 0,
-        "kernel_reasons": [
-          {
-            "code_object": null,
-            "code_object_index": null,
-            "code_object_sha256": null,
-            "entry_offset": null,
-            "kernel": "consan_lds_race",
-            "label": "consan_lds_race",
-            "reason": "consan_output_parse_error: reader 99984905693328 access site count mismatch"
-          }
-        ],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "consan_output_parse_error: reader 99984905693328 access site count mismatch",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "error"
-          }
-        ],
+        "kernel_reasons": [],
+        "kernels": [],
         "match": false,
-        "observation": "consan error; reason consan_output_parse_error: reader 99984905693328 access site count mismatch; consan_lds_race: consan_output_parse_error: reader 99984905693328 access site count mismatch; preflight error",
-        "present": true,
+        "observation": "report missing",
+        "present": false,
         "primary": {
-          "preflight": "error",
-          "reason": "consan_output_parse_error: reader 99984905693328 access site count mismatch",
-          "sanitizer": "consan",
-          "verdict": "error"
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
         },
-        "report_rel": "runs/2026-09-16T131107-35095734136/consan-clean/sanitizer_report.json",
-        "verdict": "error",
+        "report_rel": null,
+        "verdict": "\u2014",
         "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
         }
       },
       "consan-racy": {
         "backend": null,
         "cls": "guardrail",
         "coverage": "",
-        "execution": "error",
+        "execution": "missing",
         "expected": "fail",
         "finding_groups": [],
         "findings": 0,
-        "kernel_reasons": [
-          {
-            "code_object": null,
-            "code_object_index": null,
-            "code_object_sha256": null,
-            "entry_offset": null,
-            "kernel": "consan_lds_race_2wave",
-            "label": "consan_lds_race_2wave",
-            "reason": "consan_output_parse_error: reader 108641345055616 access site count mismatch"
-          }
-        ],
-        "kernels": [
-          {
-            "code_object": "",
-            "detail": "consan_output_parse_error: reader 108641345055616 access site count mismatch",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race_2wave",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "error"
-          }
-        ],
+        "kernel_reasons": [],
+        "kernels": [],
         "match": false,
-        "observation": "consan error; reason consan_output_parse_error: reader 108641345055616 access site count mismatch; consan_lds_race_2wave: consan_output_parse_error: reader 108641345055616 access site count mismatch; preflight error",
-        "present": true,
+        "observation": "report missing",
+        "present": false,
         "primary": {
-          "preflight": "error",
-          "reason": "consan_output_parse_error: reader 108641345055616 access site count mismatch",
-          "sanitizer": "consan",
-          "verdict": "error"
+          "preflight": null,
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
         },
-        "report_rel": "runs/2026-09-16T131107-35095734136/consan-racy/sanitizer_report.json",
-        "verdict": "error",
+        "report_rel": null,
+        "verdict": "\u2014",
         "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
         }
       },
       "waitcheck": {
-        "backend": {
-          "name": "rj_waitcheck",
-          "sha": "d6005ac07123"
-        },
+        "backend": null,
         "cls": "guardrail",
         "coverage": "",
-        "execution": "error",
+        "execution": "missing",
         "expected": "warn",
-        "finding_groups": [
-          {
-            "code": "wait_hazard",
-            "count": 32,
-            "example": "sol_137678.hsaco:gfx950[0]:.text+0x4a4: missing s_waitcnt lgkmcnt(0) before def of s45",
-            "sanitizer": "waitcheck",
-            "severity": "warning"
-          }
-        ],
-        "findings": 32,
-        "kernel_reasons": [
-          {
-            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco",
-            "code_object_index": 0,
-            "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
-            "entry_offset": null,
-            "kernel": "gemm_NT_M256_N4096_K1024",
-            "label": "gemm_NT_M256_N4096_K1024",
-            "reason": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)"
-          }
-        ],
-        "kernels": [
-          {
-            "code_object": "sol_126578.hsaco",
-            "detail": "waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order)",
-            "dispatch": 479,
-            "findings": 0,
-            "name": "gemm_NT_M256_N4096_K1024",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "error"
-          },
-          {
-            "code_object": "sol_175415.hsaco",
-            "detail": "same code object as gemm_NT_M256_N4096_K1024; scanned once \u2014 waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncer\u2026",
-            "dispatch": 471,
-            "findings": 0,
-            "name": "gemm_NT_M128_N4096_K1280",
-            "offset": null,
-            "sha": "57c5d8efa4",
-            "time_ms": 0.0,
-            "verdict": "error"
-          },
-          {
-            "code_object": "sol_137678.hsaco",
-            "detail": "",
-            "dispatch": 440,
-            "findings": 32,
-            "name": "gemm_TT_M64_N64_K1280",
-            "offset": null,
-            "sha": "aeb46fded1",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          }
-        ],
+        "finding_groups": [],
+        "findings": 0,
+        "kernel_reasons": [],
+        "kernels": [],
         "match": false,
-        "observation": "waitcheck error; reason worklist_not_fully_checked; gemm_NT_M256_N4096_K1024: waitcheck_backend_exit_2: /workspace/aorta/recipes/sanitizers/fixtures/isa/sol_126578.hsaco: waitcheck analysis failed for gfx950[0]: waitcheck CFG dataflow did not converge at .text+0x24d7070 (in:loadcnt,uncertain-order;out:loadcnt,uncertain-order); 32 finding(s) (wait_hazard)",
-        "present": true,
+        "observation": "report missing",
+        "present": false,
         "primary": {
           "preflight": null,
-          "reason": "worklist_not_fully_checked",
-          "sanitizer": "waitcheck",
-          "verdict": "error"
+          "reason": null,
+          "sanitizer": null,
+          "verdict": null
         },
-        "report_rel": "runs/2026-09-16T131107-35095734136/waitcheck/sanitizer_report.json",
-        "verdict": "error",
+        "report_rel": null,
+        "verdict": "\u2014",
         "worklist": {
-          "kernel_count": 3,
-          "requirement": "top_dispatch_count",
-          "top_n": 3
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
         }
       }
     },
@@ -219,13 +120,13 @@
               "entry_offset": null,
               "kernel": "gemm_f32_ss",
               "label": "gemm_f32_ss",
-              "reason": "consan_output_parse_error: reader 109060825796384 atomic site count mismatch"
+              "reason": "consan_output_parse_error: reader 109057720442656 atomic site count mismatch"
             }
           ],
           "kernels": [
             {
               "code_object": "consan_gemm_f32.hsaco",
-              "detail": "consan_output_parse_error: reader 109060825796384 atomic site count mismatch",
+              "detail": "consan_output_parse_error: reader 109057720442656 atomic site count mismatch",
               "dispatch": 1,
               "findings": 0,
               "name": "gemm_f32_ss",
@@ -236,11 +137,11 @@
             }
           ],
           "match": true,
-          "observation": "consan error; reason consan_output_parse_error: reader 109060825796384 atomic site count mismatch; gemm_f32_ss: consan_output_parse_error: reader 109060825796384 atomic site count mismatch; preflight error",
+          "observation": "consan error; reason consan_output_parse_error: reader 109057720442656 atomic site count mismatch; gemm_f32_ss: consan_output_parse_error: reader 109057720442656 atomic site count mismatch; preflight error",
           "present": true,
           "primary": {
             "preflight": "error",
-            "reason": "consan_output_parse_error: reader 109060825796384 atomic site count mismatch",
+            "reason": "consan_output_parse_error: reader 109057720442656 atomic site count mismatch",
             "sanitizer": "consan",
             "verdict": "error"
           },
@@ -274,32 +175,32 @@
             {
               "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/lds.hsaco",
               "code_object_index": 0,
-              "code_object_sha256": "1fecedd3b7672ec729babadb978b5aaba6bc7a2c838d7972f27901ebb5a71517",
+              "code_object_sha256": "edd1560157a44bdd4a3ae9340feb3ee4f9fbe9e90737103e56069dd01632a386",
               "entry_offset": null,
               "kernel": "lds_reduce",
               "label": "lds_reduce",
-              "reason": "consan_output_parse_error: reader 96397145533216 access site count mismatch"
+              "reason": "consan_output_parse_error: reader 96768798027744 access site count mismatch"
             }
           ],
           "kernels": [
             {
               "code_object": "lds.hsaco",
-              "detail": "consan_output_parse_error: reader 96397145533216 access site count mismatch",
+              "detail": "consan_output_parse_error: reader 96768798027744 access site count mismatch",
               "dispatch": 1,
               "findings": 0,
               "name": "lds_reduce",
               "offset": null,
-              "sha": "1fecedd3b7",
+              "sha": "edd1560157",
               "time_ms": 0.0,
               "verdict": "error"
             }
           ],
           "match": true,
-          "observation": "consan error; reason consan_output_parse_error: reader 96397145533216 access site count mismatch; lds_reduce: consan_output_parse_error: reader 96397145533216 access site count mismatch; preflight error",
+          "observation": "consan error; reason consan_output_parse_error: reader 96768798027744 access site count mismatch; lds_reduce: consan_output_parse_error: reader 96768798027744 access site count mismatch; preflight error",
           "present": true,
           "primary": {
             "preflight": "error",
-            "reason": "consan_output_parse_error: reader 96397145533216 access site count mismatch",
+            "reason": "consan_output_parse_error: reader 96768798027744 access site count mismatch",
             "sanitizer": "consan",
             "verdict": "error"
           },
@@ -333,7 +234,7 @@
             {
               "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
               "code_object_index": 0,
-              "code_object_sha256": "759e829ddeca25a117955d0a10e7fc88bc52233a415c745f64bf0299769b8722",
+              "code_object_sha256": "f02c07e2ceab1bac8276a45faabdd3448eba32c6b8d1bd3ea6f64a1412f05158",
               "entry_offset": null,
               "kernel": "tiny_vecadd",
               "label": "tiny_vecadd",
@@ -348,7 +249,7 @@
               "findings": 0,
               "name": "tiny_vecadd",
               "offset": null,
-              "sha": "759e829dde",
+              "sha": "f02c07e2ce",
               "time_ms": 0.0,
               "verdict": "error"
             }
@@ -462,7 +363,7 @@
               "findings": 0,
               "name": "lds_reduce",
               "offset": null,
-              "sha": "1fecedd3b7",
+              "sha": "edd1560157",
               "time_ms": 0.0,
               "verdict": "pass"
             }
@@ -514,7 +415,7 @@
               "findings": 0,
               "name": "tiny_vecadd",
               "offset": null,
-              "sha": "759e829dde",
+              "sha": "f02c07e2ce",
               "time_ms": 0.0,
               "verdict": "pass"
             }

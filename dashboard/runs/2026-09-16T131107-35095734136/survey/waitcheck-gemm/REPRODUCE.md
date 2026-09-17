@@ -10,7 +10,6 @@ Sanitizer case `waitcheck-gemm` from run `2026-09-16T131107-35095734136` of the 
 - Class: survey (observed-only, non-gating)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/35095734136
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
-- rocjitsu bundle: `3ddf9dee36e2943cf0c6f548a8735553c183aea5` (https://github.com/ROCm/rocm-systems/actions/runs/34919210236)
 
 ## Observed
 

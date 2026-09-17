@@ -10,14 +10,13 @@ Sanitizer case `consan-lds-dispatch` from run `2026-09-16T131107-35095734136` of
 - Class: survey (observed-only, non-gating)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/35095734136
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
-- rocjitsu bundle: `3ddf9dee36e2943cf0c6f548a8735553c183aea5` (https://github.com/ROCm/rocm-systems/actions/runs/34919210236)
 
 ## Observed
 
 - Verdict: `error`
 - Execution: `error`
 - Findings: 0
-- Reason: `consan_output_parse_error: reader 96397145533216 access site count mismatch`
+- Reason: `consan_output_parse_error: reader 96768798027744 access site count mismatch`
 
 ## Run it yourself
 
@@ -50,19 +49,19 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 | Path | SHA-256 |
 |---|---|
-| `fixtures/isa/lds.hsaco` | `1fecedd3b7672ec729babadb978b5aaba6bc7a2c838d7972f27901ebb5a71517` |
+| `fixtures/isa/lds.hsaco` | `edd1560157a44bdd4a3ae9340feb3ee4f9fbe9e90737103e56069dd01632a386` |
 | `fixtures/bin/lds_dispatch` | `ded4e7b336e6fea0b95c7f59f219c26dcd3a19ec83cbcdd5e8e5df30090ba708` |
 
 ## Recorded digests
 
 | Key | Value |
 |---|---|
-| `code_object:lds.hsaco` | `1fecedd3b7672ec729babadb978b5aaba6bc7a2c838d7972f27901ebb5a71517` |
+| `code_object:lds.hsaco` | `edd1560157a44bdd4a3ae9340feb3ee4f9fbe9e90737103e56069dd01632a386` |
 | `command` | `/workspace/aorta/recipes/sanitizers/fixtures/bin/lds_dispatch` |
 | `command_sha256` | `ded4e7b336e6fea0b95c7f59f219c26dcd3a19ec83cbcdd5e8e5df30090ba708` |
 | `hook` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so` |
 | `hook_sha256` | `176f11c07cf5e310ffe2207132bde42aceee44eb86454635ba2ff7ced6cd2cc5` |
-| `selected_identity_sha256` | `6994f1d6fc609834997dbc9cdef70b5a6d43c64bbfdb124b3b8f8c7e4509a40f` |
+| `selected_identity_sha256` | `55fdffebd2441d128204e040d2a0cf9295f62e36901f9e6c5fafa40ad23560d8` |
 | `selected_kernel` | `lds_reduce` |
 
 ## Files here

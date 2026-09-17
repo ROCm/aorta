@@ -10,7 +10,6 @@ Sanitizer case `consan-tiny` from run `2026-09-16T131107-35095734136` of the AOR
 - Class: survey (observed-only, non-gating)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/35095734136
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
-- rocjitsu bundle: `3ddf9dee36e2943cf0c6f548a8735553c183aea5` (https://github.com/ROCm/rocm-systems/actions/runs/34919210236)
 
 ## Observed
 
@@ -50,19 +49,19 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 | Path | SHA-256 |
 |---|---|
-| `fixtures/isa/tiny.hsaco` | `759e829ddeca25a117955d0a10e7fc88bc52233a415c745f64bf0299769b8722` |
+| `fixtures/isa/tiny.hsaco` | `f02c07e2ceab1bac8276a45faabdd3448eba32c6b8d1bd3ea6f64a1412f05158` |
 | `fixtures/bin/consan_tiny_load` | `d110a697d5866e8aedc0b2475ff3437719e1de59836432436ee11862bdaf4f75` |
 
 ## Recorded digests
 
 | Key | Value |
 |---|---|
-| `code_object:tiny.hsaco` | `759e829ddeca25a117955d0a10e7fc88bc52233a415c745f64bf0299769b8722` |
+| `code_object:tiny.hsaco` | `f02c07e2ceab1bac8276a45faabdd3448eba32c6b8d1bd3ea6f64a1412f05158` |
 | `command` | `/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_tiny_load` |
 | `command_sha256` | `d110a697d5866e8aedc0b2475ff3437719e1de59836432436ee11862bdaf4f75` |
 | `hook` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so` |
 | `hook_sha256` | `176f11c07cf5e310ffe2207132bde42aceee44eb86454635ba2ff7ced6cd2cc5` |
-| `selected_identity_sha256` | `f05a171fcb27a1d84534112b277b6de4d53e5c59e2dc0b230611b7542fddea64` |
+| `selected_identity_sha256` | `0aa0db41314996431eeed79c6a604dd4626eb16de6590524bb696a68e68cdd93` |
 | `selected_kernel` | `tiny_vecadd` |
 
 ## Files here

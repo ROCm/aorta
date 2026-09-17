@@ -6,7 +6,7 @@
         "command_sha256": "d110a697d5866e8aedc0b2475ff3437719e1de59836432436ee11862bdaf4f75",
         "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
         "hook_sha256": "176f11c07cf5e310ffe2207132bde42aceee44eb86454635ba2ff7ced6cd2cc5",
-        "selected_identity_sha256": "f05a171fcb27a1d84534112b277b6de4d53e5c59e2dc0b230611b7542fddea64",
+        "selected_identity_sha256": "0aa0db41314996431eeed79c6a604dd4626eb16de6590524bb696a68e68cdd93",
         "selected_kernel": "tiny_vecadd"
       },
       "coverage": [],
@@ -19,7 +19,7 @@
           "identity": {
             "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
             "code_object_index": 0,
-            "code_object_sha256": "759e829ddeca25a117955d0a10e7fc88bc52233a415c745f64bf0299769b8722",
+            "code_object_sha256": "f02c07e2ceab1bac8276a45faabdd3448eba32c6b8d1bd3ea6f64a1412f05158",
             "entry_offset": null,
             "name": "tiny_vecadd",
             "target": "gfx950"
@@ -61,7 +61,7 @@
         "identity": {
           "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
           "code_object_index": 0,
-          "code_object_sha256": "759e829ddeca25a117955d0a10e7fc88bc52233a415c745f64bf0299769b8722",
+          "code_object_sha256": "f02c07e2ceab1bac8276a45faabdd3448eba32c6b8d1bd3ea6f64a1412f05158",
           "entry_offset": null,
           "name": "tiny_vecadd",
           "target": "gfx950"

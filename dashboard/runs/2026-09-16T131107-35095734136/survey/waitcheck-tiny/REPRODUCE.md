@@ -10,7 +10,6 @@ Sanitizer case `waitcheck-tiny` from run `2026-09-16T131107-35095734136` of the 
 - Class: survey (observed-only, non-gating)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/35095734136
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
-- rocjitsu bundle: `3ddf9dee36e2943cf0c6f548a8735553c183aea5` (https://github.com/ROCm/rocm-systems/actions/runs/34919210236)
 
 ## Observed
 
@@ -48,13 +47,13 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 | Path | SHA-256 |
 |---|---|
-| `fixtures/isa/tiny.hsaco` | `759e829ddeca25a117955d0a10e7fc88bc52233a415c745f64bf0299769b8722` |
+| `fixtures/isa/tiny.hsaco` | `f02c07e2ceab1bac8276a45faabdd3448eba32c6b8d1bd3ea6f64a1412f05158` |
 
 ## Recorded digests
 
 | Key | Value |
 |---|---|
-| `code_object:tiny.hsaco` | `759e829ddeca25a117955d0a10e7fc88bc52233a415c745f64bf0299769b8722` |
+| `code_object:tiny.hsaco` | `f02c07e2ceab1bac8276a45faabdd3448eba32c6b8d1bd3ea6f64a1412f05158` |
 | `path` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck` |
 | `sha256` | `d6005ac071231baf5eed5cd24a1590c2dbc2a0f93aa3c4aeccf9f75eb002cc13` |
 

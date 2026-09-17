@@ -10,7 +10,6 @@ Sanitizer case `waitcheck-lds-dispatch` from run `2026-09-16T131107-35095734136`
 - Class: survey (observed-only, non-gating)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/35095734136
 - Container image: `rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c`
-- rocjitsu bundle: `3ddf9dee36e2943cf0c6f548a8735553c183aea5` (https://github.com/ROCm/rocm-systems/actions/runs/34919210236)
 
 ## Observed
 
@@ -48,13 +47,13 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 | Path | SHA-256 |
 |---|---|
-| `fixtures/isa/lds.hsaco` | `1fecedd3b7672ec729babadb978b5aaba6bc7a2c838d7972f27901ebb5a71517` |
+| `fixtures/isa/lds.hsaco` | `edd1560157a44bdd4a3ae9340feb3ee4f9fbe9e90737103e56069dd01632a386` |
 
 ## Recorded digests
 
 | Key | Value |
 |---|---|
-| `code_object:lds.hsaco` | `1fecedd3b7672ec729babadb978b5aaba6bc7a2c838d7972f27901ebb5a71517` |
+| `code_object:lds.hsaco` | `edd1560157a44bdd4a3ae9340feb3ee4f9fbe9e90737103e56069dd01632a386` |
 | `path` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck` |
 | `sha256` | `d6005ac071231baf5eed5cd24a1590c2dbc2a0f93aa3c4aeccf9f75eb002cc13` |
 
