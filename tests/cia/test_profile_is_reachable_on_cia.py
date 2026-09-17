@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import builtins
 import logging
-import tomllib
 from pathlib import Path
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 pytest.importorskip("dspy", reason="the agents need the [cia] extra")
 
@@ -59,6 +63,12 @@ class TestTheExtraDeclaresWhatItReadsTheProfileWith:
     def test_dspy_is_still_declared(self):
         """The fix must not have displaced what was already there."""
         assert any(r.startswith("dspy-ai") for r in _cia_requirements())
+
+    def test_python_310_gets_the_tomllib_backport(self):
+        declared = " ".join(_cia_requirements())
+
+        assert "tomli>=2.0" in declared
+        assert "python_version < '3.11'" in declared
 
 
 class TestTheProfileIsActuallyReadable:
