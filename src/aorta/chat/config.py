@@ -32,7 +32,10 @@ import os
 from pathlib import Path
 from typing import Annotated, Any
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10; supplied by the [cia] extra
+    import tomli as tomllib
 from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import (
     BaseSettings,
@@ -91,7 +94,7 @@ def read_profile(path: Path | None = None) -> dict[str, Any]:
 
 
 class _TomlProfileSource(PydanticBaseSettingsSource):
-    """Reads ``$XDG_CONFIG_HOME/aorta/chat.toml`` with stdlib ``tomllib``.
+    """Reads ``$XDG_CONFIG_HOME/aorta/chat.toml`` with tomllib/tomli.
 
     Ranked below the environment so a CI job or a one-off shell export always
     wins over the file, and above the built-in defaults so the file is what
