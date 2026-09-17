@@ -291,6 +291,80 @@ class TestFailureIsRetriedAndThenGivenUpOn:
 
         assert len(calls) == 2, f"a failed autopsy was retried {len(calls) - 1} times"
 
+    def test_it_retries_while_the_same_watch_process_stays_alive(
+        self, tmp_path, alerting, monkeypatch
+    ):
+        """The old test restarted poll_jobs, which reset the suppressing set."""
+        calls: list[str] = []
+        failed_persisted = threading.Event()
+        real_record = poll_mod.record_autopsy_state
+
+        def recording(job_dir, state, **fields):
+            real_record(job_dir, state, **fields)
+            if state == "failed":
+                # Set after the state is on disk, so the next round is testing
+                # the exact ordering that failed in production.
+                failed_persisted.set()
+
+        def between_rounds(_seconds):
+            assert failed_persisted.wait(timeout=10), "the first Autopsy never failed"
+
+        def boom(bundle, job, jobs_root, stop=None):
+            calls.append(job.job_id)
+            raise RuntimeError("autopsy exploded")
+
+        monkeypatch.setattr(poll_mod, "record_autopsy_state", recording)
+        monkeypatch.setattr(poll_mod.time, "sleep", between_rounds)
+        monkeypatch.setattr("aorta.cia.watch.trigger.trigger_autopsy", boom)
+        _write_job(tmp_path, "cia-aaa")
+
+        poll_jobs(tmp_path, max_rounds=3)
+
+        assert len(calls) == 2, (
+            "the persisted failed state never overrode the in-memory alert claim"
+        )
+
+    def test_the_same_process_still_stops_at_the_attempt_limit(
+        self, tmp_path, alerting, monkeypatch
+    ):
+        """Recoverable must remain bounded when every attempt fails."""
+        calls: list[str] = []
+        condition = threading.Condition()
+        failure_count = 0
+        sleeps = 0
+        real_record = poll_mod.record_autopsy_state
+
+        def recording(job_dir, state, **fields):
+            nonlocal failure_count
+            real_record(job_dir, state, **fields)
+            if state == "failed":
+                with condition:
+                    failure_count += 1
+                    condition.notify_all()
+
+        def between_rounds(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+            target = min(sleeps, poll_mod.AUTOPSY_MAX_ATTEMPTS)
+            with condition:
+                assert condition.wait_for(
+                    lambda: failure_count >= target, timeout=10
+                ), f"Autopsy failure {target} was never persisted"
+
+        def boom(bundle, job, jobs_root, stop=None):
+            calls.append(job.job_id)
+            raise RuntimeError("autopsy exploded")
+
+        monkeypatch.setattr(poll_mod, "record_autopsy_state", recording)
+        monkeypatch.setattr(poll_mod.time, "sleep", between_rounds)
+        monkeypatch.setattr("aorta.cia.watch.trigger.trigger_autopsy", boom)
+        job_dir = _write_job(tmp_path, "cia-aaa")
+
+        poll_jobs(tmp_path, max_rounds=4)
+
+        assert len(calls) == poll_mod.AUTOPSY_MAX_ATTEMPTS
+        assert autopsy_state(job_dir)["state"] == "gave_up"
+
     def test_it_stops_after_the_attempt_limit(self, tmp_path, alerting, monkeypatch):
         """A crash loop must not spend every round on one job."""
         calls: list[str] = []

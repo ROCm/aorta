@@ -164,7 +164,11 @@ def autopsy_is_settled(job_dir: Path) -> bool:
     persistence exists to stop duplicate work, not to suppress work that never
     happened.
     """
-    recorded = autopsy_state(job_dir)
+    return _autopsy_state_is_settled(autopsy_state(job_dir))
+
+
+def _autopsy_state_is_settled(recorded: dict) -> bool:
+    """Whether one already-read state record means no work is eligible."""
     state = recorded.get("state")
     if not state:
         return False
@@ -287,15 +291,24 @@ def _poll_rounds(*, pool, jobs_root, finder, watcher, interval,
         active = scan_active_jobs(jobs_root)
 
         for job in active:
-            # Both halves matter: the set covers this process, the file covers
-            # a restart. Only the set existed, so a watcher that came back
-            # re-diagnosed what it had already paid for.
-            if job.job_id in alerted:
-                continue
             job_state_dir = jobs_root / job.job_id
-            if autopsy_is_settled(job_state_dir):
+            recorded = autopsy_state(job_state_dir)
+
+            # The persisted state is authoritative. ``alerted`` is only the
+            # fallback for a state file that could not be written: checking the
+            # set first suppressed a worker that had already recorded
+            # ``failed``, so the bounded retry path below was unreachable until
+            # this whole Watch process restarted.
+            #
+            # The same rule recovers an abandoned attempt and a stale
+            # queued/running attempt. A fresh queued/running one and every
+            # terminal state remain settled, so they keep the in-memory claim.
+            if not recorded.get("state") and job.job_id in alerted:
+                continue
+            if _autopsy_state_is_settled(recorded):
                 alerted.add(job.job_id)
                 continue
+            alerted.discard(job.job_id)
 
             # A retry does not wait for the job to say something new. Alerting
             # is driven by fresh log bytes, which is right for deciding whether
@@ -304,7 +317,7 @@ def _poll_rounds(*, pool, jobs_root, finder, watcher, interval,
             # that alerted and then went quiet -- which a crashed one does --
             # would otherwise keep its failed state for ever while the counter
             # that was meant to retry it never advanced.
-            pending = autopsy_state(job_state_dir)
+            pending = recorded
             if pending.get("state") in {"failed", "abandoned", "queued", "running"}:
                 bundle = job_state_dir / "bundle"
                 if bundle.exists():
