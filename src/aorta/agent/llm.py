@@ -177,15 +177,57 @@ class LLMProposer(Protocol):
     ) -> AgentStep: ...
 
 
+# Tokens that say *which tool* found something, and tokens that say the finding
+# is inside one kernel. `barrier` and a bare sanitizer name are each ambiguous
+# on their own -- see `_is_kernel_race_id`.
+_SANITIZER_TOKENS = frozenset({"consan", "waitcheck", "rocjitsu"})
+_INTRA_KERNEL_TOKENS = frozenset({"barrier", "hazard", "lds"})
+
+
+def _id_words(detector: str) -> set[str]:
+    """One detector ID split into words.
+
+    IDs separate words with ":" and "_" (`tier4:python_traceback`,
+    `custom:consan_data_race`), so splitting on non-alphanumerics is what makes
+    a whole-word test possible.
+    """
+    return set(re.split(r"[^a-z0-9]+", detector.lower()))
+
+
+def _is_kernel_race_id(detector: str) -> bool:
+    """Whether *one* detector ID is evidence of an intra-kernel race.
+
+    Judged per ID rather than over the joined string, which matters: two IDs
+    that each carry half the evidence -- say `custom:distributed_barrier_timeout`
+    beside `custom:consan_tool_failure` -- would otherwise combine into a
+    finding neither of them reports.
+
+    `race` and `waitcnt` are specific enough to stand alone. `barrier` and a
+    bare sanitizer name are not, and `custom:*` IDs are free-form
+    (`probe/classifier/tier5_custom.py` builds `custom:<raw_id>` from whatever
+    the recipe named), so both appear in IDs that are not races at all: a
+    `custom:distributed_barrier_timeout` is a collective that did not arrive,
+    and a `custom:consan_tool_failure` is the sanitizer itself falling over.
+    Neither is a race inside a kernel, and labelling them `kernel_race` asserts
+    a sanitizer-confirmed hazard that nothing observed.
+
+    So those two are required to co-occur on the same ID: a sanitizer named it
+    *and* the evidence is intra-kernel.
+    """
+    words = _id_words(detector)
+    if "race" in words or "waitcnt" in words:
+        return True
+    return bool(words & _SANITIZER_TOKENS) and bool(words & _INTRA_KERNEL_TOKENS)
+
+
 def _infer_category_from_detectors(detectors: list[str]) -> str:
     joined = " ".join(detectors).lower()
-    # Detector IDs separate words with ":" and "_" (`consan:data_race`,
+    # Detector IDs separate words with ":" and "_" (`custom:consan_data_race`,
     # `tier4:python_traceback`), so a substring test for a short word like
-    # "race" also fires inside "traceback". Only the "race" leg below needs
-    # whole-word matching; every other term here is either long enough to be
-    # unambiguous or is deliberately matched across a separator ("tier1:exit",
-    # "nan_signature"), which tokenising would break.
-    words = set(re.split(r"[^a-z0-9]+", joined))
+    # "race" also fires inside "traceback". The kernel-race leg below is
+    # therefore decided per ID by `_is_kernel_race_id`; every other term here is
+    # either long enough to be unambiguous or is deliberately matched across a
+    # separator ("tier1:exit", "nan_signature"), which tokenising would break.
     if "tier2" in joined or "hang" in joined or "rccl" in joined:
         return "rccl_hang"
     if "oom" in joined or "137" in joined:
@@ -201,7 +243,7 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # barrier, so the old branch routed intra-kernel evidence to a checkpoint-I/O
     # label. Checked after "checkpoint" so a detector naming both still wins for
     # checkpoint_race.
-    if "race" in words or "consan" in joined or "barrier" in joined or "waitcnt" in joined:
+    if any(_is_kernel_race_id(detector) for detector in detectors):
         return "kernel_race"
     if "tier1:exit" in joined or "launch" in joined:
         return "launch_error"
@@ -230,7 +272,14 @@ class FakeLLMProposer:
                 category = "illegal_mem"
             elif "oom" in low:
                 category = "oom_fragment"
-            elif "nan" in low:
+            # Whole word, for the same reason the `race` legs want one: "nan" is
+            # a substring of ordinary words a GPU symptom is likely to contain
+            # -- "canonical", "nanoseconds", "maintenance" -- and this branch
+            # only runs once the detectors have already fallen through to
+            # `unknown`, which is exactly when a stray match decides the label.
+            # `nans?` because the plural is how people write it ("NaNs in the
+            # gradients") and a bare `\bnan\b` would miss it.
+            elif re.search(r"\bnans?\b", low):
                 category = "numeric_instability"
             elif "nondetermin" in low:
                 category = "nondeterminism"

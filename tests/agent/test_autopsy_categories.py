@@ -184,6 +184,31 @@ class TestTheOfflineHeuristic:
         """`race` is a substring of `traceback`, a plausible symptom word."""
         assert _fake_step(symptom="python traceback at startup").category != "kernel_race"
 
+    @pytest.mark.parametrize(
+        "symptom",
+        [
+            "canonical layout mismatch in the reduction kernel",
+            "kernel launch overhead measured in nanoseconds",
+            "maintenance window truncated the run",
+        ],
+    )
+    def test_nan_inside_another_word_is_not_numeric_instability(self, symptom):
+        """Same footgun as `race` inside `traceback`, on the symptom branch.
+
+        `"nan" in "canonical"` holds, and this branch only runs once the
+        detectors have fallen through to `unknown` -- exactly when a stray
+        match is what decides the label.
+        """
+        assert _fake_step(symptom=symptom).category != "numeric_instability"
+
+    @pytest.mark.parametrize(
+        "symptom",
+        ["loss went to nan at step 40", "NaNs in the gradients after the all-reduce"],
+    )
+    def test_nan_as_a_word_still_routes(self, symptom):
+        """Including the plural, which is how it tends to be written."""
+        assert _fake_step(symptom=symptom).category == "numeric_instability"
+
     def test_the_traceback_detector_is_not_a_race(self):
         """The same substring collision, but reached through a shipping detector ID.
 
@@ -198,12 +223,71 @@ class TestTheOfflineHeuristic:
         step = _fake_step(detectors=["tier4:python_traceback", "consan:data_race"])
         assert step.category == "kernel_race"
 
+    @pytest.mark.parametrize(
+        "detector",
+        [
+            # A collective that never arrived, not a hazard inside a kernel.
+            "custom:distributed_barrier_timeout",
+            # The sanitizer itself falling over reports nothing about a race.
+            "custom:consan_tool_failure",
+        ],
+    )
+    def test_an_ambiguous_custom_id_is_not_a_kernel_race(self, detector):
+        """`custom:*` ids are free-form, so `barrier` and a bare sanitizer name
+        are not evidence on their own.
+
+        `tier5_custom.py` builds `custom:<raw_id>` from whatever a recipe named,
+        so a substring test over them asserts a sanitizer-confirmed hazard that
+        nothing observed -- the same class of miss as `race` inside `traceback`.
+        """
+        assert _fake_step(detectors=[detector]).category != "kernel_race"
+
+    @pytest.mark.parametrize(
+        "detector",
+        [
+            # The reachable spelling: tier 5 is the only route a sanitizer
+            # finding has into `failure_detectors_fired`, and it prefixes
+            # `custom:`. The `consan:`/`waitcheck:` ids used elsewhere in this
+            # file are not valid detector prefixes at all.
+            "custom:consan_data_race",
+            "custom:consan_barrier_unpatched",
+            "custom:waitcheck_lds_hazard",
+            "custom:waitcheck_missing_waitcnt",
+        ],
+    )
+    def test_a_real_sanitizer_custom_id_is_a_kernel_race(self, detector):
+        """Narrowing the leg must not make it unreachable.
+
+        Requiring a literal `consan:` / `waitcheck:` prefix would have done
+        exactly that: `KNOWN_DETECTOR_PREFIXES` is tier1..tier4 plus custom, so
+        no detector the classifier can emit carries those prefixes, and the leg
+        would have been dead for every id that can actually fire.
+        """
+        assert _fake_step(detectors=[detector]).category == "kernel_race"
+
+    def test_two_half_matches_on_different_ids_do_not_combine(self):
+        """Judged per id, not over the joined string.
+
+        Scanning the concatenation lets one id supply `barrier` and another
+        supply `consan`, producing a finding neither of them reports.
+        """
+        step = _fake_step(
+            detectors=["custom:distributed_barrier_timeout", "custom:consan_tool_failure"]
+        )
+        assert step.category != "kernel_race"
+
 
 class TestTheDocsAgree:
     @pytest.mark.parametrize("category", sorted(AUTOPSY_CATEGORIES))
     def test_the_operator_doc_lists_every_label(self, category):
-        """The taxonomy table is what a human reads; it drifts silently otherwise."""
-        assert f"`{category}`" in AGENT_DOC.read_text(encoding="utf-8")
+        """The taxonomy table is what a human reads; it drifts silently otherwise.
+
+        Pinned to a table *row*, not to the name appearing anywhere. The gloss
+        prose under the table names the labels too, so a bare
+        `` `kernel_race` `` search passed with the row deleted -- the drift this
+        test exists to catch was the one shape it could not see.
+        """
+        assert f"| `{category}` |" in AGENT_DOC.read_text(encoding="utf-8")
 
 
 class TestTheCorpusGroundTruth:
