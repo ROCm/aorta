@@ -177,6 +177,19 @@ def _fmt_tools_used(result: dict) -> list[str]:
     return lines
 
 
+#: Written into the result when a sweep came back without the report it owed,
+#: and read again by the cache guards. One string, because a run that did not
+#: check anything must not be remembered as a diagnosis -- and the check for
+#: that is only as good as the two spellings agreeing.
+_DID_NOT_RUN = "Sanitizer verdict: DID NOT RUN"
+
+#: The triage arguments that submit a sanitizer sweep, and therefore owe a
+#: report. Both reach `aorta sweep run`: --recipe directly, --source through
+#: the kernel recipe triage.py writes for it. --command is the user's own
+#: program and promises nothing.
+_SWEEP_ARGS = ("--recipe", "--source")
+
+
 def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) -> str:
     lines = [
         f"Job {result['job_id']} (slurm {result.get('slurm_job_id', '?')}) — {label}",
@@ -206,7 +219,7 @@ def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) 
         # "no wait hazards found".
         lines.append("")
         lines.append(
-            "Sanitizer verdict: DID NOT RUN. This job was submitted to run a "
+            f"{_DID_NOT_RUN}. This job was submitted to run a "
             "sanitizer and produced no report, so nothing was checked. This is "
             "not a clean result and must not be reported as one: say the run "
             "failed, and cite the job log."
@@ -317,10 +330,16 @@ def _run_triage(extra_args: list[str], label: str) -> str:
         return (f"Triage failed at stage {result.get('stage', '?')}: "
                 f"{result.get('error', 'unknown error')}")
 
-    # A --recipe run is a sanitizer run by construction: write_asm_recipe asks
-    # for waitcheck and sets on_missing_backend=fail. So a report is owed, and
-    # its absence is a failure rather than a clean sheet.
-    expect_sanitizer = "--recipe" in extra_args
+    # A sweep run is a sanitizer run by construction: write_asm_recipe asks for
+    # waitcheck and sets on_missing_backend=fail, and the kernel recipe
+    # triage.py writes for --source runs the same sweep. So a report is owed,
+    # and its absence is a failure rather than a clean sheet.
+    #
+    # This read --recipe alone, which is the one sweep argument the pasted
+    # kernel path does not use: triage_kernel_source passes --source, so the
+    # warning below never fired for exactly the case it was written about -- a
+    # kernel that nothing analysed, reported as clean.
+    expect_sanitizer = any(arg in extra_args for arg in _SWEEP_ARGS)
     return _format_result(result, label, expect_sanitizer=expect_sanitizer)
 
 
@@ -486,7 +505,13 @@ def triage_kernel_source(
     rendered = "\n".join(lines) + body
     # Only a completed run is worth reusing; a transient launch failure should be
     # retried rather than remembered.
-    if "Autopsy verdict:" in rendered:
+    #
+    # An Autopsy verdict is not enough on its own. Autopsy will happily explain
+    # an empty bundle, so a sweep whose sanitizer never ran still comes back
+    # carrying a verdict -- and caching that pins "we looked and found nothing"
+    # to this paste for the rest of the conversation, including across the retry
+    # that would have worked.
+    if "Autopsy verdict:" in rendered and _DID_NOT_RUN not in rendered:
         cache.put(cache_key, rendered)
     return rendered
 
@@ -679,11 +704,12 @@ def triage_assembly_source(
         "the kernel was tested."
     )
     result = "\n".join([body, "", *note])
-    # The same rule the kernel path keeps: a timeout, a launch failure or an
-    # Autopsy that produced no report is worth retrying, and caching one means
-    # the next attempt replays it instead -- for the rest of the conversation,
-    # since the key is the paste and the paste has not changed.
-    if "Autopsy verdict:" in result:
+    # The same rule the kernel path keeps: a timeout, a launch failure, an
+    # Autopsy that produced no report, or a sweep whose sanitizer never ran is
+    # worth retrying, and caching one means the next attempt replays it instead
+    # -- for the rest of the conversation, since the key is the paste and the
+    # paste has not changed.
+    if "Autopsy verdict:" in result and _DID_NOT_RUN not in result:
         cache.put(cache_key, result)
     return result
 
