@@ -371,9 +371,11 @@ the stacked follow-up:
   the argmax with HTTP 200 — so `n` completions come back identical while the
   export describes a sampled rollout. Rollout mode therefore defaults the flag
   to `triton`, reserves it against `serve_args`, and reads `sampling_backend`
-  back off `/get_server_info` after bring-up, failing the step (exit 57,
-  `rollout_sampling_ignored`) if the engine still reports `greedy`. Benchmark
-  cells are left on the engine default, where argmax is what is wanted.
+  back off `/get_server_info` after bring-up, failing the step if the engine
+  disagrees — exit 57 `rollout_sampling_ignored` when it reports `greedy`, exit
+  58 `rollout_sampling_backend_mismatch` when it reports a different sampling
+  backend. Benchmark cells are left on the engine default, where argmax is what
+  is wanted.
 - **`rollout_samples > 1` does not give you independent samples, and this is
   the biggest caveat on the page.** TokenSpeed returns *identical* choices for
   `n > 1` within a single request. So `rollout_samples: 8` produces one
@@ -385,7 +387,7 @@ the stacked follow-up:
 
   ⚠ **This is not the greedy-default defect described in the bullet above, and
   the two must not be conflated.** That one is fixed here — the backend is
-  pinned to `triton` and read back, with exit 57 if the engine disagrees. The
+  pinned to `triton` and read back, failing the step if the engine disagrees. The
   `n > 1` collapse is a separate upstream defect that *survives* that fix: it
   reproduces at every temperature with sampling working. Do not read the
   sampling-backend fix as having resolved it. Separate requests are unaffected,

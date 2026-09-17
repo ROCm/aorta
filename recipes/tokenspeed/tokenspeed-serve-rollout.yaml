@@ -42,8 +42,10 @@
 # must not be conflated. That one was the engine defaulting `--sampling-backend`
 # to `greedy` off NVIDIA and silently discarding `temperature`, `top_p`, `top_k`
 # and `seed`; it is fixed, the backend is now pinned to `triton`, and the
-# workload reads it back off `/get_server_info` and fails with exit 57 if the
-# engine disagrees. The `n > 1` collapse is a separate upstream defect that
+# workload reads it back off `/get_server_info` -- failing with exit 57
+# (`rollout_sampling_ignored`) if the engine reports `greedy`, or exit 58
+# (`rollout_sampling_backend_mismatch`) if it reports some other backend than
+# was asked for. The `n > 1` collapse is a separate upstream defect that
 # SURVIVES that fix -- it reproduces at every temperature with sampling working.
 # A future reader should not assume the sampling-backend fix resolved it,
 # because it does not. Separate requests are unaffected, which is why the RL
