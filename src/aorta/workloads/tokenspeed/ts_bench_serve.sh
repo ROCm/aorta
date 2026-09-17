@@ -76,9 +76,13 @@
 #                         appended                        (rollout only)
 #   TS_TEMPERATURE        sampling temperature            (rollout only)
 #   TS_TOP_P              nucleus sampling mass, omitted when unset
-#   TS_MIN_MEAN_OUTPUT_TOKENS  floor on total_output_tokens/completed per
-#                         step, 0 to disable. Guards the collapsed-policy case
-#                         described at the audit below     (default 0)
+#   TS_MIN_MEAN_OUTPUT_TOKENS  floor on mean tokens per *completion* per step,
+#                         total_output_tokens/(completed*TS_ROLLOUT_SAMPLES),
+#                         0 to disable. Per completion, not per request:
+#                         total_output_tokens sums across all n choices, so a
+#                         per-request floor is n times easier to clear. Guards
+#                         the collapsed-policy case described at the audit
+#                         below                             (default 0)
 #   TS_SAVE_DETAILED      1 to keep the export's per-request arrays, which is
 #                         what carries `output_lens`       (default 0)
 #   TS_SEED               dataset/sampling seed           (default 0)
