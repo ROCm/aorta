@@ -18,6 +18,7 @@ silently replacing a sibling's source.
 
 from __future__ import annotations
 
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -25,7 +26,8 @@ import pytest
 
 pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
 
-from aorta.chat.tools.cluster import _stage_dir, _write_new
+import aorta.chat.tools.cluster as cluster
+from aorta.chat.tools.cluster import _stage_dir, _staged_stem, _write_new
 
 _CLUSTER = (
     Path(__file__).resolve().parents[2] / "src" / "aorta" / "chat" / "tools" / "cluster.py"
@@ -62,6 +64,52 @@ class TestEachCallGetsItsOwnDirectory:
         work = _stage_dir(tmp_path, "reduce_sum")
 
         assert work.name.startswith("reduce_sum-")
+
+
+class TestAStagedNameIsOneComponent:
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "../../outside",
+            "/tmp/outside",
+            r"..\..\outside",
+            "kernel/child",
+            "..",
+        ],
+    )
+    def test_path_syntax_is_removed(self, hostile):
+        stem = _staged_stem(hostile)
+
+        assert stem not in {"", ".", ".."}
+        assert Path(stem).name == stem
+        assert "/" not in stem
+        assert "\\" not in stem
+
+    def test_the_directory_prefix_is_sanitized_defensively(self, tmp_path):
+        work = _stage_dir(tmp_path, "../../outside")
+
+        work.relative_to(tmp_path.resolve())
+        assert work.parent == tmp_path.resolve()
+        assert work.name.startswith("outside-")
+
+    def test_an_empty_result_gets_a_safe_fallback(self):
+        assert _staged_stem("../../", "kernel") == "kernel"
+
+    def test_an_overlong_symbol_is_bounded(self):
+        assert len(_staged_stem("k" * 10_000)) == 60
+
+    def test_the_created_directory_is_verified_after_mkdtemp(
+        self, tmp_path, monkeypatch
+    ):
+        parent = tmp_path / "inside"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        monkeypatch.setattr(
+            cluster.tempfile, "mkdtemp", lambda **_kwargs: str(outside)
+        )
+
+        with pytest.raises(ValueError, match="escaped"):
+            _stage_dir(parent, "kernel")
 
 
 class TestTheWritesAreExclusive:
@@ -109,3 +157,49 @@ class TestAllThreePathsUseIt:
         source = _CLUSTER.read_text(encoding="utf-8")
 
         assert 'asm_path = staging /' not in source
+
+
+class TestACompleteAssemblyCannotNameAPath:
+    def test_its_kernel_token_stays_semantic_not_structural(
+        self, tmp_path, monkeypatch
+    ):
+        jobs = tmp_path / "jobs"
+        monkeypatch.setenv("AORTA_CHAT_JOBS_PATH", str(jobs))
+        from aorta.chat.config import reset_settings
+
+        reset_settings()
+        submitted: list[str] = []
+
+        def assemble(_command):
+            assembly = next((jobs / "chat-asm").rglob("*.s"))
+            assembly.with_suffix(".hsaco").write_bytes(b"code object")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        monkeypatch.setattr(cluster, "_assemble", assemble)
+        monkeypatch.setattr(
+            cluster,
+            "_run_triage",
+            lambda args, _label: (
+                submitted.extend(args) or "Autopsy verdict:\n  category: clean"
+            ),
+        )
+        complete = """
+.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
+.text
+.amdhsa_kernel ../../outside
+.end_amdhsa_kernel
+"""
+        try:
+            result = cluster.triage_assembly_source.func(complete)
+        finally:
+            reset_settings()
+
+        root = (jobs / "chat-asm").resolve()
+        staged = [path for path in root.rglob("*") if path.is_file()]
+        assert staged, result
+        for path in staged:
+            path.resolve().relative_to(root)
+            assert path.name not in {".", ".."}
+        recipe = Path(submitted[submitted.index("--recipe") + 1])
+        recipe.resolve().relative_to(root)
+        assert recipe.name == "outside.yaml"

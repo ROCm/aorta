@@ -332,6 +332,19 @@ def _wrong_tool_hint(source: str) -> str:
     )
 
 
+def _staged_stem(name: str, fallback: str = "source") -> str:
+    """Turn a model/source-derived name into one filename component.
+
+    A complete assembly unit supplies its own kernel name through
+    ``.amdhsa_kernel``. The parser intentionally accepts the assembler's token
+    rather than a C identifier, so a token such as ``../../outside`` reached
+    both ``mkdtemp(prefix=...)`` and ``work / f"{name}.s"``. Sanitizing only
+    the directory prefix would therefore leave the filename escape intact.
+    """
+    stem = _STAGED_STEM_RE.sub("_", str(name)).strip("._")[:60]
+    return stem or fallback
+
+
 def _stage_dir(parent: Path, name: str) -> Path:
     """A staging directory this call alone owns.
 
@@ -346,9 +359,22 @@ def _stage_dir(parent: Path, name: str) -> Path:
     call's or the call raises, and the plain filenames inside it cannot
     collide because nothing else can reach them.
     """
+    stem = _staged_stem(name)
     parent.mkdir(parents=True, exist_ok=True)
+    resolved_parent = parent.resolve(strict=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path(tempfile.mkdtemp(prefix=f"{name}-{stamp}-", dir=parent))
+    created = Path(
+        tempfile.mkdtemp(prefix=f"{stem}-{stamp}-", dir=resolved_parent)
+    ).resolve(strict=True)
+    try:
+        created.relative_to(resolved_parent)
+    except ValueError as exc:
+        # tempfile promises to honor dir, but this is a security boundary and
+        # the path is used for writes immediately after this function returns.
+        raise ValueError(
+            f"temporary staging directory escaped {resolved_parent}: {created}"
+        ) from exc
+    return created
 
 
 def _write_new(path: Path, text: str) -> None:
@@ -425,8 +451,9 @@ def triage_kernel_source(
             "conversation — no second cluster job was submitted.)\n\n" + cached
         )
 
-    work = _stage_dir(settings.jobs_root / "chat-kernels", prepared.kernel)
-    src_path = work / f"{prepared.kernel}.hip"
+    stem = _staged_stem(prepared.kernel, "kernel")
+    work = _stage_dir(settings.jobs_root / "chat-kernels", stem)
+    src_path = work / f"{stem}.hip"
     _write_new(src_path, prepared.program)
 
     lines = [f"Analysing kernel '{prepared.kernel}' from {src_path}."]
@@ -573,9 +600,10 @@ def triage_assembly_source(source: str, label: str = "") -> str:
             "conversation.)\n\n" + cached
         )
 
-    work = _stage_dir(settings.jobs_root / "chat-asm", prepared.kernel)
-    asm_path = work / f"{prepared.kernel}.s"
-    obj_path = work / f"{prepared.kernel}.hsaco"
+    stem = _staged_stem(prepared.kernel, "kernel")
+    work = _stage_dir(settings.jobs_root / "chat-asm", stem)
+    asm_path = work / f"{stem}.s"
+    obj_path = work / f"{stem}.hsaco"
     _write_new(asm_path, prepared.program)
 
     try:
@@ -608,7 +636,7 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         )
 
     recipe = write_asm_recipe(
-        recipe_path=work / f"{prepared.kernel}.yaml",
+        recipe_path=work / f"{stem}.yaml",
         kernel_name=prepared.kernel,
         code_object=obj_path,
         target=_arch(),
@@ -674,7 +702,7 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
     # same path, so a second triage overwrote the first one's script while it
     # was still being read on the node. The kernel and assembly paths already
     # stamp their stems; this one did not.
-    stem = _STAGED_STEM_RE.sub("_", name).strip("._")[:60] or "workload"
+    stem = _staged_stem(name, "workload")
     work = _stage_dir(settings.jobs_root / "staged", stem)
     script = work / f"{stem}.py"
     _write_new(script, source)
