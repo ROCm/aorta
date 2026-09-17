@@ -24,7 +24,7 @@ Two modes, mirroring the two committed HIP loaders:
     all -- ConSan instruments a code object when it is loaded.
 
 ``dispatch``
-    Additionally launch the kernel once, for record/replay's dynamic coverage.
+    Additionally launch the kernel once, for ConSan's dynamic coverage.
     This needs the argument signature, which Triton does **not** always write to
     the metadata JSON (it is absent in 3.7.1), so pass ``--launch-spec`` when the
     metadata has no ``signature`` -- preferably as an array of ``[name, type]``

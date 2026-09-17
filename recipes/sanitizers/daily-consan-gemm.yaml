@@ -107,7 +107,7 @@ sanitizer_plan:
     #
     # Dynamic race evidence over a dispatching GEMM is genuinely out of scope here and
     # is tracked separately; daily-consan-lds-dispatch.yaml is the end-to-end control
-    # that proves the record/replay path works on a caller-supplied object.
+    # that proves the dynamic MOI path works on a caller-supplied object.
     consan_policy: lenient
     on_missing_backend: fail
     # Raised from the 300s cap of #364, which was chosen only because ROCm/rocm-systems#9964

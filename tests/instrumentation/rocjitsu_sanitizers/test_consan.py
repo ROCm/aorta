@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -8,12 +9,15 @@ import pytest
 from aorta.instrumentation.rocjitsu_sanitizers import (
     ConSanMode,
     ExecutionState,
+    FindingSeverity,
     KernelIdentity,
     KernelObservation,
     KernelWorklist,
     SelectionRequirement,
     Verdict,
+    evaluate_consan_output,
     evaluate_record_replay,
+    parse_consan_output,
     parse_record_replay_output,
     scoped_consan_not_checked,
 )
@@ -40,9 +44,9 @@ def _zero_counts(kind: str) -> str:
     )
 
 
-def _healthy_evidence() -> str:
+def _healthy_evidence(*, engine: str = "record_replay") -> str:
     coverage = (
-        f"{_PREFIX} coverage reader=1 load=1 flavor=moi engine=record_replay "
+        f"{_PREFIX} coverage reader=1 load=1 flavor=moi engine={engine} "
         "analysis_complete=true expert_limit=false "
         "access_discovered=2 access_supported=2 access_selected=2 "
         "access_patched=2 access_unsupported=0 access_resource_failed=0 "
@@ -68,6 +72,64 @@ def _healthy_evidence() -> str:
         "replay_metadata_full=0"
     )
     return "\n".join((coverage, *sites, verdict))
+
+
+# The three Sampled log shapes below are transcribed from RocJITsu's renderer
+# (rj_hsa_dbi_moi_sampled_report_renderer.cpp at 164c20fae8c). Two of them look
+# alike on purpose: the conflict record and the benign per-watchpoint evidence
+# record share the "auto sampled" stem, and only the first is a race.
+
+
+def _sampled_report(
+    *,
+    reader: int = 1,
+    conflicts: int = 0,
+    immediate: int = 0,
+    examples: int = 0,
+    pairs_without_example: int = 0,
+) -> str:
+    """One per-reader ``auto report`` line with the Sampled counters appended.
+
+    Only the four conflict counters are load-bearing here; the rest of the line
+    is carried so the parser is exercised against a realistically wide record.
+    """
+    return (
+        f"{_PREFIX} MOI auto report reader={reader} addr=0x7f1200000000 bytes=65536 "
+        "generation=3 code_object=b1946ac92492d234 event_counter=0 access_records=2 "
+        "visible_records=2 dropped_records=0 capacity=1024 barrier_records=0 "
+        "visible_barriers=0 dropped_barriers=0 barrier_capacity=256 atomic_records=0 "
+        "visible_atomics=0 dropped_atomics=0 atomic_capacity=256 fence_records=0 "
+        "visible_fences=0 dropped_fences=0 fence_capacity=256 diagnostics=0 "
+        "visible_diagnostics=0 dropped_diagnostics=0 diagnostic_capacity=8 "
+        "sampled_watchpoints=64 visible_sampled=2 sampled_sync_capacity=64 "
+        f"sampled_conflicts={conflicts} sampled_immediate_conflicts={immediate} "
+        "sampled_claimed_windows=2 sampled_dropped_windows=0 sampled_saturated_windows=0 "
+        f"sampled_conflict_examples={examples} "
+        f"sampled_conflict_pairs_without_example={pairs_without_example} fine_grained=false"
+    )
+
+
+def _sampled_conflict(*, reader: int = 1, first_index: int = 0, second_index: int = 1) -> str:
+    return (
+        f"{_PREFIX} MOI auto sampled conflict reader={reader} first_index={first_index} "
+        f"second_index={second_index} first_kind=1 second_kind=2 first_owner=0 "
+        "second_owner=1 epoch=2 generation=3 first_bytes=[0,4) second_bytes=[0,4) "
+        "code_object=b1946ac92492d234 first_instruction=0x40 second_instruction=0x48 "
+        "dispatch=0x1 workgroup=(0,0,0) cluster_workgroup=0 "
+        "first_lanes=0x000000000000000f second_lanes=0x00000000000000f0"
+    )
+
+
+def _sampled_evidence(*, reader: int = 1, index: int = 0) -> str:
+    """A benign retained-watchpoint record. Evidence of coverage, not a race."""
+    return (
+        f"{_PREFIX} MOI auto sampled reader={reader} index={index} kind=1 owner=0 "
+        "epoch=2 generation=3 bytes=[0,4) consumed=false dispatch=0x1 "
+        "workgroup=(0,0,0) instruction=0x40 trampoline=0x180 relocated_guest=0x200 "
+        "scratch_vgpr=6 range=0 bank=0 mapped=true sync_class=0 sync_kind=0 "
+        "sync_role=0 sync_scope=0 sync_outcome=0 sync_address=0x0 sync_bytes=0 "
+        "sync_epochs=0/0"
+    )
 
 
 def _attention_evidence(*, access_sites: int = 3) -> str:
@@ -169,6 +231,310 @@ def test_benign_inventory_diagnostics_are_not_races() -> None:
     parsed = parse_record_replay_output(output)
 
     assert parsed.consan_findings == ()
+
+
+def test_clean_sampled_evidence_is_not_a_race() -> None:
+    # Retained-watchpoint records are how Sampled shows it was watching. They
+    # share the "auto sampled" stem with the conflict record, so a parser that
+    # keyed off the stem would report every clean run as a race.
+    output = "\n".join(
+        (
+            _sampled_evidence(index=0),
+            _sampled_evidence(index=1),
+            _sampled_report(),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.findings == ()
+    assert consan.verdict is Verdict.PASS
+
+
+def test_sampled_log_limit_line_is_not_a_race() -> None:
+    # Past 64 retained watchpoints the hook stops itemizing and says so. That
+    # line is an omission notice about benign evidence, not a conflict.
+    output = "\n".join(
+        (
+            f"{_PREFIX} MOI auto sampled reader=1 omitted=12 after log limit=64",
+            _sampled_report(),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.findings == ()
+    assert consan.verdict is Verdict.PASS
+
+
+def test_sampled_conflict_records_are_races() -> None:
+    output = "\n".join(
+        (
+            _sampled_conflict(first_index=0, second_index=1),
+            _sampled_conflict(first_index=2, second_index=3),
+            _sampled_report(conflicts=2, examples=2),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.verdict is Verdict.FAIL
+    assert [finding.code for finding in consan.findings] == ["sampled_conflict"] * 2
+    assert all(finding.severity is FindingSeverity.RACE for finding in consan.findings)
+    assert all(finding.code_object == "b1946ac92492d234" for finding in consan.findings)
+
+
+def test_sampled_summary_shortfall_adds_exactly_one_finding() -> None:
+    # Three conflicts, one example logged: the other two are visible only as a
+    # count, and must not be reported as two separate unexplained races either.
+    output = "\n".join(
+        (
+            _sampled_conflict(),
+            _sampled_report(conflicts=3, examples=1, pairs_without_example=2),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    parsed = parse_consan_output(output)
+
+    codes = [finding.code for finding in parsed.consan_findings]
+    assert codes.count("sampled_conflict") == 1
+    assert codes.count("sampled_conflict_summary") == 1
+    assert len(parsed.consan_findings) == 2
+    summary = next(
+        finding for finding in parsed.consan_findings if finding.code == "sampled_conflict_summary"
+    )
+    # A dashboard reader has to be able to tell "3 races, 1 shown" from "1 race".
+    assert "summary only" in summary.message
+    metadata = dict(summary.metadata)
+    assert metadata.get("reader") == "1"
+    assert metadata.get("sampled_conflicts") == "3"
+    assert metadata.get("sampled_conflict_pairs_without_example") == "2"
+    assert metadata.get("itemized_conflicts") == "1"
+
+
+def test_sampled_conflict_with_no_example_is_still_visible() -> None:
+    output = "\n".join(
+        (
+            _sampled_report(conflicts=1, examples=0, pairs_without_example=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.verdict is Verdict.FAIL
+    assert [finding.code for finding in consan.findings] == ["sampled_conflict_summary"]
+
+
+def test_sampled_conflicts_accumulate_across_a_readers_reports() -> None:
+    # One report per published snapshot, so a reader's conflict count is the sum.
+    # Two conflicts counted, one example logged -> one summary-only finding,
+    # even though each individual report claimed no shortfall of its own.
+    output = "\n".join(
+        (
+            _sampled_conflict(),
+            _sampled_report(conflicts=1, examples=1),
+            _sampled_report(conflicts=1, examples=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    parsed = parse_consan_output(output)
+
+    codes = [finding.code for finding in parsed.consan_findings]
+    assert codes.count("sampled_conflict_summary") == 1
+    assert len(parsed.consan_findings) == 2
+
+
+def test_sampled_immediate_conflicts_are_reported_separately() -> None:
+    # A device-side counter, not a restatement of the host-side analysis: it is
+    # what remains visible when the evidence window itself was dropped.
+    output = "\n".join(
+        (
+            _sampled_report(conflicts=0, immediate=3),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.verdict is Verdict.FAIL
+    assert [finding.code for finding in consan.findings] == ["sampled_immediate_conflict"]
+    assert dict(consan.findings[0].metadata).get("sampled_immediate_conflicts") == "3"
+
+
+def test_sampled_summary_and_immediate_conflicts_are_not_summed() -> None:
+    # Two counters of different things: one finding each, distinctly coded, so
+    # neither double-counts the other nor cancels it.
+    output = "\n".join(
+        (
+            _sampled_report(conflicts=2, examples=0, pairs_without_example=2, immediate=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    parsed = parse_consan_output(output)
+
+    assert [finding.code for finding in parsed.consan_findings] == [
+        "sampled_conflict_summary",
+        "sampled_immediate_conflict",
+    ]
+
+
+def test_sampled_summary_for_another_reader_is_not_suppressed() -> None:
+    output = "\n".join(
+        (
+            _sampled_conflict(reader=1),
+            _sampled_report(reader=1, conflicts=1, examples=1),
+            _sampled_report(reader=2, conflicts=1, examples=0, pairs_without_example=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    parsed = parse_consan_output(output)
+
+    summaries = [
+        finding for finding in parsed.consan_findings if finding.code == "sampled_conflict_summary"
+    ]
+    assert [dict(finding.metadata)["reader"] for finding in summaries] == ["2"]
+    assert len(parsed.consan_findings) == 2
+
+
+def test_sampled_conflict_without_a_fingerprint_or_instruction_parses() -> None:
+    # The Sampled renderer has no "missing" fallback for an empty fingerprint,
+    # and reports an instruction it cannot pin down as a word rather than a
+    # number. None of that is malformed output.
+    conflict = (
+        _sampled_conflict()
+        .replace("code_object=b1946ac92492d234 ", "code_object= ")
+        .replace("first_instruction=0x40", "first_instruction=unavailable")
+        .replace("second_instruction=0x48", "second_instruction=ambiguous")
+        .replace("first_lanes=0x000000000000000f", "first_lanes=unavailable")
+    )
+    output = "\n".join(
+        (
+            conflict,
+            _sampled_report(conflicts=1, examples=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    parsed = parse_consan_output(output)
+
+    (finding,) = parsed.consan_findings
+    assert finding.code_object is None
+    assert dict(finding.metadata).get("first_instruction") == "unavailable"
+    assert dict(finding.metadata).get("first_lanes") == "unavailable"
+
+
+def test_malformed_sampled_counts_never_pass() -> None:
+    output = "\n".join(
+        (
+            _sampled_report().replace("sampled_conflicts=0", "sampled_conflicts=abc"),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert str(consan.reason).startswith("consan_output_parse_error:")
+
+
+def test_truncated_sampled_summary_never_passes() -> None:
+    # The counters come from one format string, so a line carrying some and not
+    # others is a truncated log. Treating the absent ones as zero is the reading
+    # that would buy a PASS.
+    report = _sampled_report(conflicts=2)
+    output = "\n".join(
+        (
+            report[: report.index(" sampled_conflict_examples=")],
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert str(consan.reason).startswith("consan_output_parse_error:")
+
+
+@pytest.mark.parametrize(
+    "broken",
+    (
+        _sampled_report(conflicts=1, examples=2),
+        _sampled_report(conflicts=2, examples=1, pairs_without_example=0),
+        _sampled_report().replace(" reader=1 ", " "),
+    ),
+)
+def test_inconsistent_sampled_summary_never_passes(broken: str) -> None:
+    output = "\n".join((broken, _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert str(consan.reason).startswith("consan_output_parse_error:")
+
+
+def test_legacy_and_sampled_evidence_do_not_cross_contaminate() -> None:
+    # One log, both engines -- the shape of a saved log from before the
+    # migration replayed next to a current one. The Sampled detail record must
+    # not be credited against the Record/Replay summary's diagnostic count,
+    # which would silently drop the legacy summary-only conflict.
+    output = "\n".join(
+        (
+            f"{_PREFIX} MOI auto replay diagnostic reader=1 index=0 kind=1",
+            f"{_PREFIX} MOI auto replay reader=1 diagnostics=2 conflict=true",
+            _sampled_conflict(reader=1),
+            _sampled_report(reader=1, conflicts=2, examples=1, pairs_without_example=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    parsed = parse_consan_output(output)
+
+    codes = [finding.code for finding in parsed.consan_findings]
+    assert codes.count("record_replay_conflict_summary") == 1
+    assert codes.count("sampled_conflict") == 1
+    assert codes.count("sampled_conflict_summary") == 1
+    assert len(parsed.consan_findings) == 4
+
+
+def test_racy_baseline_finding_shape_matches_every_sampled_message() -> None:
+    """The nightly gate matches ``finding_shape`` as a plain substring.
+
+    So the declared shape is checked against messages the parser really emits
+    rather than against hand-copied fixture text, and against all three ways
+    Sampled states a race -- a racy run that happened to log no example record
+    must still satisfy the gate instead of turning it red.
+    """
+    baselines = (
+        Path(__file__).resolve().parents[3]
+        / "recipes"
+        / "sanitizers"
+        / "fixtures"
+        / "expected"
+        / "verdict_baselines.json"
+    )
+    shape = json.loads(baselines.read_text(encoding="utf-8"))["consan_racy"]["finding_shape"][
+        "consan"
+    ]
+    output = "\n".join(
+        (
+            _sampled_conflict(),
+            _sampled_report(conflicts=3, examples=1, pairs_without_example=2, immediate=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    findings = parse_consan_output(output).consan_findings
+
+    assert len(findings) == 3
+    assert [finding.message for finding in findings if shape not in finding.message] == []
 
 
 def test_combined_waitcheck_is_reported_separately() -> None:
@@ -609,7 +975,11 @@ def test_strict_mode_relies_on_backend_exit_and_coverage_gate() -> None:
     assert consan.verdict is Verdict.PASS
 
 
-def test_only_record_replay_is_exposed() -> None:
+def test_supported_consan_modes_are_exposed() -> None:
+    assert ConSanMode.SAMPLED.value == "sampled"
+    # Retained so a pre-migration bundle or saved log still names a mode this
+    # module reads, even though aorta no longer requests it.
+    assert ConSanMode.RECORD_REPLAY.value == "record-replay"
     with pytest.raises(ValueError):
         ConSanMode("inline-shadow")
 
@@ -700,6 +1070,51 @@ def test_run_consan_scrubs_inherited_log_env_when_disabled(
     )
 
     assert "RJ_CONSAN_LOG" not in captured
+
+
+def test_run_consan_pins_sampled_mode_and_the_max_preset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # The nightly racy case is a positive control, so the gate needs stride 1 on
+    # both axes: at the hook's ordinary 1/256 default a known race can be missed
+    # statistically and reported as a clean pass.
+    env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
+
+    assert env.get("RJ_CONSAN_MODE") == "sampled"
+    assert env.get("RJ_CONSAN_MOI_SAMPLED_PRESET") == "max"
+
+
+# Every inherited setting that could weaken or invalidate the pinned gate.
+# Spelled out rather than imported so dropping one from the source is a test
+# failure, not a silent reopening of the weakening vector.
+_SAMPLED_GATE_OVERRIDES = (
+    "RJ_CONSAN_MOI_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES",
+    "RJ_CONSAN_MOI_SAMPLE_STRIDE",
+    "RJ_CONSAN_MOI_SAMPLE_OFFSET",
+    "RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE",
+    "RJ_CONSAN_MOI_RUNTIME_SAMPLE_OFFSET",
+    "RJ_CONSAN_MOI_WORKGROUP_SAMPLE_STRIDE",
+    "RJ_CONSAN_MOI_WORKGROUP_SAMPLE_OFFSET",
+    "RJ_CONSAN_MOI_CELL_SAMPLE_STRIDE",
+    "RJ_CONSAN_MOI_CELL_SAMPLE_OFFSET",
+    "RJ_CONSAN_MOI_SAMPLED_BANKS",
+)
+
+
+def test_run_consan_scrubs_inherited_sampled_gate_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # A preset supplies defaults only, so any one of these inherited from the
+    # parent shell silently overrides max and thins the sampling back out --
+    # and mixing the coupled with the per-axis selectors is a hard hook config
+    # error. Pinning the preset without scrubbing leaves the gate
+    # non-deterministic.
+    for name in _SAMPLED_GATE_OVERRIDES:
+        monkeypatch.setenv(name, "256")
+
+    env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
+
+    assert [name for name in _SAMPLED_GATE_OVERRIDES if name in env] == []
 
 
 def _multi_worklist(count: int) -> KernelWorklist:
@@ -798,7 +1213,7 @@ def test_run_consan_pins_policy_env_over_hostile_inheritance(
         monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_evidence(), strict=True
     )
 
-    assert env["RJ_CONSAN_MODE"] == ConSanMode.RECORD_REPLAY.value
+    assert env.get("RJ_CONSAN_MODE") == ConSanMode.SAMPLED.value
     assert env["RJ_CONSAN_POLICY"] == "strict"
     assert env["HSA_TOOLS_DISABLE_REGISTER"] == "1"
 
