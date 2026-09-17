@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import Future, ThreadPoolExecutor
 import time
 import uuid
@@ -129,6 +130,9 @@ _AUTOPSY_TERMINAL = frozenset({"done", "gave_up"})
 #: outside the process could see an Autopsy was in flight.
 _AUTOPSY_STATE = "autopsy.state.json"
 
+#: One file per attempt, created exclusively. See :func:`claim_autopsy_attempt`.
+_AUTOPSY_CLAIM = ".autopsy.claim"
+
 
 def autopsy_state(job_dir: Path) -> dict:
     """What is known about this job's Autopsy, or ``{}`` if it has not alerted."""
@@ -204,6 +208,42 @@ def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> None:
         print(f"[watch] could not record autopsy state for {job_dir.name}: {exc}")
 
 
+def claim_autopsy_attempt(job_dir: Path, attempt: int) -> bool:
+    """Take the exclusive right to run *attempt* for this job. True if we got it.
+
+    ``autopsy_is_settled`` reads the state and the caller writes "queued" some
+    lines later, and nothing holds the gap. Two watchers over the same job both
+    read "not settled", both write, and the second write wins a file it was
+    never told it was racing for -- so the job is diagnosed twice, which means
+    two LLM ReAct loops and two escalations to a four-hour sweep.
+
+    ``O_CREAT | O_EXCL`` is the smallest thing that decides it, and the kernel
+    decides rather than the reader. Keyed by attempt number because a retry is a
+    legitimate second claim: attempts only advance through the paths that
+    already reason about staleness and AUTOPSY_MAX_ATTEMPTS, so a new number
+    means that reasoning has happened and this is a new race to win.
+
+    Nothing to unlock, so nothing leaks when a watcher dies holding it -- the
+    marker is a fact about an attempt that was started, not a lease.
+    """
+    marker = job_dir / f"{_AUTOPSY_CLAIM}.{attempt}"
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        # Same trade as record_autopsy_state below: a filesystem that cannot
+        # take the marker should cost a duplicate Autopsy, not a missed one.
+        print(f"[watch] could not claim autopsy for {job_dir.name}: {exc}")
+        return True
+    try:
+        os.write(fd, (_utc_now() + "\n").encode())
+    finally:
+        os.close(fd)
+    return True
+
+
 def _run_autopsy_off_the_loop(
     bundle: Path, job: JobRecord, jobs_root: Path, job_dir: Path, stop: Stop
 ) -> None:
@@ -230,8 +270,16 @@ def poll_jobs(
     config_path: Path | None = None,
     max_rounds: int | None = None,
     stop: Stop = None,
+    only: str = "",
 ) -> None:
-    """Main watch loop: discover active jobs and monitor their logs with LLM."""
+    """Main watch loop: discover active jobs and monitor their logs with LLM.
+
+    *only* narrows the loop to a single job id. The standalone watcher wants
+    every active job, which is what it is for. A triage does not: it starts a
+    watcher of its own, so with four triages running there were four watchers
+    over all four jobs, each paying for its own model call on every log chunk
+    and each free to alert on a job it did not submit.
+    """
     cfg = _load_watch_config(config_path)
     watch_cfg = cfg.get("watch", {})
     finder_cfg = cfg.get("log_finder", {})
@@ -270,7 +318,7 @@ def poll_jobs(
             pool=pool, queued=queued, jobs_root=jobs_root, finder=finder, watcher=watcher,
             interval=interval, confidence_threshold=confidence_threshold,
             expectations=expectations, max_rounds=max_rounds, stop=stop,
-            alerted=alerted, failures=failures, rounds=rounds,
+            alerted=alerted, failures=failures, rounds=rounds, only=only,
         )
     finally:
         # Why the loop ended decides what happens to work still queued.
@@ -297,7 +345,7 @@ def poll_jobs(
 
 def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
                  confidence_threshold, expectations, max_rounds, stop,
-                 alerted, failures, rounds) -> None:
+                 alerted, failures, rounds, only="") -> None:
     """The rounds themselves, so the pool above owns its own lifetime."""
     while max_rounds is None or rounds < max_rounds:
         if stopped(stop):
@@ -305,6 +353,8 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
             return
         rounds += 1
         active = scan_active_jobs(jobs_root)
+        if only:
+            active = [job for job in active if job.job_id == only]
 
         for job in active:
             # Both halves matter: the set covers this process, the file covers
@@ -338,6 +388,8 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
                             job_state_dir, "gave_up", job_id=job.job_id,
                             attempts=attempts - 1,
                         )
+                    elif not claim_autopsy_attempt(job_state_dir, attempts):
+                        print(f"[watch] {job.job_id}: autopsy {attempts} is another watcher's")
                     else:
                         print(f"[watch] {job.job_id}: retrying autopsy ({attempts})")
                         record_autopsy_state(
@@ -509,6 +561,13 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
                         job_dir, "gave_up", job_id=job.job_id,
                         attempts=attempts - 1, signal=signal,
                     )
+                    alerted.add(job.job_id)
+                    continue
+                if not claim_autopsy_attempt(job_dir, attempts):
+                    # Another watcher got there between its read and ours. Its
+                    # Autopsy is the one that runs; ours would be the same work
+                    # on the same bundle, twice.
+                    print(f"[watch] {job.job_id}: autopsy {attempts} is another watcher's")
                     alerted.add(job.job_id)
                     continue
                 record_autopsy_state(
