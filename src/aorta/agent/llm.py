@@ -7,14 +7,22 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+log = logging.getLogger(__name__)
+
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
+# ``proposal_unresolved`` is the one the proposer never sets itself: it means
+# the loop stopped because every name the model asked for was dropped by the
+# candidate filter below, so there was nothing left to run. It exists so that
+# stop is separable from a model that genuinely concluded the search.
 StopReason = Literal[
     "baseline_pass",
     "exhausted_candidates",
     "agent_requested",
+    "proposal_unresolved",
 ]
 
 AUTOPSY_CATEGORIES: frozenset[str] = frozenset(
@@ -43,6 +51,13 @@ class AgentStep:
     confidence: float
     stop: bool
     stop_reason: StopReason | None = None
+    #: Names the model proposed that the candidate filter dropped -- not in the
+    #: registry, already tried, or outside the operator's allowlist. Set by the
+    #: proposer, never by the model (see from_dict). Without this the loop
+    #: cannot say which name failed to resolve, so an affected run can be
+    #: detected but not repaired; with it, ``next_mitigations`` plus this list
+    #: reconstruct what the model actually asked for.
+    unresolved_mitigations: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentStep:
@@ -53,6 +68,13 @@ class AgentStep:
         stop = stop_raw if isinstance(stop_raw, bool) else False
         reason_raw = raw.get("stop_reason")
         stop_reason: StopReason | None = None
+        # The model-claimable reasons only. "proposal_unresolved" is
+        # deliberately absent: it is a statement about what the agent did with
+        # the model's names, so a model that claimed it would be reporting on
+        # machinery it cannot see -- the same reason a claimed "baseline_pass"
+        # is downgraded in loop._resolve_stop_outcome unless the probe
+        # verdicts agree. unresolved_mitigations is likewise never read from
+        # raw: the proposer computes it.
         if stop and isinstance(reason_raw, str) and reason_raw in (
             "baseline_pass",
             "exhausted_candidates",
@@ -275,7 +297,25 @@ def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
     # Never let the model widen its own allowlist: PolicyValidation re-checks,
     # but a name outside `remaining` is a mitigation already tried or never
     # registered, and running it is not the agent's call.
+    #
+    # Keep what was dropped. This filter runs BEFORE
+    # AgentPolicy.validate_step, so it empties the very list validation would
+    # have rejected, and the loop then reads the empty list as a decision to
+    # stop (aorta#449). Recording the names is what separates "the model
+    # concluded" from "the agent could not resolve what the model asked for",
+    # and it is the only record of the dropped half when some names survive
+    # and the loop carries on. Not de-duplicated: this is the audit trail of
+    # what the model actually emitted, so it stays faithful to the reply.
     filtered = [m for m in step.next_mitigations if m in remaining]
+    unresolved = [m for m in step.next_mitigations if m not in remaining]
+    if unresolved:
+        log.warning(
+            "proposer named %d mitigation(s) that do not resolve against the "
+            "remaining candidates and were dropped: %s (remaining: %s)",
+            len(unresolved),
+            sorted(set(unresolved)),
+            sorted(remaining),
+        )
     stop_reason = step.stop_reason
     if step.stop and stop_reason is None:
         stop_reason = "agent_requested"
@@ -286,6 +326,7 @@ def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
         confidence=step.confidence,
         stop=step.stop,
         stop_reason=stop_reason,
+        unresolved_mitigations=unresolved,
     )
 
 

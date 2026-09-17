@@ -314,6 +314,7 @@ PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail 
 | `converged` | Some `{mitigation}-none` passed | Ship that mitigation to customer / gate |
 | `exhausted_candidates` | No mitigations left in allowlist/registry | Manual matrix or new sidecar mitigations |
 | `agent_stop` | Proposer set `stop` (LLM or fake) | Read `agent_report.md` hypothesis |
+| `proposal_unresolved` | The proposer named mitigations and the candidate filter dropped all of them | Check `unresolved_mitigations` in `agent_log.jsonl` against `aorta mitigations list` and `--mitigation`; do *not* read the hypothesis as the reason |
 | `approval_required` | Mitigation needs ack (`--require-approval`) | Operator approves, re-run |
 | `walltime_exhausted` | `--max-walltime-sec` hit | Re-run same ticket to resume |
 | `policy_stop` | e.g. `--max-iterations` hit | Increase budget or narrow allowlist |
@@ -364,6 +365,20 @@ Append-only JSON lines, e.g.:
 {"ts": "...", "type": "llm_step", "category": "unknown", "hypothesis": "Baseline cell passed...", "stop": true, "stop_reason": "baseline_pass"}
 {"ts": "...", "type": "search_stopped", "outcome": "baseline_pass", "stop_reason": "baseline_pass"}
 ```
+
+`llm_step` and `search_stopped` carry an extra `unresolved_mitigations` key
+**only** when the proposer named mitigations the candidate filter dropped:
+
+```json
+{"ts": "...", "type": "llm_step", "next_mitigations": [], "stop": false, "stop_reason": null, "unresolved_mitigations": ["rccl_p2p_disable"]}
+{"ts": "...", "type": "search_stopped", "outcome": "proposal_unresolved", "stop_reason": "proposal_unresolved", "unresolved_mitigations": ["rccl_p2p_disable"]}
+```
+
+The key is absent, not empty, when nothing was dropped — a run with no
+rejections writes exactly the log it wrote before the key existed. It also
+appears on a `llm_step` whose `next_mitigations` is non-empty, which is a
+*partial* rejection: the search continued on the names that survived, and
+this is the only record of the half that was discarded.
 
 ### Report (`agent_report.md`)
 
