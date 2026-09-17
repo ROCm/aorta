@@ -181,8 +181,22 @@ class TestTheOfflineHeuristic:
         assert _fake_step(symptom=symptom).category == expected
 
     def test_a_traceback_is_not_a_race(self):
-        """"race" is a substring of "traceback", which is a plausible symptom word."""
+        """`race` is a substring of `traceback`, a plausible symptom word."""
         assert _fake_step(symptom="python traceback at startup").category != "kernel_race"
+
+    def test_the_traceback_detector_is_not_a_race(self):
+        """The same substring collision, but reached through a shipping detector ID.
+
+        `tier4:python_traceback` is a real detector
+        (`probe/classifier/tier4_patterns.py`), so this path fires on ordinary
+        Python failures rather than only on a symptom someone typed.
+        """
+        assert _fake_step(detectors=["tier4:python_traceback"]).category != "kernel_race"
+
+    def test_race_evidence_still_wins_beside_a_traceback(self):
+        """Suppressing the collision must not suppress the real label."""
+        step = _fake_step(detectors=["tier4:python_traceback", "consan:data_race"])
+        assert step.category == "kernel_race"
 
 
 class TestTheDocsAgree:

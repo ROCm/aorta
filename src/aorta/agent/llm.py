@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -178,6 +179,13 @@ class LLMProposer(Protocol):
 
 def _infer_category_from_detectors(detectors: list[str]) -> str:
     joined = " ".join(detectors).lower()
+    # Detector IDs separate words with ":" and "_" (`consan:data_race`,
+    # `tier4:python_traceback`), so a substring test for a short word like
+    # "race" also fires inside "traceback". Only the "race" leg below needs
+    # whole-word matching; every other term here is either long enough to be
+    # unambiguous or is deliberately matched across a separator ("tier1:exit",
+    # "nan_signature"), which tokenising would break.
+    words = set(re.split(r"[^a-z0-9]+", joined))
     if "tier2" in joined or "hang" in joined or "rccl" in joined:
         return "rccl_hang"
     if "oom" in joined or "137" in joined:
@@ -193,7 +201,7 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # barrier, so the old branch routed intra-kernel evidence to a checkpoint-I/O
     # label. Checked after "checkpoint" so a detector naming both still wins for
     # checkpoint_race.
-    if "race" in joined or "consan" in joined or "barrier" in joined or "waitcnt" in joined:
+    if "race" in words or "consan" in joined or "barrier" in joined or "waitcnt" in joined:
         return "kernel_race"
     if "tier1:exit" in joined or "launch" in joined:
         return "launch_error"
