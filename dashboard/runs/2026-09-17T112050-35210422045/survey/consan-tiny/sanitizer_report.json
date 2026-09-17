@@ -1,0 +1,79 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_tiny_load",
+        "command_sha256": "d110a697d5866e8aedc0b2475ff3437719e1de59836432436ee11862bdaf4f75",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "35e793caddd1966afc7071334ba7484b5c28c73a9fd9203249267337373b92da",
+        "selected_identity_sha256": "e1b6cfc9e4065310412318fcae9c7729a8ea9c5628133fddf3e69427cd60ffaf",
+        "selected_kernel": "tiny_vecadd"
+      },
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "00d7b78da53ed9c623ab88c18cbd83cd73583d4b946c1fb01c5b5b9e515fab57",
+            "entry_offset": null,
+            "name": "tiny_vecadd",
+            "target": "gfx950"
+          },
+          "reason": "combined_hook_exit_86",
+          "returncode": 86,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "consan",
+      "state": "error",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "waitcheck_preflight",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "00d7b78da53ed9c623ab88c18cbd83cd73583d4b946c1fb01c5b5b9e515fab57",
+          "entry_offset": null,
+          "name": "tiny_vecadd",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
