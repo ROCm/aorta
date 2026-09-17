@@ -4174,6 +4174,101 @@ def test_the_container_also_refuses_greedy_under_rollout(tmp_path):
     assert "greedy" in output, output
 
 
+@pytest.mark.parametrize(
+    ("asked", "reported", "should_fail"),
+    [
+        ("triton", "triton", False),
+        # The hole: sampling really is on, so the old greedy-only test passed
+        # this, and the cell published triton_full's numbers under triton's name.
+        ("triton", "triton_full", True),
+        ("triton_full", "triton", True),
+        ("triton", "greedy", True),
+    ],
+)
+def test_the_read_back_asserts_the_backend_asked_for(tmp_path, asked, reported, should_fail):
+    """Assert what was requested, not the absence of the one known-bad value.
+
+    Exact match rather than a family, and the engine's own resolution is the
+    reason: `_resolve_backend_name` returns `server_args.sampling_backend or
+    _get_default_backend_name()`, the CLI value verbatim when set, and
+    `create_sampling_backend` raises on a name it does not know rather than
+    falling back to a neighbour. So there is no legitimate path from `triton` to
+    `triton_full`, and treating them as one family would reintroduce the
+    looseness that let greedy through, across two backends with different
+    implementations and different performance.
+    """
+    argv_log = tmp_path / "argv.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "tokenspeed"
+    # A stub server that answers /health, /health_generate and, crucially,
+    # /get_server_info with a backend name the test chooses -- which is the only
+    # way to exercise a disagreement without a real engine.
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$@" >> "{argv_log}"\n'
+        'if [ "$1" = "version" ]; then echo fake; exit 0; fi\n'
+        'if [ "$1" = "serve" ]; then\n'
+        "  port=\"\"\n"
+        "  while [ $# -gt 0 ]; do\n"
+        '    if [ "$1" = "--control-port" ]; then port="$2"; fi\n'
+        "    shift\n"
+        "  done\n"
+        '  exec python3 -c "\n'
+        "import http.server, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers()\n"
+        "        if self.path.startswith('/get_server_info'):\n"
+        f"            self.wfile.write(b'{{\\\"sampling_backend\\\":\\\"{reported}\\\"}}')\n"
+        "        else:\n"
+        "            self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n"
+        '" "${port}"\n'
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    with socket.socket() as probe, socket.socket() as probe2:
+        probe.bind(("127.0.0.1", 0))
+        probe2.bind(("127.0.0.1", 0))
+        gateway, control = probe.getsockname()[1], probe2.getsockname()[1]
+
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_PORT": str(gateway),
+            "TS_CONTROL_PORT": str(control),
+            "TS_READY_TIMEOUT": "60",
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SAMPLING_BACKEND": asked,
+            "TS_BENCH_WARMUP_STEPS": "0",
+        },
+        timeout=300,
+    )
+    output = proc.stdout + proc.stderr
+
+    if should_fail:
+        assert proc.returncode == 57, output
+        assert "rollout_sampling_ignored" in output, output
+        assert f"asked={asked}" in output and f"engine={reported}" in output, output
+    else:
+        # Not 57: the run goes on to the bench step, which the stub fails.
+        assert proc.returncode != 57, output
+        assert "rollout_sampling_ignored" not in output, output
+
+
 def test_an_unknown_sampling_backend_is_a_recipe_error(tmp_path):
     """Rejected on the host, where it reads as the recipe error it is. Left to
     the container it is an argparse failure after the weights have loaded, which
@@ -4313,6 +4408,39 @@ def test_the_two_floors_agree_on_the_sample_count(tmp_path):
     assert _run_script_audit(
         tmp_path, collapsed, min_mean_output=8, rollout_samples=1
     ).startswith("OK")
+
+
+@pytest.mark.parametrize("total_output", [33.5, 40.0])
+def test_a_non_integer_token_total_is_unusable_on_both_sides(tmp_path, monkeypatch, total_output):
+    """`total_output_tokens` is a count, and the two audits disagreed about it.
+
+    The host's core-metric audit accepted any finite positive scalar while the
+    rollout floor guarded on `type(...) is int`, so `33.5` passed the audit
+    *and* skipped the floor -- the host being the lenient one twice over on the
+    one export shape both layers should reject. The container has always called
+    it `UNPARSEABLE`.
+
+    `40.0` is in the parametrisation on purpose: it is numerically fine and
+    still rejected, because the contract being matched is the container's
+    `type(...) is int` and not "is it a whole number".
+    """
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=total_output)])
+    result = wl.run()
+
+    assert not result.passed
+    reasons = [detail["reason"] for detail in result.failure_details]
+    assert "result_json_unusable" in reasons, result.failure_details
+    # And not *also* reported as a short rollout: one broken export, one verdict.
+    assert "rollout_output_too_short" not in reasons, result.failure_details
+
+
+def test_the_container_agrees_a_non_integer_token_total_is_unparseable(tmp_path):
+    """The other half of the pair above, so the two cannot drift again."""
+    doc = {"completed": 32, "failed": 0, "total_output_tokens": 33.5}
+    verdict = _run_script_audit(tmp_path, doc, min_mean_output=8, rollout_samples=1)
+    assert verdict.startswith("UNPARSEABLE"), verdict
 
 
 def test_a_healthy_rollout_clears_the_floor(tmp_path, monkeypatch):
@@ -4825,6 +4953,77 @@ def test_serve_args_may_still_pin_a_sampling_backend_for_a_benchmark(tmp_path):
         tmp_path, {"TS_SERVE_ARGS": json.dumps(["--sampling-backend", "greedy"])}
     )
     assert argv, "the script should have reached the bench step"
+
+
+def test_one_empty_length_array_suppresses_the_whole_distribution(tmp_path, monkeypatch):
+    """An empty array is a step that did not carry the data, not a step of none.
+
+    It used to pass every guard: `isinstance` held, the comprehension produced
+    nothing, the length check compared 0 to 0, and the step contributed no
+    entries while the loop pooled the others. So the published distribution
+    described a subset while the docstring promised every step had carried the
+    array -- and `if not pooled` only caught the case where *every* step was
+    empty.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, steps=2, rollout_samples=1)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, 10]),
+            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[]),
+        ],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+    # The reading that does not depend on the array still arrives.
+    assert result.metrics["mean_output_tokens_per_request"] == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize("bad", [-1, 10.5])
+def test_an_impossible_generated_length_suppresses_the_distribution(tmp_path, monkeypatch, bad):
+    """A negative or fractional length is not a measurement of anything.
+
+    `output_lens: [-1]` published a complete set of negative percentiles, which
+    is worse than a skewed distribution: nothing about the output looks wrong,
+    and a negative `generated_tokens_*` reading is one a `min_*` gate scores as
+    an improvement.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, bad])],
+    )
+    result = wl.run()
+
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+
+
+def test_an_integral_float_length_is_still_a_length(tmp_path, monkeypatch):
+    """Where this differs from the `total_output_tokens` rule, and why.
+
+    That field matches a container audit spelled `type(...) is int`. This one
+    has no container counterpart, so `10.0` is read as a count a JSON encoder
+    wrote rather than as a defect -- rejecting it would fail a correct run over
+    a serialisation detail.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=40, output_lens=[10.0] * 4)],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert result.metrics["generated_tokens_count"] == 4
+    assert result.metrics["generated_tokens_max"] == 10
 
 
 def test_the_pooled_length_count_is_an_integer(tmp_path, monkeypatch):

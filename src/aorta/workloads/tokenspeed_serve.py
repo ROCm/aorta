@@ -171,6 +171,14 @@ _SAMPLING_BACKENDS = frozenset(
 _ROLLOUT_SAMPLING_BACKENDS = _SAMPLING_BACKENDS - {"greedy"}
 _DEFAULT_SAMPLING_BACKEND = "triton"
 
+# Required metrics that are counts rather than measurements, so a fractional
+# value is a broken export and not a precise one. Checked with `type(...) is
+# int` rather than `isinstance`, because `bool` subclasses `int` and `json`
+# decodes `true` into it -- the same reason the container audit spells it that
+# way. Kept as a set so the host and the container cannot drift on *which*
+# fields are integral, only on the rule, which is now the same rule.
+_INTEGER_METRICS = frozenset({"total_output_tokens"})
+
 _DEFAULT_DATASET = "random"
 # `random` generates its own prompts, so it is the only one that needs nothing
 # staged; `sharegpt` measures against real conversation lengths, which is what
@@ -2468,6 +2476,22 @@ class TokenSpeedServeWorkload(Workload):
             value = record.doc.get(name)
             if not _is_scalar(value) or float(value) <= 0:
                 missing.append(name)
+            elif name in _INTEGER_METRICS and type(value) is not int:
+                # A count, so a fractional value is a broken export rather than
+                # a precise one, and the container audit already says so: it
+                # calls a non-int `total_output_tokens` UNPARSEABLE, with a
+                # comment recording that neither audit may be the lenient one.
+                # Accepting `33.5` here made the host the lenient one twice
+                # over -- it passed this audit *and* skipped the rollout floor,
+                # whose guard is `type(...) is int`, so the one export shape
+                # both layers should reject was the shape that got through.
+                #
+                # The host is the side that moved, on the same principle used
+                # when the container's zero-token verdict was corrected to match
+                # the host: whichever layer reasoned about the boundary
+                # explicitly is the one to match, and here that is the
+                # container.
+                missing.append(name)
         return missing
 
     def _container_name(self) -> str:
@@ -3211,14 +3235,45 @@ class TokenSpeedServeWorkload(Workload):
         pooled: list[float] = []
         for record in records:
             lens = record.doc.get("output_lens")
-            if not isinstance(lens, list):
+            # An empty array is treated like a missing one. It used to pass:
+            # `isinstance` held, the comprehension produced nothing, the length
+            # check compared 0 to 0, and the step contributed no entries while
+            # the loop went on pooling later steps. So one measured step with an
+            # empty array published a distribution computed from the others
+            # while the docstring above promised every step had carried it --
+            # the "describes a subset, reads as the trial's" failure, reached
+            # through the one shape that looked well-formed. `if not pooled`
+            # below only ever caught the case where *every* step was empty.
+            if not isinstance(lens, list) or not lens:
                 return
             # A zero is what the bench records for a request that failed, and
             # `failed == 0` is audited independently, so a zero here means the
             # two disagree. Kept rather than filtered: silently dropping it
             # would raise every percentile and make a partly-failed step read as
             # a healthy one.
-            step_lens = [float(v) for v in lens if _is_scalar(v)]
+            #
+            # A negative length is a different case and is not kept. There is no
+            # run it could describe -- a request cannot generate fewer than zero
+            # tokens -- and it does not merely skew the distribution, it makes it
+            # read as something no reader would question: `output_lens: [-1]`
+            # produced a complete set of negative percentiles, and a negative
+            # `generated_tokens_*` reading is one a `min_*` gate scores as an
+            # improvement. A fractional length goes the same way, being a count.
+            #
+            # Integral *value* rather than `type(v) is int`, which is where this
+            # deliberately differs from the `total_output_tokens` rule above.
+            # There, a container audit already spelled the contract as
+            # `type(...) is int` and the host's job was to stop being the
+            # lenient one. Here no container counterpart exists, so the rule is
+            # ours to choose, and `10.0` is a valid count written by a JSON
+            # encoder rather than a defect -- rejecting it would fail a correct
+            # run over a serialisation detail we have never observed either way.
+            # `_is_scalar` still carries the bool and non-finite exclusions.
+            step_lens = [
+                float(v)
+                for v in lens
+                if _is_scalar(v) and float(v) >= 0 and float(v).is_integer()
+            ]
             if len(step_lens) != len(lens):
                 return
             pooled.extend(step_lens)

@@ -916,12 +916,37 @@ if [ "${ROLLOUT}" = "1" ]; then
     echo "TS_BENCH_WARN: could not read sampling_backend from ${CONTROL}/get_server_info"
   else
     echo "TS_BENCH_INFO: sampling_backend=${reported} (asked for ${SAMPLING_BACKEND})"
-    if [ "${reported}" = "greedy" ] && [ "${SAMPLING_BACKEND}" != "greedy" ]; then
-      echo "TS_BENCH_FAIL: rollout_sampling_ignored asked=${SAMPLING_BACKEND} engine=greedy"
-      echo "  The greedy backend discards temperature, top_p, top_k and seed and"
-      echo "  returns the argmax, so every one of the ${ROLLOUT_SAMPLES} completions"
-      echo "  per prompt would be the same string while the export described a"
-      echo "  sampled rollout. Failing here rather than publishing that."
+    # Assert what was asked for, not the absence of the one known-bad value.
+    # Testing only for `greedy` accepted every other disagreement silently: ask
+    # for `triton`, get `triton_full`, and the trial publishes that cell's
+    # numbers labelled with the backend from the host config rather than the one
+    # that ran. For a perf measurement an unnoticed backend substitution is the
+    # same defect as an unnoticed sampling-parameter substitution, and this
+    # check exists for the second, so it should cover the first.
+    #
+    # Exact match rather than a family of acceptable values, and the engine's
+    # own resolution is why. `_resolve_backend_name` returns
+    # `server_args.sampling_backend or _get_default_backend_name()` -- the CLI
+    # value verbatim when set -- and `create_sampling_backend` raises on a name
+    # it does not know instead of falling back to a neighbour. So there is no
+    # legitimate path from `triton` to `triton_full`, and treating them as one
+    # family would reintroduce exactly the looseness that let greedy through,
+    # over two backends with different implementations and different
+    # performance. If some later build does normalise or alias names, this
+    # fails loudly and gets relaxed deliberately, which is the safe direction.
+    if [ "${reported}" != "${SAMPLING_BACKEND}" ]; then
+      echo "TS_BENCH_FAIL: rollout_sampling_ignored asked=${SAMPLING_BACKEND} engine=${reported}"
+      if [ "${reported}" = "greedy" ]; then
+        echo "  The greedy backend discards temperature, top_p, top_k and seed and"
+        echo "  returns the argmax, so every one of the ${ROLLOUT_SAMPLES} completions"
+        echo "  per prompt would be the same string while the export described a"
+        echo "  sampled rollout. Failing here rather than publishing that."
+      else
+        echo "  The engine is sampling, but not with the backend this cell will be"
+        echo "  labelled with. Sampling backends differ in implementation and in"
+        echo "  performance, so publishing one cell's numbers under another's name"
+        echo "  is a mislabelled result. Failing here rather than publishing that."
+      fi
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       exit 57
     fi
