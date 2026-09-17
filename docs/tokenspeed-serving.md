@@ -374,11 +374,28 @@ the stacked follow-up:
   back off `/get_server_info` after bring-up, failing the step (exit 57,
   `rollout_sampling_ignored`) if the engine still reports `greedy`. Benchmark
   cells are left on the engine default, where argmax is what is wanted.
+- **`rollout_samples > 1` does not give you independent samples, and this is
+  the biggest caveat on the page.** TokenSpeed returns *identical* choices for
+  `n > 1` within a single request. So `rollout_samples: 8` produces one
+  distinct completion repeated eight times, and the `samples-4` / `samples-8`
+  cells in `tokenspeed-serve-rollout.yaml` compare **batching overhead**, not
+  sample counts. Throughput, concurrency behaviour, prefill sharing and
+  per-completion scheduler cost are all still measured; sampling diversity,
+  group variance and anything a GRPO advantage would be computed over are not.
+
+  ⚠ **This is not the greedy-default defect described in the bullet above, and
+  the two must not be conflated.** That one is fixed here — the backend is
+  pinned to `triton` and read back, with exit 57 if the engine disagrees. The
+  `n > 1` collapse is a separate upstream defect that *survives* that fix: it
+  reproduces at every temperature with sampling working. Do not read the
+  sampling-backend fix as having resolved it. Separate requests are unaffected,
+  which is why the RL driver issues one request per sample rather than one
+  batched request per group — there it costs throughput rather than
+  correctness. Not filed upstream as of this writing.
 - **On `dataset: random` the length distribution is an artifact of the cap.**
   Random-token prompts give a model no reason to emit EOS, so every completion
   runs to `output_len` and `generated_tokens_*` reads as a constant. Throughput
-  and the sample-count comparison are unaffected; the distribution needs prompts
-  a model would answer.
+  is unaffected; the distribution needs prompts a model would answer.
 - **TPOT and ITL are not per-token latencies under `n > 1`.** The bench client
   concatenates all choices and treats every chunk gap as an inter-token interval.
   TTFT and the throughputs stay meaningful.
@@ -396,8 +413,17 @@ it is the one no audit of the export could reach: a greedy engine's output is
 well-formed, correctly counted and the right length, and differs from a sampled
 run only in being identical across choices.
 
+It detects a greedy *engine*, by asking the engine, and that is the limit of
+what it claims. It does **not** detect identical choices, so it does not and
+cannot catch the `n > 1` collapse above — there the engine is sampling
+correctly and reports so, and the choices come back identical anyway. Catching
+that from this side would need the per-choice text, which the export does not
+carry.
+
 Recipes: `tokenspeed-serve-rollout-smoke.yaml` (the shape check to run first)
-and `tokenspeed-serve-rollout.yaml` (sample-count and long-form cells).
+and `tokenspeed-serve-rollout.yaml` (batching-comparison and long-form cells —
+named `samples-*`, which per the caveat above is not what they vary; that file
+opens with the same warning).
 
 ### Perf gates
 
