@@ -4175,17 +4175,21 @@ def test_the_container_also_refuses_greedy_under_rollout(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("asked", "reported", "should_fail"),
+    ("asked", "reported", "expected_exit", "expected_reason"),
     [
-        ("triton", "triton", False),
+        ("triton", "triton", None, None),
         # The hole: sampling really is on, so the old greedy-only test passed
         # this, and the cell published triton_full's numbers under triton's name.
-        ("triton", "triton_full", True),
-        ("triton_full", "triton", True),
-        ("triton", "greedy", True),
+        # A distinct verdict from the greedy case, because here the measurement
+        # is real and only its label is wrong.
+        ("triton", "triton_full", 58, "rollout_sampling_backend_mismatch"),
+        ("triton_full", "triton", 58, "rollout_sampling_backend_mismatch"),
+        ("triton", "greedy", 57, "rollout_sampling_ignored"),
     ],
 )
-def test_the_read_back_asserts_the_backend_asked_for(tmp_path, asked, reported, should_fail):
+def test_the_read_back_asserts_the_backend_asked_for(
+    tmp_path, asked, reported, expected_exit, expected_reason
+):
     """Assert what was requested, not the absence of the one known-bad value.
 
     Exact match rather than a family, and the engine's own resolution is the
@@ -4259,14 +4263,18 @@ def test_the_read_back_asserts_the_backend_asked_for(tmp_path, asked, reported, 
     )
     output = proc.stdout + proc.stderr
 
-    if should_fail:
-        assert proc.returncode == 57, output
-        assert "rollout_sampling_ignored" in output, output
+    if expected_exit is not None:
+        assert proc.returncode == expected_exit, output
+        assert expected_reason in output, output
         assert f"asked={asked}" in output and f"engine={reported}" in output, output
+        # The greedy label must not be reused for a backend substitution: it
+        # asserts the sampling parameters did nothing, which is false there.
+        if expected_reason != "rollout_sampling_ignored":
+            assert "rollout_sampling_ignored" not in output, output
     else:
-        # Not 57: the run goes on to the bench step, which the stub fails.
-        assert proc.returncode != 57, output
-        assert "rollout_sampling_ignored" not in output, output
+        # Neither verdict: the run goes on to the bench step, which the stub fails.
+        assert proc.returncode not in (57, 58), output
+        assert "rollout_sampling" not in output, output
 
 
 def test_an_unknown_sampling_backend_is_a_recipe_error(tmp_path):

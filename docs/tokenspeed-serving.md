@@ -420,6 +420,16 @@ correctly and reports so, and the choices come back identical anyway. Catching
 that from this side would need the per-choice text, which the export does not
 carry.
 
+Exit 58 / `rollout_sampling_backend_mismatch` is its sibling, from the same
+read-back, and kept separate on purpose. It fires when the engine reports a
+*different sampling* backend than was asked for — `triton` requested,
+`triton_full` reported. There the measurement is real and what is wrong is the
+name it would be filed under, which is a different verdict from "the sampling
+parameters did nothing" and routes differently for whoever reads the failure.
+The comparison is an exact match rather than a family: the engine echoes the
+requested name verbatim and refuses names it does not know rather than falling
+back, so there is no legitimate substitution to tolerate.
+
 Recipes: `tokenspeed-serve-rollout-smoke.yaml` (the shape check to run first)
 and `tokenspeed-serve-rollout.yaml` (batching-comparison and long-form cells —
 named `samples-*`, which per the caveat above is not what they vary; that file

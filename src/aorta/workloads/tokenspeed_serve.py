@@ -212,6 +212,7 @@ _EXIT_REASONS: dict[int, str] = {
     55: "served_request_shortfall",
     56: "rollout_output_too_short",
     57: "rollout_sampling_ignored",
+    58: "rollout_sampling_backend_mismatch",
     64: "usage_error",
 }
 

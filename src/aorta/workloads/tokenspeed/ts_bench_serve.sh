@@ -33,6 +33,8 @@
 #   56  a rollout step generated fewer tokens per request than the floor
 #   57  a rollout was asked for but the engine decodes greedily, so the
 #       sampling parameters it accepted are being ignored
+#   58  the engine is sampling, but with a different backend than was asked
+#       for, so the cell's numbers would carry the wrong backend's name
 #   64  usage / environment error (missing tokenspeed CLI, bad config)
 #
 # Two ports, for the reason `ts_serve_probe.sh` documents at length: `tokenspeed
@@ -934,21 +936,32 @@ if [ "${ROLLOUT}" = "1" ]; then
     # over two backends with different implementations and different
     # performance. If some later build does normalise or alias names, this
     # fails loudly and gets relaxed deliberately, which is the safe direction.
-    if [ "${reported}" != "${SAMPLING_BACKEND}" ]; then
+    # Two verdicts, not one, and the split is the same judgement as SHORTLEN
+    # against UNPARSEABLE: these route differently for whoever reads the
+    # failure. `rollout_sampling_ignored` says the sampling parameters did
+    # nothing and the rollout is not a rollout. A mismatch between two
+    # *sampling* backends says the opposite -- the numbers are real
+    # measurements, and what is wrong is the name they would be filed under.
+    # Reusing the greedy label for both would assert "sampling was ignored"
+    # about a run that sampled correctly, which is the mislabelled verdict this
+    # script exists to prevent, reached through the fix for the previous one.
+    if [ "${reported}" = "greedy" ] && [ "${SAMPLING_BACKEND}" != "greedy" ]; then
       echo "TS_BENCH_FAIL: rollout_sampling_ignored asked=${SAMPLING_BACKEND} engine=${reported}"
-      if [ "${reported}" = "greedy" ]; then
-        echo "  The greedy backend discards temperature, top_p, top_k and seed and"
-        echo "  returns the argmax, so every one of the ${ROLLOUT_SAMPLES} completions"
-        echo "  per prompt would be the same string while the export described a"
-        echo "  sampled rollout. Failing here rather than publishing that."
-      else
-        echo "  The engine is sampling, but not with the backend this cell will be"
-        echo "  labelled with. Sampling backends differ in implementation and in"
-        echo "  performance, so publishing one cell's numbers under another's name"
-        echo "  is a mislabelled result. Failing here rather than publishing that."
-      fi
+      echo "  The greedy backend discards temperature, top_p, top_k and seed and"
+      echo "  returns the argmax, so every one of the ${ROLLOUT_SAMPLES} completions"
+      echo "  per prompt would be the same string while the export described a"
+      echo "  sampled rollout. Failing here rather than publishing that."
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       exit 57
+    fi
+    if [ "${reported}" != "${SAMPLING_BACKEND}" ]; then
+      echo "TS_BENCH_FAIL: rollout_sampling_backend_mismatch asked=${SAMPLING_BACKEND} engine=${reported}"
+      echo "  The engine is sampling, so the measurement is real -- but not with"
+      echo "  the backend this cell will be labelled with. Sampling backends"
+      echo "  differ in implementation and in performance, so publishing one"
+      echo "  backend's numbers under another's name is a mislabelled result."
+      tail -n 40 "${SERVER_LOG}" 2>/dev/null
+      exit 58
     fi
   fi
 fi
