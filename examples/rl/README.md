@@ -357,6 +357,14 @@ byte range. `distinct_evidence` dedupes on the tuple that identifies a race
 *site*, and `finding_counts` reports `raw` next to `distinct_sites` so the
 difference stays visible rather than being absorbed into a corpus size.
 
+That tuple has to cover both sanitizers, and originally it did not: it read the
+ConSan instruction-pair fields, which a Waitcheck finding does not have, so
+Waitcheck checks collapsed to one site each and discarded the rest of their
+evidence. It now also reads `metadata.context_1`/`context_2`, the producer and
+consumer offsets Waitcheck locates a hazard by. The ConSan behaviour above is
+unchanged — the two families' keys are disjoint — which is what makes
+collapsing lanes and keeping distinct hazards the same rule rather than two.
+
 ConSan also writes the same finding objects into both `check.findings` and
 `kernel_results[].findings`, which doubles a naive count — 64 findings read as
 128. Identical records are collapsed before the site dedup, so `raw` means what

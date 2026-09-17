@@ -982,13 +982,31 @@ stopping, so any reward computed over that loop is computed over a corrupted
 signal — and this is the row whose reward *is* the loop. Fix or work around
 #449 before training on sweep trajectories.
 
-**WaitCheck repair — their "moderate" is well-founded, and the data confirms
-it from a slightly different angle.** They worried that "a single case may not
-generate enough inference activity". The measurement says the shortage is not
-of records but of distinct ones: 160 findings across the whole run collapse to
-**4 distinct sites**, and the racy reproducer's 64 findings are **one race** —
-one record per lane and LDS byte range, identical instruction pair. Volume
-without variety. Compounding it,
+**WaitCheck repair — their "moderate" is well-founded, but the evidence below
+is weaker than it was and the correction runs against our own argument.** They
+worried that "a single case may not generate enough inference activity".
+
+⚠ **The "4 distinct sites" figure this paragraph used to rest on was an
+artifact of our own corpus builder, not a property of the runs.**
+`build_corpus.py`'s site key read only the ConSan metadata fields, and a
+Waitcheck finding has none of them — `entry_offset` is null and the
+producer/consumer offsets live in `metadata.context_1`/`context_2` — so every
+Waitcheck finding in a check hashed identically and each check collapsed to a
+single site. The key is fixed; the old total is not reproducible and should not
+be requoted. Rebuilding `gemm_f32_waitcheck` from the committed survey report
+gives **32** distinct sites where it reported 1, so the corpus-wide total is at
+least **35** rather than 4, and the one row whose artifact is not committed
+could take it higher.
+
+What survives, and it is the half that was always about ConSan: the racy
+reproducer's 64 findings genuinely are **one race** — one record per lane and
+LDS byte range, identical instruction pair — and that count is unaffected,
+because the two families' metadata keys are disjoint. So "volume without
+variety" holds for the ConSan LDS reproducer and **does not hold for
+Waitcheck**, which turns out to carry 32 distinct hazards in a single scenario.
+Since this paragraph is about *WaitCheck* repair, that is the reading to take
+forward: on their question, inference activity is better supplied than we told
+them, and our measurement was understating it. Compounding it,
 [#451](https://github.com/ROCm/aorta/issues/451) means per-finding attribution
 is currently unavailable: a finding names neither its kernel nor its offset, so
 "repair" has no target at finding granularity. So: moderate, yes, but the
