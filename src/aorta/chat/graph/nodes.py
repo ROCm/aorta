@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import itertools
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import re
@@ -23,21 +29,23 @@ from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
 from aorta.chat.redaction import redact_for_send
 
+from langgraph.config import get_stream_writer
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are the AORTA Codebase Assistant, an AI agent that helps \
-developers understand, navigate, and work with the AORTA codebase.
+developers understand, navigate, and work with the AORTA codebase{diagnosis_identity}.
 
 RULES:
-1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
-   this machine. Politely refuse anything else.
+1. Answer questions about the AORTA codebase, about the AORTA runs on this \
+   machine{diagnosis_scope}. Politely refuse work that is none of those.
 2. When referencing code, always cite file paths and line numbers.
 3. You have tools to explore the codebase: list_files, read_file, search_code, \
    grep_code and search_repo_map. You also have tools for this machine's own \
    AORTA run results: list_runs, read_run_matrix, read_run_env, and \
    search_run_artifacts. Use those when the question is about what a run did \
-   rather than what the code says.
+   rather than what the code says.{diagnostic_tools}
 4. NEVER fabricate or guess commands. Before suggesting any command, you MUST first \
    use search_code or read_file to find the actual scripts, entry points, or \
    configuration in the codebase. Only generate commands that are grounded in real \
@@ -61,6 +69,7 @@ RULES:
    you think you can see the bug by reading it. Reading produces a guess, and a guess \
    that happens to be right is indistinguishable, to the person reading your answer, \
    from one that is not. Only say a thing was observed if a tool observed it.
+13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
 
 RETRIEVED CONTEXT:
 {context}
@@ -79,8 +88,10 @@ You have NO tools available. Answer using only the RETRIEVED CONTEXT below \
 and the conversation so far.
 
 RULES:
-1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
-   this machine. Politely refuse anything else.
+1. Answer questions about the AORTA codebase and about the AORTA runs on \
+   this machine. If the user pasted code of their own and wants it diagnosed, \
+   say that needs a diagnostic run and this answer was reached without one. \
+   Politely refuse work that is none of those.
 2. When referencing code, always cite file paths and line numbers.
 3. NEVER fabricate file paths, commands, flags, or behaviour. Everything you \
    state must be visible in the RETRIEVED CONTEXT.
@@ -310,9 +321,54 @@ async def _send(llm: Any, messages: list[Any]) -> Any:
     return await llm.ainvoke(_system_first(redact_for_send(messages)))
 
 
+#: Added to rule 1 where the diagnostic tools are registered. Without it rule 1
+#: refuses everything that is not the AORTA codebase or an AORTA run -- which is
+#: what a user's own pasted kernel is -- while rules 12 and 13 tell the model to
+#: diagnose exactly that. Two products in one prompt, and nothing says which one
+#: wins.
+_DIAGNOSIS_SCOPE = ", and about GPU code the user pastes for diagnosis"
+
+#: The same admission, made in the sentence that says what this assistant is.
+#: Rule 1 was widened to take pasted code while the line above it still said
+#: "the AORTA codebase" and nothing else -- so the prompt introduced itself as
+#: one product and then listed the rules of another. A model reading the two
+#: in order has been told to refuse the thing it was just told to do, and the
+#: identity sentence is the one it weights when the rules are ambiguous.
+_DIAGNOSIS_IDENTITY = (
+    ", and diagnoses GPU kernels, assembly and workloads that developers paste"
+    " by building and running them on a GPU node"
+)
+
+#: Added to rule 3 alongside it, so the tools rules 12 and 13 lean on are named
+#: rather than assumed. Rule 3 listed the sandboxed tools only, so the three that
+#: do the work this product is for appeared nowhere in the prompt asking for it.
+_DIAGNOSTIC_TOOLS = (
+    " For a kernel, an assembly listing or a workload the user pastes, you also"
+    " have triage_kernel_source, triage_assembly_source and triage_workload,"
+    " which build and run it on a GPU node under a sanitizer. Those take minutes"
+    " and submit real cluster work, so run one when the user is asking what is"
+    " wrong with code they supplied."
+)
+
+
 def _build_system_message(context: str = "") -> SystemMessage:
+    """The prompt, describing the tools this deployment actually has.
+
+    The diagnostic clauses are conditional because the tools are: they register
+    only when ``allow_cluster_jobs`` is set. Naming them unconditionally would
+    promise a model tools it cannot call, which is what the removed run_nan_demo
+    redirect did -- a turn that dead-ends on a hallucinated call.
+    """
+    from aorta.chat.plugins import diagnostic_tools
+
+    available = "triage_kernel_source" in diagnostic_tools()
     return SystemMessage(
-        content=SYSTEM_PROMPT.format(context=context)
+        content=SYSTEM_PROMPT.format(
+            context=context,
+            diagnosis_identity=_DIAGNOSIS_IDENTITY if available else "",
+            diagnosis_scope=_DIAGNOSIS_SCOPE if available else "",
+            diagnostic_tools=_DIAGNOSTIC_TOOLS if available else "",
+        )
     )
 
 
@@ -487,6 +543,98 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     return {"route": route}
 
 
+#: Threads for tool execution. Explicit rather than the loop's default
+#: executor: these run for minutes, so the number that may be in flight is a
+#: decision rather than something inherited from the CPU count. Four is more
+#: than the two triage jobs the cluster pool will run at once, leaving room for
+#: the quick tools -- reading a file, searching the codebase -- to answer while
+#: a triage is out.
+_TOOL_WORKERS = 4
+_TOOL_POOL_LOCK = threading.Lock()
+_TOOL_POOL: ThreadPoolExecutor | None = None
+
+
+def _tool_pool() -> ThreadPoolExecutor:
+    """The executor tool calls run on, created on first use."""
+    global _TOOL_POOL
+    with _TOOL_POOL_LOCK:
+        if _TOOL_POOL is None:
+            _TOOL_POOL = ThreadPoolExecutor(
+                max_workers=_TOOL_WORKERS, thread_name_prefix="aorta-tool"
+            )
+        return _TOOL_POOL
+
+
+#: Numbers the tool calls in a process so a completion can be matched to the
+#: announcement it belongs to.
+_tool_calls = itertools.count(1)
+
+
+def _announce_tool(payload: dict) -> None:
+    """Put a tool progress event on the stream, if anything is listening."""
+    try:
+        get_stream_writer()(payload)
+    except RuntimeError:
+        pass  # not being streamed; nothing to announce to
+
+
+async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
+    """Run a tool off the event loop, announcing it before it blocks.
+
+    Every tool here is synchronous and the diagnostic ones block for minutes
+    while a cluster job runs. Calling one inline stalls the loop, which under
+    the web UI means the server stops answering and the browser reports the
+    backend as unreachable rather than busy.
+
+    The announcement is what makes a five-minute tool visible: steps otherwise
+    appear only when a node finishes, so the one node that takes real time is
+    the one that says nothing.
+    """
+    name = _normalise_tool_name(tool_name)
+    #: Ties the completion event to its announcement. A turn calls the same
+    #: tool more than once with different arguments, so the name alone does
+    #: not say which of them has finished.
+    call = f"{name}:{next(_tool_calls)}"
+    # The name, and nothing else. The arguments used to ride along, and for
+    # triage_kernel_source those arguments are the user's entire pasted
+    # kernel -- pushed through the stream on every tool call, for a consumer
+    # that reads the name and drops the rest. Anything wanting more than the
+    # name should be added back when there is something rendering it.
+    _announce_tool({"tool": name, "id": call})
+    # An executor of our own, sized for these tools. asyncio.to_thread would
+    # use the loop's default one, which is min(32, cpu+4) -- thirty-two here,
+    # and not a bound anyone chose for work that runs for minutes. It is also
+    # shared with every other to_thread in the process, so a burst of tool
+    # calls and unrelated work starve each other.
+    #
+    # The context is copied across by hand because run_in_executor, unlike
+    # to_thread, does not. Without it the per-conversation ToolCache and the
+    # redaction notice would be unbound inside the worker, and the cache would
+    # silently fall back to the process-wide one -- which is the cross-session
+    # bug it was introduced to fix.
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    started = time.monotonic()
+    try:
+        return await loop.run_in_executor(
+            _tool_pool(), lambda: context.run(_execute_tool, tool_name, kwargs)
+        )
+    finally:
+        # In a finally because the consumer is holding a step open on the
+        # strength of the announcement above. A tool that raises, or a turn
+        # that is cancelled, would otherwise leave "Running ..." on screen
+        # with nothing ever arriving to end it.
+        _announce_tool(
+            {
+                "tool": name,
+                "id": call,
+                "done": True,
+                "seconds": round(time.monotonic() - started, 1),
+            }
+        )
+
+
+
 # ──────────────────── Select ─────────────────────
 
 _SELECTOR_PROMPT = """\
@@ -531,6 +679,21 @@ def _looks_like_pasted_source(text: str) -> bool:
     return any(line.lstrip().startswith(_LINE_START_MARKERS) for line in text.splitlines())
 
 
+def _recent_human_turns(messages: list) -> list[str]:
+    """The user's last few turns, oldest first.
+
+    One definition of the window, because two parts of the selector ask the
+    same question about it: whether a paste is recent enough to count, and
+    whether the model gets to see that paste. Those answers disagreeing is the
+    failure this exists to prevent.
+
+    Only the human turns. The requirement is that the *user* supplied something
+    to analyse, and the tool is going to be handed that text.
+    """
+    human = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+    return human[-_SOURCE_LOOKBACK:]
+
+
 def _conversation_has_source(messages: list) -> bool:
     """Whether the user has pasted code in the recent part of this conversation.
 
@@ -539,12 +702,28 @@ def _conversation_has_source(messages: list) -> bool:
     reply is "yes, run the sanitizer on it". Reading only the newest message
     finds no code in that reply and withdraws the source tools from precisely
     the turn that asked for them.
-
-    Only the human turns count. The requirement is that the *user* supplied
-    something to analyse, and the tool is going to be handed that text.
     """
-    human = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
-    return any(_looks_like_pasted_source(text) for text in human[-_SOURCE_LOOKBACK:])
+    return any(_looks_like_pasted_source(text) for text in _recent_human_turns(messages))
+
+
+def _selector_view(turns: list[str]) -> str:
+    """The recent turns as one message, with the current ask last.
+
+    The requirement check looked back over this window while the model was
+    shown only the newest message, so a follow-up like "32, go ahead" kept the
+    source tools eligible and then gave the selector nothing to rank them on --
+    the kernel it was deciding about was one turn out of reach.
+
+    A single turn is passed through unchanged, which is the common case and the
+    one the prompt was written against.
+    """
+    if len(turns) <= 1:
+        return turns[-1] if turns else ""
+    earlier = "\n\n".join(turns[:-1])
+    return (
+        f"Earlier turns from the user, oldest first:\n\n{earlier}\n\n"
+        f"--- the user's current message ---\n\n{turns[-1]}"
+    )
 
 
 def _first_json_object(text: str) -> dict | None:
@@ -579,7 +758,7 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
     """
     from aorta.chat.tools.capabilities import MAX_CANDIDATES, catalogue, enforce_requirements
 
-    text = str(state["messages"][-1].content)
+    text = _selector_view(_recent_human_turns(state["messages"]))
     proposed: list[str] = []
     why = ""
     try:
@@ -943,7 +1122,7 @@ async def _act_native(state: AgentState) -> dict[str, Any]:
                 )
                 continue
             seen.add(signature)
-            result = _execute_tool(call["name"], call["args"])
+            result = await _execute_tool_async(call["name"], call["args"])
             trace.append(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}")
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
 
@@ -1072,7 +1251,7 @@ async def _act_text(state: AgentState) -> dict[str, Any]:
         unproductive = 0
         tool_name, kwargs = action
         logger.info("Act round %d: %s(%s)", round_num + 1, tool_name, kwargs)
-        result = _execute_tool(tool_name, kwargs)
+        result = await _execute_tool_async(tool_name, kwargs)
         # The result starts on its own line so that ``Exit code: N`` stays at
         # the start of one: ``critic_node`` scans this trace with
         # ``line.startswith(_EXIT_CODE_PREFIX)``, so putting the result after
