@@ -302,19 +302,43 @@ def _attached_source(message: cl.Message) -> tuple[str, list[str]]:
                     f"`{name}` could not be staged ({type(exc).__name__})."
                 )
                 continue
+            kind, tool = _routed_by_suffix(candidate.suffix)
             blocks.append(
                 # Backticked, and the argument spelled out. Written bare it
                 # ran into the sentence's full stop, and a name the model
                 # copies with a trailing "." is a name that does not resolve.
                 f"The user attached `{name}` ({len(raw) // 1024} KB of "
-                f"assembly), staged as `{staged}`\n\n"
-                f"It is too large to quote. Call the triage tool with "
+                f"{kind}), staged as `{staged}`\n\n"
+                f"It is too large to quote. Call {tool} with "
                 f"source_file=`{staged}` and no source argument. Do not try to "
                 "reproduce its contents."
             )
             continue
         blocks.append(f"Attached file `{name}`:\n\n```\n{text.strip()}\n```")
     return "\n\n".join(blocks), notes
+
+
+#: Which tool reads which kind of attachment, by suffix. The accepted set spans
+#: three tools and the staged message named one of them for all of it, so a
+#: large .hip was described as assembly and pointed at the assembly tool.
+_ASSEMBLY_SUFFIXES = frozenset({".s", ".asm", ".S", ".isa", ".disasm", ".txt"})
+_WORKLOAD_SUFFIXES = frozenset({".py"})
+
+
+def _routed_by_suffix(suffix: str) -> tuple[str, str]:
+    """What to call a staged attachment, and which tool should read it.
+
+    Assembly listings and Python scripts are what they look like. Everything
+    else in the accepted set is HIP or C++ that the kernel tool compiles, which
+    is also the right default for a suffix that is new here: a kernel sent to
+    the assembly tool fails on the first instruction, which is a clearer
+    outcome than a listing quietly compiled as a program.
+    """
+    if suffix in _ASSEMBLY_SUFFIXES:
+        return "assembly", "triage_assembly_source"
+    if suffix in _WORKLOAD_SUFFIXES:
+        return "Python", "triage_workload"
+    return "HIP source", "triage_kernel_source"
 
 
 def _stage_attachment(source: Path) -> str:

@@ -339,3 +339,90 @@ class TestTheToolReadsAStagedListing:
         from aorta.chat.tools import cluster
 
         assert "Error:" in cluster.triage_assembly_source.func()
+
+
+class TestAStagedFileIsRoutedByWhatItIs:
+    """The staged message named one tool for everything it accepted.
+
+    The accepted suffixes span three tools -- listings, HIP kernels and Python
+    workloads -- and the instruction called all of them assembly and pointed
+    them at `source_file`, which only the assembly tool had. So a 40 KB .hip
+    upload was described as assembly and routed to the one tool that cannot
+    compile it, and a .py workload to the same place.
+
+    The other half of the fix is that the other two tools accept a staged name
+    now, which is what makes routing to them mean anything.
+    """
+
+    @pytest.fixture()
+    def jobs_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AORTA_CHAT_JOBS_PATH", str(tmp_path / "jobs"))
+        from aorta.chat.config import reset_settings
+
+        reset_settings()
+        monkeypatch.setattr(app, "_INLINE_ATTACHMENT_BYTES", 64)
+        yield tmp_path / "jobs"
+        reset_settings()
+
+    @staticmethod
+    def _folded(tmp_path, filename: str) -> str:
+        body = "x = 1\n" * 5_000
+        msg = _Message("look at this", [attach(tmp_path, filename, body)])
+        folded, skipped = app._attached_source(msg)
+        assert skipped == [], skipped
+        return folded
+
+    def test_a_listing_still_goes_to_the_assembly_tool(self, tmp_path, jobs_root):
+        folded = self._folded(tmp_path, "big.s")
+
+        assert "triage_assembly_source" in folded
+        assert "assembly" in folded
+
+    def test_a_hip_kernel_goes_to_the_kernel_tool(self, tmp_path, jobs_root):
+        folded = self._folded(tmp_path, "big.hip")
+
+        assert "triage_kernel_source" in folded
+        assert "triage_assembly_source" not in folded
+
+    def test_a_cpp_file_does_too(self, tmp_path, jobs_root):
+        assert "triage_kernel_source" in self._folded(tmp_path, "big.cpp")
+
+    def test_a_python_workload_goes_to_the_workload_tool(self, tmp_path, jobs_root):
+        folded = self._folded(tmp_path, "train.py")
+
+        assert "triage_workload" in folded
+        assert "triage_assembly_source" not in folded
+
+    def test_a_kernel_is_not_called_assembly(self, tmp_path, jobs_root):
+        """It was, and the description is what the model routes on."""
+        assert "KB of assembly" not in self._folded(tmp_path, "big.hip")
+
+    def test_every_accepted_suffix_reaches_a_tool_that_can_read_it(self):
+        """The contract that was broken, asserted across the whole set.
+
+        Anything added to _SOURCE_SUFFIXES later has to route somewhere that
+        actually takes source_file, or this fails rather than the upload
+        silently going to the wrong tool.
+        """
+        import inspect
+
+        pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
+        from aorta.chat.tools import cluster
+
+        tools = {
+            t.name: t
+            for t in (
+                cluster.triage_kernel_source,
+                cluster.triage_assembly_source,
+                cluster.triage_workload,
+            )
+        }
+        for suffix in app._SOURCE_SUFFIXES:
+            _kind, name = app._routed_by_suffix(suffix)
+            assert name in tools, f"{suffix} routes to unknown tool {name}"
+            params = inspect.signature(tools[name].func).parameters
+            assert "source_file" in params, f"{suffix} -> {name} cannot take a file"
+
+    def test_an_unknown_suffix_defaults_to_the_kernel_tool(self):
+        """A kernel sent to the assembler fails loudly; the reverse does not."""
+        assert app._routed_by_suffix(".rocm")[1] == "triage_kernel_source"

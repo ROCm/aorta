@@ -411,8 +411,9 @@ def _write_new(path: Path, text: str) -> None:
 
 @tool
 def triage_kernel_source(
-    source: str,
+    source: str = "",
     label: str = "",
+    source_file: str = "",
     block_size: int = 0,
     grid_size: int = 0,
     block_y: int = 0,
@@ -448,10 +449,26 @@ def triage_kernel_source(
             when it applies. Ignored when the paste contains its own main().
         force: Re-run on hardware even if this exact kernel was already triaged
             in this conversation. Leave false; the cached verdict is the same run.
+        source_file: A kernel already staged for this conversation, named in the
+            message as "staged as <name>". Prefer this whenever it is offered:
+            *source* travels as an argument you have to write out in full, so a
+            large kernel does not fit there, while this is a name and the file
+            is read from disk. Never invent one -- pass exactly what the message
+            gave you.
 
     Returns:
         The sanitizer findings, the tools that ran, and the Autopsy verdict.
     """
+    if source_file.strip():
+        try:
+            source = _read_staged(source_file, "kernel")
+        except ValueError as exc:
+            return f"Error: {exc}"
+    if not source.strip():
+        return (
+            "Error: pass either source (the kernel text) or source_file (a "
+            "kernel staged for this conversation)."
+        )
     try:
         prepared = prepare_source(
             source,
@@ -593,6 +610,32 @@ def _no_assembler_message() -> str:
     )
 
 
+def _read_staged(source_file: str, what: str) -> str:
+    """Text of a file staged for this conversation.
+
+    Raises :class:`ValueError` carrying the message to show the model, so the
+    three tools that accept a staged name report the same things the same way:
+    a name that escapes the jobs root, one that is not there, and one that is
+    not readable are different failures and each is worth saying.
+
+    The containment check is the point. The name arrives from a model, so it
+    is not a path this package chose, and ``resolve_within`` is what keeps it
+    from being one.
+    """
+    staged = resolve_within(settings.jobs_root, source_file.strip(), JOBS_ROOT_LABEL)
+    if not staged.is_file():
+        raise ValueError(
+            f"no staged {what} called {source_file!r}. Pass the name exactly "
+            "as the message gave it."
+        )
+    try:
+        return staged.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"could not read {source_file!r}: {type(exc).__name__}"
+        ) from exc
+
+
 @tool
 def triage_assembly_source(
     source: str = "", label: str = "", source_file: str = ""
@@ -622,20 +665,9 @@ def triage_assembly_source(
     """
     if source_file.strip():
         try:
-            staged = resolve_within(
-                settings.jobs_root, source_file.strip(), JOBS_ROOT_LABEL
-            )
+            source = _read_staged(source_file, "listing")
         except ValueError as exc:
             return f"Error: {exc}"
-        if not staged.is_file():
-            return (
-                f"Error: no staged listing called {source_file!r}. Pass the name "
-                "exactly as the message gave it."
-            )
-        try:
-            source = staged.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            return f"Error: could not read {source_file!r}: {type(exc).__name__}"
 
     if not source.strip():
         return (
@@ -724,7 +756,9 @@ def triage_assembly_source(
     return result
 
 @tool
-def triage_workload(source: str = "", command: str = "", label: str = "") -> str:
+def triage_workload(
+    source: str = "", command: str = "", label: str = "", source_file: str = ""
+) -> str:
     """Run a workload the user supplied and diagnose why it failed.
 
     Takes either training code to run or a command to launch. Submits it to a
@@ -738,10 +772,26 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
         command: A command line to run instead, when the workload is not a
             single file.
         label: Short name for the run, used in the job record.
+        source_file: A script already staged for this conversation, named in the
+            message as "staged as <name>". Prefer this whenever it is offered:
+            *source* travels as an argument you have to write out in full, so a
+            large script does not fit there, while this is a name and the file
+            is read from disk. Never invent one -- pass exactly what the message
+            gave you.
 
     Returns:
         The Watch signal and the Autopsy verdict, with the evidence cited.
     """
+    if source_file.strip():
+        if command.strip():
+            return (
+                "Error: pass either a workload to run or a command line, not "
+                "both. source_file is the workload."
+            )
+        try:
+            source = _read_staged(source_file, "script")
+        except ValueError as exc:
+            return f"Error: {exc}"
     if bool(source.strip()) == bool(command.strip()):
         return (
             "Error: pass either source (code to run) or command (a command "
