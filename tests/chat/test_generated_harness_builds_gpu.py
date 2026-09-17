@@ -26,8 +26,11 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("dspy", reason="the harness ships with the cia extra")
-
+# No importorskip for dspy, deliberately. The sibling CPU tests of this module
+# carry one and it was copied here, which made this skip in the only job that
+# can run it: the GPU image installs [tests,hw-queue] and not [cia]. The
+# harness is string generation over the stdlib and imports without any of the
+# chat extras, which is asserted below so the guard cannot creep back.
 from aorta.chat.tools.harness.kernel import prepare_source
 
 pytestmark = [pytest.mark.gpu, pytest.mark.rocm]
@@ -117,6 +120,25 @@ class TestTheGeneratedHarnessCompiles:
         done = _build_and_run(prepared.program)
 
         assert done.returncode == 0, done.stderr[-2000:]
+
+
+class TestItCanRunWhereItIsMeantTo:
+    def test_the_harness_needs_none_of_the_chat_extras(self):
+        """The GPU image has [tests,hw-queue] and nothing else.
+
+        A module-level skip on an extra this module does not use is invisible:
+        the job goes green having run nothing. Asserted rather than commented,
+        because that is exactly how it was wrong.
+        """
+        import aorta.chat.tools.harness.kernel as harness
+
+        for absent in ("dspy", "langchain_core", "chainlit"):
+            assert absent not in getattr(harness, "__dict__", {}), absent
+
+    def test_it_generates_without_them(self):
+        prepared = prepare_source("__global__ void k(float* o){ o[0] = 1.0f; }")
+
+        assert "hipMalloc" in prepared.program
 
 
 class TestItRunsOnTheHardwareItClaims:
