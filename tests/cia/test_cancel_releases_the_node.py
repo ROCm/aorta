@@ -89,28 +89,35 @@ class TestItGoesThroughTheSeam:
         assert callable(seam.launch) and callable(seam.cancel)
 
 
+def _triage_stopping_at(tmp_path, monkeypatch, state: str, *, cancels: bool = True):
+    """Run a triage whose wait ends in *state*, with the scheduler stubbed."""
+    from aorta.cia import triage as triage_mod
+
+    cancelled: list = []
+
+    monkeypatch.setattr(triage_mod, "launch", lambda **kw: ("99999", ""))
+    monkeypatch.setattr(
+        triage_mod,
+        "cancel",
+        lambda job_id: (cancelled.append(job_id) or (cancels, "" if cancels else "no scancel")),
+    )
+    monkeypatch.setattr(triage_mod, "wait_for_job", lambda *a, **k: state)
+
+    source = tmp_path / "k.hip"
+    source.write_text("__global__ void bump(float* o) { o[0] += 1; }\n", encoding="utf-8")
+    result = triage_mod.run_triage(
+        ["--source", str(source), "--jobs-root", str(tmp_path), "--kernel-name", "bump"]
+    )
+    return result, cancelled
+
+
 class TestAnAbandonedTriageReleasesItsNode:
     @staticmethod
     def _run(tmp_path, monkeypatch, *, cancels: bool = True) -> tuple[dict, list]:
-        from aorta.cia import triage as triage_mod
-
-        cancelled: list = []
-
-        monkeypatch.setattr(triage_mod, "launch", lambda **kw: ("99999", ""))
-        monkeypatch.setattr(
-            triage_mod,
-            "cancel",
-            lambda job_id: (cancelled.append(job_id) or (cancels, "" if cancels else "no scancel")),
-        )
         # The caller gave up while the job was still running.
-        monkeypatch.setattr(triage_mod, "wait_for_job", lambda *a, **k: "ABANDONED(RUNNING)")
-
-        source = tmp_path / "k.hip"
-        source.write_text("__global__ void bump(float* o) { o[0] += 1; }\n", encoding="utf-8")
-        result = triage_mod.run_triage(
-            ["--source", str(source), "--jobs-root", str(tmp_path), "--kernel-name", "bump"]
+        return _triage_stopping_at(
+            tmp_path, monkeypatch, "ABANDONED(RUNNING)", cancels=cancels
         )
-        return result, cancelled
 
     def test_the_allocation_is_cancelled(self, tmp_path, monkeypatch):
         _result, cancelled = self._run(tmp_path, monkeypatch)
@@ -157,3 +164,83 @@ class TestAnAbandonedTriageReleasesItsNode:
         )
 
         assert cancelled == []
+
+
+class TestATimedOutTriageReleasesItsNodeToo:
+    """The other way a wait ends, which used to keep the allocation.
+
+    ``wait_for_job`` has two ways of stopping without an answer: the caller
+    gives up, which returns ``ABANDONED(state)``, or ``job_timeout`` expires,
+    which returns ``TIMEOUT_WAITING(state)``. Only the first reached scancel.
+    The second fell through to the grace window and the bundle fallback with the
+    job still queued or running, so it stayed in the scheduler until its own
+    time limit -- four hours by default.
+
+    That made the leak worst exactly where it costs most. A job hits the
+    internal timeout because it is slow, so the runs that held a node for the
+    full four hours were the ones already using it hardest.
+    """
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, *, cancels: bool = True) -> tuple[dict, list]:
+        return _triage_stopping_at(
+            tmp_path, monkeypatch, "TIMEOUT_WAITING(RUNNING)", cancels=cancels
+        )
+
+    def test_the_allocation_is_cancelled(self, tmp_path, monkeypatch):
+        _result, cancelled = self._run(tmp_path, monkeypatch)
+
+        assert cancelled == ["99999"]
+
+    def test_a_job_that_never_started_is_released_as_well(self, tmp_path, monkeypatch):
+        """Timing out while still PENDING holds a queue slot, not a node."""
+        _result, cancelled = _triage_stopping_at(
+            tmp_path, monkeypatch, "TIMEOUT_WAITING(PENDING)"
+        )
+
+        assert cancelled == ["99999"]
+
+    def test_the_result_says_it_timed_out_rather_than_that_it_was_abandoned(
+        self, tmp_path, monkeypatch
+    ):
+        """Both end the job; which one happened is what the reader needs."""
+        result, _ = self._run(tmp_path, monkeypatch)
+
+        assert result["ok"] is False
+        assert result["stage"] == "wait"
+        assert "timed out" in result["error"]
+        assert "abandoned" not in result["error"]
+
+    def test_it_names_the_job_it_gave_up_on(self, tmp_path, monkeypatch):
+        result, _ = self._run(tmp_path, monkeypatch)
+
+        assert result["slurm_job_id"] == "99999"
+        assert result["cancelled"] is True
+
+    def test_a_failed_cancellation_is_reported_not_hidden(self, tmp_path, monkeypatch):
+        """The node is still held; saying so is the only way anyone finds out."""
+        result, _ = self._run(tmp_path, monkeypatch, cancels=False)
+
+        assert result["cancelled"] is False
+
+    def test_the_job_record_is_marked_cancelled(self, tmp_path, monkeypatch):
+        import json
+
+        result, _ = self._run(tmp_path, monkeypatch)
+        record = json.loads(
+            (tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8")
+        )
+
+        assert record["status"] == "cancelled"
+
+    def test_watch_stops_being_handed_the_dead_job(self, tmp_path, monkeypatch):
+        """A terminal status is what takes it out of the polling set.
+
+        scan_active_jobs selects on status == 'running'. Left there, every later
+        round would re-read a log that stopped growing when the job was killed.
+        """
+        from aorta.cia.launch.registry import scan_active_jobs
+
+        self._run(tmp_path, monkeypatch)
+
+        assert scan_active_jobs(tmp_path) == []

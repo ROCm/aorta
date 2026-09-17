@@ -524,9 +524,15 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
 
     # Giving up on the answer has to give back the node. The allocation outlives
     # this process otherwise -- until its own time limit, four hours by default
-    # -- so a chat turn that timed out would leave a GPU occupied by a run whose
-    # result nobody will read, and the next person queues behind it.
-    if state.startswith("ABANDONED"):
+    # -- so a chat turn that stopped waiting would leave a GPU occupied by a run
+    # whose result nobody will read, and the next person queues behind it.
+    #
+    # Both ways of stopping owe that, and only abandonment paid it. A run that
+    # hit job_timeout fell through to the grace window and the bundle fallback
+    # with the job still queued or running, which made the slowest jobs -- the
+    # ones that time out precisely because they are slow -- the ones that held a
+    # node longest.
+    if state.startswith("ABANDONED") or state.startswith("TIMEOUT_WAITING"):
         cancelled, why = cancel(slurm_id)
         if cancelled:
             log.info(f"cancelled slurm {slurm_id}; the allocation is released")
@@ -535,11 +541,19 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
                 f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
                 "node until its time limit"
             )
+        # Terminal, so scan_active_jobs stops handing this to Watch. Leaving it
+        # 'running' would have every later round poll a log that stopped growing
+        # when the job died, until the staleness window finally retired it.
         update_job_status(jobs_root, job_id, "cancelled")
         return {
             "ok": False,
             "stage": "wait",
-            "error": "abandoned by caller",
+            # The job is gone either way; which way matters to whoever reads it.
+            "error": (
+                "abandoned by caller"
+                if state.startswith("ABANDONED")
+                else f"timed out after {args.job_timeout}s waiting on slurm {slurm_id}"
+            ),
             "job_id": job_id,
             "slurm_job_id": slurm_id,
             "cancelled": cancelled,
