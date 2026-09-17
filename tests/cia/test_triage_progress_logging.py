@@ -90,7 +90,7 @@ class TestTheCommandLineStillLooksTheSame:
             [sys.executable, "-m", "aorta.cia.triage", *args],
             capture_output=True,
             text=True,
-            cwd="/apps/avsharma/aorta",
+            cwd=ROOT,
         )
 
     def test_the_result_is_json_on_stdout_and_nothing_else(self):
