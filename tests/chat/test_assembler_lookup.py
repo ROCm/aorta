@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -60,9 +61,17 @@ def fake_clang(tmp_path):
 
 
 def _run(command: str, path: str) -> subprocess.CompletedProcess:
-    """Run the generated command the way srun would: a bare shell on a node."""
+    """Run the generated command the way srun would: a bare shell on a node.
+
+    bash is resolved from the real environment rather than from *path*, so a
+    caller can hand this a PATH with no clang on it without also making the
+    shell itself unfindable.
+    """
     return subprocess.run(
-        ["bash", "-c", command], capture_output=True, text=True, env={"PATH": path}
+        [shutil.which("bash") or "/bin/bash", "-c", command],
+        capture_output=True,
+        text=True,
+        env={"PATH": path},
     )
 
 
@@ -118,11 +127,20 @@ class TestTheNodeChoosesTheAssembler:
         assert "onpath" in done.stdout
 
     def test_with_neither_it_says_so_distinctly(self, cluster, tmp_path):
+        """The PATH has to be a directory that really has no clang in it.
+
+        It was the system bin, which holds a clang on a CI runner and on plenty
+        of developer machines. There the lookup succeeded and the test watched
+        clang fail on a missing input file instead -- passing or failing for
+        reasons that had nothing to do with the sentinel it is about.
+        """
         module = cluster(str(tmp_path / "nowhere"))
+        empty = tmp_path / "no-clang-here"
+        empty.mkdir()
 
         done = _run(
             module._assemble_command(tmp_path / "in.s", tmp_path / "out.hsaco"),
-            path="/usr/bin:/bin",
+            path=str(empty),
         )
 
         assert done.returncode != 0
