@@ -165,6 +165,86 @@ def test_a_cosmetically_edited_copy_earns_nothing_either(recipe_reward):
     assert grade.reward == 0.0
 
 
+def test_none_does_not_cost_a_proposal_its_availability_tier(proposal_reward):
+    """`none` is registered, deliberately not offered, and dropped by the loop.
+
+    `AgentPolicy.validate_step` removes it before `run_agent_loop` iterates, so
+    `["none", "tf32_off"]` is a proposal the real consumer accepts. Checking
+    availability against the raw list stopped it at tier 5 for naming a
+    mitigation the consumer never looks up -- the same list/cells confusion the
+    precision term was already fixed for.
+    """
+    raw = json.dumps(
+        {
+            # From this branch's category set; #484 widens it and the coupling
+            # is by import, so naming one of the new labels here would fail
+            # until that lands.
+            "category": "checkpoint_race",
+            "hypothesis": "lds race",
+            "next_mitigations": ["none", "tf32_off"],
+            "confidence": 0.5,
+            "stop": False,
+        }
+    )
+    score = proposal_reward.score_proposal(
+        proposal_reward.Proposal("p", raw, ["tf32_off"], [])
+    )
+    assert score.stopped_at != "tier5_available", score.detail
+    assert score.tier == proposal_reward.MAX_TIER, (score.tier, score.detail)
+
+
+def test_a_fenced_reply_is_not_reported_as_a_silent_stop(proposal_reward):
+    """The tier and the consumer outcome answer different questions.
+
+    `LiteLLMProposer` strips a ```json fence before parsing, so a fenced reply
+    is one the production path accepts. The format gate can stay strict about
+    it; recording `silent_stop` cannot, because that is a claim about the loop
+    stalling on a reply the loop consumes.
+    """
+    body = {
+        "category": "checkpoint_race",
+        "hypothesis": "lds race",
+        "next_mitigations": ["tf32_off"],
+        "confidence": 0.5,
+        "stop": False,
+    }
+    fenced = f"```json\n{json.dumps(body)}\n```"
+    score = proposal_reward.score_proposal(
+        proposal_reward.Proposal("p", fenced, ["tf32_off"], [])
+    )
+
+    # Strict on the format gate: the raw text is not a bare JSON object.
+    assert score.stopped_at == "tier1_json"
+    # Honest about the consumer: it strips the fence and gets a usable step.
+    assert score.consumer_outcome != "silent_stop", score.consumer_outcome
+
+
+def test_unparseable_prose_is_still_a_silent_stop(proposal_reward):
+    """Establishes the fence fix did not make every reply look consumable."""
+    score = proposal_reward.score_proposal(
+        proposal_reward.Proposal("p", "The collective timed out on rank 3.", ["tf32_off"], [])
+    )
+    assert score.stopped_at == "tier1_json"
+    assert score.consumer_outcome == "silent_stop"
+
+
+def test_hrx_perf_cannot_reach_tier_5_on_a_partial_seam(recipe_reward):
+    """Its `_validated_config` is not the whole pure-config check.
+
+    The seam covers bench/size/iters/warmup; `setup()` also validates
+    `gpu_arch`, `timeout_sec > 0` and `keep_build` being a bool, none of which
+    touch hipcc or a GPU. Treating the seam as the whole validator let a recipe
+    with a nonsense `gpu_arch` read as fully valid, so it is reported
+    ungradeable instead -- distinct from `tier4_workload`, which would blame the
+    recipe.
+    """
+    from aorta.workloads.hrx_perf import HrxPerfWorkload
+
+    assert "HrxPerfWorkload" in recipe_reward._PARTIAL_CONFIG_SEAMS
+    with pytest.raises(recipe_reward.NoConfigOnlySeam):
+        recipe_reward._validate_config(HrxPerfWorkload, {"bench": "gemm"})
+
+
 def test_an_inline_docker_environment_reaches_tier_3(recipe_reward):
     """`{docker: <ref>}` is a valid environment, and tier 3 said otherwise.
 
@@ -1792,6 +1872,21 @@ def _gen(text):
     return {"status": 200 if text is not None else 500, "text": text}
 
 
+def _lifecycle(*, start=200, update=200, finish=200):
+    """One start -> update -> finish step as `lifecycle_update` records it.
+
+    All three legs, because all three now decide the verdict: a rejected start
+    means the engine never entered the update state and a rejected finish means
+    it may still be in it, so neither is a step whose completions say anything
+    about weights.
+    """
+    return {
+        "start": {"status": start},
+        "update": {"status": update},
+        "finish": {"status": finish},
+    }
+
+
 def test_the_round_trip_is_only_proven_when_both_completions_exist(
     nccl_roundtrip_check,
 ):
@@ -1810,8 +1905,8 @@ def test_the_round_trip_is_only_proven_when_both_completions_exist(
         baseline=baseline,
         perturbed=_gen("B"),
         restored=_gen("A"),
-        perturb_status=200,
-        restore_status=200,
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
     )
     assert (proven, changed, recovered) == ("PROVEN", True, True)
 
@@ -1819,8 +1914,8 @@ def test_the_round_trip_is_only_proven_when_both_completions_exist(
         baseline=baseline,
         perturbed=_gen(None),
         restored=_gen("A"),
-        perturb_status=200,
-        restore_status=200,
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
     )
     assert verdict == "POST_UPDATE_GENERATION_FAILED"
     # Not `False` either: there was nothing to compare, and a boolean here
@@ -1842,10 +1937,47 @@ def test_a_rejected_restore_update_is_named_rather_than_scored(
         baseline=_gen("A"),
         perturbed=_gen("B"),
         restored=_gen("A"),
-        perturb_status=200,
-        restore_status=500,
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(update=500),
     )
     assert verdict == "RESTORE_UPDATE_REJECTED"
+
+
+@pytest.mark.parametrize(
+    ("leg", "expected"),
+    [
+        ("start", "LIFECYCLE_REJECTED_START"),
+        ("finish", "LIFECYCLE_REJECTED_FINISH"),
+    ],
+)
+def test_a_rejected_start_or_finish_is_not_proven(nccl_roundtrip_check, leg, expected):
+    """PROVEN required the whole update step, not just `/update_weights`.
+
+    Only the two update statuses used to reach the verdict, so a rejected
+    `/start_weight_update` -- the engine never entered the update state -- or a
+    rejected `/finish_weight_update` -- it may still be in it -- still came back
+    PROVEN whenever the two completions happened to round-trip. The completions
+    are the same in both halves of this test; only the leg differs.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    verdict, _, _ = decide(
+        baseline=_gen("A"),
+        perturbed=_gen("B"),
+        restored=_gen("A"),
+        perturb_lifecycle=_lifecycle(**{leg: 500}),
+        restore_lifecycle=_lifecycle(),
+    )
+    assert verdict == expected
+
+    # And on the restore side, named separately so a reader knows which step.
+    verdict, _, _ = decide(
+        baseline=_gen("A"),
+        perturbed=_gen("B"),
+        restored=_gen("A"),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(**{leg: 500}),
+    )
+    assert verdict == f"RESTORE_{expected}"
 
 
 def test_the_two_real_negative_results_still_come_back(nccl_roundtrip_check):
@@ -1860,8 +1992,8 @@ def test_the_two_real_negative_results_still_come_back(nccl_roundtrip_check):
         baseline=_gen("A"),
         perturbed=_gen("A"),
         restored=_gen("A"),
-        perturb_status=200,
-        restore_status=200,
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
     )
     assert unchanged == "HTTP_OK_BUT_WEIGHTS_UNCHANGED"
 
@@ -1869,7 +2001,7 @@ def test_the_two_real_negative_results_still_come_back(nccl_roundtrip_check):
         baseline=_gen("A"),
         perturbed=_gen("B"),
         restored=_gen("C"),
-        perturb_status=200,
-        restore_status=200,
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
     )
     assert unfaithful == "CHANGED_BUT_NOT_FAITHFUL"

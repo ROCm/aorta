@@ -132,13 +132,31 @@ def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str
     return out
 
 
+def _lifecycle_failure(lifecycle: dict[str, Any]) -> str | None:
+    """The first leg of a start -> update -> finish step that was not accepted.
+
+    All three legs, not just `/update_weights`. A rejected `/start_weight_update`
+    means the engine never entered the update state, and a rejected
+    `/finish_weight_update` means it may still be in it -- so neither is a step
+    whose completions can be read as evidence about weights, and the engine can
+    be left mid-update for whatever runs next. Judging on the update status
+    alone let both come back `PROVEN` whenever the two generations happened to
+    round-trip.
+    """
+    for leg in ("start", "update", "finish"):
+        status = (lifecycle.get(leg) or {}).get("status")
+        if status != 200:
+            return leg
+    return None
+
+
 def decide_verdict(
     *,
     baseline: dict[str, Any],
     perturbed: dict[str, Any],
     restored: dict[str, Any],
-    perturb_status: int,
-    restore_status: int,
+    perturb_lifecycle: dict[str, Any],
+    restore_lifecycle: dict[str, Any],
 ) -> tuple[str, bool | None, bool | None]:
     """The round trip's verdict, plus the two observations behind it.
 
@@ -152,19 +170,32 @@ def decide_verdict(
     was written to prevent.
 
     So both post-update generations must have happened before ``changed`` and
-    ``recovered`` mean anything, and both updates must have been accepted --
-    the restore for the same reason as the perturb. ``changed`` and
-    ``recovered`` come back as ``None`` when there was nothing to compare,
-    rather than as a default that reads like an observation.
+    ``recovered`` mean anything, and both update *steps* must have been accepted
+    in full -- start, update and finish, the restore for the same reason as the
+    perturb. ``changed`` and ``recovered`` come back as ``None`` when there was
+    nothing to compare, rather than as a default that reads like an observation.
     """
     both_generated = perturbed["text"] is not None and restored["text"] is not None
     changed = perturbed["text"] != baseline["text"] if both_generated else None
     recovered = restored["text"] == baseline["text"] if both_generated else None
 
-    if perturb_status != 200:
-        verdict = "UPDATE_REJECTED"
-    elif restore_status != 200:
-        verdict = "RESTORE_UPDATE_REJECTED"
+    perturb_bad = _lifecycle_failure(perturb_lifecycle)
+    restore_bad = _lifecycle_failure(restore_lifecycle)
+
+    if perturb_bad is not None:
+        # Named by leg, because "the update was rejected" and "the engine never
+        # entered the update state" are different failures to chase.
+        verdict = (
+            "UPDATE_REJECTED"
+            if perturb_bad == "update"
+            else f"LIFECYCLE_REJECTED_{perturb_bad.upper()}"
+        )
+    elif restore_bad is not None:
+        verdict = (
+            "RESTORE_UPDATE_REJECTED"
+            if restore_bad == "update"
+            else f"RESTORE_LIFECYCLE_REJECTED_{restore_bad.upper()}"
+        )
     elif not both_generated:
         verdict = "POST_UPDATE_GENERATION_FAILED"
     elif changed and recovered:
@@ -287,8 +318,8 @@ def main() -> int:
         baseline=baseline,
         perturbed=perturbed,
         restored=restored,
-        perturb_status=report["perturb"]["update"]["status"],
-        restore_status=report["restore"]["update"]["status"],
+        perturb_lifecycle=report["perturb"],
+        restore_lifecycle=report["restore"],
     )
     report["weights_changed_under_perturb"] = changed
     report["weights_recovered_under_restore"] = recovered

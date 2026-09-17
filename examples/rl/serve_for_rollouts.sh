@@ -103,6 +103,28 @@ NAME="${TS_NAME:-ts-rollout-serve}"
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || echo 000; }
 
+# Give up on a container this invocation started, after saving what it said.
+#
+# Every failure path in `up` below is reached *after* `docker run -d` has
+# succeeded, and each used to exit with the container still named. Two things
+# followed. The next `up` died with "container already exists; run 'down'
+# first", so the script needed a manual `down` before it would work again --
+# and on the readiness and health_generate paths the process is still
+# *running*, so an engine nobody is driving kept its GPU. On a shared node that
+# is the expensive half: the allocation looks busy and the next job cannot have
+# the device.
+#
+# Logs are captured before removal, because `docker rm -f` takes them with it
+# and a bring-up failure with no logs is not diagnosable.
+teardown_failed() {  # teardown_failed <exit-code> <message>
+  local code="$1" msg="$2"
+  echo "FAIL: ${msg}" >&2
+  docker logs --tail 60 "${NAME}" > "${LOG_DIR}/server-failure.log" 2>&1 || true
+  tail -n 60 "${LOG_DIR}/server-failure.log" >&2 2>/dev/null || true
+  docker rm -f "${NAME}" >/dev/null 2>&1 || true
+  exit "${code}"
+}
+
 up() {
   mkdir -p "${LOG_DIR}" "${HF_HOME_HOST}/hub" "${OUT_DIR}/triton-cache" "${OUT_DIR}/home"
   if [ -n "$(docker ps -aq -f "name=^${NAME}$")" ]; then
@@ -170,9 +192,7 @@ up() {
   deadline=$(( t0 + READY_SEC ))
   while [ "$(date +%s)" -lt "${deadline}" ]; do
     if [ -z "$(docker ps -q -f "name=^${NAME}$")" ]; then
-      echo "FAIL: container exited during startup after $(( $(date +%s) - t0 ))s" >&2
-      docker logs --tail 60 "${NAME}" 2>&1 | tee "${LOG_DIR}/server-crash.log" >&2
-      exit 50
+      teardown_failed 50 "container exited during startup after $(( $(date +%s) - t0 ))s"
     fi
     if [ "$(http_code "http://127.0.0.1:${CONTROL}/health")" = "200" ]; then
       echo "OK: /health after $(( $(date +%s) - t0 ))s"
@@ -181,9 +201,9 @@ up() {
     sleep 5
   done
   if [ "$(http_code "http://127.0.0.1:${CONTROL}/health")" != "200" ]; then
-    echo "FAIL: readiness timeout after $(( $(date +%s) - t0 ))s" >&2
-    docker logs --tail 60 "${NAME}" 2>&1 >&2
-    exit 51
+    # Still running, so this is the path where the leak cost a GPU rather than
+    # just an awkward name collision.
+    teardown_failed 51 "readiness timeout after $(( $(date +%s) - t0 ))s"
   fi
 
   # /health_generate pushes a real token through the engine. /health only proves
@@ -199,9 +219,7 @@ up() {
     fi
     sleep 5
   done
-  echo "FAIL: health_generate unhealthy" >&2
-  docker logs --tail 60 "${NAME}" 2>&1 >&2
-  exit 52
+  teardown_failed 52 "health_generate unhealthy"
 }
 
 # The name the engine advertises, which is what has to match the litellm model
@@ -238,6 +256,12 @@ hold() {
   # Tear the container down on the way out, so a cancelled step does not leave
   # a live engine holding a GPU that the next allocation cannot use.
   trap 'echo "signalled; tearing down"; docker rm -f "${NAME}" >/dev/null 2>&1 || true; exit 0' INT TERM
+  # EXIT as well as INT/TERM. `up` exits directly on a bring-up failure, so
+  # under `hold` the INT/TERM trap never ran and the container outlived the
+  # script -- the same leak, arriving by the one route the trap did not cover.
+  # Safe to arm before `up`: `up` refuses to start when the name is already
+  # taken, so anything this trap can see was created by this invocation.
+  trap 'docker rm -f "${NAME}" >/dev/null 2>&1 || true' EXIT
   up
   echo "holding ${NAME}; endpoint http://127.0.0.1:${PORT}/v1"
   while [ -n "$(docker ps -q -f "name=^${NAME}$")" ]; do

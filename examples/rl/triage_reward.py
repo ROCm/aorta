@@ -207,12 +207,20 @@ def score_answer(answer: Answer, label: Label) -> Score:
 
 
 def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
-    """Every ``result.json`` under a directory of archived probe runs."""
+    """Every readable ``result.json`` under a directory of archived probe runs.
+
+    Unreadable files are skipped *loudly*. Dropping them silently meant a
+    half-corrupt archive still produced a mean reward that looked complete, with
+    nothing to say it had been computed over fewer runs than the directory
+    holds -- and the sanitizer-report loader beside this one already prints its
+    skips, so the quiet one was the odd case rather than the convention.
+    """
     out: list[tuple[str, dict[str, Any]]] = []
     for path in sorted(root.rglob("result.json")):
         try:
             out.append((str(path), json.loads(path.read_text(encoding="utf-8"))))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"  skipped {path}: unreadable ({exc})", file=sys.stderr)
             continue
     return out
 

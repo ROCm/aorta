@@ -82,6 +82,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from proposal_reward import MAX_TIER, Proposal, score_proposal  # noqa: E402
 from triage_reward import (  # noqa: E402
+    ATTRIBUTION_WEIGHT,
+    VERDICT_WEIGHT,
     Answer,
     Label,
     load_corpus as load_triage_corpus,
@@ -135,8 +137,14 @@ def sample_seed(base: int, scenario: str, index: int) -> int:
     Rollouts want both: GRPO needs the samples in a group to *differ*, and a
     result nobody can re-derive is not evidence. Hashing the scenario id with
     the sample index gives a value that varies across a group, does not repeat
-    across groups, and is a pure function of `--seed` -- so the whole run
-    replays from one integer.
+    across groups, and is a pure function of `--seed` -- so the *request* is
+    stable.
+
+    The completions are not, and this docstring used to promise they were. The
+    engine accepted and ignored every seed form this branch tested -- the
+    OpenAI-standard `seed`, TokenSpeed's `sampling_seed`, and a plain `seed` in
+    `extra_body` -- so a run replays as the same set of requests rather than as
+    the same set of completions. See `--seed-mode` and `probe_seed.py`.
 
     `hashlib` rather than `hash()`, which is salted per process.
     """
@@ -671,6 +679,35 @@ def template_baselines(
     return rows
 
 
+def _always_pass_floor(triage: list[dict[str, Any]]) -> float | None:
+    """What a policy that answers `pass` and cites nothing would score here.
+
+    The number to read a model's triage reward against, and it is a property of
+    the labels that were scored rather than a constant. Quoting the corpus's
+    original 0.533 next to a run over a different label set -- a subset, a
+    rebuilt corpus, `--include-disagreements` -- describes a run nobody
+    performed while reading as this one.
+
+    Same weights and the same attribution rule as `triage_reward.score_answer`:
+    the verdict term is 1.0 on each label whose verdict is `pass`, and the
+    attribution term is 1.0 exactly where the label cites nothing, since an
+    empty answer against an empty truth is a perfect set match.
+    """
+    if not triage:
+        return None
+    verdict_hits = 0
+    attribution = 0.0
+    for row in triage:
+        label = row.get("label") or {}
+        if label.get("verdict") == "pass":
+            verdict_hits += 1
+        if not (label.get("cited_detectors") or []):
+            attribution += 1.0
+    n = len(triage)
+    floor = VERDICT_WEIGHT * (verdict_hits / n) + ATTRIBUTION_WEIGHT * (attribution / n)
+    return round(floor, 4)
+
+
 def aggregate(
     proposals: list[dict[str, Any]], triage: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -789,6 +826,17 @@ def aggregate(
         },
         "triage": {
             "n": len(triage),
+            # Computed from the labels this run actually scored, not pinned to
+            # the nine the corpus originally shipped. `--include-disagreements`,
+            # a rebuilt corpus, or any subset changes the mix, and a hard-coded
+            # 0.533 printed beside a different denominator is a floor for a run
+            # nobody did -- while reading as this run's.
+            #
+            # The always-`pass` policy: right on every label whose verdict is
+            # `pass`, and its empty citation list scores attribution 1.0 exactly
+            # on the labels that cite nothing (`set_f1` of two empty sets),
+            # which is the same arithmetic `triage_reward.py` applies.
+            "always_pass_floor": _always_pass_floor(triage),
             "mean_reward": round(_mean(triage_rewards), 4),
             "verdict_accuracy": round(
                 _mean([1.0 if t["verdict_correct"] else 0.0 for t in triage]), 4
@@ -859,13 +907,17 @@ def print_report(agg: dict[str, Any], meta: dict[str, Any]) -> None:
     print(f"  attribution F1      {tri['mean_attribution_f1']:.4f}")
     print(f"  parse failures      {tri['parse_failures']}/{tri['n']}")
     print()
-    # 0.533, not the 0.629 the rollout plan quotes. Recomputed here from the
-    # nine committed labels: always-`pass` is right on 4 of 9, and cites
-    # correctly on the 4 passes plus the 2 zero-finding errors, so the reward is
-    # 0.6*(4/9) + 0.4*(6/9). `triage_reward.py --corpus` prints the same number,
-    # and no data source in the tree produces 0.629.
-    print("  reference points: oracle 1.0, always-pass floor 0.533 "
-          "(recomputed; the plan's 0.629 does not reproduce)")
+    # Computed from the labels this run scored, not quoted. On the nine
+    # committed labels it comes out at 0.533 -- always-`pass` is right on 4 of 9
+    # and cites correctly on the 4 passes plus the 2 zero-finding errors, so
+    # 0.6*(4/9) + 0.4*(6/9) -- and the rollout plan's 0.629 does not reproduce
+    # from any data source in the tree. But the number moves with the label set,
+    # so printing the constant beside a run over a subset, a rebuilt corpus, or
+    # `--include-disagreements` described a run nobody performed.
+    floor = tri.get("always_pass_floor")
+    floor_text = "n/a (no triage rows)" if floor is None else f"{floor:.3f}"
+    print(f"  reference points: oracle 1.0, always-pass floor {floor_text} "
+          f"(computed from the {tri['n']} labels scored here)")
     print(f"  run: {meta.get('model')} on {meta.get('node')}, "
           f"condition {meta.get('condition')}")
 

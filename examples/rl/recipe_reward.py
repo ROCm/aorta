@@ -212,6 +212,26 @@ def _scratch_keys_accepted_by(workload_cls: type) -> tuple[str, ...]:
         return ()
 
 
+# Workloads whose `_validated_config` exists but is not the whole pure-config
+# check, so passing it is not evidence of full validity.
+#
+# `HrxPerfWorkload` is the known case: the seam covers bench/size/iters/warmup,
+# while `setup()` goes on to validate `gpu_arch` through `_validated_arch`,
+# require `timeout_sec > 0`, and require `keep_build` to be a bool -- three
+# checks that touch neither hipcc nor a GPU. Treating the seam as the whole
+# validator let a recipe with a nonsense `gpu_arch` reach tier 5 and read as
+# fully valid.
+#
+# Listed here rather than repaired here on purpose. Replicating those three
+# checks in this grader would put the same rule in two files, which is how the
+# rule drifts; the real fix is widening `_validated_config` in
+# `src/aorta/workloads/hrx_perf.py` so the seam means what this grader assumes
+# it means. That is product code, and this PR is deliberately the
+# scaffolding-only half of a split -- so it is called out in review rather than
+# smuggled in here.
+_PARTIAL_CONFIG_SEAMS = frozenset({"HrxPerfWorkload"})
+
+
 class NoConfigOnlySeam(Exception):
     """The workload offers no way to validate a config without a machine."""
 
@@ -249,6 +269,14 @@ def _validate_config(workload_cls: type, config: dict[str, Any]) -> None:
             "the cell without one. Not a judgement on the recipe."
         )
     validator()
+    if workload_cls.__name__ in _PARTIAL_CONFIG_SEAMS:
+        raise NoConfigOnlySeam(
+            f"{workload_cls.__name__} has a config-only seam, but not a complete "
+            "one: `_validated_config` covers some keys while `setup()` validates "
+            "others with checks that touch no hardware. Everything the seam does "
+            "cover passed. Reported as ungradeable rather than as valid, because "
+            "tier 5 is a claim of full validity."
+        )
 
 
 def grade_recipe_text(
@@ -632,10 +660,30 @@ def main(argv: list[str] | None = None) -> int:
 
     # The gate is on by default: it is part of the reward, not a diagnostic, and
     # a scorer that silently omits it pays full marks for retrieval.
+    #
+    # Refused rather than degraded when the root cannot be read. `_finish`
+    # treats a `None` or empty corpus exactly as `--no-novelty-gate` does, so a
+    # typo'd `--recipes-root`, or a directory with no recipes in it, silently
+    # turned the gate off and paid a verbatim copy full marks -- while the CLI
+    # still reported the gate as on. Switching the gate off is a decision the
+    # caller is allowed to make, and it has a flag; it must not be something a
+    # path typo makes for them.
     corpus = None
     if not args.no_novelty_gate:
         root = args.recipes_root or (Path(__file__).resolve().parents[2] / "recipes")
-        corpus = load_corpus(root) if root.is_dir() else {}
+        if not root.is_dir():
+            parser.error(
+                f"--recipes-root {root} is not a directory, so the novelty gate "
+                "has nothing to compare against. Point it at the recipe tree, or "
+                "pass --no-novelty-gate to score the tier ladder alone."
+            )
+        corpus = load_corpus(root)
+        if not corpus:
+            parser.error(
+                f"--recipes-root {root} contains no recipes, so the novelty gate "
+                "would pay a verbatim copy full marks. Point it at the recipe "
+                "tree, or pass --no-novelty-gate to score the tier ladder alone."
+            )
 
     if not args.recipes:
         return run_demo(corpus)

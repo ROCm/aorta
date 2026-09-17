@@ -123,7 +123,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aorta.agent.llm import AUTOPSY_CATEGORIES, AgentStep
+from aorta.agent.llm import AUTOPSY_CATEGORIES, AgentStep, _strip_code_fence
 from aorta.agent.policy import AgentPolicy, PolicyViolation
 from aorta.registry import get_mitigation
 from aorta.registry.errors import UnknownMitigationError
@@ -306,6 +306,30 @@ class Score:
         return self.tier >= 3 and self.category_credit < 1.0
 
 
+def _consumer_outcome_of_raw(raw: str, offered: list[str]) -> str:
+    """What the real proposer would do with this reply, fences and all.
+
+    Answers a different question from the tier ladder, and has to be computed
+    differently. The ladder is a format gate and stays strict on the raw text.
+    This is a claim about the production path, and that path is
+    ``LiteLLMProposer``, which calls ``_strip_code_fence`` before
+    ``json.loads``. So a reply wrapped in a ```json fence -- which is what a
+    model does when asked for JSON in prose -- parses for the consumer while
+    failing the gate, and recording ``silent_stop`` for it asserted the loop
+    would stall on a reply the loop accepts.
+
+    Imported from the agent package rather than reimplemented, so the two cannot
+    disagree about what a fence is.
+    """
+    try:
+        raw_obj = json.loads(_strip_code_fence(raw))
+    except json.JSONDecodeError:
+        return "silent_stop"
+    if not isinstance(raw_obj, dict):
+        return "silent_stop"
+    return _consumer_outcome(raw_obj, offered)
+
+
 def _consumer_outcome(raw_obj: dict[str, Any], offered: list[str]) -> str:
     """What `run_agent_loop` would do with this proposal.
 
@@ -338,17 +362,28 @@ def score_proposal(proposal: Proposal) -> Score:
     # Tier 1 -- strict JSON object. `response_format=json_object` asks the
     # provider for this, but providers return partial and non-object JSON, and
     # the consumer's own except-clause exists because of it.
+    #
+    # `consumer_outcome` is a *separate* question from the tier, and the two are
+    # deliberately answered from different parses. The tier is the format gate
+    # and stays strict on `proposal.raw`. The outcome claims what the real
+    # consumer would do, and `LiteLLMProposer` runs `_strip_code_fence` before
+    # `json.loads` -- so a fenced reply it accepts was being recorded here as
+    # `silent_stop`, which is a claim about the production path that is false.
     try:
         raw_obj = json.loads(proposal.raw)
     except json.JSONDecodeError as exc:
         score.stopped_at = "tier1_json"
         score.detail = f"does not parse: {exc.msg}"
-        score.consumer_outcome = "silent_stop"
+        score.consumer_outcome = _consumer_outcome_of_raw(
+            proposal.raw, proposal.offered
+        )
         return score
     if not isinstance(raw_obj, dict):
         score.stopped_at = "tier1_json"
         score.detail = f"parsed as {type(raw_obj).__name__}, not an object"
-        score.consumer_outcome = "silent_stop"
+        score.consumer_outcome = _consumer_outcome_of_raw(
+            proposal.raw, proposal.offered
+        )
         return score
     score.tier = 1
     score.consumer_outcome = _consumer_outcome(raw_obj, proposal.offered)
@@ -426,7 +461,15 @@ def score_proposal(proposal: Proposal) -> Score:
 
     # Tier 5 -- names that are available, and a usable confidence. Registered
     # but not offered is still silently dropped.
-    unavailable = [n for n in names if n not in proposal.offered]
+    #
+    # Checked against `cells`, not the raw list, for the same reason the
+    # precision term above is: `cells` is what `AgentPolicy.validate_step`
+    # leaves for the loop to run. `none` is registered and deliberately absent
+    # from `offered` -- it is the baseline cell, not a candidate -- so
+    # `["none", "tf32_off"]` is a proposal the real consumer accepts, and
+    # scoring the raw list stopped it here at tier 5 for naming a mitigation the
+    # loop drops before it looks at availability at all.
+    unavailable = [n for n in cells if n not in proposal.offered]
     if unavailable:
         score.stopped_at = "tier5_available"
         score.detail = (
