@@ -192,9 +192,10 @@ class RedactionUnavailable(RuntimeError):
 def _redaction_enabled() -> bool:
     """Whether the operator has turned redaction off.
 
-    The switch lives in the chat settings, which need pydantic-settings and, for
-    the profile file, 3.11. When they cannot be read the answer is yes: not
-    knowing whether someone disabled redaction is not a reason to skip it.
+    The switch lives in the chat settings, which need pydantic-settings and a
+    TOML reader (stdlib tomllib, or tomli on 3.10). When they cannot be read the
+    answer is yes: not knowing whether someone disabled redaction is not a
+    reason to skip it.
     """
     try:
         from aorta.chat.config import settings
