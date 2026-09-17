@@ -694,6 +694,21 @@ def _looks_like_pasted_source(text: str) -> bool:
     return any(line.lstrip().startswith(_LINE_START_MARKERS) for line in text.splitlines())
 
 
+def _recent_human_turns(messages: list) -> list[str]:
+    """The user's last few turns, oldest first.
+
+    One definition of the window, because two parts of the selector ask the
+    same question about it: whether a paste is recent enough to count, and
+    whether the model gets to see that paste. Those answers disagreeing is the
+    failure this exists to prevent.
+
+    Only the human turns. The requirement is that the *user* supplied something
+    to analyse, and the tool is going to be handed that text.
+    """
+    human = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+    return human[-_SOURCE_LOOKBACK:]
+
+
 def _conversation_has_source(messages: list) -> bool:
     """Whether the user has pasted code in the recent part of this conversation.
 
@@ -702,12 +717,28 @@ def _conversation_has_source(messages: list) -> bool:
     reply is "yes, run the sanitizer on it". Reading only the newest message
     finds no code in that reply and withdraws the source tools from precisely
     the turn that asked for them.
-
-    Only the human turns count. The requirement is that the *user* supplied
-    something to analyse, and the tool is going to be handed that text.
     """
-    human = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
-    return any(_looks_like_pasted_source(text) for text in human[-_SOURCE_LOOKBACK:])
+    return any(_looks_like_pasted_source(text) for text in _recent_human_turns(messages))
+
+
+def _selector_view(turns: list[str]) -> str:
+    """The recent turns as one message, with the current ask last.
+
+    The requirement check looked back over this window while the model was
+    shown only the newest message, so a follow-up like "32, go ahead" kept the
+    source tools eligible and then gave the selector nothing to rank them on --
+    the kernel it was deciding about was one turn out of reach.
+
+    A single turn is passed through unchanged, which is the common case and the
+    one the prompt was written against.
+    """
+    if len(turns) <= 1:
+        return turns[-1] if turns else ""
+    earlier = "\n\n".join(turns[:-1])
+    return (
+        f"Earlier turns from the user, oldest first:\n\n{earlier}\n\n"
+        f"--- the user's current message ---\n\n{turns[-1]}"
+    )
 
 
 def _first_json_object(text: str) -> dict | None:
@@ -742,7 +773,7 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
     """
     from aorta.chat.tools.capabilities import MAX_CANDIDATES, catalogue, enforce_requirements
 
-    text = str(state["messages"][-1].content)
+    text = _selector_view(_recent_human_turns(state["messages"]))
     proposed: list[str] = []
     why = ""
     try:
