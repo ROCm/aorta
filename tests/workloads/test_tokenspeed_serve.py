@@ -4799,6 +4799,35 @@ def test_a_partial_length_distribution_is_not_published(tmp_path, monkeypatch):
     assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
 
 
+def test_no_lengths_plus_a_floor_plus_many_samples_is_refused(tmp_path):
+    """The fallback is weaker at `n > 1`; at `n > 1` it is blind.
+
+    Without `output_lens` both audits compare `total_output_tokens / completed`,
+    which is per request. With summed usage accounting and
+    `rollout_samples: 8`, one token per completion reads as 8 and clears the
+    default floor exactly -- so the cell advertises a per-completion guard that
+    cannot see a fully collapsed policy. Refused rather than downgraded.
+    """
+    with pytest.raises(ValueError, match="save_detailed"):
+        _rollout(
+            tmp_path, save_detailed=False, rollout_samples=8, min_mean_output_tokens=8
+        ).setup()
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        # At n == 1 per request and per completion are the same number.
+        {"save_detailed": False, "rollout_samples": 1, "min_mean_output_tokens": 8},
+        # With the floor off there is nothing to weaken.
+        {"save_detailed": False, "rollout_samples": 8, "min_mean_output_tokens": 0},
+    ],
+)
+def test_the_refusal_is_narrow(tmp_path, cfg):
+    """Only the combination that is actually blind is refused."""
+    _rollout(tmp_path, **cfg).setup()
+
+
 def test_without_save_detailed_a_missing_array_is_not_a_failure(tmp_path, monkeypatch):
     """The other half of the contract, and the reason it is keyed on the request.
 

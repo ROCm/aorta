@@ -303,7 +303,7 @@ What follows is the configuration.
 | `rollout_samples` | `4` | Completions per prompt — the `n` of the sampling API. Max 1024. |
 | `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
 | `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
-| `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**, `total_output_tokens / (completed * rollout_samples)`. `0` disables it. Per completion because `total_output_tokens` sums across all `n` choices, so a per-request floor would be `n` times easier to clear — at `rollout_samples: 8` an immediate-EOS policy cleared the default exactly. |
+| `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**. Taken from the mean of `output_lens`, which carries one entry per completion, so no assumption is made about whether the gateway's `usage.completion_tokens` sums all `n` choices. With `save_detailed: false` (and only then) it falls back to `total_output_tokens / completed`, per request, with the basis named in the failure detail — a combination rejected outright when `rollout_samples > 1`, since a collapsed policy would clear a per-request floor there. `0` disables it. |
 | `sampling_backend` | `triton` | The server's `--sampling-backend`; `triton` or `triton_full`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. `greedy` is **rejected** under `rollout` for the same reason `temperature: 0` is, and `flashinfer` / `flashinfer_full` are rejected as CUDA-only — unregistered on the ROCm images this workload serves from, so accepting them would move the failure to server startup. Reserved in `serve_args` under this mode. |
 
 The sampling keys are **rejected outside the mode** rather than ignored. Outside
@@ -726,7 +726,7 @@ the payload route below rather than the argv route.** Rollout builds its own
 so nothing can shadow the value, so EOS genuinely is respected on
 `dataset: random` there. Everything in this section describes a cell that is not
 in rollout mode; under rollout, `ignore_eos` defaults to `false` and an explicit
-`true` is what gets rejected. See [Rollout mode](#rollout-mode-sampled-multi-completion-serving).
+`true` is what gets rejected. See [Rollout mode](#rollout-mode).
 
 The config table used to present `ignore_eos` as a plain boolean, so a recipe
 setting it to `false` on the random dataset ran at a pinned length while the

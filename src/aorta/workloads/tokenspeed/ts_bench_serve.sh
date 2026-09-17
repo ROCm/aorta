@@ -79,12 +79,15 @@
 #   TS_TEMPERATURE        sampling temperature            (rollout only)
 #   TS_TOP_P              nucleus sampling mass, omitted when unset
 #   TS_MIN_MEAN_OUTPUT_TOKENS  floor on mean tokens per *completion* per step,
-#                         total_output_tokens/(completed*TS_ROLLOUT_SAMPLES),
-#                         0 to disable. Per completion, not per request:
-#                         total_output_tokens sums across all n choices, so a
-#                         per-request floor is n times easier to clear. Guards
-#                         the collapsed-policy case described at the audit
-#                         below                             (default 0)
+#                         0 to disable. Read from the mean of the export's
+#                         output_lens, one entry per completion, so nothing is
+#                         assumed about whether the gateway's
+#                         usage.completion_tokens sums all n choices. Without
+#                         that array it falls back to
+#                         total_output_tokens/completed -- per *request*, the
+#                         weaker rule -- and the verdict names which basis was
+#                         used. Guards the collapsed-policy case described at
+#                         the audit below                   (default 0)
 #   TS_SAVE_DETAILED      1 to keep the export's per-request arrays, which is
 #                         what carries `output_lens`       (default 0)
 #   TS_SEED               dataset/sampling seed           (default 0)
@@ -1180,13 +1183,19 @@ if min_mean_output > 0:
     # rule: this audit runs first, so a container dividing differently would
     # print a verdict the host then contradicts.
     lens = doc.get("output_lens")
-    usable = (
-        isinstance(lens, list)
-        and len(lens) > 0
-        and all(
-            isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in lens
-        )
-    )
+
+    def _whole(v):
+        # The host's rule verbatim (`_valid_output_lens`): a non-bool real
+        # number that is a non-negative whole value, so `10.0` counts and
+        # `10.5` does not. Spelling it as `isinstance(v, int)` here made the
+        # two layers disagree about integral floats -- the container would
+        # reject `[1.0] * 256`, fall back to per-request accounting and derive
+        # 8, clearing the default floor on a step the host reads as a mean of 1.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return False
+        return v == v and abs(v) != float("inf") and v >= 0 and float(v).is_integer()
+
+    usable = isinstance(lens, list) and len(lens) > 0 and all(_whole(v) for v in lens)
     if usable:
         mean_output = sum(lens) / len(lens)
         basis = f"output_lens n={len(lens)}"

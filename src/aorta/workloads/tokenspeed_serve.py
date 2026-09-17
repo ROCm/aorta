@@ -587,13 +587,25 @@ class TokenSpeedServeWorkload(Workload):
             serves from.
         top_p: nucleus sampling mass in ``(0, 1]`` (default: unset, i.e. the
             server's own).
-        min_mean_output_tokens: per-step floor on mean tokens per *completion*,
-            ``total_output_tokens / (completed * rollout_samples)``; ``0``
-            disables it (default ``8``). Per completion rather than per request
-            because ``total_output_tokens`` sums across all ``rollout_samples``
-            choices, so a per-request floor would be ``rollout_samples`` times
-            easier to clear. Catches the policy that answers every request with
-            an immediate EOS, which passes every other guard here.
+        min_mean_output_tokens: per-step floor on mean tokens per *completion*;
+            ``0`` disables it (default ``8``). Catches the policy that answers
+            every request with an immediate EOS, which passes every other guard
+            here.
+
+            Read from the mean of ``output_lens`` -- one entry per completion,
+            so the reading needs no assumption about whether the gateway's
+            ``usage.completion_tokens`` sums all ``n`` choices or reports only
+            the first. Both shapes are documented as the server's decision in
+            :meth:`_add_generated_length_metrics`, and dividing
+            ``total_output_tokens`` by ``completed * rollout_samples`` was wrong
+            by a factor of ``n`` on the second one.
+
+            With ``save_detailed: false`` there is no such array, and the check
+            falls back to ``total_output_tokens / completed`` -- per *request*,
+            the weaker rule, with the basis named in the failure detail. That
+            combination is rejected outright when ``rollout_samples > 1``,
+            because a fully collapsed policy clears a per-request floor at those
+            sample counts.
         save_detailed: keep the export's per-request arrays (default ``False``,
             or ``True`` under ``rollout``). ``output_lens`` is what the
             ``generated_tokens_*`` distribution is computed from, and the
@@ -1180,6 +1192,34 @@ class TokenSpeedServeWorkload(Workload):
         # distribution is computed from, and that distribution is most of what
         # distinguishes a rollout measurement from a throughput one.
         self._save_detailed = self._bool("save_detailed", True)
+
+        # The floor needs a per-completion reading, and `output_lens` is the
+        # only one there is. Without it both audits fall back to
+        # `total_output_tokens / completed`, which is per *request* -- and at
+        # `rollout_samples: 8` with summed usage accounting, one token per
+        # completion reads as 8 and clears the default floor exactly. So the
+        # fallback is not merely weaker there, it is blind to the collapse the
+        # floor exists for, while the cell still advertises a per-completion
+        # guard.
+        #
+        # Refused rather than silently downgraded, and narrowly: at `n == 1`
+        # per request and per completion are the same number, and with the floor
+        # disabled there is nothing to weaken.
+        if (
+            not self._save_detailed
+            and self._min_mean_output_tokens > 0
+            and self._rollout_samples > 1
+        ):
+            raise ValueError(
+                "tokenspeed_serve: save_detailed: false cannot be combined with "
+                f"min_mean_output_tokens ({self._min_mean_output_tokens}) and "
+                f"rollout_samples ({self._rollout_samples}). The floor is per "
+                "completion and `output_lens` is the only per-completion source; "
+                "without it the check falls back to a per-request mean, which at "
+                "this sample count a fully collapsed policy would still clear. "
+                "Leave save_detailed on, set min_mean_output_tokens: 0 to state "
+                "that the cell is not guarding length, or use rollout_samples: 1."
+            )
 
     def _validated_positive_float(self, key: str, default: float, *, maximum: float) -> float:
         """A float in ``(0, maximum]``, spelled the way the script will accept.
