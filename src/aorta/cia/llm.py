@@ -367,15 +367,62 @@ def _qualified_model(model: str, provider: str, has_endpoint: bool) -> str:
     carry their own vendor: ``anthropic/claude-3-5-sonnet`` became
     ``openai/anthropic/claude-3-5-sonnet`` and went to the wrong backend.
 
-    A name that already names its vendor is left alone. Otherwise an endpoint
-    is what decides: with one, the request goes to something OpenAI-shaped; a
-    litellm profile without one is routed by litellm's own rules.
+    The configured route wins over the spelling of the model. Model
+    repositories commonly contain a slash -- for example the default
+    ``deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`` -- and that namespace is
+    not a LiteLLM provider. Returning it unchanged bypasses the ``openai/``
+    route required by the configured OpenAI-compatible vLLM endpoint.
+
+    A direct LiteLLM profile still gets to route its own names. Elsewhere an
+    existing prefix is preserved only when LiteLLM says it is a provider, and
+    ``openai/`` is the only prefix that already satisfies an OpenAI-compatible
+    route.
     """
-    if "/" in model:
+    provider = provider.strip().lower()
+
+    # Decide endpoint routing before looking at the slash. ``deepseek-ai`` is
+    # an organization, not a provider, and vLLM still needs
+    # openai/deepseek-ai/<model> so DSPy sends it to api_base.
+    if provider in {"vllm", "openai"} or has_endpoint:
+        return model if model.startswith("openai/") else f"openai/{model}"
+
+    if provider == "litellm":
+        # No endpoint means LiteLLM itself owns routing, for both qualified and
+        # bare names. In particular, preserve anthropic/... and bedrock/....
         return model
-    if provider == "litellm" and not has_endpoint:
+
+    prefix = _litellm_provider_prefix(model)
+    if prefix is not None:
         return model
     return f"openai/{model}"
+
+
+def _litellm_provider_prefix(model: str) -> str | None:
+    """The leading component when it is a real LiteLLM provider.
+
+    A slash alone proves nothing: Hugging Face-style ``org/model`` names have
+    the same shape. Read LiteLLM's provider registry rather than maintaining a
+    second list that drifts as providers are added. ``openai`` is recognized
+    independently because it is the route this module emits and must never be
+    doubled if an older LiteLLM does not expose ``provider_list``.
+    """
+    prefix, separator, _ = model.partition("/")
+    if not separator:
+        return None
+    if prefix == "openai":
+        return prefix
+
+    try:
+        import litellm
+
+        providers = getattr(litellm, "provider_list", ())
+    except ImportError:
+        return None
+
+    for candidate in providers:
+        if prefix == getattr(candidate, "value", candidate):
+            return prefix
+    return None
 
 
 def configure_dspy(

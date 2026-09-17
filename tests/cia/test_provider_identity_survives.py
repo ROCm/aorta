@@ -19,7 +19,7 @@ import pytest
 
 pytest.importorskip("dspy", reason="the agents need the [cia] extra")
 
-from aorta.cia.llm import _qualified_model
+from aorta.cia.llm import _litellm_provider_prefix, _qualified_model
 
 
 class TestAVendorQualifiedModelIsLeftAlone:
@@ -46,6 +46,26 @@ class TestAnOpenAIShapedEndpointStillGetsThePrefix:
     def test_vllm_speaks_the_openai_protocol(self):
         assert _qualified_model("qwen3-35b", "vllm", True) == "openai/qwen3-35b"
 
+    def test_the_default_namespaced_vllm_model_does_too(self):
+        """A repository namespace is not a provider prefix."""
+        model = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+
+        assert _qualified_model(model, "vllm", True) == f"openai/{model}"
+
+    def test_the_actual_chat_default_stays_routable(self):
+        """Cross-contract check against the default that exposed the bug."""
+        from aorta.chat.config import Settings
+
+        model = Settings.model_fields["vllm_model"].default
+
+        assert _qualified_model(model, "vllm", True) == f"openai/{model}"
+
+    def test_the_configured_route_wins_over_a_vendor_shaped_name(self):
+        """A vLLM endpoint does not become Anthropic because the name says so."""
+        model = "anthropic/locally-served-claude-compatible-model"
+
+        assert _qualified_model(model, "vllm", True) == f"openai/{model}"
+
     def test_a_proxy_does_too(self):
         """What this deployment runs: a LiteLLM proxy addressed as OpenAI."""
         assert _qualified_model("claude-haiku-4-5", "vllm", True) == (
@@ -60,6 +80,35 @@ class TestAnOpenAIShapedEndpointStillGetsThePrefix:
         assert _qualified_model("claude-haiku-4-5", "litellm", True) == (
             "openai/claude-haiku-4-5"
         )
+
+    def test_an_existing_openai_prefix_is_not_doubled(self):
+        assert _qualified_model("openai/gpt-4o", "vllm", True) == "openai/gpt-4o"
+
+
+class TestASlashIsNotEnoughToNameAProvider:
+    def test_a_hugging_face_organization_is_not_a_provider(self):
+        assert (
+            _litellm_provider_prefix(
+                "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "openai/gpt-4o",
+            "anthropic/claude-3-5-sonnet",
+            "gemini/gemini-1.5-pro",
+            "bedrock/anthropic.claude-v2",
+            "deepseek/deepseek-chat",
+        ],
+    )
+    def test_real_litellm_prefixes_are_recognized(self, model):
+        assert _litellm_provider_prefix(model) == model.split("/", 1)[0]
+
+    def test_a_bare_model_has_no_prefix(self):
+        assert _litellm_provider_prefix("qwen3-35b") is None
 
 
 class TestLitellmWithoutAnEndpointRoutesItself:
@@ -125,3 +174,21 @@ class TestTheLmIsBuiltWithIt:
         lm = llm_mod.build_lm()
 
         assert lm.model == "openai/claude-haiku-4-5", lm.model
+
+    def test_the_default_vllm_model_reaches_dspy_through_openai(self, monkeypatch):
+        """End to end: the model with a slash is still sent to api_base."""
+        import aorta.cia.llm as llm_mod
+        from aorta.chat.config import Settings
+
+        model = Settings.model_fields["vllm_model"].default
+        monkeypatch.setattr(
+            llm_mod,
+            "chat_provider",
+            lambda **_k: ("http://vllm:8000/v1", "EMPTY", model, "vllm"),
+        )
+        monkeypatch.setattr(llm_mod, "_use_certifi_bundle", lambda: None)
+
+        lm = llm_mod.build_lm()
+
+        assert lm.model == f"openai/{model}", lm.model
+        assert lm.kwargs["api_base"] == "http://vllm:8000/v1"
