@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import builtins
 import logging
-import tomllib
 from pathlib import Path
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 pytest.importorskip("dspy", reason="the agents need the [cia] extra")
 
@@ -60,6 +64,12 @@ class TestTheExtraDeclaresWhatItReadsTheProfileWith:
         """The fix must not have displaced what was already there."""
         assert any(r.startswith("dspy-ai") for r in _cia_requirements())
 
+    def test_python_310_gets_the_tomllib_backport(self):
+        declared = " ".join(_cia_requirements())
+
+        assert "tomli>=2.0" in declared
+        assert "python_version < '3.11'" in declared
+
 
 class TestTheProfileIsActuallyReadable:
     def test_the_config_module_imports(self):
@@ -67,6 +77,46 @@ class TestTheProfileIsActuallyReadable:
         from aorta.chat.config import settings
 
         assert settings is not None
+
+    def test_chat_provider_reads_values_from_the_toml_file(
+        self, tmp_path, monkeypatch
+    ):
+        """The 3.10 lane proves tomli reads the profile, not just imports."""
+        profile = tmp_path / "aorta" / "chat.toml"
+        profile.parent.mkdir(parents=True)
+        profile.write_text(
+            "\n".join(
+                [
+                    'llm_provider = "vllm"',
+                    'vllm_base_url = "http://profile:4000/v1"',
+                    'vllm_api_key = "profile-key"',
+                    'vllm_model = "profile-model"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        for name in (
+            "AORTA_CHAT_LLM_PROVIDER",
+            "AORTA_CHAT_VLLM_BASE_URL",
+            "AORTA_CHAT_VLLM_API_KEY",
+            "AORTA_CHAT_VLLM_MODEL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        from aorta.chat.config import reset_settings
+
+        reset_settings()
+        try:
+            assert llm_mod.chat_provider() == (
+                "http://profile:4000/v1",
+                "profile-key",
+                "profile-model",
+                "vllm",
+            )
+        finally:
+            reset_settings()
 
     def test_chat_provider_reaches_it(self, monkeypatch):
         monkeypatch.setenv("AORTA_CHAT_VLLM_BASE_URL", "http://configured:4000/v1")

@@ -4,4 +4,9 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+      # Two CIA files arrived with CRLF and failed the line-ending check on
+      # every run afterwards. end-of-file-fixer only looks at the last byte,
+      # so nothing here was catching the other thirty-four lines.
+      - id: mixed-line-ending
+        args: [--fix=lf]
       - id: check-yaml

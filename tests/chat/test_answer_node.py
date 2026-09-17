@@ -104,9 +104,7 @@ class TestEmptyContentIsNotADeadEnd:
         assert "more specific" in result["messages"][0].content
 
     @pytest.mark.asyncio
-    async def test_the_token_count_is_logged_so_the_cause_is_diagnosable(
-        self, caplog
-    ):
+    async def test_the_token_count_is_logged_so_the_cause_is_diagnosable(self, caplog):
         """Output tokens with no content is the signature of a reasoning model."""
         response = AIMessage(content="")
         response.usage_metadata = {
@@ -116,16 +114,15 @@ class TestEmptyContentIsNotADeadEnd:
         }
         fake = MagicMock()
         fake.ainvoke = AsyncMock(return_value=response)
-        with caplog.at_level("WARNING"), patch(
-            "aorta.chat.graph.nodes._get_llm", return_value=fake
+        with (
+            caplog.at_level("WARNING"),
+            patch("aorta.chat.graph.nodes._get_llm", return_value=fake),
         ):
             await answer_node(_state())
         assert "75 output tokens" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_a_reasoning_channel_is_logged_at_debug_when_present(
-        self, caplog
-    ):
+    async def test_a_reasoning_channel_is_logged_at_debug_when_present(self, caplog):
         """langchain-openai drops gpt-oss's `reasoning` today; read it anyway."""
         response = AIMessage(
             content="",
@@ -133,8 +130,6 @@ class TestEmptyContentIsNotADeadEnd:
         )
         fake = MagicMock()
         fake.ainvoke = AsyncMock(return_value=response)
-        with caplog.at_level("DEBUG"), patch(
-            "aorta.chat.graph.nodes._get_llm", return_value=fake
-        ):
+        with caplog.at_level("DEBUG"), patch("aorta.chat.graph.nodes._get_llm", return_value=fake):
             await answer_node(_state())
         assert "I should call search_code here." in caplog.text

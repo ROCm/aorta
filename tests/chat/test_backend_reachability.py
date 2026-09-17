@@ -117,9 +117,7 @@ class TestDoctorReportsAnUnreachableBackend:
         assert "AORTA_CHAT_VLLM_BASE_URL" in hint
         assert "aorta chat config init" in hint
 
-    def test_the_hint_is_not_prefixed_with_an_exception_class_name(
-        self, nothing_listening: str
-    ):
+    def test_the_hint_is_not_prefixed_with_an_exception_class_name(self, nothing_listening: str):
         """BackendUnreachableError's message is already operator-facing prose."""
         report = doctor.Report()
         doctor._check_backend(report)
@@ -172,9 +170,7 @@ class TestPreflightStaysPermissive:
         assert await backend.preflight(timeout=1, interval=1) is None
 
     @pytest.mark.asyncio
-    async def test_preflight_says_it_is_starting_anyway(
-        self, nothing_listening: str, caplog
-    ):
+    async def test_preflight_says_it_is_starting_anyway(self, nothing_listening: str, caplog):
         backend = LocalVLLMBackend()
         with caplog.at_level(logging.WARNING):
             await backend.preflight(timeout=1, interval=1)
@@ -336,18 +332,14 @@ class TestAskExplainsRatherThanTracebacks:
         assert nothing_listening in message
         assert "Traceback" not in message
 
-    def test_the_message_is_short_enough_to_read(
-        self, unreachable_backend, connection_failure
-    ):
+    def test_the_message_is_short_enough_to_read(self, unreachable_backend, connection_failure):
         """It replaced 180-odd lines. A dozen is a message; a hundred is a trace."""
         from aorta.cli import chat as cli
 
         message = cli._failure_message(connection_failure, unreachable_backend)
         assert len(message.splitlines()) < 15
 
-    def test_the_message_says_what_to_do_next(
-        self, unreachable_backend, connection_failure
-    ):
+    def test_the_message_says_what_to_do_next(self, unreachable_backend, connection_failure):
         from aorta.cli import chat as cli
 
         message = cli._failure_message(connection_failure, unreachable_backend)

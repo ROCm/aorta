@@ -21,6 +21,8 @@ Available now as a Python library:
 - deduplicate stable kernel identities;
 - run standalone Waitcheck on one exact code-object entry at a time;
 - run the valid exact-entry Waitcheck CLI and retain its raw log;
+- report a Waitcheck scan that hit the backend's diagnostic cap as truncated,
+  rather than quoting its capped count as the whole hazard count;
 - parse upstream `rj-waitcheck-diagnostic-v1` JSONL for corpus workflows;
 - parse Record/Replay output from the combined Waitcheck + ConSan hook;
 - preserve per-code-object ConSan coverage and fail closed on timeout, backend
@@ -247,6 +249,18 @@ complaint. The run that motivated this is written up in
 [`docs/sanitizers/consan-405-unitemized-barrier-sites.md`](../../../../docs/sanitizers/consan-405-unitemized-barrier-sites.md).
 - `pass` only means a requested backend ran healthily and produced no finding;
   Record/Replay's bounded snapshot is not proof that a program is race-free.
+
+A Waitcheck finding count is not automatically the whole hazard count.
+`rj_waitcheck` stops collecting at `--max-diagnostics` (32 per code object by
+default, and each code object is its own subprocess) and marks a capped scan by
+prefixing the summary count with `>=` (`diagnostics=>=32`). aorta carries that
+marker through as `diagnostics_truncated: true` on the kernel result and on the
+check, so `sanitizer_report.json` distinguishes a complete count from a floor —
+the gpt-oss `_topk_topp_kernel` object scanned at the default cap reports 32 of
+its 45 hazards ([#480](https://github.com/ROCm/aorta/issues/480)). Set
+`sanitizer_plan.policy.waitcheck_max_diagnostics` to raise the cap for a lane
+that needs the complete count; a higher cap costs analysis time, so the flag,
+not a hard-coded larger default, is what makes the partial result visible.
 
 The report keeps finding severity and execution completeness separate. For
 example, a Waitcheck warning plus scoped ConSan `not_checked` produces

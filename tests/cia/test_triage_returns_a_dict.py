@@ -82,6 +82,9 @@ class TestNothingIsPrintedOnTheWay:
 class TestTheCallersThatBroke:
     def test_the_chat_tool_surfaces_the_real_message(self):
         """It used to read 'triage failed: AttributeError ...'."""
+        pytest.importorskip(
+            "langchain_core", reason="the chat tool needs the [chat-cli] extra"
+        )
         from aorta.chat.tools.cluster import _run_triage
 
         with contextlib.redirect_stdout(io.StringIO()):

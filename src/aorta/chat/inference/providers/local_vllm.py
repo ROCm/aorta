@@ -42,6 +42,15 @@ class LocalVLLMBackend:
 
     name = "vllm"
 
+    native_requirement = (
+        "It needs the vLLM server restarted with --enable-auto-tool-choice and a\n"
+        "--tool-call-parser; a stock server does not accept the 'tools' parameter."
+    )
+
+    @property
+    def model_name(self) -> str:
+        return settings.vllm_model
+
     def get_chat_model(
         self,
         *,
@@ -140,7 +149,7 @@ class LocalVLLMBackend:
             "  export AORTA_CHAT_VLLM_BASE_URL=http://<host>:<port>/v1\n"
             "or set vllm_base_url in the profile: aorta chat config init "
             "--profile local-vllm\n"
-            "To use a hosted provider instead: aorta chat ask --llm-provider openai \"...\""
+            'To use a hosted provider instead: aorta chat ask --llm-provider openai "..."'
         )
 
     def describe(self) -> str:

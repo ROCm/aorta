@@ -128,13 +128,17 @@ class TestATriageWatchesOnlyItsOwnJob:
         seen: list[str] = []
         import aorta.cia.watch.poll as poll_mod
 
-        real = poll_mod.autopsy_is_settled
+        real = poll_mod.autopsy_state
 
-        def spy(job_dir, *args, **kw):
+        def spy(job_dir):
             seen.append(Path(job_dir).name)
-            return real(job_dir, *args, **kw)
+            return real(job_dir)
 
-        monkeypatch.setattr(poll_mod, "autopsy_is_settled", spy)
+        # The merged #423 implementation reads the state once and classifies
+        # that record, rather than calling autopsy_is_settled (which would read
+        # it a second time). autopsy_state is therefore the stable observation
+        # point after the per-job filter.
+        monkeypatch.setattr(poll_mod, "autopsy_state", spy)
         poll_jobs(jobs_root, max_rounds=1, **kwargs)
         return seen
 

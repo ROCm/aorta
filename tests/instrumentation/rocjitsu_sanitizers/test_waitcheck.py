@@ -18,6 +18,8 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     Verdict,
     parse_waitcheck_jsonl,
     run_waitcheck,
+    waitcheck,
+    waitcheck_argv,
 )
 from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
 from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import parse_waitcheck_text
@@ -97,6 +99,124 @@ def test_waitcheck_hazard_uses_valid_exact_entry_cli(
     assert "--code-object-index" in argv
     assert argv[argv.index("--kernel-entry") + 1] == "0x120"
     assert "--diagnostics-jsonl" not in argv
+    # An uncapped summary is a complete count, and nothing overrides the
+    # backend's own diagnostic cap unless a caller asks for it.
+    assert "--max-diagnostics" not in argv
+    assert result.diagnostics_truncated is False
+    assert result.kernel_results[0].diagnostics_truncated is False
+
+
+def test_waitcheck_reports_a_capped_scan_as_truncated(tmp_path: Path) -> None:
+    # rj_waitcheck stops collecting at --max-diagnostics and marks the summary with
+    # ">=". That marker has to reach the kernel result, the check, and the emitted
+    # report, or a partial hazard count is quoted as the whole one (#480).
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "library.so"
+    artifact.write_bytes(b"\x7fELF")
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        output = "\n".join(
+            (
+                f"rj_waitcheck: {artifact}:gfx950[3]:kernel=.text+0x120: "
+                "instructions=43023 memory-events=5198 diagnostics=>=2",
+                f"{artifact}:gfx950[3]:.text+0x20: missing s_waitcnt lgkmcnt(0)",
+                f"{artifact}:gfx950[3]:.text+0x40: missing s_waitcnt vmcnt(0)",
+            )
+        )
+        return ProcessResult(tuple(argv), 4, output, "")
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+    )
+
+    assert result.state is ExecutionState.RAN
+    assert result.verdict is Verdict.WARN
+    assert result.diagnostics_truncated is True
+    assert result.kernel_results[0].diagnostics_truncated is True
+    emitted = result.to_dict()
+    assert emitted.get("diagnostics_truncated") is True
+    kernel_results = emitted.get("kernel_results")
+    assert isinstance(kernel_results, list)
+    kernel_result = kernel_results[0]
+    assert isinstance(kernel_result, dict)
+    assert kernel_result.get("diagnostics_truncated") is True
+
+
+def test_waitcheck_raises_the_backend_cap_when_asked(tmp_path: Path) -> None:
+    # The cap is what truncates, so a lane that needs a complete count must be able
+    # to raise it without editing code.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "library.so"
+    artifact.write_bytes(b"\x7fELF")
+    captured: list[tuple[str, ...]] = []
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        captured.append(tuple(argv))
+        output = (
+            f"{artifact}:gfx950[3]:kernel=.text+0x120: "
+            "instructions=43023 memory-events=5198 diagnostics=45"
+        )
+        return ProcessResult(tuple(argv), 0, output, "")
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+        max_diagnostics=100000,
+    )
+
+    argv = captured[0]
+    assert argv[argv.index("--max-diagnostics") + 1] == "100000"
+    assert result.diagnostics_truncated is False
+
+
+@pytest.mark.parametrize("bad_cap", [0, -1, True, 1.5, "1"])
+def test_waitcheck_argv_rejects_a_cap_that_is_not_a_positive_integer(
+    tmp_path: Path, bad_cap: object
+) -> None:
+    # A library caller enters this directly, so the recipe loader's validation is
+    # not the only gate: values such as ``True`` and ``1.5`` would otherwise be
+    # spelled onto the argv.
+    artifact = tmp_path / "library.so"
+    artifact.write_bytes(b"\x7fELF")
+
+    with pytest.raises(ValueError, match="max_diagnostics"):
+        waitcheck_argv(
+            tmp_path / "rj_waitcheck", _exact_identity(artifact), max_diagnostics=bad_cap
+        )
+
+
+@pytest.mark.parametrize("bad_cap", [0, -1, True, 1.5, "1"])
+def test_run_waitcheck_rejects_an_invalid_cap_before_early_returns(
+    tmp_path: Path, bad_cap: object
+) -> None:
+    with pytest.raises(ValueError, match="max_diagnostics"):
+        run_waitcheck(
+            KernelWorklist(
+                requirement=SelectionRequirement.TOP_TIME,
+                top_n=1,
+                kernels=(),
+            ),
+            output_dir=tmp_path / "out",
+            binary=tmp_path / "missing",
+            max_diagnostics=bad_cap,
+        )
 
 
 def test_waitcheck_backend_error_never_passes(tmp_path: Path) -> None:
@@ -124,6 +244,128 @@ def test_waitcheck_backend_error_never_passes(tmp_path: Path) -> None:
     assert result.verdict is Verdict.ERROR
     assert "worklist_not_fully_checked" in str(result.reason)
     assert result.kernel_results[0].returncode == 2
+    # The rollup above names no cause, so the kernel reason has to carry the
+    # backend's own words rather than a generic parse complaint.
+    assert result.kernel_results[0].reason == "waitcheck_backend_exit_2: analysis failed"
+
+
+def test_waitcheck_unexpected_exit_reports_stderr_not_the_missing_summary(
+    tmp_path: Path,
+) -> None:
+    # rj_waitcheck refuses an input it cannot decode with exit 2, an explanation on
+    # stderr, and no analysis summary. Parsing before checking the exit code turned
+    # that explanation into "did not contain an analysis summary" -- the symptom of
+    # the refusal rather than the refusal -- and the stderr never reached the report.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "kernel.hsaco"
+    artifact.write_bytes(b"\x7fELF")
+    message = f"{artifact}: failed to parse input executable or code object"
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 2, "", message)
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+    )
+
+    kernel = result.kernel_results[0]
+    assert kernel.state is ExecutionState.ERROR
+    assert kernel.reason == f"waitcheck_backend_exit_2: {message}"
+    assert "analysis summary" not in str(kernel.reason)
+
+
+def test_waitcheck_expected_exit_still_reports_a_parse_failure(tmp_path: Path) -> None:
+    # The reorder above must not swallow a genuine identity/format mismatch: a clean
+    # or hazard exit whose output cannot be parsed is still a diagnostics error.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "kernel.hsaco"
+    artifact.write_bytes(b"\x7fELF")
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 0, "nothing that looks like a summary", "")
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+    )
+
+    kernel = result.kernel_results[0]
+    assert kernel.state is ExecutionState.ERROR
+    assert str(kernel.reason).startswith("waitcheck_diagnostics_error:")
+    assert "did not contain an analysis summary" in str(kernel.reason)
+
+
+def test_waitcheck_unexpected_exit_survives_any_parser_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Review (#479): the defensive parse caught only (OSError, ValueError), so a parser
+    # raising anything else propagated and never reached the exit-code branch -- which
+    # is the one branch that quotes stderr, and the whole reason the parse is defensive.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "kernel.hsaco"
+    artifact.write_bytes(b"\x7fELF")
+    message = f"{artifact}: failed to parse input executable or code object"
+
+    def boom(output: str, *, expected: object) -> tuple[object, ...]:
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr(waitcheck, "parse_waitcheck_text", boom)
+
+    def execute(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 2, "", message)
+
+    result = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out",
+        binary=binary,
+        execute=execute,
+    )
+
+    kernel = result.kernel_results[0]
+    assert kernel.state is ExecutionState.ERROR
+    assert kernel.reason == f"waitcheck_backend_exit_2: {message}"
+
+    # and on an expected exit code the same failure is still reported, not swallowed
+    def clean(
+        argv: Sequence[str],
+        *,
+        timeout_seconds: float,
+        env: Mapping[str, str] | None = None,
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), 0, "", "")
+
+    expected_exit = run_waitcheck(
+        _worklist(_exact_identity(artifact)),
+        output_dir=tmp_path / "out2",
+        binary=binary,
+        execute=clean,
+    )
+    only = expected_exit.kernel_results[0]
+    assert only.state is ExecutionState.ERROR
+    assert only.reason == "waitcheck_diagnostics_error: list index out of range"
 
 
 def test_waitcheck_timeout_never_passes(tmp_path: Path) -> None:
@@ -179,6 +421,8 @@ def test_waitcheck_hazard_exit_without_json_is_error(tmp_path: Path) -> None:
 
     assert result.verdict is Verdict.ERROR
     assert "without_structured_diagnostics" in str(result.kernel_results[0].reason)
+    assert result.diagnostics_truncated is True
+    assert result.kernel_results[0].diagnostics_truncated is True
 
 
 def test_waitcheck_requires_exact_identity(tmp_path: Path) -> None:
@@ -294,9 +538,35 @@ def test_parse_waitcheck_text_accepts_exact_entry_marker() -> None:
         )
     )
 
-    findings = parse_waitcheck_text(output, expected=_entry_identity())
+    parsed = parse_waitcheck_text(output, expected=_entry_identity())
 
-    assert len(findings) == 1
+    assert len(parsed.findings) == 1
+    assert parsed.diagnostics_truncated is False
+
+
+@pytest.mark.parametrize(
+    ("summary_count", "expected_truncated"),
+    [(">=32", True), ("45", False)],
+)
+def test_parse_waitcheck_text_preserves_the_truncation_marker(
+    summary_count: str, expected_truncated: bool
+) -> None:
+    # rj_waitcheck caps collection at --max-diagnostics (32 by default) and says so
+    # by prefixing the summary count with ">=". Both summaries below are verbatim
+    # from scanning one gpt-oss _topk_topp_kernel object for gfx1250, at the default
+    # cap and at --max-diagnostics 100000: the capped scan reports 32 of the 45
+    # hazards that are really there. Dropping the marker reported that floor as a
+    # complete count (#480).
+    output = (
+        f"rj_waitcheck: /tmp/library.so:gfx950[3]:kernel=.text+0x120: "
+        f"instructions=43023 memory-events=5198 diagnostics={summary_count}\n"
+        "/tmp/library.so:gfx950[3]:.text+0x20: missing s_waitcnt lgkmcnt(0)"
+    )
+
+    parsed = parse_waitcheck_text(output, expected=_entry_identity())
+
+    assert parsed.diagnostics_truncated is expected_truncated
+    assert len(parsed.findings) == 1
 
 
 def test_parse_waitcheck_text_rejects_mismatched_entry() -> None:

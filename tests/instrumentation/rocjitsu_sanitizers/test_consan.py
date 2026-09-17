@@ -561,6 +561,29 @@ def test_partially_itemized_site_kind_is_still_a_parse_error() -> None:
     assert "access site count mismatch" in str(consan.reason)
 
 
+@pytest.mark.parametrize("kind", ("access", "barrier", "atomic", "fence"))
+def test_not_applicable_site_is_excluded_from_discovered_count(kind: str) -> None:
+    # The hook itemizes policy decisions that it deliberately excludes from
+    # *_discovered. Those debug records must not make otherwise self-consistent
+    # coverage look malformed (nightly run 35189763335).
+    output = "\n".join(
+        (
+            _healthy_evidence(),
+            (
+                f"{_PREFIX} coverage_site reader=1 load=1 kind={kind} "
+                "disposition=not_applicable reason=operation_kind_excluded "
+                "outcome=not_applicable lowering_reason=semantic_not_applicable "
+                "resource_reason=none container=k scope=kernel text=0xc "
+                "mnemonic=unknown"
+            ),
+        )
+    )
+
+    _waitcheck, consan = evaluate_record_replay(ProcessResult(("app",), 0, output, ""), strict=True)
+
+    assert consan.verdict is Verdict.PASS
+
+
 def test_race_in_an_unitemized_run_is_not_discarded() -> None:
     # A race found while coverage was incomplete is still a race. The old parse
     # error threw the findings away with the rest of the parsed output.

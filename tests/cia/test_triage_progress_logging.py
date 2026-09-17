@@ -13,14 +13,24 @@ handler it configures for itself is what makes that true.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from aorta.cia import triage as triage_mod
+
+ROOT = Path(__file__).resolve().parents[2]
+CLUSTER = ROOT / "src" / "aorta" / "chat" / "tools" / "cluster.py"
+
+
+def _module_doc(path: Path) -> str:
+    """A module docstring without importing its optional dependencies."""
+    return ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
 
 
 
@@ -136,28 +146,20 @@ class TestTheDocstringsDescribeWhatHappens:
         assert "run_triage" in doc
 
     def test_the_chat_tools_do_not_claim_to_shell_out(self):
-        pytest.importorskip("dspy", reason="cluster tools need the [cia] extra")
-        from aorta.chat.tools import cluster
-
-        doc = cluster.__doc__ or ""
+        doc = _module_doc(CLUSTER)
 
         assert "shells out" not in doc
         assert "console scripts" not in doc
 
     def test_the_chat_tools_say_the_agents_run_in_this_process(self):
-        pytest.importorskip("dspy", reason="cluster tools need the [cia] extra")
-        from aorta.chat.tools import cluster
-
-        assert "in this process" in (cluster.__doc__ or "")
+        assert "in this process" in _module_doc(CLUSTER)
 
     def test_and_do_not_overclaim_about_the_rest_of_the_pipeline(self):
         """Watch and the probe still print; saying otherwise is the same defect."""
-        pytest.importorskip("dspy", reason="cluster tools need the [cia] extra")
-        from aorta.chat.tools import cluster
         from aorta.cia.watch import poll
 
-        doc = cluster.__doc__ or ""
-        still_printing = "print(" in (poll.__file__ and open(poll.__file__).read())
+        doc = _module_doc(CLUSTER)
+        still_printing = "print(" in Path(poll.__file__).read_text(encoding="utf-8")
 
         if still_printing:
             assert "still print" in doc
