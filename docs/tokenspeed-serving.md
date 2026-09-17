@@ -304,7 +304,7 @@ What follows is the configuration.
 | `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
 | `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
 | `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**, `total_output_tokens / (completed * rollout_samples)`. `0` disables it. Per completion because `total_output_tokens` sums across all `n` choices, so a per-request floor would be `n` times easier to clear — at `rollout_samples: 8` an immediate-EOS policy cleared the default exactly. |
-| `sampling_backend` | `triton` | The server's `--sampling-backend`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. Reserved in `serve_args` under this mode. |
+| `sampling_backend` | `triton` | The server's `--sampling-backend`; `triton`, `triton_full`, `flashinfer` or `flashinfer_full`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. `greedy` is **rejected** under `rollout`, for the same reason `temperature: 0` is. Reserved in `serve_args` under this mode. |
 
 The sampling keys are **rejected outside the mode** rather than ignored. Outside
 it no sampling parameters are sent at all, so a `temperature` in an ordinary

@@ -160,6 +160,15 @@ _DEFAULT_MIN_MEAN_OUTPUT_TOKENS = 8
 _SAMPLING_BACKENDS = frozenset(
     {"greedy", "triton", "triton_full", "flashinfer", "flashinfer_full"}
 )
+# `greedy` is a backend the engine offers and is *not* one this mode accepts.
+# It discards `temperature`, `top_p`, `top_k` and `seed` and returns the argmax,
+# so `rollout: true, sampling_backend: greedy` would publish `n` repetitions of
+# one completion as a sampled rollout -- the identical end state that rejecting
+# `temperature: 0` exists to prevent, reached through the other knob. Refused
+# rather than warned about, and refused in both layers, because the engine-side
+# read-back deliberately stays quiet when greedy is what was asked for: a
+# check that trusts the request cannot also police it.
+_ROLLOUT_SAMPLING_BACKENDS = _SAMPLING_BACKENDS - {"greedy"}
 _DEFAULT_SAMPLING_BACKEND = "triton"
 
 _DEFAULT_DATASET = "random"
@@ -519,10 +528,11 @@ class TokenSpeedServeWorkload(Workload):
             Zero is rejected: it would draw the same greedy completion
             ``rollout_samples`` times.
         sampling_backend: the server's ``--sampling-backend``; one of
-            ``greedy``, ``triton``, ``triton_full``, ``flashinfer``,
-            ``flashinfer_full`` (default ``"triton"``). Defaulted away from the
-            engine's own default, which resolves to ``greedy`` off NVIDIA and
-            discards the sampling parameters without saying so.
+            ``triton``, ``triton_full``, ``flashinfer``, ``flashinfer_full``
+            (default ``"triton"``). Defaulted away from the engine's own
+            default, which resolves to ``greedy`` off NVIDIA and discards the
+            sampling parameters without saying so. ``greedy`` is rejected here
+            for the reason ``temperature: 0`` is: it is not a rollout.
         top_p: nucleus sampling mass in ``(0, 1]`` (default: unset, i.e. the
             server's own).
         min_mean_output_tokens: per-step floor on mean tokens per *completion*,
@@ -1058,10 +1068,18 @@ class TokenSpeedServeWorkload(Workload):
         # name is a recipe error rather than an argparse failure inside the
         # container after the weights have loaded.
         backend = self.config.get("sampling_backend", _DEFAULT_SAMPLING_BACKEND)
-        if not isinstance(backend, str) or backend not in _SAMPLING_BACKENDS:
+        if not isinstance(backend, str) or backend not in _ROLLOUT_SAMPLING_BACKENDS:
+            extra = (
+                " A rollout samples; greedy returns the argmax and ignores "
+                "temperature, top_p and seed, so the n completions per prompt "
+                "would be one decode repeated -- the same run temperature: 0 is "
+                "rejected for."
+                if backend == "greedy"
+                else ""
+            )
             raise ValueError(
                 f"tokenspeed_serve: sampling_backend ({backend!r}) must be one of "
-                f"{', '.join(sorted(_SAMPLING_BACKENDS))}."
+                f"{', '.join(sorted(_ROLLOUT_SAMPLING_BACKENDS))}.{extra}"
             )
         self._sampling_backend = backend
         # Strictly above zero. At temperature 0 the `n` completions per prompt

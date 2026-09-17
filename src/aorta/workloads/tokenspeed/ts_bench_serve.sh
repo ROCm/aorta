@@ -386,10 +386,24 @@ SAMPLING_BACKEND="${TS_SAMPLING_BACKEND:-triton}"
 # weights have loaded, which reports as exit 50 several minutes in.
 if [ "${ROLLOUT}" = "1" ]; then
   case "${SAMPLING_BACKEND}" in
-    greedy|triton|triton_full|flashinfer|flashinfer_full) ;;
+    triton|triton_full|flashinfer|flashinfer_full) ;;
+    greedy)
+      # A backend the engine offers and this mode does not accept. Greedy
+      # returns the argmax and ignores temperature, top_p, top_k and seed, so
+      # this would run n copies of one decode and publish them as a sampled
+      # rollout -- the run TS_TEMPERATURE=0 is refused for, reached through the
+      # other knob. Refused here as well as on the host because the
+      # /get_server_info check below deliberately says nothing when greedy is
+      # what was asked for, so that check cannot be what catches this.
+      echo "TS_BENCH_FAIL: usage TS_SAMPLING_BACKEND=greedy cannot be combined with TS_ROLLOUT=1"
+      echo "  Greedy decoding ignores temperature, top_p, top_k and seed, so the"
+      echo "  ${ROLLOUT_SAMPLES} completions per prompt would be one decode repeated."
+      echo "  Use triton (the default), or drop TS_ROLLOUT for a benchmark cell."
+      exit 64
+      ;;
     *)
       echo "TS_BENCH_FAIL: usage TS_SAMPLING_BACKEND (${SAMPLING_BACKEND}) is not a backend the engine offers"
-      echo "  Accepted: greedy, triton, triton_full, flashinfer, flashinfer_full."
+      echo "  Accepted under rollout: triton, triton_full, flashinfer, flashinfer_full."
       exit 64
       ;;
   esac

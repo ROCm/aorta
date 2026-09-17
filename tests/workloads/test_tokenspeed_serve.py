@@ -4133,6 +4133,47 @@ def test_rollout_asks_the_server_for_a_sampling_backend(tmp_path):
     assert wl._container_env()["TS_SAMPLING_BACKEND"] == "triton"
 
 
+def test_greedy_is_refused_under_rollout(tmp_path):
+    """The other route to the run `temperature: 0` is rejected for.
+
+    Greedy is a backend the engine offers and not one this mode can use: it
+    returns the argmax and ignores the sampling parameters, so the cell would
+    publish `n` repetitions of one decode as a sampled rollout. Accepting it
+    would have made the whole `sampling_backend` key a way to reinstate the
+    default this change exists to move away from.
+    """
+    with pytest.raises(ValueError, match="greedy"):
+        _rollout(tmp_path, sampling_backend="greedy").setup()
+
+
+def test_the_container_also_refuses_greedy_under_rollout(tmp_path):
+    """Both layers, because the engine read-back cannot be what catches it.
+
+    The `/get_server_info` check fires only when the engine reports greedy and
+    greedy is *not* what was asked for. A run that asked for it passes that
+    check by construction, so the refusal has to happen before the server
+    starts.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SAMPLING_BACKEND": "greedy",
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert "greedy" in output, output
+
+
 def test_an_unknown_sampling_backend_is_a_recipe_error(tmp_path):
     """Rejected on the host, where it reads as the recipe error it is. Left to
     the container it is an argparse failure after the weights have loaded, which
