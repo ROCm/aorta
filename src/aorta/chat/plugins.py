@@ -102,6 +102,17 @@ _DIAGNOSTIC_JOB_TOOLS = (
 _DIAGNOSTIC_TOOL_NAMES = _DIAGNOSTIC_READ_TOOLS + _DIAGNOSTIC_JOB_TOOLS
 
 
+def job_tool_names() -> frozenset[str]:
+    """The tools that submit a cluster job and block while it runs.
+
+    Public because the graph sizes a thread pool against them: they are the
+    slow ones, and telling them apart from a file read is what keeps a burst
+    of triages from taking the threads a file read needs. Names rather than
+    objects, so asking the question costs no import.
+    """
+    return frozenset(_DIAGNOSTIC_JOB_TOOLS)
+
+
 def diagnostic_tools() -> dict[str, BaseTool]:
     """The cluster diagnostic tools, or nothing when their extra is absent.
 

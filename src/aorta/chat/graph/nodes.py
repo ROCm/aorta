@@ -562,24 +562,50 @@ async def router_node(state: AgentState) -> dict[str, Any]:
 
 #: Threads for tool execution. Explicit rather than the loop's default
 #: executor: these run for minutes, so the number that may be in flight is a
-#: decision rather than something inherited from the CPU count. Four is more
-#: than the two triage jobs the cluster pool will run at once, leaving room for
-#: the quick tools -- reading a file, searching the codebase -- to answer while
-#: a triage is out.
-_TOOL_WORKERS = 4
+#: decision rather than something inherited from the CPU count.
+#:
+#: Two pools, because one did not hold. There were four workers here against
+#: the cluster pool's two, on the reasoning that four is more than two and the
+#: difference is room for quick tools. It is not: a triage call occupies a
+#: worker here and *then* waits for a slot in the cluster pool, so the third
+#: and fourth concurrent triages sat here holding the very capacity they were
+#: supposed to be leaving free. Four triages took every worker, and reading a
+#: file queued behind a GPU job.
+#:
+#: Sized to the cluster pool so a job worker never waits for an inner slot: one
+#: here maps to one there, and a third triage queues as a job rather than as a
+#: tool. The quick tools have their own workers and a burst cannot reach them.
+_JOB_WORKERS = 2
+_QUICK_WORKERS = 4
 _TOOL_POOL_LOCK = threading.Lock()
-_TOOL_POOL: ThreadPoolExecutor | None = None
+_TOOL_POOLS: dict[str, ThreadPoolExecutor] = {}
 
 
-def _tool_pool() -> ThreadPoolExecutor:
-    """The executor tool calls run on, created on first use."""
-    global _TOOL_POOL
+def _is_job_tool(tool_name: str) -> bool:
+    """Whether this tool submits a cluster job and blocks for minutes."""
+    from aorta.chat.plugins import job_tool_names
+
+    return _normalise_tool_name(tool_name) in job_tool_names()
+
+
+def _tool_pool(tool_name: str = "") -> ThreadPoolExecutor:
+    """The executor this tool runs on, created on first use.
+
+    Keyed by kind rather than by name: the point is that a burst of cluster
+    jobs cannot take the threads a file read needs, not that every tool gets
+    its own.
+    """
+    job = _is_job_tool(tool_name)
+    key = "job" if job else "quick"
     with _TOOL_POOL_LOCK:
-        if _TOOL_POOL is None:
-            _TOOL_POOL = ThreadPoolExecutor(
-                max_workers=_TOOL_WORKERS, thread_name_prefix="aorta-tool"
+        pool = _TOOL_POOLS.get(key)
+        if pool is None:
+            pool = ThreadPoolExecutor(
+                max_workers=_JOB_WORKERS if job else _QUICK_WORKERS,
+                thread_name_prefix=f"aorta-tool-{key}",
             )
-        return _TOOL_POOL
+            _TOOL_POOLS[key] = pool
+        return pool
 
 
 #: Numbers the tool calls in a process so a completion can be matched to the
@@ -682,7 +708,7 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     # submit rather than run_in_executor, to keep the worker's own future. The
     # asyncio wrapper is cancelled the moment the turn is; the thread behind it
     # is not, and it is the thread that has to end before this call is over.
-    worker = _tool_pool().submit(lambda: context.run(work))
+    worker = _tool_pool(tool_name).submit(lambda: context.run(work))
     was_cancelled = False
     try:
         return await asyncio.wrap_future(worker)

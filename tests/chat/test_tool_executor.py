@@ -28,21 +28,35 @@ from aorta.chat.tools.cache import ToolCache, current_tool_cache, use_tool_cache
 
 
 class TestTheExecutorIsChosenRatherThanInherited:
-    def test_it_has_an_explicit_size(self):
-        assert nodes._TOOL_WORKERS == 4
+    def test_both_pools_have_an_explicit_size(self):
+        assert nodes._JOB_WORKERS == 2
+        assert nodes._QUICK_WORKERS == 4
 
     def test_which_is_smaller_than_the_default_would_be(self):
         """min(32, cpu+4) is whatever the machine happens to have."""
         import os
 
-        assert nodes._TOOL_WORKERS < min(32, (os.cpu_count() or 1) + 4)
+        assert nodes._QUICK_WORKERS < min(32, (os.cpu_count() or 1) + 4)
 
-    def test_it_leaves_room_beside_the_triage_pool(self):
-        """A quick tool should still answer while a triage is out."""
+    def test_the_job_pool_matches_the_triage_pool(self):
+        """This asserted the opposite, and the opposite was the bug.
+
+        It read `_TOOL_WORKERS > _TRIAGE_WORKERS`, on the reasoning that four
+        is more than two and the difference is room for quick tools. A triage
+        occupies a tool worker and then waits for a triage slot, so the extra
+        two were spent holding that capacity rather than leaving it free.
+        Matching is what stops a job worker waiting on an inner slot.
+        """
         pytest.importorskip("dspy", reason="the triage pool needs the [cia] extra")
         from aorta.chat.tools import cluster
 
-        assert nodes._TOOL_WORKERS > cluster._TRIAGE_WORKERS
+        assert nodes._JOB_WORKERS == cluster._TRIAGE_WORKERS
+
+    def test_the_quick_pool_is_not_shared_with_the_job_pool(self):
+        """Room for a file read means its own threads, not spare ones."""
+        assert nodes._tool_pool("read_file") is not nodes._tool_pool(
+            "triage_kernel_source"
+        )
 
     def test_one_pool_is_reused(self):
         assert nodes._tool_pool() is nodes._tool_pool()
@@ -156,7 +170,7 @@ class TestItStillRunsOffTheLoop:
                 *(nodes._execute_tool_async("t", {}) for _ in range(12))
             )
 
-        assert peak <= nodes._TOOL_WORKERS, f"{peak} tools ran at once"
+        assert peak <= nodes._QUICK_WORKERS, f"{peak} tools ran at once"
 
     async def test_the_loop_keeps_answering_while_a_tool_blocks(self):
         """A tool that blocks must not stall the server."""
