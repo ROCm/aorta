@@ -38,7 +38,7 @@ RocJITsu bundle `f92da4cb3c5b3612db3752a36f4f3d0d3e9ff768` (rocm-systems run
 | file | rows | what one row is |
 |---|---|---|
 | `triage.jsonl` | 9 | one sanitizer run: verdict label, deduped evidence, ground truth |
-| `proposal.jsonl` | 45 | one model proposal against a real scenario's candidate set |
+| `proposal.jsonl` | 45 | one *synthesised* proposal against a real scenario's candidate set — 5 fixed contract variants × 9 scenarios, not model output |
 | `manifest.json` | — | counts, family split, verdict split, disagreements |
 
 Scored with no conversion pass, once the files exist (see the note at the top):
@@ -63,17 +63,32 @@ here; it matters on the next sweep that disagrees.
 | `consan-lds-dispatch` | synthetic_hip_lds | pass | 0 | 0 | — |
 | `consan-tiny` | synthetic_hip_vecadd | error | 0 | 0 | — |
 | `consan-gemm` | tensile_gemm_object | error | 0 | 0 | — |
-| `waitcheck` (gated, top-3 CSV) | tensile_gemm_object | warn | 64 | 2 | warn, agrees |
-| `waitcheck-gemm` (object) | tensile_gemm_object | warn | 32 | 1 | — |
+| `waitcheck` (gated, top-3 CSV) | tensile_gemm_object | warn | 64 | ⚠ stale, was 2 | warn, agrees |
+| `waitcheck-gemm` (object) | tensile_gemm_object | warn | 32 | ⚠ 32, was 1 | — |
 | `waitcheck-lds-dispatch` | synthetic_hip_lds | pass | 0 | 0 | — |
 | `waitcheck-tiny` | synthetic_hip_vecadd | pass | 0 | 0 | — |
 
 All three baseline-gated cases agree with `verdict_baselines.json`.
 
-160 findings, four distinct sites. The racy reproducer alone accounts for 64 of
-them and they are one race: same instruction pair (`0x8`/`0x28`), one record per
-lane and LDS byte range. Counting findings as examples would inflate this
-corpus sixteen-fold, which is why `finding_counts` reports both numbers.
+⚠ **The two Waitcheck site counts above were taken before `_race_site` could
+tell Waitcheck findings apart, and are not what a rebuild produces now.** The
+key read the ConSan metadata fields only, and a Waitcheck finding has none of
+them — `entry_offset` is null and the producer/consumer offsets live in
+`metadata.context_1`/`context_2` — so every finding in a check hashed
+identically and the whole check collapsed to one site. Rebuilding
+`gemm_f32_waitcheck` from the committed survey report, which carries the same
+32 findings as the `waitcheck-gemm` row, now gives **32** sites rather than 1.
+The `waitcheck` row cannot be restated here: its artifact came from the GPU
+sweep and is not committed, so the number will be whatever the next rebuild
+reports. The ConSan rows are unaffected, by construction — the two families'
+metadata keys are disjoint, so the added fields are null on a ConSan finding.
+
+160 findings. The racy reproducer alone accounts for 64 of them and they are one
+race: same instruction pair (`0x8`/`0x28`), one record per lane and LDS byte
+range. Counting findings as examples would inflate that scenario sixteen-fold,
+which is why `finding_counts` reports both numbers — and the Waitcheck
+correction above is the same point from the other side, a key that collapsed
+evidence it should have kept.
 
 ## Observed tool defects
 

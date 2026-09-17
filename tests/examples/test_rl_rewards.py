@@ -165,6 +165,116 @@ def test_a_cosmetically_edited_copy_earns_nothing_either(recipe_reward):
     assert grade.reward == 0.0
 
 
+def test_an_inline_docker_environment_reaches_tier_3(recipe_reward):
+    """`{docker: <ref>}` is a valid environment, and tier 3 said otherwise.
+
+    `load_recipe` rewrites it to an auto-name `_inline_<hash>` and records it
+    on `recipe.inline_environments`; the name is deliberately absent from the
+    global registry, because the definition is the recipe. Re-resolving every
+    cell through plain `get_environment` therefore raised
+    `UnknownEnvironmentError` on a recipe the loader had just accepted, and the
+    grade came back at tier 2 -- the tier that means the schema is wrong.
+    """
+    text = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "ticket": "INLINE-1",
+            "workload": "gpu_smoke",
+            "trials": 1,
+            "steps": 1,
+            "cells": [
+                {
+                    "name": "inline-env",
+                    "mitigations": ["none"],
+                    "environment": {"docker": "ubuntu:24.04"},
+                }
+            ],
+        }
+    )
+    grade = recipe_reward.grade_recipe_text(text)
+
+    assert grade.tier >= 3, (grade.tier, grade.failed_at, grade.reason)
+    assert grade.failed_at != "tier3_registry", grade.reason
+
+
+def test_an_unknown_environment_still_fails_tier_3(recipe_reward):
+    """The skip above is scoped to names the loader itself minted.
+
+    A genuinely unregistered environment must still be caught, or the fix has
+    turned tier 3 off rather than corrected it.
+    """
+    text = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "ticket": "INLINE-2",
+            "workload": "gpu_smoke",
+            "trials": 1,
+            "steps": 1,
+            "cells": [
+                {
+                    "name": "bad-env",
+                    "mitigations": ["none"],
+                    "environment": "no_such_environment",
+                }
+            ],
+        }
+    )
+    grade = recipe_reward.grade_recipe_text(text)
+
+    assert grade.tier == 2
+    assert grade.failed_at == "tier3_registry", grade.reason
+
+
+def test_the_grader_only_injects_a_scratch_key_the_workload_takes(recipe_reward):
+    """The grader's own convenience must not become the model's error.
+
+    `work_dir` was added to every cell so the validator had somewhere to stat.
+    `HrxPerfWorkload` does not accept it, so its validator logged "ignoring
+    unknown workload_config key 'work_dir'" -- and tier 5 is precisely the tier
+    that fails on an unknown-key warning. Every otherwise-valid `hrx_perf`
+    recipe therefore lost the top tier over a key the model never wrote.
+    """
+    from aorta.workloads.hrx_perf import HrxPerfWorkload
+    from aorta.workloads.tokenspeed_serve import TokenSpeedServeWorkload
+
+    assert recipe_reward._scratch_keys_accepted_by(HrxPerfWorkload) == ()
+    assert recipe_reward._scratch_keys_accepted_by(TokenSpeedServeWorkload) == ("work_dir",)
+
+
+def test_the_injected_scratch_key_does_not_trip_the_unknown_key_guard(recipe_reward):
+    """The above, demonstrated through the warning tier 5 actually reads."""
+    import logging
+
+    from aorta.workloads.hrx_perf import HrxPerfWorkload
+
+    class _Trap(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records: list[str] = []
+
+        def emit(self, record):
+            self.records.append(record.getMessage())
+
+    trap = _Trap()
+    root = logging.getLogger()
+    root.addHandler(trap)
+    previous = root.level
+    root.setLevel(logging.WARNING)
+    try:
+        config = {"bench": "gemm"}
+        for key in recipe_reward._scratch_keys_accepted_by(HrxPerfWorkload):
+            config[key] = "/tmp/scratch"
+        try:
+            recipe_reward._validate_config(HrxPerfWorkload, config)
+        except Exception:  # noqa: BLE001 - the warning is what is under test
+            pass
+    finally:
+        root.removeHandler(trap)
+        root.setLevel(previous)
+
+    assert [m for m in trap.records if "unknown" in m.lower()] == []
+
+
 def test_a_genuinely_novel_valid_recipe_keeps_its_full_reward(recipe_reward):
     """Otherwise the gate is a difficulty penalty, not a novelty term."""
     novel = recipe_reward._GOOD
@@ -1137,6 +1247,37 @@ def test_lanes_of_one_race_collapse_to_one_site(build_corpus, tmp_path):
     _, manifest = _build(build_corpus, tmp_path, tmp_path / "results")
     assert manifest["findings"]["raw"] == 64
     assert manifest["findings"]["distinct_sites"] == 1
+
+
+def test_distinct_waitcheck_hazards_do_not_collapse(build_corpus, tmp_path):
+    """The mirror of the test above, and the case it did not cover.
+
+    Collapsing lanes of one race is right; collapsing distinct hazards is not,
+    and the site key could not tell the difference because it read only the
+    ConSan metadata keys. A Waitcheck finding has none of them -- `entry_offset`
+    is null and the producer/consumer offsets are in `metadata.context_1` and
+    `context_2` -- so every finding in a check hashed identically. The committed
+    `gemm_f32_waitcheck` report carries 32 hazards at 32 distinct offset pairs
+    and reported one site, discarding 31 evidence locations before anything
+    downstream could see them.
+    """
+    out, manifest = _build(build_corpus, tmp_path, _SURVEY)
+    assert manifest["findings"]["raw"] == 32
+    assert manifest["findings"]["distinct_sites"] == 32
+
+    row = next(
+        json.loads(line)
+        for line in (out / "triage.jsonl").read_text().splitlines()
+        if json.loads(line).get("scenario_id") == "gemm_f32_waitcheck"
+    )
+    assert row["finding_counts"]["distinct_sites"] == 32
+    # The evidence is the point of keeping them apart, so the row has to carry
+    # 32 different places rather than 32 copies of one.
+    contexts = {
+        (e["metadata"].get("context_1"), e["metadata"].get("context_2"))
+        for e in row["distinct_evidence"]
+    }
+    assert len(contexts) == 32
 
 
 def test_the_corpus_scores_through_the_triage_scorer(

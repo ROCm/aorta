@@ -188,6 +188,30 @@ def _cell_configs(recipe: Any) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+def _scratch_keys_accepted_by(workload_cls: type) -> tuple[str, ...]:
+    """``("work_dir",)`` if this workload declares the key, else ``()``.
+
+    The grader supplies a scratch directory so a recipe is not marked down for
+    the filesystem it happens to be validated on. Supplying it to a workload
+    that does not take it is worse than not supplying it: the validator logs an
+    unknown-key warning, and tier 5 is the tier that reads unknown-key warnings.
+
+    Read off the workload module's ``_KNOWN_KEYS``, which is where the three
+    workloads with an unknown-key warning keep the answer, and treated as
+    "do not inject" when absent. Not injecting costs a possible tier-4
+    downgrade on a workload that needed it; injecting blind cost a guaranteed
+    tier-5 downgrade on every workload that did not.
+    """
+    module = sys.modules.get(getattr(workload_cls, "__module__", ""), None)
+    known = getattr(module, "_KNOWN_KEYS", None)
+    if known is None:
+        return ()
+    try:
+        return ("work_dir",) if "work_dir" in known else ()
+    except TypeError:
+        return ()
+
+
 class NoConfigOnlySeam(Exception):
     """The workload offers no way to validate a config without a machine."""
 
@@ -272,14 +296,34 @@ def grade_recipe_text(
         # so this cannot fail here; it is spelled out because the tier is a
         # named contract and a future loader that stopped resolving eagerly
         # should fail this tier rather than silently pass it.
+        #
+        # Two things have to be carried over from the loader for that to be
+        # true, and without them the tier failed recipes the loader accepted:
+        #
+        # An inline `{docker: <ref>}` environment is rewritten by `load_recipe`
+        # into an auto-name `_inline_<hash>` and recorded on
+        # `recipe.inline_environments`. It is deliberately not in the global
+        # registry -- there is nothing to register, the definition is the
+        # recipe -- so `get_environment` raises for it by design. Re-resolving
+        # it here therefore marked every valid inline-environment recipe down
+        # to tier 2, which is the tier meaning "the schema is wrong".
+        #
+        # `sidecar_files` is the other half: a recipe may ship environment
+        # definitions beside itself, and `load_recipe` resolves names against
+        # those as well. Resolving without them rejects a registered name that
+        # the loader had just accepted.
+        inline_names = {
+            str(env.name) for env in getattr(recipe, "inline_environments", None) or ()
+        }
+        sidecars = [Path(p) for p in getattr(recipe, "sidecar_files", None) or ()]
         try:
             for cell in getattr(recipe, "cells", None) or []:
                 for name in getattr(cell, "mitigations", None) or []:
                     if str(name) != "none":
                         get_mitigation(str(name))
                 environment = getattr(cell, "environment", None)
-                if environment:
-                    get_environment(str(environment))
+                if environment and str(environment) not in inline_names:
+                    get_environment(str(environment), extra_files=sidecars or None)
         except (UnknownMitigationError, UnknownEnvironmentError) as exc:
             grade.failed_at = "tier3_registry"
             grade.reason = f"{type(exc).__name__}: {exc}"
@@ -300,12 +344,20 @@ def grade_recipe_text(
         root.addHandler(trap)
         previous_level = root.level
         root.setLevel(logging.WARNING)
+        scratch_keys = _scratch_keys_accepted_by(workload_cls)
         try:
             for cell_name, config in _cell_configs(recipe):
                 # A work_dir the validator can stat, so a recipe is not marked
-                # down for the grader's filesystem.
+                # down for the grader's filesystem -- but only where the
+                # workload declares the key. Added universally it was itself a
+                # silent misconfiguration: `HrxPerfWorkload` does not accept
+                # `work_dir`, so its validator logged "ignoring unknown
+                # workload_config key 'work_dir'", and tier 5 exists to catch
+                # exactly that string. Every otherwise-valid `hrx_perf` recipe
+                # therefore failed the tier, on a key the model had not written.
                 config = dict(config)
-                config.setdefault("work_dir", str(Path(tmp) / "work"))
+                for key in scratch_keys:
+                    config.setdefault(key, str(Path(tmp) / "work"))
                 try:
                     _validate_config(workload_cls, config)
                 except NoConfigOnlySeam as exc:

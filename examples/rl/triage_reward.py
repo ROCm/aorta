@@ -574,7 +574,10 @@ def run_demo(
     print("which is why it is printed next to it and not on its own.")
     if stale:
         print(f"\n{len(stale)} run(s) carry a stored verdict that disagrees with the")
-        print("current rules; they are flagged rather than trained on.")
+        print("current rules. They are scored, under the verdict recomputed here")
+        print("rather than the one archived: the resolver is the label, and an old")
+        print("run recorded before a detector moved sides is still good evidence.")
+        print("The flag is so a reader can see which rows that applies to.")
     return 0
 
 

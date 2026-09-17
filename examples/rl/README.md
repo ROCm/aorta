@@ -314,9 +314,16 @@ accepts it every time. This is asserted as a test, so if it ever changes the
 docstring's claim that this measures form only has become false. Pair it with
 `triage_reward.py`, which scores whether the read is right.
 
-Row two is the term that earns its place: a policy with the verdict right and
-the citation invented keeps 0.689, and the 0.311 it loses is entirely
-attribution. Without that term it would be indistinguishable from the oracle.
+Row two is the one to read next. `{}` parses as a JSON object, so it clears
+tier 1 and collects that 0.2 and nothing further: tier 2 wants the five
+demanded keys and it has none. The loop accepts it 0.00 of the time. That gap
+between a non-zero reward and zero acceptance is the honest shape of a
+form-only scorer — it can say the output was well-formed, and it cannot say
+the output was useful.
+
+For whether the *read* is right rather than the shape, see `triage_reward.py`.
+Attribution is scored there, against real detector IDs, and it is not scored
+here at all.
 
 ## `build_corpus.py`
 

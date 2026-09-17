@@ -137,9 +137,20 @@ def _race_site(finding: dict[str, Any]) -> tuple:
     """The tuple that identifies a distinct finding *site*.
 
     For a ConSan race the instruction pair is what makes two findings the same
-    defect; lane mask and LDS byte range make them different lanes of it. The
-    metadata keys are absent on a Waitcheck finding, where code plus offset is
-    already the site, so this degrades to that.
+    defect; lane mask and LDS byte range make them different lanes of it.
+
+    Waitcheck locates a hazard differently, and reading it through the ConSan
+    keys collapsed the whole check to a single site. Its findings carry
+    ``entry_offset: null`` and a constant ``code`` of ``wait_hazard``, and put
+    the producer and consumer offsets in ``metadata.context_1`` and
+    ``context_2`` -- none of which the ConSan keys touch, so every finding
+    produced an identical tuple. Measured against the committed survey report,
+    ``gemm_f32_waitcheck``'s 32 distinct hazards became 1 site and 31 evidence
+    locations were dropped before anything downstream could see them.
+
+    The two families' keys are disjoint -- Waitcheck has no ``first_inst``,
+    ConSan no ``context_1`` -- so the added fields are ``None`` on a ConSan
+    finding and its sites partition exactly as before.
     """
     meta = finding.get("metadata") or {}
     return (
@@ -151,6 +162,8 @@ def _race_site(finding: dict[str, Any]) -> tuple:
         meta.get("first_inst"),
         meta.get("second_inst"),
         meta.get("kind"),
+        meta.get("context_1"),
+        meta.get("context_2"),
     )
 
 
