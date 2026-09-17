@@ -33,6 +33,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from aorta.chat.cancellation import current_cancel_token
 from aorta.chat.config import settings
 from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
 from aorta.chat.tools._sandbox import JOBS_ROOT_LABEL, resolve_within
@@ -300,7 +301,16 @@ def _run_triage(extra_args: list[str], label: str) -> str:
         if value:
             argv += ["--env", f"{key}={value}"]
 
-    stop = threading.Event()
+    # The turn's own token when there is one, so that a caller who gives up
+    # reaches the triage and through it `scancel`. Without this the only thing
+    # that could stop the work was the timeout below: the chat turn ended, the
+    # thread ran on, and the allocation was held until either the triage
+    # timeout or Slurm's own four-hour limit -- for an answer nobody was
+    # waiting for any more.
+    #
+    # One event serves both, because the token is created per tool call, so
+    # setting it on timeout cannot reach another call's work.
+    stop = current_cancel_token() or threading.Event()
     future = _triage_pool().submit(run_triage, argv, stop=stop)
     try:
         # Covers the queue as well as the run: with every worker busy the

@@ -7,7 +7,8 @@ import contextvars
 import itertools
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 import json
 import logging
 import re
@@ -21,6 +22,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool
 
+from aorta.chat.cancellation import bind_cancel_token
 from aorta.chat.config import settings
 from aorta.chat.graph.state import AgentState
 from aorta.chat.inference.vllm_client import get_chat_llm
@@ -593,6 +595,43 @@ def _announce_tool(payload: dict) -> None:
         pass  # not being streamed; nothing to announce to
 
 
+#: How long a cancelled tool is given to notice its token and stop. Long
+#: enough for a triage to cancel its Slurm job and return, short enough that a
+#: tool which ignores the token cannot hold the turn open indefinitely.
+_CANCEL_GRACE_SEC = 30.0
+
+
+async def _wait_for_worker(worker: Future, grace: float | None = None) -> bool:
+    """Wait for a cancelled tool's thread to end. True if it did.
+
+    Off the event loop: this runs while the turn is being torn down, and
+    blocking the loop to wait for a thread is what the executor exists to
+    avoid in the first place.
+
+    *grace* is read here rather than bound as a default, so the module constant
+    is one an operator or a test can actually change -- a default argument is
+    fixed at import and would have ignored them.
+    """
+    loop = asyncio.get_running_loop()
+    limit = _CANCEL_GRACE_SEC if grace is None else grace
+
+    def wait() -> bool:
+        try:
+            worker.exception(timeout=limit)
+        except FuturesTimeout:
+            return False
+        except Exception:  # noqa: BLE001 - it ended, which is the question
+            return True
+        return True
+
+    try:
+        return await loop.run_in_executor(None, wait)
+    except asyncio.CancelledError:
+        # Cancelled again while winding down. Nothing further to do: the token
+        # is set and the thread will end on its own.
+        return worker.done()
+
+
 async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     """Run a tool off the event loop, announcing it before it blocks.
 
@@ -627,26 +666,54 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     # redaction notice would be unbound inside the worker, and the cache would
     # silently fall back to the process-wide one -- which is the cross-session
     # bug it was introduced to fix.
-    loop = asyncio.get_running_loop()
     context = contextvars.copy_context()
     started = time.monotonic()
+    # Watched by the tool itself. Cancelling the coroutine below cannot reach
+    # the thread -- Python has no way to interrupt one -- so the only thing
+    # that stops a triage early is the triage agreeing to stop, and this is how
+    # it is asked. Bound inside the copied context so two tool calls running at
+    # once do not share one.
+    token = threading.Event()
+
+    def work() -> str:
+        bind_cancel_token(token)
+        return _execute_tool(tool_name, kwargs)
+
+    # submit rather than run_in_executor, to keep the worker's own future. The
+    # asyncio wrapper is cancelled the moment the turn is; the thread behind it
+    # is not, and it is the thread that has to end before this call is over.
+    worker = _tool_pool().submit(lambda: context.run(work))
+    was_cancelled = False
     try:
-        return await loop.run_in_executor(
-            _tool_pool(), lambda: context.run(_execute_tool, tool_name, kwargs)
-        )
+        return await asyncio.wrap_future(worker)
+    except asyncio.CancelledError:
+        was_cancelled = True
+        token.set()
+        # Wait for it to actually stop. The done event below is what closes the
+        # step on screen and what a caller reads as "this is over", and emitting
+        # it while a cluster job was still running said the opposite of the
+        # truth. Bounded, because a tool that ignores the token must not hold
+        # the turn open for ever -- and the wait happens off the loop, so
+        # nothing else stalls while it winds down.
+        await _wait_for_worker(worker)
+        raise
     finally:
         # In a finally because the consumer is holding a step open on the
         # strength of the announcement above. A tool that raises, or a turn
         # that is cancelled, would otherwise leave "Running ..." on screen
         # with nothing ever arriving to end it.
-        _announce_tool(
-            {
-                "tool": name,
-                "id": call,
-                "done": True,
-                "seconds": round(time.monotonic() - started, 1),
-            }
-        )
+        payload = {
+            "tool": name,
+            "id": call,
+            "done": True,
+            "seconds": round(time.monotonic() - started, 1),
+        }
+        if was_cancelled:
+            # Which of the two happened, because they are different facts: the
+            # work stopped, or it was asked to and had not by the time we gave
+            # up waiting.
+            payload["cancelled"] = "stopped" if worker.done() else "still running"
+        _announce_tool(payload)
 
 
 
