@@ -293,8 +293,9 @@ that matters is that the number of tokens generated becomes a property of the
 policy instead of a number the recipe chose.
 
 The design, the cost model it supports, and where the RL loop itself would live
-are in [RL post-training](tokenspeed-rl-post-training.md). What follows is the
-configuration.
+are in `docs/tokenspeed-rl-post-training.md`, which arrives with the stacked
+follow-up rather than with this change — named without a link for that reason.
+What follows is the configuration.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -302,7 +303,8 @@ configuration.
 | `rollout_samples` | `4` | Completions per prompt — the `n` of the sampling API. Max 1024. |
 | `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
 | `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
-| `min_mean_output_tokens` | `8` | Per-step floor on `total_output_tokens / completed`. `0` disables it. |
+| `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**, `total_output_tokens / (completed * rollout_samples)`. `0` disables it. Per completion because `total_output_tokens` sums across all `n` choices, so a per-request floor would be `n` times easier to clear — at `rollout_samples: 8` an immediate-EOS policy cleared the default exactly. |
+| `sampling_backend` | `triton` | The server's `--sampling-backend`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. Reserved in `serve_args` under this mode. |
 
 The sampling keys are **rejected outside the mode** rather than ignored. Outside
 it no sampling parameters are sent at all, so a `temperature` in an ordinary
@@ -327,7 +329,7 @@ the metric set it reported before this mode existed.
 | Metric | Meaning |
 |---|---|
 | `mean_output_tokens_per_request` | `total_output_tokens / completed`, meaned across steps. The reading to trust — computed from fields every export carries. |
-| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of per-request generated length, pooled across measured steps. Needs `save_detailed`. |
+| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of generated length over the entries of the export's `output_lens`, pooled across measured steps. Needs `save_detailed`. One entry per completion, not per request, whenever `rollout_samples > 1` — see the note below. |
 | `generated_tokens_mean` / `_min` / `_max` / `_std` / `_count` | The rest of the distribution. |
 
 `generated_tokens_*` comes from the export's `output_lens` array, which the bench
@@ -337,8 +339,10 @@ array, for the same reason the scalar aggregate requires that: a distribution
 pooled over whichever steps happened to have it would describe a subset while
 reading as the trial's.
 
-Three things about this mode are traps rather than settings, and all three are
-explained at length in [RL post-training](tokenspeed-rl-post-training.md#2-what-a-rollout-loop-needs-from-the-engine-and-what-tokenspeed-has):
+Six things about this mode are traps rather than settings, and all of them are
+explained at length in `docs/tokenspeed-rl-post-training.md`, section 2 ("what a
+rollout loop needs from the engine, and what TokenSpeed has"), which lands with
+the stacked follow-up:
 
 - **`ignore_eos` is forced on for `dataset: random` by the bench CLI itself**,
   after argument parsing, regardless of the flags. EOS-respecting generation is
@@ -351,6 +355,25 @@ explained at length in [RL post-training](tokenspeed-rl-post-training.md#2-what-
   so the throughput figures cover the whole rollout — but that is one gateway
   version's behaviour, and the name is true either way. Both rollout recipes keep
   an `n=1` control cell so the ratio stays observable.
+- **`generated_tokens_*` and `mean_output_tokens_per_request` do not have the
+  same denominator under `n > 1`, and the difference is not a rounding
+  argument.** The former is one entry per `output_lens` element and the latter
+  is per request. The smoke recipe reads `mean_output_tokens_per_request` at
+  1024 for `n=4` against a 256-token allowance, which no single choice can
+  exceed, so `output_lens` holding per-choice lengths is what that measurement
+  implies. `generated_tokens_count` is the observable that settles it on any
+  given gateway: equal to `completed` means per request, `completed * n` means
+  per choice. Read the two metrics against each other rather than assuming they
+  share a unit.
+- **The engine decodes greedily unless told otherwise, and says nothing.** On
+  non-NVIDIA hardware `--sampling-backend` defaults to `greedy`, which accepts
+  `temperature`, `top_p`, `top_k` and `seed` and then ignores them, returning
+  the argmax with HTTP 200 — so `n` completions come back identical while the
+  export describes a sampled rollout. Rollout mode therefore defaults the flag
+  to `triton`, reserves it against `serve_args`, and reads `sampling_backend`
+  back off `/get_server_info` after bring-up, failing the step (exit 57,
+  `rollout_sampling_ignored`) if the engine still reports `greedy`. Benchmark
+  cells are left on the engine default, where argmax is what is wanted.
 - **On `dataset: random` the length distribution is an artifact of the cap.**
   Random-token prompts give a model no reason to emit EOS, so every completion
   runs to `output_len` and `generated_tokens_*` reads as a constant. Throughput
@@ -365,7 +388,13 @@ completions — but it stops being *sufficient*, which is what
 `min_mean_output_tokens` exists for: a policy that answers every request with an
 immediate EOS passes every other guard in the workload while generating about one
 token per prompt. Exit 56 / `rollout_output_too_short` is that verdict, checked in
-the container and again on the host.
+the container and again on the host — both dividing by `completed *
+rollout_samples`, so the guard does not get `n` times weaker as `n` grows.
+
+Exit 57 / `rollout_sampling_ignored` is the other rollout-specific verdict, and
+it is the one no audit of the export could reach: a greedy engine's output is
+well-formed, correctly counted and the right length, and differs from a sampled
+run only in being identical across choices.
 
 Recipes: `tokenspeed-serve-rollout-smoke.yaml` (the shape check to run first)
 and `tokenspeed-serve-rollout.yaml` (sample-count and long-form cells).

@@ -65,6 +65,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -153,6 +154,14 @@ _MAX_ROLLOUT_TEMPERATURE = 2.0
 # about what a good length is.
 _DEFAULT_MIN_MEAN_OUTPUT_TOKENS = 8
 
+# The engine's `--sampling-backend` choices. `flashinfer*` are CUDA-only, so
+# `triton` is the portable option that honours sampling parameters on ROCm, and
+# it is the default under rollout for the reason set out where it is read.
+_SAMPLING_BACKENDS = frozenset(
+    {"greedy", "triton", "triton_full", "flashinfer", "flashinfer_full"}
+)
+_DEFAULT_SAMPLING_BACKEND = "triton"
+
 _DEFAULT_DATASET = "random"
 # `random` generates its own prompts, so it is the only one that needs nothing
 # staged; `sharegpt` measures against real conversation lengths, which is what
@@ -185,6 +194,7 @@ _EXIT_REASONS: dict[int, str] = {
     54: "result_json_unusable",
     55: "served_request_shortfall",
     56: "rollout_output_too_short",
+    57: "rollout_sampling_ignored",
     64: "usage_error",
 }
 
@@ -207,6 +217,7 @@ _KNOWN_KEYS = frozenset(
         "ignore_eos",
         "rollout",
         "rollout_samples",
+        "sampling_backend",
         "temperature",
         "top_p",
         "min_mean_output_tokens",
@@ -394,6 +405,28 @@ def _is_scalar(value: Any) -> bool:
     return math.isfinite(value)
 
 
+def _plain_decimal(value: float) -> str:
+    """``value`` in plain decimal notation, exactly, for the container's env.
+
+    The script's ``require_decimal`` refuses exponent and leading-dot forms so
+    the two layers cannot disagree about the value the result is labelled with,
+    which rules out ``str()`` and ``repr()`` (``str(1e-05)`` is ``'1e-05'``).
+
+    ``format(value, "f")`` satisfies that spelling but not the agreement: it
+    renders six fractional digits and rounds everything past them away, so a
+    temperature of ``1e-7`` arrived in the container as ``0.000000``. That is
+    the zero temperature this workload rejects by name, reintroduced by the
+    serializer after validation had passed, and it would have run as an
+    ``n``-times-repeated greedy decode reported as a sampled rollout.
+
+    ``Decimal`` formatted with ``"f"`` is fixed-point at full precision for any
+    magnitude, so every accepted value round-trips. ``repr`` first because
+    ``Decimal(float)`` would expand the binary representation
+    (``Decimal(0.7)`` is ``0.6999999999999999555910790149937383830547332763671875``).
+    """
+    return format(Decimal(repr(value)), "f")
+
+
 def _step_detail(record: _StepRecord) -> dict[str, Any]:
     """One step's scalars, with the export's integers still integers.
 
@@ -485,12 +518,20 @@ class TokenSpeedServeWorkload(Workload):
         temperature: sampling temperature, in ``(0, 2]`` (default ``1.0``).
             Zero is rejected: it would draw the same greedy completion
             ``rollout_samples`` times.
+        sampling_backend: the server's ``--sampling-backend``; one of
+            ``greedy``, ``triton``, ``triton_full``, ``flashinfer``,
+            ``flashinfer_full`` (default ``"triton"``). Defaulted away from the
+            engine's own default, which resolves to ``greedy`` off NVIDIA and
+            discards the sampling parameters without saying so.
         top_p: nucleus sampling mass in ``(0, 1]`` (default: unset, i.e. the
             server's own).
-        min_mean_output_tokens: per-step floor on
-            ``total_output_tokens / completed``; ``0`` disables it (default
-            ``8``). Catches the policy that answers every request with an
-            immediate EOS, which passes every other guard here.
+        min_mean_output_tokens: per-step floor on mean tokens per *completion*,
+            ``total_output_tokens / (completed * rollout_samples)``; ``0``
+            disables it (default ``8``). Per completion rather than per request
+            because ``total_output_tokens`` sums across all ``rollout_samples``
+            choices, so a per-request floor would be ``rollout_samples`` times
+            easier to clear. Catches the policy that answers every request with
+            an immediate EOS, which passes every other guard here.
         save_detailed: keep the export's per-request arrays (default ``False``,
             or ``True`` under ``rollout``). ``output_lens`` is what the
             ``generated_tokens_*`` distribution is computed from, and the
@@ -962,7 +1003,13 @@ class TokenSpeedServeWorkload(Workload):
         cfg = self.config
         self._rollout = self._bool("rollout", False)
 
-        rollout_only = ("rollout_samples", "temperature", "top_p", "min_mean_output_tokens")
+        rollout_only = (
+            "rollout_samples",
+            "sampling_backend",
+            "temperature",
+            "top_p",
+            "min_mean_output_tokens",
+        )
         if not self._rollout:
             present = [key for key in rollout_only if key in cfg]
             if present:
@@ -992,6 +1039,7 @@ class TokenSpeedServeWorkload(Workload):
 
         if not self._rollout:
             self._rollout_samples = 1
+            self._sampling_backend: str | None = None
             self._temperature: float | None = None
             self._top_p: float | None = None
             self._min_mean_output_tokens = 0
@@ -1001,6 +1049,21 @@ class TokenSpeedServeWorkload(Workload):
         self._rollout_samples = self._bounded_int(
             "rollout_samples", _DEFAULT_ROLLOUT_SAMPLES, maximum=_MAX_ROLLOUT_SAMPLES
         )
+        # Defaulted against the engine's own default rather than left to it.
+        # `_get_default_backend_name` returns `flashinfer` only when the
+        # platform is NVIDIA and `greedy` otherwise, and greedy discards
+        # `temperature`, `top_p`, `top_k` and `seed` while still answering 200 --
+        # so on this hardware the unset case is the one that silently converts
+        # a rollout into `n` copies of the argmax. Validated here so an unknown
+        # name is a recipe error rather than an argparse failure inside the
+        # container after the weights have loaded.
+        backend = self.config.get("sampling_backend", _DEFAULT_SAMPLING_BACKEND)
+        if not isinstance(backend, str) or backend not in _SAMPLING_BACKENDS:
+            raise ValueError(
+                f"tokenspeed_serve: sampling_backend ({backend!r}) must be one of "
+                f"{', '.join(sorted(_SAMPLING_BACKENDS))}."
+            )
+        self._sampling_backend = backend
         # Strictly above zero. At temperature 0 the `n` completions per prompt
         # are the same greedy decode repeated, so the run reports a length
         # distribution with no variance in it and a sample count that multiplies
@@ -1497,15 +1560,10 @@ class TokenSpeedServeWorkload(Workload):
         if self._rollout:
             env["TS_ROLLOUT"] = "1"
             env["TS_ROLLOUT_SAMPLES"] = str(self._rollout_samples)
-            # `format(..., "f")` rather than `str()` or `repr()`: those render a
-            # small value in exponent form (`str(1e-05)` is `'1e-05'`), and the
-            # script's `require_decimal` refuses that spelling so the two layers
-            # cannot disagree about the value the result is labelled with. A
-            # recipe passing the host and then exiting 64 in the container is the
-            # failure this avoids.
-            env["TS_TEMPERATURE"] = format(float(self._temperature or 0.0), "f")
+            env["TS_SAMPLING_BACKEND"] = str(self._sampling_backend)
+            env["TS_TEMPERATURE"] = _plain_decimal(float(self._temperature or 0.0))
             if self._top_p is not None:
-                env["TS_TOP_P"] = format(float(self._top_p), "f")
+                env["TS_TOP_P"] = _plain_decimal(float(self._top_p))
             env["TS_MIN_MEAN_OUTPUT_TOKENS"] = str(self._min_mean_output_tokens)
         # JSON, not a space-joined string. The recipe documents these as lists,
         # and joining them threw the boundaries away: one item containing a
@@ -2851,18 +2909,30 @@ class TokenSpeedServeWorkload(Workload):
                     and type(completed) is int
                     and completed > 0
                 ):
-                    mean_output = total_output / completed
+                    # Per completion, not per request. `total_output_tokens`
+                    # sums `usage.completion_tokens` over all `rollout_samples`
+                    # choices, so dividing only by `completed` compared the
+                    # whole rollout's budget against a floor that describes one
+                    # answer -- and scaled the guard's sensitivity down by `n`
+                    # exactly as `n` grew. At the default floor of 8 a policy
+                    # emitting an immediate EOS passed from `rollout_samples: 8`
+                    # upward, which is the built-in `samples-8` cell and the
+                    # collapse this check was written for.
+                    completions = completed * self._rollout_samples
+                    mean_output = total_output / completions
                     if mean_output < self._min_mean_output_tokens:
                         failure_details.append(
                             {
                                 "reason": "rollout_output_too_short",
                                 "step": record.step,
                                 "detail": (
-                                    f"mean_output_tokens={mean_output:.3f} is below "
-                                    f"min_mean_output_tokens="
+                                    f"mean_output_tokens={mean_output:.3f} per "
+                                    "completion is below min_mean_output_tokens="
                                     f"{self._min_mean_output_tokens} "
                                     f"(total_output_tokens={total_output}, "
-                                    f"completed={completed}). Every request was "
+                                    f"completed={completed}, "
+                                    f"rollout_samples={self._rollout_samples}). "
+                                    "Every request was "
                                     "served, so this is a policy that stopped "
                                     "generating rather than a serving failure."
                                 ),
@@ -2975,6 +3045,11 @@ class TokenSpeedServeWorkload(Workload):
             # in the trial JSON and is skipped by the perf aggregate, the same
             # convention `input_len` uses under ShareGPT.
             "rollout_samples": self._rollout_samples if self._rollout else None,
+            # A string, so it lands in the trial JSON rather than being meaned
+            # into `perf.md` -- the same reason the ports below are strings.
+            # Recorded because it is the setting that decides whether the
+            # temperature beside it did anything.
+            "sampling_backend": self._sampling_backend,
             "temperature": self._temperature,
             "top_p": self._top_p,
             "bench_steps": self._steps,
@@ -3091,11 +3166,20 @@ class TokenSpeedServeWorkload(Workload):
         rollout recipe carries an ``n=1`` control cell so the ratio between the
         two readings is measurable rather than assumed.
 
-        ``generated_tokens_*`` comes from the export's per-request ``output_lens``
-        array, which is only present with ``save_detailed``. Published only when
-        *every* measured step carries it, matching the rule the scalar aggregate
-        follows: a distribution pooled over whichever steps happened to have the
-        array would describe a subset while reading as the trial's.
+        ``generated_tokens_*`` comes from the export's ``output_lens`` array,
+        which is only present with ``save_detailed``. One entry per recorded
+        completion, which is *not* the same denominator as the metric above
+        whenever ``rollout_samples > 1``: the smoke recipe reads
+        ``mean_output_tokens_per_request`` at 1024 for ``n=4`` against a
+        256-token allowance no single choice can exceed, so on that gateway the
+        array holds per-choice lengths while the scalar is per request.
+        ``generated_tokens_count`` is what settles it for any given gateway --
+        equal to ``completed`` means per request, ``completed * n`` means per
+        choice -- and it is published for that reason as much as for the
+        population size. Published only when *every* measured step carries the
+        array, matching the rule the scalar aggregate follows: a distribution
+        pooled over whichever steps happened to have it would describe a subset
+        while reading as the trial's.
         """
         per_request: list[float] = []
         for record in records:

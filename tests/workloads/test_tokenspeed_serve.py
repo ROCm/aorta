@@ -2605,7 +2605,12 @@ def test_a_failure_without_a_step_still_points_at_an_iteration(tmp_path, monkeyp
 
 
 def _run_script_audit(
-    tmp_path: Path, doc: dict, *, expected: int = 32, min_mean_output: int = 0
+    tmp_path: Path,
+    doc: dict,
+    *,
+    expected: int = 32,
+    min_mean_output: int = 0,
+    rollout_samples: int = 1,
 ) -> str:
     """Drive `audit_result_json` out of ts_bench_serve.sh directly.
 
@@ -2630,6 +2635,7 @@ def _run_script_audit(
     harness.write_text(
         f"NUM_PROMPTS={expected}\n"
         f"MIN_MEAN_OUTPUT_TOKENS={min_mean_output}\n"
+        f"ROLLOUT_SAMPLES={rollout_samples}\n"
         f'{body}\naudit_result_json "$1"\n'
     )
     proc = subprocess.run(["bash", str(harness), str(export)], capture_output=True, text=True)
@@ -4085,13 +4091,61 @@ def test_rollout_env_carries_the_sampling_contract(tmp_path):
 
     assert env["TS_ROLLOUT"] == "1"
     assert env["TS_ROLLOUT_SAMPLES"] == "8"
-    assert env["TS_TOP_P"] == "0.950000"
+    assert env["TS_SAMPLING_BACKEND"] == "triton"
+    assert env["TS_TOP_P"] == "0.95"
     assert "e" not in env["TS_TEMPERATURE"], env["TS_TEMPERATURE"]
     assert float(env["TS_TEMPERATURE"]) == pytest.approx(0.00001)
     # Defaulted on inside the mode: the per-request `output_lens` array the
     # length distribution is computed from is stripped from the export without it.
     assert env["TS_SAVE_DETAILED"] == "1"
     assert env["TS_MIN_MEAN_OUTPUT_TOKENS"] == "8"
+
+
+@pytest.mark.parametrize("value", [1e-7, 1e-5, 1.5e-6, 0.95, 0.7, 1.0, 2.0])
+def test_the_temperature_reaches_the_container_undamaged(tmp_path, value):
+    """Six fractional digits are not enough, and the shortfall is not cosmetic.
+
+    `format(1e-7, "f")` is `'0.000000'`: a plain decimal the script accepts, and
+    zero. Zero temperature is the one value this workload rejects by name, so
+    the serializer was reintroducing it after validation had passed, and the
+    cell would have run `n` copies of the argmax while reporting itself as
+    sampled at 1e-7.
+    """
+    wl = _rollout(tmp_path, temperature=value)
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    spelled = wl._container_env()["TS_TEMPERATURE"]
+
+    assert "e" not in spelled, spelled
+    assert float(spelled) == value
+    assert float(spelled) > 0
+
+
+def test_rollout_asks_the_server_for_a_sampling_backend(tmp_path):
+    """The engine's own default is `greedy` off NVIDIA, and greedy accepts the
+    sampling parameters and discards them -- HTTP 200, `n` identical choices,
+    nothing in the log. Every audit in this workload reads counts and lengths,
+    none of which differ, so the setting has to be made rather than checked."""
+    wl = _rollout(tmp_path, rollout_samples=8)
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+
+    assert wl._container_env()["TS_SAMPLING_BACKEND"] == "triton"
+
+
+def test_an_unknown_sampling_backend_is_a_recipe_error(tmp_path):
+    """Rejected on the host, where it reads as the recipe error it is. Left to
+    the container it is an argparse failure after the weights have loaded, which
+    surfaces as exit 50 several minutes into the trial."""
+    with pytest.raises(ValueError, match="sampling_backend"):
+        _rollout(tmp_path, sampling_backend="nucleus").setup()
+
+
+def test_the_sampling_backend_is_rejected_outside_rollout(tmp_path):
+    """Same contract as the other sampling keys: outside the mode nothing is
+    sampled, so accepting it would publish a setting that changed nothing."""
+    with pytest.raises(ValueError, match="sampling_backend"):
+        _make(tmp_path, sampling_backend="triton").setup()
 
 
 def test_an_ordinary_serving_cell_carries_no_rollout_env(tmp_path):
@@ -4166,10 +4220,58 @@ def test_a_collapsed_policy_fails_the_rollout_floor(tmp_path, monkeypatch):
     reasons = [detail["reason"] for detail in result.failure_details]
     assert reasons == ["rollout_output_too_short"], result.failure_details
     detail = result.failure_details[0]
-    assert detail["mean_output_tokens"] == pytest.approx(33 / 32)
+    # Per completion: 32 requests at the default `rollout_samples: 4`.
+    assert detail["mean_output_tokens"] == pytest.approx(33 / (32 * 4))
     # Said explicitly, because the counters look healthy and the reader's first
     # guess will be the engine.
     assert "stopped generating rather than a serving failure" in detail["detail"]
+
+
+def test_the_floor_does_not_weaken_as_the_sample_count_grows(tmp_path, monkeypatch):
+    """The case a per-request floor let through, and it was the built-in one.
+
+    `total_output_tokens` sums `usage.completion_tokens` over all `n` choices,
+    so a policy answering with an immediate EOS produces about `n` tokens per
+    request. Divided by `completed` alone that reads as `n`, which clears the
+    default floor of 8 from `rollout_samples: 8` upward -- and `samples-8` is a
+    cell in the shipped rollout recipe. The collapse the guard exists for was
+    therefore invisible at exactly the configuration most likely to run.
+    """
+    wl = _rollout(tmp_path, rollout_samples=8, min_mean_output_tokens=8)
+    wl.setup()
+    # 32 requests, 8 completions each, one token apiece.
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=32 * 8)])
+    result = wl.run()
+
+    assert not result.passed, result.metrics
+    detail = result.failure_details[0]
+    assert detail["reason"] == "rollout_output_too_short"
+    assert detail["mean_output_tokens"] == pytest.approx(1.0)
+    # Per request this is 8.0, which is exactly the floor: the old reading
+    # cleared it.
+    assert 32 * 8 / 32 == 8.0
+
+
+def test_the_two_floors_agree_on_the_sample_count(tmp_path):
+    """Host and container must divide by the same thing.
+
+    Two independent audits are only worth running while they enforce one
+    contract; the container's runs first and its verdict is the one a reader
+    sees, so a container still dividing per request would pass the step the
+    host was about to fail.
+    """
+    collapsed = {"completed": 32, "failed": 0, "total_output_tokens": 32 * 8}
+    verdict = _run_script_audit(
+        tmp_path, collapsed, min_mean_output=8, rollout_samples=8
+    )
+    assert verdict.startswith("SHORTLEN"), verdict
+    assert "samples=8" in verdict, verdict
+
+    # The same export at n=1 is a genuine 8 tokens per completion and passes,
+    # so the check above is the sample count and not a floor that fails all.
+    assert _run_script_audit(
+        tmp_path, collapsed, min_mean_output=8, rollout_samples=1
+    ).startswith("OK")
 
 
 def test_a_healthy_rollout_clears_the_floor(tmp_path, monkeypatch):
@@ -4198,7 +4300,7 @@ def test_the_floor_is_not_applied_outside_rollout(tmp_path, monkeypatch):
 
 
 def test_an_unusable_token_total_fails_rather_than_skipping_the_floor(tmp_path, monkeypatch):
-    """"We could not read it" must not become "it passed".
+    """`We could not read it` must not become `it passed`.
 
     The floor is computed from `total_output_tokens`, and an export omitting it
     would otherwise leave the rollout's one mode-specific guard silently
@@ -4374,7 +4476,10 @@ def test_the_length_distribution_is_pooled_across_steps(tmp_path, monkeypatch):
     unremarkable, while it is the thing that sizes the KV cache and decides how
     long the slowest completion holds a batch open.
     """
-    wl = _rollout(tmp_path, num_prompts=4, steps=2)
+    # `rollout_samples=1` so the fixture is self-consistent: four `output_lens`
+    # entries against four completed requests is one completion each, and the
+    # floor divides by completions.
+    wl = _rollout(tmp_path, num_prompts=4, steps=2, rollout_samples=1)
     wl.setup()
     _stub_docker(
         wl,
@@ -4401,7 +4506,7 @@ def test_a_partial_length_distribution_is_not_published(tmp_path, monkeypatch):
     """Pooling over whichever steps happened to carry the array would describe a
     subset while reading as the trial's -- the same reason the scalar aggregate
     publishes a metric only when every step supplied it."""
-    wl = _rollout(tmp_path, num_prompts=4, steps=2)
+    wl = _rollout(tmp_path, num_prompts=4, steps=2, rollout_samples=1)
     wl.setup()
     _stub_docker(
         wl,
@@ -4601,6 +4706,86 @@ def test_the_script_accepts_only_a_plain_decimal_temperature(tmp_path, spelling)
     assert "TS_TEMPERATURE" in output, output
 
 
+@pytest.mark.parametrize(
+    ("env", "label"),
+    [
+        ({"TS_TEMPERATURE": "0"}, "TS_TEMPERATURE"),
+        ({"TS_TEMPERATURE": "5"}, "TS_TEMPERATURE"),
+        ({"TS_TEMPERATURE": "1.0", "TS_TOP_P": "2"}, "TS_TOP_P"),
+        ({"TS_TEMPERATURE": "1.0", "TS_TOP_P": "0"}, "TS_TOP_P"),
+    ],
+)
+def test_the_script_enforces_the_documented_ranges(tmp_path, env, label):
+    """Spelling is not the range, and the container was only checking spelling.
+
+    `require_decimal` proves the value is a number; `TS_TEMPERATURE=5` and
+    `TS_TOP_P=2` are numbers. They reached the server and were refused there,
+    once per request and only after the model had loaded, so a usage error
+    arrived as every prompt failing. The host has always enforced `(0, 2]` and
+    `(0, 1]`; two validators are only worth having while they agree.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            **env,
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert label in output, output
+
+
+def test_serve_args_may_not_respell_the_sampling_backend_under_rollout(tmp_path):
+    """Losing this argument is silent, which is why it is reserved rather than
+    left to last-one-wins.
+
+    The host derives the backend from the same rollout block it derives
+    `temperature` and `n` from. A second spelling in `serve_args` would set the
+    engine's half while the request body kept asking to sample, and a greedy
+    engine answers a sampled request with 200 and the argmax -- so the run
+    would look entirely healthy.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SERVE_ARGS": json.dumps(["--sampling-backend", "greedy"]),
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert "--sampling-backend" in output, output
+
+
+def test_serve_args_may_still_pin_a_sampling_backend_for_a_benchmark(tmp_path):
+    """The reservation is rollout-only, and deliberately so.
+
+    A throughput benchmark has a real reason to name a backend by hand, and
+    greedy is the right answer there -- reserving it everywhere would forbid a
+    legitimate configuration to guard a mode it is not in.
+    """
+    argv = _script_bench_argv(
+        tmp_path, {"TS_SERVE_ARGS": json.dumps(["--sampling-backend", "greedy"])}
+    )
+    assert argv, "the script should have reached the bench step"
+
+
 def test_the_pooled_length_count_is_an_integer(tmp_path, monkeypatch):
     """A population size, not a measurement.
 
@@ -4608,7 +4793,7 @@ def test_the_pooled_length_count_is_an_integer(tmp_path, monkeypatch):
     beside it, `rocprof_kernel_count`, `proton_kernel_count` -- and a lone
     `96.0` among them is a type surprise for anything reading the export.
     """
-    wl = _rollout(tmp_path, num_prompts=4)
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1)
     wl.setup()
     _stub_docker(
         wl,

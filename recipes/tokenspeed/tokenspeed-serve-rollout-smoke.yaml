@@ -3,9 +3,15 @@
 # Two cells, eight prompts each, a 256-token allowance: small enough that the
 # run is dominated by model load rather than by generation, which is what makes
 # it a check on the plumbing instead of a measurement. What it establishes is
-# that sampled multi-completion requests reach the engine, that generation stops
-# on EOS rather than at `output_len`, and that the export carries the per-request
-# lengths the distribution is computed from.
+# that sampled multi-completion requests reach the engine, that the request body
+# carrying `ignore_eos: false` survives the bench CLI's own override, and that
+# the export carries the per-completion lengths the distribution is computed
+# from.
+#
+# What it does NOT establish is that generation stops on EOS, and the note on
+# `generated_tokens_max` below says why: `dataset: random` gives the model no
+# reason to emit one, so an EOS-respecting run and an EOS-ignoring run produce
+# the same observable lengths here. Showing that needs answerable prompts.
 #
 #   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-rollout-smoke.yaml \
 #     --output-dir /tmp/ts-rollout-smoke
