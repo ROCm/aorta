@@ -230,6 +230,10 @@ class TestTheOfflineHeuristic:
             "custom:distributed_barrier_timeout",
             # The sanitizer itself falling over reports nothing about a race.
             "custom:consan_tool_failure",
+            # A race, and not one inside a kernel. This is why `race` does not
+            # stand alone either: it says there *was* a race, not where, and
+            # `kernel_race` is a claim about where.
+            "custom:host_data_race",
         ],
     )
     def test_an_ambiguous_custom_id_is_not_a_kernel_race(self, detector):

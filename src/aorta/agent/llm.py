@@ -181,7 +181,7 @@ class LLMProposer(Protocol):
 # is inside one kernel. `barrier` and a bare sanitizer name are each ambiguous
 # on their own -- see `_is_kernel_race_id`.
 _SANITIZER_TOKENS = frozenset({"consan", "waitcheck", "rocjitsu"})
-_INTRA_KERNEL_TOKENS = frozenset({"barrier", "hazard", "lds"})
+_INTRA_KERNEL_TOKENS = frozenset({"race", "waitcnt", "barrier", "hazard", "lds"})
 
 
 def _id_words(detector: str) -> set[str]:
@@ -202,21 +202,25 @@ def _is_kernel_race_id(detector: str) -> bool:
     beside `custom:consan_tool_failure` -- would otherwise combine into a
     finding neither of them reports.
 
-    `race` and `waitcnt` are specific enough to stand alone. `barrier` and a
-    bare sanitizer name are not, and `custom:*` IDs are free-form
+    Two things are required, on the same ID: a sanitizer named the finding, and
+    the evidence is intra-kernel. Neither half is sufficient alone, and
+    `custom:*` IDs are why -- they are free-form
     (`probe/classifier/tier5_custom.py` builds `custom:<raw_id>` from whatever
-    the recipe named), so both appear in IDs that are not races at all: a
-    `custom:distributed_barrier_timeout` is a collective that did not arrive,
-    and a `custom:consan_tool_failure` is the sanitizer itself falling over.
-    Neither is a race inside a kernel, and labelling them `kernel_race` asserts
-    a sanitizer-confirmed hazard that nothing observed.
+    the recipe named), so every one of these tokens turns up in IDs that are
+    not intra-kernel races:
 
-    So those two are required to co-occur on the same ID: a sanitizer named it
-    *and* the evidence is intra-kernel.
+    * `custom:distributed_barrier_timeout` -- a collective that did not arrive.
+    * `custom:consan_tool_failure` -- the sanitizer itself falling over.
+    * `custom:host_data_race` -- a race, and not one inside a kernel.
+
+    `race` was briefly allowed to stand alone, on the reasoning that it is
+    specific enough. The third example is why it is not: "race" says there was
+    a race, not where, and `kernel_race` is a claim about where. Requiring the
+    sanitizer token costs nothing on the reachable spellings, since a ConSan or
+    Waitcheck finding names its tool -- `custom:consan_data_race`,
+    `custom:waitcheck_missing_waitcnt`.
     """
     words = _id_words(detector)
-    if "race" in words or "waitcnt" in words:
-        return True
     return bool(words & _SANITIZER_TOKENS) and bool(words & _INTRA_KERNEL_TOKENS)
 
 
