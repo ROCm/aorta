@@ -75,6 +75,59 @@ class TestAFailureThatIsNotNumeric:
 
         assert found.category == "launch_error"
 
+    def test_a_failed_inference_cell_is_not_numeric_corruption(self):
+        """``inf`` was matching the first three letters of ``inference``."""
+        found = classify_matrix(
+            matrix(
+                repro(
+                    "inference_offline",
+                    failure_hints=["inference request failed before producing output"],
+                ),
+                CLEAN_MITIGATION,
+            )
+        )
+
+        assert found.category == "unknown"
+        assert found.confidence <= 0.4
+
+    def test_an_infrastructure_failure_is_not_numeric_corruption(self):
+        """A clean mitigation beside it must not turn infrastructure into math."""
+        found = classify_matrix(
+            matrix(
+                repro(
+                    "infrastructure_probe",
+                    failure_hints=["infrastructure unavailable on this worker"],
+                ),
+                CLEAN_MITIGATION,
+            )
+        )
+
+        assert found.category == "unknown"
+        assert found.confidence <= 0.4
+
+    @pytest.mark.parametrize(
+        "ordinary_word",
+        [
+            "information",
+            "inflight request",
+            "inference server",
+            "infrastructure check",
+        ],
+    )
+    def test_other_inf_prefixes_are_not_numeric_evidence(self, ordinary_word):
+        found = classify_matrix(
+            matrix(repro(failure_hints=[ordinary_word]), CLEAN_MITIGATION)
+        )
+
+        assert found.category != "numeric_silent"
+
+    def test_residual_alone_is_a_workload_name_not_numeric_evidence(self):
+        found = classify_matrix(
+            matrix(repro("Residual-Repro", failure_hints=[]), CLEAN_MITIGATION)
+        )
+
+        assert found.category == "unknown"
+
 
 class TestAFailureThatSaysNothing:
     def test_a_bare_non_zero_exit_is_unknown(self):
@@ -112,6 +165,24 @@ class TestAFailureThatIsNumeric:
     def test_a_non_finite_hint_does_too(self):
         found = classify_matrix(
             matrix(repro(failure_hints=["non-finite gradient"]), CLEAN_MITIGATION)
+        )
+
+        assert found.category == "numeric_silent"
+
+    @pytest.mark.parametrize(
+        "hint",
+        [
+            "activation=inf",
+            "gradient=-inf",
+            "loss reached infinity",
+            "nonfinite output",
+            "non finite output",
+            "non-finite output",
+        ],
+    )
+    def test_complete_numeric_tokens_still_count(self, hint):
+        found = classify_matrix(
+            matrix(repro(failure_hints=[hint]), CLEAN_MITIGATION)
         )
 
         assert found.category == "numeric_silent"

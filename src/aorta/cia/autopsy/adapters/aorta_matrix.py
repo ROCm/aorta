@@ -10,7 +10,15 @@ from typing import Any
 from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext
 
 MITIGATION_ISOLATION = frozenset({"tf32_off", "deterministic"})
-NAN_HINTS = re.compile(r"nan|residual|non.?finite|inf", re.I)
+#: Complete numeric-failure tokens, not substrings. The former ``inf`` branch
+#: matched ``inference`` and ``infrastructure``, so a failed inference cell
+#: beside a clean mitigation became numeric corruption at 0.88 confidence even
+#: when the cell said only that its infrastructure failed. ``residual`` was
+#: equally broad: it names a workload family, not a value that went non-finite.
+NUMERIC_HINTS = re.compile(
+    r"\b(?:nan|inf(?:inity)?|non[- ]?finite)\b",
+    re.I,
+)
 
 #: Failures that are plainly not numeric corruption. A cell matching one of
 #: these has said what went wrong, and it was not the arithmetic.
@@ -29,14 +37,14 @@ def _numeric_evidence(cell: dict[str, Any]) -> bool:
     test before: any non-zero exit satisfied it, so an OOM, a missing module
     and a killed process all came back as silent numeric corruption at 0.88.
     The check that was meant to catch this was written and then not used --
-    ``if is_repro and not NAN_HINTS.search(...): pass`` -- so it read like a
+    ``if is_repro and not NUMERIC_HINTS.search(...): pass`` -- so it read like a
     guard and did nothing.
 
     Hints or the cell's own name, plus the structured fields a matrix carries
     when the harness recorded what it saw.
     """
     hints = " ".join(cell.get("failure_hints") or [])
-    if NAN_HINTS.search(hints) or NAN_HINTS.search(cell.get("name", "")):
+    if NUMERIC_HINTS.search(hints) or NUMERIC_HINTS.search(cell.get("name", "")):
         return True
     counts = cell.get("exit_status_counts") or {}
     if int(counts.get("numeric_nan") or 0) > 0:
