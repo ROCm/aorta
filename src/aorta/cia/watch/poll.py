@@ -99,6 +99,49 @@ def _emit_skipped(events_path: Path, job, content: str, error: str) -> None:
         )
 
 
+def _emit_log_read_error(
+    events_path: Path,
+    job: JobRecord,
+    source: Path,
+    cursor: int,
+    error: OSError,
+) -> None:
+    """Record one unreadable watched file without losing every other job.
+
+    The stderr line is immediately visible to the Watch operator; the event
+    makes the same failure available to bundle readers and Autopsy. Failure to
+    write that event must not recreate the original outage, so it is reported
+    and contained here too.
+    """
+    kind = type(error).__name__
+    assessment = (
+        f"Could not read watched log {source}: {kind}: {error}. "
+        f"Its cursor remains at byte {cursor} so Watch will retry it."
+    )
+    print(f"[watch] {job.job_id}: {assessment}")
+    payload = {
+        "schema_version": "0.1",
+        "event_id": str(uuid.uuid4()),
+        "ts": _utc_now(),
+        "phase": "watchdog",
+        "event_type": "watchdog_error",
+        "job_id": job.job_id,
+        "signal": "WATCH_LOG_READ_FAILED",
+        "confidence": 1.0,
+        "excerpt": "",
+        "assessment": assessment,
+        "source": str(source),
+    }
+    try:
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload) + "\n")
+    except OSError as exc:
+        print(
+            f"[watch] {job.job_id}: could not persist the log-read error "
+            f"for {source}: {type(exc).__name__}: {exc}"
+        )
+
+
 #: How many Autopsies may run at once. Bounded because each is an LLM ReAct
 #: loop that can escalate to a production sweep, and an unbounded pool would
 #: let one bad round start one per job on the cluster at the same time.
@@ -496,7 +539,16 @@ def _poll_rounds(*, pool, capacity, jobs_root, finder, watcher, interval,
             for p_str in job.watch_files:
                 p = Path(p_str)
                 cursor = cursors.get(p_str, 0)
-                text, new_cursor = read_new_bytes(p, cursor)
+                try:
+                    text, new_cursor = read_new_bytes(p, cursor)
+                except OSError as exc:
+                    # Per file, not around the job or the round. A permission
+                    # error or transient NFS failure in one sidecar must not
+                    # stop the primary log, the next job, or every later
+                    # polling round. Do not update this cursor: the same bytes
+                    # are owed another attempt once the file is readable.
+                    _emit_log_read_error(events_path, job, p, cursor, exc)
+                    continue
                 cursors[p_str] = new_cursor
                 if text:
                     new_parts.append(f"=== {p.name} ===\n{text}")
