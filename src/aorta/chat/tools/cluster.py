@@ -420,10 +420,9 @@ def triage_kernel_source(
         block_z: Threads per block in z, for a kernel that indexes threadIdx.z.
         fill: The byte every generated input buffer is filled with. 0 is the
             default and is right for a kernel that only writes its buffers.
-            Use 1 when the kernel branches on an input -- with zeros, a path
-            behind `if (input[i] > 0)` never executes, and the sanitizer
-            cannot find a race in code that did not run. The result says so
-            when it applies. Ignored when the paste contains its own main().
+            Use 1 to explore a path behind `if (input[i] > 0)`, but one repeated
+            byte is not representative input and cannot make a clean result
+            conclusive. Ignored when the paste contains its own main().
         force: Re-run on hardware even if this exact kernel was already triaged
             in this conversation. Leave false; the cached verdict is the same run.
 
@@ -469,16 +468,24 @@ def triage_kernel_source(
         label or f"user kernel {prepared.kernel}",
     )
 
-    if prepared.data_dependent:
-        guarded = ", ".join(f"`{name}`" for name in prepared.input_guards)
+    if prepared.generated_inputs:
+        guarded = ""
+        if prepared.input_guards:
+            names = ", ".join(f"`{name}`" for name in prepared.input_guards)
+            guarded = (
+                f" The lightweight scan found an obvious branch on {names}, "
+                "but that scan is informational rather than a completeness check."
+            )
         lines.append(
-            f"WARNING — input caveat: this kernel branches on {guarded}, and the "
-            f"generated harness filled every buffer with the byte {fill}. A path guarded "
-            f"by an input does not execute, so ConSan cannot report a conflict "
-            f"inside it and a 'pass' here does NOT mean the kernel is race-free "
-            f"— it means the guarded path was never reached. Re-run with a "
-            f"fill that enters the branch (fill=1 gives non-zero bytes), or "
-            f"paste a main() of your own that supplies representative input.\n"
+            "WARNING — generated-input caveat: no main() was supplied, so AORTA "
+            f"chose synthetic arguments (buffer fill byte {fill}, inferred scalar "
+            "values, and one launch). A clean ConSan result covers only the path "
+            "those values executed and is INCONCLUSIVE for data-dependent paths: "
+            "scalar modes, pointer-derived flags, ternaries, switches, and helper "
+            f"conditions may all remain unexecuted.{guarded} Changing fill can "
+            "explore another path but cannot make a clean result representative. "
+            "Supply a main() with realistic arguments before treating a clean run "
+            "as evidence that the kernel is race-free.\n"
         )
 
     if prepared.single_wave:

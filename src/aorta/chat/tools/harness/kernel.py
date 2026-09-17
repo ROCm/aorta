@@ -202,9 +202,9 @@ def build_harness(
 ) -> str:
     """Wrap a bare kernel in a main() that launches it once.
 
-    *fill_byte* is the byte every input buffer is filled with. Zero is right
-    for a buffer the kernel writes and wrong for one it branches on, which is
-    why it is a parameter rather than a constant.
+    *fill_byte* is the byte every input buffer is filled with. Changing it can
+    explore a different path, but one repeated byte is not representative
+    input and never makes a clean result conclusive.
     """
     name = kernel_name(source)
     params = parse_params(source)
@@ -296,13 +296,23 @@ class Prepared:
         return self.block * max(self.block_y, 1) * max(self.block_z, 1)
 
     @property
-    def data_dependent(self) -> bool:
-        """Whether a clean result here proves less than it appears to.
+    def generated_inputs(self) -> bool:
+        """Whether AORTA, rather than the caller, chose every argument value.
 
-        The harness this generates fills inputs with zeros, so a branch
-        guarded by an input never executes. ConSan cannot report a conflict in
-        code that did not run, and a sweep of the unguarded path alone returns
-        "pass".
+        This is the clean-result boundary. Synthetic inputs exercise one path;
+        no source regex can prove that path represents scalar guards, values
+        derived from pointers, ternaries, switches, or conditions hidden in a
+        helper. A caller-supplied main is the only case where this harness did
+        not choose the data.
+        """
+        return self.wrapped
+
+    @property
+    def data_dependent(self) -> bool:
+        """Whether the lightweight scan found an obvious pointer guard.
+
+        Informational only. It enriches the generated-input caveat but never
+        decides whether that caveat is shown.
         """
         return self.wrapped and bool(self.input_guards)
 
@@ -320,21 +330,21 @@ class Prepared:
         return self.wrapped and self.threads <= WAVEFRONT
 
 
-#: A branch whose condition reads one of the kernel's own inputs. Not an
-#: exhaustive parse -- it wants the shape ``if (input[i] > 0)``, which is what
-#: makes a race data-dependent, and would rather name a kernel that turns out
-#: to be fine than stay quiet about one that is not.
+#: A direct pointer read in an if/while condition. Deliberately only a hint for
+#: the message: it cannot see aliases, scalar parameters, ternaries, switches,
+#: helper functions, or a value computed before the condition, so it must never
+#: be used to declare a generated run representative.
 _GUARD = re.compile(r"\b(?:if|while)\s*\(([^)]*)\)", re.S)
 
 
 def branches_on_input(source: str, params: list[Param]) -> list[str]:
-    """Names of pointer parameters this kernel reads inside a condition.
+    """Obvious pointer parameters to name in the generated-input caveat.
 
     The generated harness fills every buffer with zeros, so a branch guarded
     by one of them never runs. ConSan then reports a clean sweep of code it
     never reached -- and the report says "pass", not "the guarded path was not
     executed". A kernel with a race behind ``if (input[i] > 0)`` comes back
-    clean and looks diagnosed.
+    clean and looks diagnosed. Missing a name here does not remove the caveat.
     """
     pointers = [p.name for p in params if p.is_pointer]
     if not pointers:
