@@ -494,9 +494,16 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         node=args.node,
         # The sanitizer positive control exits non-zero by design ("guardrail
         # not clean"), so the batch script swallows the code and the verdict
-        # comes from the sanitizer report. Per call, not per process: triages
-        # run concurrently and share one environment.
-        tolerate_nonzero=True,
+        # comes from the sanitizer report instead. Per call, not per process:
+        # triages run concurrently and share one environment.
+        #
+        # Only the sweep paths, which is what `recipe` distinguishes. A raw
+        # --command is the user's own program and its exit code is the only
+        # thing anyone has to go on: swallowing it recorded a workload that
+        # crashed as COMPLETED, and the status written further down follows the
+        # scheduler's state, so the record agreed. The run looked clean because
+        # nothing was left to say otherwise.
+        tolerate_nonzero=recipe is not None,
     )
 
     if err:

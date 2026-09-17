@@ -159,6 +159,86 @@ class TestTheDriverAsksForIt:
         assert during == [None]
 
 
+class TestOnlyTheSweepPathsGetIt:
+    """A raw workload's exit code is the only thing anyone has to go on.
+
+    Swallowing it is right for a sanitizer sweep, where exiting non-zero is the
+    finding and the verdict lives in a JSON report. It is wrong for --command,
+    which runs the user's own program: a training script that died came back
+    exit 0, Slurm recorded COMPLETED, and the job status follows the scheduler's
+    state, so the record agreed with it. Nothing anywhere said the run had
+    failed.
+
+    The flag had no effect on the paths it was written for anyway. Both sweep
+    commands end in ``|| true`` from echo_findings, so their exit code is
+    already zero before the script's own handling sees it. Set unconditionally,
+    it changed the outcome of exactly one path -- the one it should never have
+    applied to.
+    """
+
+    @staticmethod
+    def _flag_for(argv: list[str], tmp_path, monkeypatch) -> object:
+        seen: dict = {}
+
+        def fake_launch(**kwargs):
+            seen.update(kwargs)
+            return "", "stopped before submitting"
+
+        monkeypatch.setattr(triage_mod, "launch", fake_launch)
+        triage_mod.run_triage([*argv, "--jobs-root", str(tmp_path)])
+        return seen.get("tolerate_nonzero")
+
+    def test_a_raw_command_reports_its_exit_code(self, tmp_path, monkeypatch):
+        flag = self._flag_for(["--command", "python train.py"], tmp_path, monkeypatch)
+
+        assert flag is False
+
+    def test_a_pasted_kernel_still_tolerates_one(self, tmp_path, monkeypatch):
+        source = tmp_path / "k.hip"
+        source.write_text("__global__ void bump(float* o) { o[0] += 1; }\n", encoding="utf-8")
+
+        flag = self._flag_for(
+            ["--source", str(source), "--kernel-name", "bump"], tmp_path, monkeypatch
+        )
+
+        assert flag is True
+
+    def test_and_so_does_a_recipe(self, tmp_path, monkeypatch):
+        recipe = tmp_path / "r.yaml"
+        recipe.write_text("schema_version: 1\n", encoding="utf-8")
+
+        flag = self._flag_for(["--recipe", str(recipe)], tmp_path, monkeypatch)
+
+        assert flag is True
+
+
+class TestWhatTheScriptDoesWithIt:
+    """The consequence, at the level the scheduler sees."""
+
+    def test_a_tolerated_crash_is_reported_as_success(self):
+        """Which is correct for a sweep and wrong for a user's program."""
+        script = _script(command="(exit 1)", tolerate_nonzero=True)
+
+        assert script.rstrip().endswith("exit 0")
+
+    def test_an_untolerated_crash_keeps_its_code(self):
+        script = _script(command="(exit 1)", tolerate_nonzero=False)
+
+        assert script.rstrip().endswith("exit $rc")
+
+    def test_the_sweep_command_already_ends_in_a_tolerant_shape(self):
+        """echo_findings appends `|| true`, so rc is zero before the flag acts.
+
+        This is why setting it unconditionally looked harmless: on the paths it
+        was written for it does nothing at all.
+        """
+        import inspect
+
+        source = inspect.getsource(triage_mod.run_triage)
+
+        assert "|| true" in source
+
+
 class TestTheDeadCodeIsGone:
     def test_the_unused_run_helper_was_removed(self):
         """It was the only reader of the env copy above it; both were dead."""
