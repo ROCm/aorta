@@ -37,10 +37,9 @@ _AUTO_REPLAY_DIAGNOSTIC = re.compile(r"\bauto\s+replay\s+diagnostic(?:\s|$)", re
 # a race report.
 _AUTO_SAMPLED_CONFLICT = re.compile(r"\bauto\s+sampled\s+conflict(?:\s|$)", re.IGNORECASE)
 # The Sampled mode appends its counters to the shared per-reader
-# ``ConSan MOI auto report`` line. Both halves are required: ``auto report`` also
-# prefixes allocation/cleanup/plan lines that carry no counters, and the
-# ``sampled_*`` names also appear in the RJ_CONSAN_MOI_REQUIRE_DIAGNOSTICS
-# rejection message, which is not a per-reader report.
+# ``ConSan MOI auto report`` line. Match that record kind explicitly even though
+# ``visible_sampled`` is unique in the current renderer, so an unrelated future
+# diagnostic cannot be accepted as the authoritative summary.
 #
 # Keyed on ``visible_sampled``, which the renderer writes second, rather than on
 # a conflict counter near the end of the line: a line truncated between the two
@@ -56,6 +55,19 @@ _SAMPLED_SUMMARY_COUNTS = (
     "sampled_conflict_pairs_without_example",
     "sampled_conflicts",
     "sampled_immediate_conflicts",
+)
+# These mean evidence was lost, unusable, or cannot be attributed safely.
+# RocJITsu folds all but static_mapping_malformed into dynamic_incomplete; check
+# the summary independently as well because the two are separate log records.
+_SAMPLED_INCOMPLETE_COUNTS = (
+    "sampled_changed_snapshots",
+    "sampled_dropped_windows",
+    "sampled_incomplete_snapshots",
+    "sampled_malformed_snapshots",
+    "sampled_malformed_sync",
+    "sampled_stale_snapshots",
+    "sampled_static_mapping_malformed",
+    "sampled_unsupported_sync",
 )
 _KV = re.compile(r"(\w+)=(\S+)")
 # glibc's ld.so message when a needed DT_NEEDED library is not on any search
@@ -86,32 +98,13 @@ class ConSanMode(str, Enum):
 # known race as a clean pass.
 _CONSAN_SAMPLED_PRESET = "max"
 
-# Everything inherited from the caller's shell that could weaken the gate, of
-# which there are three kinds. A preset supplies DEFAULTS for the selection
-# knobs only, so an inherited selector silently thins ``max`` back out, and
-# mixing the coupled with the per-axis selectors is a hard hook config error.
-# The same-value opt-in suppresses a class of conflicts outright. The epoch
-# selector decides which epochs are analysed at all. Scrub all three so the
-# pinned mode and preset are the whole contract.
-_SAMPLED_GATE_OVERRIDES = (
-    "RJ_CONSAN_MOI_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES",
-    "RJ_CONSAN_MOI_CELL_SAMPLE_OFFSET",
-    "RJ_CONSAN_MOI_CELL_SAMPLE_STRIDE",
-    # Only the default ``every`` analyses each synchronized epoch. ``nth:N`` and
-    # ``periodic:N`` reset an unselected epoch's report without decoding it, and
-    # ``manual`` analyses nothing at all unless the harness opens a window
-    # through the hook's exported API -- which run_consan never does. An
-    # inherited value could therefore drop the positive control's race even at
-    # the max preset.
-    "RJ_CONSAN_MOI_EPOCH_ANALYSIS",
-    "RJ_CONSAN_MOI_RUNTIME_SAMPLE_OFFSET",
-    "RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE",
-    "RJ_CONSAN_MOI_SAMPLED_BANKS",
-    "RJ_CONSAN_MOI_SAMPLE_OFFSET",
-    "RJ_CONSAN_MOI_SAMPLE_STRIDE",
-    "RJ_CONSAN_MOI_WORKGROUP_SAMPLE_OFFSET",
-    "RJ_CONSAN_MOI_WORKGROUP_SAMPLE_STRIDE",
-)
+# Every ``RJ_CONSAN_MOI_*`` variable changes the engine's evidence, reporting,
+# or verdict contract. Examples include selectors that thin ``max`` back out,
+# ``EPOCH_ANALYSIS`` values that skip host analysis, ``SAMPLED_CHECK`` adding a
+# lower-fidelity device check, and REQUIRE/FORBID guards that change control
+# outcomes. Scrub the namespace rather than maintaining a list that can go stale
+# when RocJITsu adds a knob, then set the one MOI control this gate owns below.
+_CONSAN_MOI_ENV_PREFIX = "RJ_CONSAN_MOI_"
 
 
 # The strict coverage cross-check (consan_coverage.parse_coverage_decision)
@@ -268,6 +261,15 @@ def _sampled_totals(summaries: list[dict[str, str]]) -> dict[str, dict[str, int]
             raise ValueError("ConSan field reader is missing from a Sampled report summary")
         _required_int(summary, "reader")
         counts = {key: _required_int(summary, key) for key in _SAMPLED_SUMMARY_COUNTS}
+        incomplete = {
+            key: _required_int(summary, key) for key in _SAMPLED_INCOMPLETE_COUNTS
+        }
+        nonzero_incomplete = [key for key, value in incomplete.items() if value != 0]
+        if nonzero_incomplete:
+            raise ValueError(
+                f"ConSan Sampled evidence is incomplete for reader {reader}: "
+                + ", ".join(nonzero_incomplete)
+            )
         conflicts = counts["sampled_conflicts"]
         examples = counts["sampled_conflict_examples"]
         pairs_without_example = counts["sampled_conflict_pairs_without_example"]
@@ -303,6 +305,21 @@ def _require_sampled_summaries(
     if missing:
         raise ValueError(
             "ConSan Sampled report summary is missing for reader(s) " + ", ".join(missing)
+        )
+
+
+def _require_expected_engine(
+    coverage: tuple[CoverageRecord, ...], expected_mode: ConSanMode | None
+) -> None:
+    """Verify that the hook honored the mode pinned by the execution path."""
+    if expected_mode is None:
+        return
+    expected = expected_mode.value.replace("-", "_")
+    observed = sorted({record.engine for record in coverage})
+    if observed != [expected]:
+        rendered = ", ".join(observed) if observed else "<none>"
+        raise ValueError(
+            f"ConSan ran with engine(s) {rendered}, expected the pinned engine {expected}"
         )
 
 
@@ -370,7 +387,9 @@ def _sampled_summary_findings(
     return findings
 
 
-def parse_consan_output(output: str) -> ParsedCombinedOutput:
+def parse_consan_output(
+    output: str, *, expected_mode: ConSanMode | None = None
+) -> ParsedCombinedOutput:
     """Parse one combined-hook stream without double-counting summaries.
 
     Both MOI engines are read in the same pass: Sampled, which is what
@@ -443,6 +462,7 @@ def parse_consan_output(output: str) -> ParsedCombinedOutput:
     )
 
     decision = parse_coverage_decision(output)
+    _require_expected_engine(decision.coverage, expected_mode)
     _require_sampled_summaries(decision.coverage, sampled_totals)
     object_coverage = tuple(
         ObjectCoverage(
@@ -628,6 +648,7 @@ def evaluate_consan_output(
     process: ProcessResult,
     *,
     strict: bool = False,
+    expected_mode: ConSanMode | None = None,
 ) -> tuple[CheckResult, CheckResult]:
     """Evaluate a future allowlisted combined-hook run.
 
@@ -696,7 +717,9 @@ def evaluate_consan_output(
             ),
         )
     try:
-        parsed = parse_consan_output(f"{process.stdout}\n{process.stderr}")
+        parsed = parse_consan_output(
+            f"{process.stdout}\n{process.stderr}", expected_mode=expected_mode
+        )
     except ValueError as exc:
         reason = f"consan_output_parse_error: {exc}"
         return (
@@ -908,9 +931,10 @@ def run_consan(
     # so the two are set together and never on a legacy-mode path.
     env["HSA_TOOLS_DISABLE_REGISTER"] = "1"
     env["RJ_CONSAN_MODE"] = ConSanMode.SAMPLED.value
+    for name in tuple(env):
+        if name.startswith(_CONSAN_MOI_ENV_PREFIX):
+            env.pop(name)
     env["RJ_CONSAN_MOI_SAMPLED_PRESET"] = _CONSAN_SAMPLED_PRESET
-    for name in _SAMPLED_GATE_OVERRIDES:
-        env.pop(name, None)
     env["RJ_CONSAN_POLICY"] = "strict" if strict else "default"
     if consan_log:
         env["RJ_CONSAN_LOG"] = _CONSAN_LOG_DEBUG_LEVEL
@@ -924,7 +948,9 @@ def run_consan(
         timeout_seconds=timeout_seconds,
         env=env,
     )
-    preflight, consan = evaluate_consan_output(process, strict=strict)
+    preflight, consan = evaluate_consan_output(
+        process, strict=strict, expected_mode=ConSanMode.SAMPLED
+    )
     log_path = output_dir / "consan.log"
     log_path.write_text(f"{process.stdout}\n{process.stderr}", encoding="utf-8")
 

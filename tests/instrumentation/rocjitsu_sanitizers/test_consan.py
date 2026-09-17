@@ -90,8 +90,8 @@ def _sampled_report(
 ) -> str:
     """One per-reader ``auto report`` line with the Sampled counters appended.
 
-    Only the four conflict counters are load-bearing here; the rest of the line
-    is carried so the parser is exercised against a realistically wide record.
+    Conflict and evidence-integrity counters are load-bearing; the rest of the
+    line is carried so the parser is exercised against a realistic record.
     """
     return (
         f"{_PREFIX} MOI auto report reader={reader} addr=0x7f1200000000 bytes=65536 "
@@ -102,11 +102,23 @@ def _sampled_report(
         "visible_fences=0 dropped_fences=0 fence_capacity=256 diagnostics=0 "
         "visible_diagnostics=0 dropped_diagnostics=0 diagnostic_capacity=8 "
         "sampled_watchpoints=64 visible_sampled=2 sampled_sync_capacity=64 "
+        "sampled_watchpoint_slots_examined=2 visible_sampled_sync=0 "
+        "sampled_unsupported_sync=0 sampled_malformed_sync=0 "
+        "sampled_pending_acquire_capacity=16 sampled_pending_acquires=0 "
+        "sampled_pending_acquire_contention=0 sampled_pending_acquire_collisions=0 "
+        "sampled_pending_acquire_malformed=0 sampled_pending_release_slots_examined=0 "
         f"sampled_conflicts={conflicts} sampled_immediate_conflicts={immediate} "
         "sampled_claimed_windows=2 sampled_dropped_windows=0 sampled_saturated_windows=0 "
+        "sampled_stale_snapshots=0 sampled_incomplete_snapshots=0 "
+        "sampled_changed_snapshots=0 sampled_malformed_snapshots=0 "
+        "sampled_static_mapping_malformed=0 "
         f"sampled_conflict_examples={examples} "
         f"sampled_conflict_pairs_without_example={pairs_without_example} fine_grained=false"
     )
+
+
+def _healthy_sampled_evidence() -> str:
+    return "\n".join((_sampled_report(), _healthy_evidence(engine="sampled")))
 
 
 def _sampled_conflict(*, reader: int = 1, first_index: int = 0, second_index: int = 1) -> str:
@@ -464,6 +476,69 @@ def test_truncated_sampled_summary_never_passes() -> None:
 
 
 @pytest.mark.parametrize(
+    "counter",
+    (
+        "sampled_conflict_examples",
+        "sampled_conflict_pairs_without_example",
+        "sampled_conflicts",
+        "sampled_immediate_conflicts",
+    ),
+)
+def test_each_required_sampled_counter_is_individually_required(counter: str) -> None:
+    report = _sampled_report().replace(f"{counter}=0 ", "")
+    output = "\n".join((report, _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert counter in str(consan.reason)
+
+
+@pytest.mark.parametrize(
+    "counter",
+    (
+        "sampled_changed_snapshots",
+        "sampled_dropped_windows",
+        "sampled_incomplete_snapshots",
+        "sampled_malformed_snapshots",
+        "sampled_malformed_sync",
+        "sampled_stale_snapshots",
+        "sampled_static_mapping_malformed",
+        "sampled_unsupported_sync",
+    ),
+)
+def test_each_incomplete_sampled_counter_fails_closed(counter: str) -> None:
+    report = _sampled_report().replace(f"{counter}=0", f"{counter}=1")
+    output = "\n".join((report, _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert counter in str(consan.reason)
+
+
+@pytest.mark.parametrize(
+    "counter",
+    (
+        "sampled_pending_acquire_malformed",
+        "sampled_saturated_windows",
+    ),
+)
+def test_conservative_sampled_counters_do_not_claim_evidence_loss(counter: str) -> None:
+    # RocJITsu deliberately keeps these out of dynamic_incomplete. Saturation is
+    # expected bounded sampling, while malformed pending-acquire state disables
+    # ordering suppression and therefore biases toward extra findings rather
+    # than hiding a conflict.
+    report = _sampled_report().replace(f"{counter}=0", f"{counter}=1")
+    output = "\n".join((report, _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.RAN
+    assert consan.verdict is Verdict.PASS
+
+
+@pytest.mark.parametrize(
     "broken",
     (
         _sampled_report(conflicts=1, examples=2),
@@ -564,6 +639,27 @@ def test_legacy_record_replay_logs_need_no_sampled_summary() -> None:
     assert consan.verdict is Verdict.PASS
 
 
+@pytest.mark.parametrize("engine", ("inline_shadow", "record_replay", "supercollider"))
+def test_expected_sampled_mode_rejects_another_engine(engine: str) -> None:
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 0, _healthy_evidence(engine=engine), ""),
+        expected_mode=ConSanMode.SAMPLED,
+    )
+
+    assert consan.state is ExecutionState.ERROR
+    assert "expected the pinned engine sampled" in str(consan.reason)
+
+
+def test_expected_sampled_mode_accepts_sampled_engine() -> None:
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 0, _healthy_sampled_evidence(), ""),
+        expected_mode=ConSanMode.SAMPLED,
+    )
+
+    assert consan.state is ExecutionState.RAN
+    assert consan.verdict is Verdict.PASS
+
+
 def test_legacy_and_sampled_evidence_do_not_cross_contaminate() -> None:
     # One log, both engines -- the shape of a saved log from before the
     # migration replayed next to a current one. The Sampled detail record must
@@ -586,6 +682,24 @@ def test_legacy_and_sampled_evidence_do_not_cross_contaminate() -> None:
     assert codes.count("sampled_conflict") == 1
     assert codes.count("sampled_conflict_summary") == 1
     assert len(parsed.consan_findings) == 4
+
+
+def test_replay_detail_does_not_hide_sampled_summary_shortfall() -> None:
+    # Mirror the direction above: an unrelated Replay detail for this reader
+    # cannot count as the example that Sampled says it should have logged.
+    output = "\n".join(
+        (
+            f"{_PREFIX} MOI auto replay diagnostic reader=1 index=0 kind=1",
+            _sampled_report(reader=1, conflicts=1, examples=1),
+            _healthy_evidence(engine="sampled"),
+        )
+    )
+
+    parsed = parse_consan_output(output)
+
+    codes = [finding.code for finding in parsed.consan_findings]
+    assert codes.count("sampled_conflict_summary") == 1
+    assert len(parsed.consan_findings) == 2
 
 
 def test_racy_baseline_finding_shape_matches_every_sampled_message() -> None:
@@ -1091,7 +1205,7 @@ def _capture_consan_env(
 
     def fake_run_argv(argv, *, timeout_seconds, env):
         captured.update(env)
-        return ProcessResult(tuple(argv), 0, _healthy_evidence(), "")
+        return ProcessResult(tuple(argv), 0, _healthy_sampled_evidence(), "")
 
     monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
     result = run_consan(
@@ -1142,7 +1256,7 @@ def test_run_consan_scrubs_inherited_log_env_when_disabled(
 
     def fake_run_argv(argv, *, timeout_seconds, env):
         captured.update(env)
-        return ProcessResult(tuple(argv), 0, _healthy_evidence(), "")
+        return ProcessResult(tuple(argv), 0, _healthy_sampled_evidence(), "")
 
     monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
     run_consan(
@@ -1168,38 +1282,51 @@ def test_run_consan_pins_sampled_mode_and_the_max_preset(
     assert env.get("RJ_CONSAN_MOI_SAMPLED_PRESET") == "max"
 
 
-# Every inherited setting that could weaken or invalidate the pinned gate.
-# Spelled out rather than imported so dropping one from the source is a test
-# failure, not a silent reopening of the weakening vector.
+# Current upstream controls that can alter Sampled evidence or verdicts. The
+# production scrub is prefix-based so future MOI controls are covered too; this
+# list documents and exercises today's concrete risks.
 _SAMPLED_GATE_OVERRIDES = (
     "RJ_CONSAN_MOI_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES",
+    "RJ_CONSAN_MOI_AUTO_REPORT_BUFFER_SIZE",
     "RJ_CONSAN_MOI_EPOCH_ANALYSIS",
+    "RJ_CONSAN_MOI_FORBID_DIAGNOSTICS",
+    "RJ_CONSAN_MOI_FORBID_OVERFLOW",
+    "RJ_CONSAN_MOI_INIT_OWNER_EPOCH",
+    "RJ_CONSAN_MOI_REPORT_BUFFER",
+    "RJ_CONSAN_MOI_REPORT_BUFFER_SIZE",
+    "RJ_CONSAN_MOI_REQUIRE_DIAGNOSTICS",
+    "RJ_CONSAN_MOI_REQUIRE_RECORDS",
     "RJ_CONSAN_MOI_SAMPLE_STRIDE",
     "RJ_CONSAN_MOI_SAMPLE_OFFSET",
     "RJ_CONSAN_MOI_RUNTIME_SAMPLE_STRIDE",
     "RJ_CONSAN_MOI_RUNTIME_SAMPLE_OFFSET",
+    "RJ_CONSAN_MOI_SAMPLED_CHECK",
+    "RJ_CONSAN_MOI_SAMPLED_CONFLICT_LIMIT",
+    "RJ_CONSAN_MOI_SAMPLED_TOTAL_CONFLICT_LIMIT",
     "RJ_CONSAN_MOI_WORKGROUP_SAMPLE_STRIDE",
     "RJ_CONSAN_MOI_WORKGROUP_SAMPLE_OFFSET",
     "RJ_CONSAN_MOI_CELL_SAMPLE_STRIDE",
     "RJ_CONSAN_MOI_CELL_SAMPLE_OFFSET",
     "RJ_CONSAN_MOI_SAMPLED_BANKS",
+    "RJ_CONSAN_MOI_TRACK_ATOMICS",
+    "RJ_CONSAN_MOI_TRACK_BARRIERS",
 )
 
 
 def test_run_consan_scrubs_inherited_sampled_gate_overrides(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    # A preset supplies defaults only, so any one of these inherited from the
-    # parent shell silently overrides max and thins the sampling back out --
-    # and mixing the coupled with the per-axis selectors is a hard hook config
-    # error. Pinning the preset without scrubbing leaves the gate
-    # non-deterministic.
+    # A preset supplies defaults only, and several other MOI controls change
+    # whether or how evidence is analyzed. None may leak from the parent.
     for name in _SAMPLED_GATE_OVERRIDES:
         monkeypatch.setenv(name, "256")
+    monkeypatch.setenv("RJ_CONSAN_MOI_FUTURE_CONTROL", "hostile")
 
     env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
 
     assert [name for name in _SAMPLED_GATE_OVERRIDES if name in env] == []
+    assert env.get("RJ_CONSAN_MOI_FUTURE_CONTROL") is None
+    assert env.get("RJ_CONSAN_MOI_SAMPLED_PRESET") == "max"
 
 
 def _multi_worklist(count: int) -> KernelWorklist:
@@ -1249,7 +1376,7 @@ def test_run_consan_empty_worklist_fails_closed(
     def fake_run_argv(argv, *, timeout_seconds, env):
         nonlocal ran
         ran = True
-        return ProcessResult(tuple(argv), 0, _healthy_evidence(), "")
+        return ProcessResult(tuple(argv), 0, _healthy_sampled_evidence(), "")
 
     monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
     command = tmp_path / "repro"
@@ -1295,7 +1422,7 @@ def test_run_consan_pins_policy_env_over_hostile_inheritance(
     monkeypatch.delenv("HSA_TOOLS_DISABLE_REGISTER", raising=False)
 
     _, env = _run_consan_with(
-        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_evidence(), strict=True
+        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_sampled_evidence(), strict=True
     )
 
     assert env.get("RJ_CONSAN_MODE") == ConSanMode.SAMPLED.value
@@ -1307,7 +1434,11 @@ def test_run_consan_default_policy_when_not_strict(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     _, env = _run_consan_with(
-        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_evidence(), strict=False
+        monkeypatch,
+        tmp_path,
+        worklist=_worklist(),
+        output=_healthy_sampled_evidence(),
+        strict=False,
     )
     assert env["RJ_CONSAN_POLICY"] == "default"
 
@@ -1319,8 +1450,7 @@ def test_run_consan_surfaces_preflight_and_attributes_kernel(
         (
             "rocjitsu-waitcheck: .text+0x40: missing s_wait_loadcnt <= 0",
             "rocjitsu-waitcheck: consumer: v_mov_b32",
-            f"{_PREFIX} MOI auto replay diagnostics=0 conflict=false",
-            _healthy_evidence(),
+            _healthy_sampled_evidence(),
         )
     )
     result, _ = _run_consan_with(

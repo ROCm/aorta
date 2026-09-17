@@ -98,10 +98,10 @@ So the rejection is a deliberate, tunable capacity policy with two spellings:
   *original input image*, which scales with the object.
 
 AORTA sets neither growth limit. `run_consan` pins the mode, policy, logging and
-deterministic Sampled preset, and scrubs the inherited settings that could weaken
-that gate: the sampling selectors, the same-value suppression opt-in, and the
-epoch-analysis selector. Everything else, including the two growth limits above,
-is still inherited from the ambient environment.
+deterministic Sampled preset, and scrubs every inherited `RJ_CONSAN_MOI_*`
+control so none can change the evidence or verdict contract. Everything else,
+including the two growth limits above, is still inherited from the ambient
+environment.
 Note the default ceiling itself moved between bundles — 402,653,184 (384 MiB) on
 `7d2c61e7` versus 419,430,400 (400 MiB) on `97c1640b` — so it is not a constant
 to rely on either.
