@@ -30,7 +30,7 @@
 #   53  a bench step failed or timed out
 #   54  a bench step exported no parseable result JSON
 #   55  a bench step served fewer requests than asked (the silent-pass guard)
-#   56  a rollout step generated fewer tokens per request than the floor
+#   56  a rollout step generated fewer tokens per completion than the floor
 #   57  a rollout was asked for but the engine decodes greedily, so the
 #       sampling parameters it accepted are being ignored
 #   58  the engine is sampling, but with a different backend than was asked
@@ -392,7 +392,18 @@ SAMPLING_BACKEND="${TS_SAMPLING_BACKEND:-triton}"
 # weights have loaded, which reports as exit 50 several minutes in.
 if [ "${ROLLOUT}" = "1" ]; then
   case "${SAMPLING_BACKEND}" in
-    triton|triton_full|flashinfer|flashinfer_full) ;;
+    triton|triton_full) ;;
+    flashinfer|flashinfer_full)
+      # Offered by the engine, unusable here: these are CUDA-only and this
+      # script serves from ROCm images, where they are not registered at all.
+      # Accepting them moved the failure past `tokenspeed serve` startup, so a
+      # recipe error arrived as exit 50 after the weights had loaded.
+      echo "TS_BENCH_FAIL: usage TS_SAMPLING_BACKEND=${SAMPLING_BACKEND} is CUDA-only"
+      echo "  This script serves from a ROCm image, where the NVIDIA-only"
+      echo "  sampling backends are not registered. Use triton (the default) or"
+      echo "  triton_full."
+      exit 64
+      ;;
     greedy)
       # A backend the engine offers and this mode does not accept. Greedy
       # returns the argmax and ignores temperature, top_p, top_k and seed, so
@@ -409,7 +420,7 @@ if [ "${ROLLOUT}" = "1" ]; then
       ;;
     *)
       echo "TS_BENCH_FAIL: usage TS_SAMPLING_BACKEND (${SAMPLING_BACKEND}) is not a backend the engine offers"
-      echo "  Accepted under rollout: triton, triton_full, flashinfer, flashinfer_full."
+      echo "  Accepted under rollout: triton, triton_full."
       exit 64
       ;;
   esac
@@ -832,8 +843,11 @@ fi
 # under the blessed baselines. So this is appended only under rollout.
 #
 # `--sampling-backend` accepts greedy | triton | triton_full | flashinfer |
-# flashinfer_full; flashinfer is CUDA-only, so `triton` is the portable choice
-# that honours sampling parameters on ROCm.
+# flashinfer_full. Under rollout this script accepts only `triton` and
+# `triton_full`: `greedy` is not sampling, and the `flashinfer*` pair is
+# CUDA-only and unregistered on the ROCm images served here, so allowing it
+# only moved the failure past weight load. Both refusals are above, next to the
+# value they check.
 if [ "${ROLLOUT}" = "1" ]; then
   serve_args+=( --sampling-backend "${SAMPLING_BACKEND}" )
 fi
@@ -1132,8 +1146,9 @@ if failed != 0 or completed != expected:
 #
 # Mean rather than minimum, and from total_output_tokens rather than from a
 # per-request array, because those two fields are the ones every export version
-# carries. `output_lens` is used for the distribution the host reports, but it
-# is not depended on for the verdict.
+# carries. `output_lens` is preferred when present -- it is the only
+# per-completion source and needs no assumption about the gateway's usage
+# accounting -- but its absence is not fatal here; the host audits that.
 #
 # Non-positive is UNPARSEABLE here, not SHORTLEN, and the boundary matters
 # because the two verdicts route differently: SHORTLEN says a policy stopped
@@ -1153,20 +1168,37 @@ if min_mean_output > 0:
     ):
         print(f"UNPARSEABLE total_output_tokens={total_output!r}")
         raise SystemExit(0)
-    # Per completion, not per request, and under `n > 1` those differ by a
-    # factor of `n`. The gateway sums `usage.completion_tokens` across all
-    # sampled choices -- established by the smoke recipe, whose n=1 cell reads
-    # 256 and whose n=4 cell reads 1024 against a 256-token cap no single
-    # choice can exceed. Dividing only by `completed` therefore measured the
-    # rollout's whole token budget against a floor written per answer, and the
-    # collapsed policy this guard exists for was the case it let through: an
-    # immediate EOS at n=8 is eight tokens a request, which clears a floor of
-    # eight while every individual completion is one token long.
-    mean_output = total_output / (completed * samples)
+    # Per completion, and read off the per-completion array when the export has
+    # one rather than derived by dividing. Dividing by `completed * samples`
+    # assumed the gateway sums `usage.completion_tokens` across all `n` choices;
+    # the host's own metric documentation allows the other shape,
+    # first-choice-only, and on that shape the division is wrong by a factor of
+    # `n` in the direction that fails a healthy run. `output_lens` carries one
+    # entry per recorded completion, so its mean needs no assumption at all.
+    #
+    # Same rule as the host's `_valid_output_lens`, and it has to stay the same
+    # rule: this audit runs first, so a container dividing differently would
+    # print a verdict the host then contradicts.
+    lens = doc.get("output_lens")
+    usable = (
+        isinstance(lens, list)
+        and len(lens) > 0
+        and all(
+            isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in lens
+        )
+    )
+    if usable:
+        mean_output = sum(lens) / len(lens)
+        basis = f"output_lens n={len(lens)}"
+    else:
+        # Granularity unknown, so it is not guessed: compared per request, the
+        # weaker guard, and the verdict says so.
+        mean_output = total_output / completed
+        basis = f"total_output_tokens/completed={total_output}/{completed} per_request"
     if mean_output < min_mean_output:
         print(
             f"SHORTLEN mean_output_tokens={mean_output:.3f} "
-            f"floor={min_mean_output} total_output_tokens={total_output} "
+            f"floor={min_mean_output} basis={basis} "
             f"completed={completed} samples={samples}"
         )
         raise SystemExit(0)

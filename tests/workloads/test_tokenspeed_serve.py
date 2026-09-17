@@ -3935,19 +3935,36 @@ def _rollout_doc(
     completed: int = 32,
     total_output_tokens: int = 8192,
     output_lens: list[int] | None = None,
+    samples: int = mod._DEFAULT_ROLLOUT_SAMPLES,
     **overrides,
 ) -> dict:
     """A `--save-detailed` export from an EOS-respecting sampled run.
 
     Differs from `_bench_doc` in the two fields a rollout is read through: the
     generated-token total is a property of the policy rather than of the recipe,
-    and `output_lens` carries the per-request lengths that only appear with
+    and `output_lens` carries the per-completion lengths that only appear with
     `--save-detailed`.
+
+    `output_lens` is populated by default, and has to be: rollout defaults
+    `save_detailed` on, so an export without the array is
+    `result_json_unusable` rather than a rollout with no distribution. The
+    default spreads `total_output_tokens` evenly over `completed * samples`
+    completions, which is the summed-usage shape these fixtures describe. Pass
+    `samples=` to match a cell's `rollout_samples`, or `output_lens=` to state
+    the array directly; `output_lens=[]` is how a test asks for the missing-array
+    case on purpose.
     """
     doc = _bench_doc(completed=completed)
     doc["total_output_tokens"] = total_output_tokens
-    if output_lens is not None:
-        doc["output_lens"] = output_lens
+    if output_lens is None:
+        count = max(1, completed * samples)
+        # Distributed with the remainder spread, so `sum(output_lens)` equals
+        # `total_output_tokens` exactly. A fixture whose two fields disagree is
+        # not an export any gateway would write, and it would make the floor's
+        # reading look arbitrary.
+        base, extra = divmod(max(0, int(total_output_tokens)), count)
+        output_lens = [base + 1] * extra + [base] * (count - extra)
+    doc["output_lens"] = output_lens
     doc.update(overrides)
     return doc
 
@@ -4384,16 +4401,83 @@ def test_the_floor_does_not_weaken_as_the_sample_count_grows(tmp_path, monkeypat
     wl = _rollout(tmp_path, rollout_samples=8, min_mean_output_tokens=8)
     wl.setup()
     # 32 requests, 8 completions each, one token apiece.
-    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=32 * 8)])
+    _stub_docker(
+        wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=32 * 8, samples=8)]
+    )
     result = wl.run()
 
     assert not result.passed, result.metrics
     detail = result.failure_details[0]
     assert detail["reason"] == "rollout_output_too_short"
     assert detail["mean_output_tokens"] == pytest.approx(1.0)
+    assert "output_lens" in detail["basis"], detail["basis"]
     # Per request this is 8.0, which is exactly the floor: the old reading
     # cleared it.
     assert 32 * 8 / 32 == 8.0
+
+
+def test_an_unreadable_export_is_not_also_reported_as_a_short_rollout(
+    tmp_path, monkeypatch
+):
+    """One broken export, one verdict -- pinned because it regressed once.
+
+    The boundary used to fall out of the floor's own `total_output_tokens > 0`
+    guard. Reading the per-completion lengths instead removed that coupling, so
+    an export with a broken token total came back as *both*
+    `result_json_unusable` and `rollout_output_too_short`. The audit owns "we
+    could not read it"; the floor owns "we read it and it is too short", and it
+    now stands down whenever the audit has already claimed the step.
+    """
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        # Readable, short lengths -- but a token total the audit rejects.
+        docs=[_rollout_doc(total_output_tokens=0, output_lens=[0] * 128)],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
+def test_a_first_choice_only_gateway_does_not_fail_a_healthy_rollout(
+    tmp_path, monkeypatch
+):
+    """The false failure the previous fix introduced, in the other direction.
+
+    Dividing `total_output_tokens` by `completed * rollout_samples` assumed the
+    gateway sums `usage.completion_tokens` across all `n` choices. This class's
+    own metric docs allow the other shape, first-choice-only, and there the
+    division is wrong by a factor of `n`: healthy 16-token completions at
+    `rollout_samples: 8` read as 2 and failed a floor of 8.
+
+    `output_lens` settles it without an assumption -- one entry per completion,
+    so its mean is the per-completion mean whatever the counters mean.
+    """
+    wl = _rollout(tmp_path, rollout_samples=8, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=32,
+                # First-choice-only accounting: one choice's worth per request.
+                total_output_tokens=32 * 16,
+                # But 8 genuine completions per request, 16 tokens each.
+                output_lens=[16] * (32 * 8),
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    # Sanity: the old rule would have failed this.
+    assert (32 * 16) / (32 * 8) == 2.0
 
 
 def test_the_two_floors_agree_on_the_sample_count(tmp_path):
@@ -4404,17 +4488,26 @@ def test_the_two_floors_agree_on_the_sample_count(tmp_path):
     sees, so a container still dividing per request would pass the step the
     host was about to fail.
     """
-    collapsed = {"completed": 32, "failed": 0, "total_output_tokens": 32 * 8}
+    # 256 tokens over 32 requests at n=8: one token per completion, and the
+    # per-completion array says so without anyone having to divide.
+    collapsed = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": 32 * 8,
+        "output_lens": [1] * (32 * 8),
+    }
     verdict = _run_script_audit(
         tmp_path, collapsed, min_mean_output=8, rollout_samples=8
     )
     assert verdict.startswith("SHORTLEN"), verdict
-    assert "samples=8" in verdict, verdict
+    assert "output_lens" in verdict, verdict
 
-    # The same export at n=1 is a genuine 8 tokens per completion and passes,
-    # so the check above is the sample count and not a floor that fails all.
+    # The same token total spread over 32 completions is a genuine 8 apiece and
+    # passes, so the check above is the per-completion length and not a floor
+    # that fails everything.
+    healthy = dict(collapsed, output_lens=[8] * 32)
     assert _run_script_audit(
-        tmp_path, collapsed, min_mean_output=8, rollout_samples=1
+        tmp_path, healthy, min_mean_output=8, rollout_samples=1
     ).startswith("OK")
 
 
@@ -4682,7 +4775,12 @@ def test_the_length_distribution_is_pooled_across_steps(tmp_path, monkeypatch):
 def test_a_partial_length_distribution_is_not_published(tmp_path, monkeypatch):
     """Pooling over whichever steps happened to carry the array would describe a
     subset while reading as the trial's -- the same reason the scalar aggregate
-    publishes a metric only when every step supplied it."""
+    publishes a metric only when every step supplied it.
+
+    Under the rollout default this is also a *failure*, not just a suppression:
+    `save_detailed` asked for the array and one step did not deliver it. The
+    suppression-without-failure path is `save_detailed: false`, tested below.
+    """
     wl = _rollout(tmp_path, num_prompts=4, steps=2, rollout_samples=1)
     wl.setup()
     _stub_docker(
@@ -4690,8 +4788,28 @@ def test_a_partial_length_distribution_is_not_published(tmp_path, monkeypatch):
         monkeypatch,
         docs=[
             _rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, 10]),
-            _rollout_doc(completed=4, total_output_tokens=40),
+            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[]),
         ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
+    assert "output_lens" in result.failure_details[0]["detail"]
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+
+
+def test_without_save_detailed_a_missing_array_is_not_a_failure(tmp_path, monkeypatch):
+    """The other half of the contract, and the reason it is keyed on the request.
+
+    An explicit `save_detailed: false` is the caller saying they do not want the
+    per-completion array, so its absence is the configuration working. Only a
+    cell that *asked* for the lengths and did not get them is unusable.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1, save_detailed=False)
+    wl.setup()
+    _stub_docker(
+        wl, monkeypatch, docs=[_rollout_doc(completed=4, total_output_tokens=40, output_lens=[])]
     )
     result = wl.run()
 
@@ -4963,34 +5081,6 @@ def test_serve_args_may_still_pin_a_sampling_backend_for_a_benchmark(tmp_path):
     assert argv, "the script should have reached the bench step"
 
 
-def test_one_empty_length_array_suppresses_the_whole_distribution(tmp_path, monkeypatch):
-    """An empty array is a step that did not carry the data, not a step of none.
-
-    It used to pass every guard: `isinstance` held, the comprehension produced
-    nothing, the length check compared 0 to 0, and the step contributed no
-    entries while the loop pooled the others. So the published distribution
-    described a subset while the docstring promised every step had carried the
-    array -- and `if not pooled` only caught the case where *every* step was
-    empty.
-    """
-    wl = _rollout(tmp_path, num_prompts=4, steps=2, rollout_samples=1)
-    wl.setup()
-    _stub_docker(
-        wl,
-        monkeypatch,
-        docs=[
-            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, 10]),
-            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[]),
-        ],
-    )
-    result = wl.run()
-
-    assert result.passed, result.failure_details
-    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
-    # The reading that does not depend on the array still arrives.
-    assert result.metrics["mean_output_tokens_per_request"] == pytest.approx(10.0)
-
-
 @pytest.mark.parametrize("bad", [-1, 10.5])
 def test_an_impossible_generated_length_suppresses_the_distribution(tmp_path, monkeypatch, bad):
     """A negative or fractional length is not a measurement of anything.
@@ -4998,7 +5088,8 @@ def test_an_impossible_generated_length_suppresses_the_distribution(tmp_path, mo
     `output_lens: [-1]` published a complete set of negative percentiles, which
     is worse than a skewed distribution: nothing about the output looks wrong,
     and a negative `generated_tokens_*` reading is one a `min_*` gate scores as
-    an improvement.
+    an improvement. Under the rollout default it also fails the trial, since
+    `save_detailed` asked for a usable array.
     """
     wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1)
     wl.setup()
@@ -5010,6 +5101,8 @@ def test_an_impossible_generated_length_suppresses_the_distribution(tmp_path, mo
     result = wl.run()
 
     assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
 
 
 def test_an_integral_float_length_is_still_a_length(tmp_path, monkeypatch):

@@ -160,15 +160,26 @@ _DEFAULT_MIN_MEAN_OUTPUT_TOKENS = 8
 _SAMPLING_BACKENDS = frozenset(
     {"greedy", "triton", "triton_full", "flashinfer", "flashinfer_full"}
 )
-# `greedy` is a backend the engine offers and is *not* one this mode accepts.
-# It discards `temperature`, `top_p`, `top_k` and `seed` and returns the argmax,
-# so `rollout: true, sampling_backend: greedy` would publish `n` repetitions of
-# one completion as a sampled rollout -- the identical end state that rejecting
-# `temperature: 0` exists to prevent, reached through the other knob. Refused
-# rather than warned about, and refused in both layers, because the engine-side
-# read-back deliberately stays quiet when greedy is what was asked for: a
-# check that trusts the request cannot also police it.
-_ROLLOUT_SAMPLING_BACKENDS = _SAMPLING_BACKENDS - {"greedy"}
+# What a *rollout* accepts, which is narrower than what the engine offers, for
+# two independent reasons.
+#
+# `greedy` discards `temperature`, `top_p`, `top_k` and `seed` and returns the
+# argmax, so `rollout: true, sampling_backend: greedy` would publish `n`
+# repetitions of one completion as a sampled rollout -- the identical end state
+# that rejecting `temperature: 0` exists to prevent, reached through the other
+# knob. Refused rather than warned about, and refused in both layers, because
+# the engine-side read-back deliberately stays quiet when greedy is what was
+# asked for: a check that trusts the request cannot also police it.
+#
+# `flashinfer` and `flashinfer_full` are CUDA-only and this workload runs on
+# ROCm images -- `docs/tokenspeed.md` records that the NVIDIA-only solutions
+# (`flashinfer`, `fa4`, `cuda`) are simply not registered on AMD. Accepting them
+# bought nothing and cost the thing this validation exists for: the recipe
+# passed `setup()`, the container pulled an image and loaded weights, and the
+# run then died in `create_sampling_backend` minutes later, reported as exit 50
+# rather than as the recipe error it is. Reversible in one line if aorta ever
+# grows a CUDA lane, and the error message says so.
+_ROLLOUT_SAMPLING_BACKENDS = frozenset({"triton", "triton_full"})
 _DEFAULT_SAMPLING_BACKEND = "triton"
 
 # Required metrics that are counts rather than measurements, so a fractional
@@ -423,6 +434,36 @@ def _is_scalar(value: Any) -> bool:
     return math.isfinite(value)
 
 
+def _valid_output_lens(doc: dict[str, Any]) -> list[float] | None:
+    """The export's per-completion generated lengths, or ``None`` if unusable.
+
+    One rule, one place. Three consumers read this array -- the length
+    distribution, the rollout floor, and the core-metric audit -- and a rule
+    restated three times is a rule that drifts.
+
+    Usable means: present, a list, non-empty, and every entry a non-negative
+    whole number. Empty counts as unusable rather than as a distribution of
+    nothing; a step that carried no lengths did not carry the array.
+
+    Zeros are kept. A zero is what the bench records for a request that failed,
+    `failed == 0` is audited independently, so a zero here means the two
+    disagree -- and dropping it would raise every percentile and make a
+    partly-failed step read as a healthy one. Negative and fractional entries
+    are not kept: no run produces them, and `output_lens: [-1]` published a
+    complete set of negative percentiles, which a ``min_*`` gate scores as an
+    improvement.
+    """
+    lens = doc.get("output_lens")
+    if not isinstance(lens, list) or not lens:
+        return None
+    out: list[float] = []
+    for value in lens:
+        if not _is_scalar(value) or float(value) < 0 or not float(value).is_integer():
+            return None
+        out.append(float(value))
+    return out
+
+
 def _plain_decimal(value: float) -> str:
     """``value`` in plain decimal notation, exactly, for the container's env.
 
@@ -530,18 +571,20 @@ class TokenSpeedServeWorkload(Workload):
             benchmark (default ``False``): ``rollout_samples`` sampled
             completions per prompt at ``temperature``, stopping on EOS, with
             the generated-length distribution reported and audited against
-            ``min_mean_output_tokens``. The four keys below require it.
+            ``min_mean_output_tokens``. The five keys below require it.
         rollout_samples: completions per prompt, the ``n`` of the sampling API
             (default ``4``, max ``1024``).
         temperature: sampling temperature, in ``(0, 2]`` (default ``1.0``).
             Zero is rejected: it would draw the same greedy completion
             ``rollout_samples`` times.
-        sampling_backend: the server's ``--sampling-backend``; one of
-            ``triton``, ``triton_full``, ``flashinfer``, ``flashinfer_full``
-            (default ``"triton"``). Defaulted away from the engine's own
-            default, which resolves to ``greedy`` off NVIDIA and discards the
-            sampling parameters without saying so. ``greedy`` is rejected here
-            for the reason ``temperature: 0`` is: it is not a rollout.
+        sampling_backend: the server's ``--sampling-backend``; ``triton`` or
+            ``triton_full`` (default ``"triton"``). Defaulted away from the
+            engine's own default, which resolves to ``greedy`` off NVIDIA and
+            discards the sampling parameters without saying so. ``greedy`` is
+            rejected here for the reason ``temperature: 0`` is: it is not a
+            rollout. ``flashinfer``/``flashinfer_full`` are rejected as
+            CUDA-only, being unregistered on the ROCm images this workload
+            serves from.
         top_p: nucleus sampling mass in ``(0, 1]`` (default: unset, i.e. the
             server's own).
         min_mean_output_tokens: per-step floor on mean tokens per *completion*,
@@ -1078,14 +1121,22 @@ class TokenSpeedServeWorkload(Workload):
         # container after the weights have loaded.
         backend = self.config.get("sampling_backend", _DEFAULT_SAMPLING_BACKEND)
         if not isinstance(backend, str) or backend not in _ROLLOUT_SAMPLING_BACKENDS:
-            extra = (
-                " A rollout samples; greedy returns the argmax and ignores "
-                "temperature, top_p and seed, so the n completions per prompt "
-                "would be one decode repeated -- the same run temperature: 0 is "
-                "rejected for."
-                if backend == "greedy"
-                else ""
-            )
+            if backend == "greedy":
+                extra = (
+                    " A rollout samples; greedy returns the argmax and ignores "
+                    "temperature, top_p and seed, so the n completions per prompt "
+                    "would be one decode repeated -- the same run temperature: 0 is "
+                    "rejected for."
+                )
+            elif backend in _SAMPLING_BACKENDS:
+                extra = (
+                    f" {backend} is CUDA-only and this workload serves from ROCm "
+                    "images, where it is not registered at all. Accepting it here "
+                    "would move the failure to server startup, after the weights "
+                    "have loaded."
+                )
+            else:
+                extra = ""
             raise ValueError(
                 f"tokenspeed_serve: sampling_backend ({backend!r}) must be one of "
                 f"{', '.join(sorted(_ROLLOUT_SAMPLING_BACKENDS))}.{extra}"
@@ -2493,6 +2544,20 @@ class TokenSpeedServeWorkload(Workload):
                 # explicitly is the one to match, and here that is the
                 # container.
                 missing.append(name)
+
+        # `save_detailed` is a request for the per-completion lengths, and under
+        # rollout it defaults on precisely because the mode is measured through
+        # them -- the smoke recipe's stated check is that they reached the
+        # export, and the rollout floor reads them rather than assuming the
+        # gateway's usage accounting.
+        #
+        # An export that omits them therefore did not satisfy what the cell
+        # asked for. Skipping the distribution and passing anyway let the smoke
+        # recipe go green without establishing its own headline claim. An
+        # explicit `save_detailed: false` is a different statement -- the caller
+        # said they did not want the array -- and stays unaudited.
+        if self._save_detailed and _valid_output_lens(record.doc) is None:
+            missing.append("output_lens")
         return missing
 
     def _container_name(self) -> str:
@@ -2929,7 +2994,20 @@ class TokenSpeedServeWorkload(Workload):
             # (entropy collapse, an overshooting length penalty, a tokenizer
             # whose EOS lands first) and the cell would go green calling it
             # throughput.
-            if self._rollout and self._min_mean_output_tokens > 0:
+            # Computed before the floor so the floor can stand down when the
+            # export is unreadable. That ordering is the boundary this class
+            # already litigated once: the audit owns "we could not read it" and
+            # the floor owns "we read it and it is too short", and a broken
+            # export must produce one detail rather than two.
+            #
+            # It used to fall out of the floor's own `total_output_tokens > 0`
+            # guard. Reading the lengths instead removed that coupling, so a
+            # zero or fractional total came back as *both* an unusable export
+            # and a collapsed policy -- reinstating the double report from the
+            # other side. Stated as a condition now rather than left implicit.
+            missing = self._missing_core_metrics(record)
+
+            if self._rollout and self._min_mean_output_tokens > 0 and not missing:
                 total_output = record.doc.get("total_output_tokens")
                 # Only compare when there is a number to compare. Every other
                 # shape of `total_output_tokens` -- absent, non-numeric, boolean,
@@ -2946,45 +3024,68 @@ class TokenSpeedServeWorkload(Workload):
                 # unreadable measurement rather than a collapsed policy. The
                 # audit owns "we could not read it"; the floor owns "we read it
                 # and it is too short".
-                if (
+                # Measured per completion, and taken from the per-completion
+                # array when the export has one rather than derived by dividing.
+                #
+                # Dividing `total_output_tokens` by `completed * rollout_samples`
+                # assumed the gateway sums `usage.completion_tokens` across all
+                # `n` choices. `_add_generated_length_metrics` in this same class
+                # documents that as the gateway's decision and explicitly allows
+                # the other shape, first-choice-only -- and on that shape the
+                # division is wrong by a factor of `n` in the dangerous
+                # direction: a healthy 16-token completion at
+                # `rollout_samples: 8` read as 2 and failed a floor of 8. So the
+                # previous fix traded a false pass for a false failure.
+                #
+                # `output_lens` needs no such assumption: one entry per recorded
+                # completion, so its mean *is* the per-completion mean. Rollout
+                # defaults `save_detailed` on to obtain it, and a rollout that
+                # asked for it and did not get it is now `result_json_unusable`
+                # (see `_missing_core_metrics`), which leaves this fallback
+                # reachable only for an explicit `save_detailed: false`.
+                lens = _valid_output_lens(record.doc)
+                basis: str | None = None
+                mean_output = 0.0
+                if lens:
+                    mean_output = sum(lens) / len(lens)
+                    basis = f"mean of {len(lens)} output_lens entries"
+                elif (
                     type(total_output) is int
                     and total_output > 0
                     and type(completed) is int
                     and completed > 0
                 ):
-                    # Per completion, not per request. `total_output_tokens`
-                    # sums `usage.completion_tokens` over all `rollout_samples`
-                    # choices, so dividing only by `completed` compared the
-                    # whole rollout's budget against a floor that describes one
-                    # answer -- and scaled the guard's sensitivity down by `n`
-                    # exactly as `n` grew. At the default floor of 8 a policy
-                    # emitting an immediate EOS passed from `rollout_samples: 8`
-                    # upward, which is the built-in `samples-8` cell and the
-                    # collapse this check was written for.
-                    completions = completed * self._rollout_samples
-                    mean_output = total_output / completions
-                    if mean_output < self._min_mean_output_tokens:
-                        failure_details.append(
-                            {
-                                "reason": "rollout_output_too_short",
-                                "step": record.step,
-                                "detail": (
-                                    f"mean_output_tokens={mean_output:.3f} per "
-                                    "completion is below min_mean_output_tokens="
-                                    f"{self._min_mean_output_tokens} "
-                                    f"(total_output_tokens={total_output}, "
-                                    f"completed={completed}, "
-                                    f"rollout_samples={self._rollout_samples}). "
-                                    "Every request was "
-                                    "served, so this is a policy that stopped "
-                                    "generating rather than a serving failure."
-                                ),
-                                "mean_output_tokens": mean_output,
-                                "floor": self._min_mean_output_tokens,
-                            }
-                        )
+                    # No per-completion array, so the granularity is unknown and
+                    # is not guessed. Compared per *request*, which is the weaker
+                    # guard -- it under-detects a collapse by a factor of `n` --
+                    # but never fails a healthy run, and the detail says which
+                    # rule was applied so a reader is not left to infer it.
+                    mean_output = total_output / completed
+                    basis = (
+                        f"total_output_tokens/completed = {total_output}/{completed}, "
+                        "per request: no output_lens, so per-completion lengths "
+                        "are unavailable and the gateway's usage accounting is "
+                        "not assumed"
+                    )
+                if basis is not None and mean_output < self._min_mean_output_tokens:
+                    failure_details.append(
+                        {
+                            "reason": "rollout_output_too_short",
+                            "step": record.step,
+                            "detail": (
+                                f"mean_output_tokens={mean_output:.3f} is below "
+                                f"min_mean_output_tokens="
+                                f"{self._min_mean_output_tokens} "
+                                f"({basis}). Every request was "
+                                "served, so this is a policy that stopped "
+                                "generating rather than a serving failure."
+                            ),
+                            "mean_output_tokens": mean_output,
+                            "floor": self._min_mean_output_tokens,
+                            "basis": basis,
+                        }
+                    )
 
-            missing = self._missing_core_metrics(record)
             if missing:
                 failure_details.append(
                     {
@@ -3235,47 +3336,16 @@ class TokenSpeedServeWorkload(Workload):
 
         pooled: list[float] = []
         for record in records:
-            lens = record.doc.get("output_lens")
-            # An empty array is treated like a missing one. It used to pass:
-            # `isinstance` held, the comprehension produced nothing, the length
-            # check compared 0 to 0, and the step contributed no entries while
-            # the loop went on pooling later steps. So one measured step with an
-            # empty array published a distribution computed from the others
-            # while the docstring above promised every step had carried it --
-            # the "describes a subset, reads as the trial's" failure, reached
-            # through the one shape that looked well-formed. `if not pooled`
-            # below only ever caught the case where *every* step was empty.
-            if not isinstance(lens, list) or not lens:
-                return
-            # A zero is what the bench records for a request that failed, and
-            # `failed == 0` is audited independently, so a zero here means the
-            # two disagree. Kept rather than filtered: silently dropping it
-            # would raise every percentile and make a partly-failed step read as
-            # a healthy one.
-            #
-            # A negative length is a different case and is not kept. There is no
-            # run it could describe -- a request cannot generate fewer than zero
-            # tokens -- and it does not merely skew the distribution, it makes it
-            # read as something no reader would question: `output_lens: [-1]`
-            # produced a complete set of negative percentiles, and a negative
-            # `generated_tokens_*` reading is one a `min_*` gate scores as an
-            # improvement. A fractional length goes the same way, being a count.
-            #
-            # Integral *value* rather than `type(v) is int`, which is where this
-            # deliberately differs from the `total_output_tokens` rule above.
-            # There, a container audit already spelled the contract as
-            # `type(...) is int` and the host's job was to stop being the
-            # lenient one. Here no container counterpart exists, so the rule is
-            # ours to choose, and `10.0` is a valid count written by a JSON
-            # encoder rather than a defect -- rejecting it would fail a correct
-            # run over a serialisation detail we have never observed either way.
-            # `_is_scalar` still carries the bool and non-finite exclusions.
-            step_lens = [
-                float(v)
-                for v in lens
-                if _is_scalar(v) and float(v) >= 0 and float(v).is_integer()
-            ]
-            if len(step_lens) != len(lens):
+            # One shared validity rule, in `_valid_output_lens`, because the
+            # floor and the core-metric audit read the same array and three
+            # copies of the rule would be three chances to drift. An empty or
+            # invalid array is unusable rather than a distribution of nothing:
+            # it used to pass every guard here -- `isinstance` held, the
+            # comprehension produced nothing, the length check compared 0 to 0 --
+            # so the step contributed no entries while the loop pooled the
+            # others, publishing a subset that read as the trial's.
+            step_lens = _valid_output_lens(record.doc)
+            if step_lens is None:
                 return
             pooled.extend(step_lens)
         if not pooled:

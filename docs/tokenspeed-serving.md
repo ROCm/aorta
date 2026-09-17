@@ -299,12 +299,12 @@ What follows is the configuration.
 
 | Key | Default | Notes |
 |---|---|---|
-| `rollout` | `false` | Enables the mode. The four keys below are rejected without it. |
+| `rollout` | `false` | Enables the mode. The five keys below are rejected without it. |
 | `rollout_samples` | `4` | Completions per prompt — the `n` of the sampling API. Max 1024. |
 | `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
 | `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
 | `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**, `total_output_tokens / (completed * rollout_samples)`. `0` disables it. Per completion because `total_output_tokens` sums across all `n` choices, so a per-request floor would be `n` times easier to clear — at `rollout_samples: 8` an immediate-EOS policy cleared the default exactly. |
-| `sampling_backend` | `triton` | The server's `--sampling-backend`; `triton`, `triton_full`, `flashinfer` or `flashinfer_full`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. `greedy` is **rejected** under `rollout`, for the same reason `temperature: 0` is. Reserved in `serve_args` under this mode. |
+| `sampling_backend` | `triton` | The server's `--sampling-backend`; `triton` or `triton_full`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. `greedy` is **rejected** under `rollout` for the same reason `temperature: 0` is, and `flashinfer` / `flashinfer_full` are rejected as CUDA-only — unregistered on the ROCm images this workload serves from, so accepting them would move the failure to server startup. Reserved in `serve_args` under this mode. |
 
 The sampling keys are **rejected outside the mode** rather than ignored. Outside
 it no sampling parameters are sent at all, so a `temperature` in an ordinary
@@ -314,9 +314,17 @@ cell's configuration.
 `ignore_eos` defaults to `false` under `rollout`, and an explicit `true` is
 refused. The two cannot both mean what they say: ignoring EOS pins every
 completion to `output_len`, so the run has no length distribution and its token
-volume is a function of the recipe. `output_len` remains meaningful as the
-`max_tokens` **allowance** — a `generated_tokens_max` sitting exactly on it means
-the cap truncated the rollout rather than the model stopping.
+volume is a function of the recipe. On `dataset: random`, `output_len` remains
+meaningful as the `max_tokens` **allowance** — a `generated_tokens_max` sitting
+exactly on it means the cap truncated the rollout rather than the model
+stopping.
+
+That reading is dataset-specific, and rollout mode accepts `sharegpt` too. There
+the config table above applies: `output_len` is not sent at all, the lengths come
+from the conversations, and there is no recipe-set cap for
+`generated_tokens_max` to sit on — so a `sharegpt` rollout has no truncation
+signal of that kind, and `min_mean_output_tokens` is the only length guard it
+gets.
 
 Metrics EOS-respecting generation adds — that is, `rollout: true`, or a
 `sharegpt` cell with `ignore_eos: false`. A cell that ignores EOS publishes none
@@ -712,13 +720,23 @@ argv that turns EOS back on: omitting `--ignore-eos` does not, and neither does
 `--disable-ignore-eos`. Every request goes out with `ignore_eos` in its payload
 and runs to `output_len`.
 
+**`rollout: true` is the one exception, and it is the exception because it takes
+the payload route below rather than the argv route.** Rollout builds its own
+`--extra-body` always carrying `"ignore_eos": false`, and it reserves that flag
+so nothing can shadow the value, so EOS genuinely is respected on
+`dataset: random` there. Everything in this section describes a cell that is not
+in rollout mode; under rollout, `ignore_eos` defaults to `false` and an explicit
+`true` is what gets rejected. See [Rollout mode](#rollout-mode-sampled-multi-completion-serving).
+
 The config table used to present `ignore_eos` as a plain boolean, so a recipe
 setting it to `false` on the random dataset ran at a pinned length while the
 trial reported `ignore_eos: false` — the reported configuration is not the one
 that ran, and nothing in the export contradicts it. That is the same shape as a
 `bench_args` override of `--max-concurrency`, and it is treated the same way:
 the combination is **rejected** during validation, on the host and again in
-`ts_bench_serve.sh`, rather than warned about.
+`ts_bench_serve.sh`, rather than warned about — with `rollout: true` exempt in
+both layers, since there the payload carries the value and the trial's reported
+configuration is the one that ran.
 
 The route that does work is the request payload:
 
@@ -733,7 +751,8 @@ this — output lengths become whatever the model chooses, so `perf.md` is
 comparing runs of different sizes. That is why the default is `true`.
 
 `dataset: sharegpt` is unaffected. The rule is keyed on the dataset name, so
-`ignore_eos: false` is honoured there and stays accepted.
+`ignore_eos: false` is honoured there and stays accepted. `rollout: true` is
+likewise unaffected on either dataset, for the reason above.
 
 ### Extra arguments cannot shadow the flags the workload owns
 
@@ -1146,16 +1165,25 @@ label the result with a shape the run did not have, and a matrix mixing the two
 datasets would compare those labels as though they meant the same thing.
 
 The TPOT audit follows from the same question — does the configuration actually
-determine the output length? Only `random` does, and it always does, since EOS
-is ignored there whatever the recipe says (see [`ignore_eos: false` has never
-reached the random dataset](#ignore_eos-false-has-never-reached-the-random-dataset)),
+determine the output length? Only `random` does, and outside rollout mode it
+always does, since EOS is ignored there whatever the recipe says (see
+[`ignore_eos: false` has never reached the random dataset](#ignore_eos-false-has-never-reached-the-random-dataset)),
 so the audit asks whether `output_len` exceeds 1. For `sharegpt` it asks the
 export instead, whether more output tokens were produced than requests
 completed: the lengths come from the conversations rather than from the recipe,
-and with `ignore_eos: false` — which only `sharegpt` can express — the model
-stops at its first EOS token, which for a short prompt can be immediately, so
-every request may emit exactly one token and TPOT is genuinely undefined. Keying
-off `output_len` there rejected a correct export.
+and with `ignore_eos: false` the model stops at its first EOS token, which for a
+short prompt can be immediately, so every request may emit exactly one token and
+TPOT is genuinely undefined. Keying off `output_len` there rejected a correct
+export.
+
+`rollout: true` takes the export-based branch too, on either dataset, and that
+is load-bearing rather than incidental: rollout runs on `random` with
+`ignore_eos` false — reaching the forced flag through the request body — so its
+lengths come from the policy and not from `output_len`, and deciding from
+`output_len` there would demand TPOT of a rollout whose completions may each be
+a single token. So `ignore_eos: false` is **not** something only `sharegpt` can
+express; rollout expresses it on `random`, which is exactly why the condition is
+keyed on the pair rather than on the dataset alone.
 
 ## Not done yet
 

@@ -16,8 +16,14 @@
 # `perf.md` are what bound a rollout iteration's duration, and the
 # `generated_tokens_p50` / `_p90` / `_p99` / `_max` columns are what size the KV
 # cache and set how long the slowest completion holds a batch open.
-# `mean_output_tokens_per_request` is the same quantity read from the always-
-# present counters, so it is the one to trust if the two disagree.
+# `mean_output_tokens_per_request` is the request-level reading, computed from
+# counters every export version carries, and it is the one to trust for
+# throughput accounting. It is *not* the same quantity as `generated_tokens_*`:
+# it sums all `n` choices where this gateway does, while each
+# `generated_tokens_*` length is a single completion. So expect the two to
+# disagree by about `n`, and do not read that as a reason to distrust the
+# distribution -- an `n`-fold gap is the agreement, not the fault. The header
+# block below covers the denominator at length.
 #
 # The confound ratio in `matrix.md` is not meaningful here. Cells differ by
 # sample count and prompt shape, so they legitimately do different amounts of
