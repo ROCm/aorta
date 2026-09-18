@@ -55,6 +55,7 @@ class CoverageParseError(ValueError):
 
 @dataclass(frozen=True)
 class CoverageRecord:
+    schema: str
     reader: int
     load: int | None
     flavor: str
@@ -79,6 +80,7 @@ class CoverageRecord:
 
 @dataclass(frozen=True)
 class AnalysisVerdict:
+    schema: str
     applicable: bool
     analysis_complete: bool
     static_complete: bool
@@ -244,6 +246,7 @@ def _parse_coverage(payload: str, line_number: int) -> CoverageRecord:
     if analysis_complete != complete:
         raise CoverageParseError(f"{context}: analysis_complete contradicts counters")
     return CoverageRecord(
+        schema="current" if has_current_mode else "legacy",
         reader=_count(fields, "reader", context),
         load=_load(fields, context),
         flavor=flavor,
@@ -281,6 +284,7 @@ def _parse_verdict(payload: str, line_number: int) -> AnalysisVerdict:
     )
     pairs = {kind: _pair(fields, kind, context) for kind in _SITE_KINDS}
     return AnalysisVerdict(
+        schema="legacy" if all(legacy_present) else "current",
         applicable=_boolean(fields, "applicable", context),
         analysis_complete=_boolean(fields, "analysis_complete", context),
         static_complete=_boolean(fields, "static_complete", context),
@@ -305,6 +309,7 @@ def _aggregate(verdicts: list[AnalysisVerdict]) -> AnalysisVerdict:
         for kind in _SITE_KINDS
     }
     return AnalysisVerdict(
+        schema="aggregate",
         applicable=bool(applicable),
         analysis_complete=bool(applicable)
         and all(verdict.analysis_complete for verdict in applicable),
@@ -382,6 +387,14 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
         raise CoverageParseError("missing ConSan coverage record")
     if not verdicts:
         raise CoverageParseError("missing ConSan analysis verdict")
+    coverage_schemas = {record.schema for record in coverage}
+    verdict_schemas = {verdict.schema for verdict in verdicts}
+    if coverage_schemas != verdict_schemas:
+        raise CoverageParseError(
+            "coverage/verdict schema mismatch: "
+            f"coverage={','.join(sorted(coverage_schemas))} "
+            f"verdict={','.join(sorted(verdict_schemas))}"
+        )
     identities = [record.identity for record in coverage]
     if len(identities) != len(set(identities)):
         raise CoverageParseError("ambiguous duplicate coverage identities")

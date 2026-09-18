@@ -1138,6 +1138,22 @@ def test_malformed_coverage_never_passes() -> None:
     assert "parse_error" in str(consan.reason)
 
 
+def test_legacy_verdict_cannot_drop_all_legacy_counters() -> None:
+    output = _healthy_evidence()
+    for field in (
+        "replay_unsupported_access",
+        "replay_unsupported_atomics",
+        "replay_unsupported_fences",
+        "replay_metadata_full",
+    ):
+        output = output.replace(f" {field}=0", "")
+
+    _waitcheck, consan = evaluate_record_replay(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert "coverage/verdict schema mismatch" in str(consan.reason)
+
+
 def test_inconsistent_aggregate_coverage_never_passes() -> None:
     output = _healthy_evidence().replace("access=2/2", "access=1/2")
 
