@@ -102,15 +102,24 @@ _DIAGNOSTIC_JOB_TOOLS = (
 _DIAGNOSTIC_TOOL_NAMES = _DIAGNOSTIC_READ_TOOLS + _DIAGNOSTIC_JOB_TOOLS
 
 
-def job_tool_names() -> frozenset[str]:
-    """The tools that submit a cluster job and block while it runs.
+def _missing_optional_dspy(error: ImportError) -> bool:
+    """Whether *error* is exactly the supported no-CIA installation.
 
-    Public because the graph sizes a thread pool against them: they are the
-    slow ones, and telling them apart from a file read is what keeps a burst
-    of triages from taking the threads a file read needs. Names rather than
-    objects, so asking the question costs no import.
+    ``aorta.cia.llm`` adds an installation hint by wrapping the original
+    ``ModuleNotFoundError``, so inspect explicit causes as well as the outer
+    exception. Exact equality is intentional: ``dspy.some_internal_module``
+    missing from an incompatible DSPy release means the installed built-in is
+    broken and must raise rather than masquerade as an absent optional extra.
     """
-    return frozenset(_DIAGNOSTIC_JOB_TOOLS)
+    current: BaseException | None = error
+    while current is not None:
+        if (
+            isinstance(current, ModuleNotFoundError)
+            and current.name == "dspy"
+        ):
+            return True
+        current = current.__cause__
+    return False
 
 
 def diagnostic_tools() -> dict[str, BaseTool]:
@@ -126,6 +135,8 @@ def diagnostic_tools() -> dict[str, BaseTool]:
     try:
         from aorta.chat.tools import cluster
     except ImportError as exc:
+        if not _missing_optional_dspy(exc):
+            raise
         logger.warning(
             "The cluster diagnostic tools are unavailable (%s), so %s will not "
             "be offered. They need the agents: pip install 'amd-aorta[cia]'.",

@@ -1,243 +1,210 @@
-"""Cancelling the turn has to reach the work, not just the screen.
+"""Cancelling a chat task must reach the tool and its scheduler job.
 
-Every tool here is synchronous and runs on a worker thread. Cancelling the
-coroutine that awaited it cannot touch that thread -- Python has no way to
-interrupt one -- so the tool ran on. For a triage that meant the full timeout
-with a Slurm allocation held behind it, for a turn nobody was waiting for.
+``BaseTool.ainvoke`` keeps synchronous tools off the event loop, but cancelling
+the asyncio waiter cannot interrupt the callable already running in that
+executor. The old ``finally`` immediately announced ``done`` while a triage
+continued until its internal timeout, holding a Slurm allocation after the
+browser disconnected.
 
-The completion event made it worse rather than visible. It was emitted from a
-``finally``, so cancelling produced "done" immediately while the job was still
-running: the one signal a caller reads as "this is over" said so first.
-
-Two things now. A cancellation token rides the context into the worker, which
-is the same route the per-conversation cache already takes, and the triage
-watches it -- so giving up reaches `scancel`. And completion waits for the
-thread to actually end, bounded, saying which of the two happened rather than
-claiming the good one.
+Each call now carries a context-local event through LangChain's executor into
+``_run_triage``. Cancellation sets it, the triage waits for ``run_triage`` to
+observe it and cancel Slurm, and the completion event belongs to the worker
+Task rather than to the cancelled waiter.
 """
 
 from __future__ import annotations
 
 import asyncio
 import threading
-import time
 
 import pytest
-
-pytest.importorskip("langchain_core", reason="the graph needs the chat-cli extra")
+from langchain_core.tools import tool
 
 import aorta.chat.graph.nodes as nodes
-from aorta.chat.cancellation import cancelled, current_cancel_token
+from aorta.chat.cancellation import current_cancel_token
+
+
+async def _started(event: threading.Event) -> None:
+    deadline = asyncio.get_running_loop().time() + 10
+    while not event.is_set():
+        assert asyncio.get_running_loop().time() < deadline, "tool never started"
+        await asyncio.sleep(0.01)
 
 
 @pytest.fixture()
-def announced(monkeypatch):
-    """Collect the progress events instead of streaming them."""
+def announcements(monkeypatch):
     events: list[dict] = []
     monkeypatch.setattr(nodes, "_announce_tool", events.append)
     return events
 
 
-@pytest.fixture()
-def quick_grace(monkeypatch):
-    """A grace short enough to assert against."""
-    monkeypatch.setattr(nodes, "_CANCEL_GRACE_SEC", 1.0)
-
-
-def _run(coro_factory):
-    async def main():
-        task = asyncio.create_task(coro_factory())
-        await asyncio.sleep(0.2)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            return "cancelled"
-        return "finished"
-
-    return asyncio.run(main())
-
-
-class TestTheTokenReachesTheTool:
-    def test_a_tool_can_see_its_token(self, monkeypatch, announced):
+class TestCancellationCrossesTheLangChainExecutor:
+    async def test_the_sync_tool_receives_a_per_call_handle(
+        self, monkeypatch, announcements
+    ):
+        started = threading.Event()
+        stopped = threading.Event()
         seen: dict = {}
 
-        def tool(name, kwargs):
-            seen["token"] = current_cancel_token()
-            return "ok"
+        @tool
+        def waits_for_cancel() -> str:
+            """Wait until the caller gives up."""
+            token = current_cancel_token()
+            seen["token"] = token
+            started.set()
+            assert token is not None
+            token.wait(timeout=10)
+            stopped.set()
+            return "stopped"
 
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-        asyncio.run(nodes._execute_tool_async("triage_workload", {}))
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, waits_for_cancel.name, waits_for_cancel)
+        task = asyncio.create_task(
+            nodes._execute_tool_async(waits_for_cancel.name, {})
+        )
+        await _started(started)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
         assert isinstance(seen["token"], threading.Event)
+        assert seen["token"].is_set()
+        assert stopped.is_set()
 
-    def test_it_is_not_set_while_the_caller_is_still_waiting(
-        self, monkeypatch, announced
-    ):
-        seen: dict = {}
+    async def test_two_calls_do_not_share_a_handle(self, monkeypatch, announcements):
+        started = [threading.Event(), threading.Event()]
+        release = threading.Event()
+        tokens: list[threading.Event] = []
+        lock = threading.Lock()
 
-        def tool(name, kwargs):
-            seen["cancelled"] = cancelled()
-            return "ok"
+        @tool
+        def concurrent_call(slot: int) -> str:
+            """Record this call's cancellation token."""
+            token = current_cancel_token()
+            assert token is not None
+            with lock:
+                tokens.append(token)
+            started[slot].set()
+            release.wait(timeout=10)
+            return "done"
 
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-        asyncio.run(nodes._execute_tool_async("triage_workload", {}))
-
-        assert seen["cancelled"] is False
-
-    def test_two_calls_at_once_do_not_share_one(self, monkeypatch, announced):
-        """Cancelling one turn must not stop another's tool."""
-        tokens: list = []
-        gate = threading.Barrier(2, timeout=10)
-
-        def tool(name, kwargs):
-            tokens.append(current_cancel_token())
-            gate.wait()  # both inside the tool at the same moment
-            return "ok"
-
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-
-        async def both():
-            await asyncio.gather(
-                nodes._execute_tool_async("triage_workload", {}),
-                nodes._execute_tool_async("triage_workload", {}),
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, concurrent_call.name, concurrent_call)
+        tasks = [
+            asyncio.create_task(
+                nodes._execute_tool_async(concurrent_call.name, {"slot": slot})
             )
-
-        asyncio.run(both())
+            for slot in range(2)
+        ]
+        await asyncio.gather(*(_started(event) for event in started))
+        release.set()
+        await asyncio.gather(*tasks)
 
         assert len(tokens) == 2
         assert tokens[0] is not tokens[1]
 
 
-class TestCancellingSetsIt:
-    def test_a_watching_tool_is_told(self, monkeypatch, announced):
-        noticed = threading.Event()
-
-        def tool(name, kwargs):
-            token = current_cancel_token()
-            for _ in range(200):
-                if token is not None and token.is_set():
-                    noticed.set()
-                    return "stopped early"
-                time.sleep(0.05)
-            return "ran to completion"
-
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-        outcome = _run(lambda: nodes._execute_tool_async("triage_kernel_source", {}))
-
-        assert outcome == "cancelled"
-        assert noticed.is_set()
-
-    def test_and_it_stops_promptly_rather_than_running_its_course(
-        self, monkeypatch, announced
+class TestCompletionBelongsToTheWorker:
+    async def test_done_is_not_emitted_while_the_callable_still_runs(
+        self, monkeypatch, announcements
     ):
-        def tool(name, kwargs):
-            token = current_cancel_token()
-            for _ in range(200):  # 10s if never cancelled
-                if token is not None and token.is_set():
-                    return "stopped early"
-                time.sleep(0.05)
-            return "ran to completion"
+        started = threading.Event()
+        release = threading.Event()
+        exited = threading.Event()
 
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-        started = time.monotonic()
-        _run(lambda: nodes._execute_tool_async("triage_kernel_source", {}))
+        @tool
+        def ignores_cancel_until_released() -> str:
+            """Model a synchronous tool winding down after cancellation."""
+            started.set()
+            release.wait(timeout=10)
+            exited.set()
+            return "done"
 
-        assert time.monotonic() - started < 3.0
+        monkeypatch.setitem(
+            nodes.TOOL_REGISTRY,
+            ignores_cancel_until_released.name,
+            ignores_cancel_until_released,
+        )
+        task = asyncio.create_task(
+            nodes._execute_tool_async(ignores_cancel_until_released.name, {})
+        )
+        await _started(started)
+        task.cancel()
+        await asyncio.sleep(0.1)
 
+        assert not exited.is_set()
+        assert not any(event.get("done") for event in announcements)
+        assert not task.done()
 
-class TestCompletionWaitsForTheWorker:
-    def test_a_tool_that_stops_is_reported_as_stopped(self, monkeypatch, announced):
-        def tool(name, kwargs):
-            token = current_cancel_token()
-            while not (token is not None and token.is_set()):
-                time.sleep(0.02)
-            return "stopped"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-        _run(lambda: nodes._execute_tool_async("triage_kernel_source", {}))
+        done = [event for event in announcements if event.get("done")]
+        assert exited.is_set()
+        assert len(done) == 1
+        assert done[0]["cancelled"] is True
 
-        done = [e for e in announced if e.get("done")]
-        assert done and done[0]["cancelled"] == "stopped"
-
-    def test_a_tool_that_ignores_the_token_is_not_called_stopped(
-        self, monkeypatch, announced, quick_grace
+    async def test_normal_completion_still_announces_once(
+        self, monkeypatch, announcements
     ):
-        """The honest answer, since the cluster job may still be running."""
+        @tool
+        def quick_tool() -> str:
+            """Return immediately."""
+            return "answer"
 
-        def tool(name, kwargs):
-            time.sleep(5.0)
-            return "ignored it"
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, quick_tool.name, quick_tool)
 
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-        _run(lambda: nodes._execute_tool_async("triage_workload", {}))
-
-        done = [e for e in announced if e.get("done")]
-        assert done and done[0]["cancelled"] == "still running"
-
-    def test_waiting_is_bounded_by_the_grace(self, monkeypatch, announced, quick_grace):
-        """A tool that never looks must not hold the turn open for ever."""
-
-        def tool(name, kwargs):
-            time.sleep(5.0)
-            return "ignored it"
-
-        monkeypatch.setattr(nodes, "_execute_tool", tool)
-        started = time.monotonic()
-        _run(lambda: nodes._execute_tool_async("triage_workload", {}))
-
-        assert time.monotonic() - started < 3.0
-
-    def test_the_grace_is_read_at_the_time_it_is_used(self):
-        """A default argument would fix it at import and ignore the constant."""
-        import inspect
-
-        signature = inspect.signature(nodes._wait_for_worker)
-
-        assert signature.parameters["grace"].default is None
+        assert await nodes._execute_tool_async(quick_tool.name, {}) == "answer"
+        assert len(announcements) == 2
+        assert announcements[0].get("done") is None
+        assert announcements[1]["done"] is True
+        assert announcements[1]["cancelled"] is False
+        assert announcements[0]["id"] == announcements[1]["id"]
 
 
-class TestAnUncancelledCallIsUnchanged:
-    def test_it_returns_the_tool_result(self, monkeypatch, announced):
-        monkeypatch.setattr(nodes, "_execute_tool", lambda name, kwargs: "the answer")
+class TestCancellationReachesRunTriage:
+    async def test_the_inner_worker_stops_before_the_chat_task_finishes(
+        self, tmp_path, monkeypatch, announcements
+    ):
+        pytest.importorskip(
+            "dspy", reason="the end-to-end triage path needs the [cia] extra"
+        )
+        import aorta.chat.tools.cluster as cluster
 
-        assert asyncio.run(nodes._execute_tool_async("triage_workload", {})) == "the answer"
+        entered = threading.Event()
+        exited = threading.Event()
+        seen: dict = {}
 
-    def test_it_announces_a_start_and_a_finish(self, monkeypatch, announced):
-        monkeypatch.setattr(nodes, "_execute_tool", lambda name, kwargs: "ok")
-        asyncio.run(nodes._execute_tool_async("triage_workload", {}))
+        def fake_run_triage(argv, *, stop=None):
+            seen["stop"] = stop
+            entered.set()
+            assert stop is not None
+            stop.wait(timeout=10)
+            exited.set()
+            return {
+                "ok": False,
+                "stage": "wait",
+                "error": "abandoned by caller",
+            }
 
-        assert len(announced) == 2
-        assert not announced[0].get("done")
-        assert announced[1]["done"] is True
+        monkeypatch.setattr(cluster, "run_triage", fake_run_triage)
+        monkeypatch.setattr(cluster.settings, "jobs_path", str(tmp_path), raising=False)
 
-    def test_nothing_claims_it_was_cancelled(self, monkeypatch, announced):
-        monkeypatch.setattr(nodes, "_execute_tool", lambda name, kwargs: "ok")
-        asyncio.run(nodes._execute_tool_async("triage_workload", {}))
+        @tool
+        def diagnostic() -> str:
+            """Run the synchronous triage seam."""
+            return cluster._run_triage(["--source", "kernel.hip"], "test")
 
-        assert "cancelled" not in announced[1]
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, diagnostic.name, diagnostic)
+        task = asyncio.create_task(nodes._execute_tool_async(diagnostic.name, {}))
+        await _started(entered)
+        task.cancel()
 
-    def test_the_two_events_share_an_id(self, monkeypatch, announced):
-        """The consumer closes the step it opened, not whichever is newest."""
-        monkeypatch.setattr(nodes, "_execute_tool", lambda name, kwargs: "ok")
-        asyncio.run(nodes._execute_tool_async("triage_workload", {}))
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
-        assert announced[0]["id"] == announced[1]["id"]
-
-
-class TestTheTriageWatchesIt:
-    def test_run_triage_adopts_the_ambient_token(self):
-        """Without this the token stops at the tool and never reaches scancel."""
-        pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
-        import inspect
-
-        from aorta.chat.tools import cluster
-
-        source = inspect.getsource(cluster._run_triage)
-
-        assert "current_cancel_token()" in source
-
-    def test_it_still_works_outside_a_tool_call(self):
-        """Called directly -- from a test or the CLI -- there is no token."""
-        assert current_cancel_token() is None
-        assert cancelled() is False
+        assert seen["stop"] is not None and seen["stop"].is_set()
+        assert exited.is_set()
+        done = [event for event in announcements if event.get("done")]
+        assert len(done) == 1
+        assert done[0]["cancelled"] is True

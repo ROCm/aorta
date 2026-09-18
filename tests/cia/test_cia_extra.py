@@ -6,16 +6,20 @@
 ``import aorta.cia.launch.planner`` fail on a missing module -- an install that
 reported success and a runtime error that named the wrong problem.
 
-The marker was copied from the chat extras, where it is real: chat/config.py
-reads a profile with stdlib tomllib. Nothing under aorta/cia needs 3.11, and
-dspy declares >=3.10 itself.
+DSPy must remain unmarked because it supports 3.10. A version marker is valid
+only for a compatibility dependency such as tomli, which fills a stdlib gap
+on 3.10 rather than removing the feature there.
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 import pytest
 
@@ -25,12 +29,15 @@ CIA_EXTRA = PYPROJECT["project"]["optional-dependencies"]["cia"]
 
 
 class TestTheExtraResolvesOnEverySupportedPython:
-    def test_nothing_in_it_is_gated_on_a_python_version(self):
-        gated = [dep for dep in CIA_EXTRA if "python_version" in dep]
-        assert not gated, f"these install nothing on 3.10: {gated}"
+    def test_dspy_is_not_gated_on_a_python_version(self):
+        dspy = next(d for d in CIA_EXTRA if d.startswith("dspy-ai"))
 
-    def test_it_still_brings_dspy(self):
-        assert any(d.split(";")[0].strip().startswith("dspy") for d in CIA_EXTRA)
+        assert "python_version" not in dspy
+
+    def test_the_only_version_gate_adds_the_310_backport(self):
+        gated = [dep for dep in CIA_EXTRA if "python_version" in dep]
+
+        assert gated == ["tomli>=2.0; python_version < '3.11'"]
 
     def test_the_floor_is_the_one_it_claims(self):
         assert PYPROJECT["project"]["requires-python"] == ">=3.10"

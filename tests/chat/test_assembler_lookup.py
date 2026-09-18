@@ -61,11 +61,10 @@ def fake_clang(tmp_path):
 
 
 def _run(command: str, path: str) -> subprocess.CompletedProcess:
-    """Run the generated command the way srun would: a bare shell on a node.
+    """Run the command with a controllable tool PATH.
 
-    bash is resolved from the real environment rather than from *path*, so a
-    caller can hand this a PATH with no clang on it without also making the
-    shell itself unfindable.
+    Resolve bash before applying *path*, so a test can provide a directory with
+    no clang without also making the shell itself unfindable.
     """
     return subprocess.run(
         [shutil.which("bash") or "/bin/bash", "-c", command],
@@ -135,12 +134,12 @@ class TestTheNodeChoosesTheAssembler:
         reasons that had nothing to do with the sentinel it is about.
         """
         module = cluster(str(tmp_path / "nowhere"))
-        empty = tmp_path / "no-clang-here"
-        empty.mkdir()
+        empty_path = tmp_path / "no-clang-here"
+        empty_path.mkdir()
 
         done = _run(
             module._assemble_command(tmp_path / "in.s", tmp_path / "out.hsaco"),
-            path=str(empty),
+            path=str(empty_path),
         )
 
         assert done.returncode != 0

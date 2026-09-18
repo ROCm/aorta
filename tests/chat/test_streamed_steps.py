@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 
 from aorta.chat.graph.nodes import _execute_tool_async
 from aorta.chat.session import invoke_agent
@@ -47,7 +48,7 @@ async def test_a_tool_is_announced_before_it_runs():
         phase = "finished" if payload.get("done") else "announced"
         order.append(f"{phase}:{payload['tool']}")
 
-    def _slow(name: str, kwargs: dict) -> str:
+    async def _slow(name: str, kwargs: dict) -> str:
         order.append(f"ran:{name}")
         return "done"
 
@@ -75,24 +76,30 @@ async def test_a_tool_runs_off_the_event_loop():
     """
     ran_on = {}
 
-    def _record(name: str, kwargs: dict) -> str:
+    @tool
+    def record_thread() -> str:
+        """Record the worker thread used for this synchronous tool."""
         ran_on["thread"] = __import__("threading").current_thread().name
         return "done"
 
     with (
         patch("aorta.chat.graph.nodes.get_stream_writer", side_effect=RuntimeError),
-        patch("aorta.chat.graph.nodes._execute_tool", _record),
+        patch.dict(
+            "aorta.chat.graph.nodes.TOOL_REGISTRY",
+            {record_thread.name: record_thread},
+        ),
     ):
-        await _execute_tool_async("list_files", {})
+        await _execute_tool_async(record_thread.name, {})
 
     assert ran_on["thread"] != __import__("threading").current_thread().name
 
 
 async def test_no_stream_to_announce_to_is_not_an_error():
     """The CLI runs the same node without streaming."""
+    execute = AsyncMock(return_value="fine")
     with (
         patch("aorta.chat.graph.nodes.get_stream_writer", side_effect=RuntimeError),
-        patch("aorta.chat.graph.nodes._execute_tool", lambda n, k: "fine"),
+        patch("aorta.chat.graph.nodes._execute_tool", execute),
     ):
         assert await _execute_tool_async("list_files", {}) == "fine"
 

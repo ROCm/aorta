@@ -26,11 +26,13 @@ from pathlib import Path
 
 import pytest
 
-# No importorskip for dspy, deliberately. The sibling CPU tests of this module
-# carry one and it was copied here, which made this skip in the only job that
-# can run it: the GPU image installs [tests,hw-queue] and not [cia]. The
-# harness is string generation over the stdlib and imports without any of the
-# chat extras, which is asserted below so the guard cannot creep back.
+# Here rather than under tests/chat/, which is where the code it covers lives.
+# That directory's conftest ignores itself when langchain_core is absent, while
+# the GPU image intentionally installs [tests,hw-queue] without chat extras.
+# In tests/chat this lane went green having collected none of these tests.
+#
+# The harness is stdlib string generation and needs no chat dependency,
+# asserted below. tests/sanitizers/ is ungated and already activates GPU CI.
 from aorta.chat.tools.harness.kernel import prepare_source
 
 pytestmark = [pytest.mark.gpu, pytest.mark.rocm]

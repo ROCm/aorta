@@ -1,16 +1,12 @@
-"""The cancellation token for one tool call, carried to the thread running it.
+"""Per-tool cancellation propagated from the graph into synchronous workers.
 
-A tool runs on a worker thread, and cancelling the coroutine that awaited it
-does not reach the thread: Python cannot interrupt a running thread, so the
-work continues -- for a diagnostic tool, until the triage timeout, with a Slurm
-allocation held for as long as that takes. The turn was over and the cluster
-did not know.
+Cancelling an asyncio Future does not interrupt the callable already running in
+its executor. Diagnostic tools then continued through their internal timeout
+and held a Slurm allocation after the browser session had disconnected.
 
-A context variable rather than an argument because the path between the two is
-not ours to widen: the coroutine calls a LangChain ``BaseTool``, which calls
-the function underneath it, which calls the triage seam. The executor already
-copies the context across for the per-conversation cache, so this rides the
-same way.
+A context variable crosses the ``BaseTool.ainvoke`` executor boundary without
+adding an argument to every LangChain tool schema. Each tool call binds its own
+event, so cancelling one call cannot stop another.
 
 Stdlib only, and deliberately not :mod:`aorta.cia.cancellation`: chat has to
 import this without the cia extra installed.
@@ -27,17 +23,18 @@ _CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar
 )
 
 
-def bind_cancel_token(token: threading.Event) -> None:
-    """Make *token* the cancellation signal for work in this context.
+def bind_cancel_token(token: threading.Event) -> contextvars.Token:
+    """Bind *token* in this execution context and return its reset handle."""
+    return _CANCEL.set(token)
 
-    Called inside the worker's copied context, so it binds there and not in
-    the caller's -- two tool calls run at once and must not share a token.
-    """
-    _CANCEL.set(token)
+
+def reset_cancel_token(bound: contextvars.Token) -> None:
+    """Restore the context that preceded :func:`bind_cancel_token`."""
+    _CANCEL.reset(bound)
 
 
 def current_cancel_token() -> threading.Event | None:
-    """The token for the tool call on this thread, if it was given one."""
+    """The cancellation event for the current tool call, if it has one."""
     return _CANCEL.get()
 
 

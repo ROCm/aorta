@@ -270,6 +270,61 @@ jobs:
       - name: Run CPU test suite
         run: pytest -m "not gpu and not rocm" -n auto
 
+  # The general CPU matrix intentionally installs no CIA dependency, and
+  # tests/cia/conftest.py correctly ignores the directory on that supported
+  # base install. That made every green CPU check compatible with running zero
+  # CIA tests, including the security and concurrency regressions this PR adds.
+  #
+  # Keep this as a separate matrix: adding [cia] to the general job would stop
+  # testing the base-install boundary. It spans the package's full supported
+  # Python range because the extra declares support for that same range.
+  cia_tests:
+    name: pytest (CIA, py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.cpu == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CIA and test dependencies together
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[tests,cia]"
+
+      # Without this, tests/cia/conftest.py sees no DSPy and collect-ignores
+      # every test. Pytest then reports a successful run containing nothing,
+      # which is the false-green state this lane exists to prevent.
+      - name: Verify the CIA extra actually installed
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+          import dspy
+          from aorta.cia import llm
+          from aorta.cia.autopsy.router import TriageRouter
+          from aorta.cia.watch.poll import poll_jobs
+
+          assert dspy is not None
+          assert llm is not None
+          assert TriageRouter is not None
+          assert callable(poll_jobs)
+          print("CIA imports present; dspy-ai", md.version("dspy-ai"))
+          PY
+
+      - name: Run the CIA test suite
+        run: pytest tests/cia -m "not gpu and not rocm" -n auto
+
   # Stable required-status-check aggregator. Branch protection on `main` must
   # require THIS job ("CPU tests"), not the per-version `pytest (CPU, py3.x)`
   # legs: a matrix skipped by a job-level `if` never emits those contexts, so a
@@ -281,16 +336,17 @@ jobs:
   required:
     name: CPU tests
     runs-on: ubuntu-latest
-    needs: [changes, tests]
+    needs: [changes, tests, cia_tests]
     if: always()
     steps:
       - name: Collapse the CPU matrix result into one required check
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
+          CIA_TESTS_RESULT: ${{ needs.cia_tests.result }}
         run: |
           set -euo pipefail
-          echo "changes=${CHANGES_RESULT} tests=${TESTS_RESULT}"
+          echo "changes=${CHANGES_RESULT} tests=${TESTS_RESULT} cia=${CIA_TESTS_RESULT}"
 
           # The relevance gate must have completed; a broken gate is not a pass.
           if [ "$CHANGES_RESULT" != "success" ]; then
@@ -304,4 +360,10 @@ jobs:
             success)  echo "CPU matrix passed." ;;
             skipped)  echo "CPU matrix skipped (no CPU-relevant change)." ;;
             *)        echo "CPU matrix did not pass (${TESTS_RESULT})."; exit 1 ;;
+          esac
+
+          case "$CIA_TESTS_RESULT" in
+            success)  echo "CIA matrix passed." ;;
+            skipped)  echo "CIA matrix skipped (no CPU-relevant change)." ;;
+            *)        echo "CIA matrix did not pass (${CIA_TESTS_RESULT})."; exit 1 ;;
           esac

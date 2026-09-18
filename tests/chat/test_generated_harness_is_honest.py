@@ -1,9 +1,10 @@
-"""A clean sweep of code that never ran is not a clean kernel.
+"""A clean sweep with generated inputs is not proof of a clean kernel.
 
-The generated harness fills every input buffer with zeros, so a path behind
-``if (input[i] > 0)`` does not execute. ConSan cannot report a conflict inside
-code it never reached, so the run comes back "pass" -- and a pass is what the
-user reads. The race is still there, for real inputs.
+The generated harness chooses every buffer and scalar value, so it exercises
+one path. A direct ``if (input[i] > 0)`` is easy to notice; a scalar mode,
+pointer-derived flag, ternary, switch, or helper condition is not. No regex can
+prove that all data-dependent paths ran, so the caveat applies to every
+generated main rather than only to source shapes the regex recognizes.
 
 This is the same shape as the single-wave caveat already beside it: a geometry
 that cannot show a cross-wave race returns clean for a reason that has nothing
@@ -29,6 +30,30 @@ WRITES_ONLY = (
     "__global__ void k(float* out) {\n"
     "  int i = threadIdx.x;\n"
     "  out[i] = 1.0f;\n"
+    "}"
+)
+INDIRECT = (
+    "__global__ void k(const float* in, float* out) {\n"
+    "  int i = threadIdx.x;\n"
+    "  bool active = in[i] > 0;\n"
+    "  if (active) { out[i] = in[i] * 2.0f; }\n"
+    "}"
+)
+SCALAR_GUARD = (
+    "__global__ void k(float* out, int mode) {\n"
+    "  int i = threadIdx.x;\n"
+    "  if (mode == 1) { out[i] = 1.0f; }\n"
+    "}"
+)
+TERNARY = (
+    "__global__ void k(const float* in, float* out) {\n"
+    "  int i = threadIdx.x;\n"
+    "  out[i] = in[i] > 0 ? in[i] : 0.0f;\n"
+    "}"
+)
+SWITCH = (
+    "__global__ void k(float* out, int mode) {\n"
+    "  switch (mode) { case 1: out[threadIdx.x] = 1.0f; break; }\n"
     "}"
 )
 
@@ -89,6 +114,24 @@ class TestItDoesNotCryWolf:
 
         assert prepared.wrapped is False
         assert prepared.data_dependent is False
+        assert prepared.generated_inputs is False
+
+
+class TestTheRegexDoesNotDecideHonesty:
+    @pytest.mark.parametrize(
+        "source",
+        [INDIRECT, SCALAR_GUARD, TERNARY, SWITCH],
+        ids=["pointer-derived", "scalar", "ternary", "switch"],
+    )
+    def test_common_indirect_paths_are_not_proven_independent(self, source):
+        prepared = prepare_source(source)
+
+        # The lightweight scan may miss these; generated_inputs must not.
+        assert prepared.input_guards == ()
+        assert prepared.generated_inputs is True
+
+    def test_even_a_write_only_kernel_uses_generated_inputs(self):
+        assert prepare_source(WRITES_ONLY).generated_inputs is True
 
 
 class TestTheFillIsReachable:
@@ -153,17 +196,38 @@ class TestTheCaveatReachesTheUser:
     def test_a_guarded_kernel_is_warned_about(self, triage):
         out = triage(GUARDED, block_size=256)
 
-        assert "input caveat" in out
-        assert "does NOT mean the kernel is race-free" in out
+        assert "generated-input caveat" in out
+        assert "INCONCLUSIVE" in out
 
     def test_it_names_the_input_and_the_way_out(self, triage):
         out = triage(GUARDED, block_size=256)
 
         assert "`in`" in out
-        assert "fill=1" in out
         assert "main()" in out
 
-    def test_a_write_only_kernel_is_not_warned_about(self, triage):
+    @pytest.mark.parametrize(
+        "source",
+        [INDIRECT, SCALAR_GUARD, TERNARY, SWITCH],
+        ids=["pointer-derived", "scalar", "ternary", "switch"],
+    )
+    def test_every_generated_harness_is_qualified(self, triage, source):
+        out = triage(source, block_size=256)
+
+        assert "generated-input caveat" in out
+        assert "INCONCLUSIVE" in out
+
+    def test_a_write_only_kernel_is_still_qualified(self, triage):
         out = triage(WRITES_ONLY, block_size=256)
 
-        assert "input caveat" not in out
+        assert "generated-input caveat" in out
+
+    def test_a_nonzero_fill_explores_but_does_not_qualify_a_pass(self, triage):
+        out = triage(GUARDED, block_size=256, fill=1)
+
+        assert "generated-input caveat" in out
+        assert "cannot make a clean result representative" in out
+
+    def test_a_caller_supplied_main_needs_no_generated_input_caveat(self, triage):
+        out = triage(GUARDED + "\nint main() { return 0; }\n")
+
+        assert "generated-input caveat" not in out

@@ -1,16 +1,15 @@
-"""A burst of cluster jobs must not take the threads a file read needs.
+"""Cluster jobs must not occupy a small outer pool needed by quick tools.
 
-Tool calls ran on one pool of four, against a cluster pool of two, on the
-reasoning that four is more than two and the difference is room for the quick
-tools. It is not. A triage occupies a tool worker and *then* waits for a slot
-in the cluster pool, so the third and fourth concurrent triages sat in the tool
-pool holding the very capacity they were meant to be leaving free. Four at once
-took every worker, and reading a file queued behind a GPU job for minutes.
+#425 originally fixed a four-worker outer executor by splitting it into job and
+quick pools. Updated ``main`` made ``_execute_tool`` asynchronous through
+``BaseTool.ainvoke`` itself, and #424 now wraps that coroutine only for progress
+and cancellation. Keeping the old pools would reintroduce both nesting and a
+worse bug: submitting an async function to a thread returns a coroutine object
+instead of running the tool.
 
-Two pools now, and the job half is sized to the cluster pool so a worker here
-maps to a worker there and never waits for admission. A third triage queues as
-a job rather than as a tool, and the quick tools have workers a burst cannot
-reach.
+The stronger merged invariant is therefore that no outer tool executor exists.
+LangChain owns off-loop execution for synchronous tools, while the bounded
+triage pool owns cluster admission.
 """
 
 from __future__ import annotations
@@ -20,8 +19,7 @@ import threading
 import time
 
 import pytest
-
-pytest.importorskip("langchain_core", reason="the graph needs the chat-cli extra")
+from langchain_core.tools import tool
 
 import aorta.chat.graph.nodes as nodes
 
@@ -31,96 +29,69 @@ def quiet(monkeypatch):
     monkeypatch.setattr(nodes, "_announce_tool", lambda payload: None)
 
 
-class TestTheTwoKindsAreToldApart:
-    def test_a_triage_is_a_job(self):
-        assert nodes._is_job_tool("triage_kernel_source") is True
+class TestThereIsNoNestedToolPool:
+    def test_the_obsolete_outer_pool_is_gone(self):
+        assert not hasattr(nodes, "_tool_pool")
+        assert not hasattr(nodes, "_TOOL_WORKERS")
+        assert not hasattr(nodes, "_JOB_WORKERS")
+        assert not hasattr(nodes, "_QUICK_WORKERS")
 
-    def test_so_are_the_other_two(self):
-        assert nodes._is_job_tool("triage_assembly_source") is True
-        assert nodes._is_job_tool("triage_workload") is True
+    def test_the_progress_wrapper_awaits_the_async_tool_seam(self):
+        import inspect
 
-    def test_reading_a_report_is_not(self):
-        """It reads a file the job already wrote; nothing is submitted."""
-        assert nodes._is_job_tool("read_autopsy_report") is False
+        source = inspect.getsource(nodes._execute_tool_async)
 
-    def test_nor_is_listing_jobs(self):
-        assert nodes._is_job_tool("list_cluster_jobs") is False
-
-    def test_nor_is_an_ordinary_file_tool(self):
-        assert nodes._is_job_tool("read_file") is False
-
-    def test_an_unknown_tool_is_treated_as_quick(self):
-        """A plugin tool is not assumed to hold a GPU node."""
-        assert nodes._is_job_tool("something_from_a_plugin") is False
+        assert "await _execute_tool(" in source
+        assert "run_in_executor" not in source
+        assert ".submit(" not in source
 
 
-class TestTheyGetDifferentPools:
-    def test_a_job_and_a_quick_tool_do_not_share(self):
-        assert nodes._tool_pool("triage_kernel_source") is not nodes._tool_pool("read_file")
+class TestAQuickToolAnswersDuringTheReportedBurst:
+    async def test_four_long_sync_tools_do_not_hold_it(
+        self, monkeypatch
+    ):
+        """Four was the complete outer pool before; a fifth call could not run."""
+        release = threading.Event()
+        lock = threading.Lock()
+        started = 0
 
-    def test_the_job_pool_is_reused(self):
-        assert nodes._tool_pool("triage_kernel_source") is nodes._tool_pool("triage_workload")
+        @tool
+        def long_tool(slot: int) -> str:
+            """Wait until the test releases this synchronous tool."""
+            nonlocal started
+            with lock:
+                started += 1
+            release.wait(timeout=10)
+            return f"long-{slot}"
 
-    def test_the_quick_pool_is_reused(self):
-        assert nodes._tool_pool("read_file") is nodes._tool_pool("list_cluster_jobs")
-
-    def test_the_job_pool_matches_the_cluster_pool(self):
-        """The sizing is the fix: one worker here per worker there.
-
-        Larger and a job worker waits for an inner slot while holding a tool
-        thread, which is the bug. Smaller and the cluster pool is never full.
-        """
-        pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
-        from aorta.chat.tools import cluster
-
-        assert nodes._JOB_WORKERS == cluster._TRIAGE_WORKERS
-
-    def test_the_quick_pool_has_room_of_its_own(self):
-        assert nodes._QUICK_WORKERS >= 2
-
-
-class TestAQuickToolAnswersDuringABurst:
-    """The behaviour the sizing exists for, measured rather than reasoned."""
-
-    @staticmethod
-    def _burst(monkeypatch, jobs: int) -> float:
-        """Latency of a quick tool while *jobs* triages are held open."""
-        holding = threading.Event()
-
-        def slow(name, kwargs):
-            holding.wait(10)
-            return "slow"
-
-        def quick(name, kwargs):
+        @tool
+        def quick_tool() -> str:
+            """Return without waiting for cluster work."""
             return "quick"
 
-        async def main() -> float:
-            monkeypatch.setattr(nodes, "_execute_tool", slow)
-            held = [
-                asyncio.create_task(
-                    nodes._execute_tool_async("triage_kernel_source", {})
-                )
-                for _ in range(jobs)
-            ]
-            await asyncio.sleep(0.3)  # let them occupy what they are going to
-            monkeypatch.setattr(nodes, "_execute_tool", quick)
-            started = time.monotonic()
-            answer = await nodes._execute_tool_async("list_cluster_jobs", {})
-            latency = time.monotonic() - started
-            assert answer == "quick"
-            holding.set()
-            await asyncio.gather(*held)
-            return latency
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, long_tool.name, long_tool)
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, quick_tool.name, quick_tool)
+        held = [
+            asyncio.create_task(
+                nodes._execute_tool_async(long_tool.name, {"slot": slot})
+            )
+            for slot in range(4)
+        ]
 
-        return asyncio.run(main())
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            with lock:
+                all_started = started == 4
+            if all_started:
+                break
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
 
-    def test_more_triages_than_workers_do_not_block_it(self, monkeypatch):
-        """Six at once, against two job workers and four quick ones."""
-        assert self._burst(monkeypatch, jobs=6) < 1.0
+        began = time.monotonic()
+        answer = await nodes._execute_tool_async(quick_tool.name, {})
+        latency = time.monotonic() - began
+        release.set()
+        await asyncio.gather(*held)
 
-    def test_nor_does_exactly_filling_the_job_pool(self, monkeypatch):
-        assert self._burst(monkeypatch, jobs=nodes._JOB_WORKERS) < 1.0
-
-    def test_nor_does_one_more_than_the_old_single_pool_held(self, monkeypatch):
-        """Four was the whole pool before; a file read waited behind them."""
-        assert self._burst(monkeypatch, jobs=4) < 1.0
+        assert answer == "quick"
+        assert latency < 1.0

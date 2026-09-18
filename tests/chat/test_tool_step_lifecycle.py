@@ -43,7 +43,10 @@ def stream(monkeypatch):
 
 async def run_tool(monkeypatch, body):
     """Drive _execute_tool_async with *body* standing in for the tool."""
-    monkeypatch.setattr(nodes, "_execute_tool", lambda name, kwargs: body())
+    async def execute(name, kwargs):
+        return body()
+
+    monkeypatch.setattr(nodes, "_execute_tool", execute)
     return await nodes._execute_tool_async("triage_kernel_source", {})
 
 
@@ -117,5 +120,8 @@ async def test_announcing_survives_no_stream(monkeypatch):
         raise RuntimeError("not streaming")
 
     monkeypatch.setattr(nodes, "get_stream_writer", no_stream)
-    monkeypatch.setattr(nodes, "_execute_tool", lambda name, kwargs: "ok")
+    async def execute(name, kwargs):
+        return "ok"
+
+    monkeypatch.setattr(nodes, "_execute_tool", execute)
     assert await nodes._execute_tool_async("read_file", {}) == "ok"

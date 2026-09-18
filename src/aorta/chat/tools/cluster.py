@@ -26,6 +26,8 @@ import sys
 import subprocess
 import tempfile
 import threading
+import time
+from concurrent.futures import CancelledError as FuturesCancelled
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
@@ -301,33 +303,51 @@ def _run_triage(extra_args: list[str], label: str) -> str:
         if value:
             argv += ["--env", f"{key}={value}"]
 
-    # The turn's own token when there is one, so that a caller who gives up
-    # reaches the triage and through it `scancel`. Without this the only thing
-    # that could stop the work was the timeout below: the chat turn ended, the
-    # thread ran on, and the allocation was held until either the triage
-    # timeout or Slurm's own four-hour limit -- for an answer nobody was
-    # waiting for any more.
-    #
-    # One event serves both, because the token is created per tool call, so
-    # setting it on timeout cannot reach another call's work.
     stop = current_cancel_token() or threading.Event()
+    if stop.is_set():
+        return "Error: triage was cancelled before it entered the worker pool."
     future = _triage_pool().submit(run_triage, argv, stop=stop)
-    try:
-        # Covers the queue as well as the run: with every worker busy the
-        # submission simply waits here, and the caller is told it timed out
-        # rather than blocking for ever on a pool that never frees up.
-        result = future.result(timeout=settings.triage_timeout)
-    except FuturesTimeout:
-        # Cancelling matters more than the message. Nothing else stops this
-        # work, and until it stops it holds a worker and keeps the interpreter
-        # from exiting.
-        stop.set()
-        future.cancel()
-        return (f"Error: triage exceeded {settings.triage_timeout}s. "
-                f"Check {settings.jobs_root} for a partial bundle.")
-    except Exception as exc:
-        stop.set()
-        return f"Error: triage failed: {type(exc).__name__}: {exc}"
+    deadline = time.monotonic() + settings.triage_timeout
+    result = None
+    while result is None:
+        if stop.is_set():
+            # cancel() handles a task that has not started; the shared event
+            # handles one already running. Wait for either case to finish so
+            # the graph cannot announce completion while run_triage or its
+            # Slurm allocation still exists.
+            future.cancel()
+            try:
+                future.result()
+            except FuturesCancelled:
+                pass
+            except Exception:
+                pass
+            return "Error: triage was cancelled and its worker has stopped."
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            stop.set()
+            future.cancel()
+            try:
+                future.result()
+            except FuturesCancelled:
+                pass
+            except Exception:
+                pass
+            return (
+                f"Error: triage exceeded {settings.triage_timeout}s. "
+                f"Check {settings.jobs_root} for a partial bundle."
+            )
+
+        try:
+            # A short wait makes the context token observable while retaining
+            # the existing end-to-end timeout for queueing plus execution.
+            result = future.result(timeout=min(0.25, remaining))
+        except FuturesTimeout:
+            continue
+        except Exception as exc:
+            stop.set()
+            return f"Error: triage failed: {type(exc).__name__}: {exc}"
 
     if not result.get("ok"):
         if result.get("stage") == "compile":
@@ -380,6 +400,19 @@ def _wrong_tool_hint(source: str) -> str:
     )
 
 
+def _staged_stem(name: str, fallback: str = "source") -> str:
+    """Turn a model/source-derived name into one filename component.
+
+    A complete assembly unit supplies its own kernel name through
+    ``.amdhsa_kernel``. The parser intentionally accepts the assembler's token
+    rather than a C identifier, so a token such as ``../../outside`` reached
+    both ``mkdtemp(prefix=...)`` and ``work / f"{name}.s"``. Sanitizing only
+    the directory prefix would therefore leave the filename escape intact.
+    """
+    stem = _STAGED_STEM_RE.sub("_", str(name)).strip("._")[:60]
+    return stem or fallback
+
+
 def _stage_dir(parent: Path, name: str) -> Path:
     """A staging directory this call alone owns.
 
@@ -394,9 +427,22 @@ def _stage_dir(parent: Path, name: str) -> Path:
     call's or the call raises, and the plain filenames inside it cannot
     collide because nothing else can reach them.
     """
+    stem = _staged_stem(name)
     parent.mkdir(parents=True, exist_ok=True)
+    resolved_parent = parent.resolve(strict=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path(tempfile.mkdtemp(prefix=f"{name}-{stamp}-", dir=parent))
+    created = Path(
+        tempfile.mkdtemp(prefix=f"{stem}-{stamp}-", dir=resolved_parent)
+    ).resolve(strict=True)
+    try:
+        created.relative_to(resolved_parent)
+    except ValueError as exc:
+        # tempfile promises to honor dir, but this is a security boundary and
+        # the path is used for writes immediately after this function returns.
+        raise ValueError(
+            f"temporary staging directory escaped {resolved_parent}: {created}"
+        ) from exc
+    return created
 
 
 def _write_new(path: Path, text: str) -> None:
@@ -418,6 +464,8 @@ def triage_kernel_source(
     grid_size: int = 0,
     block_y: int = 0,
     block_z: int = 0,
+    grid_y: int = 0,
+    grid_z: int = 0,
     fill: int = 0,
     force: bool = False,
 ) -> str:
@@ -441,12 +489,14 @@ def triage_kernel_source(
             threadIdx.y -- a 32x32 tile is block_size=32, block_y=32. Leave 0
             for a one-dimensional kernel.
         block_z: Threads per block in z, for a kernel that indexes threadIdx.z.
+        grid_y: Blocks in y. Required for a kernel that indexes blockIdx.y or
+            gridDim.y; block_y does not satisfy a grid dimension.
+        grid_z: Blocks in z, for a kernel that indexes blockIdx.z or gridDim.z.
         fill: The byte every generated input buffer is filled with. 0 is the
             default and is right for a kernel that only writes its buffers.
-            Use 1 when the kernel branches on an input -- with zeros, a path
-            behind `if (input[i] > 0)` never executes, and the sanitizer
-            cannot find a race in code that did not run. The result says so
-            when it applies. Ignored when the paste contains its own main().
+            Use 1 to explore a path behind `if (input[i] > 0)`, but one repeated
+            byte is not representative input and cannot make a clean result
+            conclusive. Ignored when the paste contains its own main().
         force: Re-run on hardware even if this exact kernel was already triaged
             in this conversation. Leave false; the cached verdict is the same run.
         source_file: A kernel already staged for this conversation, named in the
@@ -476,13 +526,24 @@ def triage_kernel_source(
             grid=grid_size,
             block_y=block_y,
             block_z=block_z,
+            grid_y=grid_y,
+            grid_z=grid_z,
             fill_byte=fill,
         )
     except HarnessError as exc:
         return f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
 
     cache = current_tool_cache().triage
-    cache_key = (source.strip(), block_size, grid_size, block_y, block_z, fill)
+    cache_key = (
+        source.strip(),
+        block_size,
+        grid_size,
+        block_y,
+        block_z,
+        grid_y,
+        grid_z,
+        fill,
+    )
     cached = None if force else cache.get(cache_key)
     if cached is not None:
         return (
@@ -490,15 +551,38 @@ def triage_kernel_source(
             "conversation — no second cluster job was submitted.)\n\n" + cached
         )
 
-    work = _stage_dir(settings.jobs_root / "chat-kernels", prepared.kernel)
-    src_path = work / f"{prepared.kernel}.hip"
+    stem = _staged_stem(prepared.kernel, "kernel")
+    work = _stage_dir(settings.jobs_root / "chat-kernels", stem)
+    src_path = work / f"{stem}.hip"
     _write_new(src_path, prepared.program)
 
     lines = [f"Analysing kernel '{prepared.kernel}' from {src_path}."]
     if prepared.wrapped:
+        block_shape = "x".join(
+            str(value)
+            for value in (
+                prepared.block,
+                *(
+                    (max(prepared.block_y, 1), prepared.block_z)
+                    if prepared.block_z
+                    else ((prepared.block_y,) if prepared.block_y else ())
+                ),
+            )
+        )
+        grid_shape = "x".join(
+            str(value)
+            for value in (
+                prepared.grid,
+                *(
+                    (max(prepared.grid_y, 1), prepared.grid_z)
+                    if prepared.grid_z
+                    else ((prepared.grid_y,) if prepared.grid_y else ())
+                ),
+            )
+        )
         lines.append(
             f"No main() was pasted, so a launch harness was generated: "
-            f"{prepared.kernel}<<<{prepared.grid}, {prepared.block}>>>."
+            f"{prepared.kernel}<<<grid {grid_shape}, block {block_shape}>>>."
         )
     lines.append("")
 
@@ -507,16 +591,24 @@ def triage_kernel_source(
         label or f"user kernel {prepared.kernel}",
     )
 
-    if prepared.data_dependent:
-        guarded = ", ".join(f"`{name}`" for name in prepared.input_guards)
+    if prepared.generated_inputs:
+        guarded = ""
+        if prepared.input_guards:
+            names = ", ".join(f"`{name}`" for name in prepared.input_guards)
+            guarded = (
+                f" The lightweight scan found an obvious branch on {names}, "
+                "but that scan is informational rather than a completeness check."
+            )
         lines.append(
-            f"WARNING — input caveat: this kernel branches on {guarded}, and the "
-            f"generated harness filled every buffer with the byte {fill}. A path guarded "
-            f"by an input does not execute, so ConSan cannot report a conflict "
-            f"inside it and a 'pass' here does NOT mean the kernel is race-free "
-            f"— it means the guarded path was never reached. Re-run with a "
-            f"fill that enters the branch (fill=1 gives non-zero bytes), or "
-            f"paste a main() of your own that supplies representative input.\n"
+            "WARNING — generated-input caveat: no main() was supplied, so AORTA "
+            f"chose synthetic arguments (buffer fill byte {fill}, inferred scalar "
+            "values, and one launch). A clean ConSan result covers only the path "
+            "those values executed and is INCONCLUSIVE for data-dependent paths: "
+            "scalar modes, pointer-derived flags, ternaries, switches, and helper "
+            f"conditions may all remain unexecuted.{guarded} Changing fill can "
+            "explore another path but cannot make a clean result representative. "
+            "Supply a main() with realistic arguments before treating a clean run "
+            "as evidence that the kernel is race-free.\n"
         )
 
     if prepared.single_wave:
@@ -691,9 +783,10 @@ def triage_assembly_source(
             "conversation.)\n\n" + cached
         )
 
-    work = _stage_dir(settings.jobs_root / "chat-asm", prepared.kernel)
-    asm_path = work / f"{prepared.kernel}.s"
-    obj_path = work / f"{prepared.kernel}.hsaco"
+    stem = _staged_stem(prepared.kernel, "kernel")
+    work = _stage_dir(settings.jobs_root / "chat-asm", stem)
+    asm_path = work / f"{stem}.s"
+    obj_path = work / f"{stem}.hsaco"
     _write_new(asm_path, prepared.program)
 
     try:
@@ -726,7 +819,7 @@ def triage_assembly_source(
         )
 
     recipe = write_asm_recipe(
-        recipe_path=work / f"{prepared.kernel}.yaml",
+        recipe_path=work / f"{stem}.yaml",
         kernel_name=prepared.kernel,
         code_object=obj_path,
         target=_arch(),
@@ -828,7 +921,12 @@ def triage_workload(
     # `../../../../.bashrc` wrote the user's pasted source outside staged/.
     # Keeping only characters a filename is made of leaves nothing that means
     # "somewhere else" -- a separator, a parent reference, or a leading dot.
-    stem = _STAGED_STEM_RE.sub("_", name).strip("._")[:60] or "workload"
+    #
+    # The timestamp is not decoration either: two runs sharing a label wrote the
+    # same path, so a second triage overwrote the first one's script while it
+    # was still being read on the node. The kernel and assembly paths already
+    # stamp their stems; this one did not.
+    stem = _staged_stem(name, "workload")
     work = _stage_dir(settings.jobs_root / "staged", stem)
     script = work / f"{stem}.py"
     _write_new(script, source)

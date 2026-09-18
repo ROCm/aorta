@@ -44,9 +44,7 @@ class TestRunTerminalCommand:
             assert "not in the allowlist" in result
 
     @patch("aorta.chat.tools.run.settings")
-    def test_the_refusal_explains_why_a_matching_name_was_not_enough(
-        self, mock_settings, tmp_path
-    ):
+    def test_the_refusal_explains_why_a_matching_name_was_not_enough(self, mock_settings, tmp_path):
         """'ls is allowed but /tmp/ls is not' is confusing without a reason."""
         mock_settings.allowed_commands = ["ls"]
         mock_settings.aorta_root = tmp_path

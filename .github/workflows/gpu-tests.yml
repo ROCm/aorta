@@ -116,7 +116,6 @@ jobs:
             # fails in front of a user, minutes into a triage. Only a compiler
             # catches that, and this is the only job that has one.
             'src/aorta/chat/tools/harness/*'
-            'tests/chat/test_generated_harness_builds_gpu.py'
             # The Proton smoke test runs these payloads, so they are code the
             # GPU job covers: a PR that breaks pipeline.py or hotspot.py while
             # touching no collector or test file would otherwise skip the only

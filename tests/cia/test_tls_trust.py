@@ -116,7 +116,11 @@ class TestConfiguringMay:
 def test_certifi_is_declared_rather_than_inherited():
     """It worked only because litellm happened to pull it in."""
     import pathlib
-    import tomllib
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
 
     root = pathlib.Path(__file__).resolve().parents[2]
     data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))

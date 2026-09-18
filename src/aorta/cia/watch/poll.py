@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
+from threading import BoundedSemaphore
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -100,16 +101,73 @@ def _emit_skipped(events_path: Path, job, content: str, error: str) -> None:
         )
 
 
+def _emit_log_read_error(
+    events_path: Path,
+    job: JobRecord,
+    source: Path,
+    cursor: int,
+    error: OSError,
+) -> None:
+    """Record one unreadable watched file without losing every other job.
+
+    The stderr line is immediately visible to the Watch operator; the event
+    makes the same failure available to bundle readers and Autopsy. Failure to
+    write that event must not recreate the original outage, so it is reported
+    and contained here too.
+    """
+    kind = type(error).__name__
+    assessment = (
+        f"Could not read watched log {source}: {kind}: {error}. "
+        f"Its cursor remains at byte {cursor} so Watch will retry it."
+    )
+    print(f"[watch] {job.job_id}: {assessment}")
+    payload = {
+        "schema_version": "0.1",
+        "event_id": str(uuid.uuid4()),
+        "ts": _utc_now(),
+        "phase": "watchdog",
+        "event_type": "watchdog_error",
+        "job_id": job.job_id,
+        "signal": "WATCH_LOG_READ_FAILED",
+        "confidence": 1.0,
+        "excerpt": "",
+        "assessment": assessment,
+        "source": str(source),
+    }
+    try:
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload) + "\n")
+    except OSError as exc:
+        print(
+            f"[watch] {job.job_id}: could not persist the log-read error "
+            f"for {source}: {type(exc).__name__}: {exc}"
+        )
+
+
 #: How many Autopsies may run at once. Bounded because each is an LLM ReAct
 #: loop that can escalate to a production sweep, and an unbounded pool would
 #: let one bad round start one per job on the cluster at the same time.
 AUTOPSY_WORKERS = 2
+
+#: Total accepted work, including running workers. Equal to the worker count
+#: deliberately: ThreadPoolExecutor's own queue is unbounded, and permitting
+#: more here would recreate the invisible backlog this gate exists to remove.
+#: Jobs beyond this capacity are persisted as ``deferred`` and reconsidered on
+#: a later round instead of occupying process memory behind four-hour work.
+AUTOPSY_CAPACITY = AUTOPSY_WORKERS
 
 #: How long a queued or running Autopsy may sit before a later round treats it
 #: as lost. Longer than the production sweep's own four-hour limit, because
 #: finishing slowly is not the same as dying, and re-queueing a live one wastes
 #: a node.
 AUTOPSY_STALE_AFTER_SEC = 5 * 60 * 60
+
+#: A queued task has not started external work, so it does not inherit the
+#: running lease. With capacity equal to the worker count it should become
+#: ``running`` promptly; surviving this long means the process died between
+#: persisting the admission and starting the worker. A new Watch may reclaim it
+#: in minutes rather than waiting five hours.
+AUTOPSY_QUEUED_STALE_AFTER_SEC = 5 * 60
 
 #: How many times a job may be sent for Autopsy before Watch stops trying. A
 #: crash loop that re-queues for ever would spend every round on one job.
@@ -142,7 +200,7 @@ def autopsy_state(job_dir: Path) -> dict:
         return {}
 
 
-def _stale(recorded: dict) -> bool:
+def _stale(recorded: dict, max_age: float = AUTOPSY_STALE_AFTER_SEC) -> bool:
     """Whether a queued/running record is old enough to have been lost.
 
     Time rather than a liveness check: the worker is a thread in a process that
@@ -157,7 +215,7 @@ def _stale(recorded: dict) -> bool:
     except ValueError:
         return True
     age = (datetime.now(timezone.utc) - when).total_seconds()
-    return age > AUTOPSY_STALE_AFTER_SEC
+    return age > max_age
 
 
 def autopsy_is_settled(job_dir: Path) -> bool:
@@ -169,14 +227,20 @@ def autopsy_is_settled(job_dir: Path) -> bool:
     persistence exists to stop duplicate work, not to suppress work that never
     happened.
     """
-    recorded = autopsy_state(job_dir)
+    return _autopsy_state_is_settled(autopsy_state(job_dir))
+
+
+def _autopsy_state_is_settled(recorded: dict) -> bool:
+    """Whether one already-read state record means no work is eligible."""
     state = recorded.get("state")
     if not state:
         return False
     if state in _AUTOPSY_TERMINAL:
         return True
-    if state in {"queued", "running"} and not _stale(recorded):
-        return True
+    if state == "queued":
+        return not _stale(recorded, AUTOPSY_QUEUED_STALE_AFTER_SEC)
+    if state == "running":
+        return not _stale(recorded)
     return False
 
 
@@ -189,7 +253,7 @@ def autopsy_attempts(job_dir: Path) -> int:
 
 
 def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> None:
-    """Note that this job is queued for, running, or finished with Autopsy.
+    """Note that this job is deferred, queued, running, or finished with Autopsy.
 
     Written before the work is enqueued rather than after it finishes: the
     point is to survive a crash *during* an Autopsy, which is exactly when the
@@ -206,6 +270,83 @@ def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> None:
         # Losing the marker costs a duplicate Autopsy next round, which is
         # better than losing the round.
         print(f"[watch] could not record autopsy state for {job_dir.name}: {exc}")
+
+
+def _submit_autopsy(
+    *,
+    pool: ThreadPoolExecutor,
+    capacity: BoundedSemaphore,
+    queued: dict[str, Future],
+    bundle: Path,
+    job: JobRecord,
+    jobs_root: Path,
+    job_dir: Path,
+    attempt: int,
+    stop: Stop,
+    signal: str = "",
+    confidence: float | None = None,
+) -> bool:
+    """Admit one Autopsy without using the executor's unbounded queue.
+
+    Returns True only after the work has been accepted. If both workers are
+    occupied, the job is recorded as ``deferred`` with its completed-attempt
+    count unchanged; the persisted bundle is the durable queue, and the next
+    Watch round or process restart can submit it without waiting for fresh log
+    bytes or spending a retry.
+
+    ``queued`` is written before ``submit``. If the process dies in that gap,
+    its short queue lease makes the orphan promptly recoverable. A worker
+    changes it to ``running`` before any external Autopsy work begins.
+    """
+    previous_attempts = max(0, attempt - 1)
+    fields: dict[str, object] = {
+        "job_id": job.job_id,
+        "attempts": previous_attempts,
+        "next_attempt": attempt,
+    }
+    if signal:
+        fields["signal"] = signal
+    if confidence is not None:
+        fields["confidence"] = confidence
+
+    if not capacity.acquire(blocking=False):
+        record_autopsy_state(
+            job_dir,
+            "deferred",
+            **fields,
+            reason="watch capacity is full",
+        )
+        return False
+
+    # Capacity and ownership are separate claims. Capacity prevents an
+    # unbounded local backlog; the exclusive file prevents another Watch
+    # process from submitting this same attempt at the same time.
+    if not claim_autopsy_attempt(job_dir, attempt):
+        capacity.release()
+        return False
+
+    record_autopsy_state(
+        job_dir,
+        "queued",
+        **{**fields, "attempts": attempt},
+    )
+    try:
+        future = pool.submit(
+            _run_autopsy_off_the_loop, bundle, job, jobs_root, job_dir, stop
+        )
+    except RuntimeError as exc:
+        capacity.release()
+        record_autopsy_state(
+            job_dir,
+            "deferred",
+            **fields,
+            reason=f"executor rejected submission: {exc}",
+        )
+        return False
+
+    queued[job.job_id] = future
+    future.add_done_callback(lambda _done: capacity.release())
+    return True
 
 
 def claim_autopsy_attempt(job_dir: Path, attempt: int) -> bool:
@@ -312,10 +453,12 @@ def poll_jobs(
     pool = ThreadPoolExecutor(
         max_workers=AUTOPSY_WORKERS, thread_name_prefix="cia-autopsy"
     )
+    capacity = BoundedSemaphore(AUTOPSY_CAPACITY)
     queued: dict[str, Future] = {}
     try:
         _poll_rounds(
-            pool=pool, queued=queued, jobs_root=jobs_root, finder=finder, watcher=watcher,
+            pool=pool, capacity=capacity, queued=queued, jobs_root=jobs_root,
+            finder=finder, watcher=watcher,
             interval=interval, confidence_threshold=confidence_threshold,
             expectations=expectations, max_rounds=max_rounds, stop=stop,
             alerted=alerted, failures=failures, rounds=rounds, only=only,
@@ -343,7 +486,7 @@ def poll_jobs(
             pool.shutdown(wait=True)
 
 
-def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
+def _poll_rounds(*, pool, capacity, queued, jobs_root, finder, watcher, interval,
                  confidence_threshold, expectations, max_rounds, stop,
                  alerted, failures, rounds, only="") -> None:
     """The rounds themselves, so the pool above owns its own lifetime."""
@@ -357,15 +500,24 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
             active = [job for job in active if job.job_id == only]
 
         for job in active:
-            # Both halves matter: the set covers this process, the file covers
-            # a restart. Only the set existed, so a watcher that came back
-            # re-diagnosed what it had already paid for.
-            if job.job_id in alerted:
-                continue
             job_state_dir = jobs_root / job.job_id
-            if autopsy_is_settled(job_state_dir):
+            recorded = autopsy_state(job_state_dir)
+
+            # The persisted state is authoritative. ``alerted`` is only the
+            # fallback for a state file that could not be written: checking the
+            # set first suppressed a worker that had already recorded
+            # ``failed``, so the bounded retry path below was unreachable until
+            # this whole Watch process restarted.
+            #
+            # The same rule recovers an abandoned attempt and a stale
+            # queued/running attempt. A fresh queued/running one and every
+            # terminal state remain settled, so they keep the in-memory claim.
+            if not recorded.get("state") and job.job_id in alerted:
+                continue
+            if _autopsy_state_is_settled(recorded):
                 alerted.add(job.job_id)
                 continue
+            alerted.discard(job.job_id)
 
             # A retry does not wait for the job to say something new. Alerting
             # is driven by fresh log bytes, which is right for deciding whether
@@ -374,8 +526,14 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
             # that alerted and then went quiet -- which a crashed one does --
             # would otherwise keep its failed state for ever while the counter
             # that was meant to retry it never advanced.
-            pending = autopsy_state(job_state_dir)
-            if pending.get("state") in {"failed", "abandoned", "queued", "running"}:
+            pending = recorded
+            if pending.get("state") in {
+                "deferred",
+                "failed",
+                "abandoned",
+                "queued",
+                "running",
+            }:
                 bundle = job_state_dir / "bundle"
                 if bundle.exists():
                     attempts = autopsy_attempts(job_state_dir) + 1
@@ -388,18 +546,33 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
                             job_state_dir, "gave_up", job_id=job.job_id,
                             attempts=attempts - 1,
                         )
-                    elif not claim_autopsy_attempt(job_state_dir, attempts):
-                        print(f"[watch] {job.job_id}: autopsy {attempts} is another watcher's")
                     else:
                         print(f"[watch] {job.job_id}: retrying autopsy ({attempts})")
-                        record_autopsy_state(
-                            job_state_dir, "queued", job_id=job.job_id,
-                            attempts=attempts,
+                        accepted = _submit_autopsy(
+                            pool=pool,
+                            capacity=capacity,
+                            queued=queued,
+                            bundle=bundle,
+                            job=job,
+                            jobs_root=jobs_root,
+                            job_dir=job_state_dir,
+                            attempt=attempts,
+                            stop=stop,
+                            signal=str(pending.get("signal") or ""),
+                            confidence=pending.get("confidence"),
                         )
-                        queued[job.job_id] = pool.submit(
-                            _run_autopsy_off_the_loop,
-                            bundle, job, jobs_root, job_state_dir, stop,
-                        )
+                        if not accepted:
+                            state = autopsy_state(job_state_dir).get("state")
+                            if state == "deferred":
+                                print(
+                                    f"[watch] {job.job_id}: Autopsy deferred; "
+                                    "all workers are occupied"
+                                )
+                            else:
+                                print(
+                                    f"[watch] {job.job_id}: autopsy {attempts} "
+                                    "is another watcher's"
+                                )
                     alerted.add(job.job_id)
                     continue
             job_dir = jobs_root / job.job_id
@@ -455,7 +628,16 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
             for p_str in job.watch_files:
                 p = Path(p_str)
                 cursor = cursors.get(p_str, 0)
-                text, new_cursor = read_new_bytes(p, cursor)
+                try:
+                    text, new_cursor = read_new_bytes(p, cursor)
+                except OSError as exc:
+                    # Per file, not around the job or the round. A permission
+                    # error or transient NFS failure in one sidecar must not
+                    # stop the primary log, the next job, or every later
+                    # polling round. Do not update this cursor: the same bytes
+                    # are owed another attempt once the file is readable.
+                    _emit_log_read_error(events_path, job, p, cursor, exc)
+                    continue
                 cursors[p_str] = new_cursor
                 if text:
                     new_parts.append(f"=== {p.name} ===\n{text}")
@@ -563,27 +745,37 @@ def _poll_rounds(*, pool, queued, jobs_root, finder, watcher, interval,
                     )
                     alerted.add(job.job_id)
                     continue
-                if not claim_autopsy_attempt(job_dir, attempts):
-                    # Another watcher got there between its read and ours. Its
-                    # Autopsy is the one that runs; ours would be the same work
-                    # on the same bundle, twice.
-                    print(f"[watch] {job.job_id}: autopsy {attempts} is another watcher's")
-                    alerted.add(job.job_id)
-                    continue
-                record_autopsy_state(
-                    job_dir, "queued", job_id=job.job_id, signal=signal,
-                    confidence=confidence, attempts=attempts,
-                )
                 # Off this thread. Autopsy is an LLM ReAct loop that can
                 # escalate to a production sweep with a four-hour limit, and it
                 # ran here -- inside the serial job loop -- so one alert stopped
                 # every other active job being watched for as long as it took.
                 # The jobs that most need watching are the ones running beside
                 # a failure.
-                queued[job.job_id] = pool.submit(
-                    _run_autopsy_off_the_loop, bundle, job, jobs_root, job_dir,
-                    stop,
+                accepted = _submit_autopsy(
+                    pool=pool,
+                    capacity=capacity,
+                    queued=queued,
+                    bundle=bundle,
+                    job=job,
+                    jobs_root=jobs_root,
+                    job_dir=job_dir,
+                    attempt=attempts,
+                    stop=stop,
+                    signal=signal,
+                    confidence=confidence,
                 )
+                if not accepted:
+                    state = autopsy_state(job_dir).get("state")
+                    if state == "deferred":
+                        print(
+                            f"[watch] {job.job_id}: Autopsy deferred; "
+                            "all workers are occupied"
+                        )
+                    else:
+                        print(
+                            f"[watch] {job.job_id}: autopsy {attempts} "
+                            "is another watcher's"
+                        )
                 # continue, not break: break left the whole round, so a job that
                 # alerted every round starved every job listed after it. And the
                 # set above is what actually makes this once per job -- the

@@ -368,7 +368,9 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
             retained = [
                 site
                 for site in site_records
-                if site.identity == record.identity and site.kind == kind
+                if site.identity == record.identity
+                and site.kind == kind
+                and site.disposition != "not_applicable"
             ]
             discovered = counts[f"{kind}_discovered"]
             if discovered and not retained:
