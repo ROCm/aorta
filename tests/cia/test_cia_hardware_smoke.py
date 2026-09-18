@@ -243,10 +243,11 @@ def test_consan_launch_watch_autopsy_on_real_gpu(tmp_path: Path, monkeypatch) ->
         for check in sanitizer_report["checks"]
         if check["sanitizer"] == "consan"
     )
-    assert sanitizer_report["execution_status"] == "complete"
+    report_debug = json.dumps(sanitizer_report, indent=2)[:6000]
+    assert sanitizer_report["execution_status"] == "complete", report_debug
     assert consan["state"] == "ran", "ConSan was selected but did not execute"
-    assert consan["verdict"] == "fail"
-    assert consan.get("findings"), "the committed racy kernel produced no race"
+    assert consan["verdict"] == "fail", report_debug
+    assert consan.get("findings"), report_debug
 
     monkeypatch.setattr(poll_mod, "LogFinder", lambda **_kwargs: object())
     monkeypatch.setattr(
