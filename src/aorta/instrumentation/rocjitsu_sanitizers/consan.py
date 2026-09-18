@@ -311,7 +311,9 @@ def _require_sampled_summaries(
     keeps the absence itself fatal rather than silently unaccounted for. Only
     applicable readers are required: a loaded object with no discovered site is
     never instrumented and publishes no report, which is the ordinary shape of
-    the runtime helper objects that accompany a repro.
+    the runtime helper objects that accompany a repro. This presence guarantee
+    is per reader, not per snapshot: RocJITsu emits no snapshot-count field, so
+    deletion of an additional whole report record is not observable here.
     """
     missing = sorted(
         str(record.reader)
