@@ -2,7 +2,7 @@
 
 This is not a transcript. Summary mode stores counts and digests for user/model
 content while retaining the decisions needed to explain a turn: route,
-selector ranking and scrubbed rationale, tool order, CIA outcomes, and critic
+selector ranking and rationale digest, tool order, CIA outcomes, and critic
 acceptance. Nothing here reads a record back or sends one anywhere.
 """
 
@@ -22,8 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from aorta._user_paths import state_home
-from aorta.probe.redaction import scrub_text
-
 logger = logging.getLogger(__name__)
 
 SESSION_LOG_ENV = "AORTA_CHAT_SESSION_LOG"
@@ -146,16 +144,6 @@ def note_tool_call(tool: str, arguments: Any) -> None:
     )
 
 
-def _scrub_reason(reason: Any) -> str:
-    """Always scrub selector prose, even when normal redaction is disabled."""
-    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(
-        _as_text(reason),
-        scrub_paths=True,
-        scrub_ip_addresses=True,
-    )
-    return scrubbed
-
-
 def _parse_tool_trace(entry: Any) -> tuple[str, str, str]:
     text = _as_text(entry)
     native = _NATIVE_TRACE.match(text)
@@ -231,9 +219,10 @@ def turn_events(
         {
             **_base(session_id, turn, "selection", mode),
             "ranked_tools": list(state.get("candidate_tools") or []),
-            # This sentence is the point of the decision log, but filesystem
-            # paths and addresses are never part of that point.
-            "reason": _scrub_reason(state.get("selection_rationale")),
+            # The ranking is the structured decision. The model's explanation
+            # saw the full conversation and may quote any part of it, so summary
+            # mode gives it the same content boundary as prompts and plans.
+            "reason": _content(state.get("selection_rationale"), mode),
         },
         {
             **_base(session_id, turn, "plan", mode),

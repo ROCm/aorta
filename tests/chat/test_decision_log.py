@@ -21,6 +21,10 @@ REASON = (
     "WaitCheck returns instruction evidence from "
     "/home/customer7/private/kernel.hip on 10.20.30.40."
 )
+SECRET_SELECTOR_REASON = (
+    "Choose triage_kernel_source because secret_kernel contains customer "
+    "credential ghp_0123456789abcdefghijklmnopqrstuvwxyz."
+)
 TOOL_ARGUMENTS = "{'source': '__global__ void secret_kernel() {}'}"
 TOOL_OUTPUT = (
     "Job cia-20260918-123456-abcd — customer run\n"
@@ -122,23 +126,27 @@ class TestSummaryModeStoresDecisionsNotContent:
         ):
             assert secret not in blob
 
-    def test_the_selector_reason_is_kept_but_always_scrubbed(self, monkeypatch):
+    def test_the_selector_reason_is_digested_not_persisted(self, monkeypatch):
         monkeypatch.setenv(decision_log.SESSION_LOG_ENV, "1")
+        secret_state = state()
+        secret_state["selection_rationale"] = SECRET_SELECTOR_REASON
         path = decision_log.record_turn(
             session_id="session-a",
             turn=1,
             query=QUERY,
             reply=REPLY,
-            state=state(),
+            state=secret_state,
         )
 
         selection = next(
             record for record in _records(path) if record["event"] == "selection"
         )
-        assert "WaitCheck returns instruction evidence" in selection["reason"]
-        assert "/home/customer7" not in selection["reason"]
-        assert "10.20.30.40" not in selection["reason"]
-        assert "<PATH:" in selection["reason"]
+        assert selection["reason"] == decision_log.summarize_text(
+            SECRET_SELECTOR_REASON
+        )
+        blob = path.read_text(encoding="utf-8")
+        assert "secret_kernel" not in blob
+        assert "ghp_0123456789abcdefghijklmnopqrstuvwxyz" not in blob
 
     def test_route_ranking_tool_order_and_critic_are_recorded(self, monkeypatch):
         monkeypatch.setenv(decision_log.SESSION_LOG_ENV, "1")
@@ -302,6 +310,10 @@ class TestFullModeIsLoudAndExplicit:
         assert "secret_kernel" in blob
         assert "private output token 8491" in blob
         assert REPLY in blob
+        selection = next(
+            record for record in _records(path) if record["event"] == "selection"
+        )
+        assert selection["reason"] == REASON
 
     def test_it_warns_once_per_session_and_names_the_file(
         self, monkeypatch, caplog
