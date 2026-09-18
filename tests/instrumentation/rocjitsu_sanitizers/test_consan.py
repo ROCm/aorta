@@ -398,12 +398,15 @@ def test_sampled_summary_and_immediate_conflicts_are_not_summed() -> None:
 
 
 def test_sampled_summary_for_another_reader_is_not_suppressed() -> None:
+    reader_1 = _healthy_evidence(engine="sampled")
+    reader_2 = reader_1.replace("reader=1", "reader=2").replace("load=1", "load=2")
     output = "\n".join(
         (
             _sampled_conflict(reader=1),
             _sampled_report(reader=1, conflicts=1, examples=1),
             _sampled_report(reader=2, conflicts=1, examples=0, pairs_without_example=1),
-            _healthy_evidence(engine="sampled"),
+            reader_1,
+            reader_2,
         )
     )
 
@@ -556,10 +559,10 @@ def test_inconsistent_sampled_summary_never_passes(broken: str) -> None:
 
 
 def test_sampled_summary_truncated_before_its_counters_never_passes() -> None:
-    # Truncated between the first Sampled field and the conflict counters. The
+    # Truncated between early Sampled fields and the conflict counters. The
     # coverage and verdict records are independent of the report line and stay
-    # healthy, so a reader that goes unrecognized here is a silent PASS -- the
-    # counters are the only place a conflict with no logged example appears.
+    # healthy, so the truncated report itself must be rejected -- the counters
+    # are the only place a conflict with no logged example appears.
     report = _sampled_report(conflicts=2, examples=1, pairs_without_example=1)
     output = "\n".join(
         (
@@ -572,6 +575,20 @@ def test_sampled_summary_truncated_before_its_counters_never_passes() -> None:
 
     assert consan.state is ExecutionState.ERROR
     assert str(consan.reason).startswith("consan_output_parse_error:")
+
+
+def test_valid_summary_cannot_mask_a_second_truncated_snapshot() -> None:
+    # One reader publishes multiple snapshots. A set-based "reader has a
+    # summary" check accepts the valid line and silently ignores the truncated
+    # one, whose omitted counters may have held a summary-only conflict.
+    report = _sampled_report()
+    truncated = report[: report.index(" visible_sampled=")]
+    output = "\n".join((report, truncated, _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert "sampled_conflict_examples" in str(consan.reason)
 
 
 def test_sampled_report_plan_line_is_not_mistaken_for_a_summary() -> None:

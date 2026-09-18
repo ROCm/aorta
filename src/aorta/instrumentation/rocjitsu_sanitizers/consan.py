@@ -36,20 +36,13 @@ _AUTO_REPLAY_DIAGNOSTIC = re.compile(r"\bauto\s+replay\s+diagnostic(?:\s|$)", re
 # summary branch matches ``auto replay`` would turn every clean Sampled run into
 # a race report.
 _AUTO_SAMPLED_CONFLICT = re.compile(r"\bauto\s+sampled\s+conflict(?:\s|$)", re.IGNORECASE)
-# The Sampled mode appends its counters to the shared per-reader
-# ``ConSan MOI auto report`` line. Match that record kind explicitly even though
-# ``visible_sampled`` is unique in the current renderer, so an unrelated future
-# diagnostic cannot be accepted as the authoritative summary.
-#
-# Keyed on ``visible_sampled``, which the renderer writes second, rather than on
-# a conflict counter near the end of the line: a line truncated between the two
-# then still reports as a Sampled summary and fails closed on the missing
-# counters instead of going unrecognized. It cannot key on the first field
-# (``sampled_watchpoints``) because the ``auto report plan`` allocation line
-# carries that name too and no counters, so every healthy run would fail. Any
-# truncation earlier still than this is caught by the reconciliation against the
-# coverage records in _require_sampled_summaries.
-_AUTO_SAMPLED_SUMMARY = re.compile(r"\bauto\s+report\b.*\bvisible_sampled=", re.IGNORECASE)
+# The actual per-snapshot record begins ``auto report reader=``. Match that
+# prefix, before any mode-specific field: every such record belonging to a
+# Sampled reader must carry the complete Sampled schema, so one valid snapshot
+# cannot mask a second truncated one. The exact prefix excludes the sibling
+# ``auto report plan|buffer|cleanup`` records, which carry allocation/lifecycle
+# fields rather than evidence counters.
+_AUTO_REPORT = re.compile(r"\bauto\s+report\s+reader=", re.IGNORECASE)
 _SAMPLED_SUMMARY_COUNTS = (
     "sampled_conflict_examples",
     "sampled_conflict_pairs_without_example",
@@ -401,7 +394,7 @@ def parse_consan_output(
     replay_details: list[Finding] = []
     sampled_details: list[Finding] = []
     replay_summaries: list[dict[str, str]] = []
-    sampled_summaries: list[dict[str, str]] = []
+    auto_reports: list[dict[str, str]] = []
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -433,11 +426,20 @@ def parse_consan_output(
                     metadata=tuple(sorted(fields.items())),
                 )
             )
-        elif _AUTO_SAMPLED_SUMMARY.search(line):
-            sampled_summaries.append(fields)
+        elif _AUTO_REPORT.search(line):
+            _required_int(fields, "reader")
+            auto_reports.append(fields)
         elif "auto replay" in lowered:
             replay_summaries.append(fields)
 
+    decision = parse_coverage_decision(output)
+    _require_expected_engine(decision.coverage, expected_mode)
+    sampled_readers = {
+        str(record.reader) for record in decision.coverage if record.engine == "sampled"
+    }
+    sampled_summaries = [
+        report for report in auto_reports if report.get("reader") in sampled_readers
+    ]
     detailed_findings = [*replay_details, *sampled_details]
     deduplicated = {finding.dedupe_key: finding for finding in detailed_findings}
     findings = [deduplicated[key] for key in sorted(deduplicated, key=repr)]
@@ -461,8 +463,6 @@ def parse_consan_output(
         _sampled_summary_findings(sampled_totals, _itemized_by_reader(sampled_details))
     )
 
-    decision = parse_coverage_decision(output)
-    _require_expected_engine(decision.coverage, expected_mode)
     _require_sampled_summaries(decision.coverage, sampled_totals)
     object_coverage = tuple(
         ObjectCoverage(
