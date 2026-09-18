@@ -1,0 +1,79 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_gemm_load",
+        "command_sha256": "6e4ff7c53fcf007e3c6604ec6093510cbff56ae83337fbb1a6057aa245be39ad",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "b274af90cf8829112eddbe3cbc76cb653bc5b10a91708ddc42d7986e6109d0bc",
+        "selected_identity_sha256": "acd50ca2bb450f4fb8144de0b24d11a502038583bf296d9e36f32091c5fbe079",
+        "selected_kernel": "gemm_f32_ss"
+      },
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [
+        {
+          "diagnostics_truncated": false,
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+            "entry_offset": null,
+            "name": "gemm_f32_ss",
+            "target": "gfx950"
+          },
+          "reason": "combined_hook_timeout",
+          "returncode": null,
+          "state": "timed_out",
+          "verdict": "error"
+        }
+      ],
+      "reason": "combined_hook_timeout",
+      "returncode": null,
+      "sanitizer": "consan",
+      "state": "timed_out",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "diagnostics_truncated": false,
+      "findings": [],
+      "kernel_results": [],
+      "reason": "combined_hook_timeout",
+      "returncode": null,
+      "sanitizer": "waitcheck_preflight",
+      "state": "timed_out",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+          "entry_offset": null,
+          "name": "gemm_f32_ss",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
