@@ -1229,8 +1229,22 @@ if min_mean_output > 0:
         # reading like a measurement.
         return len_cap is None or v <= len_cap
 
-    usable = isinstance(lens, list) and len(lens) > 0 and all(_whole(v) for v in lens)
-    if usable:
+    # Present-but-invalid and absent are different things, and they were being
+    # treated the same. The host's `_missing_core_metrics` calls a present
+    # array that fails the rule `result_json_unusable`; this audit discarded it
+    # and fell back per-request, so the same export got UNPARSEABLE on one
+    # layer and SHORTLEN -- or OK -- on the other. An over-cap entry is an
+    # impossible export, and falling back to a different denominator is not a
+    # reading of it, it is a second opinion about a document neither layer can
+    # trust.
+    #
+    # The fallback survives for exactly one case: no array at all, which is
+    # what `save_detailed: false` produces and is a configuration rather than a
+    # defect.
+    if isinstance(lens, list) and len(lens) > 0:
+        if not all(_whole(v) for v in lens):
+            print("UNPARSEABLE output_lens (invalid entry or over cap)")
+            raise SystemExit(0)
         mean_output = sum(lens) / len(lens)
         basis = f"output_lens n={len(lens)}"
     else:

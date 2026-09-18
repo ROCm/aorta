@@ -406,7 +406,8 @@ the stacked follow-up:
   sampling-backend fix as having resolved it. Separate requests are unaffected,
   which is why the RL driver issues one request per sample rather than one
   batched request per group — there it costs throughput rather than
-  correctness. Not filed upstream as of this writing.
+  correctness. Filed upstream as
+  [lightseekorg/tokenspeed#1613](https://github.com/lightseekorg/tokenspeed/issues/1613).
 - **On `dataset: random` the length distribution is an artifact of the cap.**
   Random-token prompts give a model no reason to emit EOS, so every completion
   runs to `output_len` and `generated_tokens_*` reads as a constant. Throughput

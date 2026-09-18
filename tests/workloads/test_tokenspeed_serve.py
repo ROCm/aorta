@@ -5250,10 +5250,15 @@ def test_sharegpt_has_no_length_cap_to_check(tmp_path, monkeypatch):
 
 
 def test_the_container_enforces_the_same_length_cap(tmp_path):
-    """Both layers, since the container's verdict is the one read first."""
-    # The two fields disagree on purpose, so the verdict reveals which source
-    # the audit trusted: the array says 100 tokens a completion (clears a floor
-    # of 8), the counters say 1 (does not).
+    """Both layers, since the container's verdict is the one read first.
+
+    This test previously pinned the *wrong* behaviour: it asserted that an
+    over-cap array is discarded and the per-request fallback applies. That
+    made the container print SHORTLEN, or OK, for an export the host calls
+    `result_json_unusable` -- so the test was holding the two layers apart
+    rather than together. A present-but-invalid array is an impossible export,
+    and a second denominator is not a reading of it.
+    """
     doc = {
         "completed": 4,
         "failed": 0,
@@ -5265,13 +5270,41 @@ def test_the_container_enforces_the_same_length_cap(tmp_path):
         tmp_path, doc, expected=4, min_mean_output=8, output_len=128
     ).startswith("OK")
 
-    # Cap below them: the array is an impossible export, so it is discarded and
-    # the weaker per-request rule applies -- and says so in the verdict.
+    # Cap below them: impossible export, so unusable on both layers -- and
+    # explicitly *not* the per-request fallback.
     verdict = _run_script_audit(
         tmp_path, doc, expected=4, min_mean_output=8, output_len=50
     )
-    assert verdict.startswith("SHORTLEN"), verdict
-    assert "per_request" in verdict, verdict
+    assert verdict.startswith("UNPARSEABLE"), verdict
+    assert "output_lens" in verdict, verdict
+    assert "per_request" not in verdict, verdict
+
+
+@pytest.mark.parametrize("bad", [[10, 10, -1], [10, 10, 10.5], [10, 10, 4099]])
+def test_the_two_layers_agree_a_broken_array_is_unusable(tmp_path, monkeypatch, bad):
+    """One export, one verdict name, whichever layer reads it first.
+
+    Negative, fractional and over-cap all reach the same place now: the host
+    reports `result_json_unusable` and the container reports `UNPARSEABLE`,
+    rather than one of them substituting a different denominator and calling
+    the result a measurement.
+    """
+    doc = {"completed": 3, "failed": 0, "total_output_tokens": 30, "output_lens": bad}
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=3, min_mean_output=8, output_len=128
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+    wl = _rollout(tmp_path, num_prompts=3, rollout_samples=1, output_len=128)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=3, total_output_tokens=30, output_lens=bad)],
+    )
+    result = wl.run()
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
 
 
 def test_an_integral_float_length_is_still_a_length(tmp_path, monkeypatch):
