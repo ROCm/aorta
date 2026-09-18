@@ -209,6 +209,37 @@ class TestTheOfflineHeuristic:
         """Including the plural, which is how it tends to be written."""
         assert _fake_step(symptom=symptom).category == "numeric_instability"
 
+    @pytest.mark.parametrize(
+        ("symptom", "expected"),
+        [
+            # A checkpoint race is a checkpoint race. With no checkpoint leg on
+            # this branch at all, the phrase was landing on `kernel_race`.
+            ("checkpoint save race condition", "checkpoint_race"),
+            # Names a kernel, so the phrase is evidence of *where*.
+            (
+                "nondeterministic data race in the reduction kernel",
+                "kernel_race",
+            ),
+            ("data race on the lds tile", "kernel_race"),
+            ("consan reports a data race", "kernel_race"),
+            # No kernel and no tool named: understate rather than assert a
+            # hazard nothing observed.
+            ("intermittent data race in the host queue", "unknown"),
+            ("race condition between the two writer threads", "unknown"),
+            # Nondeterminism with no race phrase still routes as before.
+            ("nondeterministic eval scores between runs", "nondeterminism"),
+        ],
+    )
+    def test_a_race_phrase_needs_a_kernel_or_a_tool(self, symptom, expected):
+        """`kernel_race` is a claim about *where*, so the phrase is not enough.
+
+        Mirrors `_is_kernel_race_id` on the detector path, where an evidence
+        token needs a sanitizer token beside it. Both paths now demand the same
+        thing, which is why the kernel-race leg can sit ahead of the
+        nondeterminism one instead of being shadowed by it.
+        """
+        assert _fake_step(symptom=symptom).category == expected
+
     def test_the_traceback_detector_is_not_a_race(self):
         """The same substring collision, but reached through a shipping detector ID.
 
@@ -268,6 +299,30 @@ class TestTheOfflineHeuristic:
         would have been dead for every id that can actually fire.
         """
         assert _fake_step(detectors=[detector]).category == "kernel_race"
+
+    def test_the_shipping_numerics_detector_routes(self):
+        """The one detector in the tree that means this was falling through.
+
+        `recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml` declares a
+        tier-5 detector `ts_kernel_numerics_mismatch` on
+        `TS_KERNEL_FAIL: numerics_mismatch`, which arrives as
+        `custom:ts_kernel_numerics_mismatch`. An out-of-tolerance kernel result
+        is exactly what `numeric_instability` names, and matching only the
+        built-in `tier4:nan_signature` left it at `unknown` -- the gap this PR
+        exists to close, in the category it adds.
+        """
+        step = _fake_step(detectors=["custom:ts_kernel_numerics_mismatch"])
+        assert step.category == "numeric_instability"
+
+    def test_the_numerics_detector_is_declared_by_a_committed_recipe(self):
+        """Pins the premise, not just the routing.
+
+        The routing test above is only meaningful while that detector id is
+        real; if the recipe renames it, this fails rather than the mapping
+        quietly covering nothing.
+        """
+        recipe = REPO_ROOT / "recipes" / "tokenspeed" / "tokenspeed-kernel-gemm-smoke.yaml"
+        assert "ts_kernel_numerics_mismatch" in recipe.read_text(encoding="utf-8")
 
     def test_two_half_matches_on_different_ids_do_not_combine(self):
         """Judged per id, not over the joined string.

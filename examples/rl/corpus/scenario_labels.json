@@ -16,7 +16,8 @@
   "evidence": [
     "Nine sanitizer runs on a gfx950 compute node (Slurm job 32192, ROCm 7.0.2.2),",
     "RocJITsu bundle f92da4cb. Verdicts and finding counts as recorded in the",
-    "corpus manifest; see examples/rl/corpus/README.md for provenance."
+    "corpus manifest. Fuller provenance is in examples/rl/corpus/README.md, which",
+    "is not in this branch -- it arrives with the stacked RL scaffolding PR."
   ],
   "coverage_note": [
     "Three scenarios carry a committed label and six are honestly `unknown`.",

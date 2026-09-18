@@ -238,7 +238,18 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
         return "oom_fragment"
     if "hip_error" in joined or "illegal" in joined or "memory" in joined:
         return "illegal_mem"
-    if "nan_signature" in joined:
+    # `numerics_mismatch` alongside the built-in signature, because a shipping
+    # recipe already emits it: `recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml`
+    # declares a tier-5 detector `ts_kernel_numerics_mismatch` on
+    # `TS_KERNEL_FAIL: numerics_mismatch`, which arrives as
+    # `custom:ts_kernel_numerics_mismatch`. An out-of-tolerance kernel result is
+    # exactly what `numeric_instability` names, and matching only the built-in
+    # left the one detector in the tree that means it falling through to
+    # `unknown` -- the gap this PR exists to close, in the category it adds.
+    #
+    # Substring rather than a token, for the reason `nan_signature` is: both
+    # span a separator, and both are long enough not to collide.
+    if "nan_signature" in joined or "numerics_mismatch" in joined:
         return "numeric_instability"
     if "checkpoint" in joined:
         return "checkpoint_race"
@@ -285,12 +296,29 @@ class FakeLLMProposer:
             # gradients") and a bare `\bnan\b` would miss it.
             elif re.search(r"\bnans?\b", low):
                 category = "numeric_instability"
+            # Checkpoint first, and before the race legs. "checkpoint save race
+            # condition" is a checkpoint race by name, and with no checkpoint
+            # leg here at all it was landing on `kernel_race` -- the same
+            # mislabel the detector branch was fixed for, on the other path.
+            elif "checkpoint" in low:
+                category = "checkpoint_race"
+            # `kernel_race` is a claim about *where*, so the phrase alone is not
+            # enough: the symptom also has to name a kernel or the tool that
+            # found it. This mirrors `_is_kernel_race_id`, where an evidence
+            # token needs a sanitizer token beside it -- the two paths now
+            # demand the same thing, which is why "nondeterministic data race
+            # in the reduction kernel" can be ordered ahead of the
+            # nondeterminism leg rather than being shadowed by it.
+            #
+            # A bare host or checkpoint race with no kernel named stays
+            # `unknown`, which understates rather than asserting a hazard
+            # nothing observed.
+            elif ("data race" in low or "race condition" in low) and any(
+                tok in low for tok in ("kernel", "lds", "consan", "waitcheck")
+            ):
+                category = "kernel_race"
             elif "nondetermin" in low:
                 category = "nondeterminism"
-            # Bare "race" would also match "traceback", a very plausible word in
-            # a free-text symptom, so this leg wants the phrase.
-            elif "data race" in low or "race condition" in low:
-                category = "kernel_race"
 
         # Baseline pass wins even when the allowlist has no further mitigations.
         for summary in cell_summaries:
