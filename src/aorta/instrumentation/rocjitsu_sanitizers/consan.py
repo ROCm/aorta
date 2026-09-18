@@ -64,6 +64,9 @@ _SAMPLED_INCOMPLETE_COUNTS = (
     "sampled_unsupported_sync",
 )
 _SAMPLED_COUNTS = (*_SAMPLED_SUMMARY_COUNTS, *_SAMPLED_INCOMPLETE_COUNTS)
+# Current-only, and never spelled the legacy way, so it is not a _SAMPLED_COUNTS
+# member: it postdates the flattening rather than being renamed by it.
+_SUPPRESSED_CONFLICTS = "suppressed_uniform_write_conflicts"
 _KV = re.compile(r"(\w+)=(\S+)")
 # glibc's ld.so message when a needed DT_NEEDED library is not on any search
 # path. Written to stderr, and paired with exit 127 there it means the repro
@@ -309,12 +312,16 @@ def _sampled_totals(
                 f"while this run's coverage is {schema}"
             )
         counts = {key: _sampled_int(summary, key, schema) for key in _SAMPLED_SUMMARY_COUNTS}
-        # Current ConSan counts here the conflicts it detected and then withheld
-        # under an expert same-value opt-in. run_consan scrubs that opt-in, so a
-        # nonzero count means the pinned live contract was not honored. Legacy
-        # Sampled reports predate the counter and carry no such opt-in.
-        if schema == "current":
-            suppressed = _required_int(summary, "suppressed_uniform_write_conflicts")
+        # Conflicts ConSan detected and then withheld under the expert
+        # same-value opt-in (RJ_CONSAN_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES,
+        # which defaults to 0 and is not enabled by any preset). run_consan
+        # scrubs that opt-in, so a nonzero count means the pinned live contract
+        # was not honored. Required on a current report; legacy reports predate
+        # the counter, but one carrying it anyway still says conflicts were
+        # withheld, and dropping that evidence on the schema branch would pass
+        # the run on a finding it was handed.
+        if schema == "current" or _SUPPRESSED_CONFLICTS in summary:
+            suppressed = _required_int(summary, _SUPPRESSED_CONFLICTS)
             if suppressed != 0:
                 raise ValueError(
                     f"ConSan suppressed {suppressed} uniform-write conflict(s) "

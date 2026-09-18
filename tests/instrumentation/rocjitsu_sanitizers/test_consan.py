@@ -368,6 +368,22 @@ def test_current_report_cannot_borrow_a_legacy_counter_spelling() -> None:
     assert "mixes current and legacy counter spellings" in str(consan.reason)
 
 
+def test_legacy_report_with_suppressed_conflicts_never_passes() -> None:
+    # Legacy reports predate the counter, but one carrying it anyway is still
+    # saying conflicts were withheld. Reading it only on the current branch
+    # would pass the run on a finding the log handed us.
+    report = _sampled_report().replace(
+        " sampled_conflicts=0",
+        " suppressed_uniform_write_conflicts=9 sampled_conflicts=0",
+    )
+    output = "\n".join((report, _healthy_evidence(engine="sampled")))
+
+    _waitcheck, consan = evaluate_consan_output(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert "suppressed 9 uniform-write conflict(s)" in str(consan.reason)
+
+
 def test_legacy_report_cannot_accompany_current_coverage() -> None:
     # A wholly legacy report carries no suppression counter at all, so pairing
     # one with current coverage is the other way to skip that check.
