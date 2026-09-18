@@ -319,6 +319,9 @@ async def _ask_once(
     output_mode: str,
     quiet: bool,
     backend: Any = None,
+    *,
+    session_id: str | None = None,
+    turn: int = 1,
 ) -> tuple[list, bool]:
     """Invoke the agent for one query and render it; also report success.
 
@@ -332,7 +335,14 @@ async def _ask_once(
     suppress = _suppress_stderr_noise() if quiet else contextlib.nullcontext()
     try:
         with suppress:
-            reply, history, result = await invoke_agent(query, history)
+            decision = (
+                {"session_id": session_id, "turn": turn}
+                if session_id is not None
+                else {}
+            )
+            reply, history, result = await invoke_agent(
+                query, history, **decision
+            )
     except Exception as exc:
         msg = _failure_message(exc, backend)
         if output_mode == "json":
@@ -351,7 +361,12 @@ async def _ask_once(
 
 
 async def _interactive_loop(
-    invoke_agent: Any, output_mode: str, quiet: bool, backend: Any = None
+    invoke_agent: Any,
+    output_mode: str,
+    quiet: bool,
+    backend: Any = None,
+    *,
+    session_id: str | None = None,
 ) -> None:
     """Run a multi-turn REPL session."""
     banner = "AORTA Codebase Assistant  (type exit, quit, or /q to leave)"
@@ -377,6 +392,7 @@ async def _interactive_loop(
     # to protect.
     prompt_via_input = sys.stdout.isatty()
     history: list = []
+    turn = 0
 
     while True:
         try:
@@ -395,13 +411,24 @@ async def _interactive_loop(
         if not stripped:
             continue
 
-        history, _ = await _ask_once(invoke_agent, query, history, output_mode, quiet, backend)
+        turn += 1
+        history, _ = await _ask_once(
+            invoke_agent,
+            query,
+            history,
+            output_mode,
+            quiet,
+            backend,
+            session_id=session_id,
+            turn=turn,
+        )
 
 
 async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) -> bool:
     """Preflight the backend, then either answer once or start the REPL."""
     factory = _load("inference.providers.factory")
     session = _load("session")
+    decision_session = session.new_session_id()
     try:
         backend = factory.get_backend()
         if not no_wait:
@@ -419,11 +446,26 @@ async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) 
     )
 
     if query is None:
-        await _interactive_loop(session.invoke_agent, output_mode, quiet, backend)
+        await _interactive_loop(
+            session.invoke_agent,
+            output_mode,
+            quiet,
+            backend,
+            session_id=decision_session,
+        )
         # A REPL's exit status describes the session, not any one answer: the
         # user has already seen each failure and chosen to keep going.
         return True
-    _, ok = await _ask_once(session.invoke_agent, query, [], output_mode, quiet, backend)
+    _, ok = await _ask_once(
+        session.invoke_agent,
+        query,
+        [],
+        output_mode,
+        quiet,
+        backend,
+        session_id=decision_session,
+        turn=1,
+    )
     return ok
 
 

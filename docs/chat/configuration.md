@@ -71,6 +71,35 @@ If you would rather not store the key at all, leave it out of the file and
 export `AORTA_CHAT_REMOTE_LLM_API_KEY` instead; the environment outranks the
 file.
 
+## Opt-in decision logs
+
+Chat does not persist a transcript by default. Set
+`AORTA_CHAT_SESSION_LOG=1` to append privacy-preserving decision events under
+`$XDG_STATE_HOME/aorta/chat/sessions/` (default
+`~/.local/state/aorta/chat/sessions/`). The directory is mode `0700` and each
+session JSONL file is mode `0600`.
+
+Both the browser and CLI record from the state returned by `invoke_agent`, so
+they capture the same decisions without changing the CLI to a streaming path:
+
+- route and selector-ranked tools;
+- the selector's own reason, with filesystem paths and IP addresses always
+  scrubbed regardless of `--no-redact`;
+- tool execution order and CIA job ID/category/confidence;
+- whether the critic accepted the answer; and
+- a `resolution: null` attachment point keyed by `(session_id, turn)` for a
+  later verified outcome.
+
+Questions, plans, tool arguments, tool output, critic feedback, and answers are
+not stored in summary mode. Each becomes only character/byte/line/fence counts
+and a SHA-256 digest. Nothing reads these files back or sends them anywhere.
+
+`AORTA_CHAT_SESSION_LOG=full` stores those values verbatim for an operator who
+explicitly needs a transcript. It emits one warning per session naming the
+file. Full mode can contain source, paths, credentials printed by tools, and
+model output; protect and remove it accordingly. Set the variable to `0` or
+leave it unset to disable all decision logging.
+
 ## Settings
 
 Every name below is a TOML key in the profile, and `AORTA_CHAT_<NAME>` in the

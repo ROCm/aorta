@@ -94,7 +94,7 @@ def app(monkeypatch):
 def _answering(steps: list[tuple[str, dict]]):
     """An invoke_agent that reports *steps* and then answers."""
 
-    async def invoke(question, history, on_step=None):
+    async def invoke(question, history, on_step=None, **_decision):
         for node, delta in steps:
             if on_step is not None:
                 await on_step(node, delta)

@@ -6,7 +6,7 @@ from typing import Annotated
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph import add_messages
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class AgentState(TypedDict):
@@ -28,3 +28,6 @@ class AgentState(TypedDict):
     #: Tools the selector ranked, best first, and the reason it gave.
     candidate_tools: list[str] | None
     selection_rationale: str | None
+    #: Privacy-safe call metadata attached by invoke_agent after the graph
+    #: returns. It is not fed back into any node or model.
+    _decision_tool_calls: NotRequired[list[dict[str, object]]]

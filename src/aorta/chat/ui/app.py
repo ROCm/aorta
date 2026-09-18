@@ -16,6 +16,7 @@ from aorta.chat import redaction
 from aorta.chat.config import UI_NO_WAIT_ENV, UI_VERBOSE_ENV
 from aorta.chat.inference.providers.factory import get_backend
 from aorta.chat.session import invoke_agent
+from aorta.chat.decision_log import new_session_id
 from aorta.chat.tools.cache import ToolCache, use_tool_cache
 from aorta.chat.ui.welcome import welcome_message
 
@@ -35,6 +36,11 @@ _NOTICE_STATE_KEY = "redaction_notice_state"
 
 #: Key under which each browser session keeps its :class:`ToolCache`.
 _TOOL_CACHE_KEY = "tool_result_cache"
+
+#: Stable key for the opt-in decision log, and its monotonically increasing
+#: turn number. Kept in Chainlit's per-browser session with the history.
+_DECISION_SESSION_KEY = "decision_log_session_id"
+_DECISION_TURN_KEY = "decision_log_turn"
 
 
 def _unavailable_message(reason: str) -> str:
@@ -196,6 +202,8 @@ async def on_start():
     """Initialise per-session state and check the LLM backend is usable."""
     cl.user_session.set("history", [])
     cl.user_session.set("backend_error", None)
+    cl.user_session.set(_DECISION_SESSION_KEY, new_session_id())
+    cl.user_session.set(_DECISION_TURN_KEY, 0)
     # One state per browser session, not one per process: the notice is a
     # per-session disclosure and this server serves many at once.
     cl.user_session.set(
@@ -381,6 +389,12 @@ async def on_message(message: cl.Message):
     question = f"{message.content}\n\n{attached}" if attached else message.content
 
     history: list = cl.user_session.get("history", [])
+    decision_session = cl.user_session.get(_DECISION_SESSION_KEY)
+    if not decision_session:
+        decision_session = new_session_id()
+        cl.user_session.set(_DECISION_SESSION_KEY, decision_session)
+    decision_turn = int(cl.user_session.get(_DECISION_TURN_KEY) or 0) + 1
+    cl.user_session.set(_DECISION_TURN_KEY, decision_turn)
     # A session that predates this key (or a reconnect) still gets its own
     # state rather than falling back to the process-wide one, which would let
     # one browser session consume another's disclosure.
@@ -432,7 +446,11 @@ async def on_message(message: cl.Message):
     try:
         with redaction.use_notice_state(notice_state), use_tool_cache(tool_cache):
             reply, history, _result = await invoke_agent(
-                question, history, on_step=show_step
+                question,
+                history,
+                on_step=show_step,
+                session_id=decision_session,
+                turn=decision_turn,
             )
     except Exception:
         logger.exception("Agent graph error")

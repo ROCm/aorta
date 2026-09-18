@@ -34,12 +34,22 @@ def readme() -> str:
     return " ".join(_README.read_text(encoding="utf-8").split())
 
 
+def _delivery_source() -> str:
+    """Both halves of the seam after invoke_agent split out graph execution."""
+    return "\n".join(
+        [
+            inspect.getsource(session.invoke_agent),
+            inspect.getsource(session._invoke_graph),
+        ]
+    )
+
+
 class TestTheContractTheDocsPromise:
     """Kept by the code, not only by the prose."""
 
     def test_no_callback_means_the_awaited_path(self):
         """The CLI passes none, and must not be routed through streaming."""
-        source = inspect.getsource(session.invoke_agent)
+        source = _delivery_source()
 
         assert "if on_step is None:" in source
         assert "await agent_graph.ainvoke(initial)" in source
@@ -50,14 +60,14 @@ class TestTheContractTheDocsPromise:
         Checked on the stream_mode list rather than the whole function, since
         the state dict has a "messages" key of its own.
         """
-        source = inspect.getsource(session.invoke_agent)
+        source = _delivery_source()
         modes = source[source.index("stream_mode=") : source.index("stream_mode=") + 60]
 
         assert "messages" not in modes, modes
         assert "updates" in modes and "values" in modes and "custom" in modes
 
     def test_the_reply_is_assembled_once_at_the_end(self):
-        source = inspect.getsource(session.invoke_agent)
+        source = _delivery_source()
 
         assert source.count("extract_reply(") == 1
 
@@ -104,7 +114,7 @@ class TestTheStreamingChangeIsDocumented:
 
     def test_all_three_requested_modes_are_documented(self, readme):
         """Whatever the code asks for, the guide lists -- checked, not asserted once."""
-        source = inspect.getsource(session.invoke_agent)
+        source = _delivery_source()
         modes = source[source.index("stream_mode=") : source.index("stream_mode=") + 60]
         requested = {m for m in ("updates", "values", "custom") if m in modes}
 

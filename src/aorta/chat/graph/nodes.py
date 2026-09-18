@@ -23,6 +23,7 @@ from langchain_core.tools import BaseTool
 
 from aorta.chat.cancellation import bind_cancel_token, reset_cancel_token
 from aorta.chat.config import settings
+from aorta.chat.decision_log import note_tool_call
 from aorta.chat.graph.state import AgentState
 from aorta.chat.inference.vllm_client import get_chat_llm
 from aorta.chat.plugins import ChatTool, enabled_builtins, load_chat_tools
@@ -697,6 +698,7 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     # kernel -- pushed through the stream on every tool call, for a consumer
     # that reads the name and drops the rest. Anything wanting more than the
     # name should be added back when there is something rendering it.
+    note_tool_call(name, kwargs)
     _announce_tool({"tool": name, "id": call})
     started = time.monotonic()
     cancel = threading.Event()

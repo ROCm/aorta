@@ -9,6 +9,13 @@ import logging
 
 from langchain_core.messages import AIMessage, BaseMessage
 
+from aorta.chat.decision_log import (
+    capture_tool_calls,
+    new_session_id,
+    record_failure,
+    record_turn,
+    session_log_mode,
+)
 from aorta.chat.graph.graph import agent_graph
 from aorta.chat.inference.callcount import count_llm_calls
 
@@ -70,10 +77,48 @@ def extract_reply(messages: list[BaseMessage]) -> str:
     return "I couldn't generate a response. Please try rephrasing."
 
 
+async def _invoke_graph(
+    initial: dict,
+    on_step: Callable[[str, dict], Awaitable[None]] | None,
+) -> dict:
+    """Run the awaited or progress-streaming graph path to the same state."""
+    with count_llm_calls("query"):
+        if on_step is None:
+            return await agent_graph.ainvoke(initial)
+
+        # "updates" names the node that just ran and "custom" carries a tool
+        # announcing itself; "values" is accumulated state, so the last one
+        # matches what ainvoke would have returned.
+        result = {}
+        state_seen = False
+        failed: list[BaseException] = []
+        async for mode, chunk in agent_graph.astream(
+            initial, stream_mode=["updates", "values", "custom"]
+        ):
+            if mode == "updates":
+                for node, delta in chunk.items():
+                    await _announce(on_step, node, delta or {}, failed=failed)
+            elif mode == "custom":
+                await _announce(on_step, "tool", chunk, failed=failed)
+            else:
+                result = chunk
+                state_seen = True
+        if not state_seen:
+            raise RuntimeError(
+                "the agent graph streamed to completion without producing "
+                "any state, so there is no answer to return. This is a "
+                "malfunction rather than an unanswerable question."
+            )
+        return result
+
+
 async def invoke_agent(
     query: str,
     history: list[BaseMessage],
     on_step: Callable[[str, dict], Awaitable[None]] | None = None,
+    *,
+    session_id: str | None = None,
+    turn: int = 1,
 ) -> tuple[str, list[BaseMessage], dict]:
     """Run a single query through the agent graph.
 
@@ -84,6 +129,10 @@ async def invoke_agent(
     reports only on completion says nothing for all of it.
 
     Omitting it awaits the graph exactly as before.
+
+    *session_id* and *turn* join optional decision-log events across front
+    doors. When no ID is supplied this call is treated as a one-turn session;
+    logging remains entirely disabled unless AORTA_CHAT_SESSION_LOG is set.
 
     Returns:
         (reply_text, updated_history, raw_result_dict)
@@ -104,47 +153,31 @@ async def invoke_agent(
         "critic_feedback": None,
         "iteration": 0,
     }
-    with count_llm_calls("query"):
-        if on_step is None:
-            result = await agent_graph.ainvoke(initial)
-        else:
-            # "updates" names the node that just ran and "custom" carries a
-            # tool announcing itself; "values" is the accumulated state, so the
-            # last one matches what ainvoke would have returned.
-            result = {}
-            #: Whether the stream ever carried state. "values" is the only mode
-            #: that does, and without it ``result`` is still the empty dict it
-            #: started as -- which reads downstream as a turn where the model
-            #: said nothing, rather than as a graph that produced nothing.
-            state_seen = False
-            #: Progress failures seen this turn, so the warning is logged once
-            #: rather than per chunk. A dead session fails every one of them.
-            failed: list[BaseException] = []
-            async for mode, chunk in agent_graph.astream(
-                initial, stream_mode=["updates", "values", "custom"]
-            ):
-                if mode == "updates":
-                    for node, delta in chunk.items():
-                        await _announce(on_step, node, delta or {}, failed=failed)
-                elif mode == "custom":
-                    await _announce(on_step, "tool", chunk, failed=failed)
-                else:
-                    result = chunk
-                    state_seen = True
-            if not state_seen:
-                # Distinguishable from a turn the model answered badly, which
-                # is what falling through as an empty dict made this look like:
-                # extract_reply would hand back "I couldn't generate a
-                # response. Please try rephrasing.", and rephrasing cannot fix
-                # a graph that streamed without ever yielding state. Raising
-                # rather than returning that text keeps the failed turn out of
-                # the transcript, which is what the copied history above is
-                # for.
-                raise RuntimeError(
-                    "the agent graph streamed to completion without producing "
-                    "any state, so there is no answer to return. This is a "
-                    "malfunction rather than an unanswerable question."
-                )
+    decision_session = session_id or new_session_id()
+    decision_mode = session_log_mode()
+    try:
+        with capture_tool_calls(decision_mode) as decision_calls:
+            result = await _invoke_graph(initial, on_step)
+    except BaseException as exc:
+        record_failure(
+            session_id=decision_session,
+            turn=turn,
+            query=query,
+            error=exc,
+        )
+        raise
 
+    if decision_calls:
+        # A copy so logging metadata does not mutate the graph's own state
+        # object after execution. The values are already summary-only unless
+        # the operator explicitly selected full mode.
+        result = {**result, "_decision_tool_calls": decision_calls}
     reply = extract_reply(result.get("messages", []))
+    record_turn(
+        session_id=decision_session,
+        turn=turn,
+        query=query,
+        reply=reply,
+        state=result,
+    )
     return reply, [*pending, AIMessage(content=reply)], result
