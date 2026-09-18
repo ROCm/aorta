@@ -95,17 +95,17 @@ def _consan_racy_report() -> dict:
 
 
 def _consan_sampled_racy_report() -> dict:
-    """A Sampled racy run, kept alongside the Record/Replay fixture above.
+    """A default-detector racy run, kept alongside the legacy fixture above.
 
-    Sampled states a race three ways: the itemized conflict record, the count of
-    the conflicts the hook analysed but logged no example for, and the device-side
-    immediate counter. Each arrives under its own finding code.
+    The retained detector states a race three ways: the itemized conflict record,
+    the count of conflicts the hook analysed but logged no example for, and the
+    device-side immediate counter. Each arrives under its own finding code.
     """
     conflict = {
         "sanitizer": "consan", "severity": "race", "code": "sampled_conflict",
         "message": (
-            "[rocjitsu-dbi-hooks] ConSan MOI auto sampled conflict reader=1 first_index=0 "
-            "second_index=1 first_kind=1 second_kind=2 first_owner=0 second_owner=1 "
+            "[rocjitsu-dbi-hooks] ConSan conflict reader=1 first_index=0 second_index=1 "
+            "first_kind=1 second_kind=2 first_owner=0 second_owner=1 "
             "epoch=2 generation=3 first_bytes=[0,4) second_bytes=[0,4) "
             "code_object=b1946ac92492d234 first_instruction=0x40 second_instruction=0x48 "
             "dispatch=0x1 workgroup=(0,0,0) cluster_workgroup=0 "
@@ -117,8 +117,8 @@ def _consan_sampled_racy_report() -> dict:
     summary = {
         "sanitizer": "consan", "severity": "race", "code": "sampled_conflict_summary",
         "message": (
-            "ConSan MOI auto sampled conflicts reported by the report summary only: "
-            "reader=1 counted 3 with 1 example record(s) logged"
+            "ConSan conflict count reported by the summary only: reader=1 counted 3 "
+            "with 1 example record(s) logged"
         ),
         "kernel_name": None, "code_object": None, "entry_offset": None,
         "metadata": {"reader": "1", "sampled_conflicts": "3", "itemized_conflicts": "1"},
@@ -126,8 +126,7 @@ def _consan_sampled_racy_report() -> dict:
     immediate = {
         "sanitizer": "consan", "severity": "race", "code": "sampled_immediate_conflict",
         "message": (
-            "ConSan MOI auto sampled immediate conflicts counted on the device: "
-            "reader=1 counted 2"
+            "ConSan conflict counted immediately on the device: reader=1 counted 2"
         ),
         "kernel_name": None, "code_object": None, "entry_offset": None,
         "metadata": {"reader": "1", "sampled_immediate_conflicts": "2"},
@@ -5615,7 +5614,7 @@ def test_required_env_is_per_case_and_the_note_names_exactly_it():
         "HSA_TOOLS_LIB",
         "HSA_TOOLS_DISABLE_REGISTER",
         "RJ_CONSAN_MODE",
-        "RJ_CONSAN_MOI_SAMPLED_PRESET",
+        "RJ_CONSAN_PRESET",
         "RJ_CONSAN_POLICY",
     ]
     # The internal flag is not leaked into the published manifest.

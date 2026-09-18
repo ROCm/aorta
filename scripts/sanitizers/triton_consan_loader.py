@@ -33,7 +33,7 @@ Two modes, mirroring the two committed HIP loaders:
     closed for the same reason ``daily-consan-lds-dispatch.yaml`` did (zero
     captured records -> exit 86, ROCm/rocm-systems#9972); that is fixed in
     ``15275dad`` and that lane now passes. What still fails closed is an object
-    with no MOI-admissible sites -- ordinary global loads/stores alone give
+    with no ConSan-admissible sites -- ordinary global loads/stores alone give
     ``access=0/0``, so strict ``moi_require_records`` exits 86 regardless of the
     driver.
 

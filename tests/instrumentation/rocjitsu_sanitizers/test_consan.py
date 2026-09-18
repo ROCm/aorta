@@ -74,6 +74,18 @@ def _healthy_evidence(*, engine: str = "record_replay") -> str:
     return "\n".join((coverage, *sites, verdict))
 
 
+def _current_healthy_coverage() -> str:
+    """Current post-mode-simplification coverage/verdict grammar."""
+    return (
+        _healthy_evidence(engine="sampled")
+        .replace("flavor=moi engine=sampled", "mode=default")
+        .replace(" replay_unsupported_access=0", "")
+        .replace(" replay_unsupported_atomics=0", "")
+        .replace(" replay_unsupported_fences=0", "")
+        .replace(" replay_metadata_full=0", "")
+    )
+
+
 # The three Sampled log shapes below are transcribed from RocJITsu's renderer
 # (rj_hsa_dbi_moi_sampled_report_renderer.cpp at 164c20fae8c). Two of them look
 # alike on purpose: the conflict record and the benign per-watchpoint evidence
@@ -121,6 +133,34 @@ def _healthy_sampled_evidence() -> str:
     return "\n".join((_sampled_report(), _healthy_evidence(engine="sampled")))
 
 
+def _current_report(
+    *,
+    reader: int = 1,
+    conflicts: int = 0,
+    immediate: int = 0,
+    examples: int = 0,
+    pairs_without_example: int = 0,
+) -> str:
+    """Current flattened equivalent of the legacy Sampled summary."""
+    report = _sampled_report(
+        reader=reader,
+        conflicts=conflicts,
+        immediate=immediate,
+        examples=examples,
+        pairs_without_example=pairs_without_example,
+    )
+    return (
+        report.replace("ConSan MOI auto report", "ConSan auto report")
+        .replace("visible_sampled_sync", "visible_sync")
+        .replace("visible_sampled", "visible")
+        .replace("sampled_", "")
+    )
+
+
+def _healthy_default_evidence() -> str:
+    return "\n".join((_current_report(), _current_healthy_coverage()))
+
+
 def _sampled_conflict(*, reader: int = 1, first_index: int = 0, second_index: int = 1) -> str:
     return (
         f"{_PREFIX} MOI auto sampled conflict reader={reader} first_index={first_index} "
@@ -130,6 +170,12 @@ def _sampled_conflict(*, reader: int = 1, first_index: int = 0, second_index: in
         "dispatch=0x1 workgroup=(0,0,0) cluster_workgroup=0 "
         "first_lanes=0x000000000000000f second_lanes=0x00000000000000f0"
     )
+
+
+def _current_conflict(*, reader: int = 1, first_index: int = 0, second_index: int = 1) -> str:
+    return _sampled_conflict(
+        reader=reader, first_index=first_index, second_index=second_index
+    ).replace("ConSan MOI auto sampled conflict", "ConSan conflict")
 
 
 def _sampled_evidence(*, reader: int = 1, index: int = 0) -> str:
@@ -262,6 +308,25 @@ def test_clean_sampled_evidence_is_not_a_race() -> None:
 
     assert consan.findings == ()
     assert consan.verdict is Verdict.PASS
+
+
+def test_current_default_output_parses_a_conflict() -> None:
+    output = "\n".join(
+        (
+            _current_conflict(),
+            _current_report(conflicts=1, examples=1),
+            _current_healthy_coverage(),
+        )
+    )
+
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 0, output, ""),
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is ExecutionState.RAN
+    assert consan.verdict is Verdict.FAIL
+    assert [finding.code for finding in consan.findings] == ["sampled_conflict"]
 
 
 def test_sampled_log_limit_line_is_not_a_race() -> None:
@@ -724,8 +789,8 @@ def test_racy_baseline_finding_shape_matches_every_sampled_message() -> None:
 
     So the declared shape is checked against messages the parser really emits
     rather than against hand-copied fixture text, and against all three ways
-    Sampled states a race -- a racy run that happened to log no example record
-    must still satisfy the gate instead of turning it red.
+    the default detector states a race -- a racy run that happened to log no
+    example record must still satisfy the gate instead of turning it red.
     """
     baselines = (
         Path(__file__).resolve().parents[3]
@@ -740,9 +805,9 @@ def test_racy_baseline_finding_shape_matches_every_sampled_message() -> None:
     ]
     output = "\n".join(
         (
-            _sampled_conflict(),
-            _sampled_report(conflicts=3, examples=1, pairs_without_example=2, immediate=1),
-            _healthy_evidence(engine="sampled"),
+            _current_conflict(),
+            _current_report(conflicts=3, examples=1, pairs_without_example=2, immediate=1),
+            _current_healthy_coverage(),
         )
     )
 
@@ -1191,6 +1256,8 @@ def test_strict_mode_relies_on_backend_exit_and_coverage_gate() -> None:
 
 
 def test_supported_consan_modes_are_exposed() -> None:
+    assert ConSanMode.DEFAULT.value == "default"
+    # Retained only for pre-simplification logs.
     assert ConSanMode.SAMPLED.value == "sampled"
     # Retained so a pre-migration bundle or saved log still names a mode this
     # module reads, even though aorta no longer requests it.
@@ -1222,7 +1289,7 @@ def _capture_consan_env(
 
     def fake_run_argv(argv, *, timeout_seconds, env):
         captured.update(env)
-        return ProcessResult(tuple(argv), 0, _healthy_sampled_evidence(), "")
+        return ProcessResult(tuple(argv), 0, _healthy_default_evidence(), "")
 
     monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
     result = run_consan(
@@ -1273,7 +1340,7 @@ def test_run_consan_scrubs_inherited_log_env_when_disabled(
 
     def fake_run_argv(argv, *, timeout_seconds, env):
         captured.update(env)
-        return ProcessResult(tuple(argv), 0, _healthy_sampled_evidence(), "")
+        return ProcessResult(tuple(argv), 0, _healthy_default_evidence(), "")
 
     monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
     run_consan(
@@ -1287,7 +1354,7 @@ def test_run_consan_scrubs_inherited_log_env_when_disabled(
     assert "RJ_CONSAN_LOG" not in captured
 
 
-def test_run_consan_pins_sampled_mode_and_the_max_preset(
+def test_run_consan_pins_default_mode_and_the_max_preset(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     # The nightly racy case is a positive control, so the gate needs stride 1 on
@@ -1295,14 +1362,20 @@ def test_run_consan_pins_sampled_mode_and_the_max_preset(
     # statistically and reported as a clean pass.
     env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
 
-    assert env.get("RJ_CONSAN_MODE") == "sampled"
-    assert env.get("RJ_CONSAN_MOI_SAMPLED_PRESET") == "max"
+    assert env.get("RJ_CONSAN_MODE") == "default"
+    assert env.get("RJ_CONSAN_PRESET") == "max"
 
 
-# Current upstream controls that can alter Sampled evidence or verdicts. The
-# production scrub is prefix-based so future MOI controls are covered too; this
-# list documents and exercises today's concrete risks.
+# Representative current and legacy controls that can alter evidence or
+# verdicts. The production scrub is prefix-based, so future controls are covered
+# too; this list exercises the highest-risk concrete cases.
 _SAMPLED_GATE_OVERRIDES = (
+    "RJ_CONSAN_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES",
+    "RJ_CONSAN_AUTO_REPORT_BUFFER_SIZE",
+    "RJ_CONSAN_DEVICE_CONFLICT_CHECK",
+    "RJ_CONSAN_EPOCH_ANALYSIS",
+    "RJ_CONSAN_FORBID_DIAGNOSTICS",
+    "RJ_CONSAN_FORBID_OVERFLOW",
     "RJ_CONSAN_MOI_ALLOW_PROVABLY_SAME_VALUE_WRITE_RACES",
     "RJ_CONSAN_MOI_AUTO_REPORT_BUFFER_SIZE",
     "RJ_CONSAN_MOI_EPOCH_ANALYSIS",
@@ -1327,23 +1400,35 @@ _SAMPLED_GATE_OVERRIDES = (
     "RJ_CONSAN_MOI_SAMPLED_BANKS",
     "RJ_CONSAN_MOI_TRACK_ATOMICS",
     "RJ_CONSAN_MOI_TRACK_BARRIERS",
+    "RJ_CONSAN_REPORT_BUFFER",
+    "RJ_CONSAN_REPORT_BUFFER_SIZE",
+    "RJ_CONSAN_REQUIRE_DIAGNOSTICS",
+    "RJ_CONSAN_REQUIRE_RECORDS",
+    "RJ_CONSAN_RUNTIME_SAMPLE_OFFSET",
+    "RJ_CONSAN_RUNTIME_SAMPLE_STRIDE",
+    "RJ_CONSAN_TRACK_ATOMICS",
+    "RJ_CONSAN_TRACK_BARRIERS",
+    "RJ_CONSAN_WATCHPOINT_BANKS",
+    "RJ_CONSAN_WORKGROUP_SAMPLE_OFFSET",
+    "RJ_CONSAN_WORKGROUP_SAMPLE_STRIDE",
 )
 
 
 def test_run_consan_scrubs_inherited_sampled_gate_overrides(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    # A preset supplies defaults only, and several other MOI controls change
+    # A preset supplies defaults only, and several other controls change
     # whether or how evidence is analyzed. None may leak from the parent.
     for name in _SAMPLED_GATE_OVERRIDES:
         monkeypatch.setenv(name, "256")
-    monkeypatch.setenv("RJ_CONSAN_MOI_FUTURE_CONTROL", "hostile")
+    monkeypatch.setenv("RJ_CONSAN_FUTURE_CONTROL", "hostile")
 
     env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
 
     assert [name for name in _SAMPLED_GATE_OVERRIDES if name in env] == []
-    assert env.get("RJ_CONSAN_MOI_FUTURE_CONTROL") is None
-    assert env.get("RJ_CONSAN_MOI_SAMPLED_PRESET") == "max"
+    assert env.get("RJ_CONSAN_FUTURE_CONTROL") is None
+    assert env.get("RJ_CONSAN_MOI_SAMPLED_PRESET") is None
+    assert env.get("RJ_CONSAN_PRESET") == "max"
 
 
 def _multi_worklist(count: int) -> KernelWorklist:
@@ -1393,7 +1478,7 @@ def test_run_consan_empty_worklist_fails_closed(
     def fake_run_argv(argv, *, timeout_seconds, env):
         nonlocal ran
         ran = True
-        return ProcessResult(tuple(argv), 0, _healthy_sampled_evidence(), "")
+        return ProcessResult(tuple(argv), 0, _healthy_default_evidence(), "")
 
     monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
     command = tmp_path / "repro"
@@ -1439,10 +1524,10 @@ def test_run_consan_pins_policy_env_over_hostile_inheritance(
     monkeypatch.delenv("HSA_TOOLS_DISABLE_REGISTER", raising=False)
 
     _, env = _run_consan_with(
-        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_sampled_evidence(), strict=True
+        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_default_evidence(), strict=True
     )
 
-    assert env.get("RJ_CONSAN_MODE") == ConSanMode.SAMPLED.value
+    assert env.get("RJ_CONSAN_MODE") == ConSanMode.DEFAULT.value
     assert env["RJ_CONSAN_POLICY"] == "strict"
     assert env["HSA_TOOLS_DISABLE_REGISTER"] == "1"
 
@@ -1454,7 +1539,7 @@ def test_run_consan_default_policy_when_not_strict(
         monkeypatch,
         tmp_path,
         worklist=_worklist(),
-        output=_healthy_sampled_evidence(),
+        output=_healthy_default_evidence(),
         strict=False,
     )
     assert env["RJ_CONSAN_POLICY"] == "default"
@@ -1467,7 +1552,7 @@ def test_run_consan_surfaces_preflight_and_attributes_kernel(
         (
             "rocjitsu-waitcheck: .text+0x40: missing s_wait_loadcnt <= 0",
             "rocjitsu-waitcheck: consumer: v_mov_b32",
-            _healthy_sampled_evidence(),
+            _healthy_default_evidence(),
         )
     )
     result, _ = _run_consan_with(

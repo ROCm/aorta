@@ -25,11 +25,14 @@ _VERDICT_COUNTS = (
     "applicable_code_objects",
     "incomplete_code_objects",
     "dynamic_incomplete",
+)
+_LEGACY_VERDICT_COUNTS = (
     "replay_unsupported_access",
     "replay_unsupported_atomics",
     "replay_unsupported_fences",
     "replay_metadata_full",
 )
+_ALL_VERDICT_COUNTS = (*_VERDICT_COUNTS, *_LEGACY_VERDICT_COUNTS)
 _SITE_FIELDS = (
     "reader",
     "kind",
@@ -188,23 +191,37 @@ def _parse_coverage(payload: str, line_number: int) -> CoverageRecord:
         fields,
         (
             "reader",
-            "flavor",
-            "engine",
             "analysis_complete",
             "expert_limit",
             *count_names,
         ),
         context,
     )
-    if fields["flavor"] not in {"moi", "supercollider"}:
-        raise CoverageParseError(f"{context}: unsupported flavor")
-    if fields["engine"] not in {
-        "record_replay",
-        "inline_shadow",
-        "sampled",
-        "supercollider",
-    }:
-        raise CoverageParseError(f"{context}: unsupported engine")
+    has_current_mode = "mode" in fields
+    has_legacy_mode = "flavor" in fields or "engine" in fields
+    if has_current_mode == has_legacy_mode:
+        raise CoverageParseError(
+            f"{context}: expected exactly one of current mode or legacy flavor/engine"
+        )
+    if has_current_mode:
+        mode = fields["mode"]
+        if mode not in {"default", "supercollider"}:
+            raise CoverageParseError(f"{context}: unsupported mode")
+        flavor = "moi" if mode == "default" else "supercollider"
+        engine = mode
+    else:
+        _require(fields, ("flavor", "engine"), context)
+        flavor = fields["flavor"]
+        engine = fields["engine"]
+        if flavor not in {"moi", "supercollider"}:
+            raise CoverageParseError(f"{context}: unsupported flavor")
+        if engine not in {
+            "record_replay",
+            "inline_shadow",
+            "sampled",
+            "supercollider",
+        }:
+            raise CoverageParseError(f"{context}: unsupported engine")
     counts = {name: _count(fields, name, context) for name in count_names}
     complete = True
     for kind in _SITE_KINDS:
@@ -229,8 +246,8 @@ def _parse_coverage(payload: str, line_number: int) -> CoverageRecord:
     return CoverageRecord(
         reader=_count(fields, "reader", context),
         load=_load(fields, context),
-        flavor=fields["flavor"],
-        engine=fields["engine"],
+        flavor=flavor,
+        engine=engine,
         analysis_complete=analysis_complete,
         expert_limit=_boolean(fields, "expert_limit", context),
         counts=tuple(sorted(counts.items())),
@@ -252,7 +269,16 @@ def _parse_verdict(payload: str, line_number: int) -> AnalysisVerdict:
         ),
         context,
     )
+    legacy_present = [name in fields for name in _LEGACY_VERDICT_COUNTS]
+    if any(legacy_present) and not all(legacy_present):
+        raise CoverageParseError(f"{context}: incomplete legacy replay counters")
     counts = {name: _count(fields, name, context) for name in _VERDICT_COUNTS}
+    counts.update(
+        {
+            name: _count(fields, name, context) if all(legacy_present) else 0
+            for name in _LEGACY_VERDICT_COUNTS
+        }
+    )
     pairs = {kind: _pair(fields, kind, context) for kind in _SITE_KINDS}
     return AnalysisVerdict(
         applicable=_boolean(fields, "applicable", context),
@@ -268,7 +294,8 @@ def _parse_verdict(payload: str, line_number: int) -> AnalysisVerdict:
 def _aggregate(verdicts: list[AnalysisVerdict]) -> AnalysisVerdict:
     applicable = [verdict for verdict in verdicts if verdict.applicable]
     counts = {
-        name: sum(verdict.count_map[name] for verdict in verdicts) for name in _VERDICT_COUNTS
+        name: sum(verdict.count_map[name] for verdict in verdicts)
+        for name in _ALL_VERDICT_COUNTS
     }
     pairs = {
         kind: (
@@ -432,7 +459,7 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
             reasons.append(f"verdict {name}=false")
     if counts["applicable_code_objects"] == 0:
         reasons.append("no applicable code objects")
-    for name in _VERDICT_COUNTS[1:]:
+    for name in _ALL_VERDICT_COUNTS[1:]:
         if counts[name] != 0:
             reasons.append(f"{name}={counts[name]}")
     for kind, patched, supported in verdict.patched_supported:

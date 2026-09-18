@@ -36,6 +36,7 @@ _AUTO_REPLAY_DIAGNOSTIC = re.compile(r"\bauto\s+replay\s+diagnostic(?:\s|$)", re
 # summary branch matches ``auto replay`` would turn every clean Sampled run into
 # a race report.
 _AUTO_SAMPLED_CONFLICT = re.compile(r"\bauto\s+sampled\s+conflict(?:\s|$)", re.IGNORECASE)
+_DEFAULT_CONFLICT = re.compile(r"\bConSan\s+conflict(?:\s|$)", re.IGNORECASE)
 # The actual per-snapshot record begins ``auto report reader=``. Match that
 # prefix, before any mode-specific field: every such record belonging to a
 # Sampled reader must carry the complete Sampled schema, so one valid snapshot
@@ -73,14 +74,14 @@ _MISSING_SHARED_OBJECT = re.compile(
 
 
 class ConSanMode(str, Enum):
-    """The ConSan MOI engines whose evidence this module can parse.
+    """Current execution mode plus legacy engines whose saved logs still parse.
 
-    ``SAMPLED`` is what :func:`run_consan` requests: RocJITsu made it the
-    default and is the engine aorta now requests. ``RECORD_REPLAY`` is retained
-    so logs and downloaded bundles captured before that migration still name a
-    mode this module reads.
+    RocJITsu removed the pre-release engine names after retaining Sampled as its
+    ``DEFAULT`` detector. ``SAMPLED`` and ``RECORD_REPLAY`` remain here only so
+    logs captured before that simplification still name modes this module reads.
     """
 
+    DEFAULT = "default"
     SAMPLED = "sampled"
     RECORD_REPLAY = "record-replay"
 
@@ -91,13 +92,11 @@ class ConSanMode(str, Enum):
 # known race as a clean pass.
 _CONSAN_SAMPLED_PRESET = "max"
 
-# Every ``RJ_CONSAN_MOI_*`` variable changes the engine's evidence, reporting,
-# or verdict contract. Examples include selectors that thin ``max`` back out,
-# ``EPOCH_ANALYSIS`` values that skip host analysis, ``SAMPLED_CHECK`` adding a
-# lower-fidelity device check, and REQUIRE/FORBID guards that change control
-# outcomes. Scrub the namespace rather than maintaining a list that can go stale
-# when RocJITsu adds a knob, then set the one MOI control this gate owns below.
-_CONSAN_MOI_ENV_PREFIX = "RJ_CONSAN_MOI_"
+# Every ``RJ_CONSAN_*`` variable changes the hook's evidence, reporting, or
+# verdict contract. Scrub the namespace rather than maintaining old/new naming
+# lists that can go stale when RocJITsu adds or renames a control, then set only
+# the four values this gate owns below.
+_CONSAN_ENV_PREFIX = "RJ_CONSAN_"
 
 
 # The strict coverage cross-check (consan_coverage.parse_coverage_decision)
@@ -148,6 +147,19 @@ def _required_int(fields: dict[str, str], key: str) -> int:
     if key not in fields:
         raise ValueError(f"ConSan field {key} is missing from a Sampled report summary")
     return _int(fields, key)
+
+
+def _required_sampled_int(fields: dict[str, str], legacy_key: str) -> int:
+    """Read one counter from current flattened or legacy Sampled output."""
+    current_key = legacy_key.removeprefix("sampled_")
+    present = [key for key in (legacy_key, current_key) if key in fields]
+    if len(present) != 1:
+        raise ValueError(
+            f"ConSan field {legacy_key} is "
+            + ("missing" if not present else "ambiguous across current and legacy spellings")
+            + " in a Sampled report summary"
+        )
+    return _int(fields, present[0])
 
 
 def _parse_waitcheck(
@@ -253,9 +265,9 @@ def _sampled_totals(summaries: list[dict[str, str]]) -> dict[str, dict[str, int]
         if reader is None:
             raise ValueError("ConSan field reader is missing from a Sampled report summary")
         _required_int(summary, "reader")
-        counts = {key: _required_int(summary, key) for key in _SAMPLED_SUMMARY_COUNTS}
+        counts = {key: _required_sampled_int(summary, key) for key in _SAMPLED_SUMMARY_COUNTS}
         incomplete = {
-            key: _required_int(summary, key) for key in _SAMPLED_INCOMPLETE_COUNTS
+            key: _required_sampled_int(summary, key) for key in _SAMPLED_INCOMPLETE_COUNTS
         }
         nonzero_incomplete = [key for key, value in incomplete.items() if value != 0]
         if nonzero_incomplete:
@@ -293,7 +305,9 @@ def _require_sampled_summaries(
     missing = sorted(
         str(record.reader)
         for record in coverage
-        if record.engine == "sampled" and record.applicable and str(record.reader) not in totals
+        if record.engine in {"default", "sampled"}
+        and record.applicable
+        and str(record.reader) not in totals
     )
     if missing:
         raise ValueError(
@@ -357,8 +371,8 @@ def _sampled_summary_findings(
                     severity=FindingSeverity.RACE,
                     code="sampled_conflict_summary",
                     message=(
-                        "ConSan MOI auto sampled conflicts reported by the report "
-                        f"summary only: reader={reader} counted {conflicts} with "
+                        "ConSan conflict count reported by the summary only: "
+                        f"reader={reader} counted {conflicts} with "
                         f"{itemized} example record(s) logged"
                     ),
                     metadata=metadata,
@@ -371,8 +385,8 @@ def _sampled_summary_findings(
                     severity=FindingSeverity.RACE,
                     code="sampled_immediate_conflict",
                     message=(
-                        "ConSan MOI auto sampled immediate conflicts counted on the "
-                        f"device: reader={reader} counted {immediate}"
+                        "ConSan conflict counted immediately on the device: "
+                        f"reader={reader} counted {immediate}"
                     ),
                     metadata=metadata,
                 )
@@ -385,9 +399,9 @@ def parse_consan_output(
 ) -> ParsedCombinedOutput:
     """Parse one combined-hook stream without double-counting summaries.
 
-    Both MOI engines are read in the same pass: Sampled, which is what
-    :func:`run_consan` requests, and Record/Replay, whose evidence still arrives
-    in older downloaded bundles and saved logs.
+    The current default-detector grammar and the legacy Sampled/Record-Replay
+    grammars are read in one pass. :func:`run_consan` additionally requires the
+    current ``default`` mode; direct callers can still inspect saved old logs.
     """
 
     lines = output.splitlines()
@@ -414,7 +428,7 @@ def parse_consan_output(
                     metadata=tuple(sorted(fields.items())),
                 )
             )
-        elif _AUTO_SAMPLED_CONFLICT.search(line):
+        elif _AUTO_SAMPLED_CONFLICT.search(line) or _DEFAULT_CONFLICT.search(line):
             sampled_details.append(
                 Finding(
                     sanitizer="consan",
@@ -435,7 +449,9 @@ def parse_consan_output(
     decision = parse_coverage_decision(output)
     _require_expected_engine(decision.coverage, expected_mode)
     sampled_readers = {
-        str(record.reader) for record in decision.coverage if record.engine == "sampled"
+        str(record.reader)
+        for record in decision.coverage
+        if record.engine in {"default", "sampled"}
     }
     sampled_summaries = [
         report for report in auto_reports if report.get("reader") in sampled_readers
@@ -925,16 +941,14 @@ def run_consan(
     env = dict(os.environ)
     env["HSA_TOOLS_LIB"] = str(resolved_hook)
     # Pin the sanitizer contract so hostile inherited settings cannot weaken it:
-    # no auto-registration, Sampled mode at the ``max`` preset, no inherited
-    # selection overrides, and the requested policy. The preset is only legal
-    # alongside the Sampled engine -- the hook rejects it outright otherwise --
-    # so the two are set together and never on a legacy-mode path.
+    # no auto-registration, the retained default detector at the ``max`` preset,
+    # no inherited ConSan controls, and the requested policy.
     env["HSA_TOOLS_DISABLE_REGISTER"] = "1"
-    env["RJ_CONSAN_MODE"] = ConSanMode.SAMPLED.value
     for name in tuple(env):
-        if name.startswith(_CONSAN_MOI_ENV_PREFIX):
+        if name.startswith(_CONSAN_ENV_PREFIX):
             env.pop(name)
-    env["RJ_CONSAN_MOI_SAMPLED_PRESET"] = _CONSAN_SAMPLED_PRESET
+    env["RJ_CONSAN_MODE"] = ConSanMode.DEFAULT.value
+    env["RJ_CONSAN_PRESET"] = _CONSAN_SAMPLED_PRESET
     env["RJ_CONSAN_POLICY"] = "strict" if strict else "default"
     if consan_log:
         env["RJ_CONSAN_LOG"] = _CONSAN_LOG_DEBUG_LEVEL
@@ -949,7 +963,7 @@ def run_consan(
         env=env,
     )
     preflight, consan = evaluate_consan_output(
-        process, strict=strict, expected_mode=ConSanMode.SAMPLED
+        process, strict=strict, expected_mode=ConSanMode.DEFAULT
     )
     log_path = output_dir / "consan.log"
     log_path.write_text(f"{process.stdout}\n{process.stderr}", encoding="utf-8")

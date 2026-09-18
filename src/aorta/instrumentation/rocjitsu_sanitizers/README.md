@@ -5,7 +5,7 @@ RocJITsu guardrails without importing customer-derived artifacts.
 
 **Scope.** This module delivers the Phase-1 engine and the `mode: sanitizer`
 recipe UX (deterministic selection, exact-entry Waitcheck, fail-closed ConSan
-MOI Sampled, versioned reports). The end goal of
+default-detector parsing, versioned reports). The end goal of
 [#316](https://github.com/ROCm/aorta/issues/316) -- fully automatic
 workload-driven top-kernel execution (profile an uninstrumented model, resolve
 the top-K kernels to exact identities, then run scoped ConSan) -- is **not** yet
@@ -24,9 +24,9 @@ Available now as a Python library:
 - report a Waitcheck scan that hit the backend's diagnostic cap as truncated,
   rather than quoting its capped count as the whole hazard count;
 - parse upstream `rj-waitcheck-diagnostic-v1` JSONL for corpus workflows;
-- parse output from the combined Waitcheck + ConSan hook: MOI Sampled, which is
-  the mode aorta requests and RocJITsu's default, and Record/Replay, retained so
-  logs and bundles captured before that migration still parse;
+- parse output from the combined Waitcheck + ConSan hook: the current `default`
+  detector, plus legacy Sampled and Record/Replay logs retained for saved
+  bundles captured before RocJITsu simplified its modes;
 - preserve per-code-object ConSan coverage and fail closed on timeout, backend
   failure, missing verdicts, or incomplete coverage;
 - write and strictly reload experimental `aorta.sanitizer_report/0.1` JSON;

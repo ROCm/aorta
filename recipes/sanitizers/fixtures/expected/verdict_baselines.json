@@ -23,7 +23,7 @@
       "consan": "fail"
     },
     "finding_shape": {
-      "consan": "ConSan MOI auto sampled"
+      "consan": "ConSan conflict"
     }
   },
   "consan_tiny": {

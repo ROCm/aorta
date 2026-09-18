@@ -2290,9 +2290,9 @@ _REQUIRED_ENV: tuple[dict[str, Any], ...] = (
         "consan_only": True,
     },
     {
-        "var": "RJ_CONSAN_MOI_SAMPLED_PRESET",
+        "var": "RJ_CONSAN_PRESET",
         "set_by": "aorta",
-        "purpose": "max Sampled preset for deterministic guardrail coverage",
+        "purpose": "max default-detector preset for deterministic guardrail coverage",
         "consan_only": True,
     },
     {
