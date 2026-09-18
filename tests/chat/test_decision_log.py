@@ -413,6 +413,176 @@ class AsyncCallback:
         pass
 
 
+#: What ``list_cluster_jobs`` prints. Its lines carry a bare id rather than a
+#: ``Job `` prefix, and it is registered without ``allow_cluster_jobs``, so it
+#: is the tool most likely to have produced a record.
+JOB_LISTING = (
+    "Recent CIA jobs (jobs root: /home/me/cia-jobs):\n"
+    "  cia-20260918-064455-4fd02e  recipe=kernel  status=completed"
+    "  verdict=gpu_race @ 0.82\n"
+    "      bundle: /home/me/cia-jobs/cia-20260918-064455-4fd02e/bundle\n"
+    "  cia-20260918-071122-9ab31c  recipe=asm  status=completed"
+    "  verdict=numeric_instability @ 0.41\n"
+    "      bundle: /home/me/cia-jobs/cia-20260918-071122-9ab31c/bundle"
+)
+
+#: One result naming two jobs, each with its own verdict.
+TWO_JOBS = (
+    "Job cia-20260918-064455-4fd02e (slurm 1) - racy kernel\n"
+    "  category:   gpu_race\n"
+    "  confidence: 0.82\n"
+    "Job cia-20260918-071122-9ab31c (slurm 2) - the fixed rebuild\n"
+    "  category:   numeric_instability\n"
+    "  confidence: 0.41"
+)
+
+
+class TestEveryNamedJobIsFoundAndKeepsItsOwnVerdict:
+    """Both of these were found by running the extraction, not by reading it."""
+
+    def test_a_job_listing_yields_its_ids(self):
+        """Before: no ids at all, because the lines carry no ``Job `` prefix."""
+        results = decision_log._cia_results(JOB_LISTING)
+
+        assert [result["job_id"] for result in results] == [
+            "cia-20260918-064455-4fd02e",
+            "cia-20260918-071122-9ab31c",
+        ]
+
+    def test_the_bundle_path_is_not_read_as_another_job(self):
+        """The id repeats inside the path on the next line, and is not a job."""
+        results = decision_log._cia_results(JOB_LISTING)
+
+        assert len(results) == 2
+
+    def test_a_listing_without_a_parsable_verdict_says_so(self):
+        """``verdict=x @ y`` is a third rendering; null beats guessing at it.
+
+        The id is what makes the row joinable, and the report under
+        ``jobs_root`` is a better source for a verdict than a rendered line.
+        """
+        results = decision_log._cia_results(JOB_LISTING)
+
+        assert [result["category"] for result in results] == [None, None]
+        assert [result["confidence"] for result in results] == [None, None]
+
+    def test_each_job_keeps_its_own_verdict(self):
+        """Before: the second job was recorded as ``gpu_race @ 0.82``.
+
+        The direction of that error is what makes it worth fixing. A job whose
+        verdict is missing is absent from whatever reads this; a job wearing
+        another job's category is an answer, and a wrong one.
+        """
+        assert decision_log._cia_results(TWO_JOBS) == [
+            {
+                "job_id": "cia-20260918-064455-4fd02e",
+                "category": "gpu_race",
+                "confidence": 0.82,
+            },
+            {
+                "job_id": "cia-20260918-071122-9ab31c",
+                "category": "numeric_instability",
+                "confidence": 0.41,
+            },
+        ]
+
+    def test_one_job_named_twice_is_recorded_once(self):
+        results = decision_log._cia_results(
+            "Job cia-20260918-064455-4fd02e started\n"
+            'Job cia-20260918-064455-4fd02e done\n  category: gpu_race'
+        )
+
+        assert [result["job_id"] for result in results] == [
+            "cia-20260918-064455-4fd02e"
+        ]
+
+
+class TestTheFieldsThatMakeARecordResolvable:
+    """Four additions, each answering a question a record could not."""
+
+    def _one(self, monkeypatch, event: str, **overrides) -> dict:
+        monkeypatch.setenv(decision_log.SESSION_LOG_ENV, "1")
+        turn_state = state()
+        turn_state.update(overrides.pop("state", {}))
+        path = decision_log.record_turn(
+            session_id="session-a",
+            turn=1,
+            query=QUERY,
+            reply=REPLY,
+            state=turn_state,
+            **overrides,
+        )
+        return next(
+            record for record in _records(path) if record["event"] == event
+        )
+
+    def test_the_jobs_root_sits_beside_the_ids(self, monkeypatch, tmp_path):
+        """Without it a recorded id resolves against nothing.
+
+        The bundle, the autopsy report and the probe cells that would say what
+        actually happened all live under this root, and no other field names
+        it -- so it is what an empty ``resolution`` is waiting on.
+        """
+        monkeypatch.setenv("AORTA_CHAT_JOBS_PATH", str(tmp_path / "cia-jobs"))
+        from aorta.chat import config
+
+        config.reset_settings()
+
+        tool_event = self._one(monkeypatch, "tool")
+
+        assert tool_event["jobs_root"] == str(tmp_path / "cia-jobs")
+        config.reset_settings()
+
+    def test_a_tool_that_named_no_job_carries_no_root(self, monkeypatch):
+        """It is only meaningful where there is an id to resolve."""
+        tool_event = self._one(
+            monkeypatch,
+            "tool",
+            state={"tool_trace": ["[read_file(path='x')] →\nfile contents"]},
+        )
+
+        assert "jobs_root" not in tool_event
+
+    def test_the_front_door_is_recorded_on_every_event(self, monkeypatch):
+        """A browser demo and a scripted CLI run are not the same population."""
+        record = self._one(monkeypatch, "route", front_door="ui")
+
+        assert record["front_door"] == "ui"
+
+    def test_an_unstated_front_door_is_null_rather_than_guessed(
+        self, monkeypatch
+    ):
+        assert self._one(monkeypatch, "route")["front_door"] is None
+
+    def test_the_turn_duration_is_recorded_on_the_answer(self, monkeypatch):
+        """A four-minute turn and a four-second one are different decisions."""
+        record = self._one(monkeypatch, "answer", duration_seconds=214.7)
+
+        assert record["duration_seconds"] == 214.7
+
+    def test_the_critic_iteration_count_is_recorded(self, monkeypatch):
+        """``accepted`` says the answer was taken; this says what that cost."""
+        record = self._one(monkeypatch, "critic", state={"iteration": 3})
+
+        assert record["accepted"] is True
+        assert record["iterations"] == 3
+
+    def test_a_failed_turn_carries_the_time_it_spent_failing(self, monkeypatch):
+        monkeypatch.setenv(decision_log.SESSION_LOG_ENV, "1")
+        path = decision_log.record_failure(
+            session_id="session-a",
+            turn=1,
+            query=QUERY,
+            error=RuntimeError("boom"),
+            front_door="cli",
+            duration_seconds=12.5,
+        )
+        record = _records(path)[0]
+
+        assert record["duration_seconds"] == 12.5
+        assert record["front_door"] == "cli"
+
+
 class TestCliUsesOneExplicitSessionKey:
     async def test_ask_once_forwards_the_session_and_turn(
         self, monkeypatch
@@ -438,4 +608,8 @@ class TestCliUsesOneExplicitSessionKey:
         )
 
         assert ok is True
-        assert seen == {"session_id": "cli-session", "turn": 6}
+        assert seen == {
+            "session_id": "cli-session",
+            "turn": 6,
+            "front_door": "cli",
+        }
