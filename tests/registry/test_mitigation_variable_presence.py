@@ -164,20 +164,43 @@ def find_fixed_known_absent(present: frozenset[str] | set[str]) -> list[str]:
     )
 
 
-def _scan_dirs() -> list[Path]:
-    """Library directories to scan, those that exist on this machine."""
-    dirs: list[Path] = []
-    rocm = Path("/opt/rocm/lib")
-    if rocm.is_dir():
-        dirs.append(rocm)
+ROCM_LIB = Path("/opt/rocm/lib")
+
+
+def _torch_lib() -> Path | None:
     try:
         import torch
-
-        torch_lib = Path(torch.__file__).parent / "lib"
-        if torch_lib.is_dir():
-            dirs.append(torch_lib)
     except ImportError:
-        pass
+        return None
+    return Path(torch.__file__).parent / "lib"
+
+
+def _scan_dirs(
+    rocm_lib: Path | None = None, torch_lib: Path | None = None
+) -> list[Path]:
+    """Library directories to scan, or empty when this stack cannot answer.
+
+    **ROCm is required, not merely preferred.** Fifteen of the eighteen
+    mitigation variables are read by ``libamdhip64``, ``libhsa-runtime64`` or
+    ``librccl``; on a tree with only a CPU-wheel torch none of them can be
+    present, and the check would report the entire registry as unread. That is
+    a false statement about the registry and a true one about the machine --
+    and a guard that fires on the wrong lane gets deleted rather than fixed.
+    Measured: it did exactly that on this branch's first push.
+
+    Torch is scanned in addition when ROCm is there, because
+    ``PYTORCH_NO_CUDA_MEMORY_CACHING`` and ``TORCH_ROCM_FA_PREFER_CK`` live in
+    the torch libraries rather than in ROCm's.
+
+    Both directories are injectable so the rule above is testable without ROCm.
+    """
+    rocm = ROCM_LIB if rocm_lib is None else rocm_lib
+    if not rocm.is_dir():
+        return []
+    dirs = [rocm]
+    torch_dir = _torch_lib() if torch_lib is None else torch_lib
+    if torch_dir is not None and torch_dir.is_dir():
+        dirs.append(torch_dir)
     return dirs
 
 
@@ -262,6 +285,20 @@ def test_known_absent_covers_only_the_mode_this_test_can_see():
     )
 
 
+def test_a_torch_only_tree_does_not_answer_for_rocm_variables(tmp_path):
+    """Pin the scoping decision, because getting it wrong reds the CPU lane.
+
+    Fifteen of the eighteen variables are read by ROCm's libraries. On a tree
+    with a CPU-wheel torch and no ROCm the check would report almost the whole
+    registry as unread, which is a false statement about the registry and a true
+    one about the machine. Measured: it did exactly that on the first push.
+    """
+    torch_like = tmp_path / "torch" / "lib"
+    torch_like.mkdir(parents=True)
+    assert _scan_dirs(rocm_lib=tmp_path / "definitely-not-rocm",
+                      torch_lib=torch_like) == []
+
+
 def test_audit_script_is_reusable_from_here():
     """``resolve_library`` is borrowed rather than restated; prove it still loads."""
     module = _load_audit_script()
@@ -277,10 +314,11 @@ def present_names() -> frozenset[str]:
     dirs = _scan_dirs()
     if not dirs:
         pytest.skip(
-            "no runtime libraries to scan: looked for /opt/rocm/lib and the "
-            "torch lib directory and found neither. This check needs the "
-            "libraries it is auditing, so it runs on a lane that has ROCm "
-            "installed and is inert elsewhere -- it is not silently passing."
+            f"{ROCM_LIB} is not present, so this stack cannot read fifteen of "
+            "the eighteen variables under audit and the check would report the "
+            "registry as unread when the machine is what is missing. Runs on a "
+            "lane with ROCm installed; inert elsewhere, and saying so rather "
+            "than passing quietly."
         )
     audit = _load_audit_script()
     found: set[str] = set()
