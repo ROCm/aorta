@@ -357,6 +357,98 @@ class TestTheOfflineHeuristic:
         """
         assert _fake_step(detectors=[detector]).category == expected
 
+    @pytest.mark.parametrize(
+        "symptom,expected",
+        [
+            # The two forms reported on this path.
+            ("NaN in device memory", "numeric_instability"),
+            ("global memory race in the kernel", "kernel_race"),
+            # `memory` against each leg that used to sit behind it, then `hang`
+            # and `oom` likewise -- the same broad/narrow grid as the detector
+            # path's, on the chain that mirrors it.
+            ("illegal access and nondeterministic output", "nondeterminism"),
+            ("checkpoint save stalled, memory pinned", "checkpoint_race"),
+            ("hang with NaN losses", "numeric_instability"),
+            ("rccl collective and a checkpoint race", "checkpoint_race"),
+            ("nccl ring plus an LDS race in the kernel", "kernel_race"),
+            ("oom after nondeterministic scores", "nondeterminism"),
+            ("oom and a NaN gradient", "numeric_instability"),
+            # And the broad legs still answer when nothing narrower applies, so
+            # the reorder has not turned them off.
+            ("process hang on the collective", "rccl_hang"),
+            ("oom killer took the process", "oom_fragment"),
+            ("illegal memory access", "illegal_mem"),
+        ],
+    )
+    def test_a_broad_symptom_leg_does_not_answer_for_a_narrower_one(
+        self, symptom, expected
+    ):
+        """The detector path's defect, in the chain that mirrors it.
+
+        `_infer_category_from_detectors` was reordered by how much evidence each
+        leg demands; this chain was not, and had the identical shape -- `memory`,
+        `hang` and `oom` deciding any symptom containing them, ahead of the NaN,
+        checkpoint, kernel-race and nondeterminism legs. Twenty-four broad/narrow
+        pairs here against twenty-eight there.
+
+        The pair is the point. These are two parallel dispatchers over one
+        taxonomy, so a class fixed in one is a class still open in the other
+        until someone looks, and this one was found by review rather than by the
+        sweep that fixed its twin. There are exactly two such chains.
+        """
+        assert _fake_step(symptom=symptom).category == expected
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # The reported spelling: `"nondetermin" in "non-deterministic"` is
+            # false, and the hyphenated form is the conventional English one.
+            ("non-deterministic eval scores", "nondeterminism"),
+            ("non deterministic eval scores", "nondeterminism"),
+            ("nondeterministic eval scores", "nondeterminism"),
+        ],
+    )
+    def test_a_separated_spelling_still_matches_on_the_symptom_path(
+        self, text, expected
+    ):
+        """One token reported, and the sweep says it is one of four.
+
+        Of every literal this file matches by substring, exactly four have a
+        morpheme boundary a separator could fall on -- this one, plus
+        `nan_signature`, `numerics_mismatch` and `hip_error` on the detector
+        path -- and all four were holed. Every other token is a single word, an
+        acronym or a structural literal, with no boundary to separate.
+        """
+        assert _fake_step(symptom=text).category == expected
+
+    @pytest.mark.parametrize(
+        "detector,expected",
+        [
+            # `custom:<raw_id>` is free-form, so the hyphenated id is as legal
+            # as the underscored one and means the same thing.
+            ("custom:nan-signature", "numeric_instability"),
+            ("custom:nan signature", "numeric_instability"),
+            ("custom:numerics-mismatch", "numeric_instability"),
+            ("custom:hip-error", "illegal_mem"),
+            # The underscored spellings must keep working: this widens the
+            # match, it does not move it.
+            ("tier4:nan_signature", "numeric_instability"),
+            ("custom:ts_kernel_numerics_mismatch", "numeric_instability"),
+            ("tier4:hip_error", "illegal_mem"),
+        ],
+    )
+    def test_a_separated_spelling_still_matches_on_the_detector_path(
+        self, detector, expected
+    ):
+        """The other three of the four, found by sweeping rather than by report.
+
+        These three are matched deliberately across a separator, which is why
+        they were the only detector-path literals at risk: a token that spans a
+        boundary can be spelled with a different separator, and `tier5_custom.py`
+        emits whatever the recipe named.
+        """
+        assert _fake_step(detectors=[detector]).category == expected
+
     def test_the_shipping_numerics_detector_routes(self):
         """The one detector in the tree that means this was falling through.
 

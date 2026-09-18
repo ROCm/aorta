@@ -290,7 +290,18 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     #
     # Substring rather than a token, for the reason `nan_signature` is: both
     # span a separator, and both are long enough not to collide.
-    if "nan_signature" in joined or "numerics_mismatch" in joined:
+    #
+    # `[-_ ]` rather than a literal `_` on each of the three tokens that span a
+    # separator here. `custom:<raw_id>` is free-form (`tier5_custom.py` emits
+    # whatever the recipe named), so `custom:nan-signature` is as legal an id as
+    # `custom:nan_signature` and meant the same thing while matching neither
+    # leg. Same hole as `nondetermin` against "non-deterministic" on the symptom
+    # path, and these three are the only other literals in the file with a
+    # boundary for a separator to fall on. Strictly widening: every spelling
+    # that matched before still matches.
+    if re.search(r"nan[-_ ]signature", joined) or re.search(
+        r"numerics[-_ ]mismatch", joined
+    ):
         return "numeric_instability"
     if "checkpoint" in joined:
         return "checkpoint_race"
@@ -314,7 +325,11 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # legs above. `custom:consan_global_memory_race` is the case that showed
     # this: a ConSan intra-kernel race report, named exactly as one, which this
     # leg used to label an illegal access because it ran first.
-    if "hip_error" in joined or "illegal" in joined or "memory" in joined:
+    if (
+        re.search(r"hip[-_ ]error", joined)
+        or "illegal" in joined
+        or "memory" in joined
+    ):
         return "illegal_mem"
     if "tier1:exit" in joined or "launch" in joined:
         return "launch_error"
@@ -337,12 +352,21 @@ class FakeLLMProposer:
         category = _infer_category_from_detectors(detectors)
         if symptom and category == "unknown":
             low = symptom.lower()
-            if "hang" in low or "nccl" in low or "rccl" in low:
-                category = "rccl_hang"
-            elif "memory" in low or "illegal" in low:
-                category = "illegal_mem"
-            elif "oom" in low:
-                category = "oom_fragment"
+            # Ordered most specific test first, the same way and for the same
+            # reason as `_infer_category_from_detectors`. This path had the
+            # identical defect: `memory`, `hang` and `oom` decided any symptom
+            # that merely contained them, ahead of every leg that demands more,
+            # so "NaN in device memory" was an illegal access and "global memory
+            # race in the kernel" never reached the conjunction below. Twenty-four
+            # broad/narrow pairs, against twenty-eight on the detector path.
+            #
+            # The two chains are parallel dispatchers over the same taxonomy, so
+            # a fix to one belongs in both -- which is the lesson of this pair
+            # rather than an aside: the detector path was reordered first and
+            # this one was left, and the mirror had to be reported before it was
+            # looked at. There are exactly two such chains; no third dispatcher
+            # exists.
+            #
             # Whole word, for the same reason the `race` legs want one: "nan" is
             # a substring of ordinary words a GPU symptom is likely to contain
             # -- "canonical", "nanoseconds", "maintenance" -- and this branch
@@ -350,7 +374,7 @@ class FakeLLMProposer:
             # `unknown`, which is exactly when a stray match decides the label.
             # `nans?` because the plural is how people write it ("NaNs in the
             # gradients") and a bare `\bnan\b` would miss it.
-            elif re.search(r"\bnans?\b", low):
+            if re.search(r"\bnans?\b", low):
                 category = "numeric_instability"
             # Checkpoint first, and before the race legs. "checkpoint save race
             # condition" is a checkpoint race by name, and with no checkpoint
@@ -371,8 +395,31 @@ class FakeLLMProposer:
             # nothing observed.
             elif _symptom_is_a_kernel_race(low):
                 category = "kernel_race"
-            elif "nondetermin" in low:
+            # `non[- ]?determin` rather than `nondetermin`, because
+            # `"nondetermin" in "non-deterministic"` is false and the hyphenated
+            # spelling is the conventional English one -- so the leg missed the
+            # form people are most likely to write.
+            #
+            # Swept the rest rather than fixing this one: of every literal this
+            # file matches by substring, exactly four have a morpheme boundary a
+            # separator could fall on, and all four were holed. The other tokens
+            # (`hang`, `rccl`, `memory`, `illegal`, `oom`, `checkpoint`,
+            # `launch`, `tier2`, `137`, `tier1:exit`) are single words, acronyms
+            # or structural literals, with no boundary to separate, so they are
+            # not at risk. `_symptom_is_a_kernel_race` is already immune, since
+            # it splits on `[^a-z0-9]+` before matching.
+            elif re.search(r"non[- ]?determin", low):
                 category = "nondeterminism"
+            elif "hang" in low or "nccl" in low or "rccl" in low:
+                category = "rccl_hang"
+            elif "oom" in low:
+                category = "oom_fragment"
+            # Last, for the reason `illegal_mem` is last on the detector path:
+            # "memory" is the most generic word either chain keys on, and a NaN,
+            # a checkpoint fault and an intra-kernel race are all describable as
+            # being about memory.
+            elif "memory" in low or "illegal" in low:
+                category = "illegal_mem"
 
         # Baseline pass wins even when the allowlist has no further mitigations.
         for summary in cell_summaries:
