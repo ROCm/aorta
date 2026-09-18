@@ -266,7 +266,14 @@ up() {
       # Bring-up is done, so the interrupt guard stops applying: a successful
       # `up` leaves the engine running on purpose, and `hold` installs its own
       docker logs "${NAME}" > "${LOG_DIR}/server.log" 2>&1 || true
-      models
+      # Informational here, and explicitly so. `models` now reports a failed
+      # fetch as non-zero, which is right for the subcommand and wrong as a
+      # bring-up gate: the endpoint has already answered /health_generate, and
+      # what decides whether this engine is usable is `backends` below. Left
+      # bare it would be a third reading of the same defect -- an unchecked
+      # non-zero under `set -e`, exiting through `_release_owned` and losing the
+      # logs -- so the tolerance is stated rather than implied.
+      models || true
       # An engine that ignores the sampling parameters, or that cannot answer a
       # `response_format` request at all, is useless for the one job this
       # server exists to do -- so bring-up has failed even though every health
@@ -279,8 +286,22 @@ up() {
       # wrong exit code -- one verdict name for two defects, which is the
       # mistake this script has already been corrected for once. The specific
       # cause is on the FAIL line `backends` printed.
-      backends
-      rc=$?
+      #
+      # `backends || rc=$?` rather than `backends; rc=$?`, and the difference
+      # is the whole branch: `set -e` is in force, so a bare call to a function
+      # that returns non-zero exits the shell *at that line*. `rc=$?` was never
+      # reached and neither was the `teardown_failed` below -- the EXIT trap ran
+      # `_release_owned` instead, which removes the container but does not
+      # capture `docker logs`, so a bring-up that failed here left no
+      # `server-failure.log` and no FAIL line naming what was wrong. The exit
+      # code happened to survive, because bash propagates the failing command's
+      # status through an EXIT trap, which is why this looked correct.
+      #
+      # A `||` list suppresses `set -e` for its left-hand side, so the status
+      # can be read and `backends`'s own code -- 57 for sampling, 59 for
+      # grammar -- still reaches the caller.
+      rc=0
+      backends || rc=$?
       if [ "${rc}" -ne 0 ]; then
         teardown_failed "${rc}" "engine is not usable for rollouts; see the FAIL line above"
       fi
@@ -300,9 +321,23 @@ up() {
 # id minus its `openai/` routing prefix. Checked rather than assumed: the prefix
 # is stripped on the wire, so a mismatch here is a 404 on every request and
 # reads as a broken gateway rather than a naming error.
+#
+# Reports rather than decides, for the reason `backends` does: `up` calls it
+# for the record on a path where the gateway has already answered
+# /health_generate, while `serve_for_rollouts.sh models` is a caller asking
+# whether the endpoint is there. A failed fetch used to print "(no response)"
+# and return 0 to both of them, so the subcommand answered "fine" for a gateway
+# that said nothing -- absence of evidence as favourable evidence, the same
+# shape as `backends`'s old `|| echo '{}'` and as the ownership guard's earlier
+# windows.
 models() {
   echo "--- advertised models (${PORT}) ---"
-  curl -s --max-time 10 "http://127.0.0.1:${PORT}/v1/models" || echo "(no response)"
+  if ! curl -s --max-time 10 "http://127.0.0.1:${PORT}/v1/models"; then
+    echo
+    echo "FAIL: no response from ${PORT}/v1/models, so the advertised model id" \
+         "is unverified" >&2
+    return 56
+  fi
   echo
 }
 
@@ -442,8 +477,27 @@ case "${1:-up}" in
   # and must not delete one it does not own.
   backends) backends ;;
   logs) docker logs "${@:2}" "${NAME}" ;;
+  # "no ${NAME}" used to be printed for two different things: there was nothing
+  # to remove, and the removal failed. A `docker rm -f` that fails because the
+  # daemon is unreachable reported success and exit 0 with the container still
+  # running -- so the one command whose job is to release a GPU could fail to
+  # release it and say so in words that mean it was already free. The probe
+  # that distinguishes them has to be checked too, for the same reason: a
+  # `docker ps` that cannot reach the daemon returns empty, and reading empty as
+  # "nothing there" is how the first version got it wrong.
   down)
-    docker rm -f "${NAME}" >/dev/null 2>&1 && echo "removed ${NAME}" || echo "no ${NAME}"
+    if docker rm -f "${NAME}" >/dev/null 2>&1; then
+      echo "removed ${NAME}"
+    elif ! existing=$(docker ps -aq -f "name=^${NAME}$" 2>/dev/null); then
+      echo "FAIL: cannot reach the docker daemon, so whether ${NAME} is still" \
+           "running is unknown; not reporting it as removed" >&2
+      exit 55
+    elif [ -n "${existing}" ]; then
+      echo "FAIL: ${NAME} still exists and could not be removed" >&2
+      exit 55
+    else
+      echo "no ${NAME}"
+    fi
     ;;
   *) echo "usage: $0 {up|hold|models|backends|logs|down}" >&2; exit 64 ;;
 esac

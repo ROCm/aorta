@@ -2015,6 +2015,174 @@ def test_a_rejected_restore_update_is_named_rather_than_scored(
     assert verdict == "RESTORE_UPDATE_REJECTED"
 
 
+def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar"):
+    """A PATH on which the real `up()` runs with no docker and no engine.
+
+    The existing tests in this file all extract `backends` and drive it
+    directly, which is why the defect below survived: the bug was not in
+    `backends` but in how `up` called it, and no test had ever executed `up`.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "docker-calls.log"
+    (bin_dir / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "docker $*" >> "{calls}"\n'
+        'case "$1" in\n'
+        # `-aq` is the name-collision probe and must answer empty; `-q` is the
+        # liveness poll and must answer running.
+        '  ps) for a in "$@"; do [ "$a" = "-aq" ] && exit 0; done; echo deadbeefcafe ;;\n'
+        "  run) echo 0123456789abcdef ;;\n"
+        '  logs) echo "stub container log line" ;;\n'
+        "esac\nexit 0\n"
+    )
+    (bin_dir / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        'url="${@: -1}"\n'
+        'case "$url" in\n'
+        "  *get_server_info*) printf '%s' "
+        f"'{{\"sampling_backend\":\"{sampling}\",\"grammar_backend\":\"{grammar}\"}}'"
+        "; exit 0 ;;\n"
+        "  *health*) echo 200; exit 0 ;;\n"
+        "  *v1/models*) echo '{\"data\":[{\"id\":\"Qwen/Qwen3-8B\"}]}'; exit 0 ;;\n"
+        "esac\nexit 0\n"
+    )
+    for name in ("docker", "curl"):
+        (bin_dir / name).chmod(0o755)
+    return bin_dir
+
+
+def _serve_env(tmp_path, bin_dir):
+    return {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "TS_OUT_DIR": str(tmp_path / "out"),
+        "TS_LOG_DIR": str(tmp_path / "logs"),
+        "TS_HF_HOME": str(tmp_path / "hf"),
+        "TS_READY_SEC": "10",
+    }
+
+
+def test_a_failed_backends_check_still_writes_the_failure_log(tmp_path):
+    """`set -e` made the `teardown_failed` branch after `backends` unreachable.
+
+    `backends; rc=$?` reads as a status check and is not one: `set -euo
+    pipefail` is in force, so a non-zero return from a bare function call exits
+    the shell at that line. `rc=$?` never ran, the `teardown_failed` call under
+    it never ran, and the EXIT trap's `_release_owned` handled the exit instead.
+
+    The container still got removed, so the leak this script has been fixed for
+    four times did not come back -- what was lost was the diagnosis.
+    `_release_owned` does not capture `docker logs`, so a bring-up that failed
+    on an unusable engine left no `server-failure.log` and no FAIL line naming
+    which of the two backends was wrong, on the one path where the reason is
+    the whole point.
+
+    The exit code survived, because bash propagates a failing command's status
+    through an EXIT trap. That is what made this look correct: the observable
+    everyone checks was right and the observable that matters was gone.
+    """
+    bin_dir = _serve_stubs(tmp_path, sampling="greedy")
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "up"],
+        capture_output=True,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+
+    # `backends`'s own code, not a constant: 57 is the sampling verdict.
+    assert proc.returncode == 57, output
+    # `teardown_failed`'s message, which is what proves the branch was reached.
+    # `_release_owned` prints "bring-up did not complete" instead.
+    assert "engine is not usable for rollouts" in output, output
+    # And the log it exists to capture. `docker rm -f` takes the container's
+    # logs with it, so this file is the only record of why the engine was
+    # rejected.
+    assert (tmp_path / "logs" / "server-failure.log").is_file(), sorted(
+        p.name for p in (tmp_path / "logs").iterdir()
+    )
+
+
+def test_a_usable_engine_still_brings_up_clean(tmp_path):
+    """The narrowness check: the fix must not make bring-up fail generally.
+
+    Same harness, same image, only the reported backends differ -- so a failure
+    here would mean the new `|| rc=$?` broke the success path rather than that
+    the engine was rejected.
+    """
+    bin_dir = _serve_stubs(tmp_path, sampling="triton")
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "up"],
+        capture_output=True,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_the_models_subcommand_does_not_pass_on_a_silent_gateway(tmp_path):
+    """A failed fetch printed "(no response)" and returned 0.
+
+    Found by auditing the class rather than reported: `curl ... || echo "(no
+    response)"` makes the fallback the *last* command, so its zero status is
+    the function's, and `serve_for_rollouts.sh models` answered "fine" for a
+    gateway that said nothing. Same shape as `backends`'s old `|| echo '{}'`,
+    which is already fixed and tested two functions further down.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text("#!/usr/bin/env bash\nexit 7\n")
+    (bin_dir / "docker").write_text("#!/usr/bin/env bash\nexit 0\n")
+    for name in ("docker", "curl"):
+        (bin_dir / name).chmod(0o755)
+
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "models"],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        timeout=60,
+    )
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "unverified" in proc.stdout + proc.stderr
+
+
+def test_down_does_not_report_a_failed_removal_as_nothing_to_remove(tmp_path):
+    """`down` said "no ts-rollout-serve" for two different things.
+
+    `docker rm -f ... && echo removed || echo "no ${NAME}"` exits 0 whatever
+    happens, and "no ${NAME}" means "there was nothing to remove" -- so a
+    daemon this command could not reach reported the container as already gone
+    while it was still running and still holding the GPU. Releasing the device
+    is the entire job of this subcommand.
+
+    The stub fails every `docker` call, which covers the probe as well as the
+    removal: reading an unreachable `docker ps` as "nothing there" is the same
+    defect one level down, and is how a first attempt at this would go wrong.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "Cannot connect to the Docker daemon" >&2\nexit 1\n'
+    )
+    (bin_dir / "docker").chmod(0o755)
+
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "down"],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        timeout=60,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode != 0, output
+    assert "no ts-rollout-serve" not in proc.stdout, output
+
+
 def test_a_greedy_engine_is_fatal_to_the_rollout_server(tmp_path):
     """Warning here while the aorta side fails with exit 57 was the asymmetry.
 
