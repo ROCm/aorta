@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+"""Prove TokenSpeed's ``nccl`` weight transfer actually moves weights.
+
+An HTTP 200 from ``/update_weights`` proves the control plane parsed some
+metadata. It does not prove a tensor landed in the model, and a partially wired
+receive path returns exactly that 200 with unchanged outputs -- which is the
+worst thing to report as working. This driver closes that gap by observing the
+model's behaviour instead of the status code.
+
+The test is a round trip, in three greedy generations of one fixed prompt:
+
+    baseline   -> completion A
+    perturb    -> completion B, which must differ from A
+    restore    -> completion C, which must equal A
+
+Both halves are load-bearing. B != A rules out a receive path that drops the
+payload; C == A rules out one that corrupts memory or lands tensors in the wrong
+place, and shows the transfer is faithful rather than merely destructive. A
+perturbation-only test passes in both of those cases.
+
+Pair with ``nccl_weight_peer.py``, which posts the matching broadcasts. Start
+the peer first: it is rank 0 and owns the TCP store, and the engine's
+``/init_weight_transfer_engine`` blocks until the group forms.
+
+Stdlib only, so it runs on the login node against a remote engine or beside the
+peer inside the image.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+TIMEOUT_S = 1800
+
+
+def log(msg: str) -> None:
+    print(f"[check] {msg}", flush=True)
+
+
+def call(
+    base: str, method: str, path: str, body: dict[str, Any] | None = None, timeout: int = TIMEOUT_S
+) -> tuple[int, Any, float]:
+    """One HTTP call, returning (status, parsed-or-raw body, wall seconds)."""
+    url = f"{base}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode()
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        status = e.code
+    except Exception as e:  # noqa: BLE001 - report transport failures as data
+        return 0, {"transport_error": str(e)}, time.time() - started
+    elapsed = time.time() - started
+    try:
+        return status, json.loads(raw), elapsed
+    except json.JSONDecodeError:
+        return status, raw, elapsed
+
+
+def wait_healthy(base: str, deadline_s: int) -> bool:
+    limit = time.time() + deadline_s
+    while time.time() < limit:
+        status, _, _ = call(base, "GET", "/health", timeout=10)
+        if status == 200:
+            return True
+        time.sleep(3)
+    return False
+
+
+def generate(base: str, model: str, prompt: str, max_tokens: int) -> dict[str, Any]:
+    """Greedy, fixed-length completion -- the observable that must move.
+
+    temperature 0 with a fixed prompt and ``ignore_eos`` makes the completion a
+    deterministic function of the weights, so any difference between two calls
+    is a difference in the weights and not in the sampler.
+    """
+    status, body, elapsed = call(
+        base,
+        "POST",
+        "/v1/completions",
+        {
+            "model": model,
+            "prompt": prompt,
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+            "ignore_eos": True,
+        },
+        timeout=300,
+    )
+    text = None
+    if status == 200 and isinstance(body, dict):
+        choices = body.get("choices") or []
+        if choices:
+            text = choices[0].get("text")
+    return {"status": status, "text": text, "seconds": round(elapsed, 3), "raw": body if text is None else None}
+
+
+# Keys the peer puts on the plan for the driver's benefit, which the engine has
+# never heard of. Kept out of `update_info`: an unknown key there is a 500.
+_PLAN_COORDINATION_KEYS = frozenset({"run_id"})
+
+
+def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str, Any]:
+    """One trainer step: start -> update -> finish, each timed separately.
+
+    ``/update_weights`` is the interesting number. It blocks while the workers
+    receive every broadcast in the plan, so its wall time is the actual cost of
+    moving these tensors, which is what the per-iteration budget is spent on.
+    """
+    out: dict[str, Any] = {"label": label}
+    started = time.time()
+
+    status, body, elapsed = call(control, "POST", "/start_weight_update", {})
+    out["start"] = {"status": status, "seconds": round(elapsed, 3), "body": body}
+
+    # `run_id` is coordination, not part of the engine's contract, and it must
+    # not travel in the payload. `update_info` is
+    # `{names, dtype_names, shapes, packed?, ...}` and the engine rejects an
+    # unknown key with a 500 -- `probe_weight_transfer.py` has an
+    # "update_weights unknown key" step establishing exactly that. So stamping
+    # `run_id` onto the plan to defeat a stale file, which is what the previous
+    # commit did, made every round fail before a single broadcast was
+    # attempted: the fix for one silent failure created a loud one.
+    #
+    # Stripped by name from a named set rather than inline, so the next
+    # coordination key added to the plan is a one-line change in an obvious
+    # place instead of this bug again.
+    update_info = {k: v for k, v in plan.items() if k not in _PLAN_COORDINATION_KEYS}
+    status, body, elapsed = call(
+        control, "POST", "/update_weights", {"update_info": update_info}
+    )
+    out["update"] = {"status": status, "seconds": round(elapsed, 3), "body": body}
+
+    status, body, elapsed = call(control, "POST", "/finish_weight_update", {})
+    out["finish"] = {"status": status, "seconds": round(elapsed, 3), "body": body}
+
+    out["total_seconds"] = round(time.time() - started, 3)
+    return out
+
+
+def wait_for_plan(
+    plan_path: Path, run_id: str, timeout_s: int
+) -> tuple[dict[str, Any] | None, str | None]:
+    """This run's plan, or ``(None, <the run_id seen instead>)``.
+
+    Matched on ``run_id`` rather than on the path existing. The peer and the
+    driver are launched by hand against a fixed shared path -- ``/shared/plan.json``
+    in the README -- so a plan left by a previous run is the ordinary state of
+    that directory, not an unusual one. Accepting it meant reading stale tensor
+    names and shapes while this run's peer was writing its own, and then
+    mismatching the HTTP update against the collective the peer actually
+    broadcasts: that hangs rather than failing, so it would not even have
+    reported a verdict.
+
+    ``os.replace`` on the peer's side publishes each plan atomically, so a read
+    whose id matches is a complete plan for this run.
+
+    Extracted from ``main`` for the same reason ``decide_verdict`` was: the
+    branch ordering is the whole check, and reaching it through ``main`` means
+    first waiting on an engine that a test does not have.
+    """
+    limit = time.time() + timeout_s
+    stale_seen: str | None = None
+    while True:
+        if plan_path.exists():
+            try:
+                candidate = json.loads(plan_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                # Mid-rename or unreadable: not this run's plan yet.
+                candidate = None
+            if isinstance(candidate, dict):
+                found = candidate.get("run_id")
+                if found == run_id:
+                    return candidate, None
+                stale_seen = str(found)
+        if time.time() >= limit:
+            return None, stale_seen
+        time.sleep(2)
+
+
+def _lifecycle_failure(lifecycle: dict[str, Any]) -> str | None:
+    """The first leg of a start -> update -> finish step that was not accepted.
+
+    All three legs, not just `/update_weights`. A rejected `/start_weight_update`
+    means the engine never entered the update state, and a rejected
+    `/finish_weight_update` means it may still be in it -- so neither is a step
+    whose completions can be read as evidence about weights, and the engine can
+    be left mid-update for whatever runs next. Judging on the update status
+    alone let both come back `PROVEN` whenever the two generations happened to
+    round-trip.
+    """
+    for leg in ("start", "update", "finish"):
+        status = (lifecycle.get(leg) or {}).get("status")
+        if status != 200:
+            return leg
+    return None
+
+
+def decide_verdict(
+    *,
+    baseline: dict[str, Any],
+    perturbed: dict[str, Any],
+    restored: dict[str, Any],
+    perturb_lifecycle: dict[str, Any],
+    restore_lifecycle: dict[str, Any],
+) -> tuple[str, bool | None, bool | None]:
+    """The round trip's verdict, plus the two observations behind it.
+
+    Split out of ``main`` because the ordering of these branches is the whole
+    check, and getting it wrong is silent: a failed generation carries
+    ``text=None``, and ``None`` compares unequal to the baseline, which is
+    exactly what a successful weight change looks like. Ordered naively, a 500
+    from the perturbed engine followed by a healthy restore reports ``PROVEN``
+    against a completion B that never existed -- the strongest possible verdict
+    from the weakest possible evidence, which is the one failure this driver
+    was written to prevent.
+
+    So both post-update generations must have happened before ``changed`` and
+    ``recovered`` mean anything, and both update *steps* must have been accepted
+    in full -- start, update and finish, the restore for the same reason as the
+    perturb. ``changed`` and ``recovered`` come back as ``None`` when there was
+    nothing to compare, rather than as a default that reads like an observation.
+    """
+    perturb_bad = _lifecycle_failure(perturb_lifecycle)
+    restore_bad = _lifecycle_failure(restore_lifecycle)
+
+    # Both booleans require the whole round trip to have happened -- both update
+    # steps accepted in full *and* both generations returned text. Computing
+    # them from the completions alone published
+    # `weights_changed_under_perturb: true` into the report while the verdict
+    # said the lifecycle was rejected, so the JSON asserted an observation the
+    # verdict had just disowned. `None` is what the docstring promises when
+    # there was nothing to compare, and a rejected start or finish means there
+    # was nothing to compare: the engine either never entered the update state
+    # or may still be in it, so those completions are not evidence about
+    # weights.
+    comparable = (
+        perturb_bad is None
+        and restore_bad is None
+        and perturbed["text"] is not None
+        and restored["text"] is not None
+    )
+    both_generated = perturbed["text"] is not None and restored["text"] is not None
+    changed = perturbed["text"] != baseline["text"] if comparable else None
+    recovered = restored["text"] == baseline["text"] if comparable else None
+
+    if perturb_bad is not None:
+        # Named by leg, because "the update was rejected" and "the engine never
+        # entered the update state" are different failures to chase.
+        verdict = (
+            "UPDATE_REJECTED"
+            if perturb_bad == "update"
+            else f"LIFECYCLE_REJECTED_{perturb_bad.upper()}"
+        )
+    elif restore_bad is not None:
+        verdict = (
+            "RESTORE_UPDATE_REJECTED"
+            if restore_bad == "update"
+            else f"RESTORE_LIFECYCLE_REJECTED_{restore_bad.upper()}"
+        )
+    elif not both_generated:
+        verdict = "POST_UPDATE_GENERATION_FAILED"
+    elif changed and recovered:
+        verdict = "PROVEN"
+    elif changed:
+        verdict = "CHANGED_BUT_NOT_FAITHFUL"
+    else:
+        verdict = "HTTP_OK_BUT_WEIGHTS_UNCHANGED"
+    return verdict, changed, recovered
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--engine-url", default="http://127.0.0.1:30000")
+    ap.add_argument("--control-url", default="http://127.0.0.1:30010")
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--plan", required=True, help="plan file written by the peer")
+    # Required rather than optional: the whole point is that a plan is only
+    # trusted when it is this run's, and an optional check is one an
+    # invocation can leave off precisely when it matters.
+    ap.add_argument("--plan-run-id", required=True,
+                    help="must match the peer's --run-id")
+    # Bounded here rather than hard-coded in the wait, so the stale-plan and
+    # never-appeared paths are reachable in a test without waiting ten
+    # minutes for each.
+    ap.add_argument("--plan-timeout", type=int, default=600,
+                    help="seconds to wait for this run's plan (default 600)")
+    ap.add_argument("--master-address", default="127.0.0.1")
+    ap.add_argument("--master-port", type=int, required=True)
+    ap.add_argument("--rank-offset", type=int, default=1)
+    ap.add_argument("--world-size", type=int, required=True)
+    ap.add_argument("--group-name", default="weight_update_group")
+    ap.add_argument("--prompt", default="The capital of France is")
+    ap.add_argument("--max-tokens", type=int, default=32)
+    ap.add_argument("--out", required=True, help="where to write the JSON verdict")
+    args = ap.parse_args()
+
+    report: dict[str, Any] = {
+        "engine_url": args.engine_url,
+        "control_url": args.control_url,
+        "model": args.model,
+        "world_size": args.world_size,
+        "rank_offset": args.rank_offset,
+        "prompt": args.prompt,
+        "max_tokens": args.max_tokens,
+    }
+
+    def flush() -> None:
+        Path(args.out).write_text(json.dumps(report, indent=2))
+
+    # The control URL, not the generation one. `/health` lives on the control
+    # endpoint -- `serve_for_rollouts.sh` polls it there, `probe_weight_transfer.py`
+    # reads it there, and `/get_world_size` two lines below is already addressed
+    # there. Probing the gateway instead means the documented
+    # `--engine-url :8000 --control-url :8001` invocation waits the full fifteen
+    # minutes and then reports ENGINE_UNHEALTHY against a server that came up.
+    if not wait_healthy(args.control_url, 900):
+        report["verdict"] = "ENGINE_UNHEALTHY"
+        flush()
+        return 2
+    log("engine healthy")
+
+    status, world, _ = call(args.control_url, "GET", "/get_world_size", timeout=30)
+    report["engine_get_world_size"] = {"status": status, "body": world}
+    log(f"engine reports world size: {world}")
+
+    baseline = generate(args.engine_url, args.model, args.prompt, args.max_tokens)
+    report["baseline"] = baseline
+    if baseline["text"] is None:
+        report["verdict"] = "BASELINE_GENERATION_FAILED"
+        flush()
+        return 2
+    log(f"baseline completion: {baseline['text']!r}")
+    flush()
+
+    # The peer publishes the plan before it blocks in rendezvous, so this
+    # arriving means the sender is up and it is safe to make the engine join.
+    #
+    # Matched on `run_id`, not just on the path existing. The two processes are
+    # launched by hand against a fixed shared path -- `/shared/plan.json` in the
+    # README -- so a plan left by a previous run is the normal state of that
+    # directory. Accepting it meant reading stale tensor names and shapes while
+    # this run's peer was still writing its own, and then mismatching the HTTP
+    # update against the collective the peer actually broadcasts, which hangs
+    # rather than failing. `os.replace` on the peer's side makes each plan
+    # appear atomically, so a read that matches the id is a complete plan for
+    # this run.
+    plan, stale_seen = wait_for_plan(
+        Path(args.plan), args.plan_run_id, args.plan_timeout
+    )
+    if plan is None:
+        # Distinguished, because the two send an operator to different places:
+        # nothing appeared means the peer never got that far, while a plan from
+        # another run means the path needs clearing or the ids do not match.
+        report["verdict"] = (
+            "PEER_PLAN_STALE" if stale_seen is not None else "PEER_PLAN_NEVER_APPEARED"
+        )
+        report["plan_run_id_expected"] = args.plan_run_id
+        report["plan_run_id_seen"] = stale_seen
+        flush()
+        return 2
+    report["plan"] = plan
+    log(f"plan: {len(plan['names'])} tensor(s) {plan['names']}")
+
+    status, body, elapsed = call(
+        args.control_url,
+        "POST",
+        "/init_weight_transfer_engine",
+        {
+            "init_info": {
+                "master_address": args.master_address,
+                "master_port": args.master_port,
+                "rank_offset": args.rank_offset,
+                "world_size": args.world_size,
+                "group_name": args.group_name,
+            }
+        },
+    )
+    report["init"] = {"status": status, "seconds": round(elapsed, 3), "body": body}
+    log(f"init_weight_transfer_engine -> {status} in {elapsed:.3f}s")
+    flush()
+    if status != 200:
+        report["verdict"] = "GROUP_INIT_FAILED"
+        flush()
+        return 2
+
+    report["perturb"] = lifecycle_update(args.control_url, plan, "perturb")
+    log(f"perturb update -> {report['perturb']['update']['status']} in {report['perturb']['update']['seconds']}s")
+    flush()
+
+    perturbed = generate(args.engine_url, args.model, args.prompt, args.max_tokens)
+    report["after_perturb"] = perturbed
+    log(f"after perturb: {perturbed['text']!r}")
+    flush()
+
+    report["restore"] = lifecycle_update(args.control_url, plan, "restore")
+    log(f"restore update -> {report['restore']['update']['status']} in {report['restore']['update']['seconds']}s")
+    flush()
+
+    restored = generate(args.engine_url, args.model, args.prompt, args.max_tokens)
+    report["after_restore"] = restored
+    log(f"after restore: {restored['text']!r}")
+
+    verdict, changed, recovered = decide_verdict(
+        baseline=baseline,
+        perturbed=perturbed,
+        restored=restored,
+        perturb_lifecycle=report["perturb"],
+        restore_lifecycle=report["restore"],
+    )
+    report["weights_changed_under_perturb"] = changed
+    report["weights_recovered_under_restore"] = recovered
+    report["verdict"] = verdict
+
+    report["update_seconds"] = {
+        "perturb": report["perturb"]["update"]["seconds"],
+        "restore": report["restore"]["update"]["seconds"],
+    }
+
+    flush()
+    log(f"VERDICT: {report['verdict']}")
+    return 0 if report["verdict"] == "PROVEN" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
