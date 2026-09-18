@@ -94,6 +94,48 @@ def _consan_racy_report() -> dict:
     }
 
 
+def _consan_sampled_racy_report() -> dict:
+    """A default-detector racy run, kept alongside the legacy fixture above.
+
+    The retained detector states a race three ways: the itemized conflict record,
+    the count of conflicts the hook analysed but logged no example for, and the
+    device-side immediate counter. Each arrives under its own finding code.
+    """
+    conflict = {
+        "sanitizer": "consan", "severity": "race", "code": "sampled_conflict",
+        "message": (
+            "[rocjitsu-dbi-hooks] ConSan conflict reader=1 first_index=0 second_index=1 "
+            "first_kind=1 second_kind=2 first_owner=0 second_owner=1 "
+            "epoch=2 generation=3 first_bytes=[0,4) second_bytes=[0,4) "
+            "code_object=b1946ac92492d234 first_instruction=0x40 second_instruction=0x48 "
+            "dispatch=0x1 workgroup=(0,0,0) cluster_workgroup=0 "
+            "first_lanes=0x000000000000000f second_lanes=0x00000000000000f0"
+        ),
+        "kernel_name": None, "code_object": "b1946ac92492d234", "entry_offset": None,
+        "metadata": {"reader": "1"},
+    }
+    summary = {
+        "sanitizer": "consan", "severity": "race", "code": "sampled_conflict_summary",
+        "message": (
+            "ConSan conflict count reported by the summary only: reader=1 counted 3 "
+            "with 1 example record(s) logged"
+        ),
+        "kernel_name": None, "code_object": None, "entry_offset": None,
+        "metadata": {"reader": "1", "sampled_conflicts": "3", "itemized_conflicts": "1"},
+    }
+    immediate = {
+        "sanitizer": "consan", "severity": "race", "code": "sampled_immediate_conflict",
+        "message": (
+            "ConSan conflict counted immediately on the device: reader=1 counted 2"
+        ),
+        "kernel_name": None, "code_object": None, "entry_offset": None,
+        "metadata": {"reader": "1", "sampled_immediate_conflicts": "2"},
+    }
+    report = _consan_racy_report()
+    report["checks"][0]["findings"] = [conflict, summary, immediate]
+    return report
+
+
 def _incomplete_execution_report() -> dict:
     report = _waitcheck_report()
     report["execution_status"] = "not_checked"
@@ -2040,6 +2082,34 @@ def test_summarize_consan_credits_process_findings_to_single_kernel():
     assert case["kernels"][0]["verdict"] == "fail"
     assert case["finding_groups"][0]["severity"] == "race"
     assert case["finding_groups"][0]["count"] == 2
+
+
+def test_summarize_consan_keeps_the_three_sampled_finding_kinds_apart():
+    case = gen.summarize_case(_consan_sampled_racy_report(), "fail")
+
+    assert case.get("verdict") == "fail" and case.get("match") is True
+    # Grouping is by finding code, so the dashboard reads "one race itemized, three
+    # counted, two seen on the device" instead of collapsing three different
+    # statements about the run into a single race row.
+    groups = case.get("finding_groups") or []
+    assert [group.get("code") for group in groups] == [
+        "sampled_conflict",
+        "sampled_conflict_summary",
+        "sampled_immediate_conflict",
+    ]
+    summary = next(
+        group for group in groups if group.get("code") == "sampled_conflict_summary"
+    )
+    assert "counted 3 with 1 example record(s) logged" in str(summary.get("example"))
+    # The Sampled conflict record is several times longer than the Record/Replay
+    # diagnostic it replaces, so the one-line clamp is what keeps it inside a
+    # table cell. The count it belongs to is carried by the group, not the text.
+    conflict = next(group for group in groups if group.get("code") == "sampled_conflict")
+    example = str(conflict.get("example"))
+    assert example.endswith("\u2026")
+    assert "\n" not in example
+    kernels = case.get("kernels") or []
+    assert kernels and kernels[0].get("findings") == 3
 
 
 def test_missing_report_is_marked_absent():
@@ -5532,14 +5602,21 @@ def test_case_index_page_carries_the_reproduction_details(tmp_path, monkeypatch)
 
 
 def test_required_env_is_per_case_and_the_note_names_exactly_it():
-    # The prose has always said the four HSA/RJ variables are what ConSan
+    # The prose says the HSA/RJ variables below are what ConSan
     # *additionally* requires, so listing them for a waitcheck reproduction would
     # make the machine-readable field contradict it.
     waitcheck = gen.required_env_for(case="waitcheck", report=_waitcheck_report())
     assert [item["var"] for item in waitcheck] == ["ROCJITSU_PREBUILT"]
 
     consan = gen.required_env_for(case="consan-racy", report=_consan_racy_report())
-    assert [item["var"] for item in consan] == [item["var"] for item in gen._REQUIRED_ENV]
+    assert [item["var"] for item in consan] == [
+        "ROCJITSU_PREBUILT",
+        "HSA_TOOLS_LIB",
+        "HSA_TOOLS_DISABLE_REGISTER",
+        "RJ_CONSAN_MODE",
+        "RJ_CONSAN_PRESET",
+        "RJ_CONSAN_POLICY",
+    ]
     # The internal flag is not leaked into the published manifest.
     assert all("consan_only" not in item for item in consan)
 
