@@ -26,6 +26,8 @@ import sys
 import subprocess
 import tempfile
 import threading
+import time
+from concurrent.futures import CancelledError as FuturesCancelled
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime
@@ -33,6 +35,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from aorta.chat.cancellation import current_cancel_token
 from aorta.chat.config import settings
 from aorta.cia.triage import _default_aorta_root, run_triage, write_asm_recipe
 from aorta.chat.tools._sandbox import JOBS_ROOT_LABEL, resolve_within
@@ -272,24 +275,52 @@ def _run_triage(extra_args: list[str], label: str) -> str:
         if value:
             argv += ["--env", f"{key}={value}"]
 
-    stop = threading.Event()
+    stop = current_cancel_token() or threading.Event()
+    if stop.is_set():
+        return "Error: triage was cancelled before it entered the worker pool."
+
     future = _triage_pool().submit(run_triage, argv, stop=stop)
-    try:
-        # Covers the queue as well as the run: with every worker busy the
-        # submission simply waits here, and the caller is told it timed out
-        # rather than blocking for ever on a pool that never frees up.
-        result = future.result(timeout=settings.triage_timeout)
-    except FuturesTimeout:
-        # Cancelling matters more than the message. Nothing else stops this
-        # work, and until it stops it holds a worker and keeps the interpreter
-        # from exiting.
-        stop.set()
-        future.cancel()
-        return (f"Error: triage exceeded {settings.triage_timeout}s. "
-                f"Check {settings.jobs_root} for a partial bundle.")
-    except Exception as exc:
-        stop.set()
-        return f"Error: triage failed: {type(exc).__name__}: {exc}"
+    deadline = time.monotonic() + settings.triage_timeout
+    result = None
+    while result is None:
+        if stop.is_set():
+            # cancel() handles a task that has not started; the shared event
+            # handles one already running. Wait for either case to finish so
+            # the graph cannot announce completion while run_triage or its
+            # Slurm allocation still exists.
+            future.cancel()
+            try:
+                future.result()
+            except FuturesCancelled:
+                pass
+            except Exception:
+                pass
+            return "Error: triage was cancelled and its worker has stopped."
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            stop.set()
+            future.cancel()
+            try:
+                future.result()
+            except FuturesCancelled:
+                pass
+            except Exception:
+                pass
+            return (
+                f"Error: triage exceeded {settings.triage_timeout}s. "
+                f"Check {settings.jobs_root} for a partial bundle."
+            )
+
+        try:
+            # A short wait makes the context token observable while retaining
+            # the existing end-to-end timeout for queueing plus execution.
+            result = future.result(timeout=min(0.25, remaining))
+        except FuturesTimeout:
+            continue
+        except Exception as exc:
+            stop.set()
+            return f"Error: triage failed: {type(exc).__name__}: {exc}"
 
     if not result.get("ok"):
         if result.get("stage") == "compile":

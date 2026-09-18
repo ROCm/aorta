@@ -7,6 +7,7 @@ import itertools
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
@@ -20,6 +21,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool
 
+from aorta.chat.cancellation import bind_cancel_token, reset_cancel_token
 from aorta.chat.config import settings
 from aorta.chat.graph.state import AgentState
 from aorta.chat.inference.vllm_client import get_chat_llm
@@ -682,21 +684,53 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     # name should be added back when there is something rendering it.
     _announce_tool({"tool": name, "id": call})
     started = time.monotonic()
-    try:
-        return await _execute_tool(tool_name, kwargs)
-    finally:
-        # In a finally because the consumer is holding a step open on the
-        # strength of the announcement above. A tool that raises, or a turn
-        # that is cancelled, would otherwise leave "Running ..." on screen
-        # with nothing ever arriving to end it.
+    cancel = threading.Event()
+
+    async def run() -> str:
+        # Bind inside the child Task. BaseTool.ainvoke carries its context into
+        # the executor used for a synchronous tool, so _run_triage receives this
+        # same event without exposing an internal argument to the model.
+        bound = bind_cancel_token(cancel)
+        try:
+            return await _execute_tool(tool_name, kwargs)
+        finally:
+            reset_cancel_token(bound)
+
+    worker = asyncio.create_task(run())
+
+    def announce_done(_worker: asyncio.Task) -> None:
+        # A callback on the work, not a finally on the waiter: cancellation of
+        # the chat task can no longer close the step while its executor callable
+        # and Slurm allocation are still alive.
         _announce_tool(
             {
                 "tool": name,
                 "id": call,
                 "done": True,
+                "cancelled": cancel.is_set(),
                 "seconds": round(time.monotonic() - started, 1),
             }
         )
+
+    worker.add_done_callback(announce_done)
+    try:
+        # Shield keeps cancellation of this waiter from cancelling the Task
+        # that represents the still-running executor callable.
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        cancel.set()
+        # Do not return through the graph until the tool has observed the token,
+        # cancelled its scheduler allocation, and exited. Repeated cancellation
+        # requests still cannot turn "asked to stop" into "has stopped".
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancel.set()
+                continue
+            except Exception:
+                break
+        raise
 
 
 
