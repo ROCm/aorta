@@ -166,6 +166,9 @@ class TestCancellationReachesRunTriage:
     async def test_the_inner_worker_stops_before_the_chat_task_finishes(
         self, tmp_path, monkeypatch, announcements
     ):
+        pytest.importorskip(
+            "dspy", reason="the end-to-end triage path needs the [cia] extra"
+        )
         import aorta.chat.tools.cluster as cluster
 
         entered = threading.Event()

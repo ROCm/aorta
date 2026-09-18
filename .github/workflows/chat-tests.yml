@@ -175,11 +175,13 @@ jobs:
             extras: chat-cli
           - python-version: "3.12"
             extras: chat-cli
-          # One leg carries the full stack -- Chainlit and LiteLLM -- at the top
-          # of Chainlit's supported range, which is where a `Requires-Python`
-          # bump on its side will show up first.
+          # One leg carries the full stack -- Chainlit, LiteLLM and the cluster
+          # agents -- at the top of Chainlit's supported range, which is where a
+          # `Requires-Python` bump on its side will show up first. The
+          # cancellation contract crosses BaseTool into run_triage, so testing
+          # either extra alone cannot exercise it.
           - python-version: "3.13"
-            extras: chat-all
+            extras: chat-all,cia
             litellm: "yes"
           - python-version: "3.14"
             extras: chat-cli
@@ -218,6 +220,7 @@ jobs:
           import sys
 
           extras = os.environ["EXTRAS"]
+          selected = set(extras.split(","))
           required = [
               "langchain_core",
               "langchain_openai",
@@ -226,8 +229,10 @@ jobs:
               "sqlite_vec",
               "fastembed",
           ]
-          if extras in ("chat-ui", "chat-all"):
+          if selected & {"chat-ui", "chat-all"}:
               required.append("chainlit")
+          if "cia" in selected:
+              required.append("dspy")
           if os.environ.get("WITH_LITELLM") == "yes":
               required += ["litellm", "langchain_litellm"]
           missing = [name for name in required if importlib.util.find_spec(name) is None]
