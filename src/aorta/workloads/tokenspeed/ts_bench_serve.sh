@@ -553,6 +553,23 @@ if [ "${ROLLOUT}" = "1" ]; then
     require_decimal TS_TOP_P "${TS_TOP_P}"
     require_range TS_TOP_P "${TS_TOP_P}" 1
   fi
+  # The floor needs a per-completion reading and `output_lens` is the only one,
+  # so without TS_SAVE_DETAILED the audit falls back to
+  # total_output_tokens/completed -- per request. At n > 1 that is not merely
+  # weaker, it is blind: with summed usage accounting one token per completion
+  # reads as n and clears a floor of n exactly. The host refuses this
+  # combination; refused here too, or a direct script run enforces a weaker
+  # contract than a recipe-driven one while printing the same verdict names.
+  if [ "${SAVE_DETAILED}" != "1" ] && [ "${MIN_MEAN_OUTPUT_TOKENS}" != "0" ] \
+     && [ "${ROLLOUT_SAMPLES}" -gt 1 ]; then
+    echo "TS_BENCH_FAIL: usage TS_SAVE_DETAILED=0 cannot be combined with TS_MIN_MEAN_OUTPUT_TOKENS=${MIN_MEAN_OUTPUT_TOKENS} and TS_ROLLOUT_SAMPLES=${ROLLOUT_SAMPLES}"
+    echo "  The floor is per completion and output_lens is the only"
+    echo "  per-completion source; without it the check falls back to a"
+    echo "  per-request mean, which at this sample count a fully collapsed"
+    echo "  policy would still clear. Set TS_SAVE_DETAILED=1, or"
+    echo "  TS_MIN_MEAN_OUTPUT_TOKENS=0, or TS_ROLLOUT_SAMPLES=1."
+    exit 64
+  fi
   # `--ignore-eos` pins every completion to TS_OUTPUT_LEN, which is the opposite
   # of what a rollout measures: real rollouts stop on EOS and their cost is the
   # length distribution that produces. Combining the two would run a

@@ -4828,6 +4828,34 @@ def test_the_refusal_is_narrow(tmp_path, cfg):
     _rollout(tmp_path, **cfg).setup()
 
 
+def test_the_container_refuses_the_blind_floor_too(tmp_path):
+    """Both layers, or a direct script run enforces the weaker contract.
+
+    The verdict names are the same either way, so a container that accepted
+    what the host refuses would print `OK` under the same vocabulary the host
+    uses to fail.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "8",
+            "TS_MIN_MEAN_OUTPUT_TOKENS": "8",
+            "TS_SAVE_DETAILED": "0",
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert "TS_SAVE_DETAILED" in output, output
+
+
 def test_without_save_detailed_a_missing_array_is_not_a_failure(tmp_path, monkeypatch):
     """The other half of the contract, and the reason it is keyed on the request.
 

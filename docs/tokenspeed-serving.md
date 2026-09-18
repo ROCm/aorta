@@ -415,8 +415,17 @@ completions — but it stops being *sufficient*, which is what
 `min_mean_output_tokens` exists for: a policy that answers every request with an
 immediate EOS passes every other guard in the workload while generating about one
 token per prompt. Exit 56 / `rollout_output_too_short` is that verdict, checked in
-the container and again on the host — both dividing by `completed *
-rollout_samples`, so the guard does not get `n` times weaker as `n` grows.
+the container and again on the host, on the same rule in both.
+
+That rule is the mean of `output_lens`, which holds one entry per completion —
+so the check needs no assumption about whether the gateway's
+`usage.completion_tokens` sums all `n` choices or reports only the first, and
+both shapes are documented above as the server's decision. Only when
+`save_detailed` is off is there no such array, and the check then falls back to
+`total_output_tokens / completed`, per *request*, naming that basis in the
+failure detail. Both layers reject that fallback outright when
+`rollout_samples > 1`, because a per-request floor is one a fully collapsed
+policy clears at those sample counts.
 
 Exit 57 / `rollout_sampling_ignored` is the other rollout-specific verdict, and
 it is the one no audit of the export could reach: a greedy engine's output is
