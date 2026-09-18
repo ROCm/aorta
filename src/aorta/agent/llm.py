@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
@@ -17,18 +20,86 @@ StopReason = Literal[
     "agent_requested",
 ]
 
-AUTOPSY_CATEGORIES: frozenset[str] = frozenset(
+# The closed autopsy label set, each member carrying the one-line gloss the
+# proposer is told to route on. Set and glosses are one object deliberately:
+# several members are near neighbours (``checkpoint_race`` vs ``kernel_race``,
+# ``kernel_race`` vs ``nondeterminism``) and a bare list of names is not enough
+# to choose between them, so a member added without a gloss would be a member
+# the model has never been told how to use.
+#
+# Labels exist to route toward a *diagnostic*, so the granularity follows the
+# diagnostic rather than the symptom. That is why a race inside a kernel is its
+# own label and not a flavour of ``nondeterminism``: a race is localised to one
+# kernel and confirmed with ConSan/waitcheck, whereas nondeterminism is a
+# workload-level symptom whose triage starts with repeating the run.
+AUTOPSY_CATEGORY_GUIDANCE: Mapping[str, str] = MappingProxyType(
     {
-        "rccl_hang",
-        "thermal_throttle",
-        "illegal_mem",
-        "oom_fragment",
-        "checkpoint_race",
-        "launch_error",
-        "perf_regression",
-        "unknown",
+        "rccl_hang": (
+            "A collective stopped making progress -- ranks stuck in RCCL/NCCL, "
+            "watchdog timeout, no forward progress."
+        ),
+        "thermal_throttle": (
+            "Sustained clock or throughput loss attributable to thermal or power "
+            "limiting rather than to the workload itself."
+        ),
+        "illegal_mem": (
+            "Illegal or out-of-bounds device memory access -- HIP/CUDA fault, VM "
+            "protection fault, fault in device code."
+        ),
+        "oom_fragment": (
+            "Out of memory or allocator fragmentation, including an OOM kill."
+        ),
+        "checkpoint_race": (
+            "A concurrency defect around checkpoint I/O: a save or load racing "
+            "with training, with another rank, or with a filesystem barrier. This "
+            "label is about checkpointing, never about code inside a GPU kernel -- "
+            "for that use kernel_race."
+        ),
+        "kernel_race": (
+            "An unsynchronised access inside a single GPU kernel: an LDS or global "
+            "data race, or a missing wait-count hazard. Localised to one kernel and "
+            "confirmed by a sanitizer (ConSan, waitcheck) that names the offending "
+            "sites. Prefer this over nondeterminism whenever a specific kernel is "
+            "already implicated."
+        ),
+        "launch_error": (
+            "The workload failed at or before launch -- bad argv, missing "
+            "dependency, early non-zero exit before real work started."
+        ),
+        "perf_regression": (
+            "The workload produces correct results but is slower than its reference."
+        ),
+        "nondeterminism": (
+            "A workload that should be reproducible is not: results or verdicts "
+            "diverge run to run on identical inputs. A workload-level symptom with "
+            "many possible causes, triaged by repeating the run and diffing rather "
+            "than by pointing a sanitizer at one kernel. Use kernel_race instead "
+            "once a specific kernel's race is the evidence."
+        ),
+        "numeric_instability": (
+            "NaN, Inf, or a loss of numeric accuracy: training loss goes NaN "
+            "(``tier4:nan_signature``), values overflow, or results drift beyond "
+            "tolerance because of precision or accumulation order."
+        ),
+        "unknown": (
+            "The evidence does not support any label above. The honest answer when "
+            "nothing fits -- not a placeholder for a guess."
+        ),
     }
 )
+
+#: Closed set :class:`aorta.agent.policy.AgentPolicy` validates against, derived
+#: from the guidance so the two cannot drift apart.
+AUTOPSY_CATEGORIES: frozenset[str] = frozenset(AUTOPSY_CATEGORY_GUIDANCE)
+
+
+def format_category_guidance() -> str:
+    """Render the autopsy labels as one ``- name: gloss`` line each."""
+    return "\n".join(
+        f"- {name}: {AUTOPSY_CATEGORY_GUIDANCE[name]}"
+        for name in sorted(AUTOPSY_CATEGORY_GUIDANCE)
+    )
+
 
 _BASELINE_CELL = "none-none"
 
@@ -106,16 +177,160 @@ class LLMProposer(Protocol):
     ) -> AgentStep: ...
 
 
+# Tokens that say *which tool* found something, and tokens that say the finding
+# is inside one kernel. `barrier` and a bare sanitizer name are each ambiguous
+# on their own -- see `_is_kernel_race_id`.
+_SANITIZER_TOKENS = frozenset({"consan", "waitcheck", "rocjitsu"})
+_INTRA_KERNEL_TOKENS = frozenset({"race", "waitcnt", "barrier", "hazard", "lds"})
+
+
+def _id_words(detector: str) -> set[str]:
+    """One detector ID split into words.
+
+    IDs separate words with ":" and "_" (`tier4:python_traceback`,
+    `custom:consan_data_race`), so splitting on non-alphanumerics is what makes
+    a whole-word test possible.
+    """
+    return set(re.split(r"[^a-z0-9]+", detector.lower()))
+
+
+def _is_kernel_race_id(detector: str) -> bool:
+    """Whether *one* detector ID is evidence of an intra-kernel race.
+
+    Judged per ID rather than over the joined string, which matters: two IDs
+    that each carry half the evidence -- say `custom:distributed_barrier_timeout`
+    beside `custom:consan_tool_failure` -- would otherwise combine into a
+    finding neither of them reports.
+
+    Two things are required, on the same ID: a sanitizer named the finding, and
+    the evidence is intra-kernel. Neither half is sufficient alone, and
+    `custom:*` IDs are why -- they are free-form
+    (`probe/classifier/tier5_custom.py` builds `custom:<raw_id>` from whatever
+    the recipe named), so every one of these tokens turns up in IDs that are
+    not intra-kernel races:
+
+    * `custom:distributed_barrier_timeout` -- a collective that did not arrive.
+    * `custom:consan_tool_failure` -- the sanitizer itself falling over.
+    * `custom:host_data_race` -- a race, and not one inside a kernel.
+
+    `race` was briefly allowed to stand alone, on the reasoning that it is
+    specific enough. The third example is why it is not: "race" says there was
+    a race, not where, and `kernel_race` is a claim about where. Requiring the
+    sanitizer token costs nothing on the reachable spellings, since a ConSan or
+    Waitcheck finding names its tool -- `custom:consan_data_race`,
+    `custom:waitcheck_missing_waitcnt`.
+    """
+    words = _id_words(detector)
+    return bool(words & _SANITIZER_TOKENS) and bool(words & _INTRA_KERNEL_TOKENS)
+
+
+# Where a symptom says the hazard is. `kernel` and `lds` are the location words
+# a person writes; the sanitizer names come from the detector path, so the two
+# branches share one vocabulary rather than two that drift.
+_SYMPTOM_LOCATION_TOKENS = frozenset({"kernel", "lds"}) | _SANITIZER_TOKENS
+# What it says the hazard *is*. `barrier` is included here, unlike on the
+# detector path, because a symptom naming a barrier has already had to name a
+# location to get this far.
+_SYMPTOM_HAZARD_TOKENS = frozenset({"race", "hazard", "barrier"})
+
+
+def _symptom_is_a_kernel_race(low: str) -> bool:
+    """Whether free text says a race happened *inside a kernel*.
+
+    Both halves required, as on the detector path: something saying where, and
+    something saying what. `kernel_race` is a claim about location, so "race
+    condition between the two writer threads" must not reach it.
+
+    Word-bounded, which the first version of this guard was not, and the
+    counter-example is one this file should have anticipated: `"lds" in
+    "fields"` holds, so "data race between fields" satisfied a location test by
+    accident -- the same substring collision as `race` inside `traceback` and
+    `nan` inside `canonical`, reintroduced in the fix for the first of them.
+
+    Matching tokens rather than the phrases "data race" / "race condition" also
+    widens it correctly. Those two spellings missed "LDS race", "kernel race"
+    and a waitcheck hazard report, all of which are what `kernel_race` names.
+
+    `waitcnt` is matched with a trailing boundary only, because the spelling in
+    the wild is `s_waitcnt` and `_` is a word character. No English word
+    contains the sequence, so the looser side costs nothing here.
+    """
+    words = set(re.split(r"[^a-z0-9]+", low))
+    located = bool(words & _SYMPTOM_LOCATION_TOKENS)
+    hazard = bool(words & _SYMPTOM_HAZARD_TOKENS) or re.search(r"waitcnt\b", low)
+    return located and bool(hazard)
+
+
 def _infer_category_from_detectors(detectors: list[str]) -> str:
     joined = " ".join(detectors).lower()
+    # Detector IDs separate words with ":" and "_" (`custom:consan_data_race`,
+    # `tier4:python_traceback`), so a substring test for a short word like
+    # "race" also fires inside "traceback". The kernel-race leg below is
+    # therefore decided per ID by `_is_kernel_race_id`; every other term here is
+    # either long enough to be unambiguous or is deliberately matched across a
+    # separator ("tier1:exit", "nan_signature"), which tokenising would break.
+    #
+    # The legs are ordered most specific test first, and that ordering is
+    # load-bearing rather than cosmetic. A leg keyed on a generic word decides
+    # every ID that merely contains it, including IDs a later leg would have
+    # identified exactly, so an accidental order silently downgrades the
+    # function's best answers to its vaguest ones. The order here is: exact
+    # multi-word signatures, then the per-ID conjunction, then the broad
+    # single-word legs. Adding a leg means placing it by how much evidence it
+    # demands, not appending it.
+    #
+    # `numerics_mismatch` alongside the built-in signature, because a shipping
+    # recipe already emits it: `recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml`
+    # declares a tier-5 detector `ts_kernel_numerics_mismatch` on
+    # `TS_KERNEL_FAIL: numerics_mismatch`, which arrives as
+    # `custom:ts_kernel_numerics_mismatch`. An out-of-tolerance kernel result is
+    # exactly what `numeric_instability` names, and matching only the built-in
+    # left the one detector in the tree that means it falling through to
+    # `unknown` -- the gap this PR exists to close, in the category it adds.
+    #
+    # Substring rather than a token, for the reason `nan_signature` is: both
+    # span a separator, and both are long enough not to collide.
+    #
+    # `[-_ ]` rather than a literal `_` on each of the three tokens that span a
+    # separator here. `custom:<raw_id>` is free-form (`tier5_custom.py` emits
+    # whatever the recipe named), so `custom:nan-signature` is as legal an id as
+    # `custom:nan_signature` and meant the same thing while matching neither
+    # leg. Same hole as `nondetermin` against "non-deterministic" on the symptom
+    # path, and these three are the only other literals in the file with a
+    # boundary for a separator to fall on. Strictly widening: every spelling
+    # that matched before still matches.
+    if re.search(r"nan[-_ ]signature", joined) or re.search(
+        r"numerics[-_ ]mismatch", joined
+    ):
+        return "numeric_instability"
+    if "checkpoint" in joined:
+        return "checkpoint_race"
+    # "barrier" used to land here, but in this codebase a barrier is a GPU-side
+    # object -- ConSan barrier sites, barrier patching -- not a checkpoint
+    # barrier, so the old branch routed intra-kernel evidence to a checkpoint-I/O
+    # label. Checked after "checkpoint" so a detector naming both still wins for
+    # checkpoint_race.
+    if any(_is_kernel_race_id(detector) for detector in detectors):
+        return "kernel_race"
     if "tier2" in joined or "hang" in joined or "rccl" in joined:
         return "rccl_hang"
     if "oom" in joined or "137" in joined:
         return "oom_fragment"
-    if "hip_error" in joined or "illegal" in joined or "memory" in joined:
+    # Last of the categories, and the reason is that "memory" is the most
+    # generic word any leg keys on: an intra-kernel race is a race on memory, a
+    # numerics mismatch is read out of memory, a checkpoint fault touches
+    # memory. Every ID this leg should claim -- `tier4:hip_error`,
+    # `custom:illegal_address` -- says so in a word no other leg wants, so
+    # deciding it last costs nothing and stops it from answering for the three
+    # legs above. `custom:consan_global_memory_race` is the case that showed
+    # this: a ConSan intra-kernel race report, named exactly as one, which this
+    # leg used to label an illegal access because it ran first.
+    if (
+        re.search(r"hip[-_ ]error", joined)
+        or "illegal" in joined
+        or "memory" in joined
+    ):
         return "illegal_mem"
-    if "checkpoint" in joined or "barrier" in joined:
-        return "checkpoint_race"
     if "tier1:exit" in joined or "launch" in joined:
         return "launch_error"
     return "unknown"
@@ -137,12 +352,74 @@ class FakeLLMProposer:
         category = _infer_category_from_detectors(detectors)
         if symptom and category == "unknown":
             low = symptom.lower()
-            if "hang" in low or "nccl" in low or "rccl" in low:
+            # Ordered most specific test first, the same way and for the same
+            # reason as `_infer_category_from_detectors`. This path had the
+            # identical defect: `memory`, `hang` and `oom` decided any symptom
+            # that merely contained them, ahead of every leg that demands more,
+            # so "NaN in device memory" was an illegal access and "global memory
+            # race in the kernel" never reached the conjunction below. Twenty-four
+            # broad/narrow pairs, against twenty-eight on the detector path.
+            #
+            # The two chains are parallel dispatchers over the same taxonomy, so
+            # a fix to one belongs in both -- which is the lesson of this pair
+            # rather than an aside: the detector path was reordered first and
+            # this one was left, and the mirror had to be reported before it was
+            # looked at. There are exactly two such chains; no third dispatcher
+            # exists.
+            #
+            # Whole word, for the same reason the `race` legs want one: "nan" is
+            # a substring of ordinary words a GPU symptom is likely to contain
+            # -- "canonical", "nanoseconds", "maintenance" -- and this branch
+            # only runs once the detectors have already fallen through to
+            # `unknown`, which is exactly when a stray match decides the label.
+            # `nans?` because the plural is how people write it ("NaNs in the
+            # gradients") and a bare `\bnan\b` would miss it.
+            if re.search(r"\bnans?\b", low):
+                category = "numeric_instability"
+            # Checkpoint first, and before the race legs. "checkpoint save race
+            # condition" is a checkpoint race by name, and with no checkpoint
+            # leg here at all it was landing on `kernel_race` -- the same
+            # mislabel the detector branch was fixed for, on the other path.
+            elif "checkpoint" in low:
+                category = "checkpoint_race"
+            # `kernel_race` is a claim about *where*, so the phrase alone is not
+            # enough: the symptom also has to name a kernel or the tool that
+            # found it. This mirrors `_is_kernel_race_id`, where an evidence
+            # token needs a sanitizer token beside it -- the two paths now
+            # demand the same thing, which is why "nondeterministic data race
+            # in the reduction kernel" can be ordered ahead of the
+            # nondeterminism leg rather than being shadowed by it.
+            #
+            # A bare host or checkpoint race with no kernel named stays
+            # `unknown`, which understates rather than asserting a hazard
+            # nothing observed.
+            elif _symptom_is_a_kernel_race(low):
+                category = "kernel_race"
+            # `non[- ]?determin` rather than `nondetermin`, because
+            # `"nondetermin" in "non-deterministic"` is false and the hyphenated
+            # spelling is the conventional English one -- so the leg missed the
+            # form people are most likely to write.
+            #
+            # Swept the rest rather than fixing this one: of every literal this
+            # file matches by substring, exactly four have a morpheme boundary a
+            # separator could fall on, and all four were holed. The other tokens
+            # (`hang`, `rccl`, `memory`, `illegal`, `oom`, `checkpoint`,
+            # `launch`, `tier2`, `137`, `tier1:exit`) are single words, acronyms
+            # or structural literals, with no boundary to separate, so they are
+            # not at risk. `_symptom_is_a_kernel_race` is already immune, since
+            # it splits on `[^a-z0-9]+` before matching.
+            elif re.search(r"non[- ]?determin", low):
+                category = "nondeterminism"
+            elif "hang" in low or "nccl" in low or "rccl" in low:
                 category = "rccl_hang"
-            elif "memory" in low or "illegal" in low:
-                category = "illegal_mem"
             elif "oom" in low:
                 category = "oom_fragment"
+            # Last, for the reason `illegal_mem` is last on the detector path:
+            # "memory" is the most generic word either chain keys on, and a NaN,
+            # a checkpoint fault and an intra-kernel race are all describable as
+            # being about memory.
+            elif "memory" in low or "illegal" in low:
+                category = "illegal_mem"
 
         # Baseline pass wins even when the allowlist has no further mitigations.
         for summary in cell_summaries:
@@ -224,7 +501,10 @@ def _build_prompt(
         "names from the candidate list. Never propose shell commands or argv. "
         "Return strict JSON with keys: category, hypothesis, next_mitigations "
         "(list of strings), confidence (0-1), stop (bool). "
-        f"category must be one of: {sorted(AUTOPSY_CATEGORIES)}."
+        "category must be exactly one of the labels below. Several are near "
+        "neighbours, so the gloss -- not the name -- is what tells them apart; "
+        "read it before choosing.\n"
+        f"{format_category_guidance()}"
     )
     user = json.dumps(
         {
@@ -464,6 +744,7 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
 
 __all__ = [
     "AUTOPSY_CATEGORIES",
+    "AUTOPSY_CATEGORY_GUIDANCE",
     "CHAT_PROVIDER_BACKENDS",
     "AgentStep",
     "ChatProviderProposer",
@@ -471,5 +752,6 @@ __all__ = [
     "LLMProposer",
     "LiteLLMProposer",
     "StopReason",
+    "format_category_guidance",
     "make_proposer",
 ]

@@ -56,7 +56,7 @@ flowchart TD
 
 | Field | Meaning |
 |-------|---------|
-| `category` | One of eight generic autopsy labels (see below) |
+| `category` | One of eleven generic autopsy labels (see below) |
 | `hypothesis` | Short natural-language explanation |
 | `next_mitigations` | Registered mitigation names to try next (never raw argv) |
 | `confidence` | 0.0–1.0 self-reported confidence |
@@ -70,10 +70,37 @@ flowchart TD
 | `thermal_throttle` | Sustained perf drop + thermal context (when available) |
 | `illegal_mem` | `tier4:hip_error`, illegal-access regex in stderr |
 | `oom_fragment` | OOM / exit 137 patterns |
-| `checkpoint_race` | Barrier / checkpoint boundary signatures |
+| `checkpoint_race` | Checkpoint save/load boundary signatures |
+| `kernel_race` | ConSan / waitcheck findings naming sites inside one kernel |
 | `launch_error` | Early exit, launch failures |
 | `perf_regression` | Pass with warn detectors or confound regression |
+| `nondeterminism` | Same inputs, different results across repeated runs |
+| `numeric_instability` | `tier4:nan_signature`, Inf/overflow, out-of-tolerance drift |
 | `unknown` | No confident mapping |
+
+The set is closed: `AgentPolicy.validate_step` raises `PolicyViolation` on
+anything outside it, so the loop stops rather than recording a label nothing
+downstream can route on. It is defined once, in
+`aorta.agent.llm.AUTOPSY_CATEGORY_GUIDANCE`, as name → one-line gloss;
+`AUTOPSY_CATEGORIES` is derived from that mapping and the proposer prompt
+renders the glosses, so a new label cannot reach the validator without also
+reaching the model.
+
+Three distinctions the glosses exist to enforce, because the names alone do not:
+
+* **`checkpoint_race` is about checkpoint I/O, not about kernels.** An
+  intra-wave LDS race is `kernel_race`. The two were previously conflated —
+  `checkpoint_race` was the nearest available name for a kernel race, and it was
+  the wrong one.
+* **`kernel_race` is preferred over `nondeterminism` once a kernel is
+  implicated.** Both labels describe results you cannot reproduce, but they
+  route to different diagnostics: `kernel_race` to ConSan/waitcheck against a
+  specific code object, `nondeterminism` to repeating the run and diffing.
+  Granularity here follows the diagnostic, not the symptom.
+* **`unknown` is a real answer, not a failure to answer.** It is the correct
+  label when the evidence supports none of the others, and `validate_step`
+  accepts it. Guessing a specific label to avoid `unknown` is worse than
+  `unknown`, because the loop routes on the label.
 
 ---
 

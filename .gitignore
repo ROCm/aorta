@@ -68,6 +68,10 @@ overlap_debug*/
 # `aorta chat index eval` reads it with no arguments, and pyproject ships it in
 # the wheel, so the *.json rule above must not swallow it.
 !src/aorta/chat/rag/eval_questions.json
+# Exception: the RL corpus scenario labels are hand-written ground truth, not a
+# generated corpus. The corpus rows next to them (*.jsonl) are output and stay
+# ignored; these labels are the input that survives a rebuild.
+!examples/rl/corpus/scenario_labels.json
 *_merged_enhanced.json
 nccl_thread_sweep_*.log
 nccl_thread_sweep_summary_*.txt
