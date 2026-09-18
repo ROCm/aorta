@@ -138,7 +138,10 @@ buck-out/
 # Site-specific launchers: these name one machine's venv, proxy and
 # sanitizer paths, which is the thing tests/cia/test_settings_neutral.py
 # keeps out of the package.
-start-chat.sh
-chainlit.md
-.chainlit/
-.files/
+/start-chat.sh
+# Chainlit writes these beside the app at runtime. `.chainlit/config.toml` is
+# not among them: it is committed on purpose, because it is where the CORS
+# origins and the key masking are set and those should be reviewed rather than
+# regenerated with the permissive defaults.
+/chainlit.md
+/.files/

@@ -193,6 +193,17 @@ class Settings(BaseSettings):
     #: Which GPU the submitted work is built for. Read by the chat tools for the
     #: assembler target and handed to the agents as ``--arch``.
     gpu_arch: str = Field("gfx950", validation_alias=_either("GPU_ARCH", "CIA_GPU_ARCH"))
+    #: Which interpreter runs a pasted workload on the node. Empty means the
+    #: one serving the chat, which is only right when they are the same
+    #: environment -- and they are usually not. This server needs langchain and
+    #: Chainlit; a training run needs a ROCm build of torch. Running a pasted
+    #: script under the server's own interpreter got "Torch not compiled with
+    #: CUDA enabled" and a job that exited before reaching the bug it was
+    #: submitted to find, which reads downstream as a workload with no NaN in
+    #: it rather than as a workload that never ran.
+    workload_python: str = Field(
+        "", validation_alias=_either("WORKLOAD_PYTHON", "CIA_WORKLOAD_PYTHON")
+    )
     #: The sanitizer backend. Unset means the sweep will report that it could
     #: not run, which is the honest outcome -- not that it found nothing.
     rocjitsu_build: str = ""

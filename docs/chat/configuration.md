@@ -71,6 +71,35 @@ If you would rather not store the key at all, leave it out of the file and
 export `AORTA_CHAT_REMOTE_LLM_API_KEY` instead; the environment outranks the
 file.
 
+## Opt-in decision logs
+
+Chat does not persist a transcript by default. Set
+`AORTA_CHAT_SESSION_LOG=1` to append privacy-preserving decision events under
+`$XDG_STATE_HOME/aorta/chat/sessions/` (default
+`~/.local/state/aorta/chat/sessions/`). The directory is mode `0700` and each
+session JSONL file is mode `0600`.
+
+Both the browser and CLI record from the state returned by `invoke_agent`, so
+they capture the same decisions without changing the CLI to a streaming path:
+
+- route and selector-ranked tools;
+- the selector's own reason, with filesystem paths and IP addresses always
+  scrubbed regardless of `--no-redact`;
+- tool execution order and CIA job ID/category/confidence;
+- whether the critic accepted the answer; and
+- a `resolution: null` attachment point keyed by `(session_id, turn)` for a
+  later verified outcome.
+
+Questions, plans, tool arguments, tool output, critic feedback, and answers are
+not stored in summary mode. Each becomes only character/byte/line/fence counts
+and a SHA-256 digest. Nothing reads these files back or sends them anywhere.
+
+`AORTA_CHAT_SESSION_LOG=full` stores those values verbatim for an operator who
+explicitly needs a transcript. It emits one warning per session naming the
+file. Full mode can contain source, paths, credentials printed by tools, and
+model output; protect and remove it accordingly. Set the variable to `0` or
+leave it unset to disable all decision logging.
+
 ## Settings
 
 Every name below is a TOML key in the profile, and `AORTA_CHAT_<NAME>` in the
@@ -194,6 +223,35 @@ The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMI
 `CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, `CIA_CONTAINER_IMAGE`,
 `CIA_SBATCH_EXTRA` — have no chat setting. They describe the cluster rather than
 the assistant, and are read from the environment the chat server runs in.
+
+
+## The web UI's own settings
+
+`aorta chat ui` is a Chainlit app, and Chainlit keeps its own configuration in
+`.chainlit/config.toml` beside the app rather than in your profile. It writes
+that file itself the first time it runs, with defaults chosen for a demo. Two
+of them matter here, and both are committed set rather than left to be
+regenerated.
+
+| Setting | Shipped as | Why |
+| --- | --- | --- |
+| `allow_origins` | `["http://localhost:8000", "http://127.0.0.1:8000"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
+| `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
+
+**Serving anywhere other than `localhost:8000` means editing `allow_origins`.**
+Those two are `aorta chat ui`'s own defaults, and they have to stay in step with
+it: Chainlit reads `allow_origins` from the file and has no environment
+override, so a port listed here that the command never serves on refuses the
+browser of every default install.
+
+`aorta chat ui --host` and `--port`, and the `PORT` variable in a launcher, all
+move the socket without reaching into that file. The command compares the two at
+startup and prints what to add, because the failure otherwise is a page that
+loads and a websocket that never opens, with nothing on screen to say why.
+
+The rest of the file is Chainlit's own defaults. If you delete it, Chainlit
+regenerates it — with `allow_origins = ["*"]` and `mask_user_env = false` — so
+it is committed rather than ignored.
 
 
 ## Configuring a remote embedding provider by hand

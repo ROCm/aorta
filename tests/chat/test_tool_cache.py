@@ -332,7 +332,9 @@ class TestTheChainlitServerBindsOnePerSession:
         app.cl.user_session.set(app._TOOL_CACHE_KEY, session_cache)
         seen = []
 
-        async def _answer(question, history, on_step=None):  # noqa: ARG001 - signature match
+        async def _answer(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             seen.append(current_tool_cache())
             return "answer", [], {}
 
@@ -346,7 +348,9 @@ class TestTheChainlitServerBindsOnePerSession:
         what would let one browser session read another's run."""
         seen = []
 
-        async def _answer(question, history, on_step=None):  # noqa: ARG001 - signature match
+        async def _answer(
+            question, history, on_step=None, **_decision
+        ):  # noqa: ARG001 - signature match
             seen.append(current_tool_cache())
             return "answer", [], {}
 

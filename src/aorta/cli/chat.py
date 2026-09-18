@@ -319,6 +319,9 @@ async def _ask_once(
     output_mode: str,
     quiet: bool,
     backend: Any = None,
+    *,
+    session_id: str | None = None,
+    turn: int = 1,
 ) -> tuple[list, bool]:
     """Invoke the agent for one query and render it; also report success.
 
@@ -332,7 +335,14 @@ async def _ask_once(
     suppress = _suppress_stderr_noise() if quiet else contextlib.nullcontext()
     try:
         with suppress:
-            reply, history, result = await invoke_agent(query, history)
+            decision = (
+                {"session_id": session_id, "turn": turn}
+                if session_id is not None
+                else {}
+            )
+            reply, history, result = await invoke_agent(
+                query, history, **decision
+            )
     except Exception as exc:
         msg = _failure_message(exc, backend)
         if output_mode == "json":
@@ -351,7 +361,12 @@ async def _ask_once(
 
 
 async def _interactive_loop(
-    invoke_agent: Any, output_mode: str, quiet: bool, backend: Any = None
+    invoke_agent: Any,
+    output_mode: str,
+    quiet: bool,
+    backend: Any = None,
+    *,
+    session_id: str | None = None,
 ) -> None:
     """Run a multi-turn REPL session."""
     banner = "AORTA Codebase Assistant  (type exit, quit, or /q to leave)"
@@ -377,6 +392,7 @@ async def _interactive_loop(
     # to protect.
     prompt_via_input = sys.stdout.isatty()
     history: list = []
+    turn = 0
 
     while True:
         try:
@@ -395,13 +411,24 @@ async def _interactive_loop(
         if not stripped:
             continue
 
-        history, _ = await _ask_once(invoke_agent, query, history, output_mode, quiet, backend)
+        turn += 1
+        history, _ = await _ask_once(
+            invoke_agent,
+            query,
+            history,
+            output_mode,
+            quiet,
+            backend,
+            session_id=session_id,
+            turn=turn,
+        )
 
 
 async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) -> bool:
     """Preflight the backend, then either answer once or start the REPL."""
     factory = _load("inference.providers.factory")
     session = _load("session")
+    decision_session = session.new_session_id()
     try:
         backend = factory.get_backend()
         if not no_wait:
@@ -419,11 +446,26 @@ async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) 
     )
 
     if query is None:
-        await _interactive_loop(session.invoke_agent, output_mode, quiet, backend)
+        await _interactive_loop(
+            session.invoke_agent,
+            output_mode,
+            quiet,
+            backend,
+            session_id=decision_session,
+        )
         # A REPL's exit status describes the session, not any one answer: the
         # user has already seen each failure and chosen to keep going.
         return True
-    _, ok = await _ask_once(session.invoke_agent, query, [], output_mode, quiet, backend)
+    _, ok = await _ask_once(
+        session.invoke_agent,
+        query,
+        [],
+        output_mode,
+        quiet,
+        backend,
+        session_id=decision_session,
+        turn=1,
+    )
     return ok
 
 
@@ -675,6 +717,9 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
     spec = importlib.util.find_spec("aorta.chat.ui.app")
     if spec is None or spec.origin is None:
         raise click.ClickException("could not locate aorta.chat.ui.app on disk")
+    app_root = _chainlit_app_root()
+    child_env["CHAINLIT_APP_ROOT"] = str(app_root)
+    _warn_if_origin_not_allowed(app_root, host, port)
     raise SystemExit(
         subprocess.call(
             [
@@ -692,6 +737,102 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
             env=child_env,
         )
     )
+
+
+def origins_for(host: str, port: int) -> list[str]:
+    """The browser origins a UI bound to *host*:*port* is reached through.
+
+    A bind address and an origin are not the same thing. ``127.0.0.1`` is
+    typed as ``localhost`` as often as not, and both have to be listed or the
+    socket is refused for whichever one the operator used. ``0.0.0.0`` is not
+    an origin at all -- it means every interface, and the browser will send
+    whatever name it dialled -- so the loopback pair is the most that can be
+    said for it.
+    """
+    if host in ("0.0.0.0", "::", ""):
+        hosts = ["localhost", "127.0.0.1"]
+    elif host in ("localhost", "127.0.0.1"):
+        hosts = ["localhost", "127.0.0.1"]
+    else:
+        hosts = [host]
+    return [f"http://{name}:{port}" for name in hosts]
+
+
+def _configured_origins(app_root: Path) -> list[str] | None:
+    """``allow_origins`` from the config in force, or None if unreadable."""
+    settings = app_root / ".chainlit" / "config.toml"
+    try:
+        import tomllib
+
+        with settings.open("rb") as handle:
+            loaded = tomllib.load(handle)
+    except (OSError, ValueError, ImportError):
+        return None
+    origins = loaded.get("project", {}).get("allow_origins")
+    return [str(o) for o in origins] if isinstance(origins, list) else None
+
+
+def _warn_if_origin_not_allowed(app_root: Path, host: str, port: int) -> None:
+    """Say so now if the browser will be refused, rather than in the browser.
+
+    The origin policy lives in a file Chainlit reads and the bind address
+    arrives as an argument, so the two can disagree and nothing notices. What
+    the operator sees when they do is a page that loads and a websocket that
+    never opens, which reads as the UI being broken rather than as a setting
+    being one line short.
+
+    A warning and not an error. Binding ``0.0.0.0`` and reaching the box by
+    hostname is an ordinary deployment, and the origin the browser sends is
+    then a name this process cannot know -- refusing to start would break a
+    setup that works.
+    """
+    allowed = _configured_origins(app_root)
+    if allowed is None or "*" in allowed:
+        return
+    wanted = origins_for(host, port)
+    if any(origin in allowed for origin in wanted):
+        return
+    settings = app_root / ".chainlit" / "config.toml"
+    listed = ", ".join(allowed) or "(none)"
+    click.echo(
+        f"Warning: this UI will serve on {wanted[0]}, which is not in the "
+        f"origin policy, so the browser's connection will be refused.\n"
+        f"  allowed: {listed}\n"
+        f"  add it to allow_origins in {settings}",
+        err=True,
+    )
+
+
+def _chainlit_app_root() -> Path:
+    """A writable directory holding the Chainlit settings we intend to ship.
+
+    Chainlit reads ``.chainlit/config.toml`` under ``CHAINLIT_APP_ROOT``, or
+    under the working directory when that is unset -- and creates one with its
+    own defaults if there is none. Setting neither, as this did, meant the
+    settings that applied were whatever directory the operator happened to be
+    standing in: the repository's hardened file from a checkout, and a freshly
+    generated ``allow_origins = ["*"]`` from anywhere else. On a wheel there is
+    no repository file at all, so the permissive pair was what every install
+    got, on a UI whose tools run pasted code on GPU nodes.
+
+    Under the user's config directory rather than the package, because Chainlit
+    writes here -- ``.files`` for uploads, translations, the config itself --
+    and site-packages is the wrong place for that and often read-only.
+
+    The shipped file seeds it once. An operator editing the copy keeps their
+    edits; upgrading does not overwrite them, which is the tradeoff that goes
+    with making it theirs.
+    """
+    from aorta._user_paths import config_home
+
+    root = config_home() / "aorta" / "chat-ui"
+    settings = root / ".chainlit" / "config.toml"
+    if not settings.is_file():
+        shipped = Path(__file__).resolve().parents[1] / "chat" / "ui" / "chainlit_config.toml"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        if shipped.is_file():
+            settings.write_text(shipped.read_text(encoding="utf-8"), encoding="utf-8")
+    return root
 
 
 def _ui_env(options: _GroupOptions) -> dict[str, str]:

@@ -386,10 +386,18 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # healthy. Echo the findings after the sweep, with ';' rather than '&&' so it
     # still runs when the guardrail exits non-zero, and '|| true' so a broken
     # summary can never fail the run.
+    #
+    # The sweep's own status is saved across it and restored at the end. The
+    # launcher takes `rc=$?` on the line after this, so without the save it read
+    # the echo's status -- and the echo ends in `|| true`, which is always zero.
+    # Every run reported exit=0, including one whose interpreter was missing and
+    # which produced no sanitizer report at all: the job looked clean and Autopsy
+    # was handed an empty bundle to explain.
     echo_findings = (
-        f"; {shlex.quote(venv_bin('python'))} "
+        f"; _cia_rc=$?; {shlex.quote(venv_bin('python'))} "
         f"{shlex.quote(str(Path(__file__).resolve().parent / 'echo_findings.py'))} "
         f"{shlex.quote(str(Path(aorta_output) / 'sanitizer_report.json'))} || true"
+        "; (exit $_cia_rc)"
     )
 
     if compiled_from_source:
