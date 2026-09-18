@@ -269,12 +269,16 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # therefore decided per ID by `_is_kernel_race_id`; every other term here is
     # either long enough to be unambiguous or is deliberately matched across a
     # separator ("tier1:exit", "nan_signature"), which tokenising would break.
-    if "tier2" in joined or "hang" in joined or "rccl" in joined:
-        return "rccl_hang"
-    if "oom" in joined or "137" in joined:
-        return "oom_fragment"
-    if "hip_error" in joined or "illegal" in joined or "memory" in joined:
-        return "illegal_mem"
+    #
+    # The legs are ordered most specific test first, and that ordering is
+    # load-bearing rather than cosmetic. A leg keyed on a generic word decides
+    # every ID that merely contains it, including IDs a later leg would have
+    # identified exactly, so an accidental order silently downgrades the
+    # function's best answers to its vaguest ones. The order here is: exact
+    # multi-word signatures, then the per-ID conjunction, then the broad
+    # single-word legs. Adding a leg means placing it by how much evidence it
+    # demands, not appending it.
+    #
     # `numerics_mismatch` alongside the built-in signature, because a shipping
     # recipe already emits it: `recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml`
     # declares a tier-5 detector `ts_kernel_numerics_mismatch` on
@@ -297,6 +301,21 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # checkpoint_race.
     if any(_is_kernel_race_id(detector) for detector in detectors):
         return "kernel_race"
+    if "tier2" in joined or "hang" in joined or "rccl" in joined:
+        return "rccl_hang"
+    if "oom" in joined or "137" in joined:
+        return "oom_fragment"
+    # Last of the categories, and the reason is that "memory" is the most
+    # generic word any leg keys on: an intra-kernel race is a race on memory, a
+    # numerics mismatch is read out of memory, a checkpoint fault touches
+    # memory. Every ID this leg should claim -- `tier4:hip_error`,
+    # `custom:illegal_address` -- says so in a word no other leg wants, so
+    # deciding it last costs nothing and stops it from answering for the three
+    # legs above. `custom:consan_global_memory_race` is the case that showed
+    # this: a ConSan intra-kernel race report, named exactly as one, which this
+    # leg used to label an illegal access because it ran first.
+    if "hip_error" in joined or "illegal" in joined or "memory" in joined:
+        return "illegal_mem"
     if "tier1:exit" in joined or "launch" in joined:
         return "launch_error"
     return "unknown"

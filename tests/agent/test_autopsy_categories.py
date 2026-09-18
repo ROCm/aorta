@@ -309,6 +309,54 @@ class TestTheOfflineHeuristic:
         """
         assert _fake_step(detectors=[detector]).category == "kernel_race"
 
+    def test_a_memory_race_reported_by_a_sanitizer_is_a_kernel_race(self):
+        """The reported instance: a ConSan race report, labelled an illegal access.
+
+        `custom:consan_global_memory_race` satisfies `_is_kernel_race_id`
+        exactly -- a sanitizer token and an intra-kernel one, on one id -- and
+        never reached that leg, because `"memory" in joined` decided it several
+        legs earlier. The narrowest spelling available for this finding was the
+        one the function got wrong.
+        """
+        step = _fake_step(detectors=["custom:consan_global_memory_race"])
+        assert step.category == "kernel_race"
+
+    @pytest.mark.parametrize(
+        "detector,expected",
+        [
+            # `memory`, against each of the three legs that used to sit behind
+            # it. It is the most generic word any leg keys on, and an
+            # intra-kernel race, a numerics fault and a checkpoint fault are all
+            # describable as being about memory, so it shadowed all three.
+            ("custom:consan_shared_memory_race", "kernel_race"),
+            ("custom:memory_numerics_mismatch", "numeric_instability"),
+            ("custom:checkpoint_memory_fault", "checkpoint_race"),
+            # `hang` and `rccl`, which had the same relationship to the same
+            # three legs one tier further up.
+            ("custom:rccl_consan_data_race", "kernel_race"),
+            ("custom:hang_nan_signature", "numeric_instability"),
+            ("custom:rccl_checkpoint_stall", "checkpoint_race"),
+            # And `oom`.
+            ("custom:oom_consan_data_race", "kernel_race"),
+            ("custom:oom_numerics_mismatch", "numeric_instability"),
+        ],
+    )
+    def test_a_broad_leg_does_not_answer_for_a_narrower_one(self, detector, expected):
+        """The defect class behind the instance above, not the instance.
+
+        `custom:consan_global_memory_race` was reported, and it is one of
+        twenty-eight combinations: every leg keyed on a generic single word sat
+        ahead of all three legs that demand more evidence -- the two exact
+        multi-word signatures and the per-id conjunction -- so each of those
+        four broad legs answered for each of those three narrow ones.
+
+        Reordering by how much evidence a leg demands fixes the class. This
+        parametrisation is what stops a later leg being appended rather than
+        placed, which is how the ordering came to be accidental in the first
+        place.
+        """
+        assert _fake_step(detectors=[detector]).category == expected
+
     def test_the_shipping_numerics_detector_routes(self):
         """The one detector in the tree that means this was falling through.
 
