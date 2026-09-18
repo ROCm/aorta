@@ -70,6 +70,7 @@ def alerting(monkeypatch):
     # poll_jobs sleeps once after its last bounded round. Avoid a minute-long
     # test; Event.wait below remains a real clock.
     monkeypatch.setattr(poll_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(poll_mod, "pause", lambda _stop, _seconds: False)
 
     def write_bundle(job, job_dir, evidence, signal):
         bundle = job_dir / "bundle"
@@ -190,6 +191,111 @@ class TestAdmissionIsActuallyBounded:
         finally:
             release.set()
             runner.join(timeout=20)
+
+
+class TestAFailedDeferralWriteIsNotAClaim:
+    def test_atomic_failure_reports_false_and_preserves_the_old_state(
+        self, tmp_path, monkeypatch
+    ):
+        assert record_autopsy_state(
+            tmp_path,
+            "deferred",
+            job_id="cia-aaa",
+            attempts=0,
+        )
+        before = autopsy_state(tmp_path)
+        real_replace = poll_mod.os.replace
+
+        def deny_state_replace(source, destination):
+            if Path(destination).name == "autopsy.state.json":
+                raise PermissionError("state directory is read-only")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(poll_mod.os, "replace", deny_state_replace)
+
+        assert not record_autopsy_state(
+            tmp_path,
+            "queued",
+            job_id="cia-aaa",
+            attempts=1,
+        )
+        assert autopsy_state(tmp_path) == before
+        assert not list(tmp_path.glob(".autopsy.state.json.*.tmp"))
+
+    def test_unwritten_full_capacity_deferral_is_reassessed(
+        self, tmp_path, alerting, monkeypatch
+    ):
+        """No worker plus no state must leave the alert bytes uncommitted."""
+        release = threading.Event()
+        workers_full = threading.Event()
+        state_write_failed = threading.Event()
+        lock = threading.Lock()
+        calls: list[str] = []
+        target = f"cia-{poll_mod.AUTOPSY_CAPACITY:03d}"
+
+        def blocked(_bundle, job, _jobs_root, **_kwargs):
+            with lock:
+                calls.append(job.job_id)
+                if len(calls) == poll_mod.AUTOPSY_CAPACITY:
+                    workers_full.set()
+            release.wait(timeout=20)
+
+        monkeypatch.setattr(
+            "aorta.cia.watch.trigger.trigger_autopsy",
+            blocked,
+        )
+        for i in range(poll_mod.AUTOPSY_CAPACITY + 1):
+            _write_job(tmp_path, f"cia-{i:03d}")
+
+        real_replace = poll_mod.os.replace
+
+        def fail_target_deferral_once(source, destination):
+            destination = Path(destination)
+            if (
+                destination.name == "autopsy.state.json"
+                and destination.parent.name == target
+                and not state_write_failed.is_set()
+            ):
+                state_write_failed.set()
+                raise PermissionError("state directory is read-only")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(
+            poll_mod.os,
+            "replace",
+            fail_target_deferral_once,
+        )
+
+        runner = threading.Thread(
+            target=poll_jobs,
+            args=(tmp_path,),
+            kwargs={"max_rounds": 1},
+            daemon=True,
+        )
+        runner.start()
+        assert workers_full.wait(timeout=10), "the workers never filled"
+        assert state_write_failed.wait(timeout=10), "the deferral write did not fail"
+
+        try:
+            assert autopsy_state(tmp_path / target) == {}
+            assert target not in calls
+        finally:
+            release.set()
+            runner.join(timeout=20)
+
+        assert not runner.is_alive()
+
+        # Model a restarted Watch. The log did not grow; this only succeeds if
+        # the failed admission left its cursor at the alerting bytes.
+        calls.clear()
+        monkeypatch.setattr(
+            "aorta.cia.watch.trigger.trigger_autopsy",
+            lambda _bundle, job, _jobs_root, **_kwargs: calls.append(job.job_id),
+        )
+        poll_jobs(tmp_path, max_rounds=1)
+
+        assert calls == [target]
+        assert autopsy_state(tmp_path / target)["state"] == "done"
 
 
 class TestThePersistedQueueRecovers:
