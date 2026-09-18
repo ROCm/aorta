@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -60,9 +61,16 @@ def fake_clang(tmp_path):
 
 
 def _run(command: str, path: str) -> subprocess.CompletedProcess:
-    """Run the generated command the way srun would: a bare shell on a node."""
+    """Run the command with a controllable tool PATH.
+
+    Resolve bash before applying *path*, so a test can provide a directory with
+    no clang without also making the shell itself unfindable.
+    """
     return subprocess.run(
-        ["bash", "-c", command], capture_output=True, text=True, env={"PATH": path}
+        [shutil.which("bash") or "/bin/bash", "-c", command],
+        capture_output=True,
+        text=True,
+        env={"PATH": path},
     )
 
 
@@ -119,10 +127,12 @@ class TestTheNodeChoosesTheAssembler:
 
     def test_with_neither_it_says_so_distinctly(self, cluster, tmp_path):
         module = cluster(str(tmp_path / "nowhere"))
+        empty_path = tmp_path / "no-clang-here"
+        empty_path.mkdir()
 
         done = _run(
             module._assemble_command(tmp_path / "in.s", tmp_path / "out.hsaco"),
-            path="/usr/bin:/bin",
+            path=str(empty_path),
         )
 
         assert done.returncode != 0
