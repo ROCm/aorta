@@ -1943,6 +1943,52 @@ def test_a_rejected_restore_update_is_named_rather_than_scored(
     assert verdict == "RESTORE_UPDATE_REJECTED"
 
 
+def test_a_rejected_lifecycle_publishes_no_weight_observations(nccl_roundtrip_check):
+    """The verdict and the JSON must not disagree.
+
+    `changed` and `recovered` were computed from the completions alone, so a
+    rejected start or finish gave a verdict naming the rejection while the
+    report still published `weights_changed_under_perturb: true` -- the JSON
+    asserting an observation the verdict had just disowned. A rejected start
+    means the engine never entered the update state and a rejected finish means
+    it may still be in it, so in neither case are those completions evidence
+    about weights.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    verdict, changed, recovered = decide(
+        baseline=_gen("A"),
+        perturbed=_gen("B"),
+        restored=_gen("A"),
+        perturb_lifecycle=_lifecycle(finish=500),
+        restore_lifecycle=_lifecycle(),
+    )
+    assert verdict == "LIFECYCLE_REJECTED_FINISH"
+    assert changed is None and recovered is None
+
+
+@pytest.mark.parametrize("bad", [10**400, "high", None])
+def test_an_unusable_confidence_scores_low_rather_than_raising(proposal_reward, bad):
+    """A scorer has to survive the bad output it exists to score.
+
+    `AgentStep.from_dict` coerces `confidence` with `float()`, and a JSON
+    integer has no width limit -- so `10**400` raised `OverflowError` out of the
+    scorer and aborted the whole batch instead of scoring one proposal low.
+    """
+    raw = json.dumps(
+        {
+            "category": "checkpoint_race",
+            "hypothesis": "h",
+            "next_mitigations": ["tf32_off"],
+            "confidence": bad,
+            "stop": False,
+        }
+    )
+    score = proposal_reward.score_proposal(
+        proposal_reward.Proposal("p", raw, ["tf32_off"], [])
+    )
+    assert score.tier < proposal_reward.MAX_TIER, (score.tier, score.detail)
+
+
 @pytest.mark.parametrize(
     ("leg", "expected"),
     [

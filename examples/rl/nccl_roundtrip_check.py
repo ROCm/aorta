@@ -175,12 +175,28 @@ def decide_verdict(
     perturb. ``changed`` and ``recovered`` come back as ``None`` when there was
     nothing to compare, rather than as a default that reads like an observation.
     """
-    both_generated = perturbed["text"] is not None and restored["text"] is not None
-    changed = perturbed["text"] != baseline["text"] if both_generated else None
-    recovered = restored["text"] == baseline["text"] if both_generated else None
-
     perturb_bad = _lifecycle_failure(perturb_lifecycle)
     restore_bad = _lifecycle_failure(restore_lifecycle)
+
+    # Both booleans require the whole round trip to have happened -- both update
+    # steps accepted in full *and* both generations returned text. Computing
+    # them from the completions alone published
+    # `weights_changed_under_perturb: true` into the report while the verdict
+    # said the lifecycle was rejected, so the JSON asserted an observation the
+    # verdict had just disowned. `None` is what the docstring promises when
+    # there was nothing to compare, and a rejected start or finish means there
+    # was nothing to compare: the engine either never entered the update state
+    # or may still be in it, so those completions are not evidence about
+    # weights.
+    comparable = (
+        perturb_bad is None
+        and restore_bad is None
+        and perturbed["text"] is not None
+        and restored["text"] is not None
+    )
+    both_generated = perturbed["text"] is not None and restored["text"] is not None
+    changed = perturbed["text"] != baseline["text"] if comparable else None
+    recovered = restored["text"] == baseline["text"] if comparable else None
 
     if perturb_bad is not None:
         # Named by leg, because "the update was rejected" and "the engine never

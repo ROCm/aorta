@@ -336,7 +336,16 @@ def _consumer_outcome(raw_obj: dict[str, Any], offered: list[str]) -> str:
     Replays the two filters the real path applies, in order: the proposer's
     silent name filter, then the policy's category/registry check.
     """
-    step = AgentStep.from_dict(raw_obj)
+    # A JSON integer has no width limit, and `from_dict` coerces `confidence`
+    # with `float()`, which raises `OverflowError` past ~1.8e308. Uncaught, one
+    # malformed completion aborted the whole scoring batch instead of scoring
+    # low -- a scorer that cannot survive bad model output is not a scorer, and
+    # bad model output is its subject matter. Treated as the policy stopping,
+    # which is what an unusable confidence means to the loop.
+    try:
+        step = AgentStep.from_dict(raw_obj)
+    except (OverflowError, ValueError, TypeError):
+        return "policy_stop"
     filtered = [m for m in step.next_mitigations if m in offered]
     step = AgentStep(
         category=step.category,
@@ -477,7 +486,18 @@ def score_proposal(proposal: Proposal) -> Score:
             "offered (already tried, or outside the allowlist)"
         )
         return _finish(score)
-    confidence = float(raw_obj["confidence"])
+    # Same overflow route as `_consumer_outcome` above: an unbounded JSON
+    # integer here raised out of the scorer rather than scoring the proposal.
+    # A confidence that cannot be represented is outside [0, 1] by any reading,
+    # so it lands on the branch that already exists for that.
+    try:
+        confidence = float(raw_obj["confidence"])
+    except (OverflowError, ValueError, TypeError):
+        score.stopped_at = "tier5_available"
+        score.detail = (
+            f"confidence {raw_obj['confidence']!r} is not a usable number"
+        )
+        return _finish(score)
     if not 0.0 <= confidence <= 1.0:
         score.stopped_at = "tier5_available"
         score.detail = f"confidence {confidence} outside [0, 1]"

@@ -149,6 +149,15 @@ up() {
   # Rediscovering this list costs two failed bring-ups, which is what it cost
   # here before the workload's own copy was read.
   #
+  # The engine's arguments are passed as positional parameters to `bash -c`,
+  # not interpolated into its script text. Every one of them --  MODEL, PORT,
+  # CONTROL, GRAMMAR, SAMPLING, READY_SEC -- comes from a caller-settable
+  # environment variable, and interpolating them meant the container's shell
+  # reparsed their contents: a quote or a `;` in any of them ran a different
+  # command inside a `--network host` container with /dev/kfd and
+  # seccomp=unconfined. As positional `$1`..`$6` the shell never reparses them,
+  # so the values stay data whatever they contain. `_` fills `$0`.
+  #
   # --gateway-startup-timeout for the reason ts_bench_serve.sh raises it: the
   # orchestrator's own default is 60s, and a cold start blows through it while
   # the engine is still loading weights and compiling kernels. Left at our
@@ -176,13 +185,21 @@ up() {
     -e LOGNAME="$(id -un)" \
     -e HIP_VISIBLE_DEVICES="${GPU}" \
     --entrypoint bash \
-    "${IMAGE}" -c "exec tokenspeed serve '${MODEL}' \
-      --host 127.0.0.1 --port ${PORT} --control-port ${CONTROL} \
-      --grammar-backend ${GRAMMAR} \
-      --sampling-backend ${SAMPLING} \
-      --gateway-startup-timeout ${READY_SEC}" \
+    "${IMAGE}" -c 'exec tokenspeed serve "$1" \
+      --host 127.0.0.1 --port "$2" --control-port "$3" \
+      --grammar-backend "$4" \
+      --sampling-backend "$5" \
+      --gateway-startup-timeout "$6"' \
+    _ "${MODEL}" "${PORT}" "${CONTROL}" "${GRAMMAR}" "${SAMPLING}" "${READY_SEC}" \
     > "${LOG_DIR}/container-id.txt"
   echo "started ${NAME} ($(cut -c1-12 "${LOG_DIR}/container-id.txt"))"
+
+  # From here to the end of the readiness wait, an interrupt would leave the
+  # container running and holding a GPU -- the same leak the failure paths were
+  # fixed for, arriving by Ctrl-C instead. Armed after `docker run` so it can
+  # only ever target the container this call created, and cleared on success,
+  # because a successful `up` is supposed to leave the engine up.
+  trap 'echo "interrupted during bring-up; removing ${NAME}" >&2; docker rm -f "${NAME}" >/dev/null 2>&1 || true; exit 130' INT TERM
 
   # Poll health, but re-check liveness every iteration: a crash during weight
   # load has to surface as its own failure instead of burning the whole
@@ -212,6 +229,10 @@ up() {
   for _ in $(seq 1 20); do
     if [ "$(http_code "http://127.0.0.1:${CONTROL}/health_generate")" = "200" ]; then
       echo "OK: /health_generate after $(( $(date +%s) - t0 ))s"
+      # Bring-up is done, so the interrupt guard stops applying: a successful
+      # `up` leaves the engine running on purpose, and `hold` installs its own
+      # traps after this returns.
+      trap - INT TERM
       docker logs "${NAME}" > "${LOG_DIR}/server.log" 2>&1 || true
       models
       backends
@@ -255,14 +276,20 @@ backends() {
 hold() {
   # Tear the container down on the way out, so a cancelled step does not leave
   # a live engine holding a GPU that the next allocation cannot use.
-  trap 'echo "signalled; tearing down"; docker rm -f "${NAME}" >/dev/null 2>&1 || true; exit 0' INT TERM
-  # EXIT as well as INT/TERM. `up` exits directly on a bring-up failure, so
-  # under `hold` the INT/TERM trap never ran and the container outlived the
-  # script -- the same leak, arriving by the one route the trap did not cover.
-  # Safe to arm before `up`: `up` refuses to start when the name is already
-  # taken, so anything this trap can see was created by this invocation.
-  trap 'docker rm -f "${NAME}" >/dev/null 2>&1 || true' EXIT
+  # Armed only *after* `up` returns, and the ordering is the whole point.
+  #
+  # Arming first looked safer and was dangerous: `up` refuses to start when the
+  # name is already taken, and it refuses by exiting -- so on a collision with
+  # another invocation's live server, the trap fired on the way out and removed
+  # *their* container. That trades a leak for destroying someone else's running
+  # engine, which is the worse failure by a distance.
+  #
+  # Nothing is lost by waiting. `up`'s own failure paths go through
+  # `teardown_failed`, which removes the container it created, so the window
+  # this trap used to cover is already covered by the code that owns it.
   up
+  trap 'echo "signalled; tearing down"; docker rm -f "${NAME}" >/dev/null 2>&1 || true; exit 0' INT TERM
+  trap 'docker rm -f "${NAME}" >/dev/null 2>&1 || true' EXIT
   echo "holding ${NAME}; endpoint http://127.0.0.1:${PORT}/v1"
   while [ -n "$(docker ps -q -f "name=^${NAME}$")" ]; do
     sleep 10
