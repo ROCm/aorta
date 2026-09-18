@@ -142,7 +142,7 @@ class TestCompletionBelongsToTheWorker:
         done = [event for event in announcements if event.get("done")]
         assert exited.is_set()
         assert len(done) == 1
-        assert done[0]["cancelled"] is True
+        assert done[0]["cancelled"] == "stopped"
 
     async def test_normal_completion_still_announces_once(
         self, monkeypatch, announcements
@@ -158,7 +158,7 @@ class TestCompletionBelongsToTheWorker:
         assert len(announcements) == 2
         assert announcements[0].get("done") is None
         assert announcements[1]["done"] is True
-        assert announcements[1]["cancelled"] is False
+        assert "cancelled" not in announcements[1]
         assert announcements[0]["id"] == announcements[1]["id"]
 
 
@@ -207,4 +207,4 @@ class TestCancellationReachesRunTriage:
         assert exited.is_set()
         done = [event for event in announcements if event.get("done")]
         assert len(done) == 1
-        assert done[0]["cancelled"] is True
+        assert done[0]["cancelled"] == "stopped"

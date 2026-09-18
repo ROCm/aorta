@@ -131,7 +131,12 @@ class _ToolSteps:
         # wrong one.
         call = str(delta.get("id") or name)
         if delta.get("done"):
-            await self._finish(call, name, delta.get("seconds"))
+            await self._finish(
+                call,
+                name,
+                delta.get("seconds"),
+                delta.get("cancelled"),
+            )
             return
         step = cl.Step(name=f"Running {name}", type="tool")
         step.start = utc_now()
@@ -139,12 +144,20 @@ class _ToolSteps:
         await step.send()
         self._open[call] = step
 
-    async def _finish(self, call: str, name, seconds) -> None:
+    async def _finish(self, call: str, name, seconds, cancellation=None) -> None:
         step = self._open.pop(call, None)
         if step is None:
             return  # a completion with nothing open; nothing to close
         took = f" in {seconds:g}s" if isinstance(seconds, (int, float)) else ""
-        step.output = f"`{name}` finished{took}."
+        if cancellation in {"stopped", True}:
+            step.output = f"`{name}` stopped after cancellation{took}."
+        elif cancellation == "still running":
+            step.output = (
+                f"`{name}` cancellation requested{took}; its underlying work "
+                "is still running."
+            )
+        else:
+            step.output = f"`{name}` finished{took}."
         step.end = utc_now()
         await step.update()
 

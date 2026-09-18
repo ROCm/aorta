@@ -152,6 +152,7 @@ async def invoke_agent(
         "command_output": None,
         "critic_feedback": None,
         "iteration": 0,
+        "user_evidence": [],
     }
     decision_session = session_id or new_session_id()
     decision_mode = session_log_mode()

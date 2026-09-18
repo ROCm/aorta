@@ -17,7 +17,11 @@ from __future__ import annotations
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from aorta.chat.graph.nodes import _last_human_message
+from aorta.chat.graph.nodes import (
+    _answer_result,
+    _critic_user_context,
+    _last_human_message,
+)
 
 
 class TestItFindsWhatTheUserSaid:
@@ -71,6 +75,105 @@ class TestALargePasteDoesNotSwampIt:
         assert "lr=5.0" in _last_human_message(state)
 
 
+class TestRelevantEvidenceSurvivesADeepPaste:
+    @staticmethod
+    def _state():
+        lines = [
+            "why does this kernel produce NaNs?",
+            *[f"// filler {number:04d}" for number in range(600)],
+            "float variance = sum / count;",
+            "float scale = rsqrtf(variance);",
+            "output[index] = input[index] * scale;",
+        ]
+        return {"messages": [HumanMessage(content="\n".join(lines))]}
+
+    def test_the_answer_carries_an_exact_late_citation(self):
+        state = self._state()
+        result = _answer_result(
+            state,
+            "The cause is `float scale = rsqrtf(variance);`: zero variance "
+            "has no epsilon.",
+            [],
+        )
+
+        assert result["user_evidence"] == [
+            {
+                "excerpt": "float scale = rsqrtf(variance);",
+                "line": 603,
+            }
+        ]
+
+    def test_the_critic_gets_a_bounded_window_around_that_citation(self):
+        state = self._state()
+        answer = "The cause is `float scale = rsqrtf(variance);`."
+        state["user_evidence"] = _answer_result(
+            state,
+            answer,
+            [],
+        )["user_evidence"]
+
+        context = _critic_user_context(state)
+
+        assert len(context) <= 4000
+        assert "VERIFIED USER EVIDENCE" in context
+        assert "float variance = sum / count;" in context
+        assert "float scale = rsqrtf(variance);" in context
+        assert "output[index] = input[index] * scale;" in context
+
+    def test_a_forged_excerpt_is_not_forwarded(self):
+        state = self._state()
+        state["user_evidence"] = [
+            {"excerpt": "variance = definitely_invented", "line": 602}
+        ]
+
+        context = _critic_user_context(state)
+
+        assert "VERIFIED USER EVIDENCE" not in context
+        assert "definitely_invented" not in context
+
+    def test_the_carried_line_must_match_too(self):
+        state = self._state()
+        state["user_evidence"] = [
+            {"excerpt": "float scale = rsqrtf(variance);", "line": 2}
+        ]
+
+        context = _critic_user_context(state)
+
+        assert "VERIFIED USER EVIDENCE" not in context
+        assert "float scale = rsqrtf(variance);" not in context
+
+    @pytest.mark.asyncio
+    async def test_the_verified_window_is_sent_to_the_critic(self, monkeypatch):
+        from aorta.chat.graph import nodes
+
+        class Critic:
+            messages = None
+
+            async def ainvoke(self, messages):
+                self.messages = messages
+                return AIMessage(content="VALID")
+
+        critic = Critic()
+        state = self._state()
+        answer = "The cause is `float scale = rsqrtf(variance);`."
+        state.update(
+            {
+                "command_output": answer,
+                "tool_trace": [],
+                "iteration": 0,
+                "user_evidence": _answer_result(state, answer, [])["user_evidence"],
+            }
+        )
+        monkeypatch.setattr(nodes.settings, "max_retry_iterations", 3)
+        monkeypatch.setattr(nodes, "_get_llm", lambda **_kwargs: critic)
+
+        await nodes.critic_node(state)
+
+        prompt = critic.messages[-1].content
+        assert "float scale = rsqrtf(variance);" in prompt
+        assert "VERIFIED USER EVIDENCE" in prompt
+
+
 class TestTheCriticIsGivenIt:
     @staticmethod
     def _source() -> str:
@@ -84,7 +187,7 @@ class TestTheCriticIsGivenIt:
         assert "WHAT THE USER ASKED" in self._source()
 
     def test_it_is_filled_from_the_state(self):
-        assert "asked = _last_human_message(state)" in self._source()
+        assert "asked = _critic_user_context(state)" in self._source()
 
     def test_the_tool_results_are_still_there(self):
         """Adding the paste must not displace what it was checking before."""

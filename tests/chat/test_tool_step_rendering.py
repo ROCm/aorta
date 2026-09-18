@@ -49,6 +49,8 @@ def steps(monkeypatch):
 
 START = {"tool": "triage_kernel_source", "id": "triage_kernel_source:1"}
 DONE = {**START, "done": True, "seconds": 312.0}
+STOPPED = {**DONE, "cancelled": "stopped"}
+STILL_RUNNING = {**DONE, "cancelled": "still running"}
 
 
 async def test_the_step_is_still_running_after_the_announcement(steps):
@@ -87,6 +89,26 @@ async def test_the_wait_is_reported(steps):
     await tracker.handle(START)
     await tracker.handle(DONE)
     assert "312s" in steps[0].output
+
+
+async def test_a_stopped_tool_is_not_rendered_as_finished(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(STOPPED)
+
+    assert "stopped after cancellation" in steps[0].output
+    assert "finished" not in steps[0].output
+    assert not steps[0].running
+
+
+async def test_a_cancellation_request_can_report_work_still_running(steps):
+    tracker = app._ToolSteps()
+    await tracker.handle(START)
+    await tracker.handle(STILL_RUNNING)
+
+    assert "cancellation requested" in steps[0].output
+    assert "still running" in steps[0].output
+    assert "finished" not in steps[0].output
 
 
 async def test_concurrent_tools_close_independently(steps):

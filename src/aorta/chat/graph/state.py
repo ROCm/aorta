@@ -9,6 +9,13 @@ from langgraph.graph import add_messages
 from typing_extensions import NotRequired, TypedDict
 
 
+class UserEvidence(TypedDict):
+    """An exact answer citation located in the user's full current message."""
+
+    excerpt: str
+    line: int
+
+
 class AgentState(TypedDict):
     """Shared state that flows through the LangGraph nodes."""
 
@@ -25,6 +32,9 @@ class AgentState(TypedDict):
     # returns just its final answer. Keeping it out of `messages` also avoids
     # replaying every tool result to the model on a retry.
     tool_trace: list[str] | None
+    # Exact snippets cited by the generated answer, located against the full
+    # user turn before that turn is bounded for the critic prompt.
+    user_evidence: NotRequired[list[UserEvidence]]
     #: Tools the selector ranked, best first, and the reason it gave.
     candidate_tools: list[str] | None
     selection_rationale: str | None
