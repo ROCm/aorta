@@ -349,6 +349,39 @@ def test_current_default_output_rejects_suppressed_conflicts() -> None:
     assert "suppressed 9 uniform-write conflict(s)" in str(consan.reason)
 
 
+def test_current_report_cannot_borrow_a_legacy_counter_spelling() -> None:
+    # Spelling one counter the legacy way while dropping the current-only
+    # suppression counter must not read as a legacy report and skip the
+    # suppressed-conflict check.
+    report = _current_report().replace(
+        " conflicts=0 suppressed_uniform_write_conflicts=0",
+        " sampled_conflicts=0",
+    )
+    output = "\n".join((report, _current_healthy_coverage()))
+
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 0, output, ""),
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is ExecutionState.ERROR
+    assert "mixes current and legacy counter spellings" in str(consan.reason)
+
+
+def test_legacy_report_cannot_accompany_current_coverage() -> None:
+    # A wholly legacy report carries no suppression counter at all, so pairing
+    # one with current coverage is the other way to skip that check.
+    output = "\n".join((_sampled_report(), _current_healthy_coverage()))
+
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 0, output, ""),
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is ExecutionState.ERROR
+    assert "is legacy output while this run's coverage is current" in str(consan.reason)
+
+
 def test_sampled_log_limit_line_is_not_a_race() -> None:
     # Past 64 retained watchpoints the hook stops itemizing and says so. That
     # line is an omission notice about benign evidence, not a conflict.
@@ -1167,6 +1200,29 @@ def test_legacy_verdict_cannot_drop_all_legacy_counters() -> None:
         "replay_metadata_full",
     ):
         output = output.replace(f" {field}=0", "")
+
+    _waitcheck, consan = evaluate_record_replay(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.state is ExecutionState.ERROR
+    assert "coverage/verdict schema mismatch" in str(consan.reason)
+
+
+def test_mixed_current_and_legacy_records_never_pass() -> None:
+    # Splicing a current code object into a legacy run leaves both schema sets
+    # equal at {current, legacy}, and verdicts carry no identity to pair with a
+    # coverage record. Only requiring one schema across the whole run keeps a
+    # legacy verdict stripped of its replay counters from reading as current.
+    current = (
+        _current_healthy_coverage().replace("reader=1", "reader=2").replace("load=1", "load=2")
+    )
+    output = "\n".join(
+        (
+            _sampled_report(reader=1),
+            _current_report(reader=2),
+            _healthy_evidence(engine="sampled"),
+            current,
+        )
+    )
 
     _waitcheck, consan = evaluate_record_replay(ProcessResult(("app",), 0, output, ""))
 

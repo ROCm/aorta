@@ -105,6 +105,15 @@ class CoverageDecision:
     coverage: tuple[CoverageRecord, ...]
     verdict: AnalysisVerdict
 
+    @property
+    def schema(self) -> str:
+        """The one grammar every record of this run was written in.
+
+        ``parse_coverage_decision`` is the only constructor and refuses a run
+        whose records disagree, so any record names it.
+        """
+        return self.coverage[0].schema
+
 
 @dataclass(frozen=True)
 class _SiteRecord:
@@ -387,9 +396,15 @@ def parse_coverage_decision(log_text: str) -> CoverageDecision:
         raise CoverageParseError("missing ConSan coverage record")
     if not verdicts:
         raise CoverageParseError("missing ConSan analysis verdict")
+    # One hook build writes one grammar, so every record of a run shares a
+    # schema. Requiring a single schema over coverage and verdicts together
+    # rejects a mixed stream as well as a straight disagreement: verdicts carry
+    # no identity to pair with a coverage record, so in a mixed stream a legacy
+    # verdict stripped of all four replay counters reads as a current one, and
+    # comparing the two schema sets would still find them equal.
     coverage_schemas = {record.schema for record in coverage}
     verdict_schemas = {verdict.schema for verdict in verdicts}
-    if coverage_schemas != verdict_schemas:
+    if len(coverage_schemas | verdict_schemas) != 1:
         raise CoverageParseError(
             "coverage/verdict schema mismatch: "
             f"coverage={','.join(sorted(coverage_schemas))} "
