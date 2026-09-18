@@ -469,14 +469,35 @@ def _finish(grade: Grade, text: str, corpus: dict[str, str] | None) -> Grade:
     return grade
 
 
+class UnreadableCorpus(Exception):
+    """A recipe the novelty gate needs to compare against could not be read."""
+
+
 def load_corpus(root: Path) -> dict[str, str]:
-    """Every committed recipe, for the memorisation check."""
+    """Every committed recipe, for the memorisation check.
+
+    Fails closed on an unreadable file. Skipping one silently was the same
+    defect as an empty corpus root, reached one file at a time: a recipe that
+    is not in the corpus is one a verbatim copy of it scores full marks
+    against, while the CLI goes on reporting the gate as enabled. The other
+    files remaining readable is what makes it worse rather than better --
+    nothing in the output looks short.
+
+    Raised rather than printed, because the caller's choice is a real one:
+    every other way the gate can end up with nothing to compare already exits
+    with a message naming ``--no-novelty-gate``, and this joins them.
+    """
     corpus: dict[str, str] = {}
     for path in sorted(root.rglob("*.yaml")):
         try:
             corpus[str(path.relative_to(root.parent))] = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
+        except OSError as exc:
+            raise UnreadableCorpus(
+                f"{path} could not be read ({exc}), so the novelty gate cannot "
+                "compare against it and a copy of it would score full marks. "
+                "Fix the file, point --recipes-root elsewhere, or pass "
+                "--no-novelty-gate to score the tier ladder alone."
+            ) from exc
     return corpus
 
 
@@ -677,7 +698,10 @@ def main(argv: list[str] | None = None) -> int:
                 "has nothing to compare against. Point it at the recipe tree, or "
                 "pass --no-novelty-gate to score the tier ladder alone."
             )
-        corpus = load_corpus(root)
+        try:
+            corpus = load_corpus(root)
+        except UnreadableCorpus as exc:
+            parser.error(str(exc))
         if not corpus:
             parser.error(
                 f"--recipes-root {root} contains no recipes, so the novelty gate "

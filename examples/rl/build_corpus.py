@@ -98,11 +98,28 @@ BASELINE_KEYS: dict[str, str] = {
 }
 
 
+class DuplicateScenario(Exception):
+    """Two reports would publish the same corpus id."""
+
+
 @dataclass
 class Scenario:
     """One sanitizer run: one report, one verdict, one or more findings."""
 
+    # Two names, and the split is load-bearing.
+    #
+    # `case` is the leaf directory, and it is a *lookup key*: `WORKLOAD_FAMILIES`
+    # and `BASELINE_KEYS` are keyed on it, as is the gate's `_compare_case`. It
+    # is not unique across a tree, and must not be made unique, or those lookups
+    # stop resolving.
+    #
+    # `scenario_id` is the identifier the corpus publishes, and it has to be
+    # unique: `run_e2e` keys both its label map and its GRPO groups on it, so
+    # two scenarios sharing an id means one report scored against the other's
+    # label -- mislabelled training data that nothing downstream can detect,
+    # because both halves are individually well-formed.
     case: str
+    scenario_id: str
     report_path: Path
     doc: dict[str, Any]
     workload_family: str
@@ -205,10 +222,39 @@ def _field_population(scenario: Scenario) -> dict[str, Any]:
 
 
 def collect(root: Path) -> list[Scenario]:
-    """Every sanitizer report under a results tree, as a scenario."""
+    """Every sanitizer report under a results tree, as a scenario.
+
+    Refuses a tree in which two reports share a leaf directory name, rather
+    than emitting both. `rglob` accepts an arbitrary tree, so a results root
+    holding two runs -- `<run>/<case>/sanitizer_report.json`, the ordinary shape
+    for an archived sweep -- produced two scenarios with the same id. `run_e2e`
+    keys its label map and its GRPO groups on that id, so one report was scored
+    against the other report's label: mislabelled training data, and
+    undetectable downstream because each half is well-formed on its own.
+
+    Refused rather than disambiguated, and the reason is id *stability*. A
+    path-derived id would vary with where `--results` points -- the same report
+    under `survey/` and under `survey/reports/` would get different ids -- and
+    these ids key every recorded measurement. Keeping the leaf name means every
+    existing id stays byte-identical no matter which root a rebuild uses, and
+    the collision becomes a loud refusal naming both paths. Two runs of one case
+    are also two scenarios the family and baseline lookups cannot tell apart,
+    so which of them is which is the operator's call, not this function's.
+    """
     scenarios: list[Scenario] = []
+    seen: dict[str, Path] = {}
     for path in sorted(root.rglob("sanitizer_report.json")):
         case = path.parent.name
+        scenario_id = case
+        if scenario_id in seen:
+            raise DuplicateScenario(
+                f"two reports share the scenario id {scenario_id!r}: "
+                f"{seen[scenario_id]} and {path}. The corpus id keys the label "
+                "map and the GRPO groups in run_e2e, so emitting both would "
+                "score one report against the other's label. Build them into "
+                "separate corpora, or rename one case directory."
+            )
+        seen[scenario_id] = path
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -217,6 +263,7 @@ def collect(root: Path) -> list[Scenario]:
         scenarios.append(
             Scenario(
                 case=case,
+                scenario_id=scenario_id,
                 report_path=path,
                 doc=doc,
                 workload_family=WORKLOAD_FAMILIES.get(case, "unknown"),
@@ -304,8 +351,8 @@ def triage_example(
     return {
         "schema": CORPUS_SCHEMA,
         "kind": "triage",
-        "example_id": f"triage:{scenario.case}",
-        "scenario_id": scenario.case,
+        "example_id": f"triage:{scenario.scenario_id}",
+        "scenario_id": scenario.scenario_id,
         "workload_family": scenario.workload_family,
         "label": label.as_dict(),
         "checks": [
@@ -375,13 +422,13 @@ def proposal_examples(
             {
                 "schema": CORPUS_SCHEMA,
                 "kind": "proposal",
-                "example_id": f"proposal:{scenario.case}:{variant}",
-                "scenario_id": scenario.case,
+                "example_id": f"proposal:{scenario.scenario_id}:{variant}",
+                "scenario_id": scenario.scenario_id,
                 "workload_family": scenario.workload_family,
                 "variant": variant,
                 "detail": detail,
                 "proposal": {
-                    "name": f"{scenario.case}:{variant}",
+                    "name": f"{scenario.scenario_id}:{variant}",
                     "raw": json.dumps(body),
                     "candidates": candidates,
                     "tried": tried,

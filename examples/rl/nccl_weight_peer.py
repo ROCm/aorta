@@ -187,6 +187,12 @@ def main() -> int:
         default=None,
         help="broadcast root (defaults to --rank, i.e. this peer sends)",
     )
+    # Stamped into the plan so the driver can tell this run's plan from a
+    # previous run's. The two processes are launched by hand against a fixed
+    # shared path (`--plan-out` here, `--plan` there), so a leftover file is
+    # the normal state of that directory rather than an unusual one.
+    ap.add_argument("--run-id", required=True,
+                    help="token shared with the driver's --plan-run-id")
     ap.add_argument("--group-name", default="weight_update_group")
     ap.add_argument("--device-index", type=int, default=0)
     ap.add_argument("--model-path", required=True)
@@ -221,6 +227,7 @@ def main() -> int:
     # and it cannot call that until the group exists -- so publish the plan
     # first, then block in rendezvous waiting for the engine to join.
     plan = {
+        "run_id": args.run_id,
         "names": names,
         "dtype_names": [_DTYPE_NAMES[str(originals[n].dtype)] for n in names],
         "shapes": [list(originals[n].shape) for n in names],

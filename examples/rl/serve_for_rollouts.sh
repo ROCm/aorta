@@ -235,7 +235,13 @@ up() {
       trap - INT TERM
       docker logs "${NAME}" > "${LOG_DIR}/server.log" 2>&1 || true
       models
-      backends
+      # A greedy engine makes this server useless for the one job it exists to
+      # do, so bring-up has failed even though every health check passed. Torn
+      # down rather than left running, for the reason the other failure paths
+      # are: an engine nobody can use is still holding a GPU.
+      if ! backends; then
+        teardown_failed 57 "engine reports sampling_backend=greedy; a rollout against it would have zero within-group spread"
+      fi
       return 0
     fi
     sleep 5
@@ -259,6 +265,10 @@ models() {
 # greedy engine answers every sampled request with HTTP 200 and the argmax, so
 # there is no failure to notice downstream -- only completions that are all
 # identical, which reads as a model property rather than a server setting.
+# Returns non-zero when the engine reports greedy and greedy was not asked for.
+# It only *reports*; the caller decides what that means, because the two callers
+# want different things -- `up` owns a container and must tear it down, while
+# the standalone `backends` command does not own one and must not touch it.
 backends() {
   local info greedy
   info=$(curl -s --max-time 10 "http://127.0.0.1:${CONTROL}/get_server_info" || echo '{}')
@@ -267,8 +277,22 @@ backends() {
     || echo "(could not read /get_server_info)"
   greedy=$(echo "${info}" | grep -c '"sampling_backend":"greedy"' || true)
   if [ "${greedy}" != "0" ] && [ "${SAMPLING}" != "greedy" ]; then
-    echo "WARNING: asked for --sampling-backend ${SAMPLING} but the engine " \
-         "reports 'greedy'; sampling parameters will be silently ignored" >&2
+    # Fatal to the caller, not a warning, and the aorta side already treats it
+    # that way: `tokenspeed_serve` fails the step with exit 57,
+    # `rollout_sampling_ignored`, on exactly this reading. Warning here while
+    # failing there meant two halves of one defect behaved differently, which
+    # is invisible unless someone reads both -- and is how it survived.
+    #
+    # The severity is the point rather than the tidiness. A greedy engine
+    # answers every sampled request with HTTP 200 and the argmax, so a rollout
+    # driven against it yields a group of identical completions and an
+    # identically zero advantage: the whole run is wasted and nothing in it
+    # looks wrong. Leaving the server up to be driven anyway is the failure.
+    echo "FAIL: asked for --sampling-backend ${SAMPLING} but the engine reports" \
+         "'greedy'; sampling parameters are silently ignored, so every" \
+         "completion in a group would be the argmax and the advantage zero" >&2
+    echo
+    return 57
   fi
   echo
 }
@@ -302,6 +326,9 @@ case "${1:-up}" in
   up) up ;;
   hold) hold ;;
   models) models ;;
+  # Exits non-zero on a greedy engine, so this is usable as a precondition
+  # check -- but removes nothing: this invocation did not create the container
+  # and must not delete one it does not own.
   backends) backends ;;
   logs) docker logs "${@:2}" "${NAME}" ;;
   down)

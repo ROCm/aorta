@@ -13,6 +13,8 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -303,6 +305,33 @@ def test_an_unknown_environment_still_fails_tier_3(recipe_reward):
 
     assert grade.tier == 2
     assert grade.failed_at == "tier3_registry", grade.reason
+
+
+def test_an_unreadable_recipe_fails_the_novelty_gate_closed(recipe_reward, tmp_path):
+    """A skipped recipe is one a verbatim copy of it scores full marks against.
+
+    The same defect as an empty corpus root, reached one file at a time -- and
+    worse for being partial: the other files stay readable, so nothing in the
+    output looks short while the CLI still reports the gate as enabled.
+    """
+    root = tmp_path / "recipes"
+    root.mkdir()
+    (root / "readable.yaml").write_text("schema_version: 1\n")
+    unreadable = root / "locked.yaml"
+    unreadable.write_text("schema_version: 1\n")
+    unreadable.chmod(0o000)
+    try:
+        with pytest.raises(recipe_reward.UnreadableCorpus, match="locked.yaml"):
+            recipe_reward.load_corpus(root)
+    finally:
+        unreadable.chmod(0o644)
+
+    # And readable again once the cause is gone, so the guard is the file and
+    # not the directory.
+    assert set(recipe_reward.load_corpus(root)) == {
+        "recipes/readable.yaml",
+        "recipes/locked.yaml",
+    }
 
 
 def test_the_grader_only_injects_a_scratch_key_the_workload_takes(recipe_reward):
@@ -1329,6 +1358,49 @@ def test_lanes_of_one_race_collapse_to_one_site(build_corpus, tmp_path):
     assert manifest["findings"]["distinct_sites"] == 1
 
 
+def test_two_runs_sharing_a_case_name_are_refused(build_corpus, tmp_path):
+    """The worst failure this corpus can have, because nothing detects it.
+
+    `collect()` accepts an arbitrary tree and derives the id from the leaf
+    directory, so an archived sweep holding `<run>/<case>/sanitizer_report.json`
+    produced two scenarios with one id. `run_e2e` keys its label map and its
+    GRPO groups on that id, so one report was scored against the other's label
+    -- and both halves are individually well-formed, so nothing downstream
+    could see it.
+
+    Refused rather than disambiguated, because a path-derived id would vary
+    with where `--results` points and these ids key recorded measurements.
+    """
+    results = tmp_path / "results"
+    source = (
+        _SURVEY / "reports" / "gemm_f32_waitcheck" / "sanitizer_report.json"
+    ).read_text()
+    for run in ("runA", "runB"):
+        case = results / run / "gemm_f32_waitcheck"
+        case.mkdir(parents=True)
+        (case / "sanitizer_report.json").write_text(source)
+
+    with pytest.raises(build_corpus.DuplicateScenario, match="gemm_f32_waitcheck"):
+        build_corpus.collect(results)
+
+
+def test_ids_do_not_depend_on_which_root_was_given(build_corpus):
+    """Stability is why the collision is refused instead of disambiguated.
+
+    The same report has to carry the same id whether a rebuild points at
+    `survey/` or at `survey/reports/`, because every recorded number is keyed
+    on it. A relative-path id would have changed under the shallower root.
+    """
+    deep = {s.scenario_id for s in build_corpus.collect(_SURVEY / "reports")}
+    shallow = {s.scenario_id for s in build_corpus.collect(_SURVEY)}
+
+    assert deep == shallow
+    assert "gemm_f32_waitcheck" in deep
+    # And the id is still the leaf name, which is what the committed corpus and
+    # the recorded rollouts use.
+    assert all("/" not in i for i in deep), deep
+
+
 def test_distinct_waitcheck_hazards_do_not_collapse(build_corpus, tmp_path):
     """The mirror of the test above, and the case it did not cover.
 
@@ -1941,6 +2013,100 @@ def test_a_rejected_restore_update_is_named_rather_than_scored(
         restore_lifecycle=_lifecycle(update=500),
     )
     assert verdict == "RESTORE_UPDATE_REJECTED"
+
+
+def test_a_greedy_engine_is_fatal_to_the_rollout_server(tmp_path):
+    """Warning here while the aorta side fails with exit 57 was the asymmetry.
+
+    Two halves of one defect behaving differently is invisible unless someone
+    reads both, which is how it survived. A greedy engine answers every sampled
+    request 200 with the argmax, so a rollout driven against it produces a group
+    of identical completions and an identically zero advantage -- the whole run
+    wasted with nothing in it looking wrong.
+
+    Drives the extracted `backends` function against a stub that reports greedy,
+    rather than bringing up a container.
+    """
+    script = _EXAMPLES / "serve_for_rollouts.sh"
+    body = subprocess.run(
+        ["awk", "/^backends\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "backends" in body, "failed to extract the function"
+
+    # A stub `curl` that answers /get_server_info with a greedy engine.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(
+        '#!/usr/bin/env bash\necho \'{"sampling_backend":"greedy","grammar_backend":"xgrammar"}\'\n'
+    )
+    (bin_dir / "curl").chmod(0o755)
+
+    harness = tmp_path / "drive.sh"
+    harness.write_text(f'CONTROL=1\nSAMPLING=triton\n{body}\nbackends\n')
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    output = proc.stdout + proc.stderr
+
+    # 57, the same code and the same reading as `tokenspeed_serve`'s
+    # `rollout_sampling_ignored`.
+    assert proc.returncode == 57, output
+    assert "FAIL" in output and "greedy" in output, output
+
+    # And silent when the engine agrees, so the check is the mismatch and not
+    # a function that always fails.
+    (bin_dir / "curl").write_text(
+        '#!/usr/bin/env bash\necho \'{"sampling_backend":"triton"}\'\n'
+    )
+    (bin_dir / "curl").chmod(0o755)
+    ok = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_a_stale_plan_is_not_this_runs_plan(nccl_roundtrip_check, tmp_path, capsys):
+    """`--plan` is a fixed shared path, so a leftover plan is the normal state.
+
+    Accepting it meant reading a previous run's tensor names and shapes while
+    this run's peer wrote its own, then mismatching the HTTP update against the
+    collective actually broadcast -- which hangs rather than failing, so it
+    would not even have reported.
+    """
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"run_id": "an-older-run", "names": ["w"]}))
+
+    found, stale = nccl_roundtrip_check.wait_for_plan(plan, "this-run", 0)
+
+    assert found is None
+    # Reported apart from "nothing appeared", because the two send an operator
+    # to different places: clear the path, versus the peer never got that far.
+    assert stale == "an-older-run"
+
+    # The same path, once this run's peer publishes, is accepted immediately.
+    plan.write_text(json.dumps({"run_id": "this-run", "names": ["w"]}))
+    found, stale = nccl_roundtrip_check.wait_for_plan(plan, "this-run", 0)
+    assert found is not None and found["names"] == ["w"]
+    assert stale is None
+
+
+def test_no_plan_at_all_is_a_different_verdict(nccl_roundtrip_check, tmp_path):
+    """`PEER_PLAN_NEVER_APPEARED` has to stay distinguishable from stale."""
+    found, stale = nccl_roundtrip_check.wait_for_plan(
+        tmp_path / "absent.json", "this-run", 0
+    )
+    assert found is None and stale is None
 
 
 def test_a_rejected_lifecycle_publishes_no_weight_observations(nccl_roundtrip_check):

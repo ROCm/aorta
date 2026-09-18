@@ -394,19 +394,32 @@ asserts no example carries `unknown`.
 322 s cold start with a weight update.
 
 ```bash
+RUN_ID="$(date +%s)-$$"   # any token the two sides agree on
+
 # trainer side: joins the engine's group as rank 0 and broadcasts
 python examples/rl/nccl_weight_peer.py \
   --master-port 29511 --world-size 2 --rank 0 \
   --model-path /path/to/hf/snapshot \
   --tensors model.embed_tokens.weight \
-  --rounds perturb,restore --plan-out /shared/plan.json
+  --rounds perturb,restore --plan-out /shared/plan.json \
+  --run-id "${RUN_ID}"
 
 # engine side: proves the weights actually moved
 python examples/rl/nccl_roundtrip_check.py \
   --engine-url http://127.0.0.1:8000 --control-url http://127.0.0.1:8001 \
   --model Qwen/Qwen3-0.6B --plan /shared/plan.json \
+  --plan-run-id "${RUN_ID}" \
   --master-port 29511 --world-size 2 --out roundtrip.json
 ```
+
+`--run-id` / `--plan-run-id` are required on purpose. `--plan` is a fixed
+shared path, so a plan from a previous run is the ordinary state of that
+directory, and the driver used to accept it: it would read stale tensor names
+and shapes while this run's peer was writing its own, then mismatch the HTTP
+update against the collective the peer actually broadcasts — which hangs rather
+than failing. The driver now waits for a plan whose `run_id` matches, and
+reports `PEER_PLAN_STALE` rather than `PEER_PLAN_NEVER_APPEARED` when it finds
+one from another run, since those send you to different places.
 
 `nccl_weight_peer.py` deliberately does **not** call
 `torch.distributed.init_process_group`. The engine joins a standalone group over

@@ -132,6 +132,46 @@ def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str
     return out
 
 
+def wait_for_plan(
+    plan_path: Path, run_id: str, timeout_s: int
+) -> tuple[dict[str, Any] | None, str | None]:
+    """This run's plan, or ``(None, <the run_id seen instead>)``.
+
+    Matched on ``run_id`` rather than on the path existing. The peer and the
+    driver are launched by hand against a fixed shared path -- ``/shared/plan.json``
+    in the README -- so a plan left by a previous run is the ordinary state of
+    that directory, not an unusual one. Accepting it meant reading stale tensor
+    names and shapes while this run's peer was writing its own, and then
+    mismatching the HTTP update against the collective the peer actually
+    broadcasts: that hangs rather than failing, so it would not even have
+    reported a verdict.
+
+    ``os.replace`` on the peer's side publishes each plan atomically, so a read
+    whose id matches is a complete plan for this run.
+
+    Extracted from ``main`` for the same reason ``decide_verdict`` was: the
+    branch ordering is the whole check, and reaching it through ``main`` means
+    first waiting on an engine that a test does not have.
+    """
+    limit = time.time() + timeout_s
+    stale_seen: str | None = None
+    while True:
+        if plan_path.exists():
+            try:
+                candidate = json.loads(plan_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                # Mid-rename or unreadable: not this run's plan yet.
+                candidate = None
+            if isinstance(candidate, dict):
+                found = candidate.get("run_id")
+                if found == run_id:
+                    return candidate, None
+                stale_seen = str(found)
+        if time.time() >= limit:
+            return None, stale_seen
+        time.sleep(2)
+
+
 def _lifecycle_failure(lifecycle: dict[str, Any]) -> str | None:
     """The first leg of a start -> update -> finish step that was not accepted.
 
@@ -229,6 +269,16 @@ def main() -> int:
     ap.add_argument("--control-url", default="http://127.0.0.1:30010")
     ap.add_argument("--model", required=True)
     ap.add_argument("--plan", required=True, help="plan file written by the peer")
+    # Required rather than optional: the whole point is that a plan is only
+    # trusted when it is this run's, and an optional check is one an
+    # invocation can leave off precisely when it matters.
+    ap.add_argument("--plan-run-id", required=True,
+                    help="must match the peer's --run-id")
+    # Bounded here rather than hard-coded in the wait, so the stale-plan and
+    # never-appeared paths are reachable in a test without waiting ten
+    # minutes for each.
+    ap.add_argument("--plan-timeout", type=int, default=600,
+                    help="seconds to wait for this run's plan (default 600)")
     ap.add_argument("--master-address", default="127.0.0.1")
     ap.add_argument("--master-port", type=int, required=True)
     ap.add_argument("--rank-offset", type=int, default=1)
@@ -279,15 +329,30 @@ def main() -> int:
 
     # The peer publishes the plan before it blocks in rendezvous, so this
     # arriving means the sender is up and it is safe to make the engine join.
-    plan_path = Path(args.plan)
-    limit = time.time() + 600
-    while not plan_path.exists() and time.time() < limit:
-        time.sleep(2)
-    if not plan_path.exists():
-        report["verdict"] = "PEER_PLAN_NEVER_APPEARED"
+    #
+    # Matched on `run_id`, not just on the path existing. The two processes are
+    # launched by hand against a fixed shared path -- `/shared/plan.json` in the
+    # README -- so a plan left by a previous run is the normal state of that
+    # directory. Accepting it meant reading stale tensor names and shapes while
+    # this run's peer was still writing its own, and then mismatching the HTTP
+    # update against the collective the peer actually broadcasts, which hangs
+    # rather than failing. `os.replace` on the peer's side makes each plan
+    # appear atomically, so a read that matches the id is a complete plan for
+    # this run.
+    plan, stale_seen = wait_for_plan(
+        Path(args.plan), args.plan_run_id, args.plan_timeout
+    )
+    if plan is None:
+        # Distinguished, because the two send an operator to different places:
+        # nothing appeared means the peer never got that far, while a plan from
+        # another run means the path needs clearing or the ids do not match.
+        report["verdict"] = (
+            "PEER_PLAN_STALE" if stale_seen is not None else "PEER_PLAN_NEVER_APPEARED"
+        )
+        report["plan_run_id_expected"] = args.plan_run_id
+        report["plan_run_id_seen"] = stale_seen
         flush()
         return 2
-    plan = json.loads(plan_path.read_text())
     report["plan"] = plan
     log(f"plan: {len(plan['names'])} tensor(s) {plan['names']}")
 
