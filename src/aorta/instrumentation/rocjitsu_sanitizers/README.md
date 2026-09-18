@@ -26,7 +26,9 @@ Available now as a Python library:
 - parse upstream `rj-waitcheck-diagnostic-v1` JSONL for corpus workflows;
 - parse output from the combined Waitcheck + ConSan hook: the current `default`
   detector, plus legacy Sampled and Record/Replay logs retained for saved
-  bundles captured before RocJITsu simplified its modes;
+  bundles captured before RocJITsu simplified its modes -- one log must be
+  wholly one of the two grammars, since a mixed log is how a record truncated
+  out of the legacy grammar comes to read as a current one;
 - preserve per-code-object ConSan coverage and fail closed on timeout, backend
   failure, missing verdicts, or incomplete coverage;
 - write and strictly reload experimental `aorta.sanitizer_report/0.1` JSON;
