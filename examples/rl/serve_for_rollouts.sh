@@ -103,6 +103,33 @@ NAME="${TS_NAME:-ts-rollout-serve}"
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || echo 000; }
 
+# Whether this invocation currently owns the container -- created by its
+# `docker run` and not yet handed over. One fact, read by every trap, because
+# this leak class has now been found four times and each fix guarded one more
+# code location:
+#
+#   1. `up` exited on a failure path with the container still named
+#   2. `hold` armed its traps before `up` checked for a name collision, so a
+#      collision removed *another* invocation's server
+#   3. plain `up` had no interrupt guard during the readiness wait
+#   4. the guard was cleared straight after `health_generate`, leaving
+#      `docker logs` / `models` / `backends` unguarded
+#
+# Every one of those was a window, and guarding a window means the next line
+# added outside it opens a fifth. So the guard is keyed on *ownership* instead:
+# it is armed once, at the moment the container comes into existence, and
+# released at exactly one point, where `up` decides to hand it over. Anything
+# that exits in between -- a signal, `teardown_failed`, or an `exit` some later
+# change adds -- goes through the same release.
+_OWNED=0
+
+_release_owned() {
+  [ "${_OWNED}" = "1" ] || return 0
+  echo "bring-up did not complete; removing ${NAME}" >&2
+  docker rm -f "${NAME}" >/dev/null 2>&1 || true
+  _OWNED=0
+}
+
 # Give up on a container this invocation started, after saving what it said.
 #
 # Every failure path in `up` below is reached *after* `docker run -d` has
@@ -122,10 +149,13 @@ teardown_failed() {  # teardown_failed <exit-code> <message>
   docker logs --tail 60 "${NAME}" > "${LOG_DIR}/server-failure.log" 2>&1 || true
   tail -n 60 "${LOG_DIR}/server-failure.log" >&2 2>/dev/null || true
   docker rm -f "${NAME}" >/dev/null 2>&1 || true
+  # Ownership ends here, so the EXIT trap does not attempt a second removal.
+  _OWNED=0
   exit "${code}"
 }
 
 up() {
+  local rc
   mkdir -p "${LOG_DIR}" "${HF_HOME_HOST}/hub" "${OUT_DIR}/triton-cache" "${OUT_DIR}/home"
   if [ -n "$(docker ps -aq -f "name=^${NAME}$")" ]; then
     echo "container ${NAME} already exists; run 'down' first" >&2
@@ -194,12 +224,16 @@ up() {
     > "${LOG_DIR}/container-id.txt"
   echo "started ${NAME} ($(cut -c1-12 "${LOG_DIR}/container-id.txt"))"
 
-  # From here to the end of the readiness wait, an interrupt would leave the
-  # container running and holding a GPU -- the same leak the failure paths were
-  # fixed for, arriving by Ctrl-C instead. Armed after `docker run` so it can
-  # only ever target the container this call created, and cleared on success,
-  # because a successful `up` is supposed to leave the engine up.
-  trap 'echo "interrupted during bring-up; removing ${NAME}" >&2; docker rm -f "${NAME}" >/dev/null 2>&1 || true; exit 130' INT TERM
+  # The container now exists, so this invocation owns it until it says
+  # otherwise. Armed here rather than at any later checkpoint: after
+  # `docker run` is the earliest moment there is something to clean up, and it
+  # is also the only moment that cannot drift as checks are added below.
+  #
+  # EXIT as well as INT/TERM, so an `exit` from anywhere in the bring-up path
+  # releases too rather than only a signal.
+  _OWNED=1
+  trap '_release_owned; exit 130' INT TERM
+  trap '_release_owned' EXIT
 
   # Poll health, but re-check liveness every iteration: a crash during weight
   # load has to surface as its own failure instead of burning the whole
@@ -231,17 +265,30 @@ up() {
       echo "OK: /health_generate after $(( $(date +%s) - t0 ))s"
       # Bring-up is done, so the interrupt guard stops applying: a successful
       # `up` leaves the engine running on purpose, and `hold` installs its own
-      # traps after this returns.
-      trap - INT TERM
       docker logs "${NAME}" > "${LOG_DIR}/server.log" 2>&1 || true
       models
-      # A greedy engine makes this server useless for the one job it exists to
-      # do, so bring-up has failed even though every health check passed. Torn
-      # down rather than left running, for the reason the other failure paths
-      # are: an engine nobody can use is still holding a GPU.
-      if ! backends; then
-        teardown_failed 57 "engine reports sampling_backend=greedy; a rollout against it would have zero within-group spread"
+      # An engine that ignores the sampling parameters, or that cannot answer a
+      # `response_format` request at all, is useless for the one job this
+      # server exists to do -- so bring-up has failed even though every health
+      # check passed. Torn down rather than left running, for the reason the
+      # other failure paths are: an engine nobody can use still holds a GPU.
+      #
+      # `backends`'s own status is propagated rather than a constant. It was
+      # `teardown_failed 57 "...sampling_backend=greedy..."`, which meant a
+      # grammar failure would have been reported as a greedy sampler under the
+      # wrong exit code -- one verdict name for two defects, which is the
+      # mistake this script has already been corrected for once. The specific
+      # cause is on the FAIL line `backends` printed.
+      backends
+      rc=$?
+      if [ "${rc}" -ne 0 ]; then
+        teardown_failed "${rc}" "engine is not usable for rollouts; see the FAIL line above"
       fi
+      # Handover: bring-up is complete and the container is meant to outlive
+      # this call, so ownership ends. The single place it does -- `hold`
+      # installs its own traps after this returns.
+      _OWNED=0
+      trap - INT TERM EXIT
       return 0
     fi
     sleep 5
@@ -269,8 +316,22 @@ models() {
 # It only *reports*; the caller decides what that means, because the two callers
 # want different things -- `up` owns a container and must tear it down, while
 # the standalone `backends` command does not own one and must not touch it.
+# One field out of /get_server_info, whitespace-tolerant.
+#
+# Factored out so the two backends are read the same way. The sampling check
+# originally matched `'"sampling_backend":"greedy"'` with no space, which a
+# pretty-printed response defeats -- `json.dumps` writes `": "` by default --
+# and the grammar check added next would otherwise have been a second place to
+# get that wrong.
+_backend_field() {  # _backend_field <name> <json>
+  printf '%s' "$2" \
+    | tr ',{}' '\n\n\n' \
+    | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" \
+    | head -n 1
+}
+
 backends() {
-  local info reported
+  local info reported grammar
   # No `|| echo '{}'`. Defaulting a failed fetch to an empty object made
   # `greedy` count 0, so a curl failure, a timeout or an empty body read
   # exactly like a healthy non-greedy engine -- the absence of evidence
@@ -291,10 +352,7 @@ backends() {
   # response has a space, so a genuinely greedy engine could answer in a shape
   # this check read as non-greedy. The test stub happened to emit the compact
   # form, which is why the narrow match looked fine.
-  reported=$(printf '%s' "${info}" \
-    | tr ',{}' '\n\n\n' \
-    | sed -n 's/.*"sampling_backend"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | head -n 1)
+  reported=$(_backend_field sampling_backend "${info}")
   if [ -z "${reported}" ]; then
     # Present-but-unreadable is the same class as unfetchable: we asked and
     # cannot say, so we must not say "fine".
@@ -319,6 +377,33 @@ backends() {
          "completion in a group would be the argmax and the advantage zero" >&2
     echo
     return 57
+  fi
+
+  # The grammar backend, checked for the same reason and with a larger blast
+  # radius than the sampling one. `LiteLLMProposer.propose` sends
+  # `response_format={"type": "json_object"}` on *every* call, and an engine on
+  # `--grammar-backend none` answers that with a 500 -- so the failure is
+  # total rather than degraded, and `up` was reporting such a server as ready.
+  # A greedy sampler at least returns text; this returns nothing usable at all.
+  #
+  # Exit 59 rather than reusing 57. 57 means "the engine ignored the sampling
+  # parameters", which is a different statement, and this script has already
+  # been corrected once for labelling two defects with one verdict name.
+  # Deliberately not 58 either: that is `rollout_sampling_backend_mismatch` on
+  # the aorta side, and a reader comparing the two should not meet one number
+  # with two meanings.
+  grammar=$(_backend_field grammar_backend "${info}")
+  if [ -z "${grammar}" ]; then
+    echo "FAIL: ${CONTROL}/get_server_info reported no grammar_backend, so it" \
+         "is unverified; refusing to report the engine as usable" >&2
+    return 59
+  fi
+  if [ "${grammar}" = "none" ] && [ "${GRAMMAR}" != "none" ]; then
+    echo "FAIL: asked for --grammar-backend ${GRAMMAR} but the engine reports" \
+         "'none'; every request carrying a response_format returns 500, so" \
+         "aorta agent cannot be served at all" >&2
+    echo
+    return 59
   fi
   echo
 }

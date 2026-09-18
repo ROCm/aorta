@@ -2029,7 +2029,7 @@ def test_a_greedy_engine_is_fatal_to_the_rollout_server(tmp_path):
     """
     script = _EXAMPLES / "serve_for_rollouts.sh"
     body = subprocess.run(
-        ["awk", "/^backends\\(\\) \\{/,/^\\}$/", str(script)],
+        ["awk", "/^(_backend_field|backends)\\(\\) \\{/,/^\\}$/", str(script)],
         capture_output=True,
         text=True,
         check=True,
@@ -2062,8 +2062,12 @@ def test_a_greedy_engine_is_fatal_to_the_rollout_server(tmp_path):
 
     # And silent when the engine agrees, so the check is the mismatch and not
     # a function that always fails.
+    # Both fields, because `backends` now validates both. The old stub named
+    # only the sampler, so the grammar check -- which is the larger failure,
+    # every `response_format` request returning 500 -- had nothing to read.
     (bin_dir / "curl").write_text(
-        '#!/usr/bin/env bash\necho \'{"sampling_backend":"triton"}\'\n'
+        '#!/usr/bin/env bash\n'
+        'echo \'{"sampling_backend":"triton","grammar_backend":"xgrammar"}\'\n'
     )
     (bin_dir / "curl").chmod(0o755)
     ok = subprocess.run(
@@ -2074,6 +2078,94 @@ def test_a_greedy_engine_is_fatal_to_the_rollout_server(tmp_path):
         timeout=60,
     )
     assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+@pytest.mark.parametrize(
+    ("info", "why"),
+    [
+        ('{"sampling_backend":"triton","grammar_backend":"none"}', "grammar none"),
+        # Spaced, so the compact-JSON stub is not the reason this passes -- the
+        # same trap that hid the sampling check's narrow match.
+        (
+            '{ "sampling_backend" : "triton" , "grammar_backend" : "none" }',
+            "grammar none, spaced",
+        ),
+        ('{"sampling_backend":"triton"}', "grammar field absent"),
+    ],
+)
+def test_a_none_grammar_backend_is_fatal(tmp_path, info, why):
+    """The larger blast radius of the two backend checks.
+
+    `LiteLLMProposer.propose` sends `response_format={"type": "json_object"}`
+    on *every* call, and an engine on `--grammar-backend none` answers that
+    with a 500 -- so the failure is total rather than degraded, and `up` was
+    reporting such a server as ready. A greedy sampler at least returns text.
+
+    Exit 59, not 57: "the engine ignored the sampling parameters" is a
+    different statement, and this script has been corrected once already for
+    giving two defects one verdict name.
+    """
+    script = _EXAMPLES / "serve_for_rollouts.sh"
+    body = subprocess.run(
+        ["awk", "/^(_backend_field|backends)\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(f"#!/usr/bin/env bash\nprintf '%s' '{info}'\n")
+    (bin_dir / "curl").chmod(0o755)
+
+    harness = tmp_path / "drive.sh"
+    harness.write_text(
+        f"CONTROL=1\nSAMPLING=triton\nGRAMMAR=xgrammar\n{body}\nbackends\n"
+    )
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    assert proc.returncode == 59, f"{why}: {proc.stdout + proc.stderr}"
+    assert "grammar" in (proc.stdout + proc.stderr).lower(), why
+
+
+def test_an_explicitly_requested_none_grammar_is_allowed(tmp_path):
+    """`TS_GRAMMAR=none` is a caller saying they do not need JSON responses.
+
+    The check is a mismatch between what was asked for and what was applied,
+    not a ban on the value -- the same shape as the sampling check, where
+    `greedy` is legitimate if greedy is what was requested.
+    """
+    script = _EXAMPLES / "serve_for_rollouts.sh"
+    body = subprocess.run(
+        ["awk", "/^(_backend_field|backends)\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(
+        '#!/usr/bin/env bash\n'
+        'echo \'{"sampling_backend":"triton","grammar_backend":"none"}\'\n'
+    )
+    (bin_dir / "curl").chmod(0o755)
+
+    harness = tmp_path / "drive.sh"
+    harness.write_text(f"CONTROL=1\nSAMPLING=triton\nGRAMMAR=none\n{body}\nbackends\n")
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -2100,7 +2192,7 @@ def test_backends_does_not_fail_open(tmp_path, stub, why):
     """
     script = _EXAMPLES / "serve_for_rollouts.sh"
     body = subprocess.run(
-        ["awk", "/^backends\\(\\) \\{/,/^\\}$/", str(script)],
+        ["awk", "/^(_backend_field|backends)\\(\\) \\{/,/^\\}$/", str(script)],
         capture_output=True,
         text=True,
         check=True,
