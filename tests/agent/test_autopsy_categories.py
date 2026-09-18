@@ -222,10 +222,19 @@ class TestTheOfflineHeuristic:
             ),
             ("data race on the lds tile", "kernel_race"),
             ("consan reports a data race", "kernel_race"),
+            # Forms the first version of this guard missed, because it required
+            # the literal phrases "data race" / "race condition".
+            ("LDS race", "kernel_race"),
+            ("kernel race", "kernel_race"),
+            ("waitcheck reports a missing s_waitcnt hazard", "kernel_race"),
             # No kernel and no tool named: understate rather than assert a
             # hazard nothing observed.
             ("intermittent data race in the host queue", "unknown"),
             ("race condition between the two writer threads", "unknown"),
+            # `"lds" in "fields"` holds, so this satisfied the location test by
+            # accident -- the same substring collision as `race` inside
+            # `traceback`, reintroduced in the fix for it. Word boundaries now.
+            ("data race between fields", "unknown"),
             # Nondeterminism with no race phrase still routes as before.
             ("nondeterministic eval scores between runs", "nondeterminism"),
         ],

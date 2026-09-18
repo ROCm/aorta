@@ -224,6 +224,43 @@ def _is_kernel_race_id(detector: str) -> bool:
     return bool(words & _SANITIZER_TOKENS) and bool(words & _INTRA_KERNEL_TOKENS)
 
 
+# Where a symptom says the hazard is. `kernel` and `lds` are the location words
+# a person writes; the sanitizer names come from the detector path, so the two
+# branches share one vocabulary rather than two that drift.
+_SYMPTOM_LOCATION_TOKENS = frozenset({"kernel", "lds"}) | _SANITIZER_TOKENS
+# What it says the hazard *is*. `barrier` is included here, unlike on the
+# detector path, because a symptom naming a barrier has already had to name a
+# location to get this far.
+_SYMPTOM_HAZARD_TOKENS = frozenset({"race", "hazard", "barrier"})
+
+
+def _symptom_is_a_kernel_race(low: str) -> bool:
+    """Whether free text says a race happened *inside a kernel*.
+
+    Both halves required, as on the detector path: something saying where, and
+    something saying what. `kernel_race` is a claim about location, so "race
+    condition between the two writer threads" must not reach it.
+
+    Word-bounded, which the first version of this guard was not, and the
+    counter-example is one this file should have anticipated: `"lds" in
+    "fields"` holds, so "data race between fields" satisfied a location test by
+    accident -- the same substring collision as `race` inside `traceback` and
+    `nan` inside `canonical`, reintroduced in the fix for the first of them.
+
+    Matching tokens rather than the phrases "data race" / "race condition" also
+    widens it correctly. Those two spellings missed "LDS race", "kernel race"
+    and a waitcheck hazard report, all of which are what `kernel_race` names.
+
+    `waitcnt` is matched with a trailing boundary only, because the spelling in
+    the wild is `s_waitcnt` and `_` is a word character. No English word
+    contains the sequence, so the looser side costs nothing here.
+    """
+    words = set(re.split(r"[^a-z0-9]+", low))
+    located = bool(words & _SYMPTOM_LOCATION_TOKENS)
+    hazard = bool(words & _SYMPTOM_HAZARD_TOKENS) or re.search(r"waitcnt\b", low)
+    return located and bool(hazard)
+
+
 def _infer_category_from_detectors(detectors: list[str]) -> str:
     joined = " ".join(detectors).lower()
     # Detector IDs separate words with ":" and "_" (`custom:consan_data_race`,
@@ -313,9 +350,7 @@ class FakeLLMProposer:
             # A bare host or checkpoint race with no kernel named stays
             # `unknown`, which understates rather than asserting a hazard
             # nothing observed.
-            elif ("data race" in low or "race condition" in low) and any(
-                tok in low for tok in ("kernel", "lds", "consan", "waitcheck")
-            ):
+            elif _symptom_is_a_kernel_race(low):
                 category = "kernel_race"
             elif "nondetermin" in low:
                 category = "nondeterminism"
