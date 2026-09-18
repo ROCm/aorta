@@ -23,7 +23,11 @@ import sys
 
 import pytest
 
-from aorta.chat.plugins import _DIAGNOSTIC_TOOL_NAMES, load_chat_tools
+from aorta.chat.plugins import (
+    _DIAGNOSTIC_TOOL_NAMES,
+    _missing_optional_dspy,
+    load_chat_tools,
+)
 
 #: Run in a subprocess so the absence of dspy is real rather than patched over
 #: an already-imported module.
@@ -33,7 +37,7 @@ logging.disable(logging.CRITICAL)
 _real = builtins.__import__
 def _no_dspy(name, *args, **kwargs):
     if name == "dspy" or name.startswith("dspy."):
-        raise ModuleNotFoundError("No module named 'dspy'")
+        raise ModuleNotFoundError("No module named 'dspy'", name="dspy")
     return _real(name, *args, **kwargs)
 builtins.__import__ = _no_dspy
 
@@ -106,3 +110,61 @@ def test_it_says_why_they_are_missing():
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr[-800:]
     assert "amd-aorta[cia]" in out.stderr, out.stderr[-500:]
+
+
+class TestOnlyTheExpectedOptionalImportIsSuppressed:
+    def test_a_direct_missing_dspy_is_expected(self):
+        error = ModuleNotFoundError("No module named 'dspy'", name="dspy")
+
+        assert _missing_optional_dspy(error) is True
+
+    def test_the_cia_install_hint_wrapper_is_expected_too(self):
+        try:
+            try:
+                raise ModuleNotFoundError("No module named 'dspy'", name="dspy")
+            except ModuleNotFoundError as cause:
+                raise ImportError("The CIA extra is required") from cause
+        except ImportError as error:
+            assert _missing_optional_dspy(error) is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ModuleNotFoundError(
+                "No module named 'dspy.internal'", name="dspy.internal"
+            ),
+            ModuleNotFoundError(
+                "No module named 'aorta.cia.internal'",
+                name="aorta.cia.internal",
+            ),
+            ImportError("cannot import name 'Prediction' from 'dspy'"),
+        ],
+        ids=["broken-dspy", "broken-aorta", "incompatible-api"],
+    )
+    def test_broken_installs_are_not_called_an_absent_extra(self, error):
+        assert _missing_optional_dspy(error) is False
+
+    def test_diagnostic_tools_re_raises_an_internal_import_failure(self):
+        probe = r"""
+import builtins
+import aorta.chat.plugins as plugins
+
+real_import = builtins.__import__
+def broken(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "aorta.chat.tools" and "cluster" in (fromlist or ()):
+        raise ModuleNotFoundError(
+            "No module named 'aorta.cia.internal'",
+            name="aorta.cia.internal",
+        )
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = broken
+plugins.diagnostic_tools()
+"""
+        out = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True
+        )
+
+        assert out.returncode != 0
+        assert "aorta.cia.internal" in out.stderr
+        assert "pip install 'amd-aorta[cia]'" not in out.stderr
