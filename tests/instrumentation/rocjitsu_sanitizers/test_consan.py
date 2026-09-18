@@ -149,11 +149,15 @@ def _current_report(
         examples=examples,
         pairs_without_example=pairs_without_example,
     )
-    return (
+    flattened = (
         report.replace("ConSan MOI auto report", "ConSan auto report")
         .replace("visible_sampled_sync", "visible_sync")
         .replace("visible_sampled", "visible")
         .replace("sampled_", "")
+    )
+    return flattened.replace(
+        f"conflicts={conflicts} immediate_conflicts=",
+        f"conflicts={conflicts} suppressed_uniform_write_conflicts=0 immediate_conflicts=",
     )
 
 
@@ -327,6 +331,22 @@ def test_current_default_output_parses_a_conflict() -> None:
     assert consan.state is ExecutionState.RAN
     assert consan.verdict is Verdict.FAIL
     assert [finding.code for finding in consan.findings] == ["sampled_conflict"]
+
+
+def test_current_default_output_rejects_suppressed_conflicts() -> None:
+    report = _current_report().replace(
+        "suppressed_uniform_write_conflicts=0",
+        "suppressed_uniform_write_conflicts=9",
+    )
+    output = "\n".join((report, _current_healthy_coverage()))
+
+    _waitcheck, consan = evaluate_consan_output(
+        ProcessResult(("app",), 0, output, ""),
+        expected_mode=ConSanMode.DEFAULT,
+    )
+
+    assert consan.state is ExecutionState.ERROR
+    assert "suppressed 9 uniform-write conflict(s)" in str(consan.reason)
 
 
 def test_sampled_log_limit_line_is_not_a_race() -> None:

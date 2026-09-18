@@ -266,6 +266,17 @@ def _sampled_totals(summaries: list[dict[str, str]]) -> dict[str, dict[str, int]
             raise ValueError("ConSan field reader is missing from a Sampled report summary")
         _required_int(summary, "reader")
         counts = {key: _required_sampled_int(summary, key) for key in _SAMPLED_SUMMARY_COUNTS}
+        # Current ConSan emits this only after detecting a conflict and choosing
+        # to suppress it via an expert opt-in. run_consan clears that opt-in, so
+        # a nonzero count means the pinned live contract was not honored. Legacy
+        # Sampled reports predate the field and remain parseable.
+        if "conflicts" in summary:
+            suppressed = _required_int(summary, "suppressed_uniform_write_conflicts")
+            if suppressed != 0:
+                raise ValueError(
+                    f"ConSan suppressed {suppressed} uniform-write conflict(s) "
+                    f"for reader {reader}"
+                )
         incomplete = {
             key: _required_sampled_int(summary, key) for key in _SAMPLED_INCOMPLETE_COUNTS
         }
