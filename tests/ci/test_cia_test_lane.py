@@ -20,6 +20,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "cpu-tests.yml"
+GPU_WORKFLOW = ROOT / ".github" / "workflows" / "gpu-tests.yml"
+HARDWARE_SMOKE = ROOT / "tests" / "cia" / "test_cia_hardware_smoke.py"
 
 
 def _jobs() -> dict:
@@ -28,6 +30,10 @@ def _jobs() -> dict:
 
 def _script(job: dict) -> str:
     return "\n".join(str(step.get("run") or "") for step in job["steps"])
+
+
+def _gpu_jobs() -> dict:
+    return yaml.safe_load(GPU_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
 
 
 class TestTheCIALaneExists:
@@ -69,3 +75,39 @@ class TestItIsPartOfTheRequiredGate:
 
         assert "CIA_TESTS_RESULT" in script
         assert "CIA matrix did not pass" in script
+
+
+class TestTheCIAHardwareLaneExists:
+    def test_cia_code_and_tests_are_gpu_relevant(self):
+        workflow = GPU_WORKFLOW.read_text(encoding="utf-8")
+
+        assert "'src/aorta/cia/*'" in workflow
+        assert "'tests/cia/*'" in workflow
+
+    def test_the_smoke_is_explicitly_hardware_marked(self):
+        source = HARDWARE_SMOKE.read_text(encoding="utf-8")
+
+        assert "pytest.mark.cia_hardware" in source
+        assert "pytest.mark.gpu" in source
+        assert "pytest.mark.rocm" in source
+
+    def test_the_gpu_job_provisions_the_backend_and_runs_the_smoke(self):
+        job = _gpu_jobs()["gpu-tests"]
+        step = next(
+            step
+            for step in job["steps"]
+            if step["name"] == "Run CIA Launch-Watch-Autopsy hardware smoke"
+        )
+        script = step["run"]
+
+        assert "download_sanitizer_artifacts.py" in script
+        assert "ROCJITSU_PREBUILT" in script
+        assert "AORTA_CIA_HARDWARE_SMOKE_REQUIRED" in script
+        assert "pytest tests/cia/test_cia_hardware_smoke.py" in script
+
+    def test_the_smoke_asserts_each_acceptance_boundary(self):
+        source = HARDWARE_SMOKE.read_text(encoding="utf-8")
+
+        assert 'consan["state"] == "ran"' in source
+        assert 'event["event_type"] == "watchdog_alert"' in source
+        assert 'autopsy_state(job_dir)["state"] == "done"' in source

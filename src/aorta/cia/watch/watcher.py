@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -8,6 +9,61 @@ from pathlib import Path
 import dspy
 
 from aorta.cia.llm import ensure_configured
+
+_SANITIZER_RESULT = re.compile(
+    r"^\[sanitizer\] (?P<name>[A-Za-z0-9_-]+): "
+    r"verdict=(?P<verdict>[a-z_]+) state=(?P<state>[a-z_]+) "
+    r"findings=(?P<findings>[0-9]+)$",
+    re.MULTILINE,
+)
+
+
+def sanitizer_assessment(new_content: str) -> dspy.Prediction | None:
+    """Return a deterministic verdict for a sanitizer's own summary line.
+
+    Machine-readable evidence does not need an LLM to decide whether the
+    sanitizer ran and failed. Keeping this in Watch means both the production
+    batch summary and the hardware acceptance smoke travel through the same
+    alert path; malformed or unrelated logs still fall through to ReAct.
+    """
+    matches = list(_SANITIZER_RESULT.finditer(new_content))
+    if not matches:
+        return None
+
+    failures = [
+        match
+        for match in matches
+        if match.group("state") == "ran"
+        and match.group("verdict") in {"warn", "fail", "error"}
+    ]
+    if failures:
+        match = failures[0]
+        line = match.group(0)
+        return dspy.Prediction(
+            healthy=False,
+            signal="WATCH_UNKNOWN_ERROR",
+            confidence=1.0,
+            evidence=line,
+            assessment=(
+                f"{match.group('name')} ran and reported "
+                f"{match.group('verdict')} with "
+                f"{match.group('findings')} finding(s)."
+            ),
+        )
+
+    if all(
+        match.group("state") == "ran" and match.group("verdict") == "pass"
+        for match in matches
+    ):
+        return dspy.Prediction(
+            healthy=True,
+            signal="WATCH_CLEAN",
+            confidence=1.0,
+            evidence="none",
+            assessment="The requested sanitizers ran and reported pass.",
+        )
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Tools available to the ReAct loop
@@ -147,12 +203,10 @@ class WatchAssessment(dspy.Signature):
 
 class LogWatcher(dspy.Module):
     def __init__(self):
-        ensure_configured()
-        self.react = dspy.ReAct(
-            WatchAssessment,
-            tools=[read_file_tail, list_job_files, count_repeated_lines],
-            max_iters=4,
-        )
+        # Machine-readable sanitizer summaries need no model. Build ReAct only
+        # when an unstructured log actually reaches it, so a headless hardware
+        # gate can verify sanitizer -> Watch -> Autopsy with no provider.
+        self.react = None
 
     def forward(
         self,
@@ -168,6 +222,16 @@ class LogWatcher(dspy.Module):
         tools refusing, which is the right default for a caller that has not
         said which job it is asking about.
         """
+        machine_verdict = sanitizer_assessment(new_content)
+        if machine_verdict is not None:
+            return machine_verdict
+        if self.react is None:
+            ensure_configured()
+            self.react = dspy.ReAct(
+                WatchAssessment,
+                tools=[read_file_tail, list_job_files, count_repeated_lines],
+                max_iters=4,
+            )
         with reading_within(*allowed_roots):
             return self.react.forward(
                 new_content=new_content,
