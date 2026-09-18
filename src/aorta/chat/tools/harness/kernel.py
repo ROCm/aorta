@@ -29,18 +29,38 @@ MIN_ELEMENTS = 4096
 _KERNEL_SIG = re.compile(r"__global__\s+(?:[\w:]+\s+)*?void\s+(\w+)\s*\(", re.MULTILINE)
 _SHARED_DECL = re.compile(r"__shared__\s+[\w:]+\s+\w+\s*\[\s*([^\]]+?)\s*\]")
 _DEFINE = re.compile(r"^\s*#\s*define\s+(\w+)\s+(\w+)\s*$", re.MULTILINE)
-#: A kernel that reads threadIdx.y is written for a two-dimensional block, and
-#: launching it one-dimensionally does not fail -- it runs with that index
-#: pinned at zero, touching a different set of addresses than the author wrote.
-_USES_DIM = {
-    "y": re.compile(r"\b(?:threadIdx|blockDim|blockIdx)\.y\b"),
-    "z": re.compile(r"\b(?:threadIdx|blockDim|blockIdx)\.z\b"),
+#: Block and grid axes are separate launch contracts. Supplying ``block_y`` for
+#: ``blockIdx.y`` used to satisfy one combined check while the scalar grid still
+#: pinned that index at zero.
+_USES_BLOCK_DIM = {
+    "y": re.compile(r"\b(?:threadIdx|blockDim)\.y\b"),
+    "z": re.compile(r"\b(?:threadIdx|blockDim)\.z\b"),
+}
+_USES_GRID_DIM = {
+    "y": re.compile(r"\b(?:blockIdx|gridDim)\.y\b"),
+    "z": re.compile(r"\b(?:blockIdx|gridDim)\.z\b"),
 }
 
 
+def block_dims_used(source: str) -> list[str]:
+    """Which y/z block axes the kernel uses, in order."""
+    return [
+        axis for axis, pattern in _USES_BLOCK_DIM.items() if pattern.search(source)
+    ]
+
+
+def grid_dims_used(source: str) -> list[str]:
+    """Which y/z grid axes the kernel uses, in order."""
+    return [
+        axis for axis, pattern in _USES_GRID_DIM.items() if pattern.search(source)
+    ]
+
+
 def dims_used(source: str) -> list[str]:
-    """Which of y and z the kernel indexes, in order."""
-    return [axis for axis, pattern in _USES_DIM.items() if pattern.search(source)]
+    """Which y/z axes appear in either launch domain, for compatibility."""
+    block = set(block_dims_used(source))
+    grid = set(grid_dims_used(source))
+    return [axis for axis in ("y", "z") if axis in block or axis in grid]
 _MAIN = re.compile(r"\bint\s+main\s*\(", re.MULTILINE)
 _IDENT = re.compile(r"[A-Za-z_]\w*$")
 
@@ -190,6 +210,15 @@ def _block_arg(block: int, block_y: int, block_z: int) -> str:
     return str(block)
 
 
+def _grid_arg(grid: int, grid_y: int, grid_z: int) -> str:
+    """The grid argument, preserving a scalar for a one-dimensional launch."""
+    if grid_z:
+        return f"dim3({grid}, {max(grid_y, 1)}, {grid_z})"
+    if grid_y:
+        return f"dim3({grid}, {grid_y})"
+    return str(grid)
+
+
 def build_harness(
     source: str,
     *,
@@ -198,6 +227,8 @@ def build_harness(
     elements: int = 0,
     block_y: int = 0,
     block_z: int = 0,
+    grid_y: int = 0,
+    grid_z: int = 0,
     fill_byte: int = 0,
 ) -> str:
     """Wrap a bare kernel in a main() that launches it once.
@@ -212,13 +243,26 @@ def build_harness(
     grid = grid or DEFAULT_GRID
     if not 1 <= block <= 1024:
         raise HarnessError(f"block size {block} is outside the valid range 1..1024.")
+    if grid < 1:
+        raise HarnessError(f"grid size {grid} must be at least 1.")
+    for dimension_name, value in (
+        ("block_y", block_y),
+        ("block_z", block_z),
+        ("grid_y", grid_y),
+        ("grid_z", grid_z),
+    ):
+        if value < 0:
+            raise HarnessError(
+                f"{dimension_name} must be zero (unused) or a positive extent."
+            )
     threads = block * max(block_y, 1) * max(block_z, 1)
     if threads > 1024:
         raise HarnessError(
             f"a block of {block}x{max(block_y, 1)}x{max(block_z, 1)} is "
             f"{threads} threads, past the 1024 a block may have."
         )
-    count = elements or max(threads * grid * 4, MIN_ELEMENTS)
+    blocks = grid * max(grid_y, 1) * max(grid_z, 1)
+    count = elements or max(threads * blocks * 4, MIN_ELEMENTS)
 
     prologue = "" if "hip_runtime.h" in source else "#include <hip/hip_runtime.h>\n"
     prologue += "" if "cstdio" in source or "stdio.h" in source else "#include <cstdio>\n"
@@ -256,7 +300,8 @@ def build_harness(
             f"  constexpr size_t kElements = {count};",
             *setup,
             "",
-            f"  {name}<<<{grid}, {_block_arg(block, block_y, block_z)}>>>"
+            f"  {name}<<<{_grid_arg(grid, grid_y, grid_z)}, "
+            f"{_block_arg(block, block_y, block_z)}>>>"
             f"({', '.join(args)});",
             "  const hipError_t launch = hipGetLastError();",
             "  const hipError_t sync = hipDeviceSynchronize();",
@@ -286,6 +331,8 @@ class Prepared:
     grid: int
     block_y: int = 0
     block_z: int = 0
+    grid_y: int = 0
+    grid_z: int = 0
     #: Pointer parameters the kernel reads inside a branch condition. Empty
     #: when it has none, or when the caller supplied their own main().
     input_guards: tuple[str, ...] = ()
@@ -365,6 +412,8 @@ def prepare_source(
     elements: int = 0,
     block_y: int = 0,
     block_z: int = 0,
+    grid_y: int = 0,
+    grid_z: int = 0,
     fill_byte: int = 0,
 ) -> Prepared:
     """Turn a pasted kernel or program into something ConSan can run."""
@@ -382,25 +431,44 @@ def prepare_source(
         prefix = "#include <hip/hip_runtime.h>\n" if needs_include else ""
         return Prepared(prefix + source + "\n", name, False, 0, 0)
 
-    # A kernel indexing threadIdx.y launched one-dimensionally does not fail.
-    # It runs with that index pinned at zero, over a different set of addresses
-    # than the author wrote -- so a race between rows cannot occur, and the
-    # clean result that follows is about a kernel nobody asked to check. There
-    # is nothing in the source that says how wide the second dimension should
-    # be, so this asks rather than guessing.
-    missing = [
+    # Missing block and grid dimensions are independent. Neither fails at
+    # launch: the corresponding index is pinned at zero and ConSan observes a
+    # different execution that can look clean.
+    missing_block = [
         axis
-        for axis in dims_used(source)
+        for axis in block_dims_used(source)
         if not (block_y if axis == "y" else block_z)
     ]
-    if missing:
-        named = " and ".join(f"threadIdx.{axis}" for axis in missing)
-        wanted = ", ".join(f"block_{axis}" for axis in missing)
+    missing_grid = [
+        axis
+        for axis in grid_dims_used(source)
+        if not (grid_y if axis == "y" else grid_z)
+    ]
+    if missing_block or missing_grid:
+        requirements = []
+        examples = []
+        if missing_block:
+            axes = " and ".join(
+                f"threadIdx.{axis}/blockDim.{axis}" for axis in missing_block
+            )
+            arguments = ", ".join(f"block_{axis}" for axis in missing_block)
+            requirements.append(f"{axes} requires {arguments}")
+            examples.append("block_size=32")
+            examples.extend(f"block_{axis}=32" for axis in missing_block)
+        if missing_grid:
+            axes = " and ".join(
+                f"blockIdx.{axis}/gridDim.{axis}" for axis in missing_grid
+            )
+            arguments = ", ".join(f"grid_{axis}" for axis in missing_grid)
+            requirements.append(f"{axes} requires {arguments}")
+            examples.append("grid_size=4")
+            examples.extend(f"grid_{axis}=4" for axis in missing_grid)
         raise HarnessError(
-            f"this kernel indexes {named}, so it needs a block with that many "
-            f"dimensions. Pass {wanted} -- a 32x32 tile is block_size=32, "
-            "block_y=32. Launched one-dimensionally the index would be zero "
-            "throughout and the run would not exercise what you pasted."
+            "this kernel uses multidimensional launch geometry: "
+            + "; ".join(requirements)
+            + f". Pass each extent explicitly (for example {', '.join(examples)}). "
+            "With a missing dimension its "
+            "index remains zero and the run does not exercise what you pasted."
         )
 
     resolved_block = block or infer_block_size(source)
@@ -412,9 +480,19 @@ def prepare_source(
         elements=elements,
         block_y=block_y,
         block_z=block_z,
+        grid_y=grid_y,
+        grid_z=grid_z,
         fill_byte=fill_byte,
     )
     return Prepared(
-        program, name, True, resolved_block, resolved_grid, block_y, block_z,
-        tuple(branches_on_input(source, parse_params(source))),
+        program=program,
+        kernel=name,
+        wrapped=True,
+        block=resolved_block,
+        grid=resolved_grid,
+        block_y=block_y,
+        block_z=block_z,
+        grid_y=grid_y,
+        grid_z=grid_z,
+        input_guards=tuple(branches_on_input(source, parse_params(source))),
     )

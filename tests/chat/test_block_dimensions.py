@@ -13,12 +13,16 @@ dimension should be, so the harness asks instead of guessing.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from aorta.chat.tools.harness.kernel import (
     HarnessError,
     Prepared,
+    block_dims_used,
     dims_used,
+    grid_dims_used,
     prepare_source,
 )
 
@@ -47,6 +51,18 @@ __global__ void stencil(float* o) {
 }
 """
 
+GRID_Y = """
+__global__ void rows(float* o) {
+    o[blockIdx.y * blockDim.x + threadIdx.x] = 1.0f;
+}
+"""
+
+GRID_Z = """
+__global__ void planes(float* o) {
+    o[blockIdx.z * blockDim.x + threadIdx.x] = 1.0f;
+}
+"""
+
 
 def _launch(program: str, kernel: str) -> str:
     return next(line.strip() for line in program.splitlines() if f"{kernel}<<<" in line)
@@ -64,6 +80,7 @@ class TestAKernelIsNotLaunchedFlat:
 
         message = str(raised.value)
         assert "block_y" in message
+        assert "grid_y" in message
         assert "32" in message, "an example is what makes it actionable"
 
     def test_and_why_it_matters(self):
@@ -81,27 +98,92 @@ class TestAKernelIsNotLaunchedFlat:
         with pytest.raises(HarnessError, match="threadIdx.z"):
             prepare_source(THREE_D, block=8, block_y=8)
 
+    def test_block_geometry_does_not_satisfy_a_grid_axis(self):
+        with pytest.raises(HarnessError, match="grid_y"):
+            prepare_source(TRANSPOSE, block=32, block_y=32)
+
+    def test_grid_geometry_does_not_satisfy_a_block_axis(self):
+        with pytest.raises(HarnessError, match="block_y"):
+            prepare_source(TRANSPOSE, grid=4, grid_y=4)
+
+    def test_a_grid_y_kernel_names_the_right_argument(self):
+        with pytest.raises(HarnessError) as raised:
+            prepare_source(GRID_Y)
+
+        message = str(raised.value)
+        assert "blockIdx.y" in message
+        assert "grid_y" in message
+        assert "block_y" not in message
+
+    def test_a_grid_z_kernel_names_the_right_argument(self):
+        with pytest.raises(HarnessError, match="grid_z"):
+            prepare_source(GRID_Z)
+
 
 class TestWithTheDimensionsGiven:
     def test_the_launch_is_two_dimensional(self):
-        prepared = prepare_source(TRANSPOSE, block=32, block_y=32)
+        prepared = prepare_source(
+            TRANSPOSE, block=32, block_y=32, grid=4, grid_y=3
+        )
 
-        assert "dim3(32, 32)" in _launch(prepared.program, "transpose")
+        launch = _launch(prepared.program, "transpose")
+        assert "<<<dim3(4, 3), dim3(32, 32)>>>" in launch
 
     def test_three_dimensions_reach_the_launch(self):
         prepared = prepare_source(THREE_D, block=8, block_y=8, block_z=4)
 
         assert "dim3(8, 8, 4)" in _launch(prepared.program, "stencil")
 
+    def test_three_grid_dimensions_reach_the_launch(self):
+        source = GRID_Y.replace(
+            "blockIdx.y * blockDim.x",
+            "blockIdx.y * gridDim.z + blockIdx.z",
+        )
+        prepared = prepare_source(source, grid=2, grid_y=3, grid_z=4)
+
+        assert "<<<dim3(2, 3, 4), 256>>>" in _launch(
+            prepared.program, "rows"
+        )
+
+    def test_a_z_only_grid_inserts_the_neutral_y_extent(self):
+        prepared = prepare_source(GRID_Z, grid=2, grid_z=4)
+
+        assert "<<<dim3(2, 1, 4), 256>>>" in _launch(
+            prepared.program, "planes"
+        )
+
     def test_a_block_past_the_hardware_limit_is_refused(self):
         """1024 threads is the ceiling; 32x64 would fail at launch instead."""
         with pytest.raises(HarnessError, match="1024"):
-            prepare_source(TRANSPOSE, block=32, block_y=64)
+            prepare_source(
+                TRANSPOSE, block=32, block_y=64, grid=1, grid_y=1
+            )
 
     def test_the_geometry_is_recorded(self):
-        prepared = prepare_source(TRANSPOSE, block=32, block_y=32)
+        prepared = prepare_source(
+            TRANSPOSE, block=32, block_y=32, grid=4, grid_y=3
+        )
 
         assert (prepared.block, prepared.block_y) == (32, 32)
+        assert (prepared.grid, prepared.grid_y) == (4, 3)
+
+    def test_generated_buffers_cover_the_full_grid(self):
+        prepared = prepare_source(GRID_Y, block=256, grid=20, grid_y=20)
+
+        # 256 threads * 400 blocks * four elements of padding.
+        assert "constexpr size_t kElements = 409600;" in prepared.program
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"grid": -1},
+            {"grid_y": -1},
+            {"grid_z": -1},
+        ],
+    )
+    def test_invalid_grid_extents_are_refused(self, kwargs):
+        with pytest.raises(HarnessError, match="positive|at least"):
+            prepare_source(ONE_D, **kwargs)
 
 
 class TestOneDimensionalKernelsAreUnchanged:
@@ -124,7 +206,9 @@ class TestTheWavefrontWarningCountsTheWholeBlock:
     """It read the x extent, which for 32x32 is a sixteenth of the threads."""
 
     def test_a_two_dimensional_block_is_not_called_single_wave(self):
-        prepared = prepare_source(TRANSPOSE, block=32, block_y=32)
+        prepared = prepare_source(
+            TRANSPOSE, block=32, block_y=32, grid=1, grid_y=1
+        )
 
         assert prepared.threads == 1024
         assert not prepared.single_wave
@@ -158,3 +242,24 @@ class TestSpottingTheDimensions:
     def test_a_variable_ending_in_y_is_not_an_axis(self):
         """``my.y`` is somebody's struct field, not a thread index."""
         assert dims_used("float v = point.y; o[threadIdx.x] = v;") == []
+
+    def test_block_axes_exclude_block_indices(self):
+        assert block_dims_used(
+            "o[threadIdx.y + blockDim.z + blockIdx.y] = 1;"
+        ) == ["y", "z"]
+
+    def test_grid_axes_exclude_thread_indices(self):
+        assert grid_dims_used(
+            "o[blockIdx.y + gridDim.z + threadIdx.y] = 1;"
+        ) == ["y", "z"]
+
+
+class TestTheToolExposesBothLaunchDomains:
+    def test_grid_y_and_z_are_real_tool_arguments(self):
+        pytest.importorskip("dspy", reason="cluster tools need the [cia] extra")
+        from aorta.chat.tools.cluster import triage_kernel_source
+
+        parameters = inspect.signature(triage_kernel_source.func).parameters
+
+        assert "block_y" in parameters and "block_z" in parameters
+        assert "grid_y" in parameters and "grid_z" in parameters

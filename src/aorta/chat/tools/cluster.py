@@ -426,6 +426,8 @@ def triage_kernel_source(
     grid_size: int = 0,
     block_y: int = 0,
     block_z: int = 0,
+    grid_y: int = 0,
+    grid_z: int = 0,
     fill: int = 0,
     force: bool = False,
 ) -> str:
@@ -449,6 +451,9 @@ def triage_kernel_source(
             threadIdx.y -- a 32x32 tile is block_size=32, block_y=32. Leave 0
             for a one-dimensional kernel.
         block_z: Threads per block in z, for a kernel that indexes threadIdx.z.
+        grid_y: Blocks in y. Required for a kernel that indexes blockIdx.y or
+            gridDim.y; block_y does not satisfy a grid dimension.
+        grid_z: Blocks in z, for a kernel that indexes blockIdx.z or gridDim.z.
         fill: The byte every generated input buffer is filled with. 0 is the
             default and is right for a kernel that only writes its buffers.
             Use 1 to explore a path behind `if (input[i] > 0)`, but one repeated
@@ -467,13 +472,24 @@ def triage_kernel_source(
             grid=grid_size,
             block_y=block_y,
             block_z=block_z,
+            grid_y=grid_y,
+            grid_z=grid_z,
             fill_byte=fill,
         )
     except HarnessError as exc:
         return f"Cannot analyse this source: {exc}{_wrong_tool_hint(source)}"
 
     cache = current_tool_cache().triage
-    cache_key = (source.strip(), block_size, grid_size, block_y, block_z, fill)
+    cache_key = (
+        source.strip(),
+        block_size,
+        grid_size,
+        block_y,
+        block_z,
+        grid_y,
+        grid_z,
+        fill,
+    )
     cached = None if force else cache.get(cache_key)
     if cached is not None:
         return (
@@ -488,9 +504,31 @@ def triage_kernel_source(
 
     lines = [f"Analysing kernel '{prepared.kernel}' from {src_path}."]
     if prepared.wrapped:
+        block_shape = "x".join(
+            str(value)
+            for value in (
+                prepared.block,
+                *(
+                    (max(prepared.block_y, 1), prepared.block_z)
+                    if prepared.block_z
+                    else ((prepared.block_y,) if prepared.block_y else ())
+                ),
+            )
+        )
+        grid_shape = "x".join(
+            str(value)
+            for value in (
+                prepared.grid,
+                *(
+                    (max(prepared.grid_y, 1), prepared.grid_z)
+                    if prepared.grid_z
+                    else ((prepared.grid_y,) if prepared.grid_y else ())
+                ),
+            )
+        )
         lines.append(
             f"No main() was pasted, so a launch harness was generated: "
-            f"{prepared.kernel}<<<{prepared.grid}, {prepared.block}>>>."
+            f"{prepared.kernel}<<<grid {grid_shape}, block {block_shape}>>>."
         )
     lines.append("")
 
