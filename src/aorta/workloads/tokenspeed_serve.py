@@ -434,7 +434,9 @@ def _is_scalar(value: Any) -> bool:
     return math.isfinite(value)
 
 
-def _valid_output_lens(doc: dict[str, Any]) -> list[float] | None:
+def _valid_output_lens(
+    doc: dict[str, Any], *, cap: int | None = None
+) -> list[float] | None:
     """The export's per-completion generated lengths, or ``None`` if unusable.
 
     One rule, one place. Three consumers read this array -- the length
@@ -452,6 +454,14 @@ def _valid_output_lens(doc: dict[str, Any]) -> list[float] | None:
     are not kept: no run produces them, and `output_lens: [-1]` published a
     complete set of negative percentiles, which a ``min_*`` gate scores as an
     improvement.
+
+    ``cap`` is the per-completion upper bound where one exists, which is
+    ``output_len`` on ``random`` -- the recipe sends it as each completion's
+    ``max_tokens``, so a longer length describes generation the server was not
+    permitted to do. Such an export is impossible rather than merely odd, and
+    left unchecked it cleared the floor and published percentiles that read
+    like a measurement. Passed as ``None`` for ``sharegpt``, which is sent no
+    ``output_len`` and so has no cap to check against.
     """
     lens = doc.get("output_lens")
     if not isinstance(lens, list) or not lens:
@@ -459,6 +469,8 @@ def _valid_output_lens(doc: dict[str, Any]) -> list[float] | None:
     out: list[float] = []
     for value in lens:
         if not _is_scalar(value) or float(value) < 0 or not float(value).is_integer():
+            return None
+        if cap is not None and float(value) > cap:
             return None
         out.append(float(value))
     return out
@@ -2487,6 +2499,29 @@ class TokenSpeedServeWorkload(Workload):
             )
         return outstanding, attributed
 
+    @property
+    def _completion_length_cap(self) -> int | None:
+        """The largest a single completion could legitimately be, or ``None``.
+
+        One property rather than the same conditional at each of the three
+        places that validate ``output_lens``, because a per-dataset rule
+        restated three times is a rule that drifts -- which this workload has
+        already paid for twice.
+
+        On ``random`` the recipe's ``output_len`` reaches the bench as
+        ``--random-output-len`` and becomes each completion's ``max_tokens``, so
+        no entry can exceed it: the smoke recipe's ``input_len: 128`` /
+        ``output_len: 256`` cell expects ``generated_tokens_max`` at 256, which
+        also establishes that the array counts generated tokens only.
+
+        ``sharegpt`` is sent no ``output_len`` at all -- its lengths come from
+        the conversations -- so there is no cap to check and the answer is
+        ``None`` rather than a number that would reject correct exports.
+        """
+        if self._dataset != _DEFAULT_DATASET:
+            return None
+        return self._output_len
+
     def _missing_core_metrics(self, record: _StepRecord) -> list[str]:
         """Core metrics a measured step must actually carry.
 
@@ -2596,7 +2631,10 @@ class TokenSpeedServeWorkload(Workload):
         # recipe go green without establishing its own headline claim. An
         # explicit `save_detailed: false` is a different statement -- the caller
         # said they did not want the array -- and stays unaudited.
-        if self._save_detailed and _valid_output_lens(record.doc) is None:
+        if (
+            self._save_detailed
+            and _valid_output_lens(record.doc, cap=self._completion_length_cap) is None
+        ):
             missing.append("output_lens")
         return missing
 
@@ -3083,7 +3121,9 @@ class TokenSpeedServeWorkload(Workload):
                 # asked for it and did not get it is now `result_json_unusable`
                 # (see `_missing_core_metrics`), which leaves this fallback
                 # reachable only for an explicit `save_detailed: false`.
-                lens = _valid_output_lens(record.doc)
+                lens = _valid_output_lens(
+                    record.doc, cap=self._completion_length_cap
+                )
                 basis: str | None = None
                 mean_output = 0.0
                 if lens:
@@ -3350,6 +3390,13 @@ class TokenSpeedServeWorkload(Workload):
         rollout recipe carries an ``n=1`` control cell so the ratio between the
         two readings is measurable rather than assumed.
 
+        Entries are validated by :func:`_valid_output_lens`: whole,
+        non-negative, and no larger than a completion was permitted to be --
+        ``output_len`` on ``random``, unbounded on ``sharegpt``, which is sent
+        no ``output_len``. An array breaching any of those is unusable rather
+        than a distribution, and under ``save_detailed`` that makes the step
+        ``result_json_unusable``.
+
         ``generated_tokens_*`` comes from the export's ``output_lens`` array,
         which is only present with ``save_detailed``. One entry per recorded
         completion, which is *not* the same denominator as the metric above
@@ -3384,7 +3431,9 @@ class TokenSpeedServeWorkload(Workload):
             # comprehension produced nothing, the length check compared 0 to 0 --
             # so the step contributed no entries while the loop pooled the
             # others, publishing a subset that read as the trial's.
-            step_lens = _valid_output_lens(record.doc)
+            step_lens = _valid_output_lens(
+                record.doc, cap=self._completion_length_cap
+            )
             if step_lens is None:
                 return
             pooled.extend(step_lens)

@@ -2611,6 +2611,10 @@ def _run_script_audit(
     expected: int = 32,
     min_mean_output: int = 0,
     rollout_samples: int = 1,
+    dataset: str = "random",
+    # Generous by default so a fixture's lengths are not capped unless a
+    # test is specifically about the cap.
+    output_len: int = 100000,
 ) -> str:
     """Drive `audit_result_json` out of ts_bench_serve.sh directly.
 
@@ -2636,6 +2640,8 @@ def _run_script_audit(
         f"NUM_PROMPTS={expected}\n"
         f"MIN_MEAN_OUTPUT_TOKENS={min_mean_output}\n"
         f"ROLLOUT_SAMPLES={rollout_samples}\n"
+        f"DATASET={dataset}\n"
+        f"OUTPUT_LEN={output_len}\n"
         f'{body}\naudit_result_json "$1"\n'
     )
     proc = subprocess.run(["bash", str(harness), str(export)], capture_output=True, text=True)
@@ -4748,8 +4754,13 @@ def test_the_length_distribution_is_pooled_across_steps(tmp_path, monkeypatch):
     """
     # `rollout_samples=1` so the fixture is self-consistent: four `output_lens`
     # entries against four completed requests is one completion each, and the
-    # floor divides by completions.
-    wl = _rollout(tmp_path, num_prompts=4, steps=2, rollout_samples=1)
+    # floor divides by completions. `output_len` raised above the 4000-token
+    # outlier because that outlier is the subject -- `output_len` is each
+    # completion's cap on `random`, so at the 128 default this export would be
+    # rejected as impossible rather than read as a long tail.
+    wl = _rollout(
+        tmp_path, num_prompts=4, steps=2, rollout_samples=1, output_len=4096
+    )
     wl.setup()
     _stub_docker(
         wl,
@@ -5160,6 +5171,107 @@ def test_an_impossible_generated_length_suppresses_the_distribution(tmp_path, mo
     assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
     assert not result.passed
     assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
+
+
+def test_a_length_above_the_cap_is_an_impossible_export(tmp_path, monkeypatch):
+    """On `random`, `output_len` is each completion's `max_tokens`.
+
+    A longer entry describes generation the server was not permitted to do, so
+    the export is impossible rather than merely surprising -- and left
+    unchecked it cleared the floor and published percentiles that read like a
+    measurement. The smoke recipe establishes both halves of this: `input_len:
+    128` with `output_len: 256` expects `generated_tokens_max` at 256, which
+    pins the cap *and* shows the array counts generated tokens only.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1, output_len=128)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=4, total_output_tokens=4129, output_lens=[10, 10, 10, 4099]
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+
+
+def test_a_length_exactly_on_the_cap_is_fine(tmp_path, monkeypatch):
+    """The cap truncating a rollout is a normal reading, not a fault.
+
+    On `random` nothing induces EOS, so every completion running to exactly
+    `output_len` is the expected shape -- the bound has to be `>` and not `>=`
+    or the common case becomes a failure.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1, output_len=128)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=512, output_lens=[128] * 4)],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert result.metrics["generated_tokens_max"] == 128
+
+
+def test_sharegpt_has_no_length_cap_to_check(tmp_path, monkeypatch):
+    """`sharegpt` is sent no `output_len`, so there is no bound to enforce.
+
+    Its lengths come from the conversations. Applying the recipe's `output_len`
+    there would reject correct exports against a number the run never saw --
+    the same mistake the TPOT audit already documents for this dataset.
+    """
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    wl = _rollout(
+        tmp_path,
+        num_prompts=4,
+        rollout_samples=1,
+        dataset="sharegpt",
+        dataset_path=str(dataset),
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=9000, output_lens=[9000] * 4)],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert result.metrics["generated_tokens_max"] == 9000
+
+
+def test_the_container_enforces_the_same_length_cap(tmp_path):
+    """Both layers, since the container's verdict is the one read first."""
+    # The two fields disagree on purpose, so the verdict reveals which source
+    # the audit trusted: the array says 100 tokens a completion (clears a floor
+    # of 8), the counters say 1 (does not).
+    doc = {
+        "completed": 4,
+        "failed": 0,
+        "total_output_tokens": 4,
+        "output_lens": [100, 100, 100, 100],
+    }
+    # Cap above the entries: the array is usable and is what gets used.
+    assert _run_script_audit(
+        tmp_path, doc, expected=4, min_mean_output=8, output_len=128
+    ).startswith("OK")
+
+    # Cap below them: the array is an impossible export, so it is discarded and
+    # the weaker per-request rule applies -- and says so in the verdict.
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=4, min_mean_output=8, output_len=50
+    )
+    assert verdict.startswith("SHORTLEN"), verdict
+    assert "per_request" in verdict, verdict
 
 
 def test_an_integral_float_length_is_still_a_length(tmp_path, monkeypatch):

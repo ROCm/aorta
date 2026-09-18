@@ -1117,12 +1117,20 @@ run_bench_step() {
 # and require that it actually served what we asked for. Echoes one of
 # OK / SHORTFALL / UNPARSEABLE for the caller to classify.
 audit_result_json() {
-  python3 - "$1" "${NUM_PROMPTS}" "${MIN_MEAN_OUTPUT_TOKENS}" "${ROLLOUT_SAMPLES}" <<'PY'
+  # LEN_CAP is the largest a single completion could legitimately be, or an
+  # empty string when there is no such bound. `random` sends OUTPUT_LEN as each
+  # completion's max_tokens, so no entry can exceed it; `sharegpt` is sent no
+  # output_len at all and so has no cap. Mirrors the host's
+  # `_completion_length_cap`.
+  local len_cap=""
+  if [ "${DATASET}" = "random" ]; then len_cap="${OUTPUT_LEN}"; fi
+  python3 - "$1" "${NUM_PROMPTS}" "${MIN_MEAN_OUTPUT_TOKENS}" "${ROLLOUT_SAMPLES}" "${len_cap}" <<'PY'
 import json
 import sys
 
 path, expected, min_mean_output = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 samples = int(sys.argv[4])
+len_cap = int(sys.argv[5]) if sys.argv[5] else None
 try:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
@@ -1210,7 +1218,16 @@ if min_mean_output > 0:
         # 8, clearing the default floor on a step the host reads as a mean of 1.
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             return False
-        return v == v and abs(v) != float("inf") and v >= 0 and float(v).is_integer()
+        if not (v == v and abs(v) != float("inf")):
+            return False
+        if v < 0 or not float(v).is_integer():
+            return False
+        # And no longer than a completion was permitted to be. On `random`,
+        # output_len is each completion's max_tokens, so a longer entry
+        # describes generation the server could not have done -- an impossible
+        # export that otherwise cleared the floor and published percentiles
+        # reading like a measurement.
+        return len_cap is None or v <= len_cap
 
     usable = isinstance(lens, list) and len(lens) > 0 and all(_whole(v) for v in lens)
     if usable:

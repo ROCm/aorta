@@ -317,7 +317,12 @@ completion to `output_len`, so the run has no length distribution and its token
 volume is a function of the recipe. On `dataset: random`, `output_len` remains
 meaningful as the `max_tokens` **allowance** — a `generated_tokens_max` sitting
 exactly on it means the cap truncated the rollout rather than the model
-stopping.
+stopping, which on this dataset is the ordinary reading rather than a fault.
+
+Because it is a cap, it is also validated as one: an `output_lens` entry
+*above* `output_len` describes generation the server was not permitted to do,
+so both audits treat that export as unusable instead of publishing percentiles
+from it.
 
 That reading is dataset-specific, and rollout mode accepts `sharegpt` too. There
 the config table above applies: `output_len` is not sent at all, the lengths come
@@ -337,7 +342,7 @@ the metric set it reported before this mode existed.
 | Metric | Meaning |
 |---|---|
 | `mean_output_tokens_per_request` | `total_output_tokens / completed`, meaned across steps. The reading to trust — computed from fields every export carries. |
-| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of generated length over the entries of the export's `output_lens`, pooled across measured steps. Needs `save_detailed`. One entry per completion, not per request, whenever `rollout_samples > 1` — see the note below. |
+| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of generated length over the entries of the export's `output_lens`, pooled across measured steps. Needs `save_detailed`. One entry per completion, not per request, whenever `rollout_samples > 1` — see the note below. Entries must be whole, non-negative, and on `random` no larger than `output_len`, which is each completion's `max_tokens`; an export breaching any of those is `result_json_unusable` rather than a distribution. |
 | `generated_tokens_mean` / `_min` / `_max` / `_std` / `_count` | The rest of the distribution. |
 
 `generated_tokens_*` comes from the export's `output_lens` array, which the bench
