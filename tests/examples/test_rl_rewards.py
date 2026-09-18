@@ -307,6 +307,110 @@ def test_an_unknown_environment_still_fails_tier_3(recipe_reward):
     assert grade.failed_at == "tier3_registry", grade.reason
 
 
+def _sidecar_threaded(recipe_reward, monkeypatch, tmp_path, mitigations):
+    """Make the loader receive sidecars, which `grade_recipe_text` does not do.
+
+    `load_recipe(path)` is called with no `sidecar_files`, so `recipe.sidecar_files`
+    is empty on every real candidate and the tier-3 block's sidecar threading is
+    unreachable from outside. That is why the asymmetry it had -- `get_mitigation`
+    bare while `get_environment` was given the sidecars -- could not misgrade
+    anything today: a sidecar-only name fails inside the loader first, at this
+    same tier and with this same exception.
+
+    The block exists for the case where that stops being true, which is stated in
+    its own comment: a loader that stops resolving eagerly, or a caller that
+    starts threading sidecars in, must fail the tier honestly rather than pass it
+    silently. So the seam is what to drive, and threading the loader is how to
+    reach it.
+    """
+    side = tmp_path / "extra_mitigations.json"
+    side.write_text(
+        json.dumps({"version": 1, "mitigations": mitigations}), encoding="utf-8"
+    )
+    real = recipe_reward.load_recipe
+    monkeypatch.setattr(
+        recipe_reward,
+        "load_recipe",
+        lambda path, **kw: real(path, sidecar_files=(side,), **kw),
+    )
+
+
+def test_a_sidecar_supplied_mitigation_survives_tier_3(
+    recipe_reward, monkeypatch, tmp_path
+):
+    """`get_mitigation` was called bare while `get_environment` got the sidecars.
+
+    Upstream threads both: `_validate_names_resolve` in `aorta/triage/recipe.py`
+    passes `extra_files` to `get_mitigation` and `get_environment` alike, so a
+    recipe whose mitigation is defined in a sidecar is valid. Re-resolving one
+    axis without the sidecars contradicted the loader that had just accepted it,
+    and marked the recipe down to tier 2 -- the tier that means the schema is
+    wrong.
+
+    Not a misgrade anyone could have observed, and the helper above says why.
+    What it is is the seam going wrong in the direction that matters for widening
+    the action space: sidecar registries are one of the two ways a mitigation can
+    exist without being a builtin.
+    """
+    _sidecar_threaded(
+        recipe_reward, monkeypatch, tmp_path, {"sidecar_only_knob": {"SIDECAR_ONLY": "1"}}
+    )
+    text = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "ticket": "SIDECAR-1",
+            "workload": "gpu_smoke",
+            "trials": 1,
+            "steps": 1,
+            "cells": [
+                {
+                    "name": "side",
+                    "mitigations": ["sidecar_only_knob"],
+                    "environment": "local",
+                }
+            ],
+        }
+    )
+    grade = recipe_reward.grade_recipe_text(text)
+
+    assert grade.tier >= 3, (grade.tier, grade.failed_at, grade.reason)
+    assert grade.failed_at != "tier3_registry", grade.reason
+
+
+def test_an_unknown_mitigation_still_fails_tier_3_with_sidecars_threaded(
+    recipe_reward, monkeypatch, tmp_path
+):
+    """Narrowness: threading the sidecars must not switch the mitigation axis off.
+
+    The same shape as the inline-environment pair above. A name in neither the
+    builtins nor the sidecar has to stay a tier-3 failure, or the fix has stopped
+    checking rather than started checking correctly.
+    """
+    _sidecar_threaded(
+        recipe_reward, monkeypatch, tmp_path, {"sidecar_only_knob": {"SIDECAR_ONLY": "1"}}
+    )
+    text = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "ticket": "SIDECAR-2",
+            "workload": "gpu_smoke",
+            "trials": 1,
+            "steps": 1,
+            "cells": [
+                {
+                    "name": "bad",
+                    "mitigations": ["no_such_mitigation"],
+                    "environment": "local",
+                }
+            ],
+        }
+    )
+    grade = recipe_reward.grade_recipe_text(text)
+
+    assert grade.tier == 2
+    assert grade.failed_at == "tier3_registry", grade.reason
+
+
 def test_an_unreadable_recipe_fails_the_novelty_gate_closed(recipe_reward, tmp_path):
     """A skipped recipe is one a verbatim copy of it scores full marks against.
 

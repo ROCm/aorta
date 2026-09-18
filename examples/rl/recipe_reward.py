@@ -336,10 +336,36 @@ def grade_recipe_text(
         # it here therefore marked every valid inline-environment recipe down
         # to tier 2, which is the tier meaning "the schema is wrong".
         #
-        # `sidecar_files` is the other half: a recipe may ship environment
-        # definitions beside itself, and `load_recipe` resolves names against
-        # those as well. Resolving without them rejects a registered name that
-        # the loader had just accepted.
+        # `sidecar_files` is the other half: a recipe may ship mitigation *and*
+        # environment definitions beside itself, and `load_recipe` resolves both
+        # axes against those -- `_validate_names_resolve` in
+        # `aorta/triage/recipe.py` passes `extra_files` to `get_mitigation` and
+        # `get_environment` alike. Re-resolving without them would reject a
+        # registered name the loader had just accepted.
+        #
+        # Both lookups are threaded, which they were not: `get_mitigation` was
+        # called bare while `get_environment` was given the sidecars. The
+        # asymmetry could not bite today, and the reason is worth stating so the
+        # threading is not mistaken for dead weight and removed. `load_recipe`
+        # is called above *without* `sidecar_files`, so `recipe.sidecar_files`
+        # is always empty here and a sidecar-only name fails inside the loader
+        # at this same tier, with this same exception type. So this fixes the
+        # contract rather than an observed misgrade -- which is exactly what
+        # this block is for, per the paragraph above: it exists so that a loader
+        # which stopped resolving eagerly, or a caller which starts threading
+        # sidecars in, fails the tier honestly instead of silently passing it.
+        #
+        # Note also what is *not* affected: mitigations contributed through the
+        # `aorta.mitigations` entry-point group are merged by `load_mitigations`
+        # unconditionally, with no `extra_files` involved, so a plugin-supplied
+        # name resolves here whatever this line does. Only sidecar JSON files
+        # depend on the threading.
+        #
+        # `extra_files=sidecars` rather than `sidecars or None`: both loaders
+        # spell the parameter `extra_files or ()` internally, and
+        # `load_mitigations([]) == load_mitigations(None)` and the same for
+        # environments, so the guard is a no-op and the simpler form says the
+        # same thing.
         inline_names = {
             str(env.name) for env in getattr(recipe, "inline_environments", None) or ()
         }
@@ -348,10 +374,10 @@ def grade_recipe_text(
             for cell in getattr(recipe, "cells", None) or []:
                 for name in getattr(cell, "mitigations", None) or []:
                     if str(name) != "none":
-                        get_mitigation(str(name))
+                        get_mitigation(str(name), extra_files=sidecars)
                 environment = getattr(cell, "environment", None)
                 if environment and str(environment) not in inline_names:
-                    get_environment(str(environment), extra_files=sidecars or None)
+                    get_environment(str(environment), extra_files=sidecars)
         except (UnknownMitigationError, UnknownEnvironmentError) as exc:
             grade.failed_at = "tier3_registry"
             grade.reason = f"{type(exc).__name__}: {exc}"
