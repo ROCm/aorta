@@ -336,3 +336,110 @@ def test_run_writes_full_logs_when_save_logs(monkeypatch, tmp_path):
     err_log = tmp_path / "trial_d0_m0_t0.subprocess.stderr.log"
     assert out_log.read_text() == stdout
     assert err_log.read_text() == stderr
+
+
+# --- the config-only seam -------------------------------------------------
+#
+# `_validated_config` is what a caller uses to check a recipe without a GPU
+# (the recipe grader in examples/rl does exactly this). It used to cover only
+# bench/size/iters/warmup while `setup()` validated gpu_arch, timeout_sec and
+# keep_build, so a recipe with `gpu_arch: ../../etc` came back from the seam
+# with no error at all. These call the seam directly -- never `setup()` -- so
+# they fail if a check drifts back out of it.
+
+
+@pytest.mark.parametrize("bad", ["../../etc", "/etc", "a/b", "", None, 942])
+def test_validated_config_rejects_unsafe_gpu_arch(bad):
+    wl = HrxPerfWorkload({"bench": "gemm", "gpu_arch": bad})
+    with pytest.raises(ValueError, match="gpu_arch"):
+        wl._validated_config()
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_validated_config_rejects_nonpositive_timeout(bad):
+    wl = HrxPerfWorkload({"bench": "gemm", "timeout_sec": bad})
+    with pytest.raises(ValueError, match="timeout_sec"):
+        wl._validated_config()
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, None])
+def test_validated_config_rejects_non_bool_keep_build(bad):
+    wl = HrxPerfWorkload({"bench": "gemm", "keep_build": bad})
+    with pytest.raises(ValueError, match="keep_build must be a bool"):
+        wl._validated_config()
+
+
+_VALID_CONFIG = {
+    "bench": "triad",
+    "gpu_arch": "gfx90a:xnack+",
+    "size": 1024,
+    "iters": 3,
+    "warmup": 0,
+    "timeout_sec": 30,
+    "keep_build": True,
+    "steps": 1,
+    "_aorta_save_logs": False,
+}
+
+
+def _bound(wl):
+    return (wl._bench, wl._spec, wl._size, wl._iters, wl._warmup,
+            wl._arch, wl._timeout, wl._keep_build)
+
+
+def test_setup_is_unmoved_for_a_valid_config(monkeypatch, tmp_path, caplog):
+    """The happy path: a valid config still binds exactly what it used to bind,
+    and still logs nothing. The silence matters as much as the pass -- a caller
+    grading a recipe reads an "ignoring unknown workload_config key" warning as a
+    misconfiguration, so a widened check that warned on a valid recipe would mark
+    it down just as a rejection would."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxPerfWorkload, "_build", lambda self: self._build_dir / "x")
+    wl = HrxPerfWorkload({**_VALID_CONFIG, "build_dir": str(tmp_path)})
+
+    with caplog.at_level("WARNING"):
+        wl.setup()
+
+    assert caplog.records == []
+    assert _bound(wl) == (
+        "triad", _BENCHES["triad"], 1024, 3, 0, "gfx90a:xnack+", 30, True
+    )
+
+
+def test_validated_config_binds_the_whole_hardware_free_config(caplog):
+    """The seam alone -- no setup(), no stubs -- binds every hardware-free knob,
+    so a caller with no GPU gets the same answer setup() would give it."""
+    wl = HrxPerfWorkload(dict(_VALID_CONFIG))
+
+    with caplog.at_level("WARNING"):
+        wl._validated_config()
+
+    assert caplog.records == []
+    assert _bound(wl) == (
+        "triad", _BENCHES["triad"], 1024, 3, 0, "gfx90a:xnack+", 30, True
+    )
+
+
+def test_hardware_checks_stay_in_setup():
+    """The seam is the hardware-free half and nothing more: with no hipcc and no
+    GPU on the host, a valid config still gets through it. Pins the other side of
+    the split, so a later "make the seam complete" edit cannot quietly pull the
+    toolchain or device check in front of it and make grading need a machine."""
+    wl = HrxPerfWorkload({"bench": "gemm", "hipcc": "/nonexistent/hipcc"})
+    wl._validated_config()
+
+
+def test_config_errors_precede_hardware_acquisition(monkeypatch):
+    """setup() reports a bad config as a config error even on a host with no
+    toolchain and no GPU, rather than blaming the machine. Status quo on both
+    sides of this change; pinned because it is what makes the seam meaningful --
+    if hardware were acquired first, the split could not be observed."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: None)
+    monkeypatch.setattr(perf_mod, "_gpu_available", lambda: False)
+    for config in (
+        {"gpu_arch": "../../etc"},
+        {"timeout_sec": 0},
+        {"keep_build": "yes"},
+    ):
+        with pytest.raises(ValueError):
+            HrxPerfWorkload({"bench": "gemm", **config}).setup()
