@@ -2076,6 +2076,86 @@ def test_a_greedy_engine_is_fatal_to_the_rollout_server(tmp_path):
     assert ok.returncode == 0, ok.stdout + ok.stderr
 
 
+@pytest.mark.parametrize(
+    ("stub", "why"),
+    [
+        ("exit 7", "curl failed"),
+        ("echo ''", "empty body"),
+        ("echo '{}'", "no sampling_backend field"),
+        ("echo '{\"grammar_backend\": \"xgrammar\"}'", "other fields only"),
+        # Pretty-printed and spaced: a genuinely greedy engine in a shape the
+        # old compact-only grep read as non-greedy.
+        ('echo \'{"sampling_backend": "greedy"}\'', "spaced greedy"),
+    ],
+)
+def test_backends_does_not_fail_open(tmp_path, stub, why):
+    """Every way of not knowing must fail, not pass.
+
+    `|| echo '{}'` made a curl failure, a timeout or an empty body count zero
+    greedy matches -- so "could not check" read exactly like "checked and it is
+    fine", and `up` left the GPU server running. The compact-only match was the
+    same hole in a different place: `json.dumps` writes `": "` by default, so a
+    greedy engine answering in pretty JSON slipped through, and the test stub
+    happened to emit the compact form which is why it looked fine.
+    """
+    script = _EXAMPLES / "serve_for_rollouts.sh"
+    body = subprocess.run(
+        ["awk", "/^backends\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(f"#!/usr/bin/env bash\n{stub}\n")
+    (bin_dir / "curl").chmod(0o755)
+
+    harness = tmp_path / "drive.sh"
+    harness.write_text(f"CONTROL=1\nSAMPLING=triton\n{body}\nbackends\n")
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    assert proc.returncode == 57, f"{why}: {proc.stdout + proc.stderr}"
+
+
+def test_the_coordination_key_never_reaches_the_engine(nccl_roundtrip_check, monkeypatch):
+    """The plan's `run_id` is for the driver, not for `update_info`.
+
+    Stamping it on the plan to defeat a stale file -- which is what the
+    previous commit did -- put it into the POST body, and the engine rejects an
+    unknown `update_info` key with a 500. So every round failed before a single
+    broadcast: the fix for one silent failure created a loud one, and only on
+    hardware, where no test here would have seen it.
+    """
+    sent: list[dict] = []
+
+    def fake_call(base, method, path, body=None, timeout=None):
+        sent.append({"path": path, "body": body})
+        return 200, {"ok": True}, 0.01
+
+    monkeypatch.setattr(nccl_roundtrip_check, "call", fake_call)
+    plan = {
+        "run_id": "this-run",
+        "names": ["w"],
+        "dtype_names": ["float32"],
+        "shapes": [[2, 2]],
+    }
+    nccl_roundtrip_check.lifecycle_update("http://c", plan, "perturb")
+
+    update = next(s for s in sent if s["path"] == "/update_weights")
+    info = update["body"]["update_info"]
+    assert "run_id" not in info, info
+    # And nothing else was dropped with it.
+    assert set(info) == {"names", "dtype_names", "shapes"}
+    # The plan itself is untouched, since the driver still needs the id.
+    assert plan["run_id"] == "this-run"
+
+
 def test_a_stale_plan_is_not_this_runs_plan(nccl_roundtrip_check, tmp_path, capsys):
     """`--plan` is a fixed shared path, so a leftover plan is the normal state.
 

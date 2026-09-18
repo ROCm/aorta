@@ -270,13 +270,39 @@ models() {
 # want different things -- `up` owns a container and must tear it down, while
 # the standalone `backends` command does not own one and must not touch it.
 backends() {
-  local info greedy
-  info=$(curl -s --max-time 10 "http://127.0.0.1:${CONTROL}/get_server_info" || echo '{}')
+  local info reported
+  # No `|| echo '{}'`. Defaulting a failed fetch to an empty object made
+  # `greedy` count 0, so a curl failure, a timeout or an empty body read
+  # exactly like a healthy non-greedy engine -- the absence of evidence
+  # encoded as favourable evidence, which is the one thing this check exists
+  # to prevent. A fetch that did not work is now a fetch that did not work.
+  if ! info=$(curl -s --max-time 10 "http://127.0.0.1:${CONTROL}/get_server_info"); then
+    echo "FAIL: could not read ${CONTROL}/get_server_info, so the sampling" \
+         "backend is unverified; refusing to report the engine as usable" >&2
+    return 57
+  fi
   echo "--- backends in effect (${CONTROL}) ---"
   echo "${info}" | tr ',' '\n' | grep -E '"(sampling_backend|grammar_backend)"' \
-    || echo "(could not read /get_server_info)"
-  greedy=$(echo "${info}" | grep -c '"sampling_backend":"greedy"' || true)
-  if [ "${greedy}" != "0" ] && [ "${SAMPLING}" != "greedy" ]; then
+    || echo "(no backend fields in the response)"
+
+  # Whitespace-tolerant, and extracting the value rather than testing for one
+  # spelling of it. The old `grep -c '"sampling_backend":"greedy"'` required
+  # compact JSON: `json.dumps` writes `": "` by default and any pretty-printed
+  # response has a space, so a genuinely greedy engine could answer in a shape
+  # this check read as non-greedy. The test stub happened to emit the compact
+  # form, which is why the narrow match looked fine.
+  reported=$(printf '%s' "${info}" \
+    | tr ',{}' '\n\n\n' \
+    | sed -n 's/.*"sampling_backend"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1)
+  if [ -z "${reported}" ]; then
+    # Present-but-unreadable is the same class as unfetchable: we asked and
+    # cannot say, so we must not say "fine".
+    echo "FAIL: ${CONTROL}/get_server_info reported no sampling_backend, so it" \
+         "is unverified; refusing to report the engine as usable" >&2
+    return 57
+  fi
+  if [ "${reported}" = "greedy" ] && [ "${SAMPLING}" != "greedy" ]; then
     # Fatal to the caller, not a warning, and the aorta side already treats it
     # that way: `tokenspeed_serve` fails the step with exit 57,
     # `rollout_sampling_ignored`, on exactly this reading. Warning here while

@@ -109,6 +109,11 @@ def generate(base: str, model: str, prompt: str, max_tokens: int) -> dict[str, A
     return {"status": status, "text": text, "seconds": round(elapsed, 3), "raw": body if text is None else None}
 
 
+# Keys the peer puts on the plan for the driver's benefit, which the engine has
+# never heard of. Kept out of `update_info`: an unknown key there is a 500.
+_PLAN_COORDINATION_KEYS = frozenset({"run_id"})
+
+
 def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str, Any]:
     """One trainer step: start -> update -> finish, each timed separately.
 
@@ -122,7 +127,22 @@ def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str
     status, body, elapsed = call(control, "POST", "/start_weight_update", {})
     out["start"] = {"status": status, "seconds": round(elapsed, 3), "body": body}
 
-    status, body, elapsed = call(control, "POST", "/update_weights", {"update_info": plan})
+    # `run_id` is coordination, not part of the engine's contract, and it must
+    # not travel in the payload. `update_info` is
+    # `{names, dtype_names, shapes, packed?, ...}` and the engine rejects an
+    # unknown key with a 500 -- `probe_weight_transfer.py` has an
+    # "update_weights unknown key" step establishing exactly that. So stamping
+    # `run_id` onto the plan to defeat a stale file, which is what the previous
+    # commit did, made every round fail before a single broadcast was
+    # attempted: the fix for one silent failure created a loud one.
+    #
+    # Stripped by name from a named set rather than inline, so the next
+    # coordination key added to the plan is a one-line change in an obvious
+    # place instead of this bug again.
+    update_info = {k: v for k, v in plan.items() if k not in _PLAN_COORDINATION_KEYS}
+    status, body, elapsed = call(
+        control, "POST", "/update_weights", {"update_info": update_info}
+    )
     out["update"] = {"status": status, "seconds": round(elapsed, 3), "body": body}
 
     status, body, elapsed = call(control, "POST", "/finish_weight_update", {})
