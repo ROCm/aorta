@@ -12,10 +12,19 @@ from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext
 #:
 #: Anchoring on the value is the point. The pattern here was ``loss.*nan``,
 #: which reads "checking loss for nan" as a run that has gone non-finite.
+#:
+#: The separator includes a bare space because the commonest way a training
+#: loop writes this has no operator at all: ``print(f"step {i} loss {loss}")``
+#: gives ``loss nan``. Requiring ``=`` or ``is`` missed every one of those, so
+#: Watch would alert on a run at 0.98 and Autopsy would read the same log as
+#: clean and classify it unknown. A space is still adjacency -- "loss for nan"
+#: has a word in between and does not match.
 ASSIGNED_NONFINITE = re.compile(
     r"\b\w*(?:loss|grad|gradient|norm|residual|logit|score|activation)\w*\s*"
-    r"(?:[=:]|\bis\b|\bbecame\b|\bwent\b|\bdiverged\s+to\b)\s*"
-    r"[-+]?(?:nan|inf|infinity)\b",
+    r"(?:[=:]|\bis\b|\bbecame\b|\bwent\b|\bdiverged\s+to\b|\s)\s*"
+    # Not \b: that matches before the hyphen, so "loss nan-free" -- a run
+    # reporting the opposite -- read as a run that had gone non-finite.
+    r"[-+]?(?:nan|inf|infinity)(?![\w-])",
     re.I,
 )
 

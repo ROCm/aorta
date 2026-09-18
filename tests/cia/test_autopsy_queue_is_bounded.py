@@ -70,6 +70,7 @@ def alerting(monkeypatch):
     # poll_jobs sleeps once after its last bounded round. Avoid a minute-long
     # test; Event.wait below remains a real clock.
     monkeypatch.setattr(poll_mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(poll_mod, "pause", lambda _stop, _seconds: False)
 
     def write_bundle(job, job_dir, evidence, signal):
         bundle = job_dir / "bundle"
@@ -94,7 +95,7 @@ class TestAdmissionIsActuallyBounded:
         enough_started = threading.Event()
         release = threading.Event()
 
-        def blocked(bundle, job, jobs_root):
+        def blocked(bundle, job, jobs_root, stop=None):
             with lock:
                 started.append(job.job_id)
                 if len(started) == poll_mod.AUTOPSY_CAPACITY:
@@ -154,7 +155,7 @@ class TestAdmissionIsActuallyBounded:
         release = threading.Event()
         started = threading.Event()
 
-        def blocked(*_args):
+        def blocked(*_args, **_kwargs):
             started.set()
             release.wait(timeout=20)
 
@@ -232,7 +233,7 @@ class TestAFailedDeferralWriteIsNotAClaim:
         calls: list[str] = []
         target = f"cia-{poll_mod.AUTOPSY_CAPACITY:03d}"
 
-        def blocked(_bundle, job, _jobs_root):
+        def blocked(_bundle, job, _jobs_root, **_kwargs):
             with lock:
                 calls.append(job.job_id)
                 if len(calls) == poll_mod.AUTOPSY_CAPACITY:
@@ -289,7 +290,7 @@ class TestAFailedDeferralWriteIsNotAClaim:
         calls.clear()
         monkeypatch.setattr(
             "aorta.cia.watch.trigger.trigger_autopsy",
-            lambda _bundle, job, _jobs_root: calls.append(job.job_id),
+            lambda _bundle, job, _jobs_root, **_kwargs: calls.append(job.job_id),
         )
         poll_jobs(tmp_path, max_rounds=1)
 
@@ -314,7 +315,7 @@ class TestThePersistedQueueRecovers:
         )
         monkeypatch.setattr(
             "aorta.cia.watch.trigger.trigger_autopsy",
-            lambda bundle, job, jobs_root: calls.append(job.job_id),
+            lambda bundle, job, jobs_root, stop=None: calls.append(job.job_id),
         )
 
         # A new poll_jobs invocation models a restarted Watch. The log cursor is
