@@ -37,8 +37,14 @@ _TEXT_TRACE = re.compile(
     re.S,
 )
 _JOB_ID = re.compile(
-    r"(?:\bJob\s+|[\"']job_id[\"']\s*:\s*[\"'])"
-    r"(?P<id>(?:cia|nan)-[A-Za-z0-9._-]+)"
+    # A bare id at the start of a line is how ``list_cluster_jobs`` prints one,
+    # and that tool needs no extra permission, so it is the one most likely to
+    # have run. Still anchored rather than free-floating: the bundle path on
+    # the following line repeats the same id, and an unanchored match would
+    # read it as a second job.
+    r"(?:^[ \t]*|\bJob\s+|[\"']job_id[\"']\s*:\s*[\"'])"
+    r"(?P<id>(?:cia|nan)-[A-Za-z0-9._-]+)",
+    re.M,
 )
 _CATEGORY = re.compile(
     r"(?:^\s*category:\s*|[\"']category[\"']\s*:\s*[\"'])"
@@ -172,26 +178,76 @@ def _parse_tool_trace(entry: Any) -> tuple[str, str, str]:
 
 
 def _cia_results(output: str) -> list[dict[str, Any]]:
-    ids = list(dict.fromkeys(match.group("id") for match in _JOB_ID.finditer(output)))
-    if not ids:
-        return []
-    category_match = _CATEGORY.search(output)
-    confidence_match = _CONFIDENCE.search(output)
-    category = category_match.group("value") if category_match else None
-    confidence = (
-        float(confidence_match.group("value")) if confidence_match else None
-    )
-    return [
-        {
-            "job_id": job_id,
-            "category": category,
-            "confidence": confidence,
-        }
-        for job_id in ids
-    ]
+    """One entry per job named in *output*, each carrying its own verdict.
+
+    Read per job rather than per result: the category and confidence are taken
+    from the span between one job id and the next, so a result naming two jobs
+    no longer gives the second one the first one's verdict. That direction of
+    error is the one worth spending code on -- a job whose verdict is missing
+    is absent from whatever reads this, while a job wearing another job's
+    category is an answer, and a wrong one.
+
+    A verdict that is genuinely absent stays ``None``. The job id is what makes
+    the row joinable; ``jobs_root`` on the same event is what the id resolves
+    against, and the report on disk is a better source for a verdict than a
+    rendered string in any case.
+    """
+    matches = list(_JOB_ID.finditer(output))
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for position, match in enumerate(matches):
+        job_id = match.group("id")
+        if job_id in seen:
+            continue
+        seen.add(job_id)
+        following = (
+            matches[position + 1].start()
+            if position + 1 < len(matches)
+            else len(output)
+        )
+        segment = output[match.end() : following]
+        category = _CATEGORY.search(segment)
+        confidence = _CONFIDENCE.search(segment)
+        results.append(
+            {
+                "job_id": job_id,
+                "category": category.group("value") if category else None,
+                "confidence": (
+                    float(confidence.group("value")) if confidence else None
+                ),
+            }
+        )
+    return results
 
 
-def _base(session_id: str, turn: int, event: str, mode: str) -> dict[str, Any]:
+def _jobs_root() -> str | None:
+    """Where a recorded job id resolves on this machine.
+
+    Without it the ids in a record point at nothing: the bundle, the autopsy
+    report and the probe cells that would say what actually happened all live
+    under this root, and nothing else in a record names it. That is what the
+    empty ``resolution`` field is waiting on, so a log that cannot be resolved
+    can never acquire one.
+
+    ``None`` rather than a guess when the cia extra is absent, since the
+    property reaches the agents' own default to answer.
+    """
+    try:
+        from aorta.chat.config import settings
+
+        return str(settings.jobs_root)
+    except Exception:  # noqa: BLE001 - no cia extra, or an unreadable setting
+        logger.debug("Could not resolve the jobs root for the decision log.")
+        return None
+
+
+def _base(
+    session_id: str,
+    turn: int,
+    event: str,
+    mode: str,
+    front_door: str | None = None,
+) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "timestamp": (
@@ -204,6 +260,11 @@ def _base(session_id: str, turn: int, event: str, mode: str) -> dict[str, Any]:
         "turn": turn,
         "event": event,
         "mode": mode,
+        # Which entry point the turn came through, so a browser demo and a
+        # scripted CLI run are told apart rather than averaged together. On
+        # every event, like the rest of the envelope, so a line still reads
+        # alone. ``None`` when the caller did not say.
+        "front_door": front_door,
         # Stable attachment point for a later verified outcome.
         "resolution": None,
     }
@@ -217,26 +278,28 @@ def turn_events(
     reply: str,
     state: dict[str, Any],
     mode: str,
+    front_door: str | None = None,
+    duration_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     """Event records for one completed turn."""
     events = [
         {
-            **_base(session_id, turn, "input", mode),
+            **_base(session_id, turn, "input", mode, front_door),
             "question": _content(query, mode),
         },
         {
-            **_base(session_id, turn, "route", mode),
+            **_base(session_id, turn, "route", mode, front_door),
             "route": state.get("route"),
         },
         {
-            **_base(session_id, turn, "selection", mode),
+            **_base(session_id, turn, "selection", mode, front_door),
             "ranked_tools": list(state.get("candidate_tools") or []),
             # This sentence is the point of the decision log, but filesystem
             # paths and addresses are never part of that point.
             "reason": _scrub_reason(state.get("selection_rationale")),
         },
         {
-            **_base(session_id, turn, "plan", mode),
+            **_base(session_id, turn, "plan", mode, front_door),
             "plan": _content(state.get("plan"), mode),
         },
     ]
@@ -251,16 +314,20 @@ def turn_events(
         arguments = call.get("arguments")
         if arguments is None:
             arguments = _content(parsed_arguments, mode)
-        events.append(
-            {
-                **_base(session_id, turn, "tool", mode),
-                "position": position,
-                "tool": name,
-                "arguments": arguments,
-                "output": _content(output, mode),
-                "cia_results": _cia_results(output),
-            }
-        )
+        cia_results = _cia_results(output)
+        event = {
+            **_base(session_id, turn, "tool", mode, front_door),
+            "position": position,
+            "tool": name,
+            "arguments": arguments,
+            "output": _content(output, mode),
+            "cia_results": cia_results,
+        }
+        if cia_results:
+            # Beside the ids rather than on every event, because it is only
+            # meaningful where there is an id to resolve.
+            event["jobs_root"] = _jobs_root()
+        events.append(event)
 
     route = state.get("route")
     feedback = state.get("critic_feedback")
@@ -272,13 +339,22 @@ def turn_events(
     events.extend(
         [
             {
-                **_base(session_id, turn, "critic", mode),
+                **_base(session_id, turn, "critic", mode, front_door),
                 "accepted": accepted,
+                # What acceptance cost. ``accepted`` says the answer was taken
+                # in the end; this says whether it was taken first time or on
+                # the third attempt, which is the difference between a cheap
+                # decision and an expensive one.
+                "iterations": state.get("iteration"),
                 "feedback": _content(feedback, mode),
             },
             {
-                **_base(session_id, turn, "answer", mode),
+                **_base(session_id, turn, "answer", mode, front_door),
                 "answer": _content(reply, mode),
+                # Wall clock for the whole turn, on the event that ends it. A
+                # turn that took four minutes and one that took four seconds
+                # are different decisions even when they record the same ones.
+                "duration_seconds": duration_seconds,
             },
         ]
     )
@@ -292,13 +368,18 @@ def failure_event(
     query: str,
     error: BaseException,
     mode: str,
+    front_door: str | None = None,
+    duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     """A failed turn, without persisting its question in summary mode."""
     return {
-        **_base(session_id, turn, "failure", mode),
+        **_base(session_id, turn, "failure", mode, front_door),
         "question": _content(query, mode),
         "error_type": type(error).__name__,
         "error": _content(str(error), mode),
+        # A turn that failed after four minutes of cluster job and one that
+        # failed on the first call are different failures.
+        "duration_seconds": duration_seconds,
     }
 
 
@@ -352,6 +433,8 @@ def record_turn(
     query: str,
     reply: str,
     state: dict[str, Any],
+    front_door: str | None = None,
+    duration_seconds: float | None = None,
 ) -> Path | None:
     """Record one successful turn when session logging is enabled."""
     mode = session_log_mode()
@@ -365,6 +448,8 @@ def record_turn(
             reply=reply,
             state=state,
             mode=mode,
+            front_door=front_door,
+            duration_seconds=duration_seconds,
         )
         return append_events(session_id, events, mode)
     except Exception as exc:  # noqa: BLE001 - optional telemetry cannot break a turn
@@ -378,6 +463,8 @@ def record_failure(
     turn: int,
     query: str,
     error: BaseException,
+    front_door: str | None = None,
+    duration_seconds: float | None = None,
 ) -> Path | None:
     """Record a failed turn when session logging is enabled."""
     mode = session_log_mode()
@@ -390,6 +477,8 @@ def record_failure(
                 query=query,
                 error=error,
                 mode=mode,
+                front_door=front_door,
+                duration_seconds=duration_seconds,
             )
         return append_events(session_id, [event], mode)
     except Exception as exc:  # noqa: BLE001 - preserve the original failure

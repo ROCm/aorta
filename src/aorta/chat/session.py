@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 
 import asyncio
 import logging
+import time
 
 from langchain_core.messages import AIMessage, BaseMessage
 
@@ -119,6 +120,7 @@ async def invoke_agent(
     *,
     session_id: str | None = None,
     turn: int = 1,
+    front_door: str | None = None,
 ) -> tuple[str, list[BaseMessage], dict]:
     """Run a single query through the agent graph.
 
@@ -133,6 +135,8 @@ async def invoke_agent(
     *session_id* and *turn* join optional decision-log events across front
     doors. When no ID is supplied this call is treated as a one-turn session;
     logging remains entirely disabled unless AORTA_CHAT_SESSION_LOG is set.
+    *front_door* names the entry point on those events, and is the caller's to
+    state because nothing here can tell a browser from a terminal.
 
     Returns:
         (reply_text, updated_history, raw_result_dict)
@@ -156,6 +160,9 @@ async def invoke_agent(
     }
     decision_session = session_id or new_session_id()
     decision_mode = session_log_mode()
+    # Monotonic, so a clock adjustment mid-turn cannot produce a negative
+    # duration for a turn that plainly took time.
+    started = time.monotonic()
     try:
         with capture_tool_calls(decision_mode) as decision_calls:
             result = await _invoke_graph(initial, on_step)
@@ -165,6 +172,8 @@ async def invoke_agent(
             turn=turn,
             query=query,
             error=exc,
+            front_door=front_door,
+            duration_seconds=round(time.monotonic() - started, 3),
         )
         raise
 
@@ -180,5 +189,7 @@ async def invoke_agent(
         query=query,
         reply=reply,
         state=result,
+        front_door=front_door,
+        duration_seconds=round(time.monotonic() - started, 3),
     )
     return reply, [*pending, AIMessage(content=reply)], result
