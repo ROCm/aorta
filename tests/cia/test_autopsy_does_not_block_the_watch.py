@@ -319,11 +319,12 @@ class TestFailureIsRetriedAndThenGivenUpOn:
         real_record = poll_mod.record_autopsy_state
 
         def recording(job_dir, state, **fields):
-            real_record(job_dir, state, **fields)
+            persisted = real_record(job_dir, state, **fields)
             if state == "failed":
                 # Set after the state is on disk, so the next round is testing
                 # the exact ordering that failed in production.
                 failed_persisted.set()
+            return persisted
 
         def between_rounds(_seconds):
             assert failed_persisted.wait(timeout=10), "the first Autopsy never failed"
@@ -355,11 +356,12 @@ class TestFailureIsRetriedAndThenGivenUpOn:
 
         def recording(job_dir, state, **fields):
             nonlocal failure_count
-            real_record(job_dir, state, **fields)
+            persisted = real_record(job_dir, state, **fields)
             if state == "failed":
                 with condition:
                     failure_count += 1
                     condition.notify_all()
+            return persisted
 
         def between_rounds(_seconds):
             nonlocal sleeps
