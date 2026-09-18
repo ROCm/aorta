@@ -146,6 +146,12 @@ def join_group(
     return pg, device
 
 
+# The round kinds `build_round` knows how to materialise. Named here so the
+# argument check and the dispatch below read the same list: a kind added to one
+# and not the other is the drift this constant exists to prevent.
+_ROUND_KINDS = ("perturb", "restore", "recv")
+
+
 def build_round(kind: str, originals: dict[str, Any], names: list[str], device):
     """Materialise one round's payload on the sender's device.
 
@@ -171,6 +177,11 @@ def build_round(kind: str, originals: dict[str, Any], names: list[str], device):
             poisoned.fill_(-1.0)
             payload.append(poisoned)
         else:
+            # Unreachable from the CLI, which validates against `_ROUND_KINDS`
+            # before joining the group. Kept as a backstop for a programmatic
+            # caller, and deliberately not the only check: reaching it means a
+            # peer that has already rendezvoused exits without posting, which is
+            # what made a typo look like a transport hang.
             raise SystemExit(f"unknown round kind: {kind}")
     return payload
 
@@ -215,11 +226,28 @@ def main() -> int:
     if args.src is None:
         args.src = args.rank
 
+    # Validated here, before the torch import and before the rendezvous, rather
+    # than inside `build_round` where it used to be. `build_round` is called
+    # only after `join_group` has returned, so a typo in `--rounds` was rejected
+    # *after* this peer had joined the process group -- and then exited without
+    # posting the broadcast the driver's `/update_weights` call is blocking on,
+    # so the driver hung for its full timeout on what is really a command-line
+    # error, with the engine left mid-update. A misspelled argument should cost
+    # nothing, and it now costs nothing: no import, no store, no group.
+    rounds = [r for r in args.rounds.split(",") if r]
+    if not rounds:
+        raise SystemExit("--rounds is empty; expected " + ",".join(_ROUND_KINDS))
+    unknown = [r for r in rounds if r not in _ROUND_KINDS]
+    if unknown:
+        raise SystemExit(
+            f"unknown round kind(s) {unknown}; expected any of "
+            + ", ".join(_ROUND_KINDS)
+        )
+
     import torch
     import torch.distributed as dist
 
     names = [n for n in args.tensors.split(",") if n]
-    rounds = [r for r in args.rounds.split(",") if r]
 
     originals = load_checkpoint_tensors(args.model_path, names)
 

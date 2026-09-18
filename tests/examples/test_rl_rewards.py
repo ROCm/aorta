@@ -2119,6 +2119,90 @@ def test_a_rejected_restore_update_is_named_rather_than_scored(
     assert verdict == "RESTORE_UPDATE_REJECTED"
 
 
+def _peer_argv(tmp_path, rounds):
+    return [
+        sys.executable,
+        str(_EXAMPLES / "nccl_weight_peer.py"),
+        "--run-id",
+        "R1",
+        "--rank",
+        "0",
+        "--world-size",
+        "2",
+        "--master-address",
+        "127.0.0.1",
+        "--master-port",
+        "29500",
+        # Deliberately absent: it is what makes this test an ordering test. A
+        # path that cannot be loaded fails *before* the old check ran and
+        # *after* the new one does, so the message below appears only when the
+        # validation precedes the load.
+        "--model-path",
+        str(tmp_path / "no-such-model"),
+        "--tensors",
+        "a,b",
+        "--rounds",
+        rounds,
+        "--plan-out",
+        str(tmp_path / "plan.json"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rounds", "expected"),
+    [
+        ("perturb,typo", "unknown round kind"),
+        ("", "--rounds is empty"),
+    ],
+)
+def test_a_bad_rounds_argument_is_rejected_before_the_group_is_joined(
+    tmp_path, rounds, expected
+):
+    """A typo used to be caught only after this peer had joined the group.
+
+    `build_round` raises on an unknown kind, and it is called from the round
+    loop, which runs after `join_group` has returned. So a misspelled
+    `--rounds` rendezvoused first and then exited without posting the broadcast
+    the driver's `/update_weights` call is blocking on: the driver hung for its
+    full timeout, with the engine left mid-update, on what is really a
+    command-line error.
+
+    The assertion is an ordering one rather than a message one. `--model-path`
+    points at nothing, so loading the checkpoint fails before the old check was
+    reached and after the new one is, which means this message can only appear
+    if the validation now comes first. It also precedes the torch import, so a
+    misspelled argument costs no import, no store and no group.
+    """
+    proc = subprocess.run(
+        _peer_argv(tmp_path, rounds), capture_output=True, text=True, timeout=180
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, output
+    assert expected in output, output
+    assert not (tmp_path / "plan.json").exists(), "the plan must not be published"
+
+
+def test_a_valid_rounds_argument_passes_the_new_check(tmp_path):
+    """Narrowness: the check must reject typos, not the documented kinds.
+
+    All three of `perturb`, `restore` and `recv` are kinds `build_round`
+    materialises, so none of them may be refused. This gets past the validation
+    and fails later on the unloadable model path, which is the point -- the
+    rejection message must be absent.
+    """
+    proc = subprocess.run(
+        _peer_argv(tmp_path, "perturb,restore,recv"),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert "unknown round kind" not in output, output
+    assert "--rounds is empty" not in output, output
+
+
 def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar"):
     """A PATH on which the real `up()` runs with no docker and no engine.
 
