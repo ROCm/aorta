@@ -1,0 +1,897 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "path": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck",
+        "sha256": "12ae30cb70424f4b8f4c0d68877968ded5f5f943c659d952c650026202e6bf74"
+      },
+      "coverage": [],
+      "diagnostics_truncated": true,
+      "findings": [
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x1804: missing s_waitcnt lgkmcnt(14) before use of v42",
+          "metadata": {
+            "context_1": "producer .text+0x15fc: ds_read_b32 v42, v15 offset:5632",
+            "context_2": "consumer .text+0x1804: v_mfma_f32_16x16x4_f32 acc[0:3], v42, v20, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v42",
+          "metadata": {
+            "context_1": "producer .text+0x27ac: ds_read_b32 v42, v15 offset:5632",
+            "context_2": "consumer .text+0x293c: v_mfma_f32_16x16x4_f32 acc[0:3], v42, v20, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2954: missing s_waitcnt lgkmcnt(14) before use of v42",
+          "metadata": {
+            "context_1": "producer .text+0x27ac: ds_read_b32 v42, v15 offset:5632",
+            "context_2": "consumer .text+0x2954: v_mfma_f32_16x16x4_f32 acc[4:7], v42, v21, acc[4:7]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x295c: missing s_waitcnt lgkmcnt(14) before use of v43",
+          "metadata": {
+            "context_1": "producer .text+0x27bc: ds_read_b32 v43, v15 offset:5760",
+            "context_2": "consumer .text+0x295c: v_mfma_f32_16x16x4_f32 acc[8:11], v43, v20, acc[8:11]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2964: missing s_waitcnt lgkmcnt(14) before use of v43",
+          "metadata": {
+            "context_1": "producer .text+0x27bc: ds_read_b32 v43, v15 offset:5760",
+            "context_2": "consumer .text+0x2964: v_mfma_f32_16x16x4_f32 acc[12:15], v43, v21, acc[12:15]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x296c: missing s_waitcnt lgkmcnt(14) before use of v44",
+          "metadata": {
+            "context_1": "producer .text+0x27c4: ds_read_b32 v44, v15 offset:5888",
+            "context_2": "consumer .text+0x296c: v_mfma_f32_16x16x4_f32 acc[16:19], v44, v20, acc[16:19]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2974: missing s_waitcnt lgkmcnt(14) before use of v44",
+          "metadata": {
+            "context_1": "producer .text+0x27c4: ds_read_b32 v44, v15 offset:5888",
+            "context_2": "consumer .text+0x2974: v_mfma_f32_16x16x4_f32 acc[20:23], v44, v21, acc[20:23]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x297c: missing s_waitcnt lgkmcnt(14) before use of v45",
+          "metadata": {
+            "context_1": "producer .text+0x27d4: ds_read_b32 v45, v15 offset:6016",
+            "context_2": "consumer .text+0x297c: v_mfma_f32_16x16x4_f32 acc[24:27], v45, v20, acc[24:27]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2984: missing s_waitcnt lgkmcnt(14) before use of v45",
+          "metadata": {
+            "context_1": "producer .text+0x27d4: ds_read_b32 v45, v15 offset:6016",
+            "context_2": "consumer .text+0x2984: v_mfma_f32_16x16x4_f32 acc[28:31], v45, v21, acc[28:31]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x298c: missing s_waitcnt lgkmcnt(14) before use of v46",
+          "metadata": {
+            "context_1": "producer .text+0x27dc: ds_read_b32 v46, v15 offset:6144",
+            "context_2": "consumer .text+0x298c: v_mfma_f32_16x16x4_f32 acc[32:35], v46, v20, acc[32:35]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2994: missing s_waitcnt lgkmcnt(14) before use of v46",
+          "metadata": {
+            "context_1": "producer .text+0x27dc: ds_read_b32 v46, v15 offset:6144",
+            "context_2": "consumer .text+0x2994: v_mfma_f32_16x16x4_f32 acc[36:39], v46, v21, acc[36:39]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29a0: missing s_waitcnt lgkmcnt(14) before use of v47",
+          "metadata": {
+            "context_1": "producer .text+0x27f4: ds_read_b32 v47, v15 offset:8448",
+            "context_2": "consumer .text+0x29a0: v_mfma_f32_16x16x4_f32 acc[0:3], v47, v22, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29a8: missing s_waitcnt lgkmcnt(14) before use of v47",
+          "metadata": {
+            "context_1": "producer .text+0x27f4: ds_read_b32 v47, v15 offset:8448",
+            "context_2": "consumer .text+0x29a8: v_mfma_f32_16x16x4_f32 acc[4:7], v47, v23, acc[4:7]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29b0: missing s_waitcnt lgkmcnt(14) before use of v48",
+          "metadata": {
+            "context_1": "producer .text+0x2804: ds_read_b32 v48, v15 offset:8576",
+            "context_2": "consumer .text+0x29b0: v_mfma_f32_16x16x4_f32 acc[8:11], v48, v22, acc[8:11]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29b8: missing s_waitcnt lgkmcnt(14) before use of v48",
+          "metadata": {
+            "context_1": "producer .text+0x2804: ds_read_b32 v48, v15 offset:8576",
+            "context_2": "consumer .text+0x29b8: v_mfma_f32_16x16x4_f32 acc[12:15], v48, v23, acc[12:15]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29c0: missing s_waitcnt lgkmcnt(14) before use of v49",
+          "metadata": {
+            "context_1": "producer .text+0x280c: ds_read_b32 v49, v15 offset:8704",
+            "context_2": "consumer .text+0x29c0: v_mfma_f32_16x16x4_f32 acc[16:19], v49, v22, acc[16:19]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29c8: missing s_waitcnt lgkmcnt(14) before use of v49",
+          "metadata": {
+            "context_1": "producer .text+0x280c: ds_read_b32 v49, v15 offset:8704",
+            "context_2": "consumer .text+0x29c8: v_mfma_f32_16x16x4_f32 acc[20:23], v49, v23, acc[20:23]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29d0: missing s_waitcnt lgkmcnt(14) before use of v50",
+          "metadata": {
+            "context_1": "producer .text+0x281c: ds_read_b32 v50, v15 offset:8832",
+            "context_2": "consumer .text+0x29d0: v_mfma_f32_16x16x4_f32 acc[24:27], v50, v22, acc[24:27]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29d8: missing s_waitcnt lgkmcnt(14) before use of v50",
+          "metadata": {
+            "context_1": "producer .text+0x281c: ds_read_b32 v50, v15 offset:8832",
+            "context_2": "consumer .text+0x29d8: v_mfma_f32_16x16x4_f32 acc[28:31], v50, v23, acc[28:31]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29e0: missing s_waitcnt lgkmcnt(14) before use of v51",
+          "metadata": {
+            "context_1": "producer .text+0x2824: ds_read_b32 v51, v15 offset:8960",
+            "context_2": "consumer .text+0x29e0: v_mfma_f32_16x16x4_f32 acc[32:35], v51, v22, acc[32:35]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29e8: missing s_waitcnt lgkmcnt(14) before use of v51",
+          "metadata": {
+            "context_1": "producer .text+0x2824: ds_read_b32 v51, v15 offset:8960",
+            "context_2": "consumer .text+0x29e8: v_mfma_f32_16x16x4_f32 acc[36:39], v51, v23, acc[36:39]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29f4: missing s_waitcnt lgkmcnt(14) before use of v52",
+          "metadata": {
+            "context_1": "producer .text+0x283c: ds_read_b32 v52, v15 offset:11264",
+            "context_2": "consumer .text+0x29f4: v_mfma_f32_16x16x4_f32 acc[0:3], v52, v24, acc[0:3]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29fc: missing s_waitcnt lgkmcnt(14) before use of v52",
+          "metadata": {
+            "context_1": "producer .text+0x283c: ds_read_b32 v52, v15 offset:11264",
+            "context_2": "consumer .text+0x29fc: v_mfma_f32_16x16x4_f32 acc[4:7], v52, v25, acc[4:7]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a04: missing s_waitcnt lgkmcnt(14) before use of v53",
+          "metadata": {
+            "context_1": "producer .text+0x2850: ds_read_b32 v53, v15 offset:11392",
+            "context_2": "consumer .text+0x2a04: v_mfma_f32_16x16x4_f32 acc[8:11], v53, v24, acc[8:11]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a0c: missing s_waitcnt lgkmcnt(14) before use of v53",
+          "metadata": {
+            "context_1": "producer .text+0x2850: ds_read_b32 v53, v15 offset:11392",
+            "context_2": "consumer .text+0x2a0c: v_mfma_f32_16x16x4_f32 acc[12:15], v53, v25, acc[12:15]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a14: missing s_waitcnt lgkmcnt(14) before use of v54",
+          "metadata": {
+            "context_1": "producer .text+0x2858: ds_read_b32 v54, v15 offset:11520",
+            "context_2": "consumer .text+0x2a14: v_mfma_f32_16x16x4_f32 acc[16:19], v54, v24, acc[16:19]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a1c: missing s_waitcnt lgkmcnt(14) before use of v54",
+          "metadata": {
+            "context_1": "producer .text+0x2858: ds_read_b32 v54, v15 offset:11520",
+            "context_2": "consumer .text+0x2a1c: v_mfma_f32_16x16x4_f32 acc[20:23], v54, v25, acc[20:23]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a24: missing s_waitcnt lgkmcnt(14) before use of v55",
+          "metadata": {
+            "context_1": "producer .text+0x2868: ds_read_b32 v55, v15 offset:11648",
+            "context_2": "consumer .text+0x2a24: v_mfma_f32_16x16x4_f32 acc[24:27], v55, v24, acc[24:27]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a2c: missing s_waitcnt lgkmcnt(14) before use of v55",
+          "metadata": {
+            "context_1": "producer .text+0x2868: ds_read_b32 v55, v15 offset:11648",
+            "context_2": "consumer .text+0x2a2c: v_mfma_f32_16x16x4_f32 acc[28:31], v55, v25, acc[28:31]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a34: missing s_waitcnt lgkmcnt(14) before use of v56",
+          "metadata": {
+            "context_1": "producer .text+0x2870: ds_read_b32 v56, v15 offset:11776",
+            "context_2": "consumer .text+0x2a34: v_mfma_f32_16x16x4_f32 acc[32:35], v56, v24, acc[32:35]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a3c: missing s_waitcnt lgkmcnt(14) before use of v56",
+          "metadata": {
+            "context_1": "producer .text+0x2870: ds_read_b32 v56, v15 offset:11776",
+            "context_2": "consumer .text+0x2a3c: v_mfma_f32_16x16x4_f32 acc[36:39], v56, v25, acc[36:39]"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x498: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x480: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x498: s_load_dword s45, s[0:1], 0x88"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        }
+      ],
+      "kernel_results": [
+        {
+          "diagnostics_truncated": true,
+          "findings": [
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x1804: missing s_waitcnt lgkmcnt(14) before use of v42",
+              "metadata": {
+                "context_1": "producer .text+0x15fc: ds_read_b32 v42, v15 offset:5632",
+                "context_2": "consumer .text+0x1804: v_mfma_f32_16x16x4_f32 acc[0:3], v42, v20, acc[0:3]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x293c: missing s_waitcnt lgkmcnt(14) before use of v42",
+              "metadata": {
+                "context_1": "producer .text+0x27ac: ds_read_b32 v42, v15 offset:5632",
+                "context_2": "consumer .text+0x293c: v_mfma_f32_16x16x4_f32 acc[0:3], v42, v20, acc[0:3]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2954: missing s_waitcnt lgkmcnt(14) before use of v42",
+              "metadata": {
+                "context_1": "producer .text+0x27ac: ds_read_b32 v42, v15 offset:5632",
+                "context_2": "consumer .text+0x2954: v_mfma_f32_16x16x4_f32 acc[4:7], v42, v21, acc[4:7]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x295c: missing s_waitcnt lgkmcnt(14) before use of v43",
+              "metadata": {
+                "context_1": "producer .text+0x27bc: ds_read_b32 v43, v15 offset:5760",
+                "context_2": "consumer .text+0x295c: v_mfma_f32_16x16x4_f32 acc[8:11], v43, v20, acc[8:11]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2964: missing s_waitcnt lgkmcnt(14) before use of v43",
+              "metadata": {
+                "context_1": "producer .text+0x27bc: ds_read_b32 v43, v15 offset:5760",
+                "context_2": "consumer .text+0x2964: v_mfma_f32_16x16x4_f32 acc[12:15], v43, v21, acc[12:15]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x296c: missing s_waitcnt lgkmcnt(14) before use of v44",
+              "metadata": {
+                "context_1": "producer .text+0x27c4: ds_read_b32 v44, v15 offset:5888",
+                "context_2": "consumer .text+0x296c: v_mfma_f32_16x16x4_f32 acc[16:19], v44, v20, acc[16:19]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2974: missing s_waitcnt lgkmcnt(14) before use of v44",
+              "metadata": {
+                "context_1": "producer .text+0x27c4: ds_read_b32 v44, v15 offset:5888",
+                "context_2": "consumer .text+0x2974: v_mfma_f32_16x16x4_f32 acc[20:23], v44, v21, acc[20:23]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x297c: missing s_waitcnt lgkmcnt(14) before use of v45",
+              "metadata": {
+                "context_1": "producer .text+0x27d4: ds_read_b32 v45, v15 offset:6016",
+                "context_2": "consumer .text+0x297c: v_mfma_f32_16x16x4_f32 acc[24:27], v45, v20, acc[24:27]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2984: missing s_waitcnt lgkmcnt(14) before use of v45",
+              "metadata": {
+                "context_1": "producer .text+0x27d4: ds_read_b32 v45, v15 offset:6016",
+                "context_2": "consumer .text+0x2984: v_mfma_f32_16x16x4_f32 acc[28:31], v45, v21, acc[28:31]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x298c: missing s_waitcnt lgkmcnt(14) before use of v46",
+              "metadata": {
+                "context_1": "producer .text+0x27dc: ds_read_b32 v46, v15 offset:6144",
+                "context_2": "consumer .text+0x298c: v_mfma_f32_16x16x4_f32 acc[32:35], v46, v20, acc[32:35]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2994: missing s_waitcnt lgkmcnt(14) before use of v46",
+              "metadata": {
+                "context_1": "producer .text+0x27dc: ds_read_b32 v46, v15 offset:6144",
+                "context_2": "consumer .text+0x2994: v_mfma_f32_16x16x4_f32 acc[36:39], v46, v21, acc[36:39]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29a0: missing s_waitcnt lgkmcnt(14) before use of v47",
+              "metadata": {
+                "context_1": "producer .text+0x27f4: ds_read_b32 v47, v15 offset:8448",
+                "context_2": "consumer .text+0x29a0: v_mfma_f32_16x16x4_f32 acc[0:3], v47, v22, acc[0:3]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29a8: missing s_waitcnt lgkmcnt(14) before use of v47",
+              "metadata": {
+                "context_1": "producer .text+0x27f4: ds_read_b32 v47, v15 offset:8448",
+                "context_2": "consumer .text+0x29a8: v_mfma_f32_16x16x4_f32 acc[4:7], v47, v23, acc[4:7]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29b0: missing s_waitcnt lgkmcnt(14) before use of v48",
+              "metadata": {
+                "context_1": "producer .text+0x2804: ds_read_b32 v48, v15 offset:8576",
+                "context_2": "consumer .text+0x29b0: v_mfma_f32_16x16x4_f32 acc[8:11], v48, v22, acc[8:11]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29b8: missing s_waitcnt lgkmcnt(14) before use of v48",
+              "metadata": {
+                "context_1": "producer .text+0x2804: ds_read_b32 v48, v15 offset:8576",
+                "context_2": "consumer .text+0x29b8: v_mfma_f32_16x16x4_f32 acc[12:15], v48, v23, acc[12:15]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29c0: missing s_waitcnt lgkmcnt(14) before use of v49",
+              "metadata": {
+                "context_1": "producer .text+0x280c: ds_read_b32 v49, v15 offset:8704",
+                "context_2": "consumer .text+0x29c0: v_mfma_f32_16x16x4_f32 acc[16:19], v49, v22, acc[16:19]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29c8: missing s_waitcnt lgkmcnt(14) before use of v49",
+              "metadata": {
+                "context_1": "producer .text+0x280c: ds_read_b32 v49, v15 offset:8704",
+                "context_2": "consumer .text+0x29c8: v_mfma_f32_16x16x4_f32 acc[20:23], v49, v23, acc[20:23]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29d0: missing s_waitcnt lgkmcnt(14) before use of v50",
+              "metadata": {
+                "context_1": "producer .text+0x281c: ds_read_b32 v50, v15 offset:8832",
+                "context_2": "consumer .text+0x29d0: v_mfma_f32_16x16x4_f32 acc[24:27], v50, v22, acc[24:27]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29d8: missing s_waitcnt lgkmcnt(14) before use of v50",
+              "metadata": {
+                "context_1": "producer .text+0x281c: ds_read_b32 v50, v15 offset:8832",
+                "context_2": "consumer .text+0x29d8: v_mfma_f32_16x16x4_f32 acc[28:31], v50, v23, acc[28:31]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29e0: missing s_waitcnt lgkmcnt(14) before use of v51",
+              "metadata": {
+                "context_1": "producer .text+0x2824: ds_read_b32 v51, v15 offset:8960",
+                "context_2": "consumer .text+0x29e0: v_mfma_f32_16x16x4_f32 acc[32:35], v51, v22, acc[32:35]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29e8: missing s_waitcnt lgkmcnt(14) before use of v51",
+              "metadata": {
+                "context_1": "producer .text+0x2824: ds_read_b32 v51, v15 offset:8960",
+                "context_2": "consumer .text+0x29e8: v_mfma_f32_16x16x4_f32 acc[36:39], v51, v23, acc[36:39]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29f4: missing s_waitcnt lgkmcnt(14) before use of v52",
+              "metadata": {
+                "context_1": "producer .text+0x283c: ds_read_b32 v52, v15 offset:11264",
+                "context_2": "consumer .text+0x29f4: v_mfma_f32_16x16x4_f32 acc[0:3], v52, v24, acc[0:3]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x29fc: missing s_waitcnt lgkmcnt(14) before use of v52",
+              "metadata": {
+                "context_1": "producer .text+0x283c: ds_read_b32 v52, v15 offset:11264",
+                "context_2": "consumer .text+0x29fc: v_mfma_f32_16x16x4_f32 acc[4:7], v52, v25, acc[4:7]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a04: missing s_waitcnt lgkmcnt(14) before use of v53",
+              "metadata": {
+                "context_1": "producer .text+0x2850: ds_read_b32 v53, v15 offset:11392",
+                "context_2": "consumer .text+0x2a04: v_mfma_f32_16x16x4_f32 acc[8:11], v53, v24, acc[8:11]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a0c: missing s_waitcnt lgkmcnt(14) before use of v53",
+              "metadata": {
+                "context_1": "producer .text+0x2850: ds_read_b32 v53, v15 offset:11392",
+                "context_2": "consumer .text+0x2a0c: v_mfma_f32_16x16x4_f32 acc[12:15], v53, v25, acc[12:15]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a14: missing s_waitcnt lgkmcnt(14) before use of v54",
+              "metadata": {
+                "context_1": "producer .text+0x2858: ds_read_b32 v54, v15 offset:11520",
+                "context_2": "consumer .text+0x2a14: v_mfma_f32_16x16x4_f32 acc[16:19], v54, v24, acc[16:19]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a1c: missing s_waitcnt lgkmcnt(14) before use of v54",
+              "metadata": {
+                "context_1": "producer .text+0x2858: ds_read_b32 v54, v15 offset:11520",
+                "context_2": "consumer .text+0x2a1c: v_mfma_f32_16x16x4_f32 acc[20:23], v54, v25, acc[20:23]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a24: missing s_waitcnt lgkmcnt(14) before use of v55",
+              "metadata": {
+                "context_1": "producer .text+0x2868: ds_read_b32 v55, v15 offset:11648",
+                "context_2": "consumer .text+0x2a24: v_mfma_f32_16x16x4_f32 acc[24:27], v55, v24, acc[24:27]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a2c: missing s_waitcnt lgkmcnt(14) before use of v55",
+              "metadata": {
+                "context_1": "producer .text+0x2868: ds_read_b32 v55, v15 offset:11648",
+                "context_2": "consumer .text+0x2a2c: v_mfma_f32_16x16x4_f32 acc[28:31], v55, v25, acc[28:31]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a34: missing s_waitcnt lgkmcnt(14) before use of v56",
+              "metadata": {
+                "context_1": "producer .text+0x2870: ds_read_b32 v56, v15 offset:11776",
+                "context_2": "consumer .text+0x2a34: v_mfma_f32_16x16x4_f32 acc[32:35], v56, v24, acc[32:35]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x2a3c: missing s_waitcnt lgkmcnt(14) before use of v56",
+              "metadata": {
+                "context_1": "producer .text+0x2870: ds_read_b32 v56, v15 offset:11776",
+                "context_2": "consumer .text+0x2a3c: v_mfma_f32_16x16x4_f32 acc[36:39], v56, v25, acc[36:39]"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco:gfx950[0]:.text+0x498: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x480: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x498: s_load_dword s45, s[0:1], 0x88"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            }
+          ],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+            "entry_offset": null,
+            "name": "gemm_f32_ss",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 4,
+          "state": "ran",
+          "verdict": "warn"
+        }
+      ],
+      "reason": null,
+      "returncode": null,
+      "sanitizer": "waitcheck",
+      "state": "ran",
+      "verdict": "warn"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "warn",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "57c5d8efa448315ddc5f49170757ebeec1eb397468676ff158d19c71572b1c55",
+          "entry_offset": null,
+          "name": "gemm_f32_ss",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
