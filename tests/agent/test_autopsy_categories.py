@@ -449,6 +449,105 @@ class TestTheOfflineHeuristic:
         """
         assert _fake_step(detectors=[detector]).category == expected
 
+    @pytest.mark.parametrize(
+        "detector,expected",
+        [
+            # The reported spellings. `custom_patterns[*].id` is validated as
+            # "non-empty string" and nothing more (`tier5_custom.py`), so a
+            # colon or a slash is exactly as legal as an underscore.
+            ("custom:nan:signature", "numeric_instability"),
+            ("custom:numerics/mismatch", "numeric_instability"),
+            ("custom:hip:error", "illegal_mem"),
+            # Not reported, and the point of not enumerating separators: any
+            # run of non-alphanumerics is one, so there is no list to be
+            # missing from.
+            ("custom:nan.signature", "numeric_instability"),
+            ("custom:numerics|mismatch", "numeric_instability"),
+            ("custom:hip--error", "illegal_mem"),
+            ("custom:nan::signature", "numeric_instability"),
+        ],
+    )
+    def test_any_separator_is_a_separator_on_a_free_form_id(self, detector, expected):
+        """`[-_ ]` was an allowlist, and the id field it reads is free-form.
+
+        The previous round widened these three legs from a literal `_` to
+        `[-_ ]`, which fixed the hyphen that was reported and left every other
+        punctuation mark out. Splitting on `[^a-z0-9]+` instead makes the
+        question "is there a boundary here", which has no list to keep
+        up to date.
+        """
+        assert _fake_step(detectors=[detector]).category == expected
+
+    @pytest.mark.parametrize(
+        "detector",
+        [
+            "custom:chip_error",
+            "custom:chip-error",
+            "custom:gpu_chip_error",
+            "custom:whip_error",
+        ],
+    )
+    def test_a_signature_word_glued_inside_another_word_is_not_that_signature(
+        self, detector
+    ):
+        """Found by the separator sweep, and the reason it is a word test.
+
+        `hip[-_ ]error` matched `custom:chip_error`, so a chip error was
+        labelled an illegal memory access; generalising the separator class on
+        its own keeps every one of these, because "chip" ends in "hip". Same
+        collision as `race` inside `traceback`, `lds` inside `fields` and `nan`
+        inside `canonical`, which this file has already fixed three times the
+        same way.
+        """
+        assert _fake_step(detectors=[detector]).category != "illegal_mem"
+
+    @pytest.mark.parametrize(
+        "detectors",
+        [
+            ["custom:nan", "signature"],
+            ["custom:chip", "error"],
+            ["custom:numerics", "mismatch_report"],
+        ],
+    )
+    def test_a_signature_is_not_assembled_from_two_ids(self, detectors):
+        """The other half of judging per id, extended to the signature legs.
+
+        `_is_kernel_race_id` has been per-id since the conjunction landed;
+        these three legs were still regexes over `" ".join(detectors)`, where
+        the joining space is itself a separator. Every shipped id carries a
+        `tierN:` / `custom:` prefix and so cannot begin with the second half of
+        a pair, which is why nothing has been mislabelled yet -- but that is an
+        invariant of the classifier propping this function up, and deciding per
+        id does not need it to hold.
+        """
+        assert _fake_step(detectors=detectors).category == "unknown"
+
+    @pytest.mark.parametrize(
+        "detector,expected",
+        [
+            # Every spelling the previous rounds pinned, re-asserted here
+            # because this change moved the mechanism underneath them.
+            ("tier4:nan_signature", "numeric_instability"),
+            ("custom:nan-signature", "numeric_instability"),
+            ("custom:nan signature", "numeric_instability"),
+            ("custom:ts_kernel_numerics_mismatch", "numeric_instability"),
+            ("tier4:hip_error", "illegal_mem"),
+            ("custom:hip-error", "illegal_mem"),
+            ("custom:rocm_hip_error", "illegal_mem"),
+            # Surrounding words on either side are still fine: it is one word
+            # next to another that is being asked for, not the whole id.
+            ("custom:gpu_nan_signature_v2", "numeric_instability"),
+        ],
+    )
+    def test_the_spellings_that_already_matched_still_match(self, detector, expected):
+        """Narrowness control for the word test, in the direction that matters.
+
+        The word split gives up exactly one kind of spelling -- a signature
+        word glued to another word, `custom:isnan_signature` -- and these pin
+        that nothing else went with it.
+        """
+        assert _fake_step(detectors=[detector]).category == expected
+
     def test_the_shipping_numerics_detector_routes(self):
         """The one detector in the tree that means this was falling through.
 
@@ -530,3 +629,25 @@ class TestTheCorpusGroundTruth:
         It drew `checkpoint_race` because that was the nearest available name.
         """
         assert self._labels()["consan-racy"]["category"] == "kernel_race"
+
+    def test_the_coverage_note_counts_the_rows_the_map_actually_has(self):
+        """The note explains away the `unknown` rows, so its count has to be theirs.
+
+        It reads "three ... and six", and it reached review saying "five
+        controls" plus "two more" harness errors, which totals seven against
+        six `unknown` rows -- `consan-tiny` is in both groups. The prose is now
+        written to say so, and this fails if either number drifts from the map
+        again, which is the only part a reader cannot check at a glance.
+        """
+        labels = self._labels()
+        unknown = [n for n, e in labels.items() if e["category"] == "unknown"]
+        assert (len(labels) - len(unknown), len(unknown)) == (3, 6)
+
+        note = " ".join(
+            json.loads(SCENARIO_LABELS.read_text(encoding="utf-8"))["coverage_note"]
+        )
+        assert "Three scenarios carry a committed label and six" in note
+        # The overlap is the whole correction: five plus two is seven names
+        # over six rows, and the row in both groups has to be named.
+        assert "consan-tiny" in note
+        assert "consan-tiny" in unknown

@@ -184,14 +184,59 @@ _SANITIZER_TOKENS = frozenset({"consan", "waitcheck", "rocjitsu"})
 _INTRA_KERNEL_TOKENS = frozenset({"race", "waitcnt", "barrier", "hazard", "lds"})
 
 
-def _id_words(detector: str) -> set[str]:
-    """One detector ID split into words.
+def _id_word_sequence(detector: str) -> list[str]:
+    """One detector ID split into words, in the order it writes them.
 
     IDs separate words with ":" and "_" (`tier4:python_traceback`,
     `custom:consan_data_race`), so splitting on non-alphanumerics is what makes
-    a whole-word test possible.
+    a whole-word test possible. Splitting on the *class* rather than on a list
+    of separators is the point: `custom:<raw_id>` is free-form, and
+    `tier5_custom.py` requires only a non-empty string, so `custom:nan:signature`
+    and `custom:numerics/mismatch` are as legal as the underscored spellings.
+    Any run of non-alphanumerics is a separator here, so there is no allowlist
+    to leave a spelling out of.
     """
-    return set(re.split(r"[^a-z0-9]+", detector.lower()))
+    return [word for word in re.split(r"[^a-z0-9]+", detector.lower()) if word]
+
+
+def _id_words(detector: str) -> set[str]:
+    """One detector ID's words, unordered, for the tests that ask "is it in here"."""
+    return set(_id_word_sequence(detector))
+
+
+def _any_id_writes(detectors: list[str], first: str, second: str) -> bool:
+    """Whether *one* detector ID writes `first` immediately before `second`.
+
+    Two properties, and the legs that call this need both.
+
+    Per ID rather than over the joined detector list, for the reason
+    `_is_kernel_race_id` is: a signature assembled from two IDs is a finding
+    neither of them reports. Today the join cannot in fact produce one, because
+    every ID carries a `tierN:` / `custom:` / `meta:` prefix and so can never
+    *begin* with the second half of a pair -- but that is an invariant of the
+    classifier holding this function up, and deciding per ID does not need it.
+
+    Whole words rather than a substring, which is what the separator question
+    exposed. `hip[-_ ]error` also matched `custom:chip_error`,
+    `custom:whip_error` and `custom:gpu_chip_error`, labelling a chip error an
+    illegal access; generalising the separator class without bounding the words
+    keeps every one of those. It is the collision this file has now fixed three
+    times -- `race` inside `traceback`, `lds` inside `fields`, `nan` inside
+    `canonical` -- so the word split is the mechanism already agreed here rather
+    than a fourth one.
+
+    Not quite strictly widening, and the one spelling it gives up is worth
+    naming: an id that glues a signature word to something else, `custom:isnan_signature`,
+    used to match and now does not. That is the same trade as `\\bnans?\\b` on
+    the symptom path, taken for the same reason -- "isnan" is not "nan", the
+    same way "chip" is not "hip".
+    """
+    for detector in detectors:
+        words = _id_word_sequence(detector)
+        pairs = zip(words, words[1:], strict=False)
+        if any(a == first and b == second for a, b in pairs):
+            return True
+    return False
 
 
 def _is_kernel_race_id(detector: str) -> bool:
@@ -265,10 +310,12 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     joined = " ".join(detectors).lower()
     # Detector IDs separate words with ":" and "_" (`custom:consan_data_race`,
     # `tier4:python_traceback`), so a substring test for a short word like
-    # "race" also fires inside "traceback". The kernel-race leg below is
-    # therefore decided per ID by `_is_kernel_race_id`; every other term here is
-    # either long enough to be unambiguous or is deliberately matched across a
-    # separator ("tier1:exit", "nan_signature"), which tokenising would break.
+    # "race" also fires inside "traceback". Every leg naming a word that can be
+    # glued inside another is therefore decided per ID off the word split --
+    # the kernel-race conjunction by `_is_kernel_race_id`, the three two-word
+    # signatures by `_any_id_writes`. What is left on `joined` is the broad
+    # legs, whose words are long enough not to collide, and `tier1:exit`, which
+    # is a built-in id the classifier spells one way.
     #
     # The legs are ordered most specific test first, and that ordering is
     # load-bearing rather than cosmetic. A leg keyed on a generic word decides
@@ -288,19 +335,18 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # left the one detector in the tree that means it falling through to
     # `unknown` -- the gap this PR exists to close, in the category it adds.
     #
-    # Substring rather than a token, for the reason `nan_signature` is: both
-    # span a separator, and both are long enough not to collide.
-    #
-    # `[-_ ]` rather than a literal `_` on each of the three tokens that span a
-    # separator here. `custom:<raw_id>` is free-form (`tier5_custom.py` emits
-    # whatever the recipe named), so `custom:nan-signature` is as legal an id as
-    # `custom:nan_signature` and meant the same thing while matching neither
-    # leg. Same hole as `nondetermin` against "non-deterministic" on the symptom
-    # path, and these three are the only other literals in the file with a
-    # boundary for a separator to fall on. Strictly widening: every spelling
-    # that matched before still matches.
-    if re.search(r"nan[-_ ]signature", joined) or re.search(
-        r"numerics[-_ ]mismatch", joined
+    # Three legs here name a two-word signature, and all three go through
+    # `_any_id_writes` rather than a regex over `joined`. `[-_ ]` was an
+    # allowlist of separators, which is the wrong shape for a field that permits
+    # any non-empty string: `custom:nan:signature` and `custom:numerics/mismatch`
+    # are legal ids meaning exactly what the underscored spellings mean, and they
+    # matched no leg at all. These three are the only literals in the file with a
+    # morpheme boundary for a separator to fall on -- every other token here
+    # (`checkpoint`, `hang`, `rccl`, `oom`, `illegal`, `memory`, `launch`,
+    # `tier2`, `137`, `tier1:exit`) is a single word, an acronym, or a built-in
+    # id with a spelling the classifier fixes.
+    if _any_id_writes(detectors, "nan", "signature") or _any_id_writes(
+        detectors, "numerics", "mismatch"
     ):
         return "numeric_instability"
     if "checkpoint" in joined:
@@ -326,7 +372,7 @@ def _infer_category_from_detectors(detectors: list[str]) -> str:
     # this: a ConSan intra-kernel race report, named exactly as one, which this
     # leg used to label an illegal access because it ran first.
     if (
-        re.search(r"hip[-_ ]error", joined)
+        _any_id_writes(detectors, "hip", "error")
         or "illegal" in joined
         or "memory" in joined
     ):
