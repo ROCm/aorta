@@ -56,7 +56,7 @@ flowchart TD
 
 | Field | Meaning |
 |-------|---------|
-| `category` | One of eleven generic autopsy labels (see below) |
+| `category` | One of the eight probe labels — `PROBE_CATEGORIES`, see below. Not the full eleven-label shared taxonomy: `validate_step` refuses the three evidence-only names here |
 | `hypothesis` | Short natural-language explanation |
 | `next_mitigations` | Registered mitigation names to try next (never raw argv) |
 | `confidence` | 0.0–1.0 self-reported confidence |
@@ -64,7 +64,12 @@ flowchart TD
 
 ### Autopsy category taxonomy
 
-| Category | Typical probe signals |
+The vocabulary has eleven names and is shared with `aorta.cia`, so a report
+means the same thing whichever front door wrote it. **A probe step may use only
+the eight below**; the three after them are reachable only by reading an
+instrument.
+
+| Probe category (`PROBE_CATEGORIES`) | Typical probe signals |
 |----------|----------------------|
 | `rccl_hang` | `tier2:*` hang detectors, RCCL timeout patterns |
 | `thermal_throttle` | Sustained perf drop + thermal context (when available) |
