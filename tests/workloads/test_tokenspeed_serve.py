@@ -1201,6 +1201,47 @@ def test_script_exit_codes_map_to_named_reasons(tmp_path, monkeypatch, exit_code
     assert any(d["reason"] == reason for d in result.failure_details)
 
 
+def test_the_exit_code_table_and_the_script_header_agree():
+    """`_EXIT_REASONS` says it is "kept in lockstep with the script's header
+    comment", and nothing was checking that.
+
+    The two are a restatement of one protocol across a language boundary, so
+    lockstep is the only thing that makes the second copy safe to read -- and a
+    claim maintained by hand is the claim that drifts. Derived from both sides
+    here rather than spelled out a third time, so adding a code to either half
+    fails until the other names it.
+
+    `0` is the script's success path and has no failure reason, which is why it
+    is the one code excluded rather than an exception list.
+    """
+    header = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text(encoding="utf-8")
+    header = header.split("# Two ports,", 1)[0]
+    documented = {int(code) for code in re.findall(r"^#   (\d+)  ", header, re.MULTILINE)}
+
+    assert documented - {0} == set(mod._EXIT_REASONS), (
+        "the script header and _EXIT_REASONS disagree about which exit codes exist: "
+        f"header-only={sorted(documented - {0} - set(mod._EXIT_REASONS))} "
+        f"table-only={sorted(set(mod._EXIT_REASONS) - documented)}"
+    )
+
+
+@pytest.mark.parametrize("exit_code", sorted(mod._EXIT_REASONS))
+def test_every_named_exit_code_is_one_the_script_can_produce(exit_code):
+    """The other direction, and the one the mapping test above cannot see.
+
+    `_stub_docker` can return any code, so a reason mapped to a code no branch of
+    the script ever exits with passes every other test here while documenting a
+    verdict that cannot happen. `64` is the shared usage exit and appears many
+    times; the rollout verdicts appear once or twice each.
+    """
+    script = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text(encoding="utf-8")
+    body = script.split("# Two ports,", 1)[1]
+    produced = re.search(rf"^\s*exit {exit_code}\b", body, re.MULTILINE) or re.search(
+        rf"^\s*overall={exit_code}\b", body, re.MULTILINE
+    )
+    assert produced, f"no branch of ts_bench_serve.sh exits {exit_code}"
+
+
 def test_bring_up_failure_is_reported_as_did_not_run(tmp_path, monkeypatch):
     """A server that never came up measured nothing; folding it into the matrix
     as a data point would be worse than reporting it as did-not-run."""
