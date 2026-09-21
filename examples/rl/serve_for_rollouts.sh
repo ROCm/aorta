@@ -142,14 +142,56 @@ _RETAIN_OWNERSHIP=0
 # with -- never whether it happens, which stays keyed on `_OWNED` alone.
 _PHASE=bringup
 
+# What this invocation owns, by container **id** rather than by name.
+#
+# The name was never a safe key and that is why ownership could not be armed
+# before `docker run`. The collision check and `docker run` are two steps, so a
+# racing invocation can take the name in between; a guard keyed on the name
+# would then remove *their* container on the way out, which is the failure this
+# whole mechanism exists to prevent and is worse than the leak it would fix.
+#
+# `--cidfile` removes the ambiguity rather than managing it. Measured against
+# docker 29.1.3 rather than reasoned about, because the whole argument rests on
+# when the file is written:
+#
+#   * a successful run writes the id, identical to `docker run`'s own stdout
+#   * a **name collision** writes NOTHING (rc 125) -- so a racing invocation's
+#     container is unreachable from here by construction, not by care
+#   * a container that is created and then fails to *start* DOES get a cidfile,
+#     and removing that id reclaims it -- which is the `docker run -d` window
+#     this script has carried as a known leak
+#   * an argument error writes nothing, so there is nothing to clean up
+#
+# So ownership can now be armed *before* `docker run`, closing the in-flight
+# window too, and the guarantee is stronger than it was: an empty cidfile means
+# we remove nothing at all, which is exactly right.
+_CIDFILE=""
+_CID=""
+
 _release_owned() {
   [ "${_OWNED}" = "1" ] || return 0
+  local cid="${_CID}"
+  # The in-memory id first: it survives the file being removed, and the file
+  # only exists to carry the id back from a `docker run` that may not have
+  # returned yet.
+  if [ -z "${cid}" ] && [ -n "${_CIDFILE}" ] && [ -s "${_CIDFILE}" ]; then
+    cid="$(cat "${_CIDFILE}" 2>/dev/null || true)"
+  fi
+  if [ -z "${cid}" ]; then
+    # Armed, but docker never created anything for us -- a collision or an
+    # argument error. Deliberately *no* fallback to removing `${NAME}`: the
+    # container wearing that name is then someone else's, and the fallback is
+    # the bug.
+    _OWNED=0
+    return 0
+  fi
   if [ "${_PHASE}" = "hold" ]; then
     echo "signalled; tearing down" >&2
   else
-    echo "bring-up did not complete; removing ${NAME}" >&2
+    echo "bring-up did not complete; removing ${NAME} (${cid:0:12})" >&2
   fi
-  docker rm -f "${NAME}" >/dev/null 2>&1 || true
+  docker rm -f "${cid}" >/dev/null 2>&1 || true
+  rm -f "${_CIDFILE}" 2>/dev/null || true
   _OWNED=0
 }
 
@@ -168,10 +210,16 @@ _release_owned() {
 # and a bring-up failure with no logs is not diagnosable.
 teardown_failed() {  # teardown_failed <exit-code> <message>
   local code="$1" msg="$2"
+  # By id where we have one, for the same reason `_release_owned` is: every
+  # call site here is downstream of a successful `docker run`, so the name is
+  # ours in practice -- but "in practice" is what the cidfile exists to stop
+  # this script relying on.
+  local ref="${_CID:-${NAME}}"
   echo "FAIL: ${msg}" >&2
-  docker logs --tail 60 "${NAME}" > "${LOG_DIR}/server-failure.log" 2>&1 || true
+  docker logs --tail 60 "${ref}" > "${LOG_DIR}/server-failure.log" 2>&1 || true
   tail -n 60 "${LOG_DIR}/server-failure.log" >&2 2>/dev/null || true
-  docker rm -f "${NAME}" >/dev/null 2>&1 || true
+  docker rm -f "${ref}" >/dev/null 2>&1 || true
+  rm -f "${_CIDFILE}" 2>/dev/null || true
   # Ownership ends here, so the EXIT trap does not attempt a second removal.
   _OWNED=0
   exit "${code}"
@@ -216,7 +264,33 @@ up() {
   # the engine is still loading weights and compiling kernels. Left at our
   # readiness deadline so a slow start reports as slow rather than as a dead
   # engine.
+  # Ownership is armed *before* the container can exist, not after.
+  #
+  # It used to be armed on the line after `docker run -d` returned, which left
+  # two windows: a signal while docker was creating the container, and a
+  # `docker run` that fails *after* creating it. Neither could be closed while
+  # the guard was keyed on `${NAME}`, because between the collision check above
+  # and this call a racing invocation can take the name -- so an early guard
+  # would have removed their container. Keyed on the cidfile it cannot: a name
+  # collision writes no cidfile, so the release below finds nothing and removes
+  # nothing. See the `_CIDFILE` comment for the measurements.
+  #
+  # The stale-file clear is required, not hygiene: docker refuses to run at all
+  # when the cidfile already exists ("container ID file found"), so a previous
+  # run's file would break bring-up. It is safe here because it is downstream of
+  # the collision check -- if another invocation owned this name we have already
+  # exited.
+  _CIDFILE="${LOG_DIR}/container.cid"
+  rm -f "${_CIDFILE}"
+  _OWNED=1
+  # `if` rather than `&& exit 0`: a failing `[` as the last command of an
+  # `&&` list is itself a non-zero status, which under `set -e` would exit the
+  # trap with 1 and never reach the 130.
+  trap '_release_owned; if [ "${_PHASE}" = "hold" ]; then exit 0; fi; exit 130' INT TERM
+  trap '_release_owned' EXIT
+
   docker run -d \
+    --cidfile "${_CIDFILE}" \
     --name "${NAME}" \
     --device /dev/kfd \
     --device /dev/dri \
@@ -245,21 +319,11 @@ up() {
       --gateway-startup-timeout "$6"' \
     _ "${MODEL}" "${PORT}" "${CONTROL}" "${GRAMMAR}" "${SAMPLING}" "${READY_SEC}" \
     > "${LOG_DIR}/container-id.txt"
+  # Read back into memory so the id survives the file: a later `rm` of the
+  # cidfile, or a concurrent invocation sharing this LOG_DIR, cannot then strand
+  # a container we own with nothing able to name it.
+  _CID="$(cat "${_CIDFILE}" 2>/dev/null || true)"
   echo "started ${NAME} ($(cut -c1-12 "${LOG_DIR}/container-id.txt"))"
-
-  # The container now exists, so this invocation owns it until it says
-  # otherwise. Armed here rather than at any later checkpoint: after
-  # `docker run` is the earliest moment there is something to clean up, and it
-  # is also the only moment that cannot drift as checks are added below.
-  #
-  # EXIT as well as INT/TERM, so an `exit` from anywhere in the bring-up path
-  # releases too rather than only a signal.
-  _OWNED=1
-  # `if` rather than `&& exit 0`: a failing `[` as the last command of an
-  # `&&` list is itself a non-zero status, which under `set -e` would exit the
-  # trap with 1 and never reach the 130.
-  trap '_release_owned; if [ "${_PHASE}" = "hold" ]; then exit 0; fi; exit 130' INT TERM
-  trap '_release_owned' EXIT
 
   # Poll health, but re-check liveness every iteration: a crash during weight
   # load has to surface as its own failure instead of burning the whole
@@ -373,15 +437,42 @@ up() {
 # that said nothing -- absence of evidence as favourable evidence, the same
 # shape as `backends`'s old `|| echo '{}'` and as the ownership guard's earlier
 # windows.
+#
+# Two ways this can fail and both have to count. `curl` exits 0 for any HTTP
+# response it manages to read, including a 500 -- so the transport check below
+# catches a dead socket and used to let an error *page* through as the answer,
+# printing it under "advertised models" and returning 0. That is the same
+# absence-as-evidence shape one layer up from the `(no response)` bug this
+# function was already corrected for: first the fetch failing was read as fine,
+# now the fetch succeeding at fetching a failure was.
+#
+# `%{http_code}` rather than `--fail`/`--fail-with-body`: `--fail` suppresses
+# the body, which is where the reason is, and `--fail-with-body` needs curl
+# 7.76+ and this runs inside whatever the engine image ships.
 models() {
   echo "--- advertised models (${PORT}) ---"
-  if ! curl -s --max-time 10 "http://127.0.0.1:${PORT}/v1/models"; then
+  # Declared apart from the assignment on purpose. `local body="$(cmd)"` takes
+  # its status from `local`, not from `cmd`, so a failing fetch would look
+  # successful -- the same `set -e` trap this file has now been corrected for
+  # three times, and it would have been a fourth.
+  local body status rc
+  rc=0
+  body="$(curl -s --max-time 10 -w '\n%{http_code}' \
+    "http://127.0.0.1:${PORT}/v1/models")" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
     echo
     echo "FAIL: no response from ${PORT}/v1/models, so the advertised model id" \
          "is unverified" >&2
     return 56
   fi
-  echo
+  status="${body##*$'\n'}"
+  body="${body%$'\n'*}"
+  printf '%s\n' "${body}"
+  if [ "${status}" != "200" ]; then
+    echo "FAIL: ${PORT}/v1/models answered HTTP ${status}, so the advertised" \
+         "model id is unverified" >&2
+    return 56
+  fi
 }
 
 # The two backends this script overrides, read back from the engine rather than

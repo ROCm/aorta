@@ -3876,40 +3876,6 @@ def test_a_genuinely_collapsed_group_still_reports_collapse(rescore_e2e, capsys)
     assert "Set a temperature" in err, err
 
 
-def test_a_run_that_delivered_nothing_is_not_a_measurement(run_e2e):
-    """Third member of the transport-error family, on the driver's own exit.
-
-    A reporter's exit code answers "did I produce a measurement", not "was the
-    measurement good" -- a poor reward is a finding and stays 0. But a run
-    where every request failed wrote a file with no model output in it, and
-    returning 0 says the measurement happened.
-    """
-    outage = run_e2e.aggregate(
-        [_row("s1", 0, "", 0.0, 0, error="Timeout")],
-        [],
-    )
-    assert outage["proposal"]["delivered_rate"] == 0.0
-    assert run_e2e.is_empty_measurement(outage) is True
-
-    # A partial run is deliberately *not* caught: one delivered completion is a
-    # thin measurement, which `delivered_rate` already reports and which is a
-    # finding rather than a failure to measure.
-    partial = run_e2e.aggregate(
-        [
-            _row("s1", 0, '{"a": 1}', 1.0, 5),
-            _row("s1", 1, "", 0.0, 0, error="Timeout"),
-        ],
-        [],
-    )
-    assert partial["proposal"]["delivered_rate"] == 0.5
-    assert run_e2e.is_empty_measurement(partial) is False
-
-    # And a run that asked for nothing is not an outage either -- there is no
-    # measurement to be missing, so this must not turn an empty corpus into a
-    # transport failure.
-    assert run_e2e.is_empty_measurement(run_e2e.aggregate([], [])) is False
-
-
 def test_an_infra_error_the_producer_recorded_stays_an_error(triage_reward):
     """`meta:` IDs bypass the resolver, and upstream says so in its own words.
 
@@ -4017,3 +3983,80 @@ def test_an_unreadable_recipe_is_a_max_deficit_not_a_skip(
     capsys.readouterr()
 
 
+def test_a_run_that_delivered_nothing_is_not_a_measurement(run_e2e):
+    """Third member of the transport-error family, on the driver's own exit.
+
+    A reporter's exit code answers "did I produce a measurement", not "was the
+    measurement good" -- a poor reward is a finding and stays 0. But a run
+    where every request failed wrote a file with no model output in it, and
+    returning 0 says the measurement happened.
+    """
+    outage = run_e2e.aggregate(
+        [_row("s1", 0, "", 0.0, 0, error="Timeout")],
+        [],
+    )
+    assert outage["proposal"]["delivered_rate"] == 0.0
+    assert run_e2e.is_empty_measurement(outage) is True
+
+    # A partial run is deliberately *not* caught: one delivered completion is a
+    # thin measurement, which `delivered_rate` already reports and which is a
+    # finding rather than a failure to measure.
+    partial = run_e2e.aggregate(
+        [
+            _row("s1", 0, '{"a": 1}', 1.0, 5),
+            _row("s1", 1, "", 0.0, 0, error="Timeout"),
+        ],
+        [],
+    )
+    assert partial["proposal"]["delivered_rate"] == 0.5
+    assert run_e2e.is_empty_measurement(partial) is False
+
+    # And a run that asked for nothing is not an outage either -- there is no
+    # measurement to be missing, so this must not turn an empty corpus into a
+    # transport failure.
+    assert run_e2e.is_empty_measurement(run_e2e.aggregate([], [])) is False
+
+
+def test_the_models_subcommand_fails_on_an_http_error(tmp_path):
+    """`curl` exits 0 for any response it manages to read, including a 500.
+
+    So the transport check this function already had caught a dead socket and
+    let an error *page* through as the answer -- printed under "advertised
+    models", subcommand exit 0. One layer up from the `(no response)` bug this
+    same function was corrected for: first a failed fetch read as fine, then a
+    successful fetch of a failure did.
+    """
+    bin_dir = _serve_stubs(tmp_path, models_code="500")
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "models"],
+        capture_output=True,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == 56, output
+    assert "answered HTTP 500" in output, output
+
+
+def test_the_models_subcommand_still_passes_on_a_healthy_gateway(tmp_path):
+    """Narrowness: a 200 must still print the body and exit 0.
+
+    The status is parsed off the end of the response, so getting the split
+    wrong would either eat the body or report every healthy gateway as broken.
+    """
+    bin_dir = _serve_stubs(tmp_path, models_code="200")
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "models"],
+        capture_output=True,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, output
+    assert "Qwen/Qwen3-8B" in output, output
+    # The status must not be printed as though it were part of the body.
+    assert "200" not in proc.stdout.replace("Qwen/Qwen3-8B", ""), proc.stdout
