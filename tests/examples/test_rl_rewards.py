@@ -2745,3 +2745,227 @@ def test_the_two_real_negative_results_still_come_back(nccl_roundtrip_check):
         restore_lifecycle=_lifecycle(),
     )
     assert unfaithful == "CHANGED_BUT_NOT_FAITHFUL"
+
+
+# --------------------------------------------------------------------------- #
+# The weight-transfer verdict: what the evidence can actually carry
+# --------------------------------------------------------------------------- #
+#
+# Reviewer finding, and it is the one that reaches outside this repository:
+# one greedy completion per phase cannot prove that weights changed. These
+# drive the real `decide_verdict`, because the ordering and the strength of
+# each branch *is* the check.
+
+
+def _phase(*texts):
+    """A phase as `generate_phase` records it: one entry per replicate."""
+    generated = [t for t in texts if t is not None]
+    return {
+        "status": 200 if generated else 500,
+        "text": texts[0],
+        "texts": list(texts),
+        "replicates": len(texts),
+        "distinct": len(set(generated)),
+        "ok": len(generated) == len(texts) and bool(texts),
+        "stable": len(set(generated)) == 1 and len(generated) == len(texts),
+    }
+
+
+# The two completions a temperature-0 engine on this stack actually alternates
+# between. `docs/tokenspeed-rl-e2e-sanitizer-routing.md` §5.4 measures 2 of 8
+# distinct completions across separate temperature-0 requests on the greedy
+# backend: the argmax moves with batch composition, so it is not the sampler
+# and turning the temperature down cannot remove it.
+_JITTER_A = " Paris. The capital of France is also the capital of the French Republic."
+_JITTER_B = " Paris. The capital of France is also the capital of the Republic of France."
+
+
+def test_argmax_jitter_alone_cannot_produce_proven(nccl_roundtrip_check):
+    """A no-op transfer plus decoder noise must not read as a weight change.
+
+    This is the false positive the driver exists to prevent, arriving by a
+    route the driver used to be blind to. Every HTTP leg is 200 -- which is
+    exactly what the recorded `HTTP_OK_BUT_PEER_NEVER_SENT` measurement saw --
+    and no weight moves. The engine simply returns its minority completion once
+    and its majority completion twice, which this repository has measured it
+    doing 1-2 times in 8.
+
+    Compared as single strings that is `B != A` and `C == A`: PROVEN, from
+    nothing. Simulated over the recorded jitter rate it happened 11% of the
+    time. Compared as phases it cannot happen at all, because the coincidence
+    has to repeat on every replicate.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+
+    verdict, changed, recovered = decide(
+        baseline=_phase(_JITTER_A, _JITTER_A, _JITTER_A),
+        # One jittered draw, then the engine settles back. Nothing was
+        # transferred; this is the same weights answering three times.
+        perturbed=_phase(_JITTER_B, _JITTER_A, _JITTER_A),
+        restored=_phase(_JITTER_A, _JITTER_A, _JITTER_A),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+    )
+    assert verdict == "HTTP_OK_BUT_WEIGHTS_UNCHANGED"
+    assert changed is False
+
+    # And the single-draw spelling of the same run, which is what the driver
+    # used to do: one jittered B against one baseline A reads as PROVEN.
+    single = decide(
+        baseline=_phase(_JITTER_A),
+        perturbed=_phase(_JITTER_B),
+        restored=_phase(_JITTER_A),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+    )[0]
+    assert single == "PROVEN", (
+        "kept as the control: with one draw per phase the verdict is "
+        "indistinguishable from a real transfer, which is why --replicates "
+        "defaults above 1"
+    )
+
+
+def test_a_baseline_that_disagrees_with_itself_is_its_own_verdict(
+    nccl_roundtrip_check,
+):
+    """If the observable is not a function of the weights, nothing else is.
+
+    The baseline replicates are the noise control: they are drawn before
+    anything is touched, so a disagreement among them is the decoder and only
+    the decoder. Reported as its own verdict rather than quietly compared,
+    because the honest answer is that this engine cannot support this method --
+    not that the weights did or did not move.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    verdict, changed, recovered = decide(
+        baseline=_phase(_JITTER_A, _JITTER_B, _JITTER_A),
+        perturbed=_phase("!!!!", "!!!!", "!!!!"),
+        restored=_phase(_JITTER_A, _JITTER_A, _JITTER_A),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+    )
+    assert verdict == "BASELINE_NONDETERMINISTIC"
+    # Not `False`, and not `True`: there was no trustworthy comparison, and a
+    # boolean here would read as an observation nobody made. Same rule the
+    # rejected-lifecycle branch already follows.
+    assert changed is None and recovered is None
+
+
+def test_a_missing_peer_marker_outranks_a_perfect_round_trip(nccl_roundtrip_check):
+    """Evidence of the transport beats inference from model behaviour.
+
+    `dist.broadcast` on the sending rank returns only once the other rank posts
+    its matching receive, so the peer's round marker is proof a collective was
+    matched. Absent, after the engine has already answered 200, the engine
+    posted nothing -- and then whatever the model emitted afterwards is not
+    about weights that were pushed, however cleanly it round-trips.
+
+    The completions here are the textbook PROVEN shape, deliberately: the point
+    is that the marker overrules them.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    verdict, _, _ = decide(
+        baseline=_phase("A", "A", "A"),
+        perturbed=_phase("B", "B", "B"),
+        restored=_phase("A", "A", "A"),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+        peer_sent_perturb=False,
+    )
+    assert verdict == "HTTP_OK_BUT_PEER_NEVER_SENT"
+
+    # A restore that never went out is the same finding one leg later.
+    assert decide(
+        baseline=_phase("A", "A", "A"),
+        perturbed=_phase("B", "B", "B"),
+        restored=_phase("A", "A", "A"),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+        peer_sent_perturb=True,
+        peer_sent_restore=False,
+    )[0] == "HTTP_OK_BUT_PEER_NEVER_SENT"
+
+    # `None` means the check was not run -- the caller passed `--peer-grace 0`
+    # -- and must not read as either answer.
+    assert decide(
+        baseline=_phase("A", "A", "A"),
+        perturbed=_phase("B", "B", "B"),
+        restored=_phase("A", "A", "A"),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+        peer_sent_perturb=None,
+        peer_sent_restore=None,
+    )[0] == "PROVEN"
+
+
+def test_the_driver_reads_the_marker_the_peer_actually_writes(
+    nccl_roundtrip_check, tmp_path
+):
+    """The two scripts have to agree on the filename, and nothing else checks.
+
+    The peer has written `<plan-out>.roundN.done` since it was first committed
+    and this driver ignored it, so there has never been anything holding the
+    two spellings together. Derived here from the peer's own source rather than
+    restated, so a rename on either side fails this instead of silently turning
+    the strongest evidence the driver has into a permanent `appeared: False`.
+    """
+    plan = tmp_path / "plan.json"
+    peer_source = (_EXAMPLES / "nccl_weight_peer.py").read_text()
+    assert '.round{index}.done' in peer_source, (
+        "the peer's marker filename moved; update the driver's "
+        "peer_round_marker to match"
+    )
+
+    marker = nccl_roundtrip_check.peer_round_marker(str(plan), 2)
+    assert marker == tmp_path / "plan.json.round2.done"
+
+    # Absent: reported as absent rather than waited on forever.
+    absent = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05)
+    assert absent["appeared"] is False
+
+    # Present: found, and without burning the grace period.
+    nccl_roundtrip_check.peer_round_marker(str(plan), 1).write_text("perturb")
+    present = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0)
+    assert present["appeared"] is True
+    assert present["waited_seconds"] < 5.0
+
+
+def test_a_phase_missing_a_replicate_is_not_a_comparison(nccl_roundtrip_check):
+    """Two completions and a 500 is a partial observation, not a narrow one.
+
+    Scoring the replicates that survived is the same defect as scoring a single
+    `text=None` -- an absent observation standing in for evidence -- so a phase
+    counts only when every draw came back.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    verdict, changed, recovered = decide(
+        baseline=_phase("A", "A", "A"),
+        perturbed=_phase("B", "B", None),
+        restored=_phase("A", "A", "A"),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+    )
+    assert verdict == "POST_UPDATE_GENERATION_FAILED"
+    assert changed is None and recovered is None
+
+
+def test_a_real_weight_change_is_still_proven(nccl_roundtrip_check):
+    """Narrowness: the replicates must not cost the verdict it exists to give.
+
+    A deterministic baseline, a perturb that moves every draw, and a restore
+    that returns every draw. This is the shape a working transport produces and
+    it must still be PROVEN -- otherwise the fix has bought its precision by
+    making the tool unable to say anything.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    verdict, changed, recovered = decide(
+        baseline=_phase("A", "A", "A"),
+        perturbed=_phase("!!!!", "!!!!", "!!!!"),
+        restored=_phase("A", "A", "A"),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+        peer_sent_perturb=True,
+        peer_sent_restore=True,
+    )
+    assert (verdict, changed, recovered) == ("PROVEN", True, True)
+

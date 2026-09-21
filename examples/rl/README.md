@@ -429,11 +429,41 @@ and both sides hang. The peer mirrors the engine's construction exactly.
 
 ### Why the check is a round trip
 
-The verdict is not "did `/update_weights` return 200". It is three greedy
-generations of one fixed prompt: baseline, after pushing perturbed weights, and
-after pushing the originals back. The first difference must appear and the
+The verdict is not "did `/update_weights` return 200". It is greedy generations
+of one fixed prompt in three phases: baseline, after pushing perturbed weights,
+and after pushing the originals back. The first difference must appear and the
 second must not. Both halves are load-bearing — perturb-only would pass a path
 that corrupts memory as readily as one that transfers correctly.
+
+### Why each phase is drawn more than once
+
+A temperature-0 completion is **not** a deterministic function of the weights on
+this stack. The sampler is out of the picture, but the argmax still moves with
+batch composition and reduction order: §5.4 of
+[`docs/tokenspeed-rl-e2e-sanitizer-routing.md`](../../docs/tokenspeed-rl-e2e-sanitizer-routing.md)
+measures **2 of 8 distinct completions across separate temperature-0 requests**.
+
+Compared as single strings, that noise supplies `B != A` on its own. Simulated
+at the rate that section measures, a one-draw-per-phase verdict called a *no-op*
+transfer `PROVEN` **11% of the time** — the strongest verdict this tool gives,
+from decoder jitter. So `--replicates` (default 3) draws each phase several
+times: the baseline must agree with itself, every perturb draw must differ from
+it, and every restore draw must match. At three draws the same simulation gives
+0.089%, and on an engine that is genuinely deterministic the replicates cost six
+extra 32-token generations and change no verdict.
+
+If the baseline disagrees with itself the run reports
+`BASELINE_NONDETERMINISTIC` rather than comparing anyway. That is the honest
+answer: if the observable is not a function of the weights, no later difference
+in it is evidence about weights.
+
+`--peer-grace` (default 120s) adds evidence that does not come from the model at
+all. The peer writes `<plan-out>.roundN.done` once round N's broadcasts have
+drained, and `dist.broadcast` on the sending rank returns only when the other
+rank posts its matching receive — so a missing marker after the engine has
+already answered 200 is direct proof the engine posted no collective. It
+outranks the completions, and it still works when the decoder is too unstable
+for the round trip to say anything.
 
 That is not hypothetical. On gfx950 this check found that TokenSpeed's `nccl`
 receive returns `200 {"message": "Weights updated"}` while **transferring

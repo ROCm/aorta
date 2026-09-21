@@ -8,16 +8,44 @@ receive path returns exactly that 200 with unchanged outputs -- which is the
 worst thing to report as working. This driver closes that gap by observing the
 model's behaviour instead of the status code.
 
-The test is a round trip, in three greedy generations of one fixed prompt:
+The test is a round trip, in greedy generations of one fixed prompt:
 
-    baseline   -> completion A
-    perturb    -> completion B, which must differ from A
-    restore    -> completion C, which must equal A
+    baseline   -> completion A, generated ``--replicates`` times and required
+                  to agree with itself
+    perturb    -> completion B, which must differ from A on every replicate
+    restore    -> completion C, which must equal A on every replicate
 
 Both halves are load-bearing. B != A rules out a receive path that drops the
 payload; C == A rules out one that corrupts memory or lands tensors in the wrong
 place, and shows the transfer is faithful rather than merely destructive. A
 perturbation-only test passes in both of those cases.
+
+Why the replicates, and why the peer evidence
+---------------------------------------------
+One completion per phase cannot carry this verdict, and the reason is measured
+rather than theoretical: on this stack a temperature-0 completion is *not* a
+function of the weights alone. Separate greedy requests differ occasionally --
+1-2 of 8 -- because the argmax moves with batch composition and floating-point
+reduction order (``docs/tokenspeed-rl-e2e-sanitizer-routing.md`` §5.4 records
+2/8 distinct completions at temperature 0). With a no-op transfer, a single
+jittering B and a matching C therefore report ``PROVEN`` on decoder noise. At
+the rate that section measures, a single-draw verdict does that 11% of the time.
+
+So the completions are now compared as phases rather than as strings. The
+baseline is drawn ``--replicates`` times and must agree with itself, which is
+what makes the observable's stability an observation instead of an assumption;
+if it does not agree, the verdict says so and no later difference is read as
+evidence. B must differ on *every* replicate and C must match on *every* one,
+so a jitter-driven false ``PROVEN`` needs the coincidence to repeat.
+
+Beyond the model's behaviour, ``nccl_weight_peer.py`` writes
+``<plan>.roundN.done`` once round N's broadcasts have drained, and a
+``dist.broadcast`` from the sending rank returns only when the other rank posts
+its matching receive. A missing marker after the engine has already answered
+200 is therefore direct evidence that the engine posted no collective --
+independent of anything the model emits, and available even when the decoder is
+too unstable for the round trip to say anything. The peer has always written
+these; this driver used to discard them.
 
 Pair with ``nccl_weight_peer.py``, which posts the matching broadcasts. Start
 the peer first: it is rank 0 and owns the TCP store, and the engine's
@@ -84,9 +112,14 @@ def wait_healthy(base: str, deadline_s: int) -> bool:
 def generate(base: str, model: str, prompt: str, max_tokens: int) -> dict[str, Any]:
     """Greedy, fixed-length completion -- the observable that must move.
 
-    temperature 0 with a fixed prompt and ``ignore_eos`` makes the completion a
-    deterministic function of the weights, so any difference between two calls
-    is a difference in the weights and not in the sampler.
+    temperature 0 with a fixed prompt and ``ignore_eos`` removes the *sampler*
+    as a source of variation. It does not make the completion a deterministic
+    function of the weights, and this docstring used to claim that it did: the
+    argmax still moves with batch composition and reduction order, which the
+    measurement in §5.4 of the sanitizer-routing doc records as 2 of 8 distinct
+    completions across separate temperature-0 requests. Callers must therefore
+    treat a single completion as one draw from a narrow distribution, not as a
+    reading of the weights -- see ``generate_phase``.
     """
     status, body, elapsed = call(
         base,
@@ -109,9 +142,100 @@ def generate(base: str, model: str, prompt: str, max_tokens: int) -> dict[str, A
     return {"status": status, "text": text, "seconds": round(elapsed, 3), "raw": body if text is None else None}
 
 
+def generate_phase(
+    base: str, model: str, prompt: str, max_tokens: int, replicates: int
+) -> dict[str, Any]:
+    """One phase of the round trip: ``replicates`` greedy draws, kept together.
+
+    A phase rather than a completion because the comparison the verdict makes
+    is between phases. ``texts`` is every draw in order, ``distinct`` is how
+    many different answers came back, and ``stable`` says whether the phase
+    agreed with itself -- which is the observation that decides whether any
+    comparison involving it means anything.
+
+    ``text`` is kept as the first draw so a report stays readable next to the
+    older ones, and so a reader who looks only at that field sees a completion
+    rather than a summary. It is deliberately *not* what the verdict reads.
+    """
+    draws = [generate(base, model, prompt, max_tokens) for _ in range(replicates)]
+    texts = [d["text"] for d in draws]
+    generated = [t for t in texts if t is not None]
+    return {
+        "status": draws[0]["status"],
+        "text": texts[0],
+        "texts": texts,
+        "seconds": round(sum(d["seconds"] for d in draws), 3),
+        "raw": draws[0]["raw"],
+        "replicates": replicates,
+        # Counted over the draws that produced text: a failed generation is a
+        # missing observation, not a distinct answer.
+        "distinct": len(set(generated)),
+        "ok": len(generated) == replicates and replicates > 0,
+        "stable": len(set(generated)) == 1 and len(generated) == replicates,
+    }
+
+
+def phase_texts(phase: dict[str, Any]) -> list[Any]:
+    """Every draw in a phase, tolerating a single-completion dict.
+
+    ``decide_verdict`` is reachable from callers that predate phases, and a
+    bare generation is exactly a one-replicate phase. Normalising here rather
+    than at each comparison keeps one definition of what a phase contains.
+    """
+    texts = phase.get("texts")
+    if texts is None:
+        return [phase.get("text")]
+    return list(texts)
+
+
 # Keys the peer puts on the plan for the driver's benefit, which the engine has
 # never heard of. Kept out of `update_info`: an unknown key there is a 500.
 _PLAN_COORDINATION_KEYS = frozenset({"run_id"})
+
+
+def peer_round_marker(plan: str, index: int) -> Path:
+    """Where ``nccl_weight_peer.py`` records that round ``index`` drained.
+
+    The peer writes ``<plan-out>.roundN.done`` after round N's broadcasts have
+    all returned, numbering rounds from 1 in the order of its own ``--rounds``.
+    With the documented ``--rounds perturb,restore`` that makes the perturb
+    round 1 and the restore round 2, which is the coupling the two indices in
+    ``main`` encode.
+    """
+    return Path(f"{plan}.round{index}.done")
+
+
+def wait_for_peer_round(plan: str, index: int, grace_s: float) -> dict[str, Any]:
+    """Did the sender's broadcasts for this round actually complete?
+
+    ``dist.broadcast`` from the sending rank returns only once the other rank
+    posts its matching receive, so the peer reaching its round marker is proof
+    a collective was matched -- and *not* reaching it, after the engine has
+    already answered 200, is proof one was not. That is a direct observation of
+    the transport, where the completions are an inference from model behaviour.
+
+    Polled with a grace period rather than read once, because the two sides
+    finish microseconds apart across a shared filesystem that is not
+    synchronous, so a single read races the rename rather than measuring it.
+    """
+    marker = peer_round_marker(plan, index)
+    started = time.time()
+    deadline = started + grace_s
+    interval = min(1.0, max(0.01, grace_s / 20)) if grace_s > 0 else 0.0
+    while True:
+        if marker.exists():
+            return {
+                "marker": str(marker),
+                "appeared": True,
+                "waited_seconds": round(time.time() - started, 3),
+            }
+        if time.time() >= deadline:
+            return {
+                "marker": str(marker),
+                "appeared": False,
+                "waited_seconds": round(time.time() - started, 3),
+            }
+        time.sleep(interval)
 
 
 def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str, Any]:
@@ -217,6 +341,8 @@ def decide_verdict(
     restored: dict[str, Any],
     perturb_lifecycle: dict[str, Any],
     restore_lifecycle: dict[str, Any],
+    peer_sent_perturb: bool | None = None,
+    peer_sent_restore: bool | None = None,
 ) -> tuple[str, bool | None, bool | None]:
     """The round trip's verdict, plus the two observations behind it.
 
@@ -234,9 +360,47 @@ def decide_verdict(
     in full -- start, update and finish, the restore for the same reason as the
     perturb. ``changed`` and ``recovered`` come back as ``None`` when there was
     nothing to compare, rather than as a default that reads like an observation.
+
+    Two further things gate the comparison, because status codes and a single
+    completion each turned out to be weaker evidence than they look.
+
+    *Peer evidence outranks the completions, deliberately.* A missing round
+    marker says the engine posted no collective at all; that is a direct
+    observation of the transport, where the completions are an inference from
+    model behaviour. When the peer never sent, whatever the model emitted
+    afterwards is not about weights that were pushed, whichever way it reads.
+    ``None`` means the check was not performed and is evidence either way.
+
+    *The baseline must agree with itself.* A greedy completion is not a
+    deterministic function of the weights on this stack -- the argmax moves
+    with batch composition -- so comparing single strings lets decoder noise
+    supply ``B != A``. Measured against the 2-of-8 jitter rate this repository
+    records, single-draw comparison returns a false ``PROVEN`` for a *no-op*
+    transfer 11% of the time. An unstable baseline therefore yields its own
+    verdict rather than a quiet comparison, and ``changed``/``recovered`` are
+    ``None`` because there was nothing trustworthy to compare. The phases are
+    then compared as wholes: every perturb draw must differ and every restore
+    draw must match, so the coincidence has to repeat to survive.
     """
     perturb_bad = _lifecycle_failure(perturb_lifecycle)
     restore_bad = _lifecycle_failure(restore_lifecycle)
+
+    baseline_seen = phase_texts(baseline)
+    perturb_seen = phase_texts(perturbed)
+    restore_seen = phase_texts(restored)
+
+    # A phase counts as generated only if *every* replicate came back. A phase
+    # that produced two completions and one 500 is a partial observation, and
+    # scoring it on the two that survived is the same "absence read as
+    # evidence" this function already refuses for the single-completion case.
+    perturb_generated = bool(perturb_seen) and all(t is not None for t in perturb_seen)
+    restore_generated = bool(restore_seen) and all(t is not None for t in restore_seen)
+    both_generated = perturb_generated and restore_generated
+
+    baseline_generated = bool(baseline_seen) and all(
+        t is not None for t in baseline_seen
+    )
+    baseline_stable = baseline_generated and len(set(baseline_seen)) == 1
 
     # Both booleans require the whole round trip to have happened -- both update
     # steps accepted in full *and* both generations returned text. Computing
@@ -251,12 +415,17 @@ def decide_verdict(
     comparable = (
         perturb_bad is None
         and restore_bad is None
-        and perturbed["text"] is not None
-        and restored["text"] is not None
+        and both_generated
+        and baseline_stable
     )
-    both_generated = perturbed["text"] is not None and restored["text"] is not None
-    changed = perturbed["text"] != baseline["text"] if comparable else None
-    recovered = restored["text"] == baseline["text"] if comparable else None
+    # `all`, not `!=` on one pair. One draw differing is what jitter looks
+    # like; every draw differing is what a weight change looks like.
+    changed = (
+        all(t not in set(baseline_seen) for t in perturb_seen) if comparable else None
+    )
+    recovered = (
+        all(t in set(baseline_seen) for t in restore_seen) if comparable else None
+    )
 
     if perturb_bad is not None:
         # Named by leg, because "the update was rejected" and "the engine never
@@ -266,14 +435,27 @@ def decide_verdict(
             if perturb_bad == "update"
             else f"LIFECYCLE_REJECTED_{perturb_bad.upper()}"
         )
+    elif peer_sent_perturb is False:
+        verdict = "HTTP_OK_BUT_PEER_NEVER_SENT"
     elif restore_bad is not None:
         verdict = (
             "RESTORE_UPDATE_REJECTED"
             if restore_bad == "update"
             else f"RESTORE_LIFECYCLE_REJECTED_{restore_bad.upper()}"
         )
+    elif peer_sent_restore is False:
+        verdict = "HTTP_OK_BUT_PEER_NEVER_SENT"
     elif not both_generated:
         verdict = "POST_UPDATE_GENERATION_FAILED"
+    elif not baseline_stable:
+        # Ranked below the peer check on purpose: an unstable decoder costs us
+        # the round trip, but it does not touch the marker evidence, so the
+        # strongest finding this tool can make is still available above.
+        verdict = (
+            "BASELINE_GENERATION_FAILED"
+            if not baseline_generated
+            else "BASELINE_NONDETERMINISTIC"
+        )
     elif changed and recovered:
         verdict = "PROVEN"
     elif changed:
@@ -306,8 +488,25 @@ def main() -> int:
     ap.add_argument("--group-name", default="weight_update_group")
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--max-tokens", type=int, default=32)
+    # Three rather than one, because one cannot separate a weight change from
+    # argmax jitter, and three drives the measured false-PROVEN rate for a
+    # no-op transfer from 11% to under 0.1% at the jitter rate this repository
+    # records. 1 restores the old single-draw behaviour for a caller who wants
+    # it and knows what it costs.
+    ap.add_argument("--replicates", type=int, default=3,
+                    help="greedy draws per phase; >1 separates a weight "
+                         "change from decoder jitter (default 3)")
+    # The peer writes its round markers unconditionally, so this costs nothing
+    # when the transport works -- the marker is already there and the first
+    # poll returns. It only spends the grace period when there is a real
+    # finding to report.
+    ap.add_argument("--peer-grace", type=float, default=120.0,
+                    help="seconds to wait for the peer's <plan>.roundN.done "
+                         "marker after each update; 0 disables the check")
     ap.add_argument("--out", required=True, help="where to write the JSON verdict")
     args = ap.parse_args()
+    if args.replicates < 1:
+        ap.error("--replicates must be at least 1")
 
     report: dict[str, Any] = {
         "engine_url": args.engine_url,
@@ -317,6 +516,8 @@ def main() -> int:
         "rank_offset": args.rank_offset,
         "prompt": args.prompt,
         "max_tokens": args.max_tokens,
+        "replicates": args.replicates,
+        "peer_grace_seconds": args.peer_grace,
     }
 
     def flush() -> None:
@@ -338,13 +539,26 @@ def main() -> int:
     report["engine_get_world_size"] = {"status": status, "body": world}
     log(f"engine reports world size: {world}")
 
-    baseline = generate(args.engine_url, args.model, args.prompt, args.max_tokens)
+    baseline = generate_phase(
+        args.engine_url, args.model, args.prompt, args.max_tokens, args.replicates
+    )
     report["baseline"] = baseline
-    if baseline["text"] is None:
+    if not baseline["ok"]:
         report["verdict"] = "BASELINE_GENERATION_FAILED"
         flush()
         return 2
     log(f"baseline completion: {baseline['text']!r}")
+    # Reported now rather than only in the verdict, because an operator who
+    # sees this line knows immediately that the round trip half of the run is
+    # going to be unreadable, while the peer evidence below is not. The run
+    # continues either way: the marker check is the stronger finding and it
+    # does not depend on the decoder.
+    if not baseline["stable"]:
+        log(f"baseline is NOT deterministic: {baseline['distinct']} distinct "
+            f"completions in {args.replicates} greedy draws -- no later "
+            f"difference in the completions is evidence about weights")
+    else:
+        log(f"baseline is deterministic across {args.replicates} draws")
     flush()
 
     # The peer publishes the plan before it blocks in rendezvous, so this
@@ -398,22 +612,46 @@ def main() -> int:
         flush()
         return 2
 
+    # Round indices match the peer's own numbering of its `--rounds`, which
+    # defaults to `perturb,restore` and is enumerated from 1. Named here rather
+    # than inline so the coupling between the two scripts is visible in one
+    # place if a third round is ever added.
+    perturb_round, restore_round = 1, 2
+
     report["perturb"] = lifecycle_update(args.control_url, plan, "perturb")
     log(f"perturb update -> {report['perturb']['update']['status']} in {report['perturb']['update']['seconds']}s")
+    peer_sent_perturb: bool | None = None
+    if args.peer_grace > 0:
+        peer = wait_for_peer_round(args.plan, perturb_round, args.peer_grace)
+        report["perturb"]["peer"] = peer
+        peer_sent_perturb = peer["appeared"]
+        log(f"peer round {perturb_round} marker appeared: {peer['appeared']} "
+            f"after {peer['waited_seconds']}s")
     flush()
 
-    perturbed = generate(args.engine_url, args.model, args.prompt, args.max_tokens)
+    perturbed = generate_phase(
+        args.engine_url, args.model, args.prompt, args.max_tokens, args.replicates
+    )
     report["after_perturb"] = perturbed
-    log(f"after perturb: {perturbed['text']!r}")
+    log(f"after perturb: {perturbed['text']!r} ({perturbed['distinct']} distinct)")
     flush()
 
     report["restore"] = lifecycle_update(args.control_url, plan, "restore")
     log(f"restore update -> {report['restore']['update']['status']} in {report['restore']['update']['seconds']}s")
+    peer_sent_restore: bool | None = None
+    if args.peer_grace > 0:
+        peer = wait_for_peer_round(args.plan, restore_round, args.peer_grace)
+        report["restore"]["peer"] = peer
+        peer_sent_restore = peer["appeared"]
+        log(f"peer round {restore_round} marker appeared: {peer['appeared']} "
+            f"after {peer['waited_seconds']}s")
     flush()
 
-    restored = generate(args.engine_url, args.model, args.prompt, args.max_tokens)
+    restored = generate_phase(
+        args.engine_url, args.model, args.prompt, args.max_tokens, args.replicates
+    )
     report["after_restore"] = restored
-    log(f"after restore: {restored['text']!r}")
+    log(f"after restore: {restored['text']!r} ({restored['distinct']} distinct)")
 
     verdict, changed, recovered = decide_verdict(
         baseline=baseline,
@@ -421,6 +659,8 @@ def main() -> int:
         restored=restored,
         perturb_lifecycle=report["perturb"],
         restore_lifecycle=report["restore"],
+        peer_sent_perturb=peer_sent_perturb,
+        peer_sent_restore=peer_sent_restore,
     )
     report["weights_changed_under_perturb"] = changed
     report["weights_recovered_under_restore"] = recovered
