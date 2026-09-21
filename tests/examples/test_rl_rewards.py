@@ -2920,14 +2920,14 @@ def test_the_driver_reads_the_marker_the_peer_actually_writes(
     assert marker == tmp_path / "plan.json.round2.done"
 
     # Absent: reported as absent rather than waited on forever.
-    absent = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05, "r1")
+    absent = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05, "r1", "perturb")
     assert absent["appeared"] is False
 
     # Present: found, and without burning the grace period.
     nccl_roundtrip_check.peer_round_marker(str(plan), 1).write_text(
         json.dumps({"run_id": "r1", "kind": "perturb"})
     )
-    present = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0, "r1")
+    present = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0, "r1", "perturb")
     assert present["appeared"] is True
     assert present["waited_seconds"] < 5.0
 
@@ -3486,12 +3486,12 @@ def test_a_marker_from_a_previous_run_is_not_this_runs_evidence(
     marker = nccl_roundtrip_check.peer_round_marker(str(plan), 1)
     marker.write_text(json.dumps({"run_id": "a-previous-run", "kind": "perturb"}))
 
-    stale = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05, "this-run")
+    stale = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05, "this-run", "perturb")
     assert stale["appeared"] is False
     assert stale["run_id_seen"] == "a-previous-run"
 
     marker.write_text(json.dumps({"run_id": "this-run", "kind": "perturb"}))
-    fresh = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0, "this-run")
+    fresh = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0, "this-run", "perturb")
     assert fresh["appeared"] is True
     assert fresh["waited_seconds"] < 5.0
 
@@ -3599,3 +3599,64 @@ def test_the_seed_probe_does_not_count_failed_draws_as_diversity(monkeypatch):
     # And the format statistics describe the two replies that arrived.
     assert out["tiers"] == out["tiers"][:2]
     assert 0 not in out["tiers"]
+
+
+def test_a_marker_for_the_wrong_round_is_not_this_phases_evidence(
+    nccl_roundtrip_check, tmp_path
+):
+    """The driver numbers rounds by position; the peer records what it sent.
+
+    `perturb` is round 1 and `restore` is round 2 only because that is what
+    the documented `--rounds perturb,restore` produces. The peer takes them in
+    either order, so under `--rounds restore,perturb` round 1 is the restore --
+    the marker appears on time, with this run's id, and the proof that a
+    collective was matched gets attached to the wrong phase.
+
+    Position is this driver's assumption. The kind is the peer's own record,
+    so comparing them turns the assumption into a check.
+    """
+    plan = tmp_path / "plan.json"
+    nccl_roundtrip_check.peer_round_marker(str(plan), 1).write_text(
+        json.dumps({"run_id": "this-run", "kind": "restore"})
+    )
+
+    wrong = nccl_roundtrip_check.wait_for_peer_round(
+        str(plan), 1, 0.05, "this-run", "perturb"
+    )
+    assert wrong["appeared"] is False
+    assert wrong["kind_expected"] == "perturb"
+    assert wrong["kind_seen"] == "restore"
+    # Not reported as stale: the id matched, so "clear the directory" would be
+    # the wrong advice. It is a `--rounds` ordering problem.
+    assert wrong["run_id_seen"] is None
+
+    # Narrowness: the same marker read as the round it actually is.
+    right = nccl_roundtrip_check.wait_for_peer_round(
+        str(plan), 1, 30.0, "this-run", "restore"
+    )
+    assert right["appeared"] is True
+
+
+def test_an_empty_tensor_list_cannot_manufacture_round_markers(tmp_path):
+    """A no-op plan would forge the one piece of evidence that cannot be faked.
+
+    With an empty `--tensors` the peer joins the group, broadcasts nothing,
+    writes its round markers and exits 0. Those markers are exactly what the
+    driver now reads as proof a collective was matched, so an empty plan
+    produces the evidence rather than the absence of it -- and it is a typo
+    away, since `--tensors ""` and a trailing comma both land here.
+
+    Harmless while the driver ignored the markers. Not harmless now, which is
+    why it is rejected by the same commit that started reading them.
+    """
+    argv = _peer_argv(tmp_path, "perturb,restore")
+    argv[argv.index("--tensors") + 1] = ""
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, output
+    assert "--tensors is empty" in output, output
+    # Before the checkpoint load and before the plan is published, so nothing
+    # downstream sees a partial run.
+    assert _reached_real_work(output) == [], output
+    assert not (tmp_path / "plan.json").exists()

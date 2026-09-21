@@ -206,7 +206,7 @@ def peer_round_marker(plan: str, index: int) -> Path:
 
 
 def wait_for_peer_round(
-    plan: str, index: int, grace_s: float, run_id: str
+    plan: str, index: int, grace_s: float, run_id: str, kind: str
 ) -> dict[str, Any]:
     """Did the sender's broadcasts for this round actually complete?
 
@@ -226,6 +226,15 @@ def wait_for_peer_round(
     swallowed, because "the peer never got here" and "the directory needs
     clearing" send an operator to different places.
 
+    The round's ``kind`` is matched too, for a separate reason. This driver
+    numbers rounds by position -- perturb is 1, restore is 2 -- because that is
+    what the documented ``--rounds perturb,restore`` produces. The peer accepts
+    them in either order, and under ``--rounds restore,perturb`` round 1 *is*
+    the restore: the marker appears on time and the evidence that a collective
+    was matched is attached to the wrong phase. Position is this driver's
+    assumption; the kind is the peer's own record of what it sent, so comparing
+    them turns the assumption into a check.
+
     Polled with a grace period rather than read once, because the two sides
     finish microseconds apart across a shared filesystem that is not
     synchronous, so a single read races the rename rather than measuring it.
@@ -235,27 +244,37 @@ def wait_for_peer_round(
     deadline = started + grace_s
     interval = min(1.0, max(0.01, grace_s / 20)) if grace_s > 0 else 0.0
     stale_seen: str | None = None
+    mismatched_kind: str | None = None
     while True:
         try:
-            found = json.loads(marker.read_text()).get("run_id")
+            record = json.loads(marker.read_text())
+            found, found_kind = record.get("run_id"), record.get("kind")
         except (OSError, json.JSONDecodeError, AttributeError):
             # Absent, mid-rename, or written by a peer that predates the
             # stamp. None of those is this run's marker.
-            found = None
+            found = found_kind = None
         if found is not None:
-            if found == run_id:
+            if found != run_id:
+                stale_seen = str(found)
+            elif found_kind != kind:
+                # This run's marker, but for a different round than the one
+                # the driver believes it is reading.
+                mismatched_kind = str(found_kind)
+            else:
                 return {
                     "marker": str(marker),
                     "appeared": True,
                     "run_id_seen": found,
+                    "kind_seen": found_kind,
                     "waited_seconds": round(time.time() - started, 3),
                 }
-            stale_seen = str(found)
         if time.time() >= deadline:
             return {
                 "marker": str(marker),
                 "appeared": False,
                 "run_id_seen": stale_seen,
+                "kind_expected": kind,
+                "kind_seen": mismatched_kind,
                 "waited_seconds": round(time.time() - started, 3),
             }
         time.sleep(interval)
@@ -646,7 +665,7 @@ def main() -> int:
     peer_sent_perturb: bool | None = None
     if args.peer_grace > 0:
         peer = wait_for_peer_round(
-            args.plan, perturb_round, args.peer_grace, args.plan_run_id
+            args.plan, perturb_round, args.peer_grace, args.plan_run_id, "perturb"
         )
         report["perturb"]["peer"] = peer
         peer_sent_perturb = peer["appeared"]
@@ -666,7 +685,7 @@ def main() -> int:
     peer_sent_restore: bool | None = None
     if args.peer_grace > 0:
         peer = wait_for_peer_round(
-            args.plan, restore_round, args.peer_grace, args.plan_run_id
+            args.plan, restore_round, args.peer_grace, args.plan_run_id, "restore"
         )
         report["restore"]["peer"] = peer
         peer_sent_restore = peer["appeared"]

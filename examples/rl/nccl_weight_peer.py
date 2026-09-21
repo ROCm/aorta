@@ -305,10 +305,22 @@ def main() -> int:
     if role_error:
         raise SystemExit(role_error)
 
+    # An empty tensor list is not a small plan, it is a forged result. The peer
+    # would join the group, broadcast nothing, write its round markers and exit
+    # 0 -- and those markers are what the driver now reads as proof a collective
+    # was matched, so a no-op plan manufactures exactly the evidence that is
+    # meant to be unfakeable. Harmless while the driver ignored the markers; not
+    # harmless now that it reads them. Checked up here with the other argument
+    # errors, so it costs no import and no rendezvous.
+    names = [n for n in args.tensors.split(",") if n]
+    if not names:
+        raise SystemExit(
+            "--tensors is empty; a plan with no tensors broadcasts nothing "
+            "while still reporting its rounds complete"
+        )
+
     import torch
     import torch.distributed as dist
-
-    names = [n for n in args.tensors.split(",") if n]
 
     originals = load_checkpoint_tensors(args.model_path, names)
 
