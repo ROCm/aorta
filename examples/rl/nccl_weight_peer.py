@@ -151,6 +151,57 @@ def join_group(
 # and not the other is the drift this constant exists to prevent.
 _ROUND_KINDS = ("perturb", "restore", "recv")
 
+# Which end of the broadcast each kind puts this peer on. A round's kind fixes
+# its role -- `perturb` and `restore` exist to push tensors at the engine, and
+# `recv` exists to make the engine push one at us -- so `--src` is not free to
+# contradict it. It silently could: `--src` defaults to `--rank`, which makes
+# this peer the broadcast root, and for `recv` that means it *sends* the
+# poisoned buffer it was supposed to have received into. The buffer then comes
+# back unchanged, because the root's buffer is the source, and the diagnostic
+# reports "nothing arrived" for a collective that worked perfectly.
+#
+# Both directions are checked rather than just the reported one. The mirror --
+# `--src` pointing away from a sending round -- makes this peer a receiver on a
+# round it logs as "sent", which is the same defect with the roles swapped and
+# just as quiet.
+_SENDING_ROUND_KINDS = frozenset({"perturb", "restore"})
+_RECEIVING_ROUND_KINDS = frozenset({"recv"})
+
+
+def check_round_roles(rounds: list[str], rank: int, src: int) -> str | None:
+    """Why this ``--src`` cannot serve these rounds, or ``None`` if it can.
+
+    Returns a message rather than raising so the caller decides the exit
+    route, and so a test can reach every branch without a process group.
+    """
+    sending = [k for k in rounds if k in _SENDING_ROUND_KINDS]
+    receiving = [k for k in rounds if k in _RECEIVING_ROUND_KINDS]
+    if sending and receiving:
+        # One `--src` cannot be both this peer and not this peer, so this is a
+        # contradiction in the request rather than a wrong value to correct.
+        return (
+            f"--rounds mixes sending rounds {sorted(set(sending))} with "
+            f"receiving rounds {sorted(set(receiving))}; one --src cannot be "
+            "this peer for some rounds and the engine for others. Run them as "
+            "separate invocations."
+        )
+    if receiving and src == rank:
+        return (
+            f"--rounds {receiving} receives, so the broadcast root must be an "
+            f"engine rank, but --src resolved to {src}, which is this peer's "
+            "own --rank. This peer would broadcast the poisoned buffer instead "
+            "of receiving into it, and report that nothing arrived even when "
+            "the collective works. Pass --src <engine rank>, e.g. the "
+            "--rank-offset the driver uses."
+        )
+    if sending and src != rank:
+        return (
+            f"--rounds {sorted(set(sending))} sends, so this peer must be the "
+            f"broadcast root, but --src is {src} and --rank is {rank}. This "
+            "peer would receive into the payload it believes it is sending."
+        )
+    return None
+
 
 def build_round(kind: str, originals: dict[str, Any], names: list[str], device):
     """Materialise one round's payload on the sender's device.
@@ -196,7 +247,9 @@ def main() -> int:
         "--src",
         type=int,
         default=None,
-        help="broadcast root (defaults to --rank, i.e. this peer sends)",
+        help="broadcast root (defaults to --rank, i.e. this peer sends). "
+             "Required for a `recv` round, where the root must be an engine "
+             "rank instead",
     )
     # Stamped into the plan so the driver can tell this run's plan from a
     # previous run's. The two processes are launched by hand against a fixed
@@ -243,6 +296,14 @@ def main() -> int:
             f"unknown round kind(s) {unknown}; expected any of "
             + ", ".join(_ROUND_KINDS)
         )
+    # Checked here too, and for the same reason the kind check moved here: a
+    # role mismatch is a command-line error, and paying for it after the
+    # rendezvous means the driver blocks on an /update_weights whose broadcast
+    # is never posted. The difference is that an unknown kind at least exits;
+    # this one used to run to completion and publish a wrong answer.
+    role_error = check_round_roles(rounds, args.rank, args.src)
+    if role_error:
+        raise SystemExit(role_error)
 
     import torch
     import torch.distributed as dist

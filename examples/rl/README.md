@@ -465,6 +465,19 @@ already answered 200 is direct proof the engine posted no collective. It
 outranks the completions, and it still works when the decoder is too unstable
 for the round trip to say anything.
 
+### `--src` and what a round is for
+
+A round's kind fixes which end of the broadcast the peer is on. `perturb` and
+`restore` push tensors at the engine, so the peer must be the root and `--src`
+defaults to `--rank` accordingly. `recv` is the diagnostic that swaps the roles
+— it poisons a buffer and checks whether the poison survives — so it needs an
+*engine* rank as the root, and inherits a default that makes the peer broadcast
+its own poisoned buffer straight back. The buffer then returns untouched,
+because the root's buffer is the source, and the diagnostic reports that nothing
+arrived from a collective that worked. Both directions are now rejected before
+the rendezvous, so a role mismatch costs nothing instead of blocking the driver
+on an `/update_weights` whose broadcast is never posted.
+
 That is not hypothetical. On gfx950 this check found that TokenSpeed's `nccl`
 receive returns `200 {"message": "Weights updated"}` while **transferring
 nothing**, loading uninitialised device memory into the model instead; a

@@ -2969,3 +2969,104 @@ def test_a_real_weight_change_is_still_proven(nccl_roundtrip_check):
     )
     assert (verdict, changed, recovered) == ("PROVEN", True, True)
 
+
+# --------------------------------------------------------------------------- #
+# The peer's round roles: `--src` must not contradict what the round is for
+# --------------------------------------------------------------------------- #
+
+
+def _peer_role_argv(tmp_path, rounds, extra=()):
+    argv = _peer_argv(tmp_path, rounds)
+    return argv + list(extra)
+
+
+def _run_peer(tmp_path, rounds, extra=()):
+    return subprocess.run(
+        _peer_role_argv(tmp_path, rounds, extra),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+
+def test_a_recv_round_refuses_to_broadcast_from_this_peer(tmp_path):
+    """`--src` defaulting to `--rank` inverts the one round that receives.
+
+    `recv` exists to tell "the engine posts no collective" from "the engine
+    posts one but as the root", and it does that by poisoning a buffer and
+    seeing whether the poison survives. With the default `--src` this peer is
+    the broadcast root, so it *sends* the poisoned buffer -- and the root's
+    buffer is the source, so it comes back untouched and the diagnostic reports
+    that nothing arrived. Driven against the real `build_round` and the real
+    broadcast contract, a working collective scored as a dead one:
+
+        --src omitted -> poison [-1,-1,-1,-1] -> [-1,-1,-1,-1], "changed: False"
+        --src 1       -> poison [-1,-1,-1,-1] -> [3.14, ...],   "changed: True"
+
+    So the failure is silent and it is inverted, which is the worst pair: the
+    one configuration a reader would reach for first is the one that cannot
+    work, and it reports the finding the tool was run to look for.
+    """
+    proc = _run_peer(tmp_path, "recv")
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, output
+    assert "--src resolved to 0" in output, output
+    assert "this peer's own --rank" in output, output
+    # Rejected before the torch import and before the rendezvous, for the same
+    # reason the `--rounds` kind check moved there: a peer that has already
+    # joined the group and then exits leaves the driver blocked on an
+    # `/update_weights` whose broadcast is never posted, so a command-line
+    # error costs the full timeout instead of nothing. `--model-path` points at
+    # nothing, so reaching the loader at all would fail differently.
+    assert "no .safetensors" not in output, output
+
+
+def test_a_recv_round_with_an_engine_source_is_allowed(tmp_path):
+    """Narrowness: the check must reject the inversion, not the round kind.
+
+    Same invocation with an engine rank as the root. It still fails, because
+    this environment has no torch -- but it has to fail *there*, and where it
+    fails is the assertion. The role check sits ahead of the torch import, so
+    reaching the import is proof the round was accepted rather than refused,
+    and it doubles as the ordering check: a role error must cost nothing, not
+    an import and a rendezvous.
+    """
+    proc = _run_peer(tmp_path, "recv", ("--src", "1"))
+    output = proc.stdout + proc.stderr
+
+    assert "--src resolved to" not in output, output
+    assert "this peer's own --rank" not in output, output
+    assert "import torch" in output, output
+
+
+def test_a_sending_round_refuses_a_source_that_is_not_this_peer(tmp_path):
+    """The mirror, which nobody reported and which is just as quiet.
+
+    `perturb` and `restore` exist to push tensors at the engine, so this peer
+    has to be the root. Point `--src` elsewhere and this peer silently becomes
+    a receiver on a round it logs as "sent", overwriting the payload it
+    believes it is delivering. Checked because the reported defect is one half
+    of a cross product and fixing only the reported half leaves the other
+    reachable from the same flag.
+    """
+    proc = _run_peer(tmp_path, "perturb,restore", ("--src", "1"))
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, output
+    assert "would receive into the payload it believes it is sending" in output
+
+
+def test_mixing_sending_and_receiving_rounds_is_refused(tmp_path):
+    """One `--src` cannot be this peer and not this peer at the same time.
+
+    Reported as a contradiction in the request rather than as a wrong value,
+    because there is no value that would satisfy it -- whichever way it is set,
+    one of the two rounds runs inverted.
+    """
+    proc = _run_peer(tmp_path, "perturb,recv")
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, output
+    assert "separate invocations" in output, output
+
