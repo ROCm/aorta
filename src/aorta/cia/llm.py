@@ -15,7 +15,7 @@ except ImportError as exc:  # pragma: no cover - only without the extra
         "nothing behind, say so -- that is a packaging bug, not a missing step.)"
     ) from exc
 
-#: Where the CA bundle is named, for callers who want to look.
+#: Operator-chosen CA files. Read as client configuration, never written here.
 _CA_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 log = logging.getLogger(__name__)
@@ -36,32 +36,38 @@ nothing in it to say the reasoning step had been truncated on the way.
 _configured: bool = False
 
 
-def _use_certifi_bundle() -> None:
-    """Point TLS verification at certifi, for this process, when asked to.
+def _ssl_verify() -> str | bool:
+    """TLS verification for this LM client only.
 
-    LiteLLM fetches a remote price map and can fail on a corporate TLS
-    interception proxy whose CA the certifi bundle knows and the system store
-    does not. Certifi fixes that site and breaks the opposite one, where the
-    corporate CA is in the system store and not in certifi.
+    LiteLLM can fail on a corporate TLS interception proxy whose CA the certifi
+    bundle knows and the system store does not. Certifi fixes that site and
+    breaks the opposite one, where the corporate CA is in the system store and
+    not in certifi.
 
-    So three things. It runs from here rather than at import, because importing
-    a module should not change TLS verification for everything else in the
-    process -- including unrelated aorta code and the chat provider layer,
-    which never asked. It defers to SSL_CERT_FILE or REQUESTS_CA_BUNDLE if
-    either is already set, because that is somebody having decided. And
-    CIA_SSL_USE_CERTIFI=0 turns it off for the site it would otherwise break.
+    The old answer was to write SSL_CERT_FILE and REQUESTS_CA_BUNDLE for the
+    whole process. Those variables are how OpenSSL and requests pick a CA file
+    for every later import -- chat, unrelated aorta code, and anything the
+    user imported alongside -- so a Watch that needed certifi quietly changed
+    HTTPS for everyone else.
+
+    So the choice is a LiteLLM client argument, ``ssl_verify``: a CA path, or
+    True for the system store. SSL_CERT_FILE / REQUESTS_CA_BUNDLE are still
+    read, because that is somebody having decided, and CIA_SSL_USE_CERTIFI=0
+    still turns certifi off for the site it would otherwise break. Nothing
+    here writes them.
     """
+    for var in _CA_ENV_VARS:
+        chosen = os.environ.get(var)
+        if chosen:
+            return chosen
     if os.environ.get("CIA_SSL_USE_CERTIFI", "1") == "0":
-        return
-    if any(os.environ.get(var) for var in _CA_ENV_VARS):
-        return
+        return True
     try:
         import certifi
     except ImportError:
-        log.debug("certifi is not installed; leaving TLS verification alone")
-        return
-    for var in _CA_ENV_VARS:
-        os.environ[var] = certifi.where()
+        log.debug("certifi is not installed; using system TLS trust")
+        return True
+    return certifi.where()
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -138,8 +144,7 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] 
                 "package the extra should have installed. Reinstall with "
                 "`pip install 'amd-aorta[cia]'` and report it if it persists; "
                 "the agents are meant to read the same profile as the rest of "
-                "aorta chat."
-                % (sys.version_info[0], sys.version_info[1])
+                "aorta chat." % (sys.version_info[0], sys.version_info[1])
             )
             log.warning(
                 "Reading the chat settings from the environment only: %s. %s "
@@ -235,9 +240,7 @@ def redact(text: str) -> str:
 
     if not _redaction_enabled():
         return text
-    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(
-        text, scrub_paths=True, scrub_ip_addresses=True
-    )
+    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(text, scrub_paths=True, scrub_ip_addresses=True)
     return scrubbed
 
 
@@ -334,7 +337,6 @@ def build_lm(
         )
     settings_base, settings_key, settings_model, provider = resolved or ("", "", "", "vllm")
 
-    _use_certifi_bundle()
     return RedactingLM(
         model=_qualified_model(
             model or settings_model or DEFAULT_MODEL,
@@ -345,6 +347,7 @@ def build_lm(
         api_key=api_key or settings_key or "EMPTY",
         max_tokens=max_tokens,
         cache=False,
+        ssl_verify=_ssl_verify(),
     )
 
 

@@ -68,18 +68,14 @@ class TestAnOpenAIShapedEndpointStillGetsThePrefix:
 
     def test_a_proxy_does_too(self):
         """What this deployment runs: a LiteLLM proxy addressed as OpenAI."""
-        assert _qualified_model("claude-haiku-4-5", "vllm", True) == (
-            "openai/claude-haiku-4-5"
-        )
+        assert _qualified_model("claude-haiku-4-5", "vllm", True) == ("openai/claude-haiku-4-5")
 
     def test_the_openai_provider_does(self):
         assert _qualified_model("gpt-4o-mini", "openai", False) == "openai/gpt-4o-mini"
 
     def test_litellm_with_an_endpoint_does(self):
         """An endpoint means something OpenAI-shaped is answering."""
-        assert _qualified_model("claude-haiku-4-5", "litellm", True) == (
-            "openai/claude-haiku-4-5"
-        )
+        assert _qualified_model("claude-haiku-4-5", "litellm", True) == ("openai/claude-haiku-4-5")
 
     def test_an_existing_openai_prefix_is_not_doubled(self):
         assert _qualified_model("openai/gpt-4o", "vllm", True) == "openai/gpt-4o"
@@ -87,12 +83,7 @@ class TestAnOpenAIShapedEndpointStillGetsThePrefix:
 
 class TestASlashIsNotEnoughToNameAProvider:
     def test_a_hugging_face_organization_is_not_a_provider(self):
-        assert (
-            _litellm_provider_prefix(
-                "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
-            )
-            is None
-        )
+        assert _litellm_provider_prefix("deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct") is None
 
     @pytest.mark.parametrize(
         "model",
@@ -114,9 +105,7 @@ class TestASlashIsNotEnoughToNameAProvider:
 class TestLitellmWithoutAnEndpointRoutesItself:
     def test_an_unqualified_name_is_left_to_litellm(self):
         """litellm has its own rules for a bare name; ours would override them."""
-        assert _qualified_model("claude-3-5-sonnet", "litellm", False) == (
-            "claude-3-5-sonnet"
-        )
+        assert _qualified_model("claude-3-5-sonnet", "litellm", False) == ("claude-3-5-sonnet")
 
 
 class TestTheProviderReachesTheDecision:
@@ -155,8 +144,6 @@ class TestTheLmIsBuiltWithIt:
             "chat_provider",
             lambda **_k: ("", "sk-x", "anthropic/claude-3-5-sonnet", "litellm"),
         )
-        monkeypatch.setattr(llm_mod, "_use_certifi_bundle", lambda: None)
-
         lm = llm_mod.build_lm()
 
         assert lm.model == "anthropic/claude-3-5-sonnet", lm.model
@@ -169,8 +156,6 @@ class TestTheLmIsBuiltWithIt:
             "chat_provider",
             lambda **_k: ("http://proxy:4000/v1", "sk-x", "claude-haiku-4-5", "vllm"),
         )
-        monkeypatch.setattr(llm_mod, "_use_certifi_bundle", lambda: None)
-
         lm = llm_mod.build_lm()
 
         assert lm.model == "openai/claude-haiku-4-5", lm.model
@@ -186,8 +171,6 @@ class TestTheLmIsBuiltWithIt:
             "chat_provider",
             lambda **_k: ("http://vllm:8000/v1", "EMPTY", model, "vllm"),
         )
-        monkeypatch.setattr(llm_mod, "_use_certifi_bundle", lambda: None)
-
         lm = llm_mod.build_lm()
 
         assert lm.model == f"openai/{model}", lm.model
