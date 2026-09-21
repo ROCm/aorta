@@ -583,7 +583,7 @@ class TokenSpeedServeWorkload(Workload):
             benchmark (default ``False``): ``rollout_samples`` sampled
             completions per prompt at ``temperature``, stopping on EOS, with
             the generated-length distribution reported and audited against
-            ``min_mean_output_tokens``. The five keys below require it.
+            ``min_mean_output_tokens``. The keys below require it.
         rollout_samples: completions per prompt, the ``n`` of the sampling API
             (default ``4``, max ``1024``).
         temperature: sampling temperature, in ``(0, 2]`` (default ``1.0``).
