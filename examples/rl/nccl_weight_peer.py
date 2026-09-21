@@ -372,8 +372,21 @@ def main() -> int:
         log(f"round {index} ({kind}) drained in {time.time() - started:.3f}s")
         # A marker per round lets the driver tell "the sender finished this
         # round" from "the receiver claimed it did".
-        with open(f"{args.plan_out}.round{index}.done", "w") as fh:
-            fh.write(kind)
+        #
+        # Stamped with `run_id` for exactly the reason the plan is, and it
+        # matters more here. `--plan-out` is a fixed shared path, so a marker
+        # from a previous run is the ordinary state of that directory -- and a
+        # stale one read as this run's says a collective was matched when none
+        # was, which is the single observation standing between a silently
+        # dead transport and a `PROVEN` verdict. Written by rename so a marker
+        # that exists is a marker that is complete.
+        marker = f"{args.plan_out}.round{index}.done"
+        marker_tmp = f"{marker}.partial"
+        with open(marker_tmp, "w") as fh:
+            json.dump({"run_id": args.run_id, "kind": kind}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(marker_tmp, marker)
 
     dist.destroy_process_group(pg)
     log("group destroyed; peer exiting")

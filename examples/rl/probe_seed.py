@@ -129,18 +129,33 @@ def probe_seed_modes(model: str, temperature: float) -> dict[str, Any]:
 
 
 def probe_temperature(model: str, temperature: float, draws: int) -> dict[str, Any]:
-    """Unseeded draws at one temperature: diversity, and format survival."""
+    """Unseeded draws at one temperature: diversity, and format survival.
+
+    Only the draws that came back are measured. A failed call records
+    ``content: ""``, which is both a distinct string and a tier-0 score -- so
+    counting it makes an outage read as either sampling diversity or a format
+    regression, on the one statistic this probe exists to produce. Same defect
+    as the transport-error rows in ``run_e2e.py`` and ``rescore_e2e.py``, and
+    the same remedy: keep the failures, report them separately, and leave them
+    out of the arithmetic about the model.
+
+    ``delivered`` is reported next to ``draws`` so a thin sample reads as thin.
+    A ``distinct`` of 1 over 8 draws is the finding this probe was written for;
+    a ``distinct`` of 1 over 1 delivered draw is not a finding at all.
+    """
     results = [
         call(model, temperature=temperature, seed=None, seed_mode="top_level")
         for _ in range(draws)
     ]
-    contents = [r["content"] for r in results]
+    errors = [r["error"] for r in results if r["error"]]
+    contents = [r["content"] for r in results if not r["error"]]
     scores = [graded(c) for c in contents]
     tiers = [s["tier"] for s in scores]
     return {
         "temperature": temperature,
         "draws": draws,
-        "errors": [r["error"] for r in results if r["error"]],
+        "delivered": len(contents),
+        "errors": errors,
         "distinct": len(set(contents)),
         "tiers": tiers,
         "min_tier": min(tiers) if tiers else None,

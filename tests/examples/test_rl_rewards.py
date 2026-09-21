@@ -2920,12 +2920,14 @@ def test_the_driver_reads_the_marker_the_peer_actually_writes(
     assert marker == tmp_path / "plan.json.round2.done"
 
     # Absent: reported as absent rather than waited on forever.
-    absent = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05)
+    absent = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05, "r1")
     assert absent["appeared"] is False
 
     # Present: found, and without burning the grace period.
-    nccl_roundtrip_check.peer_round_marker(str(plan), 1).write_text("perturb")
-    present = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0)
+    nccl_roundtrip_check.peer_round_marker(str(plan), 1).write_text(
+        json.dumps({"run_id": "r1", "kind": "perturb"})
+    )
+    present = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0, "r1")
     assert present["appeared"] is True
     assert present["waited_seconds"] < 5.0
 
@@ -3458,3 +3460,142 @@ def test_hold_on_a_name_collision_removes_nothing(tmp_path):
     assert "already exists" in output, output
     assert "rm -f" not in calls, calls
     assert "docker run" not in calls, calls
+
+
+# --------------------------------------------------------------------------- #
+# Follow-ups from the review pass on the fixes above
+# --------------------------------------------------------------------------- #
+
+
+def test_a_marker_from_a_previous_run_is_not_this_runs_evidence(
+    nccl_roundtrip_check, tmp_path
+):
+    """A stale round marker would undo the reason the marker check exists.
+
+    `--plan` is a fixed shared path, so a marker left behind by a previous run
+    is the ordinary state of that directory -- the same reason the plan itself
+    is matched on `run_id` rather than on the file existing. It matters more
+    here: the marker is the one observation standing between a silently dead
+    transport and `PROVEN`, so accepting a stale one suppresses
+    `HTTP_OK_BUT_PEER_NEVER_SENT` on a run where nothing was ever broadcast.
+
+    Reported with the id it saw, because "the peer never got here" and "this
+    directory needs clearing" send an operator to different places.
+    """
+    plan = tmp_path / "plan.json"
+    marker = nccl_roundtrip_check.peer_round_marker(str(plan), 1)
+    marker.write_text(json.dumps({"run_id": "a-previous-run", "kind": "perturb"}))
+
+    stale = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 0.05, "this-run")
+    assert stale["appeared"] is False
+    assert stale["run_id_seen"] == "a-previous-run"
+
+    marker.write_text(json.dumps({"run_id": "this-run", "kind": "perturb"}))
+    fresh = nccl_roundtrip_check.wait_for_peer_round(str(plan), 1, 30.0, "this-run")
+    assert fresh["appeared"] is True
+    assert fresh["waited_seconds"] < 5.0
+
+
+def test_the_peer_stamps_its_markers_with_the_run_id(tmp_path):
+    """The writer half, read off the peer's own source.
+
+    The driver validating an id the peer never writes would reject every
+    marker, which reads exactly like a transport that never sends -- a
+    permanent false negative in place of the false positive just closed. So
+    the two halves are pinned together rather than separately.
+    """
+    source = (_EXAMPLES / "nccl_weight_peer.py").read_text()
+    assert '"run_id": args.run_id' in source, source[-2000:]
+    # Published by rename for the same reason the plan is: a marker that exists
+    # has to be a marker that is complete, or the driver reads a partial write
+    # as a malformed id and waits out the whole grace period.
+    assert "os.replace(marker_tmp, marker)" in source
+
+
+def test_criterion_three_cannot_pass_over_scenarios_that_vanished(rescore_e2e):
+    """Dropping failed rows must not turn an outage into perfect diversity.
+
+    Excluding transport-error rows is right, and it has a consequence: a
+    wholly failed scenario leaves `per_scenario` entirely, so `all(...)` runs
+    over the survivors. In the limit every call fails, `per_scenario` is empty,
+    and `all([])` is True -- a total outage reported as criterion 3 holding.
+
+    The criterion has to see the scenarios that were asked about, not the ones
+    that answered.
+    """
+    def row(scenario, sample, raw, reward, tier, error=""):
+        return _row(scenario, sample, raw, reward, tier, error)
+
+    good = json.dumps({
+        "category": "checkpoint_race", "hypothesis": "h",
+        "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False,
+    })
+    # Scores differently from `good` rather than merely differing as text: the
+    # criterion is about reward spread, so a second on-contract reply would
+    # give a group with two distinct completions and no spread, which is a
+    # different finding entirely.
+    other = "not JSON, just a sentence."
+    meta = {"candidates": ["tf32_off", "xnack", "none"], "tried": []}
+
+    # s1 answered and has spread; s2 failed entirely and is gone.
+    partial = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [
+            row("s1", 0, good, 1.0, 5),
+            row("s1", 1, other, 1.0, 5),
+            row("s2", 0, "", 0.0, 0, "Timeout"),
+            row("s2", 1, "", 0.0, 0, "Timeout"),
+        ],
+    })
+    c3 = partial["criteria"]["3_within_group_spread_nonzero"]
+    assert c3["holds"] is False, c3
+    assert c3["detail"]["groups_missing"] == ["s2"], c3
+    assert c3["detail"]["groups_requested"] == 2
+
+    # The limit case: nothing came back at all.
+    total = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [row("s1", 0, "", 0.0, 0, "Timeout")],
+    })
+    assert total["criteria"]["3_within_group_spread_nonzero"]["holds"] is False
+
+    # Narrowness: a clean run still holds, so this is not just always False.
+    clean = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [row("s1", 0, good, 1.0, 5), row("s1", 1, other, 1.0, 5)],
+    })
+    c3_clean = clean["criteria"]["3_within_group_spread_nonzero"]
+    assert c3_clean["detail"]["groups_missing"] == []
+    assert c3_clean["holds"] is True, c3_clean
+
+
+def test_the_seed_probe_does_not_count_failed_draws_as_diversity(monkeypatch):
+    """Third instance of the class, on the probe whose whole output is `distinct`.
+
+    A failed call records `content: ""`, which is a distinct string and a
+    tier-0 score. Counted, an outage reads as either sampling diversity or a
+    format regression -- on the one statistic this probe exists to produce, and
+    the statistic that decided the `--sampling-backend` finding.
+    """
+    probe_seed = _load("probe_seed")
+
+    answers = [
+        {"error": "", "content": '{"a": 1}'},
+        {"error": "", "content": '{"a": 1}'},
+        {"error": "APIConnectionError: reset", "content": ""},
+        {"error": "APIConnectionError: reset", "content": ""},
+    ]
+    calls = iter(answers)
+    monkeypatch.setattr(probe_seed, "call", lambda *a, **k: next(calls))
+
+    out = probe_seed.probe_temperature("m", 0.7, 4)
+
+    # Two identical completions and two failures: one distinct completion, not
+    # two, and the collapse is real rather than manufactured by the outage.
+    assert out["distinct"] == 1
+    assert out["draws"] == 4
+    assert out["delivered"] == 2
+    assert len(out["errors"]) == 2
+    # And the format statistics describe the two replies that arrived.
+    assert out["tiers"] == out["tiers"][:2]
+    assert 0 not in out["tiers"]

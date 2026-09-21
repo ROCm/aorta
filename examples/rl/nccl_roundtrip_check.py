@@ -205,7 +205,9 @@ def peer_round_marker(plan: str, index: int) -> Path:
     return Path(f"{plan}.round{index}.done")
 
 
-def wait_for_peer_round(plan: str, index: int, grace_s: float) -> dict[str, Any]:
+def wait_for_peer_round(
+    plan: str, index: int, grace_s: float, run_id: str
+) -> dict[str, Any]:
     """Did the sender's broadcasts for this round actually complete?
 
     ``dist.broadcast`` from the sending rank returns only once the other rank
@@ -213,6 +215,16 @@ def wait_for_peer_round(plan: str, index: int, grace_s: float) -> dict[str, Any]
     a collective was matched -- and *not* reaching it, after the engine has
     already answered 200, is proof one was not. That is a direct observation of
     the transport, where the completions are an inference from model behaviour.
+
+    Matched on ``run_id``, not on the path existing, for the same reason
+    ``wait_for_plan`` is -- and the stakes are higher here. ``--plan`` is a
+    fixed shared path, so a marker left by a previous run is the ordinary state
+    of that directory, and accepting one means reporting that a collective was
+    matched when none was. That is the single observation standing between a
+    silently dead transport and ``PROVEN``, so a stale marker would quietly
+    undo the reason this check exists. ``run_id_seen`` is reported rather than
+    swallowed, because "the peer never got here" and "the directory needs
+    clearing" send an operator to different places.
 
     Polled with a grace period rather than read once, because the two sides
     finish microseconds apart across a shared filesystem that is not
@@ -222,17 +234,28 @@ def wait_for_peer_round(plan: str, index: int, grace_s: float) -> dict[str, Any]
     started = time.time()
     deadline = started + grace_s
     interval = min(1.0, max(0.01, grace_s / 20)) if grace_s > 0 else 0.0
+    stale_seen: str | None = None
     while True:
-        if marker.exists():
-            return {
-                "marker": str(marker),
-                "appeared": True,
-                "waited_seconds": round(time.time() - started, 3),
-            }
+        try:
+            found = json.loads(marker.read_text()).get("run_id")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            # Absent, mid-rename, or written by a peer that predates the
+            # stamp. None of those is this run's marker.
+            found = None
+        if found is not None:
+            if found == run_id:
+                return {
+                    "marker": str(marker),
+                    "appeared": True,
+                    "run_id_seen": found,
+                    "waited_seconds": round(time.time() - started, 3),
+                }
+            stale_seen = str(found)
         if time.time() >= deadline:
             return {
                 "marker": str(marker),
                 "appeared": False,
+                "run_id_seen": stale_seen,
                 "waited_seconds": round(time.time() - started, 3),
             }
         time.sleep(interval)
@@ -622,7 +645,9 @@ def main() -> int:
     log(f"perturb update -> {report['perturb']['update']['status']} in {report['perturb']['update']['seconds']}s")
     peer_sent_perturb: bool | None = None
     if args.peer_grace > 0:
-        peer = wait_for_peer_round(args.plan, perturb_round, args.peer_grace)
+        peer = wait_for_peer_round(
+            args.plan, perturb_round, args.peer_grace, args.plan_run_id
+        )
         report["perturb"]["peer"] = peer
         peer_sent_perturb = peer["appeared"]
         log(f"peer round {perturb_round} marker appeared: {peer['appeared']} "
@@ -640,7 +665,9 @@ def main() -> int:
     log(f"restore update -> {report['restore']['update']['status']} in {report['restore']['update']['seconds']}s")
     peer_sent_restore: bool | None = None
     if args.peer_grace > 0:
-        peer = wait_for_peer_round(args.plan, restore_round, args.peer_grace)
+        peer = wait_for_peer_round(
+            args.plan, restore_round, args.peer_grace, args.plan_run_id
+        )
         report["restore"]["peer"] = peer
         peer_sent_restore = peer["appeared"]
         log(f"peer round {restore_round} marker appeared: {peer['appeared']} "

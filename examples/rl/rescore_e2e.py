@@ -199,6 +199,11 @@ def analyse(doc: dict[str, Any]) -> dict[str, Any]:
 
     rows = rescore_recorded(doc)
     groups = group_by_scenario(rows)
+    # Every scenario the run asked about, including any that answered nothing.
+    # Read from the recorded rows rather than from `groups`, which is exactly
+    # the set that survived.
+    requested_scenarios = {row["scenario_id"] for row in doc["proposals"]}
+    groups_missing = requested_scenarios - set(groups)
 
     references = {
         name: score_reference(raw, candidates, tried)
@@ -255,11 +260,21 @@ def analyse(doc: dict[str, Any]) -> dict[str, Any]:
             "detail": {"oracle_contract_perfect": round(top, 4), "threshold": NEAR_TOP},
         },
         "3_within_group_spread_nonzero": {
-            "holds": all(
-                v["spread_within_group"] > 0.0 for v in per_scenario.values()
-            ),
+            # `all` over the *surviving* groups is not the question. Dropping
+            # transport-error rows means a wholly failed scenario leaves
+            # `per_scenario` entirely, so a run where every call failed offers
+            # `all([])` -- vacuously true, reported as perfect rollout
+            # diversity. The criterion therefore has to see the scenarios that
+            # were asked for, not only the ones that answered: an outage is a
+            # reason this run cannot support the claim, not a reason to make
+            # it over fewer groups.
+            "holds": bool(per_scenario)
+            and not groups_missing
+            and all(v["spread_within_group"] > 0.0 for v in per_scenario.values()),
             "detail": {
                 "groups": len(per_scenario),
+                "groups_requested": len(requested_scenarios),
+                "groups_missing": sorted(groups_missing),
                 "groups_with_spread": sum(
                     1 for v in per_scenario.values() if v["spread_within_group"] > 0.0
                 ),
