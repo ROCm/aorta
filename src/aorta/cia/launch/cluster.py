@@ -236,6 +236,7 @@ def build_sbatch_script(
     working_dir: str = "",
     env_vars: dict[str, str] | None = None,
     node: str = "",
+    tolerate_nonzero: bool = False,
 ) -> str:
     """Render an sbatch script that runs command and writes all output to log_path.
 
@@ -304,13 +305,40 @@ def build_sbatch_script(
     # not declared a non-zero exit expected.
     body.append("rc=$?")
     body.append('echo "[cia] workload exit=$rc"')
-    if os.environ.get("CIA_TOLERATE_NONZERO"):
-        body.append('[ "$rc" -ne 0 ] && echo "[cia] non-zero tolerated (CIA_TOLERATE_NONZERO)"')
+    if tolerate_nonzero:
+        body.append('[ "$rc" -ne 0 ] && echo "[cia] non-zero tolerated (expected by caller)"')
         body.append("exit 0")
     else:
         body.append("exit $rc")
 
     return "\n".join(["#!/bin/bash", *directives, "", *body, ""])
+
+
+def cancel_sbatch(slurm_id: str) -> tuple[bool, str]:
+    """Release the allocation for *slurm_id*. Returns ``(cancelled, error)``.
+
+    A job nobody is waiting for still holds a GPU node until its own time limit
+    -- four hours by default -- so abandoning the wait without this leaks the
+    scarcest thing in the cluster, and the next user of that node waits behind
+    a run whose answer was thrown away.
+
+    Cancelling a job that has already finished is not an error: scancel says so
+    and exits zero, and the race between a job ending and this call is ordinary
+    rather than exceptional.
+    """
+    if not slurm_id:
+        return False, "no scheduler job id to cancel"
+    try:
+        done = subprocess.run(
+            ["scancel", slurm_id], capture_output=True, text=True, timeout=30
+        )
+    except FileNotFoundError:
+        return False, "scancel not found on PATH -- is this a Slurm cluster?"
+    except Exception as exc:  # noqa: BLE001 - the caller is already giving up
+        return False, f"{type(exc).__name__}: {exc}"
+    if done.returncode != 0:
+        return False, (done.stderr or done.stdout or "scancel failed").strip()
+    return True, ""
 
 
 def submit_sbatch(
@@ -322,6 +350,7 @@ def submit_sbatch(
     working_dir: str = "",
     env_vars: dict[str, str] | None = None,
     node: str = "",
+    tolerate_nonzero: bool = False,
 ) -> tuple[str, str]:
     """Submit command as a batch job. Returns (slurm_job_id, error_message).
 
@@ -339,6 +368,7 @@ def submit_sbatch(
             working_dir=working_dir,
             env_vars=env_vars,
             node=node,
+            tolerate_nonzero=tolerate_nonzero,
         )
     except ValueError as e:
         # Rendering rejects a malformed plan. This function promises

@@ -9,6 +9,7 @@ is the only caller that can assemble the bundle and trigger Autopsy.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shlex
@@ -226,12 +227,19 @@ def test_consan_launch_watch_autopsy_on_real_gpu(tmp_path: Path, monkeypatch) ->
     )
     write_job_json(job, jobs_root)
 
+    launch_options = {
+        "command": job.launch_command,
+        "job_name": job_id,
+        "log_path": str(watch_log),
+        "script_path": job_dir / "launch.sbatch",
+        "working_dir": str(_REPO),
+    }
+    if "tolerate_nonzero" in inspect.signature(launch).parameters:
+        # PR #424 moved this from process-global environment into the launch
+        # call so concurrent triages cannot change one another's policy.
+        launch_options["tolerate_nonzero"] = True
     scheduler_id, error = launch(
-        command=job.launch_command,
-        job_name=job_id,
-        log_path=str(watch_log),
-        script_path=job_dir / "launch.sbatch",
-        working_dir=str(_REPO),
+        **launch_options,
     )
     assert error == ""
     assert scheduler_id == "cia-hardware-smoke"

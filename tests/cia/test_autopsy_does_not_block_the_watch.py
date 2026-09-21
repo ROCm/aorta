@@ -91,7 +91,7 @@ class TestTheLoopKeepsGoing:
         release = threading.Event()
         examined: list[str] = []
 
-        def slow_autopsy(bundle, job, jobs_root):
+        def slow_autopsy(bundle, job, jobs_root, stop=None):
             started.set()
             release.wait(timeout=10)
 
@@ -176,7 +176,7 @@ class TestTheStateSurvivesTheProcess:
         calls: list[str] = []
         monkeypatch.setattr(
             "aorta.cia.watch.trigger.trigger_autopsy",
-            lambda bundle, job, jobs_root: calls.append(job.job_id),
+            lambda bundle, job, jobs_root, stop=None: calls.append(job.job_id),
         )
         _write_job(tmp_path, "cia-aaa")
 
@@ -190,7 +190,7 @@ class TestTheStateSurvivesTheProcess:
         calls: list[str] = []
         monkeypatch.setattr(
             "aorta.cia.watch.trigger.trigger_autopsy",
-            lambda bundle, job, jobs_root: calls.append(job.job_id),
+            lambda bundle, job, jobs_root, stop=None: calls.append(job.job_id),
         )
         job_dir = _write_job(tmp_path, "cia-aaa")
         record_autopsy_state(job_dir, "abandoned", job_id="cia-aaa")
