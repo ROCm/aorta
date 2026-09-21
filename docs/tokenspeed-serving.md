@@ -300,7 +300,7 @@ What follows is the configuration.
 
 | Key | Default | Notes |
 |---|---|---|
-| `rollout` | `false` | Enables the mode. The five keys below are rejected without it. |
+| `rollout` | `false` | Enables the mode. The keys below are rejected without it. |
 | `rollout_samples` | `4` | Completions per prompt — the `n` of the sampling API. Max 1024. |
 | `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
 | `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
