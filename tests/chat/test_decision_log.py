@@ -486,15 +486,130 @@ class TestEveryNamedJobIsFoundAndKeepsItsOwnVerdict:
             },
         ]
 
-    def test_one_job_named_twice_is_recorded_once(self):
+    def test_one_job_named_twice_is_recorded_once_and_keeps_its_verdict(self):
+        """Announce-then-finish is the ordinary shape of a progress log.
+
+        Deduplicating to the *first* mention recorded the row and dropped the
+        answer: the span for a repeated job ended at its own second mention, so
+        everything after it -- which is where a verdict appears, because a job
+        has no verdict when it starts -- was never read.
+        """
         results = decision_log._cia_results(
             "Job cia-20260918-064455-4fd02e started\n"
-            'Job cia-20260918-064455-4fd02e done\n  category: gpu_race'
+            "Job cia-20260918-064455-4fd02e done\n"
+            "  category: gpu_race\n  confidence: 0.82"
         )
 
-        assert [result["job_id"] for result in results] == [
-            "cia-20260918-064455-4fd02e"
+        assert results == [
+            {
+                "job_id": "cia-20260918-064455-4fd02e",
+                "category": "gpu_race",
+                "confidence": 0.82,
+            }
         ]
+
+    def test_a_job_named_again_after_another_job_keeps_its_verdict(self):
+        """The case that decides the rule, rather than just the reported input.
+
+        Bounding a span at the next *distinct* id fixes the announce-then-finish
+        shape above and still loses this one: the verdict follows a mention of
+        A that is not A's first, with B named in between. Every span that
+        follows a mention of A therefore belongs to A, not only the first.
+        """
+        results = decision_log._cia_results(
+            "Job cia-20260918-064455-4fd02e started\n"
+            "Job cia-20260918-071122-9ab31c started\n"
+            "Job cia-20260918-064455-4fd02e done\n"
+            "  category: gpu_race\n  confidence: 0.82"
+        )
+
+        assert results == [
+            {
+                "job_id": "cia-20260918-064455-4fd02e",
+                "category": "gpu_race",
+                "confidence": 0.82,
+            },
+            {
+                "job_id": "cia-20260918-071122-9ab31c",
+                "category": None,
+                "confidence": None,
+            },
+        ]
+
+    def test_a_bundle_path_repeating_the_id_does_not_truncate_the_verdict(self):
+        """One reported job, and it used to lose its own verdict.
+
+        ``_JOB_ID`` matches a bare id at the start of a line as well as a
+        ``Job`` prefix, and a listing prints the bundle path under the job --
+        which repeats the id. So this needs no duplicate *announcement* to hit
+        the same defect, which is what makes it more than a curiosity of the
+        input the review quoted.
+        """
+        results = decision_log._cia_results(
+            "Job cia-20260918-064455-4fd02e\n"
+            "  cia-20260918-064455-4fd02e/bundle.tar.gz\n"
+            "  category: numeric_instability\n  confidence: 0.41"
+        )
+
+        assert results == [
+            {
+                "job_id": "cia-20260918-064455-4fd02e",
+                "category": "numeric_instability",
+                "confidence": 0.41,
+            }
+        ]
+
+    def test_widening_the_read_does_not_leak_a_verdict_backwards(self):
+        """The narrowness control, and the property this PR exists to protect.
+
+        A span begins at a mention of its own job and ends before the next job
+        is named, so text following a mention of B is B's however many times A
+        was named earlier. If this ever fails, the fix above has reintroduced
+        exactly the misattribution the PR removed.
+        """
+        results = decision_log._cia_results(
+            "Job cia-20260918-064455-4fd02e started\n"
+            "Job cia-20260918-071122-9ab31c\n"
+            "  category: gpu_race\n  confidence: 0.82"
+        )
+
+        assert results == [
+            {
+                "job_id": "cia-20260918-064455-4fd02e",
+                "category": None,
+                "confidence": None,
+            },
+            {
+                "job_id": "cia-20260918-071122-9ab31c",
+                "category": "gpu_race",
+                "confidence": 0.82,
+            },
+        ]
+
+    def test_the_first_verdict_wins_so_the_change_is_additive_only(self):
+        """Why the first match across the spans wins rather than the last.
+
+        This is the safety property of widening the read, so it is pinned with
+        two *different* verdicts rather than the same one twice -- which is the
+        only input that can tell first-wins from last-wins apart. Taking the
+        first means a job that already had a verdict reports the same one it
+        always did, and the change can only turn a ``None`` into a verdict,
+        never one verdict into another.
+        """
+        first_only = (
+            "Job cia-20260918-064455-4fd02e\n"
+            "  category: gpu_race\n  confidence: 0.82"
+        )
+        then_revised = (
+            f"{first_only}\n"
+            "Job cia-20260918-064455-4fd02e\n"
+            "  category: numeric_instability\n  confidence: 0.41"
+        )
+
+        assert decision_log._cia_results(then_revised) == decision_log._cia_results(
+            first_only
+        )
+        assert decision_log._cia_results(then_revised)[0]["category"] == "gpu_race"
 
 
 class TestTheFieldsThatMakeARecordResolvable:

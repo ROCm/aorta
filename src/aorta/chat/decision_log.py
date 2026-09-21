@@ -187,37 +187,68 @@ def _cia_results(output: str) -> list[dict[str, Any]]:
     is absent from whatever reads this, while a job wearing another job's
     category is an answer, and a wrong one.
 
+    A job named more than once gets **every** span that follows one of its own
+    mentions, not only the first. Deduplicating to the first mention loses the
+    verdict whenever a tool announces a job before it has one -- ``Job X
+    started`` then ``Job X done: category: ...`` is the ordinary shape of a
+    progress log, and the second line is where the answer is. The same thing
+    happens with no repeated *announcement* at all: ``_JOB_ID`` also matches a
+    bare id at the start of a line, which is what the bundle path under a
+    listing looks like, so a single reported job could truncate its own
+    evidence.
+
+    Spanning to the next mention of ANY job is what keeps that safe, and it is
+    a strictly wider read rather than a looser one: a span only ever begins at
+    a mention of this job and ends before the next job is named, so no text
+    this change newly consults can belong to a different job. Bounding at the
+    next *distinct* id instead would fix the announce-then-finish case and
+    still lose an interleaved one (``Job A`` / ``Job B`` / ``Job A done``),
+    where the answer sits after a mention of A that is not A's first.
+
     A verdict that is genuinely absent stays ``None``. The job id is what makes
     the row joinable; ``jobs_root`` on the same event is what the id resolves
     against, and the report on disk is a better source for a verdict than a
     rendered string in any case.
     """
     matches = list(_JOB_ID.finditer(output))
-    results: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    # Insertion-ordered, so each job keeps one row at the position it was first
+    # named -- the deduplication the `seen` set used to do, without the cost.
+    spans: dict[str, list[str]] = {}
     for position, match in enumerate(matches):
-        job_id = match.group("id")
-        if job_id in seen:
-            continue
-        seen.add(job_id)
         following = (
             matches[position + 1].start()
             if position + 1 < len(matches)
             else len(output)
         )
-        segment = output[match.end() : following]
-        category = _CATEGORY.search(segment)
-        confidence = _CONFIDENCE.search(segment)
+        spans.setdefault(match.group("id"), []).append(
+            output[match.end() : following]
+        )
+    results: list[dict[str, Any]] = []
+    for job_id, job_spans in spans.items():
+        confidence = _first_value(_CONFIDENCE, job_spans)
         results.append(
             {
                 "job_id": job_id,
-                "category": category.group("value") if category else None,
-                "confidence": (
-                    float(confidence.group("value")) if confidence else None
-                ),
+                "category": _first_value(_CATEGORY, job_spans),
+                "confidence": float(confidence) if confidence else None,
             }
         )
     return results
+
+
+def _first_value(pattern: re.Pattern[str], spans: list[str]) -> str | None:
+    """The first ``value`` group ``pattern`` finds across *spans*, in order.
+
+    First rather than last: the spans are in document order, and a rendering
+    that states a verdict twice states the same one twice. Taking the first
+    keeps the answer identical to the single-mention case, so widening the
+    read cannot change a verdict that was already being reported.
+    """
+    for span in spans:
+        found = pattern.search(span)
+        if found:
+            return found.group("value")
+    return None
 
 
 def _jobs_root() -> str | None:
