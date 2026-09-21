@@ -4716,6 +4716,176 @@ def test_the_two_audits_draw_the_unreadable_line_in_the_same_place(
     ], result.failure_details
 
 
+@pytest.mark.parametrize(
+    "unusable",
+    [[], None, "abc", {}, {"a": 1}, 5, [1.5], [-1], [True]],
+    ids=[
+        "empty",
+        "null",
+        "string",
+        "empty-object",
+        "object",
+        "number",
+        "fractional",
+        "negative",
+        "boolean",
+    ],
+)
+def test_the_two_audits_agree_that_a_present_output_lens_must_be_usable(
+    tmp_path, monkeypatch, unusable
+):
+    """One rule about a present array, asserted as an equivalence rather than twice.
+
+    The host's `_valid_output_lens` calls every one of these unusable, and under
+    `save_detailed` that makes the step `result_json_unusable`. The container
+    tested the *value* instead of the key, so `[]`, a string, an object and a
+    number fell through to the per-request fallback and the same export came
+    back `OK` or `SHORTLEN` from the layer that runs first -- one document, two
+    names, and the wrong one visible.
+
+    Enumerated here rather than restated in each layer's own tests, because that
+    restating is what let the two drift apart in the first place.
+    """
+    doc = {"completed": 32, "failed": 0, "total_output_tokens": 8192, "output_lens": unusable}
+    verdict = _run_script_audit(tmp_path, doc, min_mean_output=8)
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    # Assigned after the fixture rather than through it: `output_lens=None` is
+    # the fixture's "generate a healthy array" sentinel, so the null case has to
+    # be written onto the document to be the null case at all.
+    host_doc = _rollout_doc()
+    host_doc["output_lens"] = unusable
+    _stub_docker(wl, monkeypatch, docs=[host_doc])
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
+def test_a_present_null_output_lens_is_not_an_absent_one(tmp_path):
+    """The shape that separates testing the key from testing the value.
+
+    `doc.get` answers `None` for an absent key and for `"output_lens": null`
+    alike, so every value-based test -- including `is not None` -- reads a
+    present null as an absence and falls back per request on it. Only presence
+    of the key distinguishes them, which is why that is what the audit asks.
+    """
+    absent = _run_script_audit(
+        tmp_path, {"completed": 32, "failed": 0, "total_output_tokens": 8192}, min_mean_output=8
+    )
+    assert absent.startswith("OK"), absent
+
+    present_null = _run_script_audit(
+        tmp_path,
+        {"completed": 32, "failed": 0, "total_output_tokens": 8192, "output_lens": None},
+        min_mean_output=8,
+    )
+    assert present_null.startswith("UNPARSEABLE"), present_null
+
+
+def test_the_in_container_audit_still_falls_back_when_output_lens_is_absent(tmp_path):
+    """The narrowness control for the two tests above.
+
+    Refusing every export would satisfy them both. An absent array is a
+    configuration -- it is what `save_detailed: false` produces -- so it must
+    still reach the per-request fallback and say in the verdict that it did.
+    """
+    short = _run_script_audit(
+        tmp_path, {"completed": 32, "failed": 0, "total_output_tokens": 33}, min_mean_output=8
+    )
+    assert short.startswith("SHORTLEN"), short
+    assert "per_request" in short, short
+
+    healthy = _run_script_audit(
+        tmp_path, {"completed": 32, "failed": 0, "total_output_tokens": 8192}, min_mean_output=8
+    )
+    assert healthy.startswith("OK"), healthy
+
+
+@pytest.mark.parametrize("backend", [["triton"], {"triton": True}], ids=["list", "object"])
+def test_a_non_string_sampling_backend_is_a_recipe_error_not_a_crash(tmp_path, backend):
+    """An unhashable value reached a set membership test and left as `TypeError`.
+
+    The first condition already excluded non-strings, but only for itself: the
+    branches that build the explanation still read the raw value, and
+    `sampling_backend: [triton]` raised `unhashable type: 'list'` out of
+    `in _SAMPLING_BACKENDS` -- a crash where the recipe error this block exists
+    to raise should have been.
+    """
+    with pytest.raises(ValueError, match="sampling_backend"):
+        _rollout(tmp_path, sampling_backend=backend).setup()
+
+
+def test_a_named_backend_still_gets_its_own_explanation(tmp_path):
+    """Narrowness: normalising the value must not flatten the two named cases.
+
+    `greedy` and the CUDA-only backends each carry a reason a reader needs, and
+    a fix that routed every rejection through the bare message would pass the
+    test above while deleting them.
+    """
+    with pytest.raises(ValueError, match="greedy returns the argmax"):
+        _rollout(tmp_path, sampling_backend="greedy").setup()
+    with pytest.raises(ValueError, match="CUDA-only"):
+        _rollout(tmp_path, sampling_backend="flashinfer").setup()
+
+
+def test_a_step_that_dropped_requests_is_not_also_called_a_short_policy(
+    tmp_path, monkeypatch
+):
+    """The floor's detail ends "Every request was served" -- so it must not run
+    on a record that just reported the opposite.
+
+    A partially failed step produced `served_request_shortfall` naming
+    `completed=16 failed=16` and then `rollout_output_too_short` asserting every
+    request was served, in one result. The audit owns the counts; the floor owns
+    the lengths, and only once the counts are sound.
+    """
+    wl = _rollout(tmp_path, num_prompts=32, rollout_samples=4, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=16, failed=16, total_output_tokens=64, output_lens=[1] * 64
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "served_request_shortfall"
+    ], result.failure_details
+
+
+def test_the_floor_still_fires_when_the_counts_are_sound(tmp_path, monkeypatch):
+    """Narrowness for the test above: suppressing the floor outright would pass
+    it. The same short export with every request served is the case the floor
+    exists for, and there its closing sentence is true."""
+    wl = _rollout(tmp_path, num_prompts=32, rollout_samples=4, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=32, failed=0, total_output_tokens=128, output_lens=[1] * 128
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "rollout_output_too_short"
+    ], result.failure_details
+
+
 def test_rollout_reports_generated_length_per_request(tmp_path, monkeypatch):
     """Per *request*, and named that way on purpose.
 

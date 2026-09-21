@@ -82,12 +82,14 @@
 #                         0 to disable. Read from the mean of the export's
 #                         output_lens, one entry per completion, so nothing is
 #                         assumed about whether the gateway's
-#                         usage.completion_tokens sums all n choices. Without
-#                         that array it falls back to
+#                         usage.completion_tokens sums all n choices. With no
+#                         such key it falls back to
 #                         total_output_tokens/completed -- per *request*, the
 #                         weaker rule -- and the verdict names which basis was
-#                         used. Guards the collapsed-policy case described at
-#                         the audit below                   (default 0)
+#                         used; a key that is present but unusable is refused
+#                         rather than fallen back on. Guards the
+#                         collapsed-policy case described at the audit below
+#                                                           (default 0)
 #   TS_SAVE_DETAILED      1 to keep the export's per-request arrays, which is
 #                         what carries `output_lens`       (default 0)
 #   TS_SEED               dataset/sampling seed           (default 0)
@@ -1238,12 +1240,22 @@ if min_mean_output > 0:
     # reading of it, it is a second opinion about a document neither layer can
     # trust.
     #
+    # Keyed on presence of the key rather than on the value, which is the whole
+    # rule and is why it is written once: `doc.get` answers `None` both for an
+    # absent key and for `"output_lens": null`, so any test of the *value* --
+    # including `is not None` -- reads a present null as an absence and falls
+    # back on it. `[]`, a string and an object are the same mistake seen at
+    # other types.
+    #
     # The fallback survives for exactly one case: no array at all, which is
     # what `save_detailed: false` produces and is a configuration rather than a
     # defect.
-    if isinstance(lens, list) and len(lens) > 0:
-        if not all(_whole(v) for v in lens):
-            print("UNPARSEABLE output_lens (invalid entry or over cap)")
+    if "output_lens" in doc:
+        if not (isinstance(lens, list) and lens and all(_whole(v) for v in lens)):
+            print(
+                f"UNPARSEABLE output_lens {type(lens).__name__} "
+                "(not a non-empty array of lengths within cap)"
+            )
             raise SystemExit(0)
         mean_output = sum(lens) / len(lens)
         basis = f"output_lens n={len(lens)}"

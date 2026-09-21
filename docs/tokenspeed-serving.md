@@ -273,8 +273,9 @@ matter most:
 | `num_warmups` | `1` | Warmup requests *within* a bench step. |
 | `ignore_eos` | `true` (`false` under `rollout`) | Holds OSL fixed so cells do equal work. `false` is accepted for `sharegpt`, and on `random` only under `rollout`, which reaches it through the request payload. On plain `random` the bench CLI pins it regardless, so the combination is rejected. See below and [Rollout mode](#rollout-mode). |
 | `rollout` | `false` | Shape the load like an RL rollout. See [Rollout mode](#rollout-mode). |
-| `save_detailed` | `false` | Keep the export's per-request arrays. `true` by default under `rollout`. |
+| `save_detailed` | `false` | Keep the export's per-request arrays — `true` by default under `rollout`, which is measured through them. Those arrays describe a run over your own prompts, and exactly what `--save-detailed` records per request is the bench's decision rather than this workload's, so treat the export as sensitive whenever the prompts are: it is written under `work_dir` and stays there unless `keep_work_dir: false`. |
 | `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch and the HF cache are per-uid beneath it, at `<work_dir>/u<uid>`. See below. |
+| `keep_work_dir` | `true` | Keep this trial's exports after cleanup. `false` removes them, which is the control to reach for when a run's artifacts must not outlive it. |
 | `hf_home` | `<work_dir>/u<uid>/hf` | Set it to share one pre-populated cache between users; see below for why that has to be deliberate. |
 | `hip_visible_devices` | unset | Which GPUs the container sees. A visibility filter, not an allocation. |
 | `exclusive_gpus` | `false` | Assert that no other job shares this node's GPUs. Only then does unreleased VRAM fail the trial. |
@@ -342,7 +343,7 @@ the metric set it reported before this mode existed.
 | Metric | Meaning |
 |---|---|
 | `mean_output_tokens_per_request` | `total_output_tokens / completed`, meaned across steps. The reading to trust — computed from fields every export carries. |
-| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of generated length over the entries of the export's `output_lens`, pooled across measured steps. Needs `save_detailed`. One entry per completion, not per request, whenever `rollout_samples > 1` — see the note below. Entries must be whole, non-negative, and on `random` no larger than `output_len`, which is each completion's `max_tokens`; an export breaching any of those is `result_json_unusable` rather than a distribution. |
+| `generated_tokens_p50` / `_p90` / `_p99` | Percentiles of generated length over the entries of the export's `output_lens`, pooled across measured steps. Needs `save_detailed`. One entry per recorded completion; whether a gateway records one per request or one per choice under `rollout_samples > 1` is its decision rather than this workload's — see the note below, which says how to read it off `generated_tokens_count`. Entries must be whole, non-negative, and on `random` no larger than `output_len`, which is each completion's `max_tokens`; an export breaching any of those is `result_json_unusable` rather than a distribution. |
 | `generated_tokens_mean` / `_min` / `_max` / `_std` / `_count` | The rest of the distribution. |
 
 `generated_tokens_*` comes from the export's `output_lens` array, which the bench
@@ -352,10 +353,10 @@ array, for the same reason the scalar aggregate requires that: a distribution
 pooled over whichever steps happened to have it would describe a subset while
 reading as the trial's.
 
-Six things about this mode are traps rather than settings, and all of them are
-explained at length in `docs/tokenspeed-rl-post-training.md`, section 2 ("what a
-rollout loop needs from the engine, and what TokenSpeed has"), which lands with
-the stacked follow-up:
+What follows are traps rather than settings, and all of them are explained at
+length in `docs/tokenspeed-rl-post-training.md`, section 2 ("what a rollout loop
+needs from the engine, and what TokenSpeed has"), which lands with the stacked
+follow-up:
 
 - **`ignore_eos` is forced on for `dataset: random` by the bench CLI itself**,
   after argument parsing, regardless of the flags. EOS-respecting generation is

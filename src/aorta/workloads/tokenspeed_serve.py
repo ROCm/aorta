@@ -1144,17 +1144,27 @@ class TokenSpeedServeWorkload(Workload):
         # name is a recipe error rather than an argparse failure inside the
         # container after the weights have loaded.
         backend = self.config.get("sampling_backend", _DEFAULT_SAMPLING_BACKEND)
-        if not isinstance(backend, str) or backend not in _ROLLOUT_SAMPLING_BACKENDS:
-            if backend == "greedy":
+        # Normalised to a name or to `None` once, here, because every test below
+        # reads it as a name. Spelling the type check into the first condition
+        # only guarded that condition: the branches that build the explanation
+        # still ran on the raw value, and `sampling_backend: [triton]` reached
+        # `in _SAMPLING_BACKENDS` as an unhashable list and left as a
+        # `TypeError` -- a crash in place of the configuration error this block
+        # exists to raise. `None` is not a registered backend and compares
+        # unequal to every name, so it fails through to the same `ValueError`,
+        # which reports the value the recipe actually set.
+        name = backend if isinstance(backend, str) else None
+        if name not in _ROLLOUT_SAMPLING_BACKENDS:
+            if name == "greedy":
                 extra = (
                     " A rollout samples; greedy returns the argmax and ignores "
                     "temperature, top_p and seed, so the n completions per prompt "
                     "would be one decode repeated -- the same run temperature: 0 is "
                     "rejected for."
                 )
-            elif backend in _SAMPLING_BACKENDS:
+            elif name in _SAMPLING_BACKENDS:
                 extra = (
-                    f" {backend} is CUDA-only and this workload serves from ROCm "
+                    f" {name} is CUDA-only and this workload serves from ROCm "
                     "images, where it is not registered at all. Accepting it here "
                     "would move the failure to server startup, after the weights "
                     "have loaded."
@@ -3044,7 +3054,8 @@ class TokenSpeedServeWorkload(Workload):
             # is an export that cannot be believed. Reading it as "no failures"
             # would let `completed == num_prompts, failed == -1` through with the
             # metrics computed from whatever produced the -1.
-            if failed != 0 or completed != self._num_prompts:
+            shortfall = failed != 0 or completed != self._num_prompts
+            if shortfall:
                 failure_details.append(
                     {
                         "reason": "served_request_shortfall",
@@ -3083,9 +3094,22 @@ class TokenSpeedServeWorkload(Workload):
             # zero or fractional total came back as *both* an unusable export
             # and a collapsed policy -- reinstating the double report from the
             # other side. Stated as a condition now rather than left implicit.
+            # The same division of labour applies to the counts, and it was the
+            # one case left open. The floor's own detail ends "Every request was
+            # served, so this is a policy that stopped generating rather than a
+            # serving failure" -- which is a claim about the counts, and on a
+            # record that also reported `served_request_shortfall` it was false
+            # in the same result that had just printed the contradicting numbers.
+            # Reusing the audit's own condition rather than restating it, so the
+            # sentence is true by construction instead of by maintenance.
             missing = self._missing_core_metrics(record)
 
-            if self._rollout and self._min_mean_output_tokens > 0 and not missing:
+            if (
+                self._rollout
+                and self._min_mean_output_tokens > 0
+                and not missing
+                and not shortfall
+            ):
                 total_output = record.doc.get("total_output_tokens")
                 # Only compare when there is a number to compare. Every other
                 # shape of `total_output_tokens` -- absent, non-numeric, boolean,
@@ -3399,8 +3423,8 @@ class TokenSpeedServeWorkload(Workload):
 
         ``generated_tokens_*`` comes from the export's ``output_lens`` array,
         which is only present with ``save_detailed``. One entry per recorded
-        completion, which is *not* the same denominator as the metric above
-        whenever ``rollout_samples > 1``: the smoke recipe reads
+        completion, which need not be the same denominator as the metric above
+        under ``rollout_samples > 1``: the smoke recipe reads
         ``mean_output_tokens_per_request`` at 1024 for ``n=4`` against a
         256-token allowance no single choice can exceed, so on that gateway the
         array holds per-choice lengths while the scalar is per request.
