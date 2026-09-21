@@ -306,6 +306,26 @@ class Score:
         return self.tier >= 3 and self.category_credit < 1.0
 
 
+def delivered(row: dict[str, Any]) -> bool:
+    """Did the provider actually return a completion for this row?
+
+    Lives here because ``run_e2e.py`` and ``rescore_e2e.py`` both have to ask
+    it and must not answer it differently -- ``rescore_e2e`` is deliberately
+    free of the GPU-side imports, so this module is the only thing they share.
+
+    A failed call records an empty ``raw``, which scores tier 0 like a model
+    that emitted nothing usable. The two are not the same event and must not
+    land in the same statistic: an empty string from a provider outage is an
+    absent observation, and counting it as model output makes an outage read as
+    malformed output, or -- when a whole group fails -- as a collapsed group,
+    which is the diagnosis for greedy decoding. Rows are kept in the results
+    file either way; it is the *statistics* they are excluded from, and the
+    counts are reported beside them so the exclusion is visible rather than
+    silent.
+    """
+    return not row.get("transport_error")
+
+
 def _consumer_outcome_of_raw(raw: str, offered: list[str]) -> str:
     """What the real proposer would do with this reply, fences and all.
 
@@ -753,6 +773,7 @@ def baselines() -> list[dict[str, Any]]:
     still worth: `always abstain, one mitigation` reaches 0.9 while reading
     nothing at all, because a single-name honest abstention is a *cheap* answer
     and cheapness is most of what this reward can see.
+
     """
     rows = []
     for name, raw in (

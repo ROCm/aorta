@@ -80,7 +80,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from proposal_reward import MAX_TIER, Proposal, score_proposal  # noqa: E402
+from proposal_reward import MAX_TIER, Proposal, delivered, score_proposal  # noqa: E402
 from triage_reward import (  # noqa: E402
     ATTRIBUTION_WEIGHT,
     VERDICT_WEIGHT,
@@ -711,6 +711,25 @@ def _always_pass_floor(triage: list[dict[str, Any]]) -> float | None:
 def aggregate(
     proposals: list[dict[str, Any]], triage: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    # Every statistic below describes what the *model* did, so every statistic
+    # below is computed over the calls that reached it. A failed call records
+    # an empty `raw`, and an empty `raw` scores tier 0 -- indistinguishable, to
+    # a mean or a distinct-count, from a model that emitted garbage. Left in,
+    # a provider outage reads as malformed output, and an outage that takes a
+    # whole group reads as `distinct_completions == 1`, which is this file's
+    # own diagnosis for greedy decoding. Same defect as the `text=None` hole in
+    # `nccl_roundtrip_check.decide_verdict`: absence of evidence encoded as
+    # evidence.
+    #
+    # The rows themselves are untouched -- the caller writes all of them,
+    # `transport_error` and all -- and the counts are reported below, so
+    # dropping them from the statistics is visible in the summary rather than
+    # silent.
+    requested = list(proposals)
+    proposals = [p for p in requested if delivered(p)]
+    triage_requested = list(triage)
+    triage = [t for t in triage_requested if delivered(t)]
+
     rewards = [p["reward"] for p in proposals]
     tiers = [p["tier"] for p in proposals]
 
@@ -764,9 +783,18 @@ def aggregate(
     for p in proposals:
         groups.setdefault(p["scenario_id"], []).append(p["reward"])
         raws.setdefault(p["scenario_id"], []).append(p["raw"])
+    # Counted over every row, delivered or not, so `n` < `requested` marks a
+    # group whose spread rests on fewer samples than were asked for. Without
+    # it a group reduced to one delivered completion reports `degenerate: true`
+    # and `distinct_completions: 1`, which is the signature of a reward that
+    # saturated rather than of a group that mostly failed to arrive.
+    asked: dict[str, int] = {}
+    for p in requested:
+        asked[p["scenario_id"]] = asked.get(p["scenario_id"], 0) + 1
     per_scenario = {
         scenario: {
             "n": len(vals),
+            "requested": asked.get(scenario, len(vals)),
             "distinct_completions": len(set(raws[scenario])),
             "mean": round(_mean(vals), 4),
             "min": round(min(vals), 4),
@@ -784,7 +812,15 @@ def aggregate(
     triage_rewards = [t["reward"] for t in triage]
     return {
         "proposal": {
+            # `n` is what the statistics below were computed over, which is the
+            # number of calls that came back. `requested` is what was asked
+            # for. They differ exactly when the provider failed, and quoting a
+            # mean over `requested` would be quoting observations nobody made.
             "n": len(proposals),
+            "requested": len(requested),
+            "delivered_rate": round(len(proposals) / len(requested), 4)
+            if requested
+            else 0.0,
             "mean_reward": round(_mean(rewards), 4),
             "min_reward": round(min(rewards), 4) if rewards else 0.0,
             "max_reward": round(max(rewards), 4) if rewards else 0.0,
@@ -812,7 +848,10 @@ def aggregate(
             else 0.0,
             "shotgun_all_offered": shotgun,
             "shotgun_rate": round(shotgun / len(proposals), 4) if proposals else 0.0,
-            "offered_count": len(proposals[0]["offered"]) if proposals else 0,
+            # Read off any row, delivered or not: `offered` is a property of
+            # the request this driver made, not of the reply it got back, so a
+            # run whose every call failed still knows what it offered.
+            "offered_count": len(requested[0]["offered"]) if requested else 0,
             "per_scenario": per_scenario,
             "degenerate_groups": degenerate_groups,
             "collapsed_groups": collapsed_groups,
@@ -822,10 +861,17 @@ def aggregate(
             # would be quoting the same observation five times.
             "effective_n": len({(p["scenario_id"], p["raw"]) for p in proposals}),
             "groups": len(per_scenario),
-            "transport_errors": sum(1 for p in proposals if p["transport_error"]),
+            # Counted over every row, since a delivered row is one with no
+            # transport error: counting it over `proposals` is the tautology
+            # zero, which is exactly the number that would hide an outage.
+            "transport_errors": sum(1 for p in requested if p["transport_error"]),
         },
         "triage": {
             "n": len(triage),
+            "requested": len(triage_requested),
+            "delivered_rate": round(len(triage) / len(triage_requested), 4)
+            if triage_requested
+            else 0.0,
             # Computed from the labels this run actually scored, not pinned to
             # the nine the corpus originally shipped. `--include-disagreements`,
             # a rebuilt corpus, or any subset changes the mix, and a hard-coded
@@ -845,7 +891,9 @@ def aggregate(
                 _mean([t["attribution_f1"] for t in triage]), 4
             ),
             "parse_failures": sum(1 for t in triage if t["parse_error"]),
-            "transport_errors": sum(1 for t in triage if t["transport_error"]),
+            "transport_errors": sum(
+                1 for t in triage_requested if t["transport_error"]
+            ),
             "per_scenario": {
                 t["scenario_id"]: {
                     "said": t["answer"]["verdict"],

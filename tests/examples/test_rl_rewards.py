@@ -3070,3 +3070,119 @@ def test_mixing_sending_and_receiving_rounds_is_refused(tmp_path):
     assert proc.returncode != 0, output
     assert "separate invocations" in output, output
 
+
+# --------------------------------------------------------------------------- #
+# A provider outage is not model output
+# --------------------------------------------------------------------------- #
+
+
+def _row(scenario, sample, raw, reward, tier, error=""):
+    return {
+        "scenario_id": scenario,
+        "sample": sample,
+        "raw": raw,
+        "reward": reward,
+        "tier": tier,
+        "transport_error": error,
+        "failure_kind": "",
+        "consumer_outcome": "accepted" if raw else "silent_stop",
+        "category_claimed": "checkpoint_race" if raw else None,
+        "mitigations_claimed": ["tf32_off"] if raw else None,
+        "offered": ["tf32_off", "xnack"],
+    }
+
+
+def test_a_failed_call_does_not_enter_the_reward_mean(run_e2e):
+    """A provider failure records an empty completion, which scores tier 0.
+
+    Left in the statistics it is indistinguishable from a model that emitted
+    nothing usable, so an outage reads as malformed output and drags the mean
+    toward zero. The same shape as the `text=None` hole in `decide_verdict`:
+    an absent observation standing in for an observation.
+
+    Both numbers are reported, so excluding the row is visible rather than
+    silent -- `n` is what was scored and `requested` is what was asked for.
+    """
+    proposals = [
+        _row("s1", 0, '{"a": 1}', 1.0, 5),
+        _row("s1", 1, '{"a": 2}', 1.0, 5),
+        _row("s1", 2, "", 0.0, 0, error="APIConnectionError: connection reset"),
+    ]
+    out = run_e2e.aggregate(proposals, [])["proposal"]
+
+    assert out["n"] == 2
+    assert out["requested"] == 3
+    assert out["transport_errors"] == 1
+    assert out["delivered_rate"] == round(2 / 3, 4)
+    # The mean over what came back, not over what was asked for. The failed row
+    # would have pulled 1.0 down to 0.6667.
+    assert out["mean_reward"] == 1.0
+    # And the format rates, which are the same claim about a different axis: a
+    # call that never reached the provider did not fail to parse.
+    assert out["parse_rate"] == 1.0
+    assert out["tier_distribution"]["tier_0"] == 0
+
+
+def test_an_outage_is_not_reported_as_a_collapsed_group(run_e2e):
+    """The worse half: a whole group failing looks like greedy decoding.
+
+    `distinct_completions == 1` is this file's own diagnosis for a sampler that
+    is not sampling -- the defect that cost the first end-to-end run. Three
+    failed calls all record `raw: ""`, so the group reports one distinct
+    completion and zero spread, which is that signature exactly, produced by an
+    outage instead. `requested` next to `n` is what makes the difference
+    legible in the per-scenario block.
+    """
+    proposals = [
+        _row("s1", 0, '{"a": 1}', 1.0, 5),
+        _row("s1", 1, '{"a": 2}', 0.6, 3),
+        _row("s2", 0, "", 0.0, 0, error="Timeout"),
+        _row("s2", 1, "", 0.0, 0, error="Timeout"),
+        _row("s2", 2, "", 0.0, 0, error="Timeout"),
+    ]
+    out = run_e2e.aggregate(proposals, [])["proposal"]
+
+    # The wholly-failed group is not a group: it contributed no observation.
+    assert "s2" not in out["per_scenario"], out["per_scenario"]
+    assert out["collapsed_groups"] == 0
+    assert out["degenerate_groups"] == 0
+    assert out["per_scenario"]["s1"]["requested"] == 2
+    assert out["transport_errors"] == 3
+    # `offered` describes the request, so it survives even a total outage.
+    assert out["offered_count"] == 2
+
+
+def test_the_rescorer_skips_rows_that_never_reached_the_provider(rescore_e2e):
+    """Second instance of the same class, on the path that outlives the GPU.
+
+    `rescore_e2e` re-scores from the archived wire text, so every recorded run
+    is replayed through it long after the hardware is gone -- and it read
+    `row["raw"]` for every row, transport errors included, dropping the
+    `transport_error` field entirely on the way out. Fixing only `run_e2e`
+    would leave the durable half of the measurement still counting outages as
+    empty completions.
+    """
+    doc = {
+        "meta": {"candidates": ["tf32_off", "xnack", "none"], "tried": []},
+        "proposals": [
+            _row("s1", 0, json.dumps({
+                "category": "checkpoint_race", "hypothesis": "h",
+                "next_mitigations": ["tf32_off"], "confidence": 0.5,
+                "stop": False,
+            }), 1.0, 5),
+            _row("s1", 1, "", 0.0, 0, error="APIConnectionError: reset"),
+        ],
+    }
+    rows = rescore_e2e.rescore_recorded(doc)
+    assert len(rows) == 1
+    assert rows[0]["sample"] == 0
+
+    analysis = rescore_e2e.analyse(doc)
+    assert analysis["n"] == 1
+    assert analysis["requested"] == 2
+    assert analysis["transport_errors"] == 1
+    # The empty row would have been a second, distinct "completion" here, so a
+    # group of one real answer would have reported spread it does not have.
+    assert analysis["per_scenario"]["s1"]["distinct_completions"] == 1
+    assert analysis["per_scenario"]["s1"]["spread_within_group"] == 0.0
+

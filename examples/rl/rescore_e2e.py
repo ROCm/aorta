@@ -62,6 +62,7 @@ from proposal_reward import (  # noqa: E402
     ABSTENTION_CATEGORY,
     Proposal,
     Score,
+    delivered,
     score_proposal,
 )
 
@@ -134,10 +135,19 @@ def reference_policies(offered: list[str]) -> dict[str, str]:
 
 
 def rescore_recorded(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    """Re-score every recorded proposal from its raw completion text.
+    """Re-score every *delivered* proposal from its raw completion text.
 
     Reads `raw`, never the stored `reward`: the stored value is the "before" and
     has to stay untouched for the comparison to mean anything.
+
+    Rows whose call never reached the provider are skipped rather than scored.
+    Their `raw` is `""`, which re-scores to tier 0 exactly like a model that
+    emitted nothing usable -- so leaving them in makes an outage look like
+    malformed output in the mean, and, when a whole group fails, like a group
+    of identical completions in `distinct_completions`. This file is the
+    durable half of the measurement: every recorded run is re-scored through
+    here long after the GPU is gone, so the exclusion matters more here than it
+    does upstream. `transport_errors` below reports how many were skipped.
     """
     meta = doc["meta"]
     candidates = list(meta["candidates"])
@@ -145,6 +155,8 @@ def rescore_recorded(doc: dict[str, Any]) -> list[dict[str, Any]]:
 
     out: list[dict[str, Any]] = []
     for row in doc["proposals"]:
+        if not delivered(row):
+            continue
         score = score_proposal(
             Proposal(
                 name=f"{row['scenario_id']}:sample{row['sample']}",
@@ -270,7 +282,14 @@ def analyse(doc: dict[str, Any]) -> dict[str, Any]:
         "condition": meta.get("condition"),
         "model": meta.get("model"),
         "offered_count": len(offered),
+        # `n` counts what was scored; `requested` counts what was asked for.
+        # A gap means the provider failed on the difference, and those rows are
+        # excluded above rather than scored as empty completions.
         "n": len(rows),
+        "requested": len(doc["proposals"]),
+        "transport_errors": sum(
+            1 for row in doc["proposals"] if not delivered(row)
+        ),
         "model_mean_before": round(model_mean_before, 4),
         "model_mean_after": round(model_mean, 4),
         "references": {
