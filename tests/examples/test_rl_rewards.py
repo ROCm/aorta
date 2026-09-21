@@ -3783,3 +3783,130 @@ def test_the_report_survives_a_step_that_never_posted_an_update(
     assert nccl_roundtrip_check._update_seconds(ran) == 1.25
 
 
+def test_check_determinism_fails_on_an_outage_rather_than_passing(rescore_e2e, capsys):
+    """A flag that answers "is the rollout sampling?" from zero completions.
+
+    It scanned only the scenarios that survived, so a scenario whose every
+    request failed was simply absent, `collapsed` stayed empty and the command
+    returned 0. Worse than silent: this is the flag someone runs *because* they
+    suspect the rollout is degenerate.
+    """
+    def row(scenario, sample, raw, reward, tier, error=""):
+        return _row(scenario, sample, raw, reward, tier, error)
+
+    meta = {"candidates": ["tf32_off", "xnack", "none"], "tried": []}
+
+    total_outage = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [
+            row("s1", 0, "", 0.0, 0, "Timeout"),
+            row("s1", 1, "", 0.0, 0, "Timeout"),
+        ],
+    })
+    assert total_outage["per_scenario"] == {}
+
+    rc = rescore_e2e.check_determinism([dict(total_outage, source="run.json")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "delivered no completions" in err, err
+    # The advice has to name the cause. "Set a temperature" is what the
+    # collapsed branch says and it is the wrong fix for an outage.
+    assert "temperature" not in err, err
+
+
+def test_a_thin_group_is_not_reported_as_a_collapsed_one(rescore_e2e, capsys):
+    """The sibling: one delivered completion out of eight is not collapse.
+
+    `distinct_completions == 1` is true either way, so a group that mostly
+    failed to arrive was reported as degenerate sampling and the operator was
+    told to set a temperature -- on a rollout that may already have been
+    sampling correctly. Delivery is checked before diversity so the advice
+    names the cause rather than whichever check ran first.
+    """
+    def row(scenario, sample, raw, reward, tier, error=""):
+        return _row(scenario, sample, raw, reward, tier, error)
+
+    good = json.dumps({
+        "category": "checkpoint_race", "hypothesis": "h",
+        "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False,
+    })
+    meta = {"candidates": ["tf32_off", "xnack", "none"], "tried": []}
+
+    thin = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [
+            row("s1", 0, good, 1.0, 5),
+            row("s1", 1, "", 0.0, 0, "Timeout"),
+            row("s1", 2, "", 0.0, 0, "Timeout"),
+        ],
+    })
+    assert thin["per_scenario"]["s1"]["n"] == 1
+    assert thin["per_scenario"]["s1"]["requested"] == 3
+
+    rc = rescore_e2e.check_determinism([dict(thin, source="run.json")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "delivered 1/3" in err, err
+    assert "temperature" not in err, err
+
+
+def test_a_genuinely_collapsed_group_still_reports_collapse(rescore_e2e, capsys):
+    """Narrowness: full delivery plus one distinct completion is the real thing.
+
+    This is the finding the flag exists for -- the greedy-decoding defect that
+    cost the first end-to-end run -- so the delivery checks must not swallow it.
+    """
+    def row(scenario, sample, raw, reward, tier, error=""):
+        return _row(scenario, sample, raw, reward, tier, error)
+
+    same = json.dumps({
+        "category": "checkpoint_race", "hypothesis": "h",
+        "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False,
+    })
+    meta = {"candidates": ["tf32_off", "xnack", "none"], "tried": []}
+
+    collapsed = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [row("s1", 0, same, 1.0, 5), row("s1", 1, same, 1.0, 5)],
+    })
+    rc = rescore_e2e.check_determinism([dict(collapsed, source="run.json")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "single distinct completion" in err, err
+    assert "Set a temperature" in err, err
+
+
+def test_a_run_that_delivered_nothing_is_not_a_measurement(run_e2e):
+    """Third member of the transport-error family, on the driver's own exit.
+
+    A reporter's exit code answers "did I produce a measurement", not "was the
+    measurement good" -- a poor reward is a finding and stays 0. But a run
+    where every request failed wrote a file with no model output in it, and
+    returning 0 says the measurement happened.
+    """
+    outage = run_e2e.aggregate(
+        [_row("s1", 0, "", 0.0, 0, error="Timeout")],
+        [],
+    )
+    assert outage["proposal"]["delivered_rate"] == 0.0
+    assert run_e2e.is_empty_measurement(outage) is True
+
+    # A partial run is deliberately *not* caught: one delivered completion is a
+    # thin measurement, which `delivered_rate` already reports and which is a
+    # finding rather than a failure to measure.
+    partial = run_e2e.aggregate(
+        [
+            _row("s1", 0, '{"a": 1}', 1.0, 5),
+            _row("s1", 1, "", 0.0, 0, error="Timeout"),
+        ],
+        [],
+    )
+    assert partial["proposal"]["delivered_rate"] == 0.5
+    assert run_e2e.is_empty_measurement(partial) is False
+
+    # And a run that asked for nothing is not an outage either -- there is no
+    # measurement to be missing, so this must not turn an empty corpus into a
+    # transport failure.
+    assert run_e2e.is_empty_measurement(run_e2e.aggregate([], [])) is False
+
+

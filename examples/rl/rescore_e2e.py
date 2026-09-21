@@ -204,6 +204,9 @@ def analyse(doc: dict[str, Any]) -> dict[str, Any]:
     # the set that survived.
     requested_scenarios = {row["scenario_id"] for row in doc["proposals"]}
     groups_missing = requested_scenarios - set(groups)
+    asked: dict[str, int] = {}
+    for row in doc["proposals"]:
+        asked[row["scenario_id"]] = asked.get(row["scenario_id"], 0) + 1
 
     references = {
         name: score_reference(raw, candidates, tried)
@@ -232,6 +235,12 @@ def analyse(doc: dict[str, Any]) -> dict[str, Any]:
         across = list(on_contract.values()) + [_mean(rewards)]
         per_scenario[scenario] = {
             "n": len(members),
+            # What was asked for, beside what came back. Without it a scenario
+            # that delivered one completion out of eight is indistinguishable
+            # from one that delivered eight identical ones -- and those get
+            # opposite advice: the first is an outage, the second is a sampler
+            # that is not sampling.
+            "requested": asked.get(scenario, len(members)),
             "distinct_completions": len({m["raw"] for m in members}),
             "mean": round(_mean(rewards), 4),
             "min": round(min(rewards), 4),
@@ -401,20 +410,81 @@ def main(argv: list[str] | None = None) -> int:
             print_analysis(result)
 
     if args.check_determinism:
-        collapsed = [
-            (r["source"], scenario)
-            for r in results
-            for scenario, row in r["per_scenario"].items()
-            if row["distinct_completions"] == 1
-        ]
-        if collapsed:
-            print(
-                f"\n{len(collapsed)} group(s) have a single distinct completion; "
-                "within-group spread is unreachable for any reward. Set a "
-                "temperature on the rollout.",
-                file=sys.stderr,
-            )
-            return 1
+        return check_determinism(results)
+    return 0
+
+
+def check_determinism(results: list[dict[str, Any]]) -> int:
+    """Is the rollout sampling? Non-zero when it is not, or cannot be told.
+
+    A function rather than a block inside ``main`` so a test can drive the real
+    decision without argv and a file on disk. It was inline, which is a good
+    part of why the outage case below went unnoticed: reaching it at all meant
+    building a results file first, so nobody ever did.
+    """
+    # Three outcomes, and the order they are tested in is the whole point.
+    # This flag answers "is the rollout sampling?", and it can only answer
+    # it from completions that arrived. A scenario that delivered nothing
+    # was invisible here, so a total outage left `collapsed` empty and
+    # returned 0 -- the flag reporting success for a run with no data in
+    # it. A scenario that delivered *one* of eight was worse than
+    # invisible: `distinct_completions == 1` is true, so it was reported as
+    # a collapsed group and the operator was told to set a temperature,
+    # which is the wrong fix for an outage and would have been applied to a
+    # rollout that was already sampling correctly.
+    #
+    # So delivery is checked before diversity, because "we have no data"
+    # has to outrank "the data looks degenerate" -- otherwise the advice
+    # names the symptom of whichever check happened to run first.
+    missing = [
+        (r["source"], sorted(
+            r["criteria"]["3_within_group_spread_nonzero"]["detail"]["groups_missing"]
+        ))
+        for r in results
+        if r["criteria"]["3_within_group_spread_nonzero"]["detail"]["groups_missing"]
+    ]
+    thin = [
+        (r["source"], scenario, row["n"], row["requested"])
+        for r in results
+        for scenario, row in r["per_scenario"].items()
+        if row["n"] < row["requested"]
+    ]
+    collapsed = [
+        (r["source"], scenario)
+        for r in results
+        for scenario, row in r["per_scenario"].items()
+        if row["n"] == row["requested"] and row["distinct_completions"] == 1
+    ]
+    if missing:
+        print(
+            "\n--check-determinism cannot run: "
+            f"{sum(len(groups) for _, groups in missing)} requested "
+            "scenario(s) delivered no completions at all. That is a "
+            "provider outage, not a sampling result, and determinism "
+            "cannot be established without a completion.",
+            file=sys.stderr,
+        )
+        for source, groups in missing:
+            print(f"  {source}: {', '.join(groups)}", file=sys.stderr)
+        return 1
+    if thin:
+        print(
+            f"\n--check-determinism cannot run: {len(thin)} group(s) "
+            "delivered fewer completions than were requested, so a single "
+            "distinct completion cannot be told from an outage.",
+            file=sys.stderr,
+        )
+        for source, scenario, got, want in thin:
+            print(f"  {source}: {scenario} delivered {got}/{want}", file=sys.stderr)
+        return 1
+    if collapsed:
+        print(
+            f"\n{len(collapsed)} group(s) have a single distinct completion; "
+            "within-group spread is unreachable for any reward. Set a "
+            "temperature on the rollout.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

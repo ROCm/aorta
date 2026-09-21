@@ -708,6 +708,31 @@ def _always_pass_floor(triage: list[dict[str, Any]]) -> float | None:
     return round(floor, 4)
 
 
+def is_empty_measurement(agg: dict[str, Any]) -> bool:
+    """Did this run ask for anything and get nothing back?
+
+    The third member of the transport-error family, after the statistics
+    themselves and ``rescore_e2e --check-determinism``.
+
+    This driver is a *reporter* rather than a gate, so its exit code answers
+    "did I produce a measurement", not "was the measurement good" -- a poor
+    reward is a finding and has to stay exit 0. But a run where every request
+    failed wrote a file with no model output in it, and returning 0 for that
+    says the measurement happened; a loop that checks the exit code and moves
+    on would record an outage as a completed rollout.
+
+    A *partial* outage is deliberately not caught. One delivered completion is
+    a thin measurement, which `delivered_rate` already reports and which is a
+    finding rather than a failure to measure.
+
+    Named rather than inline in ``main`` so the rule can be driven directly --
+    the same reason ``check_determinism`` was lifted out of its own ``main``.
+    """
+    delivered = agg["proposal"]["n"] + agg["triage"]["n"]
+    requested = agg["proposal"]["requested"] + agg["triage"]["requested"]
+    return bool(requested) and not delivered
+
+
 def aggregate(
     proposals: list[dict[str, Any]], triage: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -1158,6 +1183,14 @@ def main(argv: list[str] | None = None) -> int:
     args.out.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     print(f"\nwrote {args.out}")
     print_report(agg, meta)
+
+    if is_empty_measurement(agg):
+        print(
+            f"\nFAIL: every request failed in transport; {args.out} contains "
+            "no model output and is not a measurement.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
