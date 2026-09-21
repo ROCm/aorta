@@ -23,6 +23,14 @@ Covered:
 * **the variable is read by nobody** -- the string is absent from every scanned
   binary. Greppable, and that is what this does.
 
+  Per ``(mitigation, variable)``, not per mitigation: a mitigation is an env-var
+  bundle, so an entry excused for one variable is still audited for the rest.
+
+  Only where the whole stack is present to be scanned -- ROCm's libraries and a
+  ROCm torch. On a lane that promises one and has not got one
+  (``AORTA_REQUIRE_ROCM``) that is a failure, because a check that quietly
+  audits nothing is worse than one that is not there.
+
 Not covered, and not detectable this way:
 
 * **read and refused** -- the runtime parses the value and declines. Both
@@ -45,12 +53,14 @@ from __future__ import annotations
 
 import importlib.util
 import mmap
+import os
 import re
 import sys
 from pathlib import Path
 
 import pytest
 
+from aorta.instrumentation.rocm_paths import RocmRoots, resolve_rocm_roots, safe_is_dir
 from aorta.registry.mitigations import BUILTIN_MITIGATIONS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -65,22 +75,30 @@ RUNTIME_SONAMES = (
     "librccl.so",
 )
 
-#: Mitigations whose variable is known to be absent from every scanned binary,
-#: each with the reason. The lane must not go red over a backlog on day one --
-#: the point is to catch the *next* one.
+#: ``(mitigation, variable)`` pairs known to be absent from every scanned
+#: binary, each with the reason. The lane must not go red over a backlog on day
+#: one -- the point is to catch the *next* one.
+#:
+#: **Keyed by the pair, not by the mitigation name.** A mitigation is an env-var
+#: *bundle*, so a name-keyed exemption is broader than the fact it records: it
+#: would also cover a second variable added to ``tf32_off`` later, which is a
+#: new defect and exactly what this guard exists to catch. Keying the pair also
+#: makes :func:`find_fixed_known_absent` precise -- under the name key it
+#: cleared an entry when *any* of the mitigation's variables was readable, which
+#: on a bundle is the wrong variable answering for the listed one.
 #:
 #: This list is for the absent-string mode ONLY. An entry that is inert for one
 #: of the other three reasons does not belong here and
 #: :func:`test_known_absent_covers_only_the_mode_this_test_can_see` enforces
 #: that, because silencing a mode-2 entry here would make the guard look like
 #: it had checked something it cannot check.
-KNOWN_ABSENT: dict[str, str] = {
-    "tf32_off": (
+KNOWN_ABSENT: dict[tuple[str, str], str] = {
+    ("tf32_off", "DISABLE_TF32"): (
         "DISABLE_TF32 appears in no ROCm or torch binary; aorta#500. The "
         "registry attributes it to hipBLASLt and instrumentation/env_knobs.py "
         "attributes it to pytorch, and neither holds."
     ),
-    "rccl_gfx942_cheap_fence_off": (
+    ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): (
         "RCCL_GFX942_CHEAP_FENCE_OFF appears in no binary including librccl; "
         "the name is gfx942-scoped and the supported targets have moved on. "
         "aorta#511."
@@ -142,66 +160,170 @@ def mitigation_variables() -> dict[str, set[str]]:
 def find_unread_mitigations(present: frozenset[str] | set[str]) -> dict[str, set[str]]:
     """Variables no binary contains, mapped to the mitigations that set them.
 
-    Entries in :data:`KNOWN_ABSENT` are omitted: the guard is for the next one,
-    not for the backlog.
+    ``(mitigation, variable)`` pairs in :data:`KNOWN_ABSENT` are omitted: the
+    guard is for the next one, not for the backlog. A mitigation listed there
+    for one variable is still audited for every other variable it sets.
     """
     offenders: dict[str, set[str]] = {}
     for variable, mitigations in mitigation_variables().items():
         if variable in present:
             continue
-        unexpected = {m for m in mitigations if m not in KNOWN_ABSENT}
+        unexpected = {m for m in mitigations if (m, variable) not in KNOWN_ABSENT}
         if unexpected:
             offenders[variable] = unexpected
     return offenders
 
 
-def find_fixed_known_absent(present: frozenset[str] | set[str]) -> list[str]:
-    """Listed-absent mitigations whose variable is now readable, so the list can shrink."""
+def find_fixed_known_absent(
+    present: frozenset[str] | set[str],
+) -> list[tuple[str, str]]:
+    """Listed pairs whose variable is now readable, so the list can shrink.
+
+    Asks about the listed variable itself. A sibling variable of the same
+    mitigation becoming readable says nothing about this entry and must not
+    clear it.
+    """
     return sorted(
-        mitigation
-        for mitigation in KNOWN_ABSENT
-        if any(v in present for v in BUILTIN_MITIGATIONS.get(mitigation, {}))
+        (mitigation, variable)
+        for mitigation, variable in KNOWN_ABSENT
+        if variable in present
     )
 
 
-ROCM_LIB = Path("/opt/rocm/lib")
+#: Set on a lane that promises a ROCm install. When it is set, a stack this
+#: check cannot answer for is a FAILURE rather than a skip.
+#:
+#: Without it the only way this audit reports "ROCm is missing" is a skip, and a
+#: skip on a lane configured to run the audit is indistinguishable from the
+#: audit passing -- absence of evidence reading as success, which is the shape
+#: this repo has filed twice (aorta#499, and the sanitizer nightly with no
+#: failure alert). The GPU workflow sets it; nothing else does, so a developer
+#: box still skips quietly.
+REQUIRE_ROCM_ENV = "AORTA_REQUIRE_ROCM"
+
+#: Values that turn :data:`REQUIRE_ROCM_ENV` off, so `AORTA_REQUIRE_ROCM=0` in a
+#: shell profile does not silently arm it. Same set as
+#: ``instrumentation/rocprof/_options.py`` uses for its own flags.
+_FALSE = frozenset({"", "0", "false", "no", "off"})
 
 
-def _torch_lib() -> Path | None:
+def rocm_is_required(environ: dict[str, str] | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    return env.get(REQUIRE_ROCM_ENV, "").strip().lower() not in _FALSE
+
+
+def rocm_torch_lib() -> tuple[Path | None, str]:
+    """Torch's library directory when torch is a ROCm build, else ``(None, why)``.
+
+    **The build matters, and this was measured rather than assumed.** Scanning
+    torch 2.13.0+cpu's libraries finds ``TORCH_ROCM_FA_PREFER_CK`` and
+    ``PYTORCH_CUDA_ALLOC_CONF`` but *not* ``PYTORCH_NO_CUDA_MEMORY_CACHING`` --
+    it lives in the CUDA/HIP caching allocator, which a CPU wheel does not
+    build. So a stack with ROCm installed beside a CPU-only torch would report
+    ``pytorch_no_cuda_memory_caching`` as read by nobody, which is false, and
+    false about the one registered mitigation measured to resolve a real NaN.
+
+    Same defect as the hardcoded ROCm path, one library up: the directories
+    scanned have to be the ones the stack actually reads.
+    """
     try:
         import torch
     except ImportError:
-        return None
-    return Path(torch.__file__).parent / "lib"
+        return None, "torch is not importable"
+    if getattr(torch.version, "hip", None) is None:
+        return None, (
+            f"torch {torch.__version__} is not a ROCm build (torch.version.hip "
+            "is None), so its libraries do not carry the HIP caching "
+            "allocator's variables"
+        )
+    lib = Path(torch.__file__).parent / "lib"
+    if not safe_is_dir(lib):
+        return None, f"{lib} is not a directory"
+    return lib, ""
 
 
-def _scan_dirs(
-    rocm_lib: Path | None = None, torch_lib: Path | None = None
-) -> list[Path]:
-    """Library directories to scan, or empty when this stack cannot answer.
+def rocm_lib_dirs(roots: RocmRoots | None = None) -> list[Path]:
+    """The ROCm library directories to scan, in order, deduplicated.
 
-    **ROCm is required, not merely preferred.** Fifteen of the eighteen
-    mitigation variables are read by ``libamdhip64``, ``libhsa-runtime64`` or
-    ``librccl``; on a tree with only a CPU-wheel torch none of them can be
-    present, and the check would report the entire registry as unread. That is
-    a false statement about the registry and a true one about the machine --
+    Resolved rather than hardcoded, because ``/opt/rocm`` is not where ROCm is
+    on the lane this check has to run on. ``docker/Dockerfile.ci-gpu`` pins a
+    wheel-layout (TheRock) image that has no ``/opt/rocm`` at all, so a literal
+    ``/opt/rocm/lib`` finds nothing there and the audit skips on the one
+    environment that can answer it. Issue #381 exists for exactly this, and
+    ``resolve_rocm_roots`` is the resolver the rest of the repo already uses --
+    ``audit_env_knobs.default_rocm_lib`` and the GPU workflow's own
+    ``LD_LIBRARY_PATH`` line among them.
+
+    **Both directories, and the pair is load-bearing.** ``core_lib_dir`` holds
+    ``libamdhip64`` and ``libhsa-runtime64``; ``lib_dir`` hangs off the
+    *libraries* root. On the wheel layout those are two different directories
+    under site-packages, so scanning one of them reports the other's variables
+    as unread. On a classic install they are the same ``/opt/rocm/lib`` and the
+    dedup collapses them to a single entry -- byte-identical to what the
+    hardcoded constant scanned.
+
+    Empty when no ROCm install was found at all (``source == "none"``), which
+    is what keeps the CPU lane honest: see :func:`scan_plan`.
+    """
+    resolved = resolve_rocm_roots() if roots is None else roots
+    if resolved.source == "none":
+        return []
+    ordered = dict.fromkeys([resolved.core_lib_dir, resolved.lib_dir])
+    return [directory for directory in ordered if safe_is_dir(directory)]
+
+
+def no_rocm_message(roots: RocmRoots) -> str:
+    """Why no ROCm directory was scanned, naming which mechanism answered.
+
+    ``source`` is reported because #381's whole point is that a null be
+    attributable: "no ROCm install was located" and "one was located and its
+    lib dirs are missing" are different operator problems and used to look
+    identical.
+    """
+    return (
+        "no ROCm library directory was found, so this stack cannot read "
+        "fifteen of the eighteen variables under audit and the check would "
+        "report the registry as unread when the machine is what is missing. "
+        f"resolve_rocm_roots() answered source={roots.source!r} "
+        f"layout={roots.layout!r}, core_lib_dir={roots.core_lib_dir}, "
+        f"lib_dir={roots.lib_dir}."
+    )
+
+
+def scan_plan(
+    roots: RocmRoots | None = None,
+    torch: tuple[Path | None, str] | None = None,
+) -> tuple[list[Path], str]:
+    """``(directories to scan, why not)``. A reason is non-empty iff the list is.
+
+    **Every one of the eighteen variables must have a library that could carry
+    it, or this check does not run at all.** Fifteen are read by
+    ``libamdhip64``, ``libhsa-runtime64`` or ``librccl`` and three by torch's.
+    A stack missing either side would report those variables as read by nobody
+    -- a false statement about the registry and a true one about the machine,
     and a guard that fires on the wrong lane gets deleted rather than fixed.
     Measured: it did exactly that on this branch's first push.
 
-    Torch is scanned in addition when ROCm is there, because
-    ``PYTORCH_NO_CUDA_MEMORY_CACHING`` and ``TORCH_ROCM_FA_PREFER_CK`` live in
-    the torch libraries rather than in ROCm's.
+    All-or-nothing rather than a partial audit on purpose. A partial one needs a
+    second exemption concept ("unread, but we did not look"), and an exemption
+    that means "not checked" is how a guard turns into decoration.
 
-    Both directories are injectable so the rule above is testable without ROCm.
+    Both inputs are injectable so the rules are testable on a machine with
+    neither, which every machine that is not the GPU lane is.
     """
-    rocm = ROCM_LIB if rocm_lib is None else rocm_lib
-    if not rocm.is_dir():
-        return []
-    dirs = [rocm]
-    torch_dir = _torch_lib() if torch_lib is None else torch_lib
-    if torch_dir is not None and torch_dir.is_dir():
-        dirs.append(torch_dir)
-    return dirs
+    dirs = rocm_lib_dirs(roots)
+    if not dirs:
+        resolved = resolve_rocm_roots() if roots is None else roots
+        return [], no_rocm_message(resolved)
+    torch_lib, torch_why = rocm_torch_lib() if torch is None else torch
+    if torch_lib is None:
+        return [], (
+            f"{torch_why}, so three of the eighteen variables under audit "
+            "(PYTORCH_NO_CUDA_MEMORY_CACHING, PYTORCH_CUDA_ALLOC_CONF, "
+            "TORCH_ROCM_FA_PREFER_CK) have no library that could carry them."
+        )
+    dirs.append(torch_lib)
+    return dirs, ""
 
 
 # ---------------------------------------------------------------------------
@@ -255,11 +377,32 @@ def test_absent_variable_is_reported_absent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_known_absent_names_are_real_mitigations():
-    unknown = sorted(set(KNOWN_ABSENT) - set(BUILTIN_MITIGATIONS))
+    unknown = sorted({m for m, _ in KNOWN_ABSENT} - set(BUILTIN_MITIGATIONS))
     assert not unknown, (
         f"KNOWN_ABSENT names mitigations that no longer exist: {unknown}. "
         "Remove them; an expected-failures list that outlives its entries stops "
         "being read."
+    )
+
+
+def test_known_absent_entries_name_a_variable_that_mitigation_actually_sets():
+    """The other half of rot, and only reachable now the key is the pair.
+
+    An entry whose variable the mitigation no longer sets exempts nothing -- it
+    is dead weight that reads as coverage. Under the old mitigation-name key
+    there was no variable to be wrong, so this failure mode had nowhere to be
+    caught.
+    """
+    stale = sorted(
+        (mitigation, variable)
+        for mitigation, variable in KNOWN_ABSENT
+        if mitigation in BUILTIN_MITIGATIONS
+        and variable not in BUILTIN_MITIGATIONS[mitigation]
+    )
+    assert not stale, (
+        f"{stale} name a variable their mitigation does not set, so the "
+        "exemption applies to nothing. Update the entry to the variable the "
+        "registry actually carries, or remove it."
     )
 
 
@@ -277,12 +420,82 @@ def test_known_absent_covers_only_the_mode_this_test_can_see():
         "fa_prefer_aotriton",                 # sets the default value
         "hsa_no_scratch_reclaim",             # already set in the image
     }
-    misfiled = sorted(not_greppable & set(KNOWN_ABSENT))
+    misfiled = sorted(not_greppable & {m for m, _ in KNOWN_ABSENT})
     assert not misfiled, (
         f"{misfiled} are inert for reasons a binary scan cannot detect, so "
         "listing them here would make this test look like it had checked them. "
         "See this module's docstring and aorta#511."
     )
+
+
+# ---------------------------------------------------------------------------
+# which directories get scanned, on each layout, with no ROCm on this machine
+# ---------------------------------------------------------------------------
+# The CI GPU image is wheel-layout and has no /opt/rocm, and the CPU lane has no
+# ROCm at all, so both of the environments this check has to behave correctly in
+# are environments a developer box is not. Fabricating the resolver's answer is
+# the only way to test either one here -- and the wheel case is the one that was
+# wrong, so it needs a test rather than a reading of the Dockerfile.
+
+def _roots(core: Path, libraries: Path, source: str = "import:_rocm_sdk_core",
+           layout: str = "wheel") -> RocmRoots:
+    return RocmRoots(core=core, libraries=libraries, include=core,
+                     layout=layout, source=source)
+
+
+def _rocm_torch(path: Path) -> tuple[Path, str]:
+    return path, ""
+
+
+def _outcome_of(call) -> BaseException:
+    """The skip-or-fail exception ``call`` raised, as a value to assert on.
+
+    ``pytest.raises(pytest.fail.Exception)`` cannot be used for this: a
+    ``Skipped`` escaping it skips the *test*, so the assertion that a skip has
+    become a failure passes by being skipped. Measured -- reverting the flag's
+    branch left this test green until it was written this way, which is the
+    same absence-reads-as-success shape the flag itself exists to close.
+    """
+    try:
+        call()
+    except (pytest.fail.Exception, pytest.skip.Exception) as exc:
+        return exc
+    raise AssertionError(f"{call.__name__} neither failed nor skipped")
+
+
+def test_wheel_layout_scans_both_the_core_and_the_libraries_lib_dir(tmp_path):
+    """The defect the hardcoded ``/opt/rocm/lib`` had, on the layout CI runs.
+
+    ``docker/Dockerfile.ci-gpu`` pins a TheRock image with no ``/opt/rocm``,
+    where the HIP runtime and the math libraries sit under two different
+    site-packages components. Scanning one of them reports the other's
+    variables as unread; scanning neither is what the literal path did.
+    """
+    core = tmp_path / "_rocm_sdk_core"
+    libraries = tmp_path / "_rocm_sdk_libraries"
+    (core / "lib").mkdir(parents=True)
+    (libraries / "lib").mkdir(parents=True)
+    torch_like = tmp_path / "torch" / "lib"
+    torch_like.mkdir(parents=True)
+
+    dirs, why_not = scan_plan(
+        roots=_roots(core, libraries), torch=_rocm_torch(torch_like)
+    )
+    assert dirs == [core / "lib", libraries / "lib", torch_like]
+    assert why_not == ""
+
+
+def test_classic_layout_scans_one_directory(tmp_path):
+    """On a classic install the two roots coincide; the scan must not double."""
+    root = tmp_path / "opt" / "rocm"
+    (root / "lib").mkdir(parents=True)
+    torch_like = tmp_path / "torch" / "lib"
+    torch_like.mkdir(parents=True)
+    dirs, _ = scan_plan(
+        roots=_roots(root, root, source="opt_rocm", layout="classic"),
+        torch=_rocm_torch(torch_like),
+    )
+    assert dirs == [root / "lib", torch_like]
 
 
 def test_a_torch_only_tree_does_not_answer_for_rocm_variables(tmp_path):
@@ -292,11 +505,114 @@ def test_a_torch_only_tree_does_not_answer_for_rocm_variables(tmp_path):
     with a CPU-wheel torch and no ROCm the check would report almost the whole
     registry as unread, which is a false statement about the registry and a true
     one about the machine. Measured: it did exactly that on the first push.
+
+    ``source="none"`` is precisely how ``resolve_rocm_roots`` reports "nothing
+    was found"; it still hands back the classic root so callers keep an
+    absolute path, which is why the source and not the path is what is read.
     """
     torch_like = tmp_path / "torch" / "lib"
     torch_like.mkdir(parents=True)
-    assert _scan_dirs(rocm_lib=tmp_path / "definitely-not-rocm",
-                      torch_lib=torch_like) == []
+    missing = tmp_path / "definitely-not-rocm"
+    dirs, why_not = scan_plan(
+        roots=_roots(missing, missing, source="none"), torch=_rocm_torch(torch_like)
+    )
+    assert dirs == []
+    assert "source='none'" in why_not          # attributable, per issue #381
+    assert str(missing / "lib") in why_not
+
+
+def test_a_resolved_root_whose_lib_dirs_are_missing_scans_nothing(tmp_path):
+    """Found-but-empty is still unable to answer, and must not be scanned.
+
+    Distinct from the case above: something *was* located, so ``source`` is not
+    ``"none"``, but there is no ``lib/`` under it. Scanning an empty list would
+    make every variable look unread.
+    """
+    core = tmp_path / "_rocm_sdk_core"
+    core.mkdir()
+    torch_like = tmp_path / "torch" / "lib"
+    torch_like.mkdir(parents=True)
+    dirs, why_not = scan_plan(roots=_roots(core, core), torch=_rocm_torch(torch_like))
+    assert dirs == []
+    assert "import:_rocm_sdk_core" in why_not
+
+
+def test_a_cpu_only_torch_beside_rocm_does_not_answer_either(tmp_path):
+    """The torch half of the same defect, and it is not hypothetical.
+
+    Measured on torch 2.13.0+cpu: its libraries carry
+    ``TORCH_ROCM_FA_PREFER_CK`` and ``PYTORCH_CUDA_ALLOC_CONF`` but not
+    ``PYTORCH_NO_CUDA_MEMORY_CACHING``. Auditing against it would report the
+    one registered mitigation measured to resolve a real NaN as read by
+    nobody.
+    """
+    core = tmp_path / "_rocm_sdk_core"
+    (core / "lib").mkdir(parents=True)
+    dirs, why_not = scan_plan(
+        roots=_roots(core, core), torch=(None, "torch 2.13.0+cpu is not a ROCm build")
+    )
+    assert dirs == []
+    assert "not a ROCm build" in why_not
+    assert "PYTORCH_NO_CUDA_MEMORY_CACHING" in why_not
+
+
+def test_a_real_rocm_torch_is_recognised_by_its_hip_version(monkeypatch):
+    """``torch.version.hip`` is the discriminator, and it is read, not assumed."""
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.version, "hip", "7.0.0", raising=False)
+    lib, why_not = rocm_torch_lib()
+    assert lib == Path(torch.__file__).parent / "lib"
+    assert why_not == ""
+
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    lib, why_not = rocm_torch_lib()
+    assert lib is None
+    assert "not a ROCm build" in why_not
+
+
+def test_an_unreadable_stack_fails_rather_than_skips_when_the_lane_promised_it(
+    monkeypatch,
+):
+    """A lane that runs the audit and audits nothing must not report success.
+
+    The reason the resolver fix is not enough on its own: if the scan finds no
+    directory the fixture skips, and a skipped check reads as a passing one.
+    The GPU workflow sets this so that reads as a failure there.
+    """
+    monkeypatch.setattr(
+        sys.modules[__name__], "scan_plan", lambda: ([], "nothing to scan.")
+    )
+
+    monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
+    assert isinstance(_outcome_of(require_readable_stack), pytest.skip.Exception)
+
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    outcome = _outcome_of(require_readable_stack)
+    assert isinstance(outcome, pytest.fail.Exception), (
+        f"expected a failure, got {type(outcome).__name__}: {outcome}"
+    )
+    assert "nothing to scan" in str(outcome)
+
+
+def test_a_readable_stack_neither_fails_nor_skips(monkeypatch, tmp_path):
+    """The narrowness control: the guard must not fire when the scan succeeded."""
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    monkeypatch.setattr(
+        sys.modules[__name__], "scan_plan", lambda: ([tmp_path], "")
+    )
+    assert require_readable_stack() == [tmp_path]
+
+
+def test_the_require_flag_is_off_unless_it_says_otherwise(monkeypatch):
+    """``AORTA_REQUIRE_ROCM=0`` in a shell profile must not arm it."""
+    monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
+    assert rocm_is_required() is False
+    for value in ("", " ", "0", "false", "No", "off"):
+        monkeypatch.setenv(REQUIRE_ROCM_ENV, value)
+        assert rocm_is_required() is False, value
+    for value in ("1", "true", "yes"):
+        monkeypatch.setenv(REQUIRE_ROCM_ENV, value)
+        assert rocm_is_required() is True, value
 
 
 def test_audit_script_is_reusable_from_here():
@@ -305,21 +621,63 @@ def test_audit_script_is_reusable_from_here():
     assert callable(module.resolve_library)
 
 
+_GPU_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "gpu-tests.yml"
+
+
+def test_the_gpu_lane_arms_the_require_flag_and_selects_this_file():
+    """Pin both halves of "it actually runs there", from the only place that can.
+
+    Neither is reachable from a unit test of the code it breaks, so they are
+    pinned the way this repo already pins its other workflow invariants (see
+    ``test_the_gpu_gate_exercises_the_resolved_default``). Dropping either line
+    disarms this audit *silently*: without the flag a stack it cannot read
+    becomes a green skip, and without the change filter the job never selects
+    the file at all.
+    """
+    workflow = _GPU_WORKFLOW.read_text(encoding="utf-8")
+    assert f"export {REQUIRE_ROCM_ENV}=1" in workflow, (
+        f"gpu-tests.yml no longer exports {REQUIRE_ROCM_ENV}, so a lane that "
+        "cannot find ROCm would skip this audit and report success."
+    )
+    for pattern in (
+        "'src/aorta/registry/mitigations.py'",
+        "'tests/registry/test_mitigation_variable_presence.py'",
+    ):
+        assert pattern in workflow, (
+            f"{pattern} is not in the GPU job's change filter, so a change to "
+            "the registry would not select the only lane that can audit it."
+        )
+
+
 # ---------------------------------------------------------------------------
 # the real check, where the libraries exist
 # ---------------------------------------------------------------------------
 
+def require_readable_stack() -> list[Path]:
+    """The directories to scan; fails or skips when there are none.
+
+    Separate from the fixture so the skip-or-fail decision -- the whole point
+    of :data:`REQUIRE_ROCM_ENV` -- is assertable without a ROCm machine and
+    without reaching inside a fixture object.
+    """
+    dirs, why_not = scan_plan()
+    if dirs:
+        return dirs
+    if rocm_is_required():
+        pytest.fail(
+            f"{REQUIRE_ROCM_ENV} is set, so this lane promised a stack this "
+            f"audit can read, and it cannot: {why_not} Skipping here would "
+            "report the audit as having run when it ran nothing."
+        )
+    pytest.skip(
+        f"{why_not} Runs on a lane with a ROCm stack; inert elsewhere, and "
+        "saying so rather than passing quietly."
+    )
+
+
 @pytest.fixture(scope="module")
 def present_names() -> frozenset[str]:
-    dirs = _scan_dirs()
-    if not dirs:
-        pytest.skip(
-            f"{ROCM_LIB} is not present, so this stack cannot read fifteen of "
-            "the eighteen variables under audit and the check would report the "
-            "registry as unread when the machine is what is missing. Runs on a "
-            "lane with ROCm installed; inert elsewhere, and saying so rather "
-            "than passing quietly."
-        )
+    dirs = require_readable_stack()
     audit = _load_audit_script()
     found: set[str] = set()
     scanned: list[Path] = []
@@ -339,6 +697,7 @@ def present_names() -> frozenset[str]:
     return frozenset(found)
 
 
+@pytest.mark.rocm
 def test_every_mitigation_variable_is_read_by_something(present_names):
     offenders = find_unread_mitigations(present_names)
     assert not offenders, (
@@ -349,6 +708,7 @@ def test_every_mitigation_variable_is_read_by_something(present_names):
     )
 
 
+@pytest.mark.rocm
 def test_known_absent_entries_are_still_absent(present_names):
     """Stop the expected-failures list from rotting.
 
@@ -383,11 +743,58 @@ def test_a_listed_unread_mitigation_is_tolerated():
     assert find_unread_mitigations(present) == {}
 
 
+def test_a_second_variable_on_a_listed_mitigation_is_still_reported(monkeypatch):
+    """The exemption covers the listed variable, not the mitigation.
+
+    A mitigation is an env-var bundle. Adding a second, unread variable to
+    ``tf32_off`` is a new defect of exactly the kind this guard exists to
+    catch, and the mitigation-name key silenced it -- the one entry in the list
+    would have excused a variable nobody had ever looked at.
+    """
+    monkeypatch.setitem(
+        BUILTIN_MITIGATIONS, "tf32_off", {"DISABLE_TF32": "1", "NEWLY_ADDED": "1"}
+    )
+    present = set(mitigation_variables()) - {"DISABLE_TF32", "NEWLY_ADDED"}
+    assert find_unread_mitigations(present) == {"NEWLY_ADDED": {"tf32_off"}}
+
+
+def test_a_variable_shared_with_an_unlisted_mitigation_is_still_reported(monkeypatch):
+    """The other direction: one variable, two mitigations, one of them listed.
+
+    ``TORCH_ROCM_FA_PREFER_CK`` and ``HSA_DISABLE_CACHE`` are each set by two
+    registry entries today, so this is the shape the registry already has.
+    Exempting one entry must not answer for the other.
+    """
+    monkeypatch.setitem(BUILTIN_MITIGATIONS, "tf32_off_but_louder", {"DISABLE_TF32": "1"})
+    present = set(mitigation_variables()) - {"DISABLE_TF32"}
+    assert find_unread_mitigations(present) == {
+        "DISABLE_TF32": {"tf32_off_but_louder"}
+    }
+
+
 def test_a_known_absent_entry_that_came_back_is_flagged():
     present = set(mitigation_variables())          # everything readable
-    assert find_fixed_known_absent(present) == ["rccl_gfx942_cheap_fence_off", "tf32_off"]
+    assert find_fixed_known_absent(present) == [
+        ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"),
+        ("tf32_off", "DISABLE_TF32"),
+    ]
 
 
 def test_nothing_is_flagged_while_the_backlog_is_genuinely_absent():
     present = set(mitigation_variables()) - {"DISABLE_TF32", "RCCL_GFX942_CHEAP_FENCE_OFF"}
     assert find_fixed_known_absent(present) == []
+
+
+def test_a_sibling_variable_becoming_readable_does_not_clear_the_entry(monkeypatch):
+    """The same coarseness defect, on the rot check rather than the audit.
+
+    Under the mitigation-name key this asked "is ANY of this mitigation's
+    variables present", so a readable sibling declared the listed one fixed and
+    the entry would have been removed while the variable it records is still
+    absent -- deleting the only evidence aorta#500 is still open.
+    """
+    monkeypatch.setitem(
+        BUILTIN_MITIGATIONS, "tf32_off", {"DISABLE_TF32": "1", "READABLE_SIBLING": "1"}
+    )
+    assert find_fixed_known_absent({"READABLE_SIBLING"}) == []
+    assert find_fixed_known_absent({"DISABLE_TF32"}) == [("tf32_off", "DISABLE_TF32")]

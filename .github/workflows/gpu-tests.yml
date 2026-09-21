@@ -252,6 +252,15 @@ jobs:
             # written with no apostrophe because this is a single-quoted bash -lc
             # payload that any apostrophe would close early.
             export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+            # THIS lane promises a ROCm stack, so a test that cannot find one
+            # must go red rather than skip. Read by
+            # tests/registry/test_mitigation_variable_presence.py, whose whole
+            # job is answerable only where ROCm is installed: without this, a
+            # resolver that stopped finding the wheel layout (a base-image bump
+            # is enough) would turn the audit into a green skip and the gate
+            # would report success having checked nothing. Same failure shape as
+            # a required check that was never added to the ruleset.
+            export AORTA_REQUIRE_ROCM=1
             pytest -m "gpu or rocm" -n 4 --timeout=300 --junitxml=gpu-results.xml
           '
 
