@@ -34,6 +34,16 @@ TOOL_OUTPUT = (
     "private output token 8491"
 )
 REPLY = "The private kernel has a race; add a barrier."
+DECISION_LOG_DOC = " ".join(
+    (
+        Path(__file__).resolve().parents[2]
+        / "docs"
+        / "chat"
+        / "configuration.md"
+    )
+    .read_text(encoding="utf-8")
+    .split()
+)
 
 
 def state() -> dict:
@@ -341,6 +351,26 @@ class TestFullModeIsLoudAndExplicit:
         ]
         assert len(warnings) == 1
         assert str(first) in warnings[0].message
+
+
+class TestThePublicPrivacyContractMatchesTheModes:
+    def test_summary_names_selector_rationale_as_digested_content(self):
+        assert (
+            "Questions, selector rationale, plans, tool arguments, tool output, "
+            "critic feedback, and answers are not stored in summary mode."
+            in DECISION_LOG_DOC
+        )
+        assert (
+            "character/byte/line/fence counts and a SHA-256 digest"
+            in DECISION_LOG_DOC
+        )
+
+    def test_full_names_verbatim_rationale_and_unscrubbed_locations(self):
+        assert "including selector rationale, verbatim" in DECISION_LOG_DOC
+        assert (
+            "does not scrub filesystem paths or IP addresses from the rationale"
+            in DECISION_LOG_DOC
+        )
 
 
 class TestInvokeAgentIsTheSharedRecordingSeam:

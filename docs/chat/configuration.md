@@ -82,23 +82,23 @@ session JSONL file is mode `0600`.
 Both the browser and CLI record from the state returned by `invoke_agent`, so
 they capture the same decisions without changing the CLI to a streaming path:
 
-- route and selector-ranked tools;
-- the selector's own reason, with filesystem paths and IP addresses always
-  scrubbed regardless of `--no-redact`;
+- route and selector-ranked tool names;
 - tool execution order and CIA job ID/category/confidence;
 - whether the critic accepted the answer; and
 - a `resolution: null` attachment point keyed by `(session_id, turn)` for a
   later verified outcome.
 
-Questions, plans, tool arguments, tool output, critic feedback, and answers are
-not stored in summary mode. Each becomes only character/byte/line/fence counts
-and a SHA-256 digest. Nothing reads these files back or sends them anywhere.
+Questions, selector rationale, plans, tool arguments, tool output, critic
+feedback, and answers are not stored in summary mode. Each becomes only
+character/byte/line/fence counts and a SHA-256 digest. Nothing reads these files
+back or sends them anywhere.
 
-`AORTA_CHAT_SESSION_LOG=full` stores those values verbatim for an operator who
-explicitly needs a transcript. It emits one warning per session naming the
-file. Full mode can contain source, paths, credentials printed by tools, and
-model output; protect and remove it accordingly. Set the variable to `0` or
-leave it unset to disable all decision logging.
+`AORTA_CHAT_SESSION_LOG=full` stores those values, including selector rationale,
+verbatim for an operator who explicitly needs a transcript. Full mode does not
+scrub filesystem paths or IP addresses from the rationale. It emits one warning
+per session naming the file and can contain source, paths, addresses,
+credentials, and other model/tool output; protect and remove it accordingly.
+Set the variable to `0` or leave it unset to disable all decision logging.
 
 ## Settings
 
