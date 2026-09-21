@@ -2203,7 +2203,7 @@ def test_a_valid_rounds_argument_passes_the_new_check(tmp_path):
     assert "--rounds is empty" not in output, output
 
 
-def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar"):
+def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar", models_code="200"):
     """A PATH on which the real `up()` runs with no docker and no engine.
 
     The existing tests in this file all extract `backends` and drive it
@@ -2220,19 +2220,44 @@ def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar"):
         # `-aq` is the name-collision probe and must answer empty; `-q` is the
         # liveness poll and must answer running.
         '  ps) for a in "$@"; do [ "$a" = "-aq" ] && exit 0; done; echo deadbeefcafe ;;\n'
-        "  run) echo 0123456789abcdef ;;\n"
+        # `--cidfile` is modelled rather than ignored, because ownership is now
+        # keyed on it: docker writes the id there when it *creates* the
+        # container, which is what lets the guard be armed before this call.
+        # Measured against docker 29.1.3 -- see `_CIDFILE` in the script.
+        "  run)\n"
+        '    prev=""; for a in "$@"; do\n'
+        '      if [ "$prev" = "--cidfile" ]; then\n'
+        '        if [ -e "$a" ]; then\n'
+        "          echo 'docker: container ID file found, make sure the other"
+        " container isn'\"'\"'t running or delete '\"$a\" >&2\n"
+        "          exit 125\n"
+        "        fi\n"
+        "        printf '%s' 0123456789abcdef > \"$a\"\n"
+        "      fi\n"
+        '      prev="$a"\n'
+        "    done\n"
+        "    echo 0123456789abcdef ;;\n"
         '  logs) echo "stub container log line" ;;\n'
         "esac\nexit 0\n"
     )
+    # `-w '\\n%{http_code}'` is appended by `models`, so the stub has to answer
+    # in curl's shape: body, newline, status. Overridable so the HTTP-error
+    # path is reachable without a server.
+    models_code = models_code or "200"
     (bin_dir / "curl").write_text(
         "#!/usr/bin/env bash\n"
         'url="${@: -1}"\n'
+        'wants_code=0\n'
+        'for a in "$@"; do case "$a" in *http_code*) wants_code=1 ;; esac; done\n'
         'case "$url" in\n'
         "  *get_server_info*) printf '%s' "
         f"'{{\"sampling_backend\":\"{sampling}\",\"grammar_backend\":\"{grammar}\"}}'"
         "; exit 0 ;;\n"
         "  *health*) echo 200; exit 0 ;;\n"
-        "  *v1/models*) echo '{\"data\":[{\"id\":\"Qwen/Qwen3-8B\"}]}'; exit 0 ;;\n"
+        "  *v1/models*)\n"
+        "    printf '%s' '{\"data\":[{\"id\":\"Qwen/Qwen3-8B\"}]}'\n"
+        f"    [ \"$wants_code\" = 1 ] && printf '\\n%s' '{models_code}'\n"
+        "    exit 0 ;;\n"
         "esac\nexit 0\n"
     )
     for name in ("docker", "curl"):
@@ -3660,3 +3685,101 @@ def test_an_empty_tensor_list_cannot_manufacture_round_markers(tmp_path):
     # downstream sees a partial run.
     assert _reached_real_work(output) == [], output
     assert not (tmp_path / "plan.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Review pass 2026-09-21: the blocking failure path, and the fail-open family
+# --------------------------------------------------------------------------- #
+
+
+def test_a_rejected_start_does_not_post_the_blocking_update(
+    nccl_roundtrip_check, monkeypatch
+):
+    """The verdict was already decided and the driver spent 30 minutes on it.
+
+    `/update_weights` blocks while the workers receive every broadcast in the
+    plan, and `call` gives it `TIMEOUT_S` -- 1800 seconds. When
+    `/start_weight_update` is rejected the engine never entered the update
+    state, so there is no receive to match and nothing to wait for; the step
+    posted it anyway, and `_lifecycle_failure` only got to say "start" half an
+    hour later. On the one failure path this driver exists to detect, it was
+    unusable in practice.
+    """
+    posted = []
+
+    def fake_call(base, method, path, body=None, timeout=nccl_roundtrip_check.TIMEOUT_S):
+        posted.append((path, timeout))
+        if path == "/start_weight_update":
+            return 500, {"error": "engine busy"}, 0.003
+        return 200, {"ok": True}, 0.01
+
+    monkeypatch.setattr(nccl_roundtrip_check, "call", fake_call)
+    step = nccl_roundtrip_check.lifecycle_update("http://c", {"names": ["w"]}, "perturb")
+
+    assert [p for p, _ in posted] == ["/start_weight_update"]
+    assert "update" not in step and "finish" not in step
+    # Named rather than merely absent, so a truncated record does not read as a
+    # driver that crashed here.
+    assert step["skipped"] == ["update", "finish"]
+    # And the verdict is unchanged: `_lifecycle_failure` walks the legs in
+    # order and reports `start` whether or not the later keys exist.
+    assert nccl_roundtrip_check._lifecycle_failure(step) == "start"
+
+
+def test_a_rejected_update_still_posts_finish(nccl_roundtrip_check, monkeypatch):
+    """Narrowness, and the reason the early return is on `start` only.
+
+    A rejected `/update_weights` is a different situation: start succeeded, so
+    the engine *is* mid-update, and `/finish_weight_update` is what takes it
+    back out. Skipping it on the same reasoning would leave the engine in the
+    update state for whatever runs next.
+    """
+    posted = []
+
+    def fake_call(base, method, path, body=None, timeout=nccl_roundtrip_check.TIMEOUT_S):
+        posted.append(path)
+        if path == "/update_weights":
+            return 500, {"error": "nope"}, 0.01
+        return 200, {"ok": True}, 0.01
+
+    monkeypatch.setattr(nccl_roundtrip_check, "call", fake_call)
+    step = nccl_roundtrip_check.lifecycle_update("http://c", {"names": ["w"]}, "perturb")
+
+    assert posted == [
+        "/start_weight_update",
+        "/update_weights",
+        "/finish_weight_update",
+    ]
+    assert nccl_roundtrip_check._lifecycle_failure(step) == "update"
+
+
+def test_the_report_survives_a_step_that_never_posted_an_update(
+    nccl_roundtrip_check,
+):
+    """The half the suggested patch left out, and it is not cosmetic.
+
+    `main` reads `report[...]['update']['status']` in four places -- two log
+    lines and both `update_seconds` entries -- so returning early without
+    touching them raises `KeyError: 'update'` on the line *after* the early
+    return, before the next `flush()`. That replaces a thirty-minute hang with
+    a traceback and no verdict file at all, which is worse: today's behaviour
+    at least writes the report eventually.
+    """
+    stopped = {
+        "label": "perturb",
+        "start": {"status": 500, "seconds": 0.003, "body": {}},
+        "skipped": ["update", "finish"],
+        "skipped_reason": "start was not accepted",
+        "total_seconds": 0.003,
+    }
+    # Both readers tolerate it, and the timing reader says `None` rather than
+    # `0.0`: a leg that never ran has no duration, and zero would read as an
+    # update that returned instantly -- which this driver has really recorded.
+    assert nccl_roundtrip_check._log_step(stopped) is False
+    assert nccl_roundtrip_check._update_seconds(stopped) is None
+
+    ran = {"label": "perturb", "update": {"status": 200, "seconds": 1.25}}
+    assert nccl_roundtrip_check._log_step(ran) is True
+    assert nccl_roundtrip_check._update_seconds(ran) == 1.25
+
+

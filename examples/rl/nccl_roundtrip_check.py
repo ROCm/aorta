@@ -286,12 +286,39 @@ def lifecycle_update(control: str, plan: dict[str, Any], label: str) -> dict[str
     ``/update_weights`` is the interesting number. It blocks while the workers
     receive every broadcast in the plan, so its wall time is the actual cost of
     moving these tensors, which is what the per-iteration budget is spent on.
+
+    It is also why a rejected ``/start_weight_update`` stops the step here. The
+    engine never entered the update state, so there is no receive to match, and
+    posting the update anyway meant blocking on ``TIMEOUT_S`` -- **thirty
+    minutes** -- before ``_lifecycle_failure`` got to say that the *first* leg
+    had failed. The verdict was already decided and the driver spent half an
+    hour not saying so, on precisely the failure path it exists to detect.
+
+    A rejected ``/update_weights`` is deliberately *not* treated the same way:
+    start succeeded, so the engine is mid-update, and ``/finish_weight_update``
+    is what takes it back out. Skipping that would leave the engine in the
+    update state for whatever runs next.
     """
     out: dict[str, Any] = {"label": label}
     started = time.time()
 
     status, body, elapsed = call(control, "POST", "/start_weight_update", {})
     out["start"] = {"status": status, "seconds": round(elapsed, 3), "body": body}
+    if status != 200:
+        # Named rather than simply absent. `_lifecycle_failure` walks the legs
+        # in order and reports `start` whether or not the later keys exist, so
+        # the verdict is unaffected either way -- but a reader of the JSON
+        # would otherwise have to infer why two legs are missing, and "the
+        # driver crashed here" and "the driver declined to post these" are
+        # very different things to conclude from a truncated record.
+        out["skipped"] = ["update", "finish"]
+        out["skipped_reason"] = (
+            "start was not accepted, so the engine never entered the update "
+            "state; posting /update_weights would block on a receive that "
+            "cannot be matched"
+        )
+        out["total_seconds"] = round(time.time() - started, 3)
+        return out
 
     # `run_id` is coordination, not part of the engine's contract, and it must
     # not travel in the payload. `update_info` is
@@ -356,6 +383,41 @@ def wait_for_plan(
         if time.time() >= limit:
             return None, stale_seen
         time.sleep(2)
+
+
+def _log_step(step: dict[str, Any]) -> bool:
+    """Report one lifecycle step, and say whether it is worth asking the peer.
+
+    Returns ``False`` when the step stopped before posting ``/update_weights``.
+    The round marker cannot appear for a round the engine never joined, so
+    waiting out ``--peer-grace`` there buys nothing but delay on a path that is
+    already slow for the wrong reasons, and ``decide_verdict`` ranks the
+    lifecycle failure above the peer evidence regardless.
+
+    ``peer_sent`` is then left ``None`` rather than ``False``, which is the
+    distinction that module has kept throughout: ``False`` is "the peer did not
+    send" and ``None`` is "nobody asked".
+    """
+    update = step.get("update")
+    if update is None:
+        log(
+            f"{step['label']} step stopped at start -> "
+            f"{step['start']['status']}: {step.get('skipped_reason', 'not posted')}"
+        )
+        return False
+    log(f"{step['label']} update -> {update['status']} in {update['seconds']}s")
+    return True
+
+
+def _update_seconds(step: dict[str, Any]) -> float | None:
+    """How long this step's update leg took, or ``None`` if it never ran.
+
+    ``None`` rather than ``0.0``: a leg that was never posted has no duration,
+    and a zero here would read as an update that returned instantly -- which
+    is a real and interesting observation this driver has recorded before.
+    """
+    update = step.get("update")
+    return None if update is None else update["seconds"]
 
 
 def _lifecycle_failure(lifecycle: dict[str, Any]) -> str | None:
@@ -661,9 +723,9 @@ def main() -> int:
     perturb_round, restore_round = 1, 2
 
     report["perturb"] = lifecycle_update(args.control_url, plan, "perturb")
-    log(f"perturb update -> {report['perturb']['update']['status']} in {report['perturb']['update']['seconds']}s")
+    posted_perturb = _log_step(report["perturb"])
     peer_sent_perturb: bool | None = None
-    if args.peer_grace > 0:
+    if posted_perturb and args.peer_grace > 0:
         peer = wait_for_peer_round(
             args.plan, perturb_round, args.peer_grace, args.plan_run_id, "perturb"
         )
@@ -681,9 +743,9 @@ def main() -> int:
     flush()
 
     report["restore"] = lifecycle_update(args.control_url, plan, "restore")
-    log(f"restore update -> {report['restore']['update']['status']} in {report['restore']['update']['seconds']}s")
+    posted_restore = _log_step(report["restore"])
     peer_sent_restore: bool | None = None
-    if args.peer_grace > 0:
+    if posted_restore and args.peer_grace > 0:
         peer = wait_for_peer_round(
             args.plan, restore_round, args.peer_grace, args.plan_run_id, "restore"
         )
@@ -713,8 +775,8 @@ def main() -> int:
     report["verdict"] = verdict
 
     report["update_seconds"] = {
-        "perturb": report["perturb"]["update"]["seconds"],
-        "restore": report["restore"]["update"]["seconds"],
+        "perturb": _update_seconds(report["perturb"]),
+        "restore": _update_seconds(report["restore"]),
     }
 
     flush()
