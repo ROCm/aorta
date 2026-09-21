@@ -921,6 +921,93 @@ def test_the_rollout_doc_marks_its_variance_data_as_the_old_configuration():
     ), "the record-only window is not pinned to warmup_steps: 2"
 
 
+def _gated_serving_metrics() -> dict[str, set[str]]:
+    """``cell -> gated metric names`` for tokenspeed_serve_smoke, from the real file."""
+    import yaml
+
+    baselines = yaml.safe_load(
+        (nightly_eval.REPO_ROOT / "config/ci/regression_baselines.yaml").read_text("utf-8")
+    )["baselines"]
+    return {
+        key.split("::", 1)[1]: set(spec.get("metrics") or {})
+        for key, spec in baselines.items()
+        if key.startswith("tokenspeed_serve_smoke::")
+    }
+
+
+def test_the_docs_name_exactly_the_serving_metrics_that_are_gated():
+    """Tie the prose to the config, because it already drifted once.
+
+    Arming the first gate made three separate documents wrong at a stroke --
+    they went on describing the serving cells as record-only and nothing as
+    gated -- and nothing in the tree noticed, because a claim about what is
+    gated lived only in prose. The same edit will be made again for step 7, so
+    the failure mode is recurring rather than historical.
+
+    Deliberately asserting the *set*, not that it is these two names. A reader
+    needs to know which metrics can red the nightly, so a doc that says "gated"
+    without naming them is its own inaccuracy; a doc that names a metric the
+    file does not gate is worse. Both directions fail here, and a future
+    promotion is then a docs edit the test demands rather than one it forbids.
+    """
+    gated = _gated_serving_metrics()
+    assert gated, "no tokenspeed_serve_smoke baseline keys at all"
+    assert len(set(map(frozenset, gated.values()))) == 1, (
+        f"the two serving cells gate different metric sets: {gated}. Both cells "
+        "measure the same thing under one mitigation difference, so a metric "
+        "worth gating on one is worth gating on the other."
+    )
+    names = next(iter(gated.values()))
+
+    for relative in ("docs/tokenspeed-serving.md", "docs/tokenspeed-gating-rollout.md"):
+        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        missing = sorted(n for n in names if n not in doc)
+        assert not missing, (
+            f"{relative} does not name {missing}, which the nightly now gates. "
+            "A reader cannot tell which metrics can red the run."
+        )
+
+    # The specific claims that were false the moment the bless landed. Narrow on
+    # purpose: a reworded sentence is not what this catches, an unchanged one is.
+    stale = {
+        "docs/tokenspeed-serving.md": "no serving baseline has been blessed",
+        "docs/tokenspeed-gating-rollout.md": "nothing is gated, because no serving baseline",
+        "scripts/ci/dashboard_metadata.py": "record-only until a baseline is blessed",
+    }
+    for relative, claim in stale.items():
+        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        assert claim not in doc, (
+            f"{relative} still says {claim!r} while "
+            f"config/ci/regression_baselines.yaml gates {sorted(names)}."
+        )
+
+
+def test_the_docs_say_which_serving_metrics_are_not_gated():
+    """"Gated" is only half the answer; the ungated set is the operational half.
+
+    `step_time_ms.max` is the one that has to be named. It is what `--perf-gate`
+    always writes, it is not a recorded metric at all, and it was pruned from
+    this bless by hand -- so a doc that omits it reads as though the pruning did
+    not happen, and the next hand-written bless puts it back.
+    """
+    gated = _gated_serving_metrics()
+    names = next(iter(gated.values()))
+    assert "step_time_ms" not in names and "step_time_ms.max" not in names, (
+        "step_time_ms.max is armed on a serving cell; the measured step-0 "
+        "compile excursion (2825 ms) clears any ceiling derived from a clean "
+        "night. See docs/tokenspeed-gating-rollout.md step 6."
+    )
+    for relative in ("docs/tokenspeed-serving.md", "docs/tokenspeed-gating-rollout.md"):
+        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        assert "step_time_ms.max" in doc, (
+            f"{relative} does not mention step_time_ms.max, so nothing records "
+            "that it was left out on purpose."
+        )
+        assert "record-only" in doc, (
+            f"{relative} no longer says which serving metrics stay record-only."
+        )
+
+
 def test_pending_entries_are_valid_and_loadable():
     """Validated exactly like a live entry, so promoting one is a move, not a bet.
 

@@ -1001,13 +1001,33 @@ stops at its first EOS token, which for a short prompt can be immediately, so
 every request may emit exactly one token and TPOT is genuinely undefined. Keying
 off `output_len` there rejected a correct export.
 
-## Not done yet
+## Gated in the nightly
 
-- **Blessed nightly baselines.** `tokenspeed_serve_smoke` is now live in
-  `config/ci/nightly_eval_matrix.yaml` — in this repository, not `aorta-internal`
-  — but it is **record-only**: no serving baseline has been blessed, so nothing
-  is gated yet. The bless waits on a ten-night window;
-  [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md) is the sequence.
+`tokenspeed_serve_smoke` is live in `config/ci/nightly_eval_matrix.yaml` — in
+this repository, not `aorta-internal` — and **two of its metrics are now gated
+on both cells** (`baseline` and `no-scratch-reclaim`):
+
+| metric | policy | why this one |
+|---|---|---|
+| `median_tpot_ms` | `max` | steady-state decode cost, no queueing term, and its definition excludes the step-0 compile excursion |
+| `p99_itl_ms` | `max` | the tail half of the same pair; also excursion-immune |
+
+Ceilings are `window maximum × 1.25`, from the ten-night window
+2026-09-08..09-17. A run over either is a nightly **failure**, not a chart entry.
+
+Everything else this workload reports is still **record-only** — captured,
+charted, and not gated. That is nine auto-gateable metrics (`median_ttft_ms`,
+`p99_ttft_ms`, `p99_tpot_ms`, `median_e2el_ms`, `p99_e2el_ms`,
+`output_throughput`, `request_throughput`, `total_token_throughput`,
+`tokens_per_sec`), plus `step_time_ms.max`, which was pruned from the bless on
+purpose because it is synthesised at bless time rather than recorded per night.
+`median_itl_ms` is never auto-gated at all: it measures ~0 here, so a
+multiplicative margin on it blesses a ceiling of ~0.
+
+[tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md) has the per-metric
+reasoning and the sequence for promoting the rest, which is its step 7.
+
+## Not done yet
 - **`sharegpt` measured on hardware.** The plumbing is tested; no run has been
   made against a real ShareGPT file, so there are no numbers from it yet.
 - **TP=4 and above.** TP 1 and 2 work; 4 fails to come up, diagnosed as far as

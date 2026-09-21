@@ -2,9 +2,32 @@
 
 [`tokenspeed_serve`](tokenspeed-serving.md) reports TTFT, TPOT, ITL and
 throughput, and the serving metric names are already in the nightly's gating
-allowlist. A serving recipe is now in `config/ci/nightly_eval_matrix.yaml`, but
-nothing is gated, because no serving baseline has been blessed. This document is
-the sequence for changing that, and the reasoning behind the numbers it picks.
+allowlist. A serving recipe is in `config/ci/nightly_eval_matrix.yaml`, and this
+document is the sequence that took it from record-only to gated, plus the
+reasoning behind the numbers it picks.
+
+> [!IMPORTANT]
+> **Current state: two metrics are gated, nine are not.**
+> `config/ci/regression_baselines.yaml` carries `median_tpot_ms` and
+> `p99_itl_ms` as `max` ceilings on **both** `tokenspeed_serve_smoke` cells
+> (`baseline` and `no-scratch-reclaim`), derived from the ten-night window
+> 2026-09-08..09-17. A run over either is a nightly failure, not a chart.
+>
+> **Nine auto-gateable metrics stay record-only and still only charted**:
+> `median_ttft_ms`, `p99_ttft_ms`, `p99_tpot_ms`, `median_e2el_ms`,
+> `p99_e2el_ms`, `output_throughput`, `request_throughput`,
+> `total_token_throughput` and `tokens_per_sec`. So does **`step_time_ms.max`,
+> which was pruned deliberately** rather than overlooked: it is what
+> `--perf-gate` always writes, it is not a recorded metric at all — no per-night
+> series accumulates for it, it is synthesised at bless time from one night's
+> mean — and the measured step-0 compile excursion (2825 ms) clears any ceiling
+> a clean night gives it. `median_itl_ms` is absent for a different reason
+> again: `_NO_AUTO_GATE` keeps the refresher from ever writing it, because it
+> measures ~0 here.
+>
+> Steps 1–6 below are done. Step 7 — promoting the nine on evidence — is not,
+> and is what the next window is for. Nothing else in the matrix changed: every
+> other entry is unchanged and still correctness-only.
 
 The reason it is a document rather than a commit is that we do not yet have a
 window to derive thresholds from. A threshold derived from a single observation
@@ -442,12 +465,16 @@ stack change is caught:
 Those rows are in `tests/ci/test_eval_lib.py`, run against the real comparator,
 so the claim is checked rather than asserted.
 
-## What blocks this today
+## What blocked this, and what remains
 
-Nothing, as of 2026-09-03. The matrix entry is live, the socket is signed off
-for the nightly lane, and `nightly-eval.yml` sets `docker_socket: true`. What
-remains is the measurement: ten record-only nights, from
-[step 3](#the-rollout-sequence) onward.
+Nothing blocks the first bless any more: the matrix entry is live, the socket is
+signed off for the nightly lane, `nightly-eval.yml` sets `docker_socket: true`,
+and the ten-night measurement is taken (2026-09-08..09-17, all ten scheduled
+`workflow_run` events, all ten green). The two ceilings that window sized are in
+`config/ci/regression_baselines.yaml`.
+
+What remains is [step 7](#the-rollout-sequence): the nine record-only metrics
+need another window before any of them can be promoted.
 
 This section is kept because the *shape* of the plumbing is what the sign-off
 was given against, and because the argument is worth being able to re-read.
@@ -864,9 +891,14 @@ docker exec aorta-ci-gpu aorta sweep run \
 
 ## The rollout sequence
 
-Steps 1–2a are **done**: the entry is live and the nightly lane has the socket,
-so the first nightly after this merges starts recording. Everything from step 3
-is the part this document is really specifying.
+Steps 1–6 are **done**: the entry is live, the nightly lane has the socket, the
+ten-night window was taken 2026-09-08..09-17, and the two bounds it sized are in
+`config/ci/regression_baselines.yaml`. **Step 7 is the only one outstanding.**
+
+The steps are kept written as instructions rather than rewritten as history:
+they are the procedure for the *next* bless (step 7 here, and any other
+workload's first bless), and what each one was checked against is the part worth
+being able to re-read.
 
 **1. ~~Promote the entry.~~ Done.** It is in `entries` with `min_gpus: 1`,
 `timeout_sec: 3600` and `needs_docker_daemon: true`.
@@ -914,7 +946,9 @@ branch — that argument is what bounds this one. The dashboard also makes the
 absence visible rather than silent: on a lane without the socket the entry
 reports `skip` with `needs a docker daemon: ...` in its reasons.
 
-**3. Let it record for ten nightlies, at `warmup_steps: 2`.** It will report
+**3. ~~Let it record for ten nightlies, at `warmup_steps: 2`.~~ Done** —
+2026-09-08 to 09-17, ten consecutive scheduled `workflow_run` events, every one
+green, no `workflow_dispatch` inside the range. While it ran it reported
 `recording` on the dashboard.
 
 > The window is only valid at the setting the gate will run at, and that setting
@@ -948,9 +982,10 @@ so twenty observations of each. A `fail` during this window is a real failure �
 the entry is unbaselined but the harness is fail-closed — and must be fixed
 rather than waited out.
 
-**4. Check the window before blessing, and check it for bimodality first.**
-Compute, per cell and per metric, the extremum and the ratio of extremum to
-median. Two separate checks:
+**4. ~~Check the window before blessing, and check it for bimodality first.~~
+Done, and both checks passed** — with one number that looks alarming and is not,
+recorded below the checks. Compute, per cell and per metric, the extremum and
+the ratio of extremum to median. Two separate checks:
 
 - *Spread.* If either gated metric shows a window spread above about 10%, do not
   bless it — the margin was sized for a 3% spread and a 10% one means something
@@ -963,8 +998,42 @@ median. Two separate checks:
   gives a threshold with no detection power. See
   [the bimodal-cell section](#the-extremum-anchor-has-no-good-answer-on-a-bimodal-cell).
 
+What the 2026-09-08..09-17 window actually showed, per cell and per gated metric:
+
+| cell | metric | min | median | max | max/median | full range |
+|---|---|---|---|---|---|---|
+| `baseline` | `median_tpot_ms` | 1.7373 | 1.8906 | 1.9138 | 1.0122 | **9.33%** |
+| `baseline` | `p99_itl_ms` | 34.1259 | 34.7533 | 35.4296 | 1.0195 | 3.75% |
+| `no-scratch-reclaim` | `median_tpot_ms` | 1.8604 | 1.8945 | 1.9196 | 1.0132 | 3.13% |
+| `no-scratch-reclaim` | `p99_itl_ms` | 33.9241 | 34.9653 | 35.8309 | 1.0248 | 5.45% |
+
+> **The 9.33% is not the spread-check failing, and the reason generalises.** Both
+> metrics are `max` policy, so the number that sizes a ceiling and the number
+> that can breach it is the **upside** deviation, not the full range. That 9.33%
+> is a single *low* outlier on 09-13 — the cell ran faster than usual — against
+> a ceiling it therefore cannot approach. Upside deviation never exceeds **2.48%**
+> anywhere in the window, which is what the 10% check is about. Read the
+> `max/median` column, not `full range`, when applying this check to a `max`
+> metric; the reverse for a `min` one.
+
+Bimodality: clean. `mean_step_time_ms` stayed within **1113.98–1148.66 ms across
+all twenty cell-runs** and the step-0 compile excursion did not recur once, so
+`warmup_steps: 2` did what it was changed to do.
+
 If the window shows no excursion in twenty cell-runs, that is reasonable evidence
 it has stopped happening, and the three can be promoted with the same margins.
+
+> **It did, and they were still not promoted in the first bless — deliberately.**
+> The window clears the *excursion* blocker on `median_ttft_ms`,
+> `output_throughput` and `step_time_ms.max`, so the evidence for promoting the
+> first two is now in hand and promoting them is an ordinary step-7 PR.
+> `step_time_ms.max` is the one that does not follow, on a second and
+> independent ground: it is not a recorded metric, no per-night series exists
+> for it, and a bound synthesised from one night's mean at bless time is not
+> something this window measured. Arming the first gate on the two metrics whose
+> definitions exclude the failure mode we can demonstrate, and promoting the
+> rest on their own evidence in their own diffs, keeps a gate that fires
+> attributable to the change that armed it.
 
 This window is the first measurement at `warmup_steps: 2`, so it is also the
 test of whether that change did what it was supposed to. Two outcomes worth
@@ -974,7 +1043,8 @@ still appears at position 0 means two discarded steps are not enough to cover
 the compile, which is new information and should be investigated rather than
 absorbed by raising `warmup_steps` again.
 
-**5. Bless, scoped to this entry only.**
+**5. ~~Bless, scoped to this entry only.~~ Done, by hand** — see the note
+immediately below for why a refresher run was never an option for this entry.
 
 > [!IMPORTANT]
 > **For `tokenspeed_serve_smoke`, this is a hand-written baseline, not a
@@ -1045,10 +1115,13 @@ correctness-only mode: omitting `--perf-gate` means "do not arm new gates", not
 `perf_gate_entry` accepts several names, comma- or space-separated, mapping to
 one `--perf-gate-entry` each. For this rollout it should be exactly one.
 
-**6. Write the two bounds, then merge.** Whether the numbers come from a
-refresher diff or are written by hand (as they are for this entry — see the note
-in step 5), the same two edits apply, because the refresher derives bounds from
-the *single* run it just did and from every auto-gateable metric it observed:
+**6. ~~Write the two bounds, then merge.~~ Done** — the four keys now in
+`config/ci/regression_baselines.yaml` are `max × 1.25` on the window maximum of
+each cell's `median_tpot_ms` and `p99_itl_ms`, and nothing else was written.
+Whether the numbers come from a refresher diff or are written by hand (as they
+are for this entry — see the note in step 5), the same two edits apply, because
+the refresher derives bounds from the *single* run it just did and from every
+auto-gateable metric it observed:
 
 - Replace each bound with one derived from the ten-run window: `max × 1.25` for a
   `max` metric, `min × 0.85` for a `min` metric.
