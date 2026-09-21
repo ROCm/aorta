@@ -179,11 +179,21 @@ def _explain_divergence(session: RocgdbSession) -> str:
     nans = [k for k, v in session.non_finite.items() if math.isnan(v)]
 
     if zeros and infs and nans:
+        # Debugger scripts also record coordinates and indices, which may
+        # legitimately be zero. The first zero is therefore not necessarily
+        # the denominator that produced the infinity: col_index=0 made the
+        # report prescribe rsqrtf(col_index + eps). Prefer arithmetic state by
+        # meaning, while retaining a fallback for other kernels.
+        zero = _preferred_value(
+            zeros, ("mean_sq", "variance", "var", "denominator", "denom")
+        )
+        inf = _preferred_value(infs, ("inv_rms", "inv_std", "reciprocal"))
+        nan = _preferred_value(nans, ("y", "output", "out"))
         return (
-            f"{zeros[0]} is exactly zero, so the reciprocal square root of it is "
-            f"{infs[0]}=inf, and multiplying a zero element by that infinity yields "
-            f"{nans[0]}=NaN. A variance epsilon is what normally keeps this finite; "
-            f"the fix is to add one before the rsqrt, e.g. rsqrtf({zeros[0]} + eps) "
+            f"{zero} is exactly zero, so the reciprocal square root of it is "
+            f"{inf}=inf, and multiplying a zero element by that infinity yields "
+            f"{nan}=NaN. A variance epsilon is what normally keeps this finite; "
+            f"the fix is to add one before the rsqrt, e.g. rsqrtf({zero} + eps) "
             f"with eps around 1e-6."
         )
     if zeros and infs:
@@ -194,6 +204,19 @@ def _explain_divergence(session: RocgdbSession) -> str:
     if nans:
         return f"{nans[0]} is NaN, indicating an undefined arithmetic result."
     return ""
+
+
+def _preferred_value(candidates: list[str], preferred: tuple[str, ...]) -> str:
+    """The most semantically relevant captured value, with a stable fallback."""
+    lowered = {name.lower(): name for name in candidates}
+    for wanted in preferred:
+        if wanted in lowered:
+            return lowered[wanted]
+    for wanted in preferred:
+        for candidate in candidates:
+            if wanted in candidate.lower():
+                return candidate
+    return candidates[0]
 
 
 class RocgdbAdapter:

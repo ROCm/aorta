@@ -119,6 +119,13 @@ jobs:
             'tests/instrumentation/test_environment.py'
             'tests/instrumentation/test_env_knob_audit.py'
             'tests/instrumentation/test_proton_smoke_gpu.py'
+            # The chat harness writes HIP and hands it to hipcc on a GPU node.
+            # Every CPU test of it reads the generated text, so a slip that
+            # keeps the text plausible and the C++ invalid -- hipMalloc losing
+            # its address-of was the one measured -- passes all of them and
+            # fails in front of a user, minutes into a triage. Only a compiler
+            # catches that, and this is the only job that has one.
+            'src/aorta/chat/tools/harness/*'
             # The Proton smoke test runs these payloads, so they are code the
             # GPU job covers: a PR that breaks pipeline.py or hotspot.py while
             # touching no collector or test file would otherwise skip the only

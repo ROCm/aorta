@@ -175,7 +175,22 @@ chat-cli = [
     "langchain-openai>=0.2.0; python_version >= '3.11'",
     "langchain-community>=0.3.0; python_version >= '3.11'",
     "langchain-text-splitters>=0.3.0; python_version >= '3.11'",
-    "langgraph>=0.2.0; python_version >= '3.11'",
+    # 0.5.3 is the first release this graph actually builds on, established by
+    # installing each candidate and importing the graph rather than by reading
+    # changelogs. Three separate walls are behind that number:
+    #
+    #   0.2.69  first carries langgraph.config.get_stream_writer and the
+    #           "custom" stream mode, which graph/nodes.py imports at module
+    #           scope and session.py asks for by name;
+    #   <=0.4.x rejects add_node("plan") because the state has a "plan" key --
+    #           ValueError at graph construction, so importing session fails;
+    #   <=0.5.2 raises a TypeError building the MRO for the compiled graph.
+    #
+    # The import landing in 0.2.69 is why that was the previous floor, but an
+    # install pinned there cannot construct the graph at all, so neither the UI
+    # nor the CLI starts. Verified: 0.5.2 fails, 0.5.3 passes the streaming and
+    # progress suites.
+    "langgraph>=0.5.3; python_version >= '3.11'",
     "openai>=1.50.0; python_version >= '3.11'",
     "pydantic>=2.0; python_version >= '3.11'",
     # >=2.3 is load-bearing: aorta/chat/config.py imports NoDecode, added in 2.3.
@@ -323,6 +338,12 @@ include = ["aorta*"]
 aorta = [
     "py.typed",
     "chat/ui/chainlit.md",
+    # The Chainlit settings that matter -- the CORS origins and the key
+    # masking. Chainlit resolves .chainlit/config.toml under CHAINLIT_APP_ROOT
+    # or the working directory, so without shipping this and pointing the child
+    # at it, an installed wheel generates one with Chainlit's own defaults:
+    # allow_origins = ["*"] on a UI whose tools run pasted code on GPU nodes.
+    "chat/ui/chainlit_config.toml",
     # The retrieval eval question set (Decision 19b). Shipped so `aorta chat
     # index eval` works with no arguments on an installed wheel.
     "chat/rag/eval_questions.json",

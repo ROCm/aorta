@@ -126,6 +126,13 @@ class TestTheNodeChoosesTheAssembler:
         assert "onpath" in done.stdout
 
     def test_with_neither_it_says_so_distinctly(self, cluster, tmp_path):
+        """The PATH has to be a directory that really has no clang in it.
+
+        It was the system bin, which holds a clang on a CI runner and on plenty
+        of developer machines. There the lookup succeeded and the test watched
+        clang fail on a missing input file instead -- passing or failing for
+        reasons that had nothing to do with the sentinel it is about.
+        """
         module = cluster(str(tmp_path / "nowhere"))
         empty_path = tmp_path / "no-clang-here"
         empty_path.mkdir()
