@@ -2989,6 +2989,23 @@ def _run_peer(tmp_path, rounds, extra=()):
     )
 
 
+# Evidence that the peer got past argument validation and into real work.
+#
+# *Which* of these it hits depends entirely on what the environment has
+# installed -- no torch on a bare login node, torch but no safetensors on the
+# CPU lane, both plus a real `--model-path` in anger -- so asserting any one of
+# them by name makes the test a statement about the runner rather than about
+# the script. Asserting that it reached exactly none of them is the ordering
+# claim these tests are actually making: a role error has to be paid before the
+# import and before the rendezvous, because a peer that joins the group and
+# then exits leaves the driver blocked on a broadcast that never comes.
+_PAST_VALIDATION = ("import torch", "safetensors", "no .safetensors")
+
+
+def _reached_real_work(output):
+    return [marker for marker in _PAST_VALIDATION if marker in output]
+
+
 def test_a_recv_round_refuses_to_broadcast_from_this_peer(tmp_path):
     """`--src` defaulting to `--rank` inverts the one round that receives.
 
@@ -3017,27 +3034,25 @@ def test_a_recv_round_refuses_to_broadcast_from_this_peer(tmp_path):
     # reason the `--rounds` kind check moved there: a peer that has already
     # joined the group and then exits leaves the driver blocked on an
     # `/update_weights` whose broadcast is never posted, so a command-line
-    # error costs the full timeout instead of nothing. `--model-path` points at
-    # nothing, so reaching the loader at all would fail differently.
-    assert "no .safetensors" not in output, output
+    # error costs the full timeout instead of nothing.
+    assert _reached_real_work(output) == [], output
 
 
 def test_a_recv_round_with_an_engine_source_is_allowed(tmp_path):
     """Narrowness: the check must reject the inversion, not the round kind.
 
-    Same invocation with an engine rank as the root. It still fails, because
-    this environment has no torch -- but it has to fail *there*, and where it
-    fails is the assertion. The role check sits ahead of the torch import, so
-    reaching the import is proof the round was accepted rather than refused,
-    and it doubles as the ordering check: a role error must cost nothing, not
-    an import and a rendezvous.
+    Same invocation with an engine rank as the root. It still fails -- there is
+    no checkpoint at `--model-path`, and a test runner may not have torch or
+    safetensors either -- but it has to fail *past the role check*, which is
+    what makes this the narrowness control rather than a second copy of the
+    test above.
     """
     proc = _run_peer(tmp_path, "recv", ("--src", "1"))
     output = proc.stdout + proc.stderr
 
     assert "--src resolved to" not in output, output
     assert "this peer's own --rank" not in output, output
-    assert "import torch" in output, output
+    assert _reached_real_work(output), output
 
 
 def test_a_sending_round_refuses_a_source_that_is_not_this_peer(tmp_path):
