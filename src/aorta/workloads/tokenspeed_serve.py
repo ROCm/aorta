@@ -224,6 +224,7 @@ _EXIT_REASONS: dict[int, str] = {
     56: "rollout_output_too_short",
     57: "rollout_sampling_ignored",
     58: "rollout_sampling_backend_mismatch",
+    59: "rollout_length_basis_unusable",
     64: "usage_error",
 }
 
@@ -428,10 +429,23 @@ def _is_scalar(value: Any) -> bool:
     aggregated as a mean is meaningless. Non-finite values are excluded because
     ``matrix.json`` is JSON and ``NaN``/``inf`` do not round-trip through strict
     JSON readers.
+
+    An ``int`` too large to become a ``float`` is excluded for the same reason
+    and caught here rather than at the call sites. JSON has no integer bound, so
+    ``json.load`` hands back arbitrary-precision ``int``s, and ``math.isfinite``
+    raises ``OverflowError`` on them -- which is not a value this returns but an
+    exception thrown through every caller. Every reader of an export value in
+    this file routes through this function first and then converts, so guarding
+    it once makes all of them safe; guarding one caller would leave the rest,
+    including the scalar sweep that calls this on *every* key of the document
+    and so crashed on a field the workload does not even read.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value)
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _valid_output_lens(
@@ -2641,10 +2655,19 @@ class TokenSpeedServeWorkload(Workload):
         # recipe go green without establishing its own headline claim. An
         # explicit `save_detailed: false` is a different statement -- the caller
         # said they did not want the array -- and stays unaudited.
+        #
+        # Unaudited only where the key is *absent*, though, which is the same
+        # distinction the container audit draws and for the same reason. A
+        # present value that fails the rule is a broken export whatever the cell
+        # asked for: `save_detailed: false` makes the bench strip the key, so it
+        # cannot produce `[]` or a string here. Gating on the flag alone left the
+        # permitted `save_detailed: false` path reading other numbers out of a
+        # document the container had already refused, so the two layers
+        # disagreed again -- with the host, which publishes the metrics, as the
+        # lenient one.
         if (
-            self._save_detailed
-            and _valid_output_lens(record.doc, cap=self._completion_length_cap) is None
-        ):
+            self._save_detailed or "output_lens" in record.doc
+        ) and _valid_output_lens(record.doc, cap=self._completion_length_cap) is None:
             missing.append("output_lens")
         return missing
 
@@ -3139,20 +3162,73 @@ class TokenSpeedServeWorkload(Workload):
                 # `rollout_samples: 8` read as 2 and failed a floor of 8. So the
                 # previous fix traded a false pass for a false failure.
                 #
-                # `output_lens` needs no such assumption: one entry per recorded
-                # completion, so its mean *is* the per-completion mean. Rollout
-                # defaults `save_detailed` on to obtain it, and a rollout that
-                # asked for it and did not get it is now `result_json_unusable`
-                # (see `_missing_core_metrics`), which leaves this fallback
-                # reachable only for an explicit `save_detailed: false`.
+                # `output_lens` needs no such assumption *when it is the
+                # per-choice shape*, where one entry per recorded completion
+                # makes its mean the per-completion mean. Rollout defaults
+                # `save_detailed` on to obtain it, and a rollout that asked for
+                # it and did not get it is now `result_json_unusable` (see
+                # `_missing_core_metrics`), which leaves this fallback reachable
+                # only for an explicit `save_detailed: false`.
+                #
+                # Which shape arrived is read off the cardinality rather than
+                # assumed, because the other shape this class documents and
+                # supports -- one entry per *request* -- is the same quantity as
+                # `total_output_tokens / completed` and carries the same
+                # ambiguity. Taking its mean as per-completion was the assumption
+                # the paragraph above refuses, reintroduced through the array:
+                # at `rollout_samples: 8` a policy emitting one token per choice
+                # reports 8 per request and clears the default floor of 8
+                # exactly, which is the collapse this check exists to catch.
                 lens = _valid_output_lens(
                     record.doc, cap=self._completion_length_cap
                 )
                 basis: str | None = None
                 mean_output = 0.0
-                if lens:
+                per_completion = (
+                    lens is not None
+                    and type(completed) is int
+                    and len(lens) == completed * self._rollout_samples
+                )
+                if lens and not per_completion and self._rollout_samples > 1:
+                    # Refused rather than divided. Dividing by `rollout_samples`
+                    # would be correct only if the gateway sums usage across
+                    # choices, and reading each entry as a completion would be
+                    # correct only if it reports the first -- the same coin-flip
+                    # `_validated_rollout` already refuses to make when it
+                    # rejects `save_detailed: false` at `rollout_samples > 1`.
+                    # Named for what happened rather than folded into
+                    # `result_json_unusable`: the export is readable and the
+                    # cardinality is a legitimate gateway choice, it just cannot
+                    # support a per-completion floor. The escape hatch is the one
+                    # that config-time refusal already offers.
+                    failure_details.append(
+                        {
+                            "reason": "rollout_length_basis_unusable",
+                            "step": record.step,
+                            "detail": (
+                                f"output_lens carries {len(lens)} entries for "
+                                f"completed={completed} at rollout_samples="
+                                f"{self._rollout_samples}, so each entry is a "
+                                "request total rather than a completion length "
+                                "and the per-completion mean "
+                                "min_mean_output_tokens needs cannot be derived "
+                                "from it. Set min_mean_output_tokens: 0 to state "
+                                "that this cell is not guarding length, or use "
+                                "rollout_samples: 1."
+                            ),
+                            "output_lens_count": len(lens),
+                            "completed": completed,
+                            "rollout_samples": self._rollout_samples,
+                        }
+                    )
+                elif lens and per_completion:
                     mean_output = sum(lens) / len(lens)
                     basis = f"mean of {len(lens)} output_lens entries"
+                elif lens:
+                    # `rollout_samples == 1`, where per request and per
+                    # completion are the same number whatever the cardinality.
+                    mean_output = sum(lens) / len(lens)
+                    basis = f"mean of {len(lens)} output_lens entries, n=1"
                 elif (
                     type(total_output) is int
                     and total_output > 0

@@ -304,7 +304,7 @@ What follows is the configuration.
 | `rollout_samples` | `4` | Completions per prompt — the `n` of the sampling API. Max 1024. |
 | `temperature` | `1.0` | In `(0, 2]`. Zero is rejected: it would draw the same greedy completion `n` times. |
 | `top_p` | unset | In `(0, 1]`. Left unset means the server's own. |
-| `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**. Taken from the mean of `output_lens`, which carries one entry per completion, so no assumption is made about whether the gateway's `usage.completion_tokens` sums all `n` choices. With `save_detailed: false` (and only then) it falls back to `total_output_tokens / completed`, per request, with the basis named in the failure detail — a combination rejected outright when `rollout_samples > 1`, since a collapsed policy would clear a per-request floor there. `0` disables it. |
+| `min_mean_output_tokens` | `8` | Per-step floor on mean tokens per **completion**, checked in the container and again on the host. It must be no larger than `output_len` on `random`, which caps each completion, and which reading of the export can support it depends on the shape the gateway returned — both are below rather than restated here. `0` disables it. |
 | `sampling_backend` | `triton` | The server's `--sampling-backend`; `triton` or `triton_full`. Defaulted away from the engine's own default, which is `greedy` on non-NVIDIA hardware and silently discards `temperature`, `top_p` and `seed`. `greedy` is **rejected** under `rollout` for the same reason `temperature: 0` is, and `flashinfer` / `flashinfer_full` are rejected as CUDA-only — unregistered on the ROCm images this workload serves from, so accepting them would move the failure to server startup. Reserved in `serve_args` under this mode. |
 
 The sampling keys are **rejected outside the mode** rather than ignored. Outside
@@ -424,15 +424,30 @@ immediate EOS passes every other guard in the workload while generating about on
 token per prompt. Exit 56 / `rollout_output_too_short` is that verdict, checked in
 the container and again on the host, on the same rule in both.
 
-That rule is the mean of `output_lens`, which holds one entry per completion —
-so the check needs no assumption about whether the gateway's
-`usage.completion_tokens` sums all `n` choices or reports only the first, and
-both shapes are documented above as the server's decision. Only when
-`save_detailed` is off is there no such array, and the check then falls back to
-`total_output_tokens / completed`, per *request*, naming that basis in the
-failure detail. Both layers reject that fallback outright when
-`rollout_samples > 1`, because a per-request floor is one a fully collapsed
-policy clears at those sample counts.
+That rule is the mean of `output_lens` — but only of the per-choice shape, whose
+entries are completion lengths. Which shape arrived is read off the cardinality
+rather than assumed: `completed * rollout_samples` entries is per choice, and
+anything else at `rollout_samples > 1` holds request totals, which carry exactly
+the ambiguity `total_output_tokens / completed` does. Both layers refuse that
+case as exit 59 / `rollout_length_basis_unusable` instead of dividing, because
+either reading of it is a guess about the gateway's usage accounting and the
+per-completion one is the guess a collapsed policy clears — at
+`rollout_samples: 8`, one token per choice reports 8 per request and meets a
+floor of 8 exactly. Set `min_mean_output_tokens: 0` if a cell on such a gateway
+is not guarding length.
+
+A floor above `output_len` on `random` is refused before the model loads rather
+than discovered afterwards: `output_len` is each completion's `max_tokens`, so
+no run could satisfy it and the trial would otherwise come back as a collapsed
+policy.
+
+With no array at all — what `save_detailed: false` produces — the check falls
+back to `total_output_tokens / completed`, per *request*, naming that basis in
+the failure detail. Both layers reject that fallback outright when
+`rollout_samples > 1`, for the same reason. A *present* array that fails the rule
+is neither case: without `--save-detailed` the bench writes no key, so a present
+value that is not a usable array is a broken export, and both layers call it
+`result_json_unusable` whatever `save_detailed` asked for.
 
 Exit 57 / `rollout_sampling_ignored` is the other rollout-specific verdict, and
 it is the one no audit of the export could reach: a greedy engine's output is

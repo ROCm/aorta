@@ -35,6 +35,8 @@
 #       sampling parameters it accepted are being ignored
 #   58  the engine is sampling, but with a different backend than was asked
 #       for, so the cell's numbers would carry the wrong backend's name
+#   59  a rollout step's output_lens holds one entry per request rather than
+#       per completion, so the per-completion floor cannot be derived from it
 #   64  usage / environment error (missing tokenspeed CLI, bad config)
 #
 # Two ports, for the reason `ts_serve_probe.sh` documents at length: `tokenspeed
@@ -537,6 +539,36 @@ case "${MIN_MEAN_OUTPUT_TOKENS}" in
 esac
 if [ "${ROLLOUT}" = "1" ]; then
   require_uint TS_ROLLOUT_SAMPLES "${ROLLOUT_SAMPLES}" 1 1024
+  # On `random` the recipe sends TS_OUTPUT_LEN as each completion's max_tokens,
+  # so a floor above it describes a length the server is not permitted to
+  # generate. No run can satisfy it, and left unchecked the mistake surfaces as
+  # exit 56 -- a collapsed policy -- after the weights have loaded, which is the
+  # wrong name for it and several minutes late. The host refuses the same
+  # combination at config time; refused here for the reason the SAVE_DETAILED
+  # check below gives, that a direct script run must not enforce a weaker
+  # contract than a recipe-driven one.
+  if [ "${DATASET}" = "random" ]; then
+    # Validated before the comparison, and this is load-bearing rather than
+    # defensive: `-gt` is an integer test, nothing else in this script validates
+    # TS_OUTPUT_LEN, and the script does not run under `set -e`. A non-numeric
+    # value would therefore print `[: integer expression expected` to stderr,
+    # evaluate *false*, and carry on into model load -- the guard silently not
+    # firing on exactly the malformed input a hand-run supplies, which is the
+    # case it exists for.
+    case "${OUTPUT_LEN}" in
+      ''|*[!0-9]*|0*)
+        echo "TS_BENCH_FAIL: usage TS_OUTPUT_LEN must be a positive integer without leading zeros, got '${OUTPUT_LEN}'"
+        exit 64
+        ;;
+    esac
+    if [ "${MIN_MEAN_OUTPUT_TOKENS}" -gt "${OUTPUT_LEN}" ]; then
+      echo "TS_BENCH_FAIL: usage TS_MIN_MEAN_OUTPUT_TOKENS=${MIN_MEAN_OUTPUT_TOKENS} exceeds TS_OUTPUT_LEN=${OUTPUT_LEN}"
+      echo "  TS_OUTPUT_LEN caps each completion's max_tokens on TS_DATASET=random,"
+      echo "  so no run could satisfy this floor and the trial would fail as"
+      echo "  though the policy had collapsed."
+      exit 64
+    fi
+  fi
   # Required rather than defaulted. A rollout at temperature 0 draws the same
   # greedy completion n times, so it costs n decodes and reports a length
   # distribution with no variance in it -- the shape the mode produces, with
@@ -1198,6 +1230,19 @@ if min_mean_output > 0:
     ):
         print(f"UNPARSEABLE total_output_tokens={total_output!r}")
         raise SystemExit(0)
+    # The type and sign checks above pass on an arbitrary-precision int -- they
+    # are integer comparisons -- and the per-request fallback below then divides
+    # it, which is where OverflowError lands. Same defect as `_whole`'s, one
+    # conversion later, and it is reachable on the path that has no array at
+    # all, so fixing only `_whole` would have left it.
+    try:
+        float(total_output)
+    except OverflowError:
+        print(
+            "UNPARSEABLE total_output_tokens too large to measure "
+            f"({len(str(total_output))} digits)"
+        )
+        raise SystemExit(0)
     # Per completion, and read off the per-completion array when the export has
     # one rather than derived by dividing. Dividing by `completed * samples`
     # assumed the gateway sums `usage.completion_tokens` across all `n` choices;
@@ -1222,7 +1267,17 @@ if min_mean_output > 0:
             return False
         if not (v == v and abs(v) != float("inf")):
             return False
-        if v < 0 or not float(v).is_integer():
+        # JSON bounds no integer, so `json.load` yields arbitrary-precision
+        # ints and `float(v)` raises OverflowError rather than returning one.
+        # Unguarded that aborted the audit with a traceback: the caller reads
+        # this function's stdout, got nothing, and fell through its `case` to
+        # `result_json_unusable` -- the right direction, by accident, under the
+        # wrong name and with a Python traceback in the log. The host crashed
+        # the trial outright on the same export.
+        try:
+            if v < 0 or not float(v).is_integer():
+                return False
+        except OverflowError:
             return False
         # And no longer than a completion was permitted to be. On `random`,
         # output_len is each completion's max_tokens, so a longer entry
@@ -1255,6 +1310,22 @@ if min_mean_output > 0:
             print(
                 f"UNPARSEABLE output_lens {type(lens).__name__} "
                 "(not a non-empty array of lengths within cap)"
+            )
+            raise SystemExit(0)
+        # Which shape arrived is read off the cardinality, not assumed. One
+        # entry per *request* is a shape the host documents and supports, and it
+        # is the same quantity as total_output_tokens/completed -- so taking its
+        # mean as a per-completion reading is exactly the assumption the comment
+        # above refuses, reintroduced through the array. At samples=8 a policy
+        # emitting one token per choice reports 8 per request and clears a floor
+        # of 8 exactly. Refused rather than divided, and refused here as well as
+        # on the host, or a direct script run enforces a weaker contract than a
+        # recipe-driven one while printing the same verdict names.
+        if len(lens) != completed * samples and samples > 1:
+            print(
+                f"BADBASIS output_lens n={len(lens)} completed={completed} "
+                f"samples={samples}: entries are request totals, not completion "
+                "lengths, so a per-completion floor cannot be derived"
             )
             raise SystemExit(0)
         mean_output = sum(lens) / len(lens)
@@ -1325,6 +1396,12 @@ for step in $(seq 1 "${WARMUP_STEPS}"); do
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       exit 56
       ;;
+    BADBASIS*)
+      # Fatal in a warmup too: the cardinality is a property of the gateway, so
+      # the measured steps would hit it as well, several minutes later.
+      echo "TS_BENCH_FAIL: warmup step ${step} rollout_length_basis_unusable ${audit#BADBASIS }"
+      exit 59
+      ;;
     *)
       echo "TS_BENCH_FAIL: warmup step ${step} result_json_unusable ${audit}"
       exit 54
@@ -1374,6 +1451,10 @@ for step in $(seq 1 "${BENCH_STEPS}"); do
       echo "TS_BENCH_FAIL: step ${step} rollout_output_too_short ${audit#SHORTLEN }"
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       overall=56
+      ;;
+    BADBASIS*)
+      echo "TS_BENCH_FAIL: step ${step} rollout_length_basis_unusable ${audit#BADBASIS }"
+      overall=59
       ;;
     *)
       echo "TS_BENCH_FAIL: step ${step} result_json_unusable ${audit}"
