@@ -9,6 +9,8 @@ only labels failures and proposes registered mitigation names.
 from aorta.agent.llm import (
     AUTOPSY_CATEGORIES,
     AUTOPSY_CATEGORY_GUIDANCE,
+    EVIDENCE_ONLY_CATEGORIES,
+    PROBE_CATEGORIES,
     AgentStep,
     FakeLLMProposer,
     LiteLLMProposer,
@@ -23,6 +25,8 @@ from aorta.agent.state import AgentState, append_log_event, wake
 __all__ = [
     "AUTOPSY_CATEGORIES",
     "AUTOPSY_CATEGORY_GUIDANCE",
+    "EVIDENCE_ONLY_CATEGORIES",
+    "PROBE_CATEGORIES",
     "AgentConfig",
     "AgentLoopResult",
     "AgentPolicy",

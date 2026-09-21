@@ -16,14 +16,17 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.embeddings import Embeddings
 
-from aorta.chat.config import configure, reset_settings
+from aorta.chat.config import configure, reset_settings, settings
 from aorta.chat.rag import runs as runs_rag
+from aorta.chat.rag.embeddings.base import MAX_COLLECTION_NAME, identity_digest
 from aorta.chat.rag.retriever import SqliteVecStore
 
 VOCABULARY = ["nan", "loss", "rocm", "tf32", "hang", "memory", "triton"]
@@ -173,9 +176,7 @@ class TestTheCliLifecycle:
         assert CliRunner().invoke(chat, ["index", "runs"]).exit_code == 0
         assert retriever.collection_chunk_count(wired.index, "aorta") == 1
 
-    def test_an_empty_run_root_says_so_rather_than_reporting_success(
-        self, wired, tmp_path: Path
-    ):
+    def test_an_empty_run_root_says_so_rather_than_reporting_success(self, wired, tmp_path: Path):
         from click.testing import CliRunner
 
         from aorta.cli.chat import chat
@@ -214,6 +215,163 @@ class TestCollectionNaming:
         name = runs_rag.run_collection_name()
         assert re.fullmatch(r"[A-Za-z0-9_]+", name)
         assert name.endswith(runs_rag.RUN_COLLECTION_SUFFIX)
+
+
+class TestTheRunCollectionSeparatesModelsByName:
+    """The name is the *only* thing keeping two models' run vectors apart.
+
+    Source retrieval has a second line of defence: the manifest sidecar records
+    the embedding model and refuses a mismatch before the first query. This
+    collection has no sidecar. ``_get_store`` opens ``run_collection_name()``
+    and queries whatever is under it, comparing nothing -- so two models that
+    landed on one name and happen to share a dimension read each other's
+    vectors and answer normally.
+
+    Every other test in this file that reads a collection name substitutes
+    ``FakeProvider``, which hard-codes its own, so none of them touch the real
+    naming and a change to it could not fail them. These use the actual
+    factory: naming never builds an embedding model, so there is no download.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _remote_provider(self, monkeypatch):
+        monkeypatch.setattr(settings, "embedding_provider", "remote")
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "")
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            # Slug identically: the punctuation is folded to the same run of _.
+            ("foo/bar", "foo-bar"),
+            # Slug identically for the first 63 characters.
+            ("m" * 70 + "-alpha", "m" * 70 + "-beta"),
+        ],
+    )
+    def test_models_that_slug_alike_get_different_run_collections(
+        self, monkeypatch, left: str, right: str
+    ):
+        monkeypatch.setattr(settings, "remote_embedding_model", left)
+        at_left = runs_rag.run_collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_model", right)
+
+        assert runs_rag.run_collection_name() != at_left
+
+    def test_switching_endpoint_switches_the_run_collection_too(self, monkeypatch):
+        """The endpoint is half a remote identity, and run data is per-user.
+
+        A model name means nothing without the API serving it, so pointing the
+        same model at a second gateway has to move this collection as well --
+        otherwise the previous gateway's run vectors answer the new one's
+        queries.
+        """
+        monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://a.example/v1")
+        at_a = runs_rag.run_collection_name()
+        monkeypatch.setattr(settings, "remote_embedding_base_url", "https://b.example/v1")
+
+        assert runs_rag.run_collection_name() != at_a
+
+    def test_it_is_still_a_bare_identifier_after_the_suffix(self, monkeypatch):
+        """The suffix lands after the digest, on a name already at the cap.
+
+        Shape only. Whether the result is *within* the cap is a separate
+        question, and the answer is currently no -- see the xfail below.
+        """
+        monkeypatch.setattr(settings, "remote_embedding_model", "q" * 200)
+        name = runs_rag.run_collection_name()
+
+        assert re.fullmatch(r"[A-Za-z0-9_]+", name)
+        assert name.endswith(runs_rag.RUN_COLLECTION_SUFFIX)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "#476: run_collection_name() appends _runs to a name "
+            "build_collection_name() has already filled to MAX_COLLECTION_NAME, "
+            "so the composed name runs up to 68 characters against a cap of 63"
+        ),
+    )
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # Ordinary configuration, not a synthetic edge: slugs to 38
+            # characters, which is over the 36 the remote prefix leaves once the
+            # digest and ``_runs`` are both accounted for. Measures 65.
+            "sentence-transformers/all-MiniLM-L6-v2",
+            # The extreme end, where the slug is truncated to the cap first.
+            # Measures 68.
+            "q" * 200,
+        ],
+    )
+    def test_the_suffix_does_not_push_the_name_over_the_cap(self, monkeypatch, model: str):
+        """The cap is the whole point of reserving room for the digest.
+
+        ``build_collection_name`` reserves for its own suffix and returns a name
+        at exactly :data:`MAX_COLLECTION_NAME`; ``run_collection_name`` then
+        concatenates ``_runs`` onto it, and nothing re-checks. Each function
+        keeps its own contract and the composition breaks it.
+
+        Marked ``xfail(strict=True)`` rather than deleted or inverted: asserting
+        the current 68-character result would pin a defect as a contract, and
+        deleting it would lose the only statement of what the cap means for this
+        collection. Strict so that fixing #476 turns this into a failure that
+        has to be acknowledged, instead of a silent xpass.
+
+        This is only half the contract. The other half -- that the fix must not
+        buy those characters back out of the digest -- is
+        ``test_the_whole_digest_reaches_the_run_name`` below, which is kept
+        outside this ``xfail`` so it cannot be masked by it.
+        """
+        monkeypatch.setattr(settings, "remote_embedding_model", model)
+        name = runs_rag.run_collection_name()
+
+        assert len(name) <= MAX_COLLECTION_NAME, (
+            f"{len(name)} characters, cap is {MAX_COLLECTION_NAME}: {name}"
+        )
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # Short: nothing is under truncation pressure, so this leg fails
+            # only if the digest stops being appended at all.
+            "text-embedding-3-small",
+            # Past the threshold, where fixing #476 has to take characters from
+            # somewhere. These are the legs that say where it must not take them.
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "q" * 200,
+        ],
+    )
+    def test_the_whole_digest_reaches_the_run_name(self, monkeypatch, model: str):
+        """The cap and the complete digest have to hold *at once*.
+
+        ``test_the_digest_survives_the_cap_under_every_shipped_prefix`` states
+        that pair for the collection ``build_collection_name`` returns. Only
+        half of it was ever carried through to the composed run name, and the
+        half left off is the load-bearing one: the shortest way to satisfy the
+        cap is to cut characters off the end, and the end is the digest.
+
+        A #476 fix along the lines of ``base[:58] + "_runs"`` measures 63, so it
+        would clear the cap while keeping three of the eight digest characters.
+        What #422 shipped is collision *resistance*, not injectivity -- eight
+        hex characters are 32 bits, and #447 is open precisely because that is
+        searchable. Truncating to three leaves 12 bits: 4096 buckets, with the
+        birthday point around 80 distinct model ids, which a model zoo reaches
+        by accident rather than by search. So the cost of taking the characters
+        from here is not a new class of bug, it is #447 made ordinary.
+
+        **Deliberately not folded into the xfail above.** ``xfail`` swallows a
+        failure, so a digest-truncating fix would clear the cap, leave that test
+        still failing, and be reported as an expected failure -- exactly the
+        silence this is meant to break. Kept separate, it passes today and turns
+        red the moment the tail is shortened, whether or not the ``xfail``
+        marker has been removed yet.
+        """
+        monkeypatch.setattr(settings, "remote_embedding_model", model)
+        digest = identity_digest(runs_rag.get_provider().vector_identity())
+        name = runs_rag.run_collection_name()
+
+        tail = f"_{digest}{runs_rag.RUN_COLLECTION_SUFFIX}"
+        assert name.endswith(tail), f"expected the name to end in {tail!r}, got {name!r}"
 
 
 class TestIndexing:
@@ -520,3 +678,117 @@ class TestMissingCollection:
         from aorta.chat.tools.artifacts import search_run_artifacts
 
         assert search_run_artifacts.invoke({"query": "x", "k": 0}).startswith("Error:")
+
+
+class TestTheRunStoreIsOpenedOnceUnderConcurrency:
+    """One store per process, even when the first two queries overlap.
+
+    ``_store_cache`` was safe while every reader was on the event loop, which
+    serialised them by construction. ``retrieve_node`` now reaches it through
+    ``asyncio.to_thread``, so two sessions whose first run-artifact query
+    overlaps genuinely run ``_get_store`` on two worker threads.
+
+    Measured before the lock, at 8 threads: 8 sqlite connections opened, 7 of
+    them dropped by a later assignment without being closed, and 8 embedding
+    models loaded -- the per-instance lock in ``FastembedBgeEmbeddings`` does
+    not cover this, because each store builds its own provider.
+    """
+
+    @staticmethod
+    def _race(monkeypatch, tmp_path, threads=8):
+        index = tmp_path / "index.sqlite"
+        index.write_text("x")
+        opened = []
+
+        class SlowStore:
+            def __init__(self, **_kw):
+                opened.append(self)
+                # Widen the window a real cold open would have anyway.
+                threading.Event().wait(0.02)
+
+            def collection_exists(self):
+                return True
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(runs_rag, "SqliteVecStore", SlowStore)
+        monkeypatch.setattr(runs_rag, "get_provider", lambda: SimpleNamespace(
+            get_embeddings=lambda: object()
+        ))
+        monkeypatch.setattr(runs_rag, "run_collection_name", lambda: "c")
+        monkeypatch.setattr(
+            runs_rag,
+            "settings",
+            SimpleNamespace(index_file=index, runs_root=tmp_path),
+        )
+        monkeypatch.setattr(runs_rag, "_store_cache", None)
+
+        ready = threading.Barrier(threads)
+        got = []
+
+        def go():
+            ready.wait(timeout=5)
+            got.append(runs_rag._get_store())
+
+        # Daemon threads: a worker stuck on a lock must not keep the
+        # interpreter alive after the verdict. Without this the assertion below
+        # reports in ~10s and the process then hangs at exit anyway, which puts
+        # the runner back where it started.
+        workers = [
+            threading.Thread(target=go, daemon=True) for _ in range(threads)
+        ]
+        for w in workers:
+            w.start()
+        # One deadline for the whole set, not a timeout per worker: the latter
+        # waits `threads * 10s` in the worst case, so the bound grows with the
+        # thread count and a slow hang can outlast the early joins and still
+        # look clean.
+        deadline = time.monotonic() + 10
+        for w in workers:
+            w.join(timeout=max(0.0, deadline - time.monotonic()))
+        # Bounded *and* asserted. The bound alone would turn a hang into a
+        # false pass: `opened` can read 1 while workers are still blocked
+        # inside `_get_store`, which is exactly what the callers assert on. The
+        # liveness check is what makes the bound mean something.
+        stuck = [w for w in workers if w.is_alive()]
+        assert not stuck, (
+            f"{len(stuck)} of {threads} workers still in _get_store() after 10s"
+        )
+        return opened, got
+
+    def test_eight_racing_threads_open_one_connection(self, monkeypatch, tmp_path):
+        opened, _got = self._race(monkeypatch, tmp_path)
+        assert len(opened) == 1
+
+    def test_every_thread_gets_that_same_store(self, monkeypatch, tmp_path):
+        opened, got = self._race(monkeypatch, tmp_path)
+        # The point of the re-check under the lock: the waiters must adopt the
+        # winner's store, not open their own once the lock frees.
+        assert len(got) == 8
+        assert {id(s) for s in got} == {id(opened[0])}
+
+    def test_the_cached_read_does_not_take_the_lock(self, monkeypatch, tmp_path):
+        """Otherwise every later search serialises behind one mutex forever.
+
+        Asserted with a double that raises on entry, not by holding the real
+        lock. Holding it would make this test *hang* on the regression it
+        exists to catch: ``_store_lock`` is not reentrant, so a cached path
+        that took it would block forever on a lock this same thread already
+        owns. A hang is strictly worse than a failure -- it burns a runner to
+        the platform timeout and reports nothing -- and ``pytest-timeout`` is
+        installed here but never armed (#474), so nothing would cut it short.
+        Same shape as the ``_model_lock`` test in
+        ``test_embeddings_factory.py``.
+        """
+        _opened, got = self._race(monkeypatch, tmp_path, threads=2)
+
+        class Explodes:
+            def __enter__(self):
+                raise AssertionError("the lock was taken on the cached path")
+
+            def __exit__(self, *_):
+                return False
+
+        monkeypatch.setattr(runs_rag, "_store_lock", Explodes())
+        assert runs_rag._get_store() is got[0]

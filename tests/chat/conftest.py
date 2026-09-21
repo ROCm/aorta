@@ -9,6 +9,16 @@ from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# LiteLLM downloads its model-price table from GitHub the first time it is
+# asked about a model it does not recognise, and the test models here are all
+# made up. That download is once per process, so under xdist it lands in
+# whichever test happens to be first on each worker -- and if that test holds
+# the no_network fixture, it fails while the identical test on another worker
+# passes. This is the documented way to tell LiteLLM to use the copy it ships
+# with. It has to be set before litellm is imported, which is why it is here
+# and not in a fixture.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # These tests exercise real langchain/langgraph objects, so they need the
 # chat-cli extra. A base install (pyyaml + click) is a supported and common
 # configuration -- it is what `pip install amd-aorta` gives a customer -- so the
@@ -91,7 +101,7 @@ def fake_aorta_dir(tmp_path: Path) -> Path:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "src" / "main.py").write_text(
-        "def main():\n    print('hello')\n\n" "class App:\n    def run(self):\n        pass\n",
+        "def main():\n    print('hello')\n\nclass App:\n    def run(self):\n        pass\n",
         encoding="utf-8",
     )
     (tmp_path / "config.yaml").write_text("key: value\n", encoding="utf-8")
@@ -229,11 +239,41 @@ def make_llm_sequence(*llms: MagicMock) -> Callable[..., MagicMock]:
     return _next_llm
 
 
+@pytest.fixture(autouse=True)
+def _no_sticky_escalation():
+    """Undo any auto-escalation, which is process-wide by design.
+
+    ``_EscalationState`` is deliberately process-wide: "keep it for the process"
+    is the point, and the whole test run is one process. Without this an
+    escalation in one test silently puts the next one on the native protocol.
+
+    In the directory conftest rather than beside the tests that provoke it, so
+    that the isolation is structural. No test outside ``test_act_node_tool_
+    modes.py`` drives the text loop into a dead end today -- checked by running
+    the suite with the state asserted clean after every test -- but "today" is
+    the whole of that guarantee, and the leak it would cause is a test in an
+    unrelated module silently running on the native protocol. Cheap to make
+    impossible; expensive to debug once it happens.
+    """
+    from aorta.chat.graph import nodes
+
+    nodes.reset_tool_mode_escalation()
+    yield
+    nodes.reset_tool_mode_escalation()
+
+
 @pytest.fixture()
 def fake_retriever():
-    """Return a mock retriever that yields fixed documents."""
-    mock = MagicMock()
-    mock.invoke.return_value = [
+    """Return a mock retriever that yields fixed documents.
+
+    Both ``invoke`` and ``ainvoke`` answer, with the same documents.
+    ``retrieve_node`` awaits ``ainvoke`` so that a retrieval cannot block the
+    event loop under a concurrent Chainlit session, and a bare ``MagicMock``
+    answers that with a ``MagicMock`` that cannot be awaited -- a failure that
+    points at the fixture rather than at the node. ``invoke`` stays for the
+    tests that assert on the synchronous call directly.
+    """
+    docs = [
         Document(
             page_content="def run_scenario(name):\n    pass",
             metadata={"source": "src/runner.py", "start_line": 1, "end_line": 2},
@@ -243,4 +283,42 @@ def fake_retriever():
             metadata={"source": "config/defaults.py", "start_line": 5, "end_line": 5},
         ),
     ]
+    mock = MagicMock()
+    mock.invoke.return_value = docs
+    mock.ainvoke = AsyncMock(return_value=docs)
     return mock
+
+
+@pytest.fixture()
+def cluster_jobs_enabled(monkeypatch):
+    """Register the tools that submit work, for a test that needs them present.
+
+    They are off by default -- see ``allow_cluster_jobs`` -- so a test about the
+    full tool surface has to say it wants them, the same way one about the shell
+    tool does. The registries in ``graph.nodes`` are built at import, so the
+    setting alone is not enough for anything reading those.
+    """
+    from aorta.chat.config import settings
+    from aorta.chat.graph import nodes
+    from aorta.chat.plugins import ChatTool, diagnostic_tools
+
+    # The tools themselves need the agents, which are in [cia]. The chat lane
+    # installs [chat-cli] without it, so a test about the full tool surface has
+    # nothing to be about there -- skip rather than fail on an empty registry.
+    pytest.importorskip("dspy", reason="the cluster tools need the [cia] extra")
+
+    monkeypatch.setattr(settings, "allow_cluster_jobs", True)
+    for name, tool in diagnostic_tools().items():
+        monkeypatch.setitem(nodes.TOOL_REGISTRY, name, tool)
+        monkeypatch.setitem(
+            nodes.CHAT_TOOLS, name, ChatTool(name=name, tool=tool, source_package="aorta")
+        )
+    # The prompts list the registry, so they were rendered from it at import too.
+    monkeypatch.setattr(
+        nodes,
+        "TOOL_DESCRIPTIONS",
+        nodes._tool_help(
+            nodes._BUILTIN_TOOL_DESCRIPTIONS + nodes._shell_tool_help(nodes._SHELL_TOOL_ACT_HELP)
+        ),
+    )
+    return nodes.TOOL_REGISTRY

@@ -11,6 +11,7 @@ from aorta.chat import redaction
 from aorta.chat.config import UI_NO_WAIT_ENV, UI_VERBOSE_ENV
 from aorta.chat.inference.providers.factory import get_backend
 from aorta.chat.session import invoke_agent
+from aorta.chat.tools.cache import ToolCache, use_tool_cache
 from aorta.chat.ui.welcome import welcome_message
 
 # Set by ``aorta chat ui`` from its group-level flags. This is a fresh
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 #: Key under which each browser session keeps its :class:`redaction.NoticeState`.
 _NOTICE_STATE_KEY = "redaction_notice_state"
 
+#: Key under which each browser session keeps its :class:`ToolCache`.
+_TOOL_CACHE_KEY = "tool_result_cache"
+
 
 def _unavailable_message(reason: str) -> str:
     return f"**LLM backend unavailable**\n\n```\n{reason}\n```"
@@ -40,6 +44,10 @@ async def on_start():
     # One state per browser session, not one per process: the notice is a
     # per-session disclosure and this server serves many at once.
     cl.user_session.set(_NOTICE_STATE_KEY, redaction.NoticeState())
+    # Same reason, and the reuse it controls is reported to the user as having
+    # happened "in this conversation": a shared cache would answer one user's
+    # paste from another user's cluster run and say so.
+    cl.user_session.set(_TOOL_CACHE_KEY, ToolCache())
 
     try:
         backend = get_backend()
@@ -74,11 +82,16 @@ async def on_message(message: cl.Message):
         notice_state = redaction.NoticeState()
         cl.user_session.set(_NOTICE_STATE_KEY, notice_state)
 
+    tool_cache = cl.user_session.get(_TOOL_CACHE_KEY)
+    if tool_cache is None:
+        tool_cache = ToolCache()
+        cl.user_session.set(_TOOL_CACHE_KEY, tool_cache)
+
     thinking_msg = cl.Message(content="Thinking...")
     await thinking_msg.send()
 
     try:
-        with redaction.use_notice_state(notice_state):
+        with redaction.use_notice_state(notice_state), use_tool_cache(tool_cache):
             reply, history, _result = await invoke_agent(message.content, history)
     except Exception:
         logger.exception("Agent graph error")

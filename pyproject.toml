@@ -120,6 +120,36 @@ hw-queue-profiling = [
 ]
 
 # For aorta agent closed-loop (LiteLLM proposer)
+# The Cluster Intelligence Agents. DSPy is what Watch and Autopsy reach a model
+# through today; the shared chat provider layer is where that belongs, so this
+# extra is expected to shrink rather than grow -- see
+# docs/plans/cia-agents-port.md, finding F2.
+cia = [
+    # DSPy itself supports every Python this package does. Do not put a version
+    # marker on it: that made `pip install amd-aorta[cia]` succeed on 3.10 while
+    # installing no agent at all.
+    "dspy-ai>=2.5",
+    # The agents read the shared chat profile. tomllib is stdlib from 3.11;
+    # tomli keeps the same profile available on supported Python 3.10 rather
+    # than silently falling back to environment-only configuration.
+    "tomli>=2.0; python_version < '3.11'",
+    # Used to point TLS verification at a bundle litellm's price-map fetch can
+    # verify against. It arrived transitively through litellm, which is not a
+    # promise litellm makes.
+    "certifi",
+    # The agents read the same profile as the rest of aorta chat, which is what
+    # makes configuring chat configure them -- and aorta/chat/config.py needs
+    # these to parse it. They were reaching this extra two hops out, through
+    # dspy-ai to litellm, for exactly the reason certifi above is listed: a
+    # package that happens to install something is not a package that promises
+    # to. Without them the profile silently stops being readable and the agents
+    # fall back to environment variables, which is a quieter failure than it
+    # sounds -- the answer is wrong rather than absent, because every setting
+    # has a default.
+    "pydantic>=2.0",
+    "pydantic-settings>=2.3",
+]
+
 agent = [
     "litellm>=1.0.0",
 ]
@@ -128,16 +158,18 @@ agent = [
 # Split by interface, not by backend: a user knows whether they want a terminal
 # or a browser, not whether they want ONNX or torch.
 #
-# Python range (Decision 13a): chat-cli is 3.11+ because aorta/chat/config.py
-# reads the profile file with stdlib ``tomllib``; chat-ui adds a 3.13 ceiling
-# because Chainlit declares ``Requires-Python <3.14``. Extras cannot carry their
-# own ``requires-python``, so the markers below keep pip from *trying* to
-# resolve these on an out-of-range interpreter, and ``aorta/cli/chat.py``
-# re-checks ``sys.version_info`` so a silently-empty install still produces a
-# sentence rather than an ImportError. (A deliberately-unresolvable sentinel
-# dependency would fail louder at install time, but it means putting a
-# non-existent distribution name in a public package's metadata, which is a
-# name someone else can register.)
+# Python range (Decision 13a): the full chat-cli interface remains 3.11+.
+# The headless CIA extra imports only its shared configuration and carries the
+# tomli backport to do that on supported Python 3.10; this does not make the
+# LangChain/RAG interface a 3.10 feature. chat-ui adds a 3.13 ceiling because
+# Chainlit declares ``Requires-Python <3.14``. Extras cannot carry their own
+# ``requires-python``, so the markers below keep pip from *trying* to resolve
+# these on an out-of-range interpreter, and ``aorta/cli/chat.py`` re-checks
+# ``sys.version_info`` so a silently-empty install still produces a sentence
+# rather than an ImportError. (A deliberately-unresolvable sentinel dependency
+# would fail louder at install time, but it means putting a non-existent
+# distribution name in public metadata, which is a name someone else can
+# register.)
 chat-cli = [
     "langchain>=0.3.0; python_version >= '3.11'",
     "langchain-openai>=0.2.0; python_version >= '3.11'",
@@ -239,6 +271,7 @@ all = [
     "amd-aorta[hw-queue]",
     "amd-aorta[hw-queue-profiling]",
     "amd-aorta[agent]",
+    "amd-aorta[cia]",
     "amd-aorta[dev]",
 ]
 
@@ -293,6 +326,11 @@ aorta = [
     # The retrieval eval question set (Decision 19b). Shipped so `aorta chat
     # index eval` works with no arguments on an installed wheel.
     "chat/rag/eval_questions.json",
+    # Watch loads this through Path(__file__).parent. Left out of the wheel it
+    # is not an error: the loader falls back to {} and the built-in defaults
+    # apply, so an installed Watch would poll on a different interval and hold
+    # a shorter list of expectations than the one shipped here, silently.
+    "cia/watch/watch_config.yaml",
     "ebpf/scripts/*.bt",
     "ebpf/scripts/PROVENANCE.md",
     "workloads/hrx_kernels/*.cpp",

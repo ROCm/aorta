@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import threading
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from aorta.chat.graph import nodes
 from tests.chat.conftest import make_fake_llm
 
 
@@ -45,7 +47,7 @@ class TestRetrieveNode:
     @pytest.mark.asyncio
     async def test_empty_docs(self):
         mock_ret = MagicMock()
-        mock_ret.invoke.return_value = []
+        mock_ret.ainvoke = AsyncMock(return_value=[])
         with patch("aorta.chat.graph.nodes.get_retriever", return_value=mock_ret):
             from aorta.chat.graph.nodes import retrieve_node
 
@@ -54,8 +56,71 @@ class TestRetrieveNode:
             assert "No relevant code" in result["retrieved_context"]
 
 
+class TestRetrievalDoesNotBlockTheEventLoop:
+    """Issue #444, and it applies to both retrievals in this node.
+
+    ``retrieve_node`` is a coroutine a Chainlit request handler awaits. With
+    remote embeddings a retrieval blocks on network I/O and with local
+    embeddings on CPU work in the ONNX model, so a synchronous call here stalls
+    every concurrent session behind whichever one is retrieving. Fixing only the
+    source retriever would leave the loop blocked on run-artifact search, which
+    pays the same cost.
+
+    "Did not block" has no direct probe, so the two offloads are asserted by
+    thread identity: work that ran on the loop's own thread did block it.
+    """
+
+    @staticmethod
+    def _state(query: str = "why did this sweep fail?"):
+        return {"messages": [HumanMessage(content=query)]}
+
+    @pytest.mark.asyncio
+    async def test_the_source_retriever_is_awaited_not_called(self, fake_retriever):
+        with patch.object(nodes, "get_retriever", return_value=fake_retriever):
+            await nodes.retrieve_node(self._state("how do I run scenarios?"))
+        fake_retriever.ainvoke.assert_awaited_once_with("how do I run scenarios?")
+        fake_retriever.invoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_artifact_search_runs_off_the_loop(self, fake_retriever):
+        ran_on: list[int] = []
+
+        def _record(query, k):
+            ran_on.append(threading.get_ident())
+            return []
+
+        with (
+            patch.object(nodes, "get_retriever", return_value=fake_retriever),
+            patch("aorta.chat.rag.runs.search_run_docs", side_effect=_record),
+        ):
+            await nodes.retrieve_node(self._state())
+
+        assert ran_on, "search_run_docs was never reached"
+        assert threading.get_ident() not in ran_on
+
+    @pytest.mark.asyncio
+    async def test_the_repo_map_read_runs_off_the_loop(self):
+        """Around 3 MB for AORTA, read whole on every planning call."""
+        ran_on: list[int] = []
+
+        def _record(*_args, **_kwargs):
+            ran_on.append(threading.get_ident())
+            return "(map)"
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock(return_value=AIMessage(content="1. Read main.py"))
+        with (
+            patch.object(nodes, "_get_llm", return_value=llm),
+            patch.object(nodes, "load_repo_map", side_effect=_record),
+        ):
+            await nodes.plan_node(self._state("find all mitigations"))
+
+        assert ran_on, "load_repo_map was never reached"
+        assert threading.get_ident() not in ran_on
+
+
 class TestRunArtifactsReachTheToolFreeBranch:
-    """"Why did this sweep fail?" is specific, so the router calls it a question.
+    """ "Why did this sweep fail?" is specific, so the router calls it a question.
 
     That branch has no tools, and retrieval only ever queried the source
     collection -- so the PR's headline use case was answerable only from source
@@ -67,8 +132,10 @@ class TestRunArtifactsReachTheToolFreeBranch:
         from langchain_core.documents import Document
 
         return [
-            Document(page_content=text, metadata={"source": "run_nan/matrix.json",
-                                                  "artifact_kind": "matrix"})
+            Document(
+                page_content=text,
+                metadata={"source": "run_nan/matrix.json", "artifact_kind": "matrix"},
+            )
             for text in contents
         ]
 
@@ -95,7 +162,7 @@ class TestRunArtifactsReachTheToolFreeBranch:
         from aorta.chat.graph import nodes
 
         empty = MagicMock()
-        empty.invoke.return_value = []
+        empty.ainvoke = AsyncMock(return_value=[])
         with (
             patch.object(nodes, "get_retriever", return_value=empty),
             patch(
@@ -170,10 +237,12 @@ class TestActNode:
     @pytest.mark.asyncio
     async def test_single_tool_call_then_answer(self):
         """LLM calls a tool, gets result, then answers."""
-        fake = make_fake_llm([
-            'Let me check. ACTION: list_files(path=".")',
-            "The root directory has: src/, config.yaml, README.md",
-        ])
+        fake = make_fake_llm(
+            [
+                'Let me check. ACTION: list_files(path=".")',
+                "The root directory has: src/, config.yaml, README.md",
+            ]
+        )
         mock_tool_result = "src/\nconfig.yaml\nREADME.md"
 
         with (
@@ -282,8 +351,7 @@ class TestCriticNode:
     async def test_detects_nonzero_exit_code(self):
         """Critic detects command failure from exit code in tool results."""
         failure_msg = HumanMessage(
-            content="TOOL RESULT from run_terminal_command:\n"
-            "Exit code: 1\nError: file not found"
+            content="TOOL RESULT from run_terminal_command:\nExit code: 1\nError: file not found"
         )
         fake = make_fake_llm(["Root cause: missing file. Fix: create it."])
 
@@ -306,9 +374,7 @@ class TestCriticNode:
     @pytest.mark.asyncio
     async def test_valid_response_passes(self):
         """Critic returns no feedback when response is VALID."""
-        tool_msg = HumanMessage(
-            content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml"
-        )
+        tool_msg = HumanMessage(content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml")
         fake = make_fake_llm(["VALID"])
 
         with (
@@ -329,12 +395,10 @@ class TestCriticNode:
     @pytest.mark.asyncio
     async def test_invalid_response_triggers_feedback(self):
         """Critic rejects hallucinated commands."""
-        tool_msg = HumanMessage(
-            content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml"
+        tool_msg = HumanMessage(content="TOOL RESULT from list_files:\nsrc/\nconfig.yaml")
+        fake = make_fake_llm(
+            ["The response references run_experiment.sh which was not found by any tool."]
         )
-        fake = make_fake_llm([
-            "The response references run_experiment.sh which was not found by any tool."
-        ])
 
         with (
             patch("aorta.chat.graph.nodes.settings") as mock_s,

@@ -14,7 +14,12 @@ from __future__ import annotations
 import pytest
 
 from aorta.chat.config import settings
-from aorta.chat.rag.embeddings.base import model_slug
+from aorta.chat.rag.embeddings.base import (
+    MAX_COLLECTION_NAME,
+    build_collection_name,
+    identity_digest,
+    model_slug,
+)
 from aorta.chat.rag.embeddings.factory import collection_name, get_embeddings, get_provider
 from aorta.chat.rag.embeddings.fastembed_bge import (
     LOCAL_COLLECTION_PREFIX,
@@ -159,6 +164,27 @@ class TestCollectionNamesAreUnique:
         assert len(name) <= 63
         assert _SAFE_COLLECTION.match(name)
 
+    @pytest.mark.parametrize("prefix", [LOCAL_COLLECTION_PREFIX, REMOTE_COLLECTION_PREFIX])
+    def test_the_digest_survives_the_cap_under_every_shipped_prefix(self, prefix: str):
+        """Truncation has to stay cosmetic: the slug is cut, never the digest.
+
+        Length alone proves nothing here -- the pre-digest name was inside the
+        cap too, by being the thing that got truncated. What has to hold is
+        both at once: inside the cap *and* still ending in the whole digest of
+        the identity. That is what fails if the suffix is appended without
+        reserving room for it.
+
+        Both prefixes, because the local one is three characters longer and
+        every *length* assertion in this file goes through the remote provider
+        -- so room reserved for ``aorta_remote_`` and spent by
+        ``aorta_fastembed_`` was a name over the cap that nothing measured.
+        """
+        model = "q" * 200
+        name = build_collection_name(prefix, model)
+
+        assert len(name) <= MAX_COLLECTION_NAME
+        assert name.endswith("_" + identity_digest(model))
+
     def test_the_name_is_stable_across_calls(self, monkeypatch):
         """A digest that moved would orphan the collection it named yesterday."""
         monkeypatch.setattr(settings, "remote_embedding_model", "text-embedding-3-small")
@@ -296,3 +322,80 @@ class TestRetrieverCaches:
         retriever.reset_caches()
         assert retriever._vectorstore_cache is None
         assert retriever._retriever_cache is None
+
+
+class TestTheModelIsLoadedOnceUnderConcurrency:
+    """Retrieval is no longer confined to one thread, so the lazy init is raced.
+
+    ``VectorStore``'s async default runs the synchronous search through
+    ``run_in_executor``, which is how the act loop stopped blocking the event
+    loop (issue #444). The consequence is that two Chainlit sessions whose
+    *first* queries overlap reach ``_get_model`` on different threads, and
+    before the lock both would see ``None`` and both load an ONNX model -- one
+    of which is discarded, having already spent the memory and the latency.
+    """
+
+    def test_eight_threads_load_one_model(self, monkeypatch):
+        import threading
+        import time
+
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        loads = []
+        ready = threading.Barrier(8)
+
+        def slow_load(model_name, _cache_dir):
+            loads.append(model_name)
+            # Hold the window open so a missing lock is reliably observed
+            # rather than depending on scheduler luck.
+            threading.Event().wait(0.05)
+            return object()
+
+        monkeypatch.setattr(fastembed_bge, "_text_embedding", slow_load)
+        monkeypatch.setattr(fastembed_bge, "model_cache_dir", lambda: None)
+        provider = fastembed_bge.FastembedBgeEmbeddings(model_name="m")
+
+        def race():
+            ready.wait(timeout=5)
+            provider._get_model()
+
+        # Daemon, so a thread stuck on the lock cannot hold the interpreter
+        # open past the verdict.
+        threads = [threading.Thread(target=race, daemon=True) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        # One deadline across all eight rather than a timeout each, which would
+        # wait up to 80s and let a slow hang outlast the early joins.
+        deadline = time.monotonic() + 10
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+        # Bounded, and then asserted. A bare `join()` hangs the run if a future
+        # `_get_model` blocks; a bounded one that never checks lets a hung
+        # thread *pass*, since `loads` can read 1 while seven are still stuck
+        # inside. Neither is a usable report.
+        stuck = [thread for thread in threads if thread.is_alive()]
+        assert not stuck, f"{len(stuck)} of 8 threads still in _get_model() after 10s"
+        assert len(loads) == 1, f"model loaded {len(loads)}x under 8 threads"
+
+    def test_the_cached_model_is_returned_without_taking_the_lock(self, monkeypatch):
+        """Double-checked on purpose: this runs on every embed.
+
+        Locking unconditionally would serialise concurrent embedding once the
+        model exists, which is the common case and not the one being fixed.
+        """
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        provider = fastembed_bge.FastembedBgeEmbeddings(model_name="m")
+        sentinel = object()
+        provider._model = sentinel
+
+        class Explodes:
+            def __enter__(self):
+                raise AssertionError("the lock was taken on the cached path")
+
+            def __exit__(self, *_):
+                return False
+
+        provider._model_lock = Explodes()
+        assert provider._get_model() is sentinel
