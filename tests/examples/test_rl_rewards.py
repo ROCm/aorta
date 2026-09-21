@@ -3301,3 +3301,145 @@ def test_the_stopping_constant_is_priced_in_the_baseline_table(proposal_reward):
     # which is the ordering the reward has to hold.
     assert stopping["mean_reward"] < rows["always the same valid proposal"]["mean_reward"]
 
+
+# --------------------------------------------------------------------------- #
+# `hold`: ownership is transferred, never cleared and re-installed
+# --------------------------------------------------------------------------- #
+
+
+def _serve_trace(tmp_path, bin_dir, subcommand, timeout=8):
+    """Run the real script under xtrace and return (trace, docker calls).
+
+    xtrace records the commands the shell actually executed, which is the only
+    way to observe a trap being cleared: `trap -p` cannot be read from outside
+    the process, and the handover window the reviewer found is one statement
+    wide, so no signal can be timed into it from a test. The invariant behind
+    the window is observable, though -- whether the guard is ever disarmed --
+    and that is what this reads.
+
+    `hold` does not terminate: holding is its whole job, and the stub keeps the
+    container running forever. So it is signalled once the trace has been
+    collected, rather than waited on.
+    """
+    proc = subprocess.Popen(
+        ["bash", "-x", str(_EXAMPLES / "serve_for_rollouts.sh"), subcommand],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+    )
+    try:
+        output = proc.communicate(timeout=timeout)[0]
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        output = proc.communicate(timeout=30)[0]
+    calls_file = tmp_path / "docker-calls.log"
+    calls = calls_file.read_text() if calls_file.exists() else ""
+    return output, calls
+
+
+def test_hold_never_disarms_the_ownership_guard(tmp_path):
+    """The handover window, observed as the thing that opens it.
+
+    `up` used to clear `_OWNED` and all three traps before returning, and
+    `hold` installed replacements on the following command. A signal in that
+    interval exited with the container running and nothing registered to remove
+    it -- the leak the guard exists to prevent, reintroduced by the handover.
+
+    Both orderings were wrong for opposite reasons: arming the traps *before*
+    `up` meant a name collision removed another invocation's live server, which
+    is why they were armed late in the first place. So ownership is transferred
+    instead -- the traps armed at `docker run -d` are never removed -- and the
+    observable is that `trap -` does not appear on this path at all.
+    """
+    bin_dir = _serve_stubs(tmp_path)
+    trace, _ = _serve_trace(tmp_path, bin_dir, "hold")
+
+    assert "trap - INT TERM EXIT" not in trace, trace[-3000:]
+    # And the guard really was armed: ownership taken, phase advanced.
+    assert "_OWNED=1" in trace
+    assert "_PHASE=hold" in trace
+
+
+def test_plain_up_still_releases_the_ownership_guard(tmp_path):
+    """Narrowness, and it is the half that would leak if the flag inverted.
+
+    `up` on its own hands the container to a *later* invocation, so it must
+    still release: keeping the guard armed here would make the EXIT trap remove
+    the container `up` just brought up successfully, turning the fix for a leak
+    into a fix that deletes the server.
+    """
+    bin_dir = _serve_stubs(tmp_path)
+    trace, calls = _serve_trace(tmp_path, bin_dir, "up")
+
+    assert "trap - INT TERM EXIT" in trace
+    assert "_PHASE=hold" not in trace
+    # The observable that matters: a successful `up` removes nothing.
+    assert "rm -f" not in calls, calls
+
+
+def test_a_signalled_hold_still_removes_the_container(tmp_path):
+    """`hold` installs no traps of its own now, so the cleanup must survive.
+
+    Deleting `hold`'s own traps is only safe if the ones it inherits do the
+    same job. The stub keeps the container "running" forever, so the wait loop
+    never ends and the only way out is the signal.
+    """
+    bin_dir = _serve_stubs(tmp_path)
+    proc = subprocess.Popen(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "hold"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+    )
+    try:
+        proc.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+    output = proc.communicate(timeout=30)[0]
+
+    calls = (tmp_path / "docker-calls.log").read_text()
+    assert "rm -f" in calls, calls
+    assert "signalled; tearing down" in output, output
+
+
+def test_hold_on_a_name_collision_removes_nothing(tmp_path):
+    """The catastrophic direction, and the reason the traps were armed late.
+
+    `hold` now declares that it wants ownership retained *before* calling `up`,
+    which is the same shape as the arrangement that once destroyed another
+    invocation's server. It is safe because the declaration only ever retains
+    ownership and never asserts it: `_OWNED` is still set at one place, after
+    `docker run -d` returns, and the collision path exits before reaching it.
+
+    This is the test that would catch getting that wrong, and getting it wrong
+    is worse than the leak being fixed.
+    """
+    bin_dir = _serve_stubs(tmp_path)
+    # `-aq` is the collision probe: answering non-empty means the name belongs
+    # to somebody else and this invocation must create and remove nothing.
+    (bin_dir / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "docker $*" >> "{tmp_path / "docker-calls.log"}"\n'
+        'case "$1" in\n'
+        '  ps) echo someone-elses-container ;;\n'
+        "  run) echo 0123456789abcdef ;;\n"
+        '  logs) echo "stub container log line" ;;\n'
+        "esac\nexit 0\n"
+    )
+    (bin_dir / "docker").chmod(0o755)
+
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), "hold"],
+        capture_output=True,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+        timeout=60,
+    )
+    output = proc.stdout + proc.stderr
+    calls = (tmp_path / "docker-calls.log").read_text()
+
+    assert "already exists" in output, output
+    assert "rm -f" not in calls, calls
+    assert "docker run" not in calls, calls

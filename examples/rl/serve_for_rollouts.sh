@@ -123,9 +123,32 @@ http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/nu
 # change adds -- goes through the same release.
 _OWNED=0
 
+# Set by `hold` *before* it calls `up`, to declare that this container is meant
+# to outlive bring-up inside this same process rather than be handed to a later
+# invocation. It can only cause ownership to be RETAINED, never asserted:
+# `_release_owned` stays keyed on `_OWNED`, which is still set at exactly one
+# place, after `docker run -d` returns. So the collision path -- where `up`
+# exits because the name belongs to somebody else and this invocation created
+# nothing -- is untouched by it, which is the property that matters, because
+# removing another invocation's live server is the failure this whole guard was
+# introduced to stop.
+#
+# The caller declares its intent rather than `up` inspecting who called it: the
+# subcommand dispatch stays the only thing that knows what subcommand is
+# running, and `up` keeps one rule for when ownership ends.
+_RETAIN_OWNERSHIP=0
+
+# How far `up` got. This decides only what a release *says* and what it exits
+# with -- never whether it happens, which stays keyed on `_OWNED` alone.
+_PHASE=bringup
+
 _release_owned() {
   [ "${_OWNED}" = "1" ] || return 0
-  echo "bring-up did not complete; removing ${NAME}" >&2
+  if [ "${_PHASE}" = "hold" ]; then
+    echo "signalled; tearing down" >&2
+  else
+    echo "bring-up did not complete; removing ${NAME}" >&2
+  fi
   docker rm -f "${NAME}" >/dev/null 2>&1 || true
   _OWNED=0
 }
@@ -232,7 +255,10 @@ up() {
   # EXIT as well as INT/TERM, so an `exit` from anywhere in the bring-up path
   # releases too rather than only a signal.
   _OWNED=1
-  trap '_release_owned; exit 130' INT TERM
+  # `if` rather than `&& exit 0`: a failing `[` as the last command of an
+  # `&&` list is itself a non-zero status, which under `set -e` would exit the
+  # trap with 1 and never reach the 130.
+  trap '_release_owned; if [ "${_PHASE}" = "hold" ]; then exit 0; fi; exit 130' INT TERM
   trap '_release_owned' EXIT
 
   # Poll health, but re-check liveness every iteration: a crash during weight
@@ -305,11 +331,28 @@ up() {
       if [ "${rc}" -ne 0 ]; then
         teardown_failed "${rc}" "engine is not usable for rollouts; see the FAIL line above"
       fi
-      # Handover: bring-up is complete and the container is meant to outlive
-      # this call, so ownership ends. The single place it does -- `hold`
-      # installs its own traps after this returns.
-      _OWNED=0
-      trap - INT TERM EXIT
+      # Handover. Bring-up is complete, so `up` on its own releases the guard
+      # here -- the single place it is released -- and the container is handed
+      # to a later invocation.
+      #
+      # `hold` is the other case, and it used to go through this same release:
+      # ownership was cleared and all three traps removed here, and `hold`
+      # installed replacements on the command after `up` returned. A signal in
+      # that interval exited with the container running and nothing registered
+      # to remove it, which is precisely the leak this guard exists to prevent,
+      # reintroduced by the handover itself.
+      #
+      # So ownership is *transferred* rather than cleared-then-reinstalled: the
+      # traps armed at `docker run -d` stay armed, unbroken, for the life of the
+      # process. There is no interval to hit because no trap is ever removed.
+      # `hold` therefore installs none of its own, and `_PHASE` only changes
+      # what a release prints and exits with.
+      if [ "${_RETAIN_OWNERSHIP}" = "1" ]; then
+        _PHASE=hold
+      else
+        _OWNED=0
+        trap - INT TERM EXIT
+      fi
       return 0
     fi
     sleep 5
@@ -446,20 +489,27 @@ backends() {
 hold() {
   # Tear the container down on the way out, so a cancelled step does not leave
   # a live engine holding a GPU that the next allocation cannot use.
-  # Armed only *after* `up` returns, and the ordering is the whole point.
   #
-  # Arming first looked safer and was dangerous: `up` refuses to start when the
-  # name is already taken, and it refuses by exiting -- so on a collision with
-  # another invocation's live server, the trap fired on the way out and removed
-  # *their* container. That trades a leak for destroying someone else's running
-  # engine, which is the worse failure by a distance.
+  # This used to install its own traps, after `up` returned, and the ordering
+  # was the whole point: arming them *before* `up` was dangerous, because `up`
+  # refuses a name that is already taken and refuses by exiting, so on a
+  # collision with another invocation's live server the trap fired on the way
+  # out and removed *their* container -- trading a leak for destroying someone
+  # else's running engine, which is worse by a distance.
   #
-  # Nothing is lost by waiting. `up`'s own failure paths go through
-  # `teardown_failed`, which removes the container it created, so the window
-  # this trap used to cover is already covered by the code that owns it.
+  # Both orderings were wrong, for opposite reasons, and that is the tell that
+  # the question was the wrong one. Arming late leaves the handover window a
+  # signal can land in; arming early attributes a container this invocation did
+  # not create. Neither is a question about *when*, because both answers are
+  # about *whose*, and `_OWNED` already records whose.
+  #
+  # So `hold` installs no traps at all now. It declares that it wants the
+  # container to outlive bring-up, and `up` keeps the ownership-keyed traps it
+  # armed at `docker run -d` armed rather than clearing them. On the collision
+  # path `_OWNED` is still 0, because `up` exits before it is ever set, so this
+  # declaration removes nothing that belongs to anyone else.
+  _RETAIN_OWNERSHIP=1
   up
-  trap 'echo "signalled; tearing down"; docker rm -f "${NAME}" >/dev/null 2>&1 || true; exit 0' INT TERM
-  trap 'docker rm -f "${NAME}" >/dev/null 2>&1 || true' EXIT
   echo "holding ${NAME}; endpoint http://127.0.0.1:${PORT}/v1"
   while [ -n "$(docker ps -q -f "name=^${NAME}$")" ]; do
     sleep 10
