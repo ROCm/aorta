@@ -3186,3 +3186,118 @@ def test_the_rescorer_skips_rows_that_never_reached_the_provider(rescore_e2e):
     assert analysis["per_scenario"]["s1"]["distinct_completions"] == 1
     assert analysis["per_scenario"]["s1"]["spread_within_group"] == 0.0
 
+
+# --------------------------------------------------------------------------- #
+# Reaching the top tier has to mean the loop would run cells
+# --------------------------------------------------------------------------- #
+
+
+def _proposal_body(**over):
+    body = {
+        "category": "checkpoint_race",
+        "hypothesis": "h",
+        "next_mitigations": ["tf32_off"],
+        "confidence": 0.5,
+        "stop": False,
+        "stop_reason": "",
+    }
+    body.update(over)
+    return json.dumps(body)
+
+
+def test_a_proposal_that_stops_cannot_reach_the_top_tier(proposal_reward):
+    """`stop: true` ended the search and still collected a full 1.0.
+
+    The tier-4 comment already said an empty list is a decision to stop and
+    fails there -- but that is only the implicit spelling. `run_agent_loop`
+    honours the flag and breaks before building any probe cell, so a reply that
+    set `stop` while naming valid, offered mitigations had those names dropped
+    on the floor and was paid top marks for them. `_consumer_outcome` recorded
+    `silent_stop` for the same reply at the same time, so the module was
+    already contradicting itself in its own output.
+
+    That makes a constant policy that terminates every search the cheapest way
+    to the top of this ladder, which is the exploit the reward exists to price.
+    """
+    offered = ["tf32_off", "xnack"]
+    stopping = proposal_reward.Proposal(
+        "stopping", _proposal_body(stop=True), offered + ["none"], []
+    )
+    score = proposal_reward.score_proposal(stopping)
+
+    assert score.tier < 4, (score.tier, score.reward)
+    assert score.reward < 1.0
+    assert score.stopped_at == "tier4_registry"
+    assert "never tried" in score.detail
+
+    # Narrowness: the identical reply that does not stop is still on contract.
+    running = proposal_reward.Proposal(
+        "running", _proposal_body(stop=False), offered + ["none"], []
+    )
+    assert proposal_reward.score_proposal(running).tier == proposal_reward.MAX_TIER
+
+
+def test_the_top_tier_implies_the_loop_would_accept_it(proposal_reward):
+    """The invariant behind the fix, enumerated rather than spot-checked.
+
+    `stop: true` was one spelling of "this reply is really a stop"; the point
+    of enumerating is that there could have been others, and finding out by
+    listing them is cheaper than finding out from a training run. Every way a
+    reply can end the search is walked here against both the ladder and
+    `consumer_outcome`, and the two must never disagree at the top.
+    """
+    offered = ["tf32_off", "xnack"]
+    candidates = offered + ["none"]
+    cases = {
+        "on contract": _proposal_body(),
+        "stop true, one valid name": _proposal_body(stop=True),
+        "stop true, two valid names": _proposal_body(
+            stop=True, next_mitigations=["tf32_off", "xnack"]
+        ),
+        "stop true, with a stop_reason": _proposal_body(
+            stop=True, stop_reason="found it"
+        ),
+        "stop true, empty list": _proposal_body(stop=True, next_mitigations=[]),
+        "empty list": _proposal_body(next_mitigations=[]),
+        "only `none`": _proposal_body(next_mitigations=["none"]),
+        "only repeats": _proposal_body(next_mitigations=["tf32_off", "tf32_off"]),
+        "stop as a string": _proposal_body(stop="true"),
+    }
+
+    violations = []
+    top = 0
+    for label, raw in cases.items():
+        score = proposal_reward.score_proposal(
+            proposal_reward.Proposal(label, raw, candidates, [])
+        )
+        if score.tier == proposal_reward.MAX_TIER:
+            top += 1
+            if score.consumer_outcome != "accepted":
+                violations.append((label, score.reward, score.consumer_outcome))
+
+    assert violations == [], (
+        "a proposal reached the top of the ladder that the real loop would not "
+        f"act on: {violations}"
+    )
+    # And the enumeration has to be able to fail: at least one case must
+    # actually reach the top, or this passes by testing nothing.
+    assert top >= 1
+
+
+def test_the_stopping_constant_is_priced_in_the_baseline_table(proposal_reward):
+    """It used to sit at the top of this table, so it stays in it.
+
+    The degenerate-policy table is where a constant that beats a real model
+    becomes visible, and this one scored a clean 1.0 on every fixture. Keeping
+    the row rather than deleting it with the defect means the table goes on
+    showing that the cheapest possible policy is priced.
+    """
+    rows = {r["policy"]: r for r in proposal_reward.baselines()}
+    stopping = rows["always stop, naming valid mitigations"]
+
+    assert stopping["mean_reward"] < 1.0, stopping
+    assert stopping["accepted_rate"] == 0.0, stopping
+    # Strictly worse than the same proposal that lets the search continue,
+    # which is the ordering the reward has to hold.
+    assert stopping["mean_reward"] < rows["always the same valid proposal"]["mean_reward"]
+

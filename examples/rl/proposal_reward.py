@@ -451,8 +451,30 @@ def score_proposal(proposal: Proposal) -> Score:
     # performance of it.
     score.category_credit = category_credit(category)
 
-    # Tier 4 -- names that exist. An empty list is a decision to stop, so it
-    # fails here too: a proposal that names nothing is not a proposal.
+    # Tier 4 -- names that exist, and a proposal that is actually a proposal.
+    #
+    # There are two ways a reply can be a decision to stop, and this tier used
+    # to recognise only one of them. An empty list is the implicit spelling and
+    # failed here already. `stop: true` is the explicit one and did not: a reply
+    # that set it while naming valid, offered mitigations walked to tier 5 and
+    # scored a full 1.0, while `_consumer_outcome` recorded `silent_stop` for
+    # the very same reply. `run_agent_loop` honours the flag and breaks before
+    # building any probe cell, so those names are never run -- the reward was
+    # paying full marks for work the loop does not do, and paying it to a
+    # constant policy that terminates every search.
+    #
+    # Checked before the names, because `stop: true` settles the question on its
+    # own: whatever else the reply contains, the loop stops. The invariant this
+    # restores is the one the ladder is for -- reaching MAX_TIER means the real
+    # consumer would accept the proposal and run cells for it.
+    if raw_obj["stop"]:
+        score.stopped_at = "tier4_registry"
+        score.detail = (
+            "stop is true, so the loop ends the search without running any "
+            f"cell; the {len(raw_obj['next_mitigations'])} name(s) proposed "
+            "alongside it are never tried"
+        )
+        return _finish(score)
     names = [str(m) for m in raw_obj["next_mitigations"]]
     score.n_mitigations = len(names)
     # What the loop will charge for, after the consumer's own normalisation.
@@ -774,10 +796,19 @@ def baselines() -> list[dict[str, Any]]:
     nothing at all, because a single-name honest abstention is a *cheap* answer
     and cheapness is most of what this reward can see.
 
+    `always stop, naming valid mitigations` is here because it used to score a
+    full 1.0 -- the ladder read the names and ignored the flag, so the cheapest
+    possible policy, one that ends every search on its first reply, sat at the
+    top of this table. It is kept as a row rather than deleted with the defect
+    so the table goes on showing that it is priced.
     """
     rows = []
     for name, raw in (
         ("always the same valid proposal", _ok()),
+        (
+            "always stop, naming valid mitigations",
+            _ok(stop=True, next_mitigations=["nccl_launch_order_implicit"]),
+        ),
         (
             "always abstain, one mitigation",
             _ok(
