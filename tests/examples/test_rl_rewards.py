@@ -3988,3 +3988,32 @@ def test_re_partitioning_still_corrects_a_genuinely_misfiled_detector(triage_rew
     assert mixed.error_detectors == ["meta:env_file_validation_failed"]
 
 
+def test_the_recipe_cli_fails_when_a_recipe_falls_short(recipe_reward, tmp_path, capsys):
+    """It computed `worst` and returned 0, so it could not gate anything.
+
+    The grade went to stdout and the thing automation reads said "fine" either
+    way. `run_demo`, one function up in the same file, has returned
+    `1 if failures else 0` all along -- so the correct shape was already here.
+    """
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("not: a recipe\n", encoding="utf-8")
+    assert recipe_reward.main([str(bad), "--no-novelty-gate"]) == 1
+    capsys.readouterr()
+
+
+def test_an_unreadable_recipe_is_a_max_deficit_not_a_skip(
+    recipe_reward, tmp_path, capsys
+):
+    """The half that makes the exit code honest.
+
+    The `except OSError` branch `continue`d without touching `worst`, so an
+    unreadable path was indistinguishable from one that scored top marks.
+    Wiring the exit code without this would have shipped a gate that passes the
+    inputs it never looked at -- the same defect one branch earlier.
+    """
+    missing = tmp_path / "nope.yaml"
+    assert not missing.exists()
+    assert recipe_reward.main([str(missing), "--no-novelty-gate"]) == 1
+    capsys.readouterr()
+
+

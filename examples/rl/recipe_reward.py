@@ -745,6 +745,13 @@ def main(argv: list[str] | None = None) -> int:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             results[str(path)] = {"tier": 0, "reason": str(exc)}
+            # The maximum deficit, not a skip. A file that could not be read
+            # was not graded, and `continue` alone left `worst` untouched --
+            # so an unreadable path was indistinguishable from one that scored
+            # top marks. That is the same defect as the `return 0` below, one
+            # branch earlier, and wiring the exit code without this would have
+            # shipped a gate that passes the inputs it never looked at.
+            worst = max(worst, MAX_TIER)
             continue
         grade = grade_recipe_text(text, corpus=corpus)
         results[str(path)] = grade.as_dict()
@@ -762,7 +769,17 @@ def main(argv: list[str] | None = None) -> int:
                           f"reward of {grade.tier_reward:.2f}")
     if args.json:
         print(json.dumps(results, indent=2))
-    return 0
+    # `worst` is the largest tier deficit across the inputs, so zero means
+    # every recipe reached the top tier. Computing it and then returning 0
+    # unconditionally made this unusable as a gate: the grade was on stdout and
+    # the thing automation reads said "fine" either way. `run_demo` one
+    # function up has returned `1 if failures else 0` all along, so the correct
+    # shape was already in this file.
+    #
+    # This is a deliberate change to the CLI's contract rather than a quiet
+    # fix -- anything invoking it in a `&&` chain starts failing on recipes it
+    # used to accept, which is the point.
+    return 1 if worst else 0
 
 
 if __name__ == "__main__":
