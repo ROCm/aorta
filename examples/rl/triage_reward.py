@@ -154,11 +154,39 @@ def label_run(doc: dict[str, Any], source: str | None = None) -> Label:
     through ``partition_detectors``, which owns which IDs mean "no valid
     observation". An archived run that recorded a detector on the wrong side of
     that line is corrected here, and flagged via ``stale``.
+
+    With one exception, and it is upstream's own rule rather than ours.
+    ``partition_detectors`` recognises exactly two error IDs -- ``tier1:timeout``
+    and ``tier1:exec_failed`` -- and ``verdict.py`` says in its module docstring
+    that ``error_detectors_fired`` "can still carry additional ``meta:``
+    infra-error IDs, but those are written **directly** by a workload that
+    bypasses :func:`resolve` entirely ... they are not produced by, and do not
+    flow through, this resolver." So re-partitioning them asks the wrong
+    authority: ``SubprocessWorkload`` writes ``meta:env_file_validation_failed``
+    on the error side for a rejected ``probe.env``, where the subprocess never
+    launched and the trial made no observation at all, and re-splitting moved
+    it onto ``failure_detectors`` -- scoring a trial that never ran as a
+    *reproduction*, marking the archive ``stale``, and feeding the wrong ground
+    truth to the attribution term as well as the verdict one.
+
+    The carve-out is **positional, not by prefix**, and that distinction is
+    load-bearing: ``meta:`` is not a synonym for "infra error". ``resolve``
+    synthesises ``meta:missing_pass_signal`` as a genuine *failure* signal and
+    appends it to the failure list, so a rule keyed on the prefix would flip a
+    real failure into an error -- the same defect in the opposite direction.
+    What is preserved is where the producer *put* it, which is the judgement
+    this function otherwise exists to re-derive and is the one case where the
+    producer knows something the resolver does not.
     """
-    recorded = list(doc.get("failure_detectors_fired") or []) + list(
-        doc.get("error_detectors_fired") or []
-    )
+    stored_failures = list(doc.get("failure_detectors_fired") or [])
+    stored_errors = list(doc.get("error_detectors_fired") or [])
+
+    # Held back from the re-split rather than re-classified afterwards, so the
+    # resolver is never asked about an ID it documents itself as not owning.
+    bypassed = [d for d in stored_errors if d.startswith("meta:")]
+    recorded = stored_failures + [d for d in stored_errors if d not in bypassed]
     failures, errors = partition_detectors(recorded)
+    errors = errors + bypassed
     verdict = verdict_from_detectors(failures, errors)
 
     stored = doc.get("verdict")

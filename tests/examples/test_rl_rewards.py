@@ -3910,3 +3910,81 @@ def test_a_run_that_delivered_nothing_is_not_a_measurement(run_e2e):
     assert run_e2e.is_empty_measurement(run_e2e.aggregate([], [])) is False
 
 
+def test_an_infra_error_the_producer_recorded_stays_an_error(triage_reward):
+    """`meta:` IDs bypass the resolver, and upstream says so in its own words.
+
+    `partition_detectors` recognises exactly `tier1:timeout` and
+    `tier1:exec_failed`. `verdict.py`'s module docstring states that
+    `error_detectors_fired` "can still carry additional `meta:` infra-error
+    IDs, but those are written **directly** by a workload that bypasses
+    `resolve` entirely ... they are not produced by, and do not flow through,
+    this resolver."
+
+    So recombining the two stored lists and re-splitting them asked the wrong
+    authority. `SubprocessWorkload` writes `meta:env_file_validation_failed`
+    for a rejected `probe.env`, where the subprocess never launched and the
+    trial made no observation at all -- and re-partitioning moved it onto
+    `failure_detectors`, scoring a trial that never ran as a reproduction,
+    marking the archive stale, and handing the attribution term a ground truth
+    that cites an infrastructure error as the cause.
+    """
+    doc = {
+        "verdict": "error",
+        "exit_code": 2,
+        "failure_detectors_fired": [],
+        "error_detectors_fired": ["meta:env_file_validation_failed"],
+    }
+    label = triage_reward.label_run(doc)
+
+    assert label.verdict == "error"
+    assert label.error_detectors == ["meta:env_file_validation_failed"]
+    assert label.failure_detectors == []
+    assert label.stale is False
+
+
+def test_the_meta_carve_out_is_positional_not_by_prefix(triage_reward):
+    """`meta:` is not a synonym for "infra error", and keying on it would break.
+
+    `resolve` synthesises `meta:missing_pass_signal` as a genuine *failure*
+    signal and appends it to the failure list. A rule that read the prefix
+    would move that onto the error side -- the same defect in the opposite
+    direction, turning a real reproduction into an infra flake. What is
+    preserved is where the producer put it.
+    """
+    real_failure = triage_reward.label_run({
+        "verdict": "fail",
+        "failure_detectors_fired": ["meta:missing_pass_signal"],
+        "error_detectors_fired": [],
+    })
+    assert real_failure.verdict == "fail"
+    assert real_failure.failure_detectors == ["meta:missing_pass_signal"]
+    assert real_failure.error_detectors == []
+    assert real_failure.stale is False
+
+
+def test_re_partitioning_still_corrects_a_genuinely_misfiled_detector(triage_reward):
+    """Narrowness: the carve-out must not disable the thing this function is for.
+
+    A `tier1:timeout` recorded on the failure side is exactly what
+    `partition_detectors` owns, and it still gets moved and still marks the
+    archive stale.
+    """
+    label = triage_reward.label_run({
+        "verdict": "fail",
+        "failure_detectors_fired": ["tier1:timeout"],
+        "error_detectors_fired": [],
+    })
+    assert label.verdict == "error"
+    assert label.error_detectors == ["tier1:timeout"]
+    assert label.stale is True
+
+    # And fail still beats error in precedence when both are real.
+    mixed = triage_reward.label_run({
+        "verdict": "fail",
+        "failure_detectors_fired": ["tier4:nan_signature"],
+        "error_detectors_fired": ["meta:env_file_validation_failed"],
+    })
+    assert mixed.verdict == "fail"
+    assert mixed.error_detectors == ["meta:env_file_validation_failed"]
+
+
