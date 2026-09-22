@@ -26,8 +26,17 @@ reasoning behind the numbers it picks.
 > measures ~0 here.
 >
 > Steps 1–6 below are done. Step 7 — promoting the nine on evidence — is not,
-> and is what the next window is for. Nothing else in the matrix changed: every
-> other entry is unchanged and still correctness-only.
+> and **the nine are not waiting on the same thing**, so "the next window" is
+> the right answer for only three of them:
+>
+> | record-only metric | what step 7 is waiting for |
+> |---|---|
+> | `median_ttft_ms`, `output_throughput` | **Nothing. The evidence is in hand.** Their only blocker was the step-0 compile excursion, and the completed 2026-09-08..09-17 window clears it ([step 4](#the-rollout-sequence)). They are deferred to a separate PR so the first armed gate stays attributable, not deferred for data. |
+> | `p99_ttft_ms`, `p99_tpot_ms`, `p99_e2el_ms` | **Analysis of a window, and possibly a second one.** The blocker is that a p99 over 32 requests is the 32nd of 32 order statistics with no repeat measurement behind it. The completed window recorded them — the nightly harvests every allowlisted metric — but [step 3](#the-rollout-sequence) only asked for five metrics to be written down, so nobody has computed their spread. Read the existing ten nights first; another window is needed only if that spread is too wide to size a margin from. |
+> | `median_e2el_ms`, `request_throughput`, `total_token_throughput`, `tokens_per_sec` | **No window will unblock these.** They are held back on *redundancy*, not on evidence: each is determined by a metric already gated, so arming them adds reason lines to one event rather than detection. Promoting them needs the argument in [the per-metric table](#per-metric-gate-record-only-or-never) to change, not more nights. |
+>
+> Nothing else in the matrix changed: every other entry is unchanged and still
+> correctness-only.
 
 The reason it is a document rather than a commit is that we do not yet have a
 window to derive thresholds from. A threshold derived from a single observation
@@ -473,8 +482,15 @@ and the ten-night measurement is taken (2026-09-08..09-17, all ten scheduled
 `workflow_run` events, all ten green). The two ceilings that window sized are in
 `config/ci/regression_baselines.yaml`.
 
-What remains is [step 7](#the-rollout-sequence): the nine record-only metrics
-need another window before any of them can be promoted.
+What remains is [step 7](#the-rollout-sequence), and **not one of the nine
+record-only metrics is blocked on a measurement this window failed to take.**
+Two of them (`median_ttft_ms`, `output_throughput`) have their evidence already
+and are deferred only so the first armed gate stays attributable; three are
+waiting on the *analysis* of nights already recorded; four are held back on a
+redundancy argument no number will settle. The table in the
+[current-state box](#turning-on-nightly-perf-gating-for-tokenspeed-serving) at
+the top says which is which — read it before opening a step-7 PR, because
+"wait for another window" is the wrong answer for six of the nine.
 
 This section is kept because the *shape* of the plumbing is what the sign-off
 was given against, and because the argument is worth being able to re-read.

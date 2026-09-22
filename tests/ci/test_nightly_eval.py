@@ -921,6 +921,24 @@ def test_the_rollout_doc_marks_its_variance_data_as_the_old_configuration():
     ), "the record-only window is not pinned to warmup_steps: 2"
 
 
+def _gated_names(spec: dict) -> set[str]:
+    """Every bound in one baseline entry that can red a cell, under one naming.
+
+    `step_time_ms` is not in `metrics`. `eval_lib.compare_to_baseline` reads it
+    as a *sibling* key (`baseline["step_time_ms"]["max"]`, eval_lib.py:218) and
+    compares it against the harness-synthesised `mean_step_time_ms`, so a
+    reader of `spec["metrics"]` alone sees an armed step-time ceiling as no
+    gate at all. That is precisely the bound this bless pruned by hand, which
+    makes it the one a future bless is most likely to restore by accident --
+    `refresh_baselines.py:231` writes it from `mean_step_time_ms` without being
+    asked. Folded in under the `step_time_ms.max` spelling the docs use, so the
+    tripwires below and the prose they check are talking about one name.
+    """
+    names = set(spec.get("metrics") or {})
+    names |= {f"step_time_ms.{bound}" for bound in (spec.get("step_time_ms") or {})}
+    return names
+
+
 def _gated_serving_metrics() -> dict[str, set[str]]:
     """``cell -> gated metric names`` for tokenspeed_serve_smoke, from the real file."""
     import yaml
@@ -929,7 +947,7 @@ def _gated_serving_metrics() -> dict[str, set[str]]:
         (nightly_eval.REPO_ROOT / "config/ci/regression_baselines.yaml").read_text("utf-8")
     )["baselines"]
     return {
-        key.split("::", 1)[1]: set(spec.get("metrics") or {})
+        key.split("::", 1)[1]: _gated_names(spec)
         for key, spec in baselines.items()
         if key.startswith("tokenspeed_serve_smoke::")
     }
@@ -982,6 +1000,33 @@ def test_the_docs_name_exactly_the_serving_metrics_that_are_gated():
         )
 
 
+def test_the_rollout_doc_does_not_send_step_seven_back_for_another_window():
+    """The doc gave two answers about when step 7 may begin, and they disagreed.
+
+    The header said the nine record-only metrics are "what the next window is
+    for" while step 4, further down the same file, recorded that the completed
+    window already clears the excursion blocker on `median_ttft_ms` and
+    `output_throughput`. Following the header costs ten nights nobody needs; the
+    two halves were added by different commits and nothing read them together.
+
+    Narrow on purpose, and in both directions: the blanket instruction must
+    stay gone, and the two metrics it was wrong about must still be named as
+    deferred rather than blocked. A reworded sentence passes; the old one, and
+    a rewrite that quietly drops the distinction, do not.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+    stale = "need another window before any of them can be promoted"
+    assert stale not in doc, (
+        f"the rollout doc still says the nine {stale!r}, which step 4 of the "
+        "same document contradicts for median_ttft_ms and output_throughput."
+    )
+    assert "deferred to a separate PR" in doc, (
+        "nothing records that median_ttft_ms and output_throughput are held "
+        "back for attributability rather than for evidence, so a step-7 author "
+        "cannot tell which of the nine are actually waiting on a measurement."
+    )
+
+
 def test_the_docs_say_which_serving_metrics_are_not_gated():
     """"Gated" is only half the answer; the ungated set is the operational half.
 
@@ -992,10 +1037,11 @@ def test_the_docs_say_which_serving_metrics_are_not_gated():
     """
     gated = _gated_serving_metrics()
     names = next(iter(gated.values()))
-    assert "step_time_ms" not in names and "step_time_ms.max" not in names, (
-        "step_time_ms.max is armed on a serving cell; the measured step-0 "
-        "compile excursion (2825 ms) clears any ceiling derived from a clean "
-        "night. See docs/tokenspeed-gating-rollout.md step 6."
+    armed = sorted(n for n in names if n.split(".", 1)[0] == "step_time_ms")
+    assert not armed, (
+        f"{armed} is armed on a serving cell; the measured step-0 compile "
+        "excursion (2825 ms) clears any ceiling derived from a clean night. "
+        "See docs/tokenspeed-gating-rollout.md step 6."
     )
     for relative in ("docs/tokenspeed-serving.md", "docs/tokenspeed-gating-rollout.md"):
         doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
