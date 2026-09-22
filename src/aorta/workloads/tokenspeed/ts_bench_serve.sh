@@ -1221,6 +1221,113 @@ if failed != 0 or completed != expected:
 # host is about to call unreadable, and a reader would have to reconcile two
 # names for one defect. Every request completing while zero tokens were
 # generated is not a short answer; an immediate EOS is still a token.
+# The array's validity and its shape are audited here, OUTSIDE the floor block
+# below, and only the mean comparison is left inside it. Everything in this
+# section used to sit under `if min_mean_output > 0:`, so setting the floor to 0
+# switched the whole audit off while the host went on refusing the same
+# exports -- `null`, `[]`, `"abc"` and over-cap arrays all printed OK here and
+# `result_json_unusable` there. `min_mean_output_tokens: 0` is precisely the
+# escape hatch the `rollout_length_basis_unusable` detail and the
+# `save_detailed: false` refusal both tell people to reach for, so that is the
+# configuration the hole was behind, and a direct script run enforced a weaker
+# contract than a recipe-driven one. Whether the export is readable is not a
+# question about the floor.
+#
+# Same rule as the host's `_valid_output_lens`, and it has to stay the same
+# rule: this audit runs first, so a container reading the array differently
+# would print a verdict the host then contradicts.
+lens = doc.get("output_lens")
+# Whether the entries are per completion or per request, decided by cardinality
+# rather than assumed. Read by the floor below to pick its basis.
+lens_per_request = False
+
+
+def _whole(v, cap):
+    # The host's rule verbatim (`_valid_output_lens`): a non-bool real
+    # number that is a non-negative whole value, so `10.0` counts and
+    # `10.5` does not. Spelling it as `isinstance(v, int)` here made the
+    # two layers disagree about integral floats -- the container would
+    # reject `[1.0] * 256`, fall back to per-request accounting and derive
+    # 8, clearing the default floor on a step the host reads as a mean of 1.
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if not (v == v and abs(v) != float("inf")):
+        return False
+    # JSON bounds no integer, so `json.load` yields arbitrary-precision
+    # ints and `float(v)` raises OverflowError rather than returning one.
+    # Unguarded that aborted the audit with a traceback: the caller reads
+    # this function's stdout, got nothing, and fell through its `case` to
+    # `result_json_unusable` -- the right direction, by accident, under the
+    # wrong name and with a Python traceback in the log. The host crashed
+    # the trial outright on the same export.
+    try:
+        if v < 0 or not float(v).is_integer():
+            return False
+    except OverflowError:
+        return False
+    # And no longer than an entry was permitted to be. `cap` is passed in
+    # rather than read from `len_cap` because the bound depends on what an
+    # entry *is*: on `random`, output_len is each completion's max_tokens, so
+    # a per-completion entry cannot exceed it, but a per-request entry under
+    # summed usage accounting holds up to `samples` of them. Applying the
+    # per-completion cap to the per-request shape called the same gateway a
+    # broken export as soon as its completions got long enough.
+    return cap is None or v <= cap
+
+
+# Present-but-invalid and absent are different things, and they were being
+# treated the same. The host's `_missing_core_metrics` calls a present
+# array that fails the rule `result_json_unusable`; this audit discarded it
+# and fell back per-request, so the same export got UNPARSEABLE on one
+# layer and SHORTLEN -- or OK -- on the other. An over-cap entry is an
+# impossible export, and falling back to a different denominator is not a
+# reading of it, it is a second opinion about a document neither layer can
+# trust.
+#
+# Keyed on presence of the key rather than on the value, which is the whole
+# rule and is why it is written once: `doc.get` answers `None` both for an
+# absent key and for `"output_lens": null`, so any test of the *value* --
+# including `is not None` -- reads a present null as an absence and falls
+# back on it. `[]`, a string and an object are the same mistake seen at
+# other types.
+#
+# The fallback survives for exactly one case: no array at all, which is
+# what `save_detailed: false` produces and is a configuration rather than a
+# defect.
+if "output_lens" in doc:
+    if not (isinstance(lens, list) and lens):
+        print(
+            f"UNPARSEABLE output_lens {type(lens).__name__} "
+            "(not a non-empty array of lengths)"
+        )
+        raise SystemExit(0)
+    # Exactly two cardinalities are legitimate: one entry per completion
+    # (`completed * samples`) and, at `samples > 1`, one per request
+    # (`completed`). Anything else describes a subset of the run rather than
+    # the run -- `[100]` against `completed: 32` averaged one completion
+    # standing in for thirty-two and cleared the floor on it -- so it is a
+    # broken export, not a gateway choice, and it is UNPARSEABLE rather than
+    # BADBASIS. At `samples == 1` the two shapes are the same number, so
+    # there is no second legitimate cardinality there at all; that is the
+    # case the old `and samples > 1` guard let through untested.
+    lens_per_request = samples > 1 and len(lens) == completed
+    if not lens_per_request and len(lens) != completed * samples:
+        print(
+            f"UNPARSEABLE output_lens n={len(lens)} completed={completed} "
+            f"samples={samples}: entries are neither one per completion nor "
+            "one per request"
+        )
+        raise SystemExit(0)
+    entry_cap = len_cap
+    if entry_cap is not None and lens_per_request:
+        entry_cap = entry_cap * samples
+    if not all(_whole(v, entry_cap) for v in lens):
+        print(
+            f"UNPARSEABLE output_lens {type(lens).__name__} "
+            "(entries are not whole lengths within cap)"
+        )
+        raise SystemExit(0)
+
 if min_mean_output > 0:
     total_output = doc.get("total_output_tokens")
     if (
@@ -1243,85 +1350,30 @@ if min_mean_output > 0:
             f"({len(str(total_output))} digits)"
         )
         raise SystemExit(0)
-    # Per completion, and read off the per-completion array when the export has
-    # one rather than derived by dividing. Dividing by `completed * samples`
-    # assumed the gateway sums `usage.completion_tokens` across all `n` choices;
-    # the host's own metric documentation allows the other shape,
-    # first-choice-only, and on that shape the division is wrong by a factor of
-    # `n` in the direction that fails a healthy run. `output_lens` carries one
-    # entry per recorded completion, so its mean needs no assumption at all.
+    # Per completion, and read off the per-completion array when the export
+    # has one rather than derived by dividing. Dividing by
+    # `completed * samples` assumed the gateway sums `usage.completion_tokens`
+    # across all `n` choices; the host's own metric documentation allows the
+    # other shape, first-choice-only, and on that shape the division is wrong
+    # by a factor of `n` in the direction that fails a healthy run.
+    # `output_lens` carries one entry per recorded completion, so its mean
+    # needs no assumption at all.
     #
-    # Same rule as the host's `_valid_output_lens`, and it has to stay the same
-    # rule: this audit runs first, so a container dividing differently would
-    # print a verdict the host then contradicts.
-    lens = doc.get("output_lens")
-
-    def _whole(v):
-        # The host's rule verbatim (`_valid_output_lens`): a non-bool real
-        # number that is a non-negative whole value, so `10.0` counts and
-        # `10.5` does not. Spelling it as `isinstance(v, int)` here made the
-        # two layers disagree about integral floats -- the container would
-        # reject `[1.0] * 256`, fall back to per-request accounting and derive
-        # 8, clearing the default floor on a step the host reads as a mean of 1.
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            return False
-        if not (v == v and abs(v) != float("inf")):
-            return False
-        # JSON bounds no integer, so `json.load` yields arbitrary-precision
-        # ints and `float(v)` raises OverflowError rather than returning one.
-        # Unguarded that aborted the audit with a traceback: the caller reads
-        # this function's stdout, got nothing, and fell through its `case` to
-        # `result_json_unusable` -- the right direction, by accident, under the
-        # wrong name and with a Python traceback in the log. The host crashed
-        # the trial outright on the same export.
-        try:
-            if v < 0 or not float(v).is_integer():
-                return False
-        except OverflowError:
-            return False
-        # And no longer than a completion was permitted to be. On `random`,
-        # output_len is each completion's max_tokens, so a longer entry
-        # describes generation the server could not have done -- an impossible
-        # export that otherwise cleared the floor and published percentiles
-        # reading like a measurement.
-        return len_cap is None or v <= len_cap
-
-    # Present-but-invalid and absent are different things, and they were being
-    # treated the same. The host's `_missing_core_metrics` calls a present
-    # array that fails the rule `result_json_unusable`; this audit discarded it
-    # and fell back per-request, so the same export got UNPARSEABLE on one
-    # layer and SHORTLEN -- or OK -- on the other. An over-cap entry is an
-    # impossible export, and falling back to a different denominator is not a
-    # reading of it, it is a second opinion about a document neither layer can
-    # trust.
-    #
-    # Keyed on presence of the key rather than on the value, which is the whole
-    # rule and is why it is written once: `doc.get` answers `None` both for an
-    # absent key and for `"output_lens": null`, so any test of the *value* --
-    # including `is not None` -- reads a present null as an absence and falls
-    # back on it. `[]`, a string and an object are the same mistake seen at
-    # other types.
-    #
-    # The fallback survives for exactly one case: no array at all, which is
-    # what `save_detailed: false` produces and is a configuration rather than a
-    # defect.
+    # Validity and cardinality were settled above, before the floor was
+    # consulted. What is left here is the one question that genuinely belongs
+    # to the floor: whether a per-completion mean can be derived at all.
     if "output_lens" in doc:
-        if not (isinstance(lens, list) and lens and all(_whole(v) for v in lens)):
-            print(
-                f"UNPARSEABLE output_lens {type(lens).__name__} "
-                "(not a non-empty array of lengths within cap)"
-            )
-            raise SystemExit(0)
-        # Which shape arrived is read off the cardinality, not assumed. One
-        # entry per *request* is a shape the host documents and supports, and it
-        # is the same quantity as total_output_tokens/completed -- so taking its
-        # mean as a per-completion reading is exactly the assumption the comment
-        # above refuses, reintroduced through the array. At samples=8 a policy
-        # emitting one token per choice reports 8 per request and clears a floor
-        # of 8 exactly. Refused rather than divided, and refused here as well as
-        # on the host, or a direct script run enforces a weaker contract than a
-        # recipe-driven one while printing the same verdict names.
-        if len(lens) != completed * samples and samples > 1:
+        if lens_per_request:
+            # One entry per *request* is a shape the host documents and
+            # supports, and it is the same quantity as
+            # total_output_tokens/completed -- so taking its mean as a
+            # per-completion reading is exactly the assumption the comment
+            # above refuses, reintroduced through the array. At samples=8 a
+            # policy emitting one token per choice reports 8 per request and
+            # clears a floor of 8 exactly. Refused rather than divided, and
+            # refused here as well as on the host, or a direct script run
+            # enforces a weaker contract than a recipe-driven one while
+            # printing the same verdict names.
             print(
                 f"BADBASIS output_lens n={len(lens)} completed={completed} "
                 f"samples={samples}: entries are request totals, not completion "

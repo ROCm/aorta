@@ -5188,6 +5188,286 @@ def test_the_per_choice_shape_is_still_read_as_before(
         assert reasons == [expected], result.failure_details
 
 
+@pytest.mark.parametrize(
+    "samples,lens",
+    [
+        (1, [100]),
+        (1, [100] * 31),
+        (1, [100] * 33),
+        (8, [100] * 31),
+        (8, [100] * 100),
+        (8, [100] * 33),
+    ],
+    ids=[
+        "n1-one-entry",
+        "n1-one-short",
+        "n1-one-long",
+        "n8-short-of-per-request",
+        "n8-between-the-two-shapes",
+        "n8-past-per-request",
+    ],
+)
+def test_an_array_of_neither_legitimate_cardinality_is_a_broken_export(
+    tmp_path, monkeypatch, samples, lens
+):
+    """Cardinality is part of whether the array can be read at all.
+
+    Two shapes are legitimate and this class names both: one entry per
+    completion (`completed * n`) and, at `n > 1`, one per request
+    (`completed`). Anything else describes a *subset* of the run -- `[100]`
+    against `completed: 32` published `generated_tokens_mean: 100.0` from one
+    completion standing in for thirty-two, and cleared a length floor on it.
+
+    The `n = 1` rows are the ones the old guard let through untested: its
+    per-request branch was gated on `samples > 1`, so at `n = 1` every
+    wrong-length array fell into the per-completion branch and had its mean
+    taken. There is no second legitimate cardinality at `n = 1` -- per request
+    and per completion are the same number -- so a length that is neither is a
+    broken export, and `result_json_unusable`/`UNPARSEABLE` rather than the
+    `rollout_length_basis_unusable` a real gateway choice earns.
+    """
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": sum(lens),
+        "output_lens": lens,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, min_mean_output=8, rollout_samples=samples
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+    assert "output_lens" in verdict, verdict
+
+    wl = _rollout(
+        tmp_path, num_prompts=32, rollout_samples=samples, min_mean_output_tokens=8
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=sum(lens), output_lens=lens)
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    reasons = [d["reason"] for d in result.failure_details]
+    assert reasons == ["result_json_unusable"], result.failure_details
+    # Not excused as a basis the floor merely cannot use: that verdict is for a
+    # readable export, and this one is not readable.
+    assert "rollout_length_basis_unusable" not in reasons, result.failure_details
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [None, [], "abc", {}, [100, 100, 100, 100], [10, 10, 10, -1]],
+    ids=["null", "empty", "string", "object", "over-cap", "negative"],
+)
+def test_the_container_still_audits_the_array_with_the_floor_switched_off(
+    tmp_path, unusable
+):
+    """`min_mean_output_tokens: 0` turned off the floor and the audit with it.
+
+    The whole `output_lens` section sat under `if min_mean_output > 0:`, so the
+    one configuration this workload tells people to reach for -- it is the
+    escape hatch named in both the `rollout_length_basis_unusable` detail and
+    the `save_detailed: false` refusal -- also switched off every check on
+    whether the array is readable. `null`, `[]`, `"abc"`, an object and an
+    over-cap array all printed `OK` here while the host went on calling the
+    same export `result_json_unusable`, so a direct script run enforced a
+    weaker contract than a recipe-driven one under a verdict name that reads
+    identical.
+
+    Whether an export can be read is not a question about the floor, which is
+    why the audit now runs whatever the floor is set to.
+    """
+    doc = {
+        "completed": 4,
+        "failed": 0,
+        "total_output_tokens": 40,
+        "output_lens": unusable,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=4, min_mean_output=0, output_len=50
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+    assert "output_lens" in verdict, verdict
+
+
+def test_the_floorless_audit_still_passes_the_exports_it_should(tmp_path):
+    """Narrowness for the test above: refusing everything would satisfy it too.
+
+    With the floor off, a healthy per-completion array still has to come back
+    `OK`, and so does an export with no array at all -- which is what
+    `save_detailed: false` produces and is a configuration rather than a
+    defect. And the *only* thing the floor owns is the comparison: an array
+    that would be SHORTLEN at `min_mean_output_tokens: 8` is `OK` at 0, because
+    that is what switching the floor off is supposed to mean.
+    """
+    healthy = {
+        "completed": 4,
+        "failed": 0,
+        "total_output_tokens": 40,
+        "output_lens": [10, 10, 10, 10],
+    }
+    assert _run_script_audit(
+        tmp_path, healthy, expected=4, min_mean_output=0, output_len=50
+    ).startswith("OK")
+
+    absent = {"completed": 4, "failed": 0, "total_output_tokens": 40}
+    assert _run_script_audit(
+        tmp_path, absent, expected=4, min_mean_output=0
+    ).startswith("OK")
+
+    collapsed = dict(healthy, total_output_tokens=4, output_lens=[1, 1, 1, 1])
+    assert _run_script_audit(
+        tmp_path, collapsed, expected=4, min_mean_output=8, output_len=50
+    ).startswith("SHORTLEN")
+    assert _run_script_audit(
+        tmp_path, collapsed, expected=4, min_mean_output=0, output_len=50
+    ).startswith("OK")
+
+
+def test_a_per_request_entry_may_hold_a_whole_requests_worth(tmp_path, monkeypatch):
+    """The cap is per *entry*, and an entry is not always one completion.
+
+    `output_len` is each completion's `max_tokens` on `random`, so it caps a
+    per-completion entry. A per-request entry under summed usage accounting
+    holds up to `n` of them. Applying the per-completion bound to the
+    per-request shape made the two rules contradict each other: `[800] * 32` at
+    `n=8` scored `rollout_length_basis_unusable`, and `[1600] * 32` -- the same
+    gateway with longer completions -- became `result_json_unusable`. The same
+    export was called broken once its completions got long enough, and the
+    verdict written for that shape stopped firing at exactly the point it was
+    most likely to be needed.
+
+    `1600` here is twice the per-completion cap and well inside `cap * n`, so
+    it is a possible export; the verdict it earns is the one about the basis.
+    """
+    wl = _rollout(
+        tmp_path,
+        num_prompts=32,
+        rollout_samples=8,
+        output_len=800,
+        min_mean_output_tokens=8,
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=32, total_output_tokens=32 * 1600, output_lens=[1600] * 32
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "rollout_length_basis_unusable"
+    ], result.failure_details
+
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": 32 * 1600,
+        "output_lens": [1600] * 32,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=8, output_len=800
+    )
+    assert verdict.startswith("BADBASIS"), verdict
+
+
+def test_the_scaled_bound_is_still_a_bound(tmp_path, monkeypatch):
+    """Narrowness for the test above: dropping the cap would satisfy it too.
+
+    A per-request entry is allowed `cap * n` and no more. `6401` at
+    `output_len: 800`, `n=8` is more generation than eight completions were
+    permitted between them, so it is an impossible export and goes back to
+    `result_json_unusable` -- the scaling moved the bound, it did not remove
+    it.
+    """
+    lens = [6401] + [1600] * 31
+    wl = _rollout(
+        tmp_path,
+        num_prompts=32,
+        rollout_samples=8,
+        output_len=800,
+        min_mean_output_tokens=8,
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=sum(lens), output_lens=lens)
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": sum(lens),
+        "output_lens": lens,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=8, output_len=800
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+
+def test_the_per_completion_shape_keeps_the_unscaled_bound(tmp_path, monkeypatch):
+    """The other half of the scaling rule, which the shape decides.
+
+    `completed * n` entries are completions, and a completion cannot exceed
+    `output_len`. Scaling that bound by `n` as well would have let an
+    impossible per-completion export through in the name of fixing the
+    per-request one.
+    """
+    lens = [801] + [800] * 255
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": sum(lens),
+        "output_lens": lens,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=8, output_len=800
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+    wl = _rollout(
+        tmp_path,
+        num_prompts=32,
+        rollout_samples=8,
+        output_len=800,
+        min_mean_output_tokens=8,
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=sum(lens), output_lens=lens)
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
 def test_the_container_refuses_a_floor_no_completion_could_reach(tmp_path):
     """Validate before the side effect, which here is a multi-minute weight load.
 

@@ -426,10 +426,17 @@ the container and again on the host, on the same rule in both.
 
 That rule is the mean of `output_lens` — but only of the per-choice shape, whose
 entries are completion lengths. Which shape arrived is read off the cardinality
-rather than assumed: `completed * rollout_samples` entries is per choice, and
-anything else at `rollout_samples > 1` holds request totals, which carry exactly
-the ambiguity `total_output_tokens / completed` does. Both layers refuse that
-case as exit 59 / `rollout_length_basis_unusable` instead of dividing, because
+rather than assumed, and the cardinality is part of whether the array can be
+read at all: `completed * rollout_samples` entries is per choice, `completed`
+entries at `rollout_samples > 1` holds request totals, and a length that is
+neither of those two is a broken export rather than a gateway choice — it
+describes a subset of the run, and averaging it published one completion's
+length as thirty-two completions' mean. At `rollout_samples: 1` the two shapes
+are the same number, so there is no second legitimate cardinality there at all
+and every other length is `result_json_unusable`. The per-request shape carries
+exactly the ambiguity `total_output_tokens / completed` does. Both layers refuse
+that case as exit 59 / `rollout_length_basis_unusable` instead of dividing,
+because
 either reading of it is a guess about the gateway's usage accounting and the
 per-completion one is the guess a collapsed policy clears — at
 `rollout_samples: 8`, one token per choice reports 8 per request and meets a
@@ -447,7 +454,21 @@ the failure detail. Both layers reject that fallback outright when
 `rollout_samples > 1`, for the same reason. A *present* array that fails the rule
 is neither case: without `--save-detailed` the bench writes no key, so a present
 value that is not a usable array is a broken export, and both layers call it
-`result_json_unusable` whatever `save_detailed` asked for.
+`result_json_unusable` whatever `save_detailed` asked for — and whatever
+`min_mean_output_tokens` is set to. Whether an export can be read is not a
+question about the floor, so setting the floor to `0` switches off the length
+comparison and nothing else. It used to switch off the container's whole
+`output_lens` audit, which made a `min_mean_output_tokens: 0` cell — the
+configuration both refusals above tell you to reach for — the one place where a
+direct script run enforced a weaker contract than a recipe-driven one.
+
+The per-completion cap the array is checked against is `output_len` on
+`random`, since that is each completion's `max_tokens`. It is a bound on an
+*entry*, so it scales with what an entry is: a per-request entry is allowed
+`output_len * rollout_samples`, because under summed usage accounting it holds
+that many completions' worth. Unscaled, the two rules contradicted each other —
+`[800] * 32` at `n=8` scored `rollout_length_basis_unusable` and `[1600] * 32`,
+the same gateway on longer completions, became `result_json_unusable`.
 
 Exit 57 / `rollout_sampling_ignored` is the other rollout-specific verdict, and
 it is the one no audit of the export could reach: a greedy engine's output is

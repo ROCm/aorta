@@ -449,7 +449,7 @@ def _is_scalar(value: Any) -> bool:
 
 
 def _valid_output_lens(
-    doc: dict[str, Any], *, cap: int | None = None
+    doc: dict[str, Any], *, cap: int | None = None, rollout_samples: int = 1
 ) -> list[float] | None:
     """The export's per-completion generated lengths, or ``None`` if unusable.
 
@@ -476,15 +476,54 @@ def _valid_output_lens(
     left unchecked it cleared the floor and published percentiles that read
     like a measurement. Passed as ``None`` for ``sharegpt``, which is sent no
     ``output_len`` and so has no cap to check against.
+
+    **The cap is per entry, and an entry is not always one completion**, which
+    is why ``rollout_samples`` is here. This class documents and supports two
+    cardinalities: one entry per completion (``completed * n``), and at
+    ``n > 1`` one entry per *request* (``completed``), which under summed usage
+    accounting holds up to ``n`` completions' worth. Applying the per-completion
+    cap to the per-request shape made the two rules contradict each other --
+    ``[800] * 32`` at ``n=8`` scored ``rollout_length_basis_unusable`` while
+    ``[1600] * 32``, the same gateway on longer completions, became
+    ``result_json_unusable``. The same export was called a broken one once the
+    completions got long enough, and the verdict written for it stopped firing.
+    So the bound is scaled by the shape the cardinality names.
+
+    **Cardinality is part of validity, not merely a reading of it.** Those two
+    shapes are the only legitimate ones, and anything else describes a subset
+    of the run: ``output_lens: [100]`` against ``completed: 32`` published
+    ``generated_tokens_mean: 100.0`` from one completion standing in for
+    thirty-two, and cleared a length floor on it. At ``n = 1`` the two shapes
+    coincide -- per request and per completion are the same number -- so there
+    is no second legitimate cardinality there at all, and the array that is
+    neither is a broken export rather than a gateway choice.
+
+    Cardinality goes unchecked when ``completed`` is not an integer, because
+    then there is nothing to check against and the missing counter is already
+    :meth:`_missing_core_metrics`' to report. Returning ``None`` here would
+    name the wrong field.
     """
     lens = doc.get("output_lens")
     if not isinstance(lens, list) or not lens:
         return None
+
+    completed = doc.get("completed")
+    per_completion = True
+    if type(completed) is int:
+        per_completion = len(lens) == completed * rollout_samples
+        per_request = rollout_samples > 1 and len(lens) == completed
+        if not per_completion and not per_request:
+            return None
+
+    entry_cap = None if cap is None else float(cap)
+    if entry_cap is not None and not per_completion:
+        entry_cap *= rollout_samples
+
     out: list[float] = []
     for value in lens:
         if not _is_scalar(value) or float(value) < 0 or not float(value).is_integer():
             return None
-        if cap is not None and float(value) > cap:
+        if entry_cap is not None and float(value) > entry_cap:
             return None
         out.append(float(value))
     return out
@@ -2667,7 +2706,11 @@ class TokenSpeedServeWorkload(Workload):
         # lenient one.
         if (
             self._save_detailed or "output_lens" in record.doc
-        ) and _valid_output_lens(record.doc, cap=self._completion_length_cap) is None:
+        ) and _valid_output_lens(
+            record.doc,
+            cap=self._completion_length_cap,
+            rollout_samples=self._rollout_samples,
+        ) is None:
             missing.append("output_lens")
         return missing
 
@@ -3180,7 +3223,9 @@ class TokenSpeedServeWorkload(Workload):
                 # reports 8 per request and clears the default floor of 8
                 # exactly, which is the collapse this check exists to catch.
                 lens = _valid_output_lens(
-                    record.doc, cap=self._completion_length_cap
+                    record.doc,
+                    cap=self._completion_length_cap,
+                    rollout_samples=self._rollout_samples,
                 )
                 basis: str | None = None
                 mean_output = 0.0
@@ -3189,7 +3234,21 @@ class TokenSpeedServeWorkload(Workload):
                     and type(completed) is int
                     and len(lens) == completed * self._rollout_samples
                 )
-                if lens and not per_completion and self._rollout_samples > 1:
+                # Split out rather than inferred from `not per_completion`,
+                # which used to route *every* non-per-completion array here.
+                # Only `completed` entries at `n > 1` is the legitimate gateway
+                # choice this verdict describes; a length that is neither
+                # `completed` nor `completed * n` is a broken export and
+                # `_valid_output_lens` now refuses it outright, so it arrives as
+                # `result_json_unusable` instead of being excused as a basis
+                # this floor merely cannot use.
+                per_request = (
+                    lens is not None
+                    and type(completed) is int
+                    and self._rollout_samples > 1
+                    and len(lens) == completed
+                )
+                if lens and per_request:
                     # Refused rather than divided. Dividing by `rollout_samples`
                     # would be correct only if the gateway sums usage across
                     # choices, and reading each entry as a completion would be
@@ -3224,11 +3283,8 @@ class TokenSpeedServeWorkload(Workload):
                 elif lens and per_completion:
                     mean_output = sum(lens) / len(lens)
                     basis = f"mean of {len(lens)} output_lens entries"
-                elif lens:
-                    # `rollout_samples == 1`, where per request and per
-                    # completion are the same number whatever the cardinality.
-                    mean_output = sum(lens) / len(lens)
-                    basis = f"mean of {len(lens)} output_lens entries, n=1"
+                    if self._rollout_samples == 1:
+                        basis += ", n=1"
                 elif (
                     type(total_output) is int
                     and total_output > 0
@@ -3532,7 +3588,9 @@ class TokenSpeedServeWorkload(Workload):
             # so the step contributed no entries while the loop pooled the
             # others, publishing a subset that read as the trial's.
             step_lens = _valid_output_lens(
-                record.doc, cap=self._completion_length_cap
+                record.doc,
+                cap=self._completion_length_cap,
+                rollout_samples=self._rollout_samples,
             )
             if step_lens is None:
                 return
