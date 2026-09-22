@@ -14,6 +14,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -2203,7 +2204,13 @@ def test_a_valid_rounds_argument_passes_the_new_check(tmp_path):
     assert "--rounds is empty" not in output, output
 
 
-def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar", models_code="200"):
+def _serve_stubs(
+    tmp_path,
+    sampling="triton",
+    grammar="xgrammar",
+    models_code="200",
+    models_body='{"data":[{"id":"Qwen/Qwen3-8B"}]}',
+):
     """A PATH on which the real `up()` runs with no docker and no engine.
 
     The existing tests in this file all extract `backends` and drive it
@@ -2241,9 +2248,12 @@ def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar", models_code="2
         "esac\nexit 0\n"
     )
     # `-w '\\n%{http_code}'` is appended by `models`, so the stub has to answer
-    # in curl's shape: body, newline, status. Overridable so the HTTP-error
-    # path is reachable without a server.
+    # in curl's shape: body, newline, status. Both halves are overridable: the
+    # status so the HTTP-error path is reachable without a server, and the body
+    # because a 200 is no longer the whole answer -- `models` reads the list
+    # and requires `${MODEL}` to be on it.
     models_code = models_code or "200"
+    assert "'" not in models_body, "the stub embeds the body in single quotes"
     (bin_dir / "curl").write_text(
         "#!/usr/bin/env bash\n"
         'url="${@: -1}"\n'
@@ -2255,7 +2265,7 @@ def _serve_stubs(tmp_path, sampling="triton", grammar="xgrammar", models_code="2
         "; exit 0 ;;\n"
         "  *health*) echo 200; exit 0 ;;\n"
         "  *v1/models*)\n"
-        "    printf '%s' '{\"data\":[{\"id\":\"Qwen/Qwen3-8B\"}]}'\n"
+        f"    printf '%s' '{models_body}'\n"
         f"    [ \"$wants_code\" = 1 ] && printf '\\n%s' '{models_code}'\n"
         "    exit 0 ;;\n"
         "esac\nexit 0\n"
@@ -3391,8 +3401,8 @@ def test_hold_never_disarms_the_ownership_guard(tmp_path):
     Both orderings were wrong for opposite reasons: arming the traps *before*
     `up` meant a name collision removed another invocation's live server, which
     is why they were armed late in the first place. So ownership is transferred
-    instead -- the traps armed at `docker run -d` are never removed -- and the
-    observable is that `trap -` does not appear on this path at all.
+    instead -- the traps armed just before `docker run -d` are never removed --
+    and the observable is that `trap -` does not appear on this path at all.
     """
     bin_dir = _serve_stubs(tmp_path)
     trace, _ = _serve_trace(tmp_path, bin_dir, "hold")
@@ -3452,8 +3462,12 @@ def test_hold_on_a_name_collision_removes_nothing(tmp_path):
     `hold` now declares that it wants ownership retained *before* calling `up`,
     which is the same shape as the arrangement that once destroyed another
     invocation's server. It is safe because the declaration only ever retains
-    ownership and never asserts it: `_OWNED` is still set at one place, after
-    `docker run -d` returns, and the collision path exits before reaching it.
+    ownership and never asserts it: `_OWNED` is still set at one place, on the
+    line before `docker run -d`, and the collision path exits before reaching
+    it. Armed before rather than after so that a container created by a `run`
+    that never returns a status -- killed mid-flight, or interrupted -- is
+    still covered; what keeps that safe is the cidfile, which names only the
+    id this invocation itself created.
 
     This is the test that would catch getting that wrong, and getting it wrong
     is worse than the leak being fixed.
@@ -3485,6 +3499,116 @@ def test_hold_on_a_name_collision_removes_nothing(tmp_path):
     assert "already exists" in output, output
     assert "rm -f" not in calls, calls
     assert "docker run" not in calls, calls
+
+
+def _serve_run(tmp_path, bin_dir, subcommand="up", timeout=60):
+    proc = subprocess.run(
+        ["bash", str(_EXAMPLES / "serve_for_rollouts.sh"), subcommand],
+        capture_output=True,
+        text=True,
+        env=_serve_env(tmp_path, bin_dir),
+        timeout=timeout,
+    )
+    calls_file = tmp_path / "docker-calls.log"
+    return (
+        proc.returncode,
+        proc.stdout + proc.stderr,
+        calls_file.read_text() if calls_file.exists() else "",
+    )
+
+
+def test_an_engine_serving_a_different_model_does_not_get_handed_over(tmp_path):
+    """A 200 from /v1/models was read as the answer to a question about names.
+
+    `models` fetched the list and checked only the status line, so an engine
+    advertising some *other* model passed bring-up. It is the expensive way to
+    get this wrong: the prefix is stripped on the wire, so every rollout
+    request 404s against a container that answered /health_generate, reported
+    the right backends, and looks healthy at every level the driver can see.
+    What the driver reports is a wall of failed requests with the model name
+    nowhere in it.
+
+    So the container is torn down here, where the cause still has a name.
+    """
+    bin_dir = _serve_stubs(
+        tmp_path, models_body='{"data":[{"id":"meta-llama/Llama-3.1-8B"}]}'
+    )
+    code, output, calls = _serve_run(tmp_path, bin_dir)
+
+    assert code == 58, output
+    assert "Qwen/Qwen3-8B" in output and "Llama-3.1-8B" in output, output
+    # Torn down, not left holding a GPU -- and through `teardown_failed`, so
+    # the logs of the engine that was wrong survive the failure.
+    assert "rm -f" in calls, calls
+    assert (tmp_path / "logs" / "server-failure.log").exists()
+
+
+def test_a_model_id_that_merely_contains_ours_is_not_ours(tmp_path):
+    """Why the ids are extracted instead of the body grepped for `${MODEL}`.
+
+    `grep -q "${MODEL}"` against the raw body is the one-line version of this
+    check and it is satisfied by the wrong things: a quantised or instruct
+    variant whose id contains ours as a prefix, and our own name quoted back
+    inside an error message. Both are engines that 404 every request.
+    """
+    bin_dir = _serve_stubs(
+        tmp_path, models_body='{"data":[{"id":"Qwen/Qwen3-8B-Instruct-AWQ"}]}'
+    )
+    code, output, _ = _serve_run(tmp_path, bin_dir)
+
+    assert code == 58, output
+
+
+def test_an_unreadable_model_list_is_unverified_rather_than_fatal(tmp_path):
+    """The narrowness control, and the reason `models` has two codes.
+
+    Failing bring-up on anything non-zero from `models` would be the opposite
+    error: /health_generate has already answered and `backends` is what decides
+    usability, so a list that could not be read is a question left unanswered,
+    not a wrong answer. Only 58 -- the list was read and we are not on it --
+    tears the container down.
+
+    The subcommand still reports the unreadable list as a failure, because a
+    caller running `serve_for_rollouts.sh models` is asking exactly that.
+    """
+    bin_dir = _serve_stubs(tmp_path, models_body='{"data":[]}')
+
+    code, output, calls = _serve_run(tmp_path, bin_dir)
+    assert code == 0, output
+    assert "rm -f" not in calls, calls
+
+    code, output, _ = _serve_run(tmp_path, bin_dir, subcommand="models")
+    assert code == 56, output
+
+
+def test_one_invocation_does_not_clear_another_invocations_cidfile(tmp_path):
+    """The cidfile was a fixed path, so concurrent servers shared one file.
+
+    `LOG_DIR` is keyed on `TS_LOG_DIR` and not on `TS_NAME`, so two invocations
+    serving different models into the same log directory both used
+    `${LOG_DIR}/container.cid`. The clear-before-run then deleted the peer's
+    file, docker wrote our id over it, and the loser's teardown removed
+    whichever id it found -- a live server torn down by a process that never
+    started it. (Without the clear it is the other failure: docker exits 125
+    with "container ID file found" and refuses to start at all.)
+
+    The path now carries this process's pid, which no peer can write, so the
+    clear is safe by construction rather than by being the only invocation.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    peer = logs / "container.cid"
+    peer.write_text("peerscontainerid")
+
+    bin_dir = _serve_stubs(tmp_path)
+    code, output, calls = _serve_run(tmp_path, bin_dir)
+
+    assert code == 0, output
+    assert peer.read_text() == "peerscontainerid", calls
+    assert "peerscontainerid" not in calls, calls
+    cidfile = re.search(r"--cidfile (\S+)", calls)
+    assert cidfile, calls
+    assert re.fullmatch(r".*/ts-rollout-serve\.\d+\.cid", cidfile.group(1)), calls
 
 
 # --------------------------------------------------------------------------- #

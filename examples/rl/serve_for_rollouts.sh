@@ -127,11 +127,12 @@ _OWNED=0
 # to outlive bring-up inside this same process rather than be handed to a later
 # invocation. It can only cause ownership to be RETAINED, never asserted:
 # `_release_owned` stays keyed on `_OWNED`, which is still set at exactly one
-# place, after `docker run -d` returns. So the collision path -- where `up`
-# exits because the name belongs to somebody else and this invocation created
-# nothing -- is untouched by it, which is the property that matters, because
-# removing another invocation's live server is the failure this whole guard was
-# introduced to stop.
+# place, just before `docker run -d` -- and it removes only the id in the
+# cidfile, which is a path no other invocation can write. So the collision
+# path -- where `up` exits because the name belongs to somebody else and this
+# invocation created nothing -- is untouched by it, which is the property that
+# matters, because removing another invocation's live server is the failure
+# this whole guard was introduced to stop.
 #
 # The caller declares its intent rather than `up` inspecting who called it: the
 # subcommand dispatch stays the only thing that knows what subcommand is
@@ -165,6 +166,21 @@ _PHASE=bringup
 # So ownership can now be armed *before* `docker run`, closing the in-flight
 # window too, and the guarantee is stronger than it was: an empty cidfile means
 # we remove nothing at all, which is exactly right.
+#
+# **The path has to be per-invocation, and a shared one reopened the bug the
+# cidfile was introduced to close.** `LOG_DIR` is keyed on `TS_LOG_DIR`, not on
+# `TS_NAME`, so two runs with different names shared one `container.cid`. The
+# reasoning above survives a *name* collision -- docker writes nothing -- but it
+# says nothing about a *cidfile* collision, where docker refuses with rc 125
+# ("container ID file found") and the file still holds the id the other
+# invocation put there. Reproduced against a stub docker: the script ran
+# `docker rm -f` on a peer's live server, which is precisely the outcome the
+# whole guard exists to stop, arrived at from the other side.
+#
+# `$$` rather than `${NAME}`: the name is what a peer might be sharing, and two
+# invocations of the same `TS_NAME` are exactly the case where one must not
+# clear the other's file. A pid cannot collide with a live peer, and the stale
+# `rm -f` below still covers a recycled pid from a dead one.
 _CIDFILE=""
 _CID=""
 
@@ -276,11 +292,14 @@ up() {
   # nothing. See the `_CIDFILE` comment for the measurements.
   #
   # The stale-file clear is required, not hygiene: docker refuses to run at all
-  # when the cidfile already exists ("container ID file found"), so a previous
-  # run's file would break bring-up. It is safe here because it is downstream of
-  # the collision check -- if another invocation owned this name we have already
-  # exited.
-  _CIDFILE="${LOG_DIR}/container.cid"
+  # when the cidfile already exists ("container ID file found"), so a leftover
+  # file would break bring-up. It is safe because the path carries this
+  # process's own pid, so the only file it can ever remove is one this pid
+  # wrote -- which, since we are still before our own `docker run`, means a
+  # recycled pid from a process that is gone. It used to be
+  # `${LOG_DIR}/container.cid`, shared with every concurrent invocation, and
+  # that made this line able to delete a peer's file; see `_CIDFILE`.
+  _CIDFILE="${LOG_DIR}/${NAME}.$$.cid"
   rm -f "${_CIDFILE}"
   _OWNED=1
   # `if` rather than `&& exit 0`: a failing `[` as the last command of an
@@ -356,14 +375,27 @@ up() {
       # Bring-up is done, so the interrupt guard stops applying: a successful
       # `up` leaves the engine running on purpose, and `hold` installs its own
       docker logs "${NAME}" > "${LOG_DIR}/server.log" 2>&1 || true
-      # Informational here, and explicitly so. `models` now reports a failed
-      # fetch as non-zero, which is right for the subcommand and wrong as a
-      # bring-up gate: the endpoint has already answered /health_generate, and
-      # what decides whether this engine is usable is `backends` below. Left
-      # bare it would be a third reading of the same defect -- an unchecked
-      # non-zero under `set -e`, exiting through `_release_owned` and losing the
-      # logs -- so the tolerance is stated rather than implied.
-      models || true
+      # Informational here, and explicitly so. `models` reports a failed or
+      # unreadable fetch as 56, which is right for the subcommand and wrong as
+      # a bring-up gate: the endpoint has already answered /health_generate,
+      # and what decides whether this engine is usable is `backends` below.
+      # Left bare it would be a third reading of the same defect -- an
+      # unchecked non-zero under `set -e`, exiting through `_release_owned` and
+      # losing the logs -- so the tolerance is stated rather than implied.
+      #
+      # 58 is not that. It means the list was read and `${MODEL}` is not on it,
+      # which is a determinate misconfiguration rather than an unanswered
+      # question: the prefix is stripped on the wire, so every rollout request
+      # 404s against an engine that passes every health check. Handing that
+      # container over is the expensive failure -- the driver reports a wall of
+      # failed requests and the name is nowhere in the error -- so it is torn
+      # down here, where the cause has a FAIL line. `|| rc=$?` for the reason
+      # `backends` uses it below: a bare call would exit at this line.
+      rc=0
+      models || rc=$?
+      if [ "${rc}" -eq 58 ]; then
+        teardown_failed 58 "engine does not advertise ${MODEL}; see the FAIL line above"
+      fi
       # An engine that ignores the sampling parameters, or that cannot answer a
       # `response_format` request at all, is useless for the one job this
       # server exists to do -- so bring-up has failed even though every health
@@ -416,6 +448,14 @@ up() {
       else
         _OWNED=0
         trap - INT TERM EXIT
+        # The handover is the one exit from `up` that reaches neither
+        # `_release_owned` nor `teardown_failed`, so it was the one path that
+        # left its cidfile behind. Harmless while the path was shared and a
+        # slow leak now that it carries a pid -- one file per successful
+        # bring-up, in a directory nothing prunes. The id is already in `_CID`
+        # (read back above for exactly this reason), so the file has no reader
+        # left.
+        rm -f "${_CIDFILE}" 2>/dev/null || true
       fi
       return 0
     fi
@@ -449,13 +489,39 @@ up() {
 # `%{http_code}` rather than `--fail`/`--fail-with-body`: `--fail` suppresses
 # the body, which is where the reason is, and `--fail-with-body` needs curl
 # 7.76+ and this runs inside whatever the engine image ships.
+#
+# **And a 200 is not the answer this function's own docstring asks for.** The
+# first paragraph says the advertised name "has to match the litellm model id"
+# -- then the check stopped at the status line and never read the list, so an
+# empty `data`, a malformed body, or a list advertising some *other* model all
+# printed under "advertised models" and returned 0. That is the third turn of
+# the same screw: first a failed fetch read as fine, then a fetched failure
+# read as fine, and now a successful fetch of a list that does not contain what
+# we asked for. Each time the check verified that something came back rather
+# than that it said what it had to.
+#
+# It matters most on the path where it is cheapest to get wrong: `up` calls
+# this after /health_generate has answered, so the engine is genuinely healthy
+# and merely serving a different name -- and every rollout request then 404s
+# with a gateway that looks fine at every other level.
+#
+# Ids are extracted rather than the body grepped for `${MODEL}`, because a
+# substring match is satisfied by the wrong things: a model id that merely
+# *contains* ours, or our name appearing in an error message. Same `tr`/`sed`
+# shape as `_backend_field`, and whitespace-tolerant for the same reason.
+_model_ids() {  # _model_ids <json>
+  printf '%s' "$1" \
+    | tr ',{}[]' '\n\n\n\n\n' \
+    | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
 models() {
   echo "--- advertised models (${PORT}) ---"
   # Declared apart from the assignment on purpose. `local body="$(cmd)"` takes
   # its status from `local`, not from `cmd`, so a failing fetch would look
   # successful -- the same `set -e` trap this file has now been corrected for
   # three times, and it would have been a fourth.
-  local body status rc
+  local body status rc ids
   rc=0
   body="$(curl -s --max-time 10 -w '\n%{http_code}' \
     "http://127.0.0.1:${PORT}/v1/models")" || rc=$?
@@ -473,6 +539,26 @@ models() {
          "model id is unverified" >&2
     return 56
   fi
+  ids="$(_model_ids "${body}")"
+  if [ -z "${ids}" ]; then
+    echo "FAIL: ${PORT}/v1/models answered HTTP 200 with no model id in the" \
+         "body, so the advertised model id is unverified" >&2
+    return 56
+  fi
+  # Two codes, not one, and the difference is what `up` does with them. 56 is
+  # *unverified* -- nothing came back, or what came back cannot be read -- and
+  # `up` tolerates it because the gateway has already answered
+  # /health_generate and `backends` is what decides usability. This is the
+  # other thing: the list was read and it does not have us in it, which is not
+  # an unanswered question but a determinate wrong answer. Every rollout
+  # request against this engine 404s, so bring-up has failed.
+  if ! printf '%s\n' "${ids}" | grep -qxF -- "${MODEL}"; then
+    echo "FAIL: ${PORT}/v1/models advertises" \
+         "[$(printf '%s' "${ids}" | tr '\n' ' ')] and not ${MODEL}, so every" \
+         "rollout request would 404 on a healthy-looking gateway" >&2
+    return 58
+  fi
+  echo "OK: ${MODEL} is advertised"
 }
 
 # The two backends this script overrides, read back from the engine rather than
