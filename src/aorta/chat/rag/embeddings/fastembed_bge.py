@@ -127,15 +127,35 @@ def model_is_cached(model: str | None = None) -> bool:
     id, so both names are accepted -- a cache seeded through either counts. The
     ``hub`` subdirectory is checked too, so a cache seeded by plain
     ``huggingface_hub`` into ``$HF_HOME/hub`` is recognised.
+
+    Compare repository slugs case-insensitively. FastEmbed 0.8.1 changed the
+    registered source from ``qdrant/...-onnx-q`` to ``Qdrant/...-onnx-Q``.
+    HuggingFace preserves that spelling in the cache directory, but upgrading
+    must not make the existing lowercase cache invisible on a case-sensitive
+    filesystem.
     """
     model = model or settings.embedding_model
     root = model_cache_dir()
-    candidates = {_model_dir_slug(model), _model_dir_slug(_source_repo(model))}
+    candidates = {
+        _model_dir_slug(model).casefold(),
+        _model_dir_slug(_source_repo(model)).casefold(),
+    }
     for base in (root, root / "hub"):
-        for candidate in candidates:
-            directory = base / candidate
-            if directory.is_dir() and any(directory.rglob("*.onnx")):
-                return True
+        try:
+            directories = list(base.iterdir())
+        except OSError:
+            continue
+        for directory in directories:
+            if directory.name.casefold() not in candidates:
+                continue
+            try:
+                if directory.is_dir() and any(directory.rglob("*.onnx")):
+                    return True
+            except OSError:
+                # A missing or unreadable candidate is not a warm cache. This
+                # probe is also called while explaining model-load failures, so
+                # it must not replace the useful error with a filesystem one.
+                continue
     return False
 
 
@@ -143,7 +163,7 @@ def _source_repo(model: str) -> str:
     """The HuggingFace repo fastembed actually downloads ``model`` from.
 
     fastembed re-hosts ONNX conversions under its own org, so
-    ``BAAI/bge-small-en-v1.5`` is fetched from ``qdrant/bge-small-en-v1.5-onnx-q``
+    ``BAAI/bge-small-en-v1.5`` is fetched from its Qdrant-hosted ONNX repository
     and that is the name the cache directory carries.
 
     Falls back to the model id whenever the registry cannot be read at all --

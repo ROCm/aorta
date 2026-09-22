@@ -256,6 +256,20 @@ class TestModelCacheProbe:
         weights.write_bytes(b"\x00")
         assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
+    def test_fastembed_081_source_repo_casing_counts(self, monkeypatch, tmp_path: Path):
+        """0.8.1 capitalised the source repo without renaming existing caches."""
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        weights = (
+            tmp_path
+            / "models--Qdrant--bge-small-en-v1.5-onnx-Q"
+            / "snapshots"
+            / "abc"
+            / "model_optimized.onnx"
+        )
+        weights.parent.mkdir(parents=True)
+        weights.write_bytes(b"\x00")
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
+
     def test_a_hub_seeded_cache_is_recognised_too(self, monkeypatch, tmp_path: Path):
         """Plain huggingface_hub writes under $HF_HOME/hub, not beside it."""
         monkeypatch.setenv("HF_HOME", str(tmp_path))
