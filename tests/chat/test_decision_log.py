@@ -648,6 +648,56 @@ class TestTheFieldsThatMakeARecordResolvable:
         assert tool_event["jobs_root"] == str(tmp_path / "cia-jobs")
         config.reset_settings()
 
+    def test_the_root_is_raw_in_summary_mode_and_the_docs_say_so(
+        self, monkeypatch, tmp_path
+    ):
+        """The one field summary mode does not summarise, pinned to its disclosure.
+
+        Every other free-text field goes through ``_content`` and becomes
+        counts plus a digest. ``jobs_root`` cannot: a digest of a path resolves
+        nothing, which is the whole reason it is recorded. So summary mode --
+        which ``configuration.md`` describes as privacy-preserving, and warns
+        about paths only for *full* mode -- retains an absolute path holding
+        the operator's username.
+
+        That is the right behaviour and the wrong documentation, so this pins
+        both halves together: the rawness, and the sentence disclosing it. A
+        future field that escapes summarisation gets caught by the first
+        assertion; a doc rewrite that drops the warning gets caught by the
+        second.
+        """
+        root = tmp_path / "cia-jobs"
+        monkeypatch.setenv("AORTA_CHAT_JOBS_PATH", str(root))
+        from aorta.chat import config
+
+        config.reset_settings()
+        try:
+            # `SESSION_LOG_ENV=1` is summary mode; `_one` sets it.
+            tool_event = self._one(monkeypatch, "tool")
+        finally:
+            config.reset_settings()
+
+        assert tool_event["mode"] == "summary"
+        # Verbatim, not counts-and-a-digest the way `output` beside it is.
+        assert tool_event["jobs_root"] == str(root)
+        assert isinstance(tool_event["output"], dict), (
+            "the control: summary mode still summarises everything else, so a "
+            "mode that stopped redacting at all would not pass here"
+        )
+
+        doc = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "chat"
+            / "configuration.md"
+        ).read_text(encoding="utf-8")
+        summary_half = doc.split("AORTA_CHAT_SESSION_LOG=full")[0]
+        assert "jobs_root" in summary_half, (
+            "configuration.md documents summary mode without naming jobs_root, "
+            "so an operator reading it would not know an absolute path "
+            "containing their username is retained."
+        )
+
     def test_a_tool_that_named_no_job_carries_no_root(self, monkeypatch):
         """It is only meaningful where there is an id to resolve."""
         tool_event = self._one(

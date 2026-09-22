@@ -85,14 +85,38 @@ they capture the same decisions without changing the CLI to a streaming path:
 - route and selector-ranked tools;
 - the selector's own reason, with filesystem paths and IP addresses always
   scrubbed regardless of `--no-redact`;
-- tool execution order and CIA job ID/category/confidence;
-- whether the critic accepted the answer; and
+- tool execution order, and one row per CIA job with its ID, category and
+  confidence — a turn that starts three jobs records three rows, each carrying
+  its own verdict;
+- `front_door`, which entry point the turn came through (`cli` or `ui`), so a
+  browser demo and a scripted run are told apart rather than averaged;
+- `duration_seconds` for the whole turn, and `iterations` for how many critic
+  rounds the answer took; and
 - a `resolution: null` attachment point keyed by `(session_id, turn)` for a
   later verified outcome.
 
 Questions, plans, tool arguments, tool output, critic feedback, and answers are
 not stored in summary mode. Each becomes only character/byte/line/fence counts
 and a SHA-256 digest. Nothing reads these files back or sends them anywhere.
+
+> [!NOTE]
+> **One field is stored raw in summary mode, and it is a filesystem path.**
+> Any event that carries CIA job IDs also carries `jobs_root` — the absolute
+> path those IDs resolve under, verbatim in both modes. It is the resolved
+> [`jobs_path`](#the-cluster-diagnostic-tools) setting, which defaults to `~/cia-jobs` and is
+> therefore under your home directory, username included.
+>
+> It is deliberately not summarised, because a digest of a path resolves
+> nothing: the bundle, the autopsy report and the probe cells that say what a
+> recorded job actually did all live under that root, and no other field in the
+> record names it. A summary-mode log without it is a list of job IDs pointing
+> at nowhere, which is what the empty `resolution` field is waiting on.
+>
+> Nothing else escapes summarisation: `jobs_root` is a machine-level location,
+> not a user-level one, so it does not vary with what was asked or which files
+> were touched. If that is still more than you want to retain, point
+> `jobs_path` at a shared location — which most clusters need anyway — or
+> leave decision logging off.
 
 `AORTA_CHAT_SESSION_LOG=full` stores those values verbatim for an operator who
 explicitly needs a transcript. It emits one warning per session naming the
