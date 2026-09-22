@@ -180,7 +180,20 @@ def _fmt_tools_used(result: dict) -> list[str]:
     return lines
 
 
-def _format_result(result: dict, label: str) -> str:
+#: Written into the result when a sweep came back without the report it owed,
+#: and read again by the cache guards. One string, because a run that did not
+#: check anything must not be remembered as a diagnosis -- and the check for
+#: that is only as good as the two spellings agreeing.
+_DID_NOT_RUN = "Sanitizer verdict: DID NOT RUN"
+
+#: The triage arguments that submit a sanitizer sweep, and therefore owe a
+#: report. Both reach `aorta sweep run`: --recipe directly, --source through
+#: the kernel recipe triage.py writes for it. --command is the user's own
+#: program and promises nothing.
+_SWEEP_ARGS = ("--recipe", "--source")
+
+
+def _format_result(result: dict, label: str, *, expect_sanitizer: bool = False) -> str:
     lines = [
         f"Job {result['job_id']} (slurm {result.get('slurm_job_id', '?')}) — {label}",
         f"Recipe:   {result.get('recipe')}",
@@ -199,6 +212,21 @@ def _format_result(result: dict, label: str) -> str:
         lines.append("")
         lines += _fmt_sanitizer(san)
         lines.append(f"Sanitizer report: {result.get('sanitizer_report_path')}")
+    elif expect_sanitizer:
+        # A run that asked for a sanitizer and came back without one did not
+        # find nothing -- it did not look. Said plainly, because the two are
+        # otherwise indistinguishable from here: the section above is simply
+        # absent, Autopsy explains an empty bundle, and the answer reports a
+        # clean analysis of a kernel that nothing analysed. That happened -- the
+        # interpreter failed to resolve on the compute node and the reply was
+        # "no wait hazards found".
+        lines.append("")
+        lines.append(
+            f"{_DID_NOT_RUN}. This job was submitted to run a "
+            "sanitizer and produced no report, so nothing was checked. This is "
+            "not a clean result and must not be reported as one: say the run "
+            "failed, and cite the job log."
+        )
 
     autopsy = result.get("autopsy")
     if autopsy:
@@ -278,7 +306,6 @@ def _run_triage(extra_args: list[str], label: str) -> str:
     stop = current_cancel_token() or threading.Event()
     if stop.is_set():
         return "Error: triage was cancelled before it entered the worker pool."
-
     future = _triage_pool().submit(run_triage, argv, stop=stop)
     deadline = time.monotonic() + settings.triage_timeout
     result = None
@@ -333,7 +360,17 @@ def _run_triage(extra_args: list[str], label: str) -> str:
         return (f"Triage failed at stage {result.get('stage', '?')}: "
                 f"{result.get('error', 'unknown error')}")
 
-    return _format_result(result, label)
+    # A sweep run is a sanitizer run by construction: write_asm_recipe asks for
+    # waitcheck and sets on_missing_backend=fail, and the kernel recipe
+    # triage.py writes for --source runs the same sweep. So a report is owed,
+    # and its absence is a failure rather than a clean sheet.
+    #
+    # This read --recipe alone, which is the one sweep argument the pasted
+    # kernel path does not use: triage_kernel_source passes --source, so the
+    # warning below never fired for exactly the case it was written about -- a
+    # kernel that nothing analysed, reported as clean.
+    expect_sanitizer = any(arg in extra_args for arg in _SWEEP_ARGS)
+    return _format_result(result, label, expect_sanitizer=expect_sanitizer)
 
 
 _PYTORCH_MARKERS = ("import torch", "nn.Module", "def forward", "torch.nn", "@torch")
@@ -420,8 +457,9 @@ def _write_new(path: Path, text: str) -> None:
 
 @tool
 def triage_kernel_source(
-    source: str,
+    source: str = "",
     label: str = "",
+    source_file: str = "",
     block_size: int = 0,
     grid_size: int = 0,
     block_y: int = 0,
@@ -461,10 +499,26 @@ def triage_kernel_source(
             conclusive. Ignored when the paste contains its own main().
         force: Re-run on hardware even if this exact kernel was already triaged
             in this conversation. Leave false; the cached verdict is the same run.
+        source_file: A kernel already staged for this conversation, named in the
+            message as "staged as <name>". Prefer this whenever it is offered:
+            *source* travels as an argument you have to write out in full, so a
+            large kernel does not fit there, while this is a name and the file
+            is read from disk. Never invent one -- pass exactly what the message
+            gave you.
 
     Returns:
         The sanitizer findings, the tools that ran, and the Autopsy verdict.
     """
+    if source_file.strip():
+        try:
+            source = _read_staged(source_file, "kernel")
+        except ValueError as exc:
+            return f"Error: {exc}"
+    if not source.strip():
+        return (
+            "Error: pass either source (the kernel text) or source_file (a "
+            "kernel staged for this conversation)."
+        )
     try:
         prepared = prepare_source(
             source,
@@ -570,7 +624,13 @@ def triage_kernel_source(
     rendered = "\n".join(lines) + body
     # Only a completed run is worth reusing; a transient launch failure should be
     # retried rather than remembered.
-    if "Autopsy verdict:" in rendered:
+    #
+    # An Autopsy verdict is not enough on its own. Autopsy will happily explain
+    # an empty bundle, so a sweep whose sanitizer never ran still comes back
+    # carrying a verdict -- and caching that pins "we looked and found nothing"
+    # to this paste for the rest of the conversation, including across the retry
+    # that would have worked.
+    if "Autopsy verdict:" in rendered and _DID_NOT_RUN not in rendered:
         cache.put(cache_key, rendered)
     return rendered
 
@@ -642,8 +702,36 @@ def _no_assembler_message() -> str:
     )
 
 
+def _read_staged(source_file: str, what: str) -> str:
+    """Text of a file staged for this conversation.
+
+    Raises :class:`ValueError` carrying the message to show the model, so the
+    three tools that accept a staged name report the same things the same way:
+    a name that escapes the jobs root, one that is not there, and one that is
+    not readable are different failures and each is worth saying.
+
+    The containment check is the point. The name arrives from a model, so it
+    is not a path this package chose, and ``resolve_within`` is what keeps it
+    from being one.
+    """
+    staged = resolve_within(settings.jobs_root, source_file.strip(), JOBS_ROOT_LABEL)
+    if not staged.is_file():
+        raise ValueError(
+            f"no staged {what} called {source_file!r}. Pass the name exactly "
+            "as the message gave it."
+        )
+    try:
+        return staged.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"could not read {source_file!r}: {type(exc).__name__}"
+        ) from exc
+
+
 @tool
-def triage_assembly_source(source: str, label: str = "") -> str:
+def triage_assembly_source(
+    source: str = "", label: str = "", source_file: str = ""
+) -> str:
     """Assemble AMD GPU assembly the user supplied and analyse it for wait hazards.
 
     Wraps the pasted instructions in a minimal kernel if they are a fragment,
@@ -654,12 +742,31 @@ def triage_assembly_source(source: str, label: str = "") -> str:
     involved, plus waits stronger than the dependency requires.
 
     Args:
-        source: The assembly text, exactly as the user pasted it.
+        source: The assembly text, exactly as the user pasted it. Leave empty
+            when the user attached a file and pass *source_file* instead.
         label: Human label for the run.
+        source_file: A listing already staged for this conversation, named in
+            the message as "staged as <name>". Prefer this whenever it is
+            offered: *source* travels as an argument you have to write out in
+            full, so a real kernel does not fit there, while this is a name and
+            the file is read from disk. Never invent one -- pass exactly what
+            the message gave you.
 
     Returns:
         The hazards found in the supplied assembly, or a clean result.
     """
+    if source_file.strip():
+        try:
+            source = _read_staged(source_file, "listing")
+        except ValueError as exc:
+            return f"Error: {exc}"
+
+    if not source.strip():
+        return (
+            "Error: pass either source (the assembly text) or source_file (a "
+            "listing staged for this conversation)."
+        )
+
     try:
         # Must match the -mcpu below: the .amdgcn_target it writes and the
         # compiler's target are checked against each other at assemble time.
@@ -732,16 +839,19 @@ def triage_assembly_source(source: str, label: str = "") -> str:
         "the kernel was tested."
     )
     result = "\n".join([body, "", *note])
-    # The same rule the kernel path keeps: a timeout, a launch failure or an
-    # Autopsy that produced no report is worth retrying, and caching one means
-    # the next attempt replays it instead -- for the rest of the conversation,
-    # since the key is the paste and the paste has not changed.
-    if "Autopsy verdict:" in result:
+    # The same rule the kernel path keeps: a timeout, a launch failure, an
+    # Autopsy that produced no report, or a sweep whose sanitizer never ran is
+    # worth retrying, and caching one means the next attempt replays it instead
+    # -- for the rest of the conversation, since the key is the paste and the
+    # paste has not changed.
+    if "Autopsy verdict:" in result and _DID_NOT_RUN not in result:
         cache.put(cache_key, result)
     return result
 
 @tool
-def triage_workload(source: str = "", command: str = "", label: str = "") -> str:
+def triage_workload(
+    source: str = "", command: str = "", label: str = "", source_file: str = ""
+) -> str:
     """Run a workload the user supplied and diagnose why it failed.
 
     Takes either training code to run or a command to launch. Submits it to a
@@ -755,10 +865,26 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
         command: A command line to run instead, when the workload is not a
             single file.
         label: Short name for the run, used in the job record.
+        source_file: A script already staged for this conversation, named in the
+            message as "staged as <name>". Prefer this whenever it is offered:
+            *source* travels as an argument you have to write out in full, so a
+            large script does not fit there, while this is a name and the file
+            is read from disk. Never invent one -- pass exactly what the message
+            gave you.
 
     Returns:
         The Watch signal and the Autopsy verdict, with the evidence cited.
     """
+    if source_file.strip():
+        if command.strip():
+            return (
+                "Error: pass either a workload to run or a command line, not "
+                "both. source_file is the workload."
+            )
+        try:
+            source = _read_staged(source_file, "script")
+        except ValueError as exc:
+            return f"Error: {exc}"
     if bool(source.strip()) == bool(command.strip()):
         return (
             "Error: pass either source (code to run) or command (a command "
@@ -766,8 +892,30 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
         )
 
     name = label or "workload"
+    # The kernel and assembly paths have reused a finished run since the cache
+    # was introduced; this one did not, and it is the one that runs longest. A
+    # critic that rejects an answer sends the agent round again, and without
+    # this the second pass submitted a second cluster job for a question
+    # already answered -- another GPU allocation and another two minutes to
+    # arrive at the verdict already in hand.
+    # .triage rather than .asm: this costs minutes on a GPU node, and the two
+    # are bounded separately so a run of cheap pastes cannot evict it.
+    cache = current_tool_cache().triage
+    cache_key = ("workload", source.strip(), command.strip())
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return (
+            "(Reusing the triage already run for this exact workload in this "
+            "conversation — no second cluster job was submitted.)\n\n" + cached
+        )
+
     if command.strip():
-        return _run_triage(["--command", command.strip()], name)
+        result = _run_triage(["--command", command.strip()], name)
+        # Same rule as the other two: a completed run is worth reusing, a
+        # transient launch failure is worth retrying.
+        if "Autopsy verdict:" in result:
+            cache.put(cache_key, result)
+        return result
 
     # The label is model-supplied and became the filename directly, so
     # `../../../../.bashrc` wrote the user's pasted source outside staged/.
@@ -786,10 +934,18 @@ def triage_workload(source: str = "", command: str = "", label: str = "") -> str
     # appended here, which changed the program's argument contract: a training
     # script with an argparse parser and no positional exits 2 rather than
     # running. It arrives as AORTA_BUNDLE in the job environment instead.
-    return _run_triage(
-        ["--command", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"],
+    # The server's own interpreter only if nothing better was named. It is the
+    # one serving chat, so it has langchain and Chainlit in it and need not
+    # have a GPU build of torch -- and a workload that cannot reach the GPU
+    # exits before the bug it was submitted to find.
+    runner = settings.workload_python or sys.executable
+    result = _run_triage(
+        ["--command", f"{shlex.quote(runner)} {shlex.quote(str(script))}"],
         name,
     )
+    if "Autopsy verdict:" in result:
+        cache.put(cache_key, result)
+    return result
 
 
 def _within_jobs_root(job_dir: Path, relative: str) -> Path | None:

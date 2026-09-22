@@ -26,6 +26,28 @@ from aorta.cia.autopsy.reporter import build_report
 
 log = logging.getLogger(__name__)
 
+
+def _reviewed_rationale(
+    classification: MatrixClassification, router_rationale: str
+) -> str:
+    """Keep a debugger-proven cause/fix when the LLM reviews the evidence.
+
+    ROCgDB's adapter deterministically turns ``mean_sq=0``, ``inv_rms=inf`` and
+    ``y=NaN`` into the missing-epsilon root cause and exact ``rsqrtf`` fix. The
+    router used to replace that rationale wholesale; a perfectly plausible
+    review could retain the values while dropping the fix, leaving the final
+    chatbot to invent alternatives such as skipping padding rows.
+    """
+    reviewed = str(router_rationale or "").strip()
+    if "DBG_NAN_TRAP" not in classification.signals:
+        return reviewed or classification.rationale
+
+    proven = classification.rationale.strip()
+    if not reviewed or reviewed == proven:
+        return proven
+    return f"{proven} LLM review: {reviewed}"
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -118,7 +140,10 @@ def run_autopsy(
             )
             category = getattr(pred, "category", classification.category)
             confidence = float(getattr(pred, "confidence", classification.confidence))
-            rationale = getattr(pred, "rationale", classification.rationale)
+            rationale = _reviewed_rationale(
+                classification,
+                getattr(pred, "rationale", classification.rationale),
+            )
             next_probe = getattr(pred, "next_probe", "none")
             next_probe_reason = getattr(pred, "next_probe_reason", "")
         except Exception as e:

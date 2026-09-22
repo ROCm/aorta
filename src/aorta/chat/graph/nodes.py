@@ -23,7 +23,8 @@ from langchain_core.tools import BaseTool
 
 from aorta.chat.cancellation import bind_cancel_token, reset_cancel_token
 from aorta.chat.config import settings
-from aorta.chat.graph.state import AgentState
+from aorta.chat.decision_log import note_tool_call
+from aorta.chat.graph.state import AgentState, UserEvidence
 from aorta.chat.inference.vllm_client import get_chat_llm
 from aorta.chat.plugins import ChatTool, enabled_builtins, load_chat_tools
 from aorta.chat.rag.repo_map import load_repo_map
@@ -71,6 +72,22 @@ RULES:
    that happens to be right is indistinguishable, to the person reading your answer, \
    from one that is not. Only say a thing was observed if a tool observed it.
 13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
+14. A tool tells you what happened; the user's own paste often tells you why. \
+    When the tool has localised a failure but not explained it, and the reason \
+    is visible in the code the user gave you, say so -- naming which line you \
+    read it from, quoting that source excerpt exactly in backticks or a fenced \
+    block, and keeping it separate from what the tool observed. "Loss \
+    went NaN at step 50 (Watch, confidence 0.99); your code sets lr=5.0 on \
+    SGD, which diverges" is a better answer than stopping at unlocalized. What \
+    is forbidden is asserting a cause that neither the tools nor the paste \
+    support, not reading the code in front of you.
+15. Show the fix as the lines to add or change, not as a rewritten copy of the \
+    user's code. Reproducing assembly or a kernel from memory rewrites it: \
+    register pairs come back as v[2:3] where the user wrote v[3:4], and someone \
+    who pastes that back has taken a working program and broken the addressing \
+    to fix a wait. If you must show surrounding lines for context, copy them \
+    character for character from what the user gave you, and never from what \
+    you remember of it.
 
 RETRIEVED CONTEXT:
 {context}
@@ -682,6 +699,7 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
     # kernel -- pushed through the stream on every tool call, for a consumer
     # that reads the name and drops the rest. Anything wanting more than the
     # name should be added back when there is something rendering it.
+    note_tool_call(name, kwargs)
     _announce_tool({"tool": name, "id": call})
     started = time.monotonic()
     cancel = threading.Event()
@@ -702,15 +720,18 @@ async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
         # A callback on the work, not a finally on the waiter: cancellation of
         # the chat task can no longer close the step while its executor callable
         # and Slurm allocation are still alive.
-        _announce_tool(
-            {
-                "tool": name,
-                "id": call,
-                "done": True,
-                "cancelled": cancel.is_set(),
-                "seconds": round(time.monotonic() - started, 1),
-            }
-        )
+        payload = {
+            "tool": name,
+            "id": call,
+            "done": True,
+            "seconds": round(time.monotonic() - started, 1),
+        }
+        if cancel.is_set():
+            # This producer waits for the worker to exit before this callback
+            # can run, so "stopped" is a fact rather than a request. The UI also
+            # accepts "still running" from a producer with a bounded wait.
+            payload["cancelled"] = "stopped"
+        _announce_tool(payload)
 
     worker.add_done_callback(announce_done)
     try:
@@ -1601,6 +1622,7 @@ async def _abandoned_result(state: AgentState, trace: list[str]) -> dict[str, An
             "messages": [AIMessage(content=_NO_ANSWER_MSG)],
             "command_output": "",
             "tool_trace": trace,
+            "user_evidence": [],
         }
     answer = await _fallback_retrieval_answer(state)
     if answer:
@@ -1613,6 +1635,7 @@ async def _abandoned_result(state: AgentState, trace: list[str]) -> dict[str, An
         "messages": [AIMessage(content=answer or _NO_ANSWER_MSG)],
         "command_output": "",
         "tool_trace": trace,
+        "user_evidence": [],
     }
 
 
@@ -1858,6 +1881,119 @@ def _last_human(state: AgentState) -> str:
         if isinstance(msg, HumanMessage):
             return msg.content
     return ""
+
+
+_INLINE_CODE_CITATION = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_FENCED_CODE_CITATION = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
+_ASSIGNMENT_CITATION = re.compile(
+    r"\b[A-Za-z_][\w.\[\]-]*\s*(?:<<=|>>=|[+\-*/%]?=)\s*"
+    r"[^\s,;:`]{1,160}"
+)
+_MAX_ANSWER_CITATIONS = 32
+_MAX_USER_EVIDENCE_ITEMS = 4
+_MAX_USER_EVIDENCE_EXCERPT = 500
+
+
+def _full_last_human_message(state: AgentState) -> str:
+    """Return the latest user turn without applying a prompt-size bound."""
+    for message in reversed(state.get("messages") or []):
+        if isinstance(message, HumanMessage) and isinstance(message.content, str):
+            return message.content
+    return ""
+
+
+def _answer_citations(answer: str) -> list[str]:
+    """Extract source-shaped excerpts that the answer presents as citations.
+
+    The generation prompt requires a line read from user code to be quoted
+    exactly. Keeping extraction deterministic means the evidence is never a
+    second model's paraphrase of the source it is meant to authenticate.
+    """
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        value = value.strip()
+        if value.startswith(("+ ", "- ")):
+            value = value[2:].strip()
+        if (
+            len(value) < 3
+            or len(value) > _MAX_USER_EVIDENCE_EXCERPT
+            or value in candidates
+        ):
+            return
+        candidates.append(value)
+
+    for match in _FENCED_CODE_CITATION.finditer(answer):
+        block = match.group(1).strip("\n")
+        add(block)
+        for line in block.splitlines():
+            add(line)
+    for match in _INLINE_CODE_CITATION.finditer(answer):
+        add(match.group(1))
+    # Keep common source citations working when a model omits Markdown despite
+    # the prompt. Only exact assignment-shaped text is considered here.
+    for match in _ASSIGNMENT_CITATION.finditer(answer):
+        add(match.group(0))
+
+    # Longer excerpts disambiguate repeated identifiers and operations first.
+    return sorted(candidates, key=len, reverse=True)[:_MAX_ANSWER_CITATIONS]
+
+
+def _capture_user_evidence(state: AgentState, answer: str) -> list[UserEvidence]:
+    """Locate exact answer citations in the full user turn.
+
+    The line is computed from the match rather than accepted from generated
+    prose. Ambiguous snippets are retained only when every occurrence fits in
+    the small evidence bound; otherwise they do not identify a useful window.
+    """
+    user_text = _full_last_human_message(state)
+    if not user_text or not answer:
+        return []
+
+    evidence: list[UserEvidence] = []
+    seen: set[tuple[str, int]] = set()
+    seen_lines: set[int] = set()
+    for excerpt in _answer_citations(answer):
+        positions: list[int] = []
+        start = 0
+        while len(positions) <= _MAX_USER_EVIDENCE_ITEMS:
+            position = user_text.find(excerpt, start)
+            if position < 0:
+                break
+            positions.append(position)
+            start = position + max(1, len(excerpt))
+
+        # A short token repeated throughout a kernel does not identify the line
+        # the answer relied on. A longer quoted line normally resolves this.
+        if len(positions) > _MAX_USER_EVIDENCE_ITEMS:
+            continue
+        for position in positions:
+            line = user_text.count("\n", 0, position) + 1
+            key = (excerpt, line)
+            if key in seen or line in seen_lines:
+                continue
+            seen.add(key)
+            seen_lines.add(line)
+            evidence.append({"excerpt": excerpt, "line": line})
+            if len(evidence) >= _MAX_USER_EVIDENCE_ITEMS:
+                return evidence
+    return evidence
+
+
+def _answer_result(
+    state: AgentState,
+    text: str,
+    tool_trace: list[str],
+) -> dict[str, Any]:
+    """Build an answer update with user-code grounding kept as data."""
+    return {
+        "messages": [AIMessage(content=text)],
+        "command_output": text,
+        "tool_trace": tool_trace,
+        # An empty list deliberately replaces citations from a rejected answer
+        # when this is a critic retry.
+        "user_evidence": _capture_user_evidence(state, text),
+    }
 
 
 _RETRY_NUDGE = (
@@ -2128,11 +2264,7 @@ async def _run_native_loop(
         if not tool_calls:
             if text:
                 return _NativeOutcome(
-                    result={
-                        "messages": [AIMessage(content=text)],
-                        "command_output": text,
-                        "tool_trace": whole_trace(),
-                    },
+                    result=_answer_result(state, text, whole_trace()),
                     answered=True,
                 )
             unproductive += 1
@@ -2254,11 +2386,7 @@ async def _run_native_loop(
         _log_empty_content(final, "act_node final")
         text = _NO_ANSWER_MSG
     return _NativeOutcome(
-        result={
-            "messages": [AIMessage(content=text)],
-            "command_output": text,
-            "tool_trace": whole_trace(),
-        },
+        result=_answer_result(state, text, whole_trace()),
         # A tool call is proof the protocol works even when the synthesis that
         # followed it came back empty: the model drove `tools` successfully, and
         # what failed after that is not the protocol.
@@ -2383,20 +2511,12 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
                         "from context instead of spending the remaining budget.",
                         unproductive,
                     )
-                    return {
-                        "messages": [AIMessage(content=text)],
-                        "command_output": text,
-                        "tool_trace": tool_trace,
-                    }
+                    return _answer_result(state, text, tool_trace)
                 messages.append(AIMessage(content=text))
                 messages.append(HumanMessage(content=_SEARCH_REPROMPT_MSG))
                 continue
 
-            return {
-                "messages": [AIMessage(content=text)],
-                "command_output": text,
-                "tool_trace": tool_trace,
-            }
+            return _answer_result(state, text, tool_trace)
 
         unproductive = 0
         tool_name, kwargs = action
@@ -2433,11 +2553,122 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
     if not text:
         _log_empty_content(final, "act_node final")
         text = _NO_ANSWER_MSG
-    return {
-        "messages": [AIMessage(content=text)],
-        "command_output": text,
-        "tool_trace": tool_trace,
-    }
+    return _answer_result(state, text, tool_trace)
+
+
+def _last_human_message(state: AgentState) -> str:
+    """The bounded head of the user's latest turn, used as a safe fallback."""
+    text = _full_last_human_message(state)
+    if not text:
+        return "(the user's message is not available)"
+    return text if len(text) <= 4000 else text[:4000] + "\n... (truncated)"
+
+
+_CRITIC_USER_CONTEXT_LIMIT = 4000
+_CRITIC_QUESTION_HEAD_LIMIT = 600
+
+
+def _verified_user_evidence(
+    state: AgentState,
+    user_text: str,
+) -> list[tuple[UserEvidence, int]]:
+    """Re-locate carried citations, accepting only their exact source line."""
+    raw_evidence = state.get("user_evidence") or []
+    if not isinstance(raw_evidence, list):
+        return []
+
+    line_starts = [0, *(match.end() for match in re.finditer("\n", user_text))]
+    verified: list[tuple[UserEvidence, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in raw_evidence[:_MAX_USER_EVIDENCE_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        excerpt = item.get("excerpt")
+        line = item.get("line")
+        if (
+            not isinstance(excerpt, str)
+            or not excerpt
+            or len(excerpt) > _MAX_USER_EVIDENCE_EXCERPT
+            or not isinstance(line, int)
+            or isinstance(line, bool)
+            or line < 1
+            or line > len(line_starts)
+        ):
+            continue
+
+        line_start = line_starts[line - 1]
+        line_end = (
+            line_starts[line] - 1 if line < len(line_starts) else len(user_text)
+        )
+        position = user_text.find(excerpt, line_start)
+        # The excerpt may span lines, but it must begin on the carried line.
+        if position < line_start or position > line_end:
+            continue
+        key = (excerpt, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        verified.append(({"excerpt": excerpt, "line": line}, position))
+    return verified
+
+
+def _bounded_match_window(
+    text: str,
+    position: int,
+    excerpt: str,
+    limit: int,
+) -> str:
+    """Return at most *limit* characters of source containing *excerpt*."""
+    limit = max(len(excerpt), limit)
+    room = limit - len(excerpt)
+    before = room // 2
+    start = max(0, position - before)
+    end = min(len(text), start + limit)
+    if end - start < limit:
+        start = max(0, end - limit)
+    return text[start:end]
+
+
+def _critic_user_context(state: AgentState) -> str:
+    """Build bounded user context around citations verified in the full turn."""
+    user_text = _full_last_human_message(state)
+    if not user_text:
+        return "(the user's message is not available)"
+    if len(user_text) <= _CRITIC_USER_CONTEXT_LIMIT:
+        return user_text
+
+    verified = _verified_user_evidence(state, user_text)
+    if not verified:
+        return _last_human_message(state)
+
+    head = user_text[:_CRITIC_QUESTION_HEAD_LIMIT].rstrip()
+    base = (
+        "QUESTION HEAD:\n"
+        f"{head}\n"
+        "... (middle omitted; exact cited windows follow)"
+    )
+    separators = 2 * len(verified)
+    per_window = max(
+        0,
+        (
+            _CRITIC_USER_CONTEXT_LIMIT
+            - len(base)
+            - separators
+        )
+        // len(verified),
+    )
+    parts = [base]
+    for item, position in verified:
+        label = f"VERIFIED USER EVIDENCE (message line {item['line']}):\n"
+        content_limit = max(len(item["excerpt"]), per_window - len(label))
+        window = _bounded_match_window(
+            user_text,
+            position,
+            item["excerpt"],
+            content_limit,
+        )
+        parts.append(f"{label}{window}")
+    return "\n\n".join(parts)[:_CRITIC_USER_CONTEXT_LIMIT]
 
 
 # ──────────────────── Critic ─────────────────────
@@ -2456,11 +2687,22 @@ Check for these problems:
 2. Invented flags, arguments, or paths not present in the actual codebase
 3. Commands that contradict what the tools revealed about the codebase
 
+Code the user supplied is evidence too, and reading it is not inventing. If the
+response points at something visible in the user's own paste -- a learning rate,
+a missing barrier, an index -- and says that is where it read it, that is
+grounded. Reject it only if the paste does not say what the response claims, or
+if a read is dressed up as something a tool observed.
+
+For a large paste, VERIFIED USER EVIDENCE windows are exact excerpts that were
+matched against the full user turn before this prompt was bounded. Text outside
+those windows may have been omitted; do not treat an unverified paraphrase as if
+it appeared there.
+
 If the response is well-grounded in the tool results, reply with exactly: VALID
 
 If there are problems, explain what is wrong and what the correct command should \
 be based on the tool results. Do NOT invent information yourself -- only use what \
-the tools found.
+the tools found, or what the user's own code plainly shows.
 """
 
 _CRITIC_FAILURE_PROMPT = """\
@@ -2532,12 +2774,22 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 
     if command_output:
         tool_context = "\n---\n".join(tool_results[:10]) if tool_results else "(no tool results gathered)"
+        # The question, and whatever the user pasted with it. Without this the
+        # critic had only the tools and the answer, so a claim about the user's
+        # own code was unverifiable by construction and it rejected every one:
+        # "invented specific learning rate value" on a turn where lr=5.0 sat
+        # four lines from the optimiser in the paste. Telling the critic that
+        # pasted code counts as evidence does nothing while the paste is not in
+        # front of it.
+        asked = _critic_user_context(state)
         validation = await _send(
             llm,
             [
                 SystemMessage(content=_CRITIC_VALIDATION_PROMPT),
                 HumanMessage(
                     content=(
+                        f"WHAT THE USER ASKED (including any code they pasted):\n"
+                        f"{asked}\n\n"
                         f"TOOL RESULTS:\n{tool_context}\n\n"
                         f"GENERATED RESPONSE:\n{command_output}"
                     )
