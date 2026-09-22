@@ -118,6 +118,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -505,6 +506,42 @@ def score_proposal(proposal: Proposal) -> Score:
             "silently dropped by the proposer"
         )
         return _finish(score)
+    # Registered is not the same as acceptable, and re-deriving half of
+    # `validate_step` here is what let the two drift apart. The policy rejects
+    # a name for three reasons this tier checked only one of: it is not in the
+    # registry, it looks like shell/argv (a space, or a leading `-`), or it
+    # does not match `[A-Za-z0-9_][A-Za-z0-9_.-]*` and so would not survive the
+    # round trip through a probe cell directory name -- which is how the loop
+    # recovers tried and winning mitigations afterwards. A sidecar mitigation
+    # whose name contains `/` is registered *and* refused, and it walked to
+    # tier 5 with a full reward while `consumer_outcome` on the same reply
+    # recorded `policy_stop`.
+    #
+    # That is the invariant the `stop: true` branch above was added to restore,
+    # failing on the other side: reaching MAX_TIER has to mean the real
+    # consumer would accept this proposal and run cells for it. So the question
+    # is put to the real consumer rather than to a copy of its rules -- the
+    # same reason this file imports `get_mitigation` instead of listing names.
+    #
+    # `confidence` and `stop` are placeholders: `stop` is settled above and
+    # `validate_step` only clamps the confidence, which tier 5 owns. Building
+    # the step here rather than through `AgentStep.from_dict` keeps an
+    # unrepresentable confidence landing on tier 5, where it belongs, instead
+    # of being reported as a policy violation.
+    try:
+        AgentPolicy().validate_step(
+            AgentStep(
+                category=category,
+                hypothesis=str(raw_obj["hypothesis"]),
+                next_mitigations=names,
+                confidence=0.0,
+                stop=False,
+            )
+        )
+    except PolicyViolation as exc:
+        score.stopped_at = "tier4_registry"
+        score.detail = f"AgentPolicy would reject the step: {exc}"
+        return _finish(score)
     score.tier = 4
     # Every surviving name is a probe cell the loop will run, so the block that
     # rewards naming things is scaled by how many cells the proposal spends.
@@ -540,7 +577,18 @@ def score_proposal(proposal: Proposal) -> Score:
             f"confidence {raw_obj['confidence']!r} is not a usable number"
         )
         return _finish(score)
-    if not 0.0 <= confidence <= 1.0:
+    # NaN is reachable -- `json.loads` accepts the bare `NaN` token by default,
+    # and tier 2 sees a genuine `float` -- and it is already rejected here,
+    # because every comparison against NaN is False, so `0.0 <= nan <= 1.0` is
+    # False and `not` of it is True. `isfinite` changes no verdict; it makes
+    # the rejection structural rather than incidental. The current spelling
+    # stops working if anyone reorders the chain into `confidence >= 0.0 and
+    # confidence <= 1.0`, or clamps first -- and clamping is what the consumer
+    # does: `AgentPolicy.validate_step` runs `max(0.0, min(1.0, x))`, which
+    # turns NaN into 1.0 and carries a confident-looking proposal into the
+    # loop. This is the one place the two are allowed to disagree, so it
+    # should not disagree by accident.
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
         score.stopped_at = "tier5_available"
         score.detail = f"confidence {confidence} outside [0, 1]"
         return _finish(score)

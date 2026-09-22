@@ -85,6 +85,15 @@ python examples/rl/recipe_reward.py recipes/tokenspeed/tokenspeed-serve-load.yam
 python examples/rl/recipe_reward.py --json candidate.yaml
 ```
 
+**It exits non-zero on a recipe that earned nothing**, so it can gate rather
+than only report: any input that fell short of tier 5, any path that could not
+be read, and any candidate the novelty gate marked `memorised`. That last one
+is the case the exit code is easiest to get wrong — a verbatim copy of a
+committed recipe passes every tier, because it *is* a valid recipe, so it
+reaches tier 5 with a reward of 0.00. A near-copy in the soft zone still exits
+0: there the gate scales the reward rather than zeroing it, and turning that
+taper into a second threshold would defeat the point of having one.
+
 ### Why tier 5 is separate from tier 4
 
 `tokenspeed_serve` *warns* about an unknown `workload_config` key and carries on

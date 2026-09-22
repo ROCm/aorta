@@ -189,14 +189,33 @@ def label_run(doc: dict[str, Any], source: str | None = None) -> Label:
     errors = errors + bypassed
     verdict = verdict_from_detectors(failures, errors)
 
-    stored = doc.get("verdict")
-    stored = stored if isinstance(stored, str) and stored in VALID_VERDICTS else None
+    # `stale` has to separate three states, not two: the archive recorded no
+    # verdict, it recorded one that agrees, or it recorded one that does not.
+    # Normalising an invalid value to `None` collapsed the third into the first
+    # -- `verdict: "fal"` read as *silent* rather than as *disagreeing*, and
+    # silence is the one state this signal does not report. A rotted field is
+    # exactly the corpus-rot the staleness flag exists to surface, so anything
+    # that is not the recomputed verdict now counts as disagreement, whether it
+    # is a different verdict or not a verdict at all.
+    #
+    # A present-but-null `verdict` stays in the absent case deliberately: JSON
+    # null is how a writer records "no verdict", not a corrupted one.
+    raw_stored = doc.get("verdict")
+    if raw_stored is None:
+        stored, stale = None, False
+    else:
+        # Carried through as text rather than dropped, so the STALE line names
+        # what the archive actually held. `verdict != stored` covers both the
+        # wrong-verdict and the not-a-verdict case, since `verdict` is always
+        # one the resolver produced.
+        stored = raw_stored if isinstance(raw_stored, str) else repr(raw_stored)
+        stale = stored != verdict
     return Label(
         verdict=verdict,
         failure_detectors=failures,
         error_detectors=errors,
         stored_verdict=stored,
-        stale=stored is not None and stored != verdict,
+        stale=stale,
         source=source,
     )
 
@@ -242,14 +261,28 @@ def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
     nothing to say it had been computed over fewer runs than the directory
     holds -- and the sanitizer-report loader beside this one already prints its
     skips, so the quiet one was the odd case rather than the convention.
+
+    **Parsing is not the same as loading.** A file holding `[]` or `"fail"` is
+    syntactically valid JSON, so it survived the decode and was appended, and
+    then took down the whole `--runs` sweep from inside `label_run` --
+    `doc.get` on a list is an `AttributeError`, which nothing here catches. One
+    rotted file in a directory of hundreds therefore scored none of them. The
+    root shape is checked at the seam where every other rejection is already
+    reported, so it skips loudly like the rest rather than aborting.
     """
     out: list[tuple[str, dict[str, Any]]] = []
     for path in sorted(root.rglob("result.json")):
         try:
-            out.append((str(path), json.loads(path.read_text(encoding="utf-8"))))
+            doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             print(f"  skipped {path}: unreadable ({exc})", file=sys.stderr)
             continue
+        if not isinstance(doc, dict):
+            print(f"  skipped {path}: root is a JSON {type(doc).__name__}, not "
+                  f"an object, so it carries no detector lists to label",
+                  file=sys.stderr)
+            continue
+        out.append((str(path), doc))
     return out
 
 
@@ -310,6 +343,11 @@ def load_sanitizer_reports(root: Path) -> list[tuple[str, Label]]:
 
     A report that fails aorta's own consistency check is skipped and named,
     never silently coerced: that is the corpus-rot signal for this label source.
+
+    The root-shape check is the same one `load_runs` makes and is here for the
+    same reason: `SanitizerReport.from_dict` on a list raises `AttributeError`,
+    which the `ValueError`/`KeyError`/`TypeError` clause below does not catch,
+    so a single non-object file aborted the sweep instead of being skipped.
     """
     out: list[tuple[str, Label]] = []
     for path in sorted(root.rglob("sanitizer_report.json")):
@@ -317,6 +355,11 @@ def load_sanitizer_reports(root: Path) -> list[tuple[str, Label]]:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             print(f"  skipped {path}: unreadable ({exc})", file=sys.stderr)
+            continue
+        if not isinstance(doc, dict):
+            print(f"  skipped {path}: root is a JSON {type(doc).__name__}, not "
+                  f"an object, so it is not a sanitizer report",
+                  file=sys.stderr)
             continue
         try:
             out.append((str(path), label_sanitizer_report(doc, source=str(path))))
@@ -361,6 +404,16 @@ def load_corpus(
         if not line:
             continue
         row = json.loads(line)
+        # Same seam as the two directory loaders: a JSON list or scalar decodes
+        # cleanly and then fails on `.get` with an `AttributeError` naming
+        # neither the file nor the line. This one raises rather than skips,
+        # because the corpus is the trained-on artifact -- a row it cannot read
+        # is a build defect to fix, not a file to step over.
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"{path}:{line_number}: row is a JSON {type(row).__name__}, "
+                f"not an object"
+            )
         if row.get("kind") != "triage":
             continue
         if not include_disagreements:

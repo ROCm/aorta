@@ -1054,6 +1054,42 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
+    # `--samples 0` drove nothing, wrote a results file whose every aggregate
+    # was computed over an empty list, and exited 0. That is the shape this
+    # driver already refuses one check down -- `_no_measurement` exits 1 when a
+    # run delivered nothing -- arrived at from the argument instead of from the
+    # transport, and it is worse here because the file is *well-formed*:
+    # `n: 0`, means of nothing, and a `condition` string that makes it look
+    # like a comparable row in a sweep. A typo'd `--samples` therefore adds a
+    # clean-looking zero to a results directory.
+    #
+    # Rejected rather than clamped, because clamping would silently run a
+    # sweep with a different group size than the command line records, and the
+    # command line is what the results file quotes as `samples_per_scenario`.
+    if args.samples < 1:
+        parser.error(
+            f"--samples {args.samples} draws no completions, so there is "
+            "nothing to score and the results file would report means of an "
+            "empty group. Pass at least 1."
+        )
+    # Not rejected at 1, and the line is deliberate. One completion per
+    # scenario is a real measurement -- the format gate, the tier ladder and
+    # the triage half all score it -- and it is the cheapest way to smoke-test
+    # a driver or a serving change. What it cannot do is measure *within-group*
+    # spread, and this report leads with exactly that: every group comes back
+    # `degenerate: true` with `distinct_completions: 1`, which is the signature
+    # of the greedy-decoding collapse the first end-to-end run hit. Identical
+    # numbers, entirely different cause. So the run is allowed and the reading
+    # is not left to the reader.
+    if args.samples == 1:
+        print(
+            "--samples 1: every group will report degenerate: true and "
+            "distinct_completions: 1 because a group of one has no spread to "
+            "measure, not because sampling collapsed. Use --samples 2 or more "
+            "to tell those apart.",
+            file=sys.stderr,
+        )
+
     os.environ["OPENAI_API_BASE"] = args.base_url
     os.environ["OPENAI_API_KEY"] = args.api_key
 

@@ -32,7 +32,10 @@ injected none, so the engine decoded at its default and every group's five
 completions came back byte-identical. A reward is a function of the completion,
 so identical completions earn identical rewards and the within-group spread is
 exactly zero for any reward whatsoever. `distinct_completions` in the output is
-what makes that visible; `--check-determinism` fails the run when it holds.
+what makes that visible; `--check-determinism` fails the run when it holds --
+and also when a scenario delivered nothing, or fewer completions than were
+asked for, because a group reduced to one arrival is indistinguishable from a
+group that collapsed and the advice for the two is opposite.
 
 `spread_across_on_contract_policies` is reported alongside as the honest
 substitute: the range the reward achieves on one scenario across the policies
@@ -385,8 +388,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check-determinism",
         action="store_true",
-        help="exit non-zero if any group's completions are byte-identical, which "
-             "makes within-group spread unreachable for any reward",
+        help="exit non-zero unless every group is sampling: a group whose "
+             "completions are byte-identical makes within-group spread "
+             "unreachable for any reward, and a scenario that delivered "
+             "nothing, or fewer completions than were requested, cannot be "
+             "told from one -- so those fail too, naming the outage rather "
+             "than advising a temperature",
     )
     args = parser.parse_args(argv)
 

@@ -476,6 +476,32 @@ def main(argv: list[str] | None = None) -> int:
             proposal_examples(scenario, example["label"]["verdict"], run_meta)
         )
 
+    # The empty-corpus case, which the "no reports" check above does not cover.
+    # `collect` finding nothing is a wrong `--results` path and already fails;
+    # finding reports that every one of which `triage_example` rejects is a
+    # different fault -- a baselines file that does not match this run, a
+    # schema change, a results tree from another workload -- and it used to
+    # write two empty `.jsonl` files, a manifest reading `"scenarios": 0`, and
+    # exit 0.
+    #
+    # That is the shape this repo keeps finding: nothing was learned and the
+    # output says so in a field nobody reads, while the exit code says the
+    # build succeeded. Downstream it is worse than a crash, because an empty
+    # corpus is a *valid* corpus -- training on it is a no-op run that looks
+    # like a run, and `recipe_reward`'s novelty gate refuses an empty corpus
+    # root for exactly this reason one layer over.
+    #
+    # Refused before `mkdir`, so a failed build leaves no directory for a later
+    # step to find and mistake for a good one.
+    if not triage:
+        print(
+            f"all {len(scenarios)} discovered report(s) were rejected, so there "
+            f"is nothing to publish; refusing to write an empty corpus to "
+            f"{args.out}. Check --baselines matches this results tree.",
+            file=sys.stderr,
+        )
+        return 1
+
     args.out.mkdir(parents=True, exist_ok=True)
     for name, rows in (("triage.jsonl", triage), ("proposal.jsonl", proposals)):
         with (args.out / name).open("w", encoding="utf-8") as handle:

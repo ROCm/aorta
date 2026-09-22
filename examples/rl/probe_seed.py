@@ -193,10 +193,25 @@ def main(argv: list[str] | None = None) -> int:
     for temperature in args.temperatures:
         row = probe_temperature(args.model, temperature, args.draws)
         report["temperatures"].append(row)
-        print(f"  t={temperature:<4g} distinct {row['distinct']}/{row['draws']}  "
+        # Denominated in `delivered`, not `draws`, and the difference is the
+        # one reading this probe exists to make. All three counters are
+        # computed over the completions that came back, so quoting them over
+        # what was *asked for* prints observations nobody made: four transport
+        # failures out of five draws showed as `distinct 1/5`, which is
+        # byte-for-byte the greedy-decoding collapse signature this tool was
+        # written to detect. An outage and a non-sampling engine read the same,
+        # and the one thing separating them -- the errors -- is on the lines
+        # below rather than in the number.
+        #
+        # `delivered` is printed beside it rather than only used as the
+        # denominator, because a probe that quietly asks for five and reports
+        # over two is still hiding the shortfall, just with a truthful ratio.
+        delivered = row["delivered"]
+        print(f"  t={temperature:<4g} delivered {delivered}/{row['draws']}  "
+              f"distinct {row['distinct']}/{delivered}  "
               f"tiers {row['tiers']}  reward spread {row['spread']:.4f}  "
-              f"parsed {row['parsed']}/{row['draws']}  "
-              f"gate {row['format_gate_pass']}/{row['draws']}")
+              f"parsed {row['parsed']}/{delivered}  "
+              f"gate {row['format_gate_pass']}/{delivered}")
         for error in row["errors"][:2]:
             print(f"         error: {error[:140]}")
 

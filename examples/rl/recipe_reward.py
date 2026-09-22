@@ -756,6 +756,28 @@ def main(argv: list[str] | None = None) -> int:
         grade = grade_recipe_text(text, corpus=corpus)
         results[str(path)] = grade.as_dict()
         worst = max(worst, MAX_TIER - grade.tier)
+        # The tier deficit is not the reward, and for the one input this gate
+        # exists to catch they disagree completely. A verbatim copy of a
+        # committed recipe passes every tier -- it is a *valid* recipe, that is
+        # the whole point of copying it -- so it reaches tier 5, the deficit is
+        # 0, and the novelty gate that just zeroed its reward to 0.00 left the
+        # exit code saying "fine". The printed line and the JSON both said
+        # MEMORISED while the thing automation reads did not.
+        #
+        # So the gate reads the verdict the novelty check actually reached.
+        # `MAX_TIER` rather than some intermediate penalty because that is what
+        # a zeroed reward means here: `_finish` multiplies the tier reward by a
+        # novelty multiplier that is exactly 0.0 above `MEMORISATION_HARD`, so
+        # a memorised copy and a recipe that failed at tier 0 earn the same
+        # nothing. Grading them differently in the exit code would be inventing
+        # a distinction the reward function does not make.
+        #
+        # Only the hard zone. The soft zone deliberately *scales* the reward
+        # rather than zeroing it -- a recipe that resembles a committed one is
+        # worth less, not worth nothing -- and failing on it would turn a
+        # gradient into a second cliff.
+        if grade.memorised:
+            worst = max(worst, MAX_TIER)
         if not args.json:
             print(f"tier {grade.tier}/{MAX_TIER}  reward {grade.reward:.2f}  {path}")
             print(f"     {TIER_NAMES[grade.tier]}")
@@ -769,9 +791,10 @@ def main(argv: list[str] | None = None) -> int:
                           f"reward of {grade.tier_reward:.2f}")
     if args.json:
         print(json.dumps(results, indent=2))
-    # `worst` is the largest tier deficit across the inputs, so zero means
-    # every recipe reached the top tier. Computing it and then returning 0
-    # unconditionally made this unusable as a gate: the grade was on stdout and
+    # `worst` is the largest deficit across the inputs, so zero means every
+    # recipe reached the top tier *and* earned something for it. Computing it
+    # and then returning 0 unconditionally made this unusable as a gate: the
+    # grade was on stdout and
     # the thing automation reads said "fine" either way. `run_demo` one
     # function up has returned `1 if failures else 0` all along, so the correct
     # shape was already in this file.

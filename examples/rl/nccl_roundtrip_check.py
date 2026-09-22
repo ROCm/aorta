@@ -516,9 +516,27 @@ def decide_verdict(
     # was nothing to compare: the engine either never entered the update state
     # or may still be in it, so those completions are not evidence about
     # weights.
+    #
+    # The peer evidence belongs in the same conjunction, and leaving it out was
+    # the same defect one rank down. The verdict ladder below already puts
+    # `peer_sent_* is False` *above* the generation checks -- the docstring says
+    # peer evidence outranks the completions, because a missing round marker is
+    # a direct observation that no collective was posted, where the completions
+    # are an inference from model behaviour. But `comparable` did not read it,
+    # so a run that ended `HTTP_OK_BUT_PEER_NEVER_SENT` still published
+    # `weights_changed_under_perturb: true` beside it: the JSON asserting an
+    # observation about a transfer the verdict had just said never happened.
+    #
+    # `is not False`, not truthiness. `None` means the marker check was not
+    # performed, which the docstring is explicit is evidence either way, and
+    # `not peer_sent_perturb` would read an unperformed check as a failed one
+    # -- refusing to compare on every run without a peer, which is most of
+    # them.
     comparable = (
         perturb_bad is None
         and restore_bad is None
+        and peer_sent_perturb is not False
+        and peer_sent_restore is not False
         and both_generated
         and baseline_stable
     )

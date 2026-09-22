@@ -196,6 +196,48 @@ def test_none_does_not_cost_a_proposal_its_availability_tier(proposal_reward):
     assert score.tier == proposal_reward.MAX_TIER, (score.tier, score.detail)
 
 
+def test_registered_is_not_the_same_as_acceptable(proposal_reward, monkeypatch):
+    """Tier 4 re-derived half of `validate_step`, and kept the wrong half.
+
+    The policy refuses a proposed name for three reasons. This tier checked
+    one of them -- registry membership -- and not the other two: a name that
+    looks like shell/argv, and a name that does not round-trip through a probe
+    cell directory name, which is how the loop recovers tried and winning
+    mitigations afterwards. A registered-but-unsafe name (the policy's own
+    comment names a sidecar mitigation containing `/`) therefore reached tier
+    5 with a full reward while `consumer_outcome` on the very same reply said
+    `policy_stop`.
+
+    That is the invariant the `stop: true` branch was added to restore,
+    failing from the other side: MAX_TIER has to mean the real consumer would
+    accept this proposal and run cells for it. The registry is stubbed because
+    no *builtin* name is unsafe today -- the seam is reachable through a
+    sidecar registry, and the point of asking the policy instead of copying its
+    rules is that the tier does not depend on which of them happens to be
+    reachable this week.
+    """
+    unsafe = "sidecar/thing"
+    for module in (proposal_reward, importlib.import_module("aorta.agent.policy")):
+        monkeypatch.setattr(module, "get_mitigation", lambda name, **kw: object())
+
+    raw = json.dumps({
+        "category": "checkpoint_race",
+        "hypothesis": "lds race",
+        "next_mitigations": [unsafe],
+        "confidence": 0.5,
+        "stop": False,
+    })
+    score = proposal_reward.score_proposal(
+        proposal_reward.Proposal("p", raw, [unsafe], [])
+    )
+
+    assert score.tier == 3, (score.tier, score.detail)
+    assert score.stopped_at == "tier4_registry", score.detail
+    assert "cell name" in score.detail, score.detail
+    # The two channels now agree, which is the whole point.
+    assert score.consumer_outcome == "policy_stop", score.consumer_outcome
+
+
 def test_a_fenced_reply_is_not_reported_as_a_silent_stop(proposal_reward):
     """The tier and the consumer outcome answer different questions.
 
@@ -601,6 +643,74 @@ def test_an_agreeing_run_is_not_flagged_stale(triage_reward):
     label = triage_reward.label_run(doc)
     assert label.verdict == "pass"
     assert label.stale is False
+
+
+def test_a_corrupt_stored_verdict_disagrees_rather_than_going_quiet(triage_reward):
+    """`verdict: "fal"` is a rotted archive, and rot is what `stale` reports.
+
+    The value is explicitly present and is not the recomputed verdict, so it is
+    a disagreement. Normalising it away made `stale` false, which is the reading
+    reserved for an archive that recorded nothing -- so the one file that most
+    needs flagging was the one that looked cleanest.
+    """
+    doc = triage_reward._run("rotted", "pass", [], [])
+    doc["verdict"] = "fal"
+    label = triage_reward.label_run(doc)
+
+    assert label.verdict == "pass"
+    assert label.stale is True
+    # Carried through verbatim: an operator reading the STALE line has to be
+    # able to see that the stored value was not a verdict at all.
+    assert label.stored_verdict == "fal"
+
+
+def test_a_stored_verdict_of_the_wrong_type_is_also_a_disagreement(triage_reward):
+    doc = triage_reward._run("rotted-type", "pass", [], [])
+    doc["verdict"] = 5
+    label = triage_reward.label_run(doc)
+    assert label.stale is True
+    assert label.stored_verdict == "5"
+
+
+def test_an_archive_that_recorded_no_verdict_is_not_called_stale(triage_reward):
+    """Absent stays absent -- this is the case the invalid one was stealing."""
+    for missing in ({}, {"verdict": None}):
+        doc = triage_reward._run("silent", "pass", [], [])
+        doc.pop("verdict")
+        doc.update(missing)
+        label = triage_reward.label_run(doc)
+        assert label.stored_verdict is None
+        assert label.stale is False
+
+
+def test_one_non_object_result_does_not_abort_the_whole_sweep(triage_reward, tmp_path):
+    """A JSON list parses fine and then kills `label_run` from outside its try.
+
+    `AttributeError` is not in the loader's except clause, so a single rotted
+    file scored none of the directory rather than none of itself.
+    """
+    (tmp_path / "good").mkdir()
+    (tmp_path / "good" / "result.json").write_text(
+        json.dumps(triage_reward._run("ok", "fail", ["tier1:exit_nonzero"], []))
+    )
+    (tmp_path / "listy").mkdir()
+    (tmp_path / "listy" / "result.json").write_text("[]")
+    (tmp_path / "scalar").mkdir()
+    (tmp_path / "scalar" / "result.json").write_text('"fail"')
+
+    runs = triage_reward.load_runs(tmp_path)
+
+    assert [src for src, _ in runs] == [str(tmp_path / "good" / "result.json")]
+    # and the survivor is still labellable, which is the point of not aborting
+    assert triage_reward.label_run(runs[0][1]).verdict == "fail"
+
+
+def test_one_non_object_sanitizer_report_does_not_abort_the_sweep(
+    triage_reward, tmp_path
+):
+    (tmp_path / "listy").mkdir()
+    (tmp_path / "listy" / "sanitizer_report.json").write_text("[]")
+    assert triage_reward.load_sanitizer_reports(tmp_path) == []
 
 
 def test_an_infra_only_run_is_an_error_not_a_failure(triage_reward):
@@ -1412,6 +1522,48 @@ def test_the_committed_reports_build_into_a_corpus(build_corpus, tmp_path):
     assert manifest["scenarios"] == 6
     assert manifest["examples"]["triage"] == 6
     assert manifest["rejected_reports"] == 0
+
+
+def test_a_corpus_with_nothing_in_it_is_a_failed_build(build_corpus, tmp_path, capsys):
+    """Every report rejected wrote an empty corpus and exited 0.
+
+    The `no sanitizer reports under ...` check above covers a wrong
+    `--results` path. This is the other way to end up with nothing: reports
+    were found and `triage_example` rejected all of them, which is a baselines
+    file that does not match this results tree, a schema that moved, or a
+    sweep from another workload. The build wrote two empty `.jsonl` files, a
+    manifest saying `"scenarios": 0`, and told automation it had succeeded.
+
+    Empty is worse than crashed here, because an empty corpus is a *valid*
+    corpus: training on it is a no-op run that looks like a run, and the
+    failure surfaces as a model that did not improve rather than as a build
+    that did not build. `recipe_reward` refuses an empty corpus root one layer
+    over for the same reason.
+    """
+    results = tmp_path / "results" / "consan-racy"
+    results.mkdir(parents=True)
+    # Well-formed JSON, not a sanitizer report -- the shape a schema change or
+    # a results tree from another workload produces.
+    (results / "sanitizer_report.json").write_text(
+        json.dumps({"not": "a sanitizer report"}), encoding="utf-8"
+    )
+    out = tmp_path / "corpus"
+
+    code = build_corpus.main([
+        "--results", str(results.parent),
+        "--baselines", str(
+            Path(__file__).resolve().parents[2]
+            / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+        ),
+        "--out", str(out),
+    ])
+    err = capsys.readouterr().err
+
+    assert code == 1, err
+    assert "rejected" in err and str(out) in err, err
+    # Refused before `mkdir`, so no later step finds a directory to mistake for
+    # a corpus.
+    assert not out.exists()
 
 
 def test_every_example_carries_a_workload_family(build_corpus, tmp_path):
@@ -2933,6 +3085,46 @@ def test_a_missing_peer_marker_outranks_a_perfect_round_trip(nccl_roundtrip_chec
     )[0] == "PROVEN"
 
 
+def test_a_missing_peer_marker_also_withdraws_the_two_booleans(nccl_roundtrip_check):
+    """The verdict disowned the transfer and the JSON asserted it anyway.
+
+    `comparable` gated on the lifecycle and the generations but not on the
+    peer evidence, so the run above -- verdict `HTTP_OK_BUT_PEER_NEVER_SENT` --
+    still published `weights_changed_under_perturb: true` and
+    `weights_recovered_under_restore: true` beside it. A reader taking the
+    booleans, which is what a machine does, gets the opposite of the finding.
+
+    It is the same defect the lifecycle half of `comparable` was already fixed
+    for, one rank further up the ladder, and here the evidence is stronger:
+    a missing marker is a direct observation that no collective was posted,
+    where the completions are an inference from model behaviour.
+    """
+    decide = nccl_roundtrip_check.decide_verdict
+    textbook = dict(
+        baseline=_phase("A", "A", "A"),
+        perturbed=_phase("B", "B", "B"),
+        restored=_phase("A", "A", "A"),
+        perturb_lifecycle=_lifecycle(),
+        restore_lifecycle=_lifecycle(),
+    )
+
+    for leg in ({"peer_sent_perturb": False},
+                {"peer_sent_perturb": True, "peer_sent_restore": False}):
+        verdict, changed, recovered = decide(**textbook, **leg)
+        assert verdict == "HTTP_OK_BUT_PEER_NEVER_SENT", leg
+        assert changed is None and recovered is None, (leg, changed, recovered)
+
+    # Narrowness, and the reason the test is `is not False` rather than
+    # truthiness: `None` is a check that was not performed -- `--peer-grace 0`
+    # -- and reading it as a failure would withdraw the booleans from every run
+    # without a peer, which is most of them.
+    verdict, changed, recovered = decide(
+        **textbook, peer_sent_perturb=None, peer_sent_restore=None
+    )
+    assert verdict == "PROVEN"
+    assert changed is True and recovered is True
+
+
 def test_the_driver_reads_the_marker_the_peer_actually_writes(
     nccl_roundtrip_check, tmp_path
 ):
@@ -3750,6 +3942,43 @@ def test_the_seed_probe_does_not_count_failed_draws_as_diversity(monkeypatch):
     assert 0 not in out["tiers"]
 
 
+def test_the_console_line_denominates_in_what_arrived(monkeypatch, capsys):
+    """The JSON was fixed and the line a human reads still said `1/5`.
+
+    `distinct`, `parsed` and `format_gate_pass` are all computed over the
+    completions that came back, and all three were printed over `draws` -- so
+    four transport failures out of five drew `distinct 1/5`, which is exactly
+    the greedy-decoding collapse signature this probe was written to detect.
+    The errors were on the following lines, but the number is what gets pasted
+    into a write-up, and `1/5` is a claim about sampling.
+
+    `delivered` is printed too, not just used as the denominator: a truthful
+    ratio over a shortfall nobody mentioned is still a hidden shortfall.
+    """
+    probe_seed = _load("probe_seed")
+
+    answers = [{"error": "", "content": '{"category": "race", "confidence": 0.5}'}]
+    answers += [{"error": "APIConnectionError: reset", "content": ""}] * 4
+    calls = iter(answers)
+    monkeypatch.setattr(probe_seed, "call", lambda *a, **k: next(calls))
+    monkeypatch.setattr(probe_seed, "probe_seed_modes", lambda *a, **k: {})
+
+    probe_seed.main([
+        "--base-url", "http://127.0.0.1:1/v1",
+        "--model", "m",
+        "--temperatures", "1.0",
+        "--draws", "5",
+    ])
+    line = next(
+        l for l in capsys.readouterr().out.splitlines() if "distinct" in l
+    )
+
+    assert "delivered 1/5" in line, line
+    assert "distinct 1/1" in line, line
+    # The collapse signature must not appear on a run that never collapsed.
+    assert "/5" not in line.split("delivered 1/5", 1)[1], line
+
+
 def test_a_marker_for_the_wrong_round_is_not_this_phases_evidence(
     nccl_roundtrip_check, tmp_path
 ):
@@ -4000,6 +4229,29 @@ def test_a_genuinely_collapsed_group_still_reports_collapse(rescore_e2e, capsys)
     assert "Set a temperature" in err, err
 
 
+def test_the_determinism_flag_describes_what_it_now_does(rescore_e2e, capsys):
+    """The help text still described only the check the flag started with.
+
+    Two failure modes were added to `check_determinism` -- a scenario that
+    delivered nothing, and a group short of its requested completions -- and
+    `--help` went on saying it fails "if any group's completions are
+    byte-identical". An operator reading that sees a non-zero exit for a run
+    whose groups are all distinct and has no reason to look for the outage,
+    which is the advice-reversing case the delivery checks exist to catch.
+
+    Pinned against the branches rather than spot-checked, so adding a fourth
+    reason to fail without saying so fails here.
+    """
+    with pytest.raises(SystemExit):
+        rescore_e2e.main(["--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    flag = help_text.split("--check-determinism", 1)[1]
+
+    assert "byte-identical" in flag, flag
+    assert "delivered nothing" in flag, flag
+    assert "fewer completions than were requested" in flag, flag
+
+
 def test_an_infra_error_the_producer_recorded_stays_an_error(triage_reward):
     """`meta:` IDs bypass the resolver, and upstream says so in its own words.
 
@@ -4107,6 +4359,93 @@ def test_an_unreadable_recipe_is_a_max_deficit_not_a_skip(
     capsys.readouterr()
 
 
+def _graded_as(recipe_reward, monkeypatch, tmp_path, grade):
+    """Run the CLI over one recipe whose grade is fixed by the caller.
+
+    The tier ladder is stubbed rather than driven, because the defect is in
+    how `main` turns a grade into an exit code and the input that exposes it
+    -- a copy that reaches the *top* tier -- needs tier 4 to pass, which needs
+    the aorta workload registry, which needs `torch`. Making the tripwire
+    depend on that would mean it stops guarding anything on a host without a
+    GPU stack, which is most of them. The real gate is exercised by
+    `test_a_verbatim_corpus_copy_earns_nothing` above; this is about the wire.
+    """
+    root = tmp_path / "recipes"
+    root.mkdir()
+    (root / "committed.yaml").write_text(recipe_reward._GOOD, encoding="utf-8")
+    candidate = tmp_path / "candidate.yaml"
+    candidate.write_text(recipe_reward._GOOD, encoding="utf-8")
+    monkeypatch.setattr(
+        recipe_reward, "grade_recipe_text", lambda text, corpus=None: grade
+    )
+    return recipe_reward.main([str(candidate), "--recipes-root", str(root)])
+
+
+def test_a_memorised_copy_does_not_pass_the_gate_on_its_tier(
+    recipe_reward, monkeypatch, tmp_path, capsys
+):
+    """The exit code read the tier deficit, and a copy has none.
+
+    A verbatim copy of a committed recipe passes every tier -- it is a valid
+    recipe, that is the whole point of copying it -- so it reaches tier 5, the
+    deficit is 0, and `main` returned 0 for an input the novelty gate had just
+    scored 0.00. The printed line said MEMORISED and the JSON said
+    `"memorised": true`; the only channel that disagreed was the one
+    automation reads, which is the channel the exit code exists to be.
+
+    Retrieval passing a gate that exists to price retrieval is the worst case
+    this scorer has.
+    """
+    memorised = recipe_reward.Grade(
+        tier=recipe_reward.MAX_TIER,
+        tier_reward=1.0,
+        reward=0.0,
+        nearest_committed=("recipes/committed.yaml", 1.0),
+        novelty_multiplier=0.0,
+        memorised=True,
+    )
+    assert _graded_as(recipe_reward, monkeypatch, tmp_path, memorised) == 1
+    out = capsys.readouterr().out
+    assert "MEMORISED" in out, out
+
+
+def test_a_top_tier_original_still_passes(recipe_reward, monkeypatch, tmp_path, capsys):
+    """Narrowness. Failing every top-tier recipe would be the easy over-fix."""
+    original = recipe_reward.Grade(
+        tier=recipe_reward.MAX_TIER,
+        tier_reward=1.0,
+        reward=1.0,
+        nearest_committed=("recipes/committed.yaml", 0.11),
+        novelty_multiplier=1.0,
+        memorised=False,
+    )
+    assert _graded_as(recipe_reward, monkeypatch, tmp_path, original) == 0
+    capsys.readouterr()
+
+
+def test_the_soft_zone_stays_a_gradient_rather_than_a_second_cliff(
+    recipe_reward, monkeypatch, tmp_path, capsys
+):
+    """Only the hard zone fails, and the distinction is the design.
+
+    Between `MEMORISATION_SOFT` and `MEMORISATION_HARD` the gate *scales* the
+    reward: a recipe that resembles a committed one is worth less, not worth
+    nothing. Failing on that would collapse the taper this scorer is built
+    around into a threshold, and the taper is what stops a near-copy being
+    indistinguishable from an original.
+    """
+    resembling = recipe_reward.Grade(
+        tier=recipe_reward.MAX_TIER,
+        tier_reward=1.0,
+        reward=0.5,
+        nearest_committed=("recipes/committed.yaml", 0.85),
+        novelty_multiplier=0.5,
+        memorised=False,
+    )
+    assert _graded_as(recipe_reward, monkeypatch, tmp_path, resembling) == 0
+    capsys.readouterr()
+
+
 def test_a_run_that_delivered_nothing_is_not_a_measurement(run_e2e):
     """Third member of the transport-error family, on the driver's own exit.
 
@@ -4139,6 +4478,82 @@ def test_a_run_that_delivered_nothing_is_not_a_measurement(run_e2e):
     # measurement to be missing, so this must not turn an empty corpus into a
     # transport failure.
     assert run_e2e.is_empty_measurement(run_e2e.aggregate([], [])) is False
+
+
+def test_a_group_size_of_zero_is_refused_at_the_argument(
+    run_e2e, build_corpus, tmp_path, capsys
+):
+    """`--samples 0` wrote a clean-looking results file over nothing.
+
+    The driver looped `range(0)` per scenario, aggregated means of empty
+    lists, and exited 0 -- the same "nothing was measured and the exit code
+    said fine" that `is_empty_measurement` above refuses, reached from the
+    argument rather than from the transport. It is worse here because the file
+    is well-formed: `n: 0`, a `condition` string, and a name that makes it look
+    like a comparable row in a sweep directory.
+
+    Rejected rather than clamped: `samples_per_scenario` in the results file
+    quotes the command line, so a clamp would record a group size the run did
+    not use.
+    """
+    # A real corpus, so that without the check the run would get all the way
+    # to writing the file -- `range(0)` makes no calls, so nothing else stops
+    # it and there is no network to need.
+    corpus, _ = _build(build_corpus, tmp_path, _SURVEY)
+    out = tmp_path / "results.json"
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_e2e.main([
+            "--corpus", str(corpus / "triage.jsonl"),
+            "--base-url", "http://127.0.0.1:1/v1",
+            "--model", "openai/whatever",
+            "--samples", "0",
+            "--skip-triage",
+            "--out", str(out),
+        ])
+    assert excinfo.value.code == 2
+    assert "--samples 0" in capsys.readouterr().err
+    # Refused before anything ran, so nothing was written.
+    assert not out.exists()
+
+
+def test_a_group_of_one_is_allowed_and_says_why_it_looks_collapsed(
+    run_e2e, build_corpus, monkeypatch, tmp_path, capsys
+):
+    """Narrowness, against the easy over-fix of demanding two.
+
+    One completion per scenario is a real measurement -- the format gate, the
+    tier ladder and the triage half all score it -- and it is the cheapest way
+    to smoke-test a driver or a serving change. Refusing it would remove a
+    legitimate mode to fix an argument that draws nothing at all.
+
+    What a group of one cannot do is measure within-group spread, and this
+    report leads with that: every group comes back `degenerate: true` with
+    `distinct_completions: 1`, which is byte-for-byte the signature of the
+    greedy-decoding collapse the first end-to-end run hit. Same numbers,
+    entirely different cause, so the run says which one it is.
+    """
+    single = run_e2e.aggregate([_row("s1", 0, '{"a": 1}', 1.0, 5)], [])
+    group = single["proposal"]["per_scenario"]["s1"]
+    assert group["degenerate"] is True and group["distinct_completions"] == 1
+    # ...and that shape is not an outage, so nothing else refuses it either.
+    assert run_e2e.is_empty_measurement(single) is False
+
+    # The CLI accepts it, and says which of the two causes this is. The drives
+    # are stubbed because the question here is the argument, not the rollout.
+    corpus, _ = _build(build_corpus, tmp_path, _SURVEY)
+    monkeypatch.setattr(run_e2e, "drive_proposals", lambda *a, **k: [])
+    out = tmp_path / "one.json"
+    assert run_e2e.main([
+        "--corpus", str(corpus / "triage.jsonl"),
+        "--base-url", "http://127.0.0.1:1/v1",
+        "--model", "openai/whatever",
+        "--samples", "1",
+        "--skip-triage",
+        "--out", str(out),
+    ]) == 0
+    assert out.exists()
+    assert "--samples 1" in capsys.readouterr().err
 
 
 def test_the_models_subcommand_fails_on_an_http_error(tmp_path):
