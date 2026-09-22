@@ -953,6 +953,105 @@ def _gated_serving_metrics() -> dict[str, set[str]]:
     }
 
 
+#: The two serving cells, spelled out. `assert gated` and a one-element set of
+#: frozensets are both satisfied by a single cell, so neither says what the docs
+#: say -- deleting the `no-scratch-reclaim` block left all three tripwires green
+#: while both documents went on claiming "gated on **both** cells".
+_SERVING_CELLS = frozenset({"baseline", "no-scratch-reclaim"})
+
+#: `max × 1.25` on the window maximum, from step 6 of the rollout doc. Stated
+#: here so the derivation check below has something to check against; the doc
+#: text is asserted alongside it so the two cannot drift.
+_BLESS_MARGIN = 1.25
+
+_BACKTICKED = re.compile(r"`([A-Za-z0-9_.]+)`")
+
+
+def _table_rows(doc: str, header: tuple[str, ...]) -> list[list[str]]:
+    """The body rows of the markdown table whose header cells are ``header``.
+
+    Anchored on the header rather than on a line number or a nearby heading, so
+    moving the table within the file is not a failure and renaming its columns
+    is -- a renamed column is the edit that would silently empty the row list
+    and turn every check built on it into a comparison against nothing. Callers
+    assert the result is non-empty for that reason.
+    """
+    rows: list[list[str]] = []
+    collecting = False
+    for line in doc.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            collecting = False
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if tuple(c.lower() for c in cells) == tuple(h.lower() for h in header):
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        if all(set(cell) <= set("-: ") for cell in cells):
+            continue          # the |---|---| separator
+        rows.append(cells)
+    return rows
+
+
+def _documented_gate_sets() -> dict[str, dict[str, set[str]]]:
+    """``doc -> {"gated": names, "record_only": names}``, read from the tables.
+
+    The previous spelling of this check asked whether each gated name appeared
+    *anywhere* in each file. Both documents already name every record-only
+    metric, so that condition is satisfied by any metric that could ever be
+    gated and the check could not fail: arming `median_ttft_ms` on both cells
+    and changing nothing in the docs passed, and so did moving `median_tpot_ms`
+    into the record-only list while it stayed gated. A substring test against a
+    document that lists both sets is a test of the vocabulary, not of the
+    claim.
+
+    So the names come out of the structures that carry the claim. In
+    `tokenspeed-serving.md` that is the three-column table under "Gated in the
+    nightly"; in `tokenspeed-gating-rollout.md` it is the `First bless` column
+    of the per-metric table, which states a verdict per metric and is the one
+    place either document distinguishes the two sets row by row.
+    """
+    serving = (nightly_eval.REPO_ROOT / "docs/tokenspeed-serving.md").read_text("utf-8")
+    serving_rows = _table_rows(serving, ("metric", "policy", "why this one"))
+    assert serving_rows, (
+        "docs/tokenspeed-serving.md has no `| metric | policy | why this one |` "
+        "table, so the gated set cannot be read out of it and this check would "
+        "compare against nothing."
+    )
+
+    rollout = (
+        nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md"
+    ).read_text("utf-8")
+    rollout_rows = _table_rows(rollout, ("Metric", "Policy", "First bless", "Why"))
+    assert rollout_rows, (
+        "docs/tokenspeed-gating-rollout.md has no per-metric "
+        "`| Metric | Policy | First bless | Why |` table."
+    )
+
+    def names(rows: list[list[str]], verdict: str | None) -> set[str]:
+        return {
+            name
+            for row in rows
+            if verdict is None or verdict in row[2]
+            for name in _BACKTICKED.findall(row[0])
+        }
+
+    return {
+        "docs/tokenspeed-serving.md": {
+            # That table is the gated set; the record-only names are prose
+            # beneath it, and the rollout doc states them row by row instead.
+            "gated": names(serving_rows, None),
+            "record_only": set(),
+        },
+        "docs/tokenspeed-gating-rollout.md": {
+            "gated": names(rollout_rows, "**Gate**"),
+            "record_only": names(rollout_rows, "**Record-only**"),
+        },
+    }
+
+
 def test_the_docs_name_exactly_the_serving_metrics_that_are_gated():
     """Tie the prose to the config, because it already drifted once.
 
@@ -969,7 +1068,11 @@ def test_the_docs_name_exactly_the_serving_metrics_that_are_gated():
     promotion is then a docs edit the test demands rather than one it forbids.
     """
     gated = _gated_serving_metrics()
-    assert gated, "no tokenspeed_serve_smoke baseline keys at all"
+    assert set(gated) == set(_SERVING_CELLS), (
+        f"expected both documented serving cells, got {sorted(gated)}. Both "
+        "documents say the gate is armed on both, so one cell in the file is a "
+        "claim neither of them makes."
+    )
     assert len(set(map(frozenset, gated.values()))) == 1, (
         f"the two serving cells gate different metric sets: {gated}. Both cells "
         "measure the same thing under one mitigation difference, so a metric "
@@ -977,12 +1080,17 @@ def test_the_docs_name_exactly_the_serving_metrics_that_are_gated():
     )
     names = next(iter(gated.values()))
 
-    for relative in ("docs/tokenspeed-serving.md", "docs/tokenspeed-gating-rollout.md"):
-        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
-        missing = sorted(n for n in names if n not in doc)
-        assert not missing, (
-            f"{relative} does not name {missing}, which the nightly now gates. "
-            "A reader cannot tell which metrics can red the run."
+    for relative, documented in _documented_gate_sets().items():
+        assert documented["gated"] == names, (
+            f"{relative} says the nightly gates {sorted(documented['gated'])} "
+            f"and config/ci/regression_baselines.yaml gates {sorted(names)}. "
+            "Whichever is right, a reader of that document is being told the "
+            "wrong thing about which metrics can red the run."
+        )
+        wrongly_listed = sorted(documented["record_only"] & names)
+        assert not wrongly_listed, (
+            f"{relative} lists {wrongly_listed} as record-only while "
+            "config/ci/regression_baselines.yaml gates them."
         )
 
     # The specific claims that were false the moment the bless landed. Narrow on
@@ -1025,6 +1133,97 @@ def test_the_rollout_doc_does_not_send_step_seven_back_for_another_window():
         "back for attributability rather than for evidence, so a step-7 author "
         "cannot tell which of the nine are actually waiting on a measurement."
     )
+
+
+def test_the_rollout_doc_does_not_still_say_the_window_is_outstanding():
+    """Two rollout states in one document, four lines apart.
+
+    The current-state box says the window was taken and the gate is armed; the
+    paragraph immediately under it said "we do not yet have a window to derive
+    thresholds from", which is the state before this whole PR. A reader who
+    stops at the first paragraph after the box gets the wrong answer about
+    whether there is anything to do.
+
+    Narrow in both directions, like the step-7 check beside it: the present
+    tense must be gone, and the argument it carried must still be there --
+    it is the one step 7 has to satisfy for the nine, and it is the procedure
+    for the next workload's first bless, so a rewrite that deletes it rather
+    than re-tensing it loses something the document is for.
+    """
+    doc = (
+        nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md"
+    ).read_text("utf-8")
+    stale = "we do not yet have a window to derive thresholds from"
+    assert stale not in doc, (
+        f"the rollout doc still says {stale!r} while its own current-state box "
+        "records the completed 2026-09-08..09-17 window and two armed gates."
+    )
+    assert "A threshold derived from a single observation" in doc, (
+        "the single-observation argument is gone; it is what step 7 still has "
+        "to satisfy for the nine record-only metrics."
+    )
+
+
+def test_each_blessed_ceiling_is_the_window_maximum_times_the_margin():
+    """The numbers themselves, not just the prose around them.
+
+    The other tripwires here guard the *docs* against drifting from the
+    baseline file. The four floats in it are the part that decides whether the
+    nightly reds, and they were hand-written from a window table in a document
+    -- so a transposed digit passed every test in the tree and would have been
+    found by a nightly that stopped failing, or started.
+
+    The window maxima are committed in `tokenspeed-gating-rollout.md`, so the
+    derivation is checkable rather than merely stated: each ceiling must be its
+    cell's and metric's window maximum times the documented margin. That also
+    makes the next hand-written bless show its working, which is the habit
+    worth having rather than this particular set of four numbers being right.
+
+    Both directions of coverage are asserted -- a gated key with no window row
+    is a bound nothing sized, and a window row with no gated key is a metric
+    the table measured and the bless silently dropped.
+    """
+    doc = (
+        nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md"
+    ).read_text("utf-8")
+    assert f"`max × {_BLESS_MARGIN}`" in doc, (
+        f"the rollout doc no longer states the margin as max x {_BLESS_MARGIN}, "
+        "so the derivation checked below is not the one it documents."
+    )
+
+    rows = _table_rows(
+        doc, ("cell", "metric", "min", "median", "max", "max/median", "full range")
+    )
+    assert rows, "the rollout doc has no per-cell window table to derive from"
+    maxima = {
+        (row[0].strip("`"), row[1].strip("`")): float(row[4]) for row in rows
+    }
+
+    gated = _gated_serving_metrics()
+    measured = {(cell, metric) for cell, metric in maxima}
+    armed = {(cell, name) for cell, names in gated.items() for name in names}
+    assert armed == measured, (
+        f"gated keys {sorted(armed)} and window rows {sorted(measured)} do not "
+        "cover each other: a bound with no row was sized by nothing, and a row "
+        "with no bound is a measurement the bless dropped without saying so."
+    )
+
+    import yaml
+
+    baselines = yaml.safe_load(
+        (nightly_eval.REPO_ROOT / "config/ci/regression_baselines.yaml").read_text("utf-8")
+    )["baselines"]
+    for cell, metric in sorted(armed):
+        spec = baselines[f"tokenspeed_serve_smoke::{cell}"]["metrics"][metric]
+        assert spec["policy"] == "max", (
+            f"{cell}/{metric} is policy {spec['policy']!r}; the derivation "
+            "below is the one for a max ceiling."
+        )
+        expected = round(maxima[(cell, metric)] * _BLESS_MARGIN, 4)
+        assert spec["value"] == expected, (
+            f"{cell}/{metric} is blessed at {spec['value']} but the window "
+            f"maximum {maxima[(cell, metric)]} x {_BLESS_MARGIN} is {expected}."
+        )
 
 
 def test_the_docs_say_which_serving_metrics_are_not_gated():

@@ -38,12 +38,16 @@ reasoning behind the numbers it picks.
 > Nothing else in the matrix changed: every other entry is unchanged and still
 > correctness-only.
 
-The reason it is a document rather than a commit is that we do not yet have a
-window to derive thresholds from. A threshold derived from a single observation
-encodes whichever night it was taken on, and the nightly then fails on the
-difference between two healthy runs. That failure is worse than no gate: it
-trains everyone to ignore the alert, and the first real regression arrives into a
-channel nobody reads.
+The reason it was a document rather than a commit is that there was no window to
+derive thresholds from. A threshold derived from a single observation encodes
+whichever night it was taken on, and the nightly then fails on the difference
+between two healthy runs. That failure is worse than no gate: it trains everyone
+to ignore the alert, and the first real regression arrives into a channel nobody
+reads. The window has since been taken — 2026-09-08..09-17, ten nights, all
+twenty cell-runs — and the two bounds it sized are in
+`config/ci/regression_baselines.yaml`. The argument is kept because it is the
+one step 7 still has to satisfy for the nine record-only metrics, and because it
+is the procedure for the next workload's first bless.
 
 Measuring the cell rather than reasoning about it has since made that case
 stronger and the first bless smaller. One cell-run in thirteen carries a
