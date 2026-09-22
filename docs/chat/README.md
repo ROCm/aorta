@@ -17,6 +17,29 @@ aorta chat ask "What does the five-tier failure classifier check?"
 aorta chat                       # interactive REPL
 ```
 
+To add Cluster Intelligence diagnostics, combine `cia` with whichever chat
+interface you install:
+
+```bash
+pip install 'amd-aorta[chat-cli,cia]'  # terminal, Python 3.11–3.14
+pip install 'amd-aorta[chat-ui,cia]'   # Chainlit, Python 3.11–3.13
+pip install 'amd-aorta[chat-all,cia]'  # UI + LiteLLM, Python 3.11–3.13
+
+# Editable checkout:
+uv pip install -e ".[chat-cli,cia]"
+```
+
+`allow_cluster_jobs` remains `false`. The installed CIA layer initially adds
+only `list_cluster_jobs` and `read_autopsy_report`; enabling the setting adds
+the three submitting tools (`triage_kernel_source`, `triage_assembly_source`,
+`triage_workload`). Run `aorta chat tools` to verify the effective list. If
+`cia` is absent, chat remains usable and reports that those five tools were not
+offered, with `pip install 'amd-aorta[cia]'` as the remedy. See
+[installation](installation.md#add-cia-backed-cluster-diagnostics) for all
+published/editable combinations and
+[cluster configuration and security](configuration.md#the-cluster-diagnostic-tools)
+before enabling submissions.
+
 ## `aorta chat` or `aorta agent`?
 
 Both drive an LLM, and the line between them is whether you sit and watch.
@@ -34,7 +57,7 @@ Both drive an LLM, and the line between them is whether you sit and watch.
 
 | Guide | Description |
 | --- | --- |
-| [Installation](installation.md) | The three extras, the Python range, and the sqlite requirement |
+| [Installation](installation.md) | Chat/CIA extra combinations, Python ranges, and the sqlite requirement |
 | [Configuration](configuration.md) | The profile file, precedence, secrets, and every setting |
 | [Providers](providers.md) | Local vLLM, OpenAI-compatible, LiteLLM; gateway auth; what a question costs |
 | [The RAG index](rag-index.md) | What is indexed, when to rebuild, and why a stale index is dangerous |

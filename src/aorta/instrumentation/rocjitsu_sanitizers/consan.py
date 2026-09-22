@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path
 
 from ..rocm_paths import resolve_rocm_roots, safe_is_dir
-from .consan_coverage import CoverageDecision, parse_coverage_decision
+from .consan_coverage import CoverageDecision, CoverageRecord, parse_coverage_decision
 from .execution import ProcessResult, run_argv
 from .models import (
     CheckResult,
@@ -29,6 +29,40 @@ _CONSAN_PREFIX = "[rocjitsu-dbi-hooks] ConSan"
 _WAITCHECK_HAZARD = re.compile(r"missing\s+s_wait|hazard", re.IGNORECASE)
 _WAITCHECK_CONTEXT = re.compile(r"^(producer|consumer)\b", re.IGNORECASE)
 _AUTO_REPLAY_DIAGNOSTIC = re.compile(r"\bauto\s+replay\s+diagnostic(?:\s|$)", re.IGNORECASE)
+# Anchored on the whole phrase, because the Sampled renderer writes benign
+# per-watchpoint evidence under the same ``auto sampled`` stem
+# (``auto sampled reader=... index=...``, and an ``omitted=N after log limit=N``
+# line once past its log limit). Matching the stem the way the Record/Replay
+# summary branch matches ``auto replay`` would turn every clean Sampled run into
+# a race report.
+_AUTO_SAMPLED_CONFLICT = re.compile(r"\bauto\s+sampled\s+conflict(?:\s|$)", re.IGNORECASE)
+_DEFAULT_CONFLICT = re.compile(r"\bConSan\s+conflict(?:\s|$)", re.IGNORECASE)
+# The actual per-snapshot record begins ``auto report reader=``. Match that
+# prefix, before any mode-specific field: every such record belonging to a
+# Sampled reader must carry the complete Sampled schema, so one valid snapshot
+# cannot mask a second truncated one. The exact prefix excludes the sibling
+# ``auto report plan|buffer|cleanup`` records, which carry allocation/lifecycle
+# fields rather than evidence counters.
+_AUTO_REPORT = re.compile(r"\bauto\s+report\s+reader=", re.IGNORECASE)
+_SAMPLED_SUMMARY_COUNTS = (
+    "sampled_conflict_examples",
+    "sampled_conflict_pairs_without_example",
+    "sampled_conflicts",
+    "sampled_immediate_conflicts",
+)
+# These mean evidence was lost, unusable, or cannot be attributed safely.
+# RocJITsu folds all but static_mapping_malformed into dynamic_incomplete; check
+# the summary independently as well because the two are separate log records.
+_SAMPLED_INCOMPLETE_COUNTS = (
+    "sampled_changed_snapshots",
+    "sampled_dropped_windows",
+    "sampled_incomplete_snapshots",
+    "sampled_malformed_snapshots",
+    "sampled_malformed_sync",
+    "sampled_stale_snapshots",
+    "sampled_static_mapping_malformed",
+    "sampled_unsupported_sync",
+)
 _KV = re.compile(r"(\w+)=(\S+)")
 # glibc's ld.so message when a needed DT_NEEDED library is not on any search
 # path. Written to stderr, and paired with exit 127 there it means the repro
@@ -40,9 +74,29 @@ _MISSING_SHARED_OBJECT = re.compile(
 
 
 class ConSanMode(str, Enum):
-    """The only ConSan mode whose evidence this module can parse (Record/Replay)."""
+    """Current execution mode plus legacy engines whose saved logs still parse.
 
+    RocJITsu removed the pre-release engine names after retaining Sampled as its
+    ``DEFAULT`` detector. ``SAMPLED`` and ``RECORD_REPLAY`` remain here only so
+    logs captured before that simplification still name modes this module reads.
+    """
+
+    DEFAULT = "default"
+    SAMPLED = "sampled"
     RECORD_REPLAY = "record-replay"
+
+
+# ``max`` is stride 1 on both the workgroup and the cell axis, so every selected
+# site is watched. The nightly racy control is a positive control: at the hook's
+# ordinary 1/256 default it can be missed statistically, which would report a
+# known race as a clean pass.
+_CONSAN_SAMPLED_PRESET = "max"
+
+# Every ``RJ_CONSAN_*`` variable changes the hook's evidence, reporting, or
+# verdict contract. Scrub the namespace rather than maintaining old/new naming
+# lists that can go stale when RocJITsu adds or renames a control, then set only
+# the four values this gate owns below.
+_CONSAN_ENV_PREFIX = "RJ_CONSAN_"
 
 
 # The strict coverage cross-check (consan_coverage.parse_coverage_decision)
@@ -80,6 +134,32 @@ def _int(fields: dict[str, str], key: str) -> int:
     if value < 0:
         raise ValueError(f"ConSan field {key} must be non-negative, got {value}")
     return value
+
+
+def _required_int(fields: dict[str, str], key: str) -> int:
+    """Like :func:`_int`, but a missing key is malformed rather than zero.
+
+    The Sampled counters are written by one format string, so a report line that
+    carries some of them and not others is a truncated or interleaved log. Zero
+    is the value that would buy a PASS, so it is the one value this must not
+    invent.
+    """
+    if key not in fields:
+        raise ValueError(f"ConSan field {key} is missing from a Sampled report summary")
+    return _int(fields, key)
+
+
+def _required_sampled_int(fields: dict[str, str], legacy_key: str) -> int:
+    """Read one counter from current flattened or legacy Sampled output."""
+    current_key = legacy_key.removeprefix("sampled_")
+    present = [key for key in (legacy_key, current_key) if key in fields]
+    if len(present) != 1:
+        raise ValueError(
+            f"ConSan field {legacy_key} is "
+            + ("missing" if not present else "ambiguous across current and legacy spellings")
+            + " in a Sampled report summary"
+        )
+    return _int(fields, present[0])
 
 
 def _parse_waitcheck(
@@ -157,12 +237,178 @@ def _parse_waitcheck(
     )
 
 
-def parse_record_replay_output(output: str) -> ParsedCombinedOutput:
-    """Parse one combined-hook stream without double-counting summaries."""
+def _itemized_by_reader(findings: list[Finding]) -> dict[str, int]:
+    """Distinct detail records per ``reader``.
+
+    Counted after deduplication because the summary arithmetic below asks how
+    many conflicts the log itemized, and one record printed twice is one
+    conflict. Kept per engine so a Sampled detail record cannot be credited
+    against a Record/Replay summary, or the reverse, in a log holding both.
+    """
+    distinct = {finding.dedupe_key: finding for finding in findings}
+    counts: dict[str, int] = {}
+    for finding in distinct.values():
+        reader = dict(finding.metadata).get("reader", "")
+        counts[reader] = counts.get(reader, 0) + 1
+    return counts
+
+
+def _sampled_totals(summaries: list[dict[str, str]]) -> dict[str, dict[str, int]]:
+    """Sum each reader's Sampled conflict counters across its report lines.
+
+    A reader emits one report per snapshot it publishes, and the counters are
+    per report, so the run's conflict count for a reader is the sum.
+    """
+    totals: dict[str, dict[str, int]] = {}
+    for summary in summaries:
+        reader = summary.get("reader")
+        if reader is None:
+            raise ValueError("ConSan field reader is missing from a Sampled report summary")
+        _required_int(summary, "reader")
+        counts = {key: _required_sampled_int(summary, key) for key in _SAMPLED_SUMMARY_COUNTS}
+        incomplete = {
+            key: _required_sampled_int(summary, key) for key in _SAMPLED_INCOMPLETE_COUNTS
+        }
+        nonzero_incomplete = [key for key, value in incomplete.items() if value != 0]
+        if nonzero_incomplete:
+            raise ValueError(
+                f"ConSan Sampled evidence is incomplete for reader {reader}: "
+                + ", ".join(nonzero_incomplete)
+            )
+        conflicts = counts["sampled_conflicts"]
+        examples = counts["sampled_conflict_examples"]
+        pairs_without_example = counts["sampled_conflict_pairs_without_example"]
+        if examples > conflicts or pairs_without_example != conflicts - examples:
+            raise ValueError(
+                f"ConSan Sampled conflict summary is inconsistent for reader {reader}"
+            )
+        accumulated = totals.setdefault(reader, dict.fromkeys(_SAMPLED_SUMMARY_COUNTS, 0))
+        for key, value in counts.items():
+            accumulated[key] += value
+    return totals
+
+
+def _require_sampled_summaries(
+    coverage: tuple[CoverageRecord, ...], totals: dict[str, dict[str, int]]
+) -> None:
+    """Every applicable Sampled code object must have reported its counters.
+
+    The conflict counters are the only place a Sampled race with no logged
+    example is visible, so a log that lost them cannot be distinguished from a
+    clean run by the coverage records alone -- those describe static
+    instrumentation and stay healthy either way. Reconciling against coverage
+    keeps the absence itself fatal rather than silently unaccounted for. Only
+    applicable readers are required: a loaded object with no discovered site is
+    never instrumented and publishes no report, which is the ordinary shape of
+    the runtime helper objects that accompany a repro.
+    """
+    missing = sorted(
+        str(record.reader)
+        for record in coverage
+        if record.engine in {"default", "sampled"}
+        and record.applicable
+        and str(record.reader) not in totals
+    )
+    if missing:
+        raise ValueError(
+            "ConSan Sampled report summary is missing for reader(s) " + ", ".join(missing)
+        )
+
+
+def _require_expected_engine(
+    coverage: tuple[CoverageRecord, ...], expected_mode: ConSanMode | None
+) -> None:
+    """Verify that the hook honored the mode pinned by the execution path."""
+    if expected_mode is None:
+        return
+    expected = expected_mode.value.replace("-", "_")
+    observed = sorted({record.engine for record in coverage})
+    if observed != [expected]:
+        rendered = ", ".join(observed) if observed else "<none>"
+        raise ValueError(
+            f"ConSan ran with engine(s) {rendered}, expected the pinned engine {expected}"
+        )
+
+
+def _sampled_summary_findings(
+    totals_by_reader: dict[str, dict[str, int]], itemized_by_reader: dict[str, int]
+) -> list[Finding]:
+    """At most one shortfall and one immediate-conflict finding per reader.
+
+    Two counters, deliberately not summed. ``sampled_conflicts`` comes from the
+    host's pairwise analysis of the evidence windows it retained, and the hook
+    logs an example record for only the first few of them; the remainder are
+    visible as a count alone, which is the common case rather than a corner one.
+    ``sampled_immediate_conflicts`` is a device-side counter incremented in the
+    instrumented kernel, so adding the two would over-report a race twice and
+    dropping either would under-report. They get separate codes so a dashboard
+    can tell a host-analysis shortfall from a device-side detection.
+    """
+    findings: list[Finding] = []
+    for reader, totals in sorted(totals_by_reader.items()):
+        itemized = itemized_by_reader.get(reader, 0)
+        conflicts = totals["sampled_conflicts"]
+        immediate = totals["sampled_immediate_conflicts"]
+        # The hook computes pairs_without_example as conflicts - examples, so it
+        # is authoritative; the observed shortfall is taken too, and the larger
+        # wins, so a log truncated below its own example count cannot hide
+        # conflicts. Both terms are non-negative, so a log carrying more details
+        # than the summary claims yields no shortfall rather than a negative one.
+        shortfall = max(totals["sampled_conflict_pairs_without_example"], conflicts - itemized)
+        metadata = tuple(
+            sorted(
+                (
+                    ("itemized_conflicts", str(itemized)),
+                    ("reader", reader),
+                    *((key, str(totals[key])) for key in _SAMPLED_SUMMARY_COUNTS),
+                )
+            )
+        )
+        if shortfall > 0:
+            findings.append(
+                Finding(
+                    sanitizer="consan",
+                    severity=FindingSeverity.RACE,
+                    code="sampled_conflict_summary",
+                    message=(
+                        "ConSan conflict count reported by the summary only: "
+                        f"reader={reader} counted {conflicts} with "
+                        f"{itemized} example record(s) logged"
+                    ),
+                    metadata=metadata,
+                )
+            )
+        if immediate > 0:
+            findings.append(
+                Finding(
+                    sanitizer="consan",
+                    severity=FindingSeverity.RACE,
+                    code="sampled_immediate_conflict",
+                    message=(
+                        "ConSan conflict counted immediately on the device: "
+                        f"reader={reader} counted {immediate}"
+                    ),
+                    metadata=metadata,
+                )
+            )
+    return findings
+
+
+def parse_consan_output(
+    output: str, *, expected_mode: ConSanMode | None = None
+) -> ParsedCombinedOutput:
+    """Parse one combined-hook stream without double-counting summaries.
+
+    The current default-detector grammar and the legacy Sampled/Record-Replay
+    grammars are read in one pass. :func:`run_consan` additionally requires the
+    current ``default`` mode; direct callers can still inspect saved old logs.
+    """
 
     lines = output.splitlines()
-    detailed_findings: list[Finding] = []
+    replay_details: list[Finding] = []
+    sampled_details: list[Finding] = []
     replay_summaries: list[dict[str, str]] = []
+    auto_reports: list[dict[str, str]] = []
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -171,7 +417,7 @@ def parse_record_replay_output(output: str) -> ParsedCombinedOutput:
         lowered = line.lower()
         fields = _kv(line)
         if _AUTO_REPLAY_DIAGNOSTIC.search(line):
-            detailed_findings.append(
+            replay_details.append(
                 Finding(
                     sanitizer="consan",
                     severity=FindingSeverity.RACE,
@@ -182,20 +428,43 @@ def parse_record_replay_output(output: str) -> ParsedCombinedOutput:
                     metadata=tuple(sorted(fields.items())),
                 )
             )
+        elif _AUTO_SAMPLED_CONFLICT.search(line) or _DEFAULT_CONFLICT.search(line):
+            sampled_details.append(
+                Finding(
+                    sanitizer="consan",
+                    severity=FindingSeverity.RACE,
+                    code="sampled_conflict",
+                    message=line,
+                    kernel_name=fields.get("kernel"),
+                    code_object=fields.get("code_object"),
+                    metadata=tuple(sorted(fields.items())),
+                )
+            )
+        elif _AUTO_REPORT.search(line):
+            _required_int(fields, "reader")
+            auto_reports.append(fields)
         elif "auto replay" in lowered:
             replay_summaries.append(fields)
 
+    decision = parse_coverage_decision(output)
+    _require_expected_engine(decision.coverage, expected_mode)
+    sampled_readers = {
+        str(record.reader)
+        for record in decision.coverage
+        if record.engine in {"default", "sampled"}
+    }
+    sampled_summaries = [
+        report for report in auto_reports if report.get("reader") in sampled_readers
+    ]
+    detailed_findings = [*replay_details, *sampled_details]
     deduplicated = {finding.dedupe_key: finding for finding in detailed_findings}
     findings = [deduplicated[key] for key in sorted(deduplicated, key=repr)]
-    detailed_by_reader: dict[str, int] = {}
-    for finding in findings:
-        reader = dict(finding.metadata).get("reader", "")
-        detailed_by_reader[reader] = detailed_by_reader.get(reader, 0) + 1
+    replay_by_reader = _itemized_by_reader(replay_details)
     for summary in replay_summaries:
         diagnostics = _int(summary, "diagnostics")
         conflict = summary.get("conflict", "false").lower() == "true"
         reader = summary.get("reader", "")
-        if (conflict or diagnostics > 0) and (detailed_by_reader.get(reader, 0) < diagnostics):
+        if (conflict or diagnostics > 0) and (replay_by_reader.get(reader, 0) < diagnostics):
             findings.append(
                 Finding(
                     sanitizer="consan",
@@ -205,8 +474,12 @@ def parse_record_replay_output(output: str) -> ParsedCombinedOutput:
                     metadata=tuple(sorted(summary.items())),
                 )
             )
+    sampled_totals = _sampled_totals(sampled_summaries)
+    findings.extend(
+        _sampled_summary_findings(sampled_totals, _itemized_by_reader(sampled_details))
+    )
 
-    decision = parse_coverage_decision(output)
+    _require_sampled_summaries(decision.coverage, sampled_totals)
     object_coverage = tuple(
         ObjectCoverage(
             object_id=(
@@ -254,6 +527,11 @@ def parse_record_replay_output(output: str) -> ParsedCombinedOutput:
         coverage=object_coverage,
         coverage_decision=decision,
     )
+
+
+# Retained under its Record/Replay-era name: the parser is mode-neutral now, but
+# the old name is part of the published module surface.
+parse_record_replay_output = parse_consan_output
 
 
 def _error_result(
@@ -382,10 +660,11 @@ def _launch_diagnostic(process: ProcessResult) -> str:
     )
 
 
-def evaluate_record_replay(
+def evaluate_consan_output(
     process: ProcessResult,
     *,
     strict: bool = False,
+    expected_mode: ConSanMode | None = None,
 ) -> tuple[CheckResult, CheckResult]:
     """Evaluate a future allowlisted combined-hook run.
 
@@ -454,7 +733,9 @@ def evaluate_record_replay(
             ),
         )
     try:
-        parsed = parse_record_replay_output(f"{process.stdout}\n{process.stderr}")
+        parsed = parse_consan_output(
+            f"{process.stdout}\n{process.stderr}", expected_mode=expected_mode
+        )
     except ValueError as exc:
         reason = f"consan_output_parse_error: {exc}"
         return (
@@ -512,6 +793,10 @@ def evaluate_record_replay(
         coverage=parsed.coverage,
     )
     return waitcheck, consan
+
+
+# Retained under its Record/Replay-era name, as for the parser above.
+evaluate_record_replay = evaluate_consan_output
 
 
 def scoped_consan_not_checked(worklist: KernelWorklist) -> CheckResult:
@@ -656,9 +941,14 @@ def run_consan(
     env = dict(os.environ)
     env["HSA_TOOLS_LIB"] = str(resolved_hook)
     # Pin the sanitizer contract so hostile inherited settings cannot weaken it:
-    # no auto-registration, record/replay mode, and the requested policy.
+    # no auto-registration, the retained default detector at the ``max`` preset,
+    # no inherited ConSan controls, and the requested policy.
     env["HSA_TOOLS_DISABLE_REGISTER"] = "1"
-    env["RJ_CONSAN_MODE"] = ConSanMode.RECORD_REPLAY.value
+    for name in tuple(env):
+        if name.startswith(_CONSAN_ENV_PREFIX):
+            env.pop(name)
+    env["RJ_CONSAN_MODE"] = ConSanMode.DEFAULT.value
+    env["RJ_CONSAN_PRESET"] = _CONSAN_SAMPLED_PRESET
     env["RJ_CONSAN_POLICY"] = "strict" if strict else "default"
     if consan_log:
         env["RJ_CONSAN_LOG"] = _CONSAN_LOG_DEBUG_LEVEL
@@ -672,7 +962,9 @@ def run_consan(
         timeout_seconds=timeout_seconds,
         env=env,
     )
-    preflight, consan = evaluate_record_replay(process, strict=strict)
+    preflight, consan = evaluate_consan_output(
+        process, strict=strict, expected_mode=ConSanMode.DEFAULT
+    )
     log_path = output_dir / "consan.log"
     log_path.write_text(f"{process.stdout}\n{process.stderr}", encoding="utf-8")
 

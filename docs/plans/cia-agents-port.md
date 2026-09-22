@@ -280,6 +280,15 @@ Once per PR, and again before the branch merges:
    - Watch alerted on its own evidence;
    - Autopsy was triggered **by Watch**, not by the fallback path.
 
+The merge-gating positive control is
+`tests/cia/test_cia_hardware_smoke.py` (`cia_hardware`, `gpu`, `rocm`,
+`integration`, `slow`). It sends the committed racy ConSan repro through the
+production Launch seam on a real GPU, then asserts the persisted sanitizer
+state/finding, Watch alert and `watch_signal`, and Autopsy report/terminal state.
+The GPU workflow provisions the verified RocJITsu bundle and runs this smoke
+serially whenever `src/aorta/cia/**`, `tests/cia/**`, or sanitizer integration
+paths change.
+
 That last check is not pedantry. In the source repo all three demos returned a
 correct-looking verdict while the sanitizer had not run, Watch had not alerted
 and Autopsy had reached its answer through a fallback — because every layer

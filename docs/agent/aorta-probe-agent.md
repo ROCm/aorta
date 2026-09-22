@@ -56,7 +56,7 @@ flowchart TD
 
 | Field | Meaning |
 |-------|---------|
-| `category` | One of eight generic autopsy labels (see below) |
+| `category` | One of the eight probe labels — `PROBE_CATEGORIES`, see below. Not the full eleven-label shared taxonomy: `validate_step` refuses the three evidence-only names here |
 | `hypothesis` | Short natural-language explanation |
 | `next_mitigations` | Registered mitigation names to try next (never raw argv) |
 | `confidence` | 0.0–1.0 self-reported confidence |
@@ -64,16 +64,54 @@ flowchart TD
 
 ### Autopsy category taxonomy
 
-| Category | Typical probe signals |
+The vocabulary has eleven names and is shared with `aorta.cia`, so a report
+means the same thing whichever front door wrote it. **A probe step may use only
+the eight below**; the three after them are reachable only by reading an
+instrument.
+
+| Probe category (`PROBE_CATEGORIES`) | Typical probe signals |
 |----------|----------------------|
 | `rccl_hang` | `tier2:*` hang detectors, RCCL timeout patterns |
 | `thermal_throttle` | Sustained perf drop + thermal context (when available) |
 | `illegal_mem` | `tier4:hip_error`, illegal-access regex in stderr |
 | `oom_fragment` | OOM / exit 137 patterns |
-| `checkpoint_race` | Barrier / checkpoint boundary signatures |
+| `checkpoint_race` | Checkpoint save/load boundary signatures |
 | `launch_error` | Early exit, launch failures |
 | `perf_regression` | Pass with warn detectors or confound regression |
 | `unknown` | No confident mapping |
+
+Three more are **evidence-only** — reachable by `aorta.cia` reading an
+instrument, never by a probe step:
+
+| Category | Established by |
+|----------|----------------|
+| `gpu_race` | ConSan / waitcheck findings naming sites inside one kernel |
+| `numeric_silent` | `tier4:nan_signature`, Inf/overflow, out-of-tolerance drift |
+| `tooling_gap` | The instrument could not run, or produced no records |
+
+The set is closed: `AgentPolicy.validate_step` raises `PolicyViolation` on
+anything outside `PROBE_CATEGORIES`, so the loop stops rather than recording a
+label nothing downstream can route on. The vocabulary is defined once, in
+`aorta.agent.llm.AUTOPSY_CATEGORY_GUIDANCE`, as name → one-line gloss;
+`AUTOPSY_CATEGORIES` is derived from that mapping, `PROBE_CATEGORIES` is that
+set less the evidence-only three, and the proposer prompt renders the glosses of
+the probe subset — so a new label cannot reach the validator without also
+reaching the model, and the model is never shown a label it has no way to reach.
+
+Three distinctions the glosses exist to enforce, because the names alone do not:
+
+* **`checkpoint_race` is about checkpoint I/O, not about kernels.** An
+  intra-wave LDS race is `gpu_race`. The two were previously conflated —
+  `checkpoint_race` was the nearest available name for a kernel race, and it was
+  the wrong one.
+* **`tooling_gap` is not `unknown`.** `unknown` is evidence that fits no label;
+  `tooling_gap` is evidence never collected, because the sanitizer was rejected
+  or produced no records. Reading the second as the first turns "we did not
+  look" into "we looked and found nothing".
+* **`unknown` is a real answer, not a failure to answer.** It is the correct
+  label when the evidence supports none of the others, and `validate_step`
+  accepts it. Guessing a specific label to avoid `unknown` is worse than
+  `unknown`, because the loop routes on the label.
 
 ---
 

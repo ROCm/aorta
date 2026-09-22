@@ -36,6 +36,9 @@ concurrency:
 
 env:
   CONTAINER_NAME: aorta-ci-gpu
+  # Prebuilt waitcheck/ConSan bundle consumed by the CIA hardware smoke. Kept
+  # aligned with sanitizers-nightly.yml, which exercises the same artifact.
+  ROCJITSU_REF: "shared/rocjitsu/sanitizers"
 
 jobs:
   # Cheap gate on a GitHub-hosted runner, replacing the trigger-level `paths:`
@@ -46,6 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       gpu: ${{ steps.filter.outputs.gpu }}
+      cia: ${{ steps.filter.outputs.cia }}
     steps:
       - name: Decide whether the GPU suite applies
         id: filter
@@ -59,6 +63,7 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "$EVENT_NAME is not a pull request; running the full GPU suite."
             echo "gpu=true" >> "$GITHUB_OUTPUT"
+            echo "cia=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -72,6 +77,7 @@ jobs:
             echo "::warning::Could not list the PR's files, so running the GPU" \
                  "suite rather than guessing. gh said: ${files}"
             echo "gpu=true" >> "$GITHUB_OUTPUT"
+            echo "cia=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -79,6 +85,7 @@ jobs:
             echo "::warning::The PR file list came back empty, which should not" \
                  "happen for a real PR; running the GPU suite."
             echo "gpu=true" >> "$GITHUB_OUTPUT"
+            echo "cia=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -92,6 +99,9 @@ jobs:
             'src/aorta/hw_queue_eval/*'
             'src/aorta/workloads/*'
             'src/aorta/instrumentation/rocjitsu_sanitizers/*'
+            # CIA changes must run the one test that proves their
+            # sanitizer -> Watch -> Autopsy chain on actual hardware.
+            'src/aorta/cia/*'
             'src/aorta/utils/gpu_control.py'
             'src/aorta/instrumentation/env_knobs.py'
             # The module that performs the capture. Its test file was listed
@@ -123,6 +133,7 @@ jobs:
             'examples/profiling/proton/*'
             'tests/instrumentation/rocjitsu_sanitizers/*'
             'tests/sanitizers/*'
+            'tests/cia/*'
             'tests/test_marker_partition.py'
             'config/ci/*'
             'recipes/ci/*'
@@ -130,6 +141,19 @@ jobs:
             'scripts/ci/*'
             'scripts/sanitizers/*'
             'docker/*'
+            '.github/workflows/gpu-tests.yml'
+          )
+
+          # Subset that requires provisioning the private ConSan backend and
+          # running the serial CIA hardware acceptance smoke. Keep this broader
+          # than only the test: changes to either side of the integration must
+          # exercise the chain.
+          cia_patterns=(
+            'src/aorta/cia/*'
+            'src/aorta/instrumentation/rocjitsu_sanitizers/*'
+            'tests/cia/*'
+            'recipes/sanitizers/fixtures/repro/*'
+            'scripts/sanitizers/download_sanitizer_artifacts.py'
             '.github/workflows/gpu-tests.yml'
           )
 
@@ -148,11 +172,27 @@ jobs:
             done
           done <<< "$files"
 
+          cia=false
+          while read -r file; do
+            [ -n "$file" ] || continue
+            for pattern in "${cia_patterns[@]}"; do
+              # shellcheck disable=SC2254  # unquoted glob match is intentional
+              case "$file" in
+                $pattern)
+                  echo "CIA hardware-relevant change: $file (matched $pattern)"
+                  cia=true
+                  break 2
+                  ;;
+              esac
+            done
+          done <<< "$files"
+
           if [ "$gpu" = false ]; then
             echo "No GPU-relevant paths changed; the GPU jobs will be skipped."
             echo "A skipped job reports Success, satisfying the required check."
           fi
           echo "gpu=$gpu" >> "$GITHUB_OUTPUT"
+          echo "cia=$cia" >> "$GITHUB_OUTPUT"
 
   gpu-tests:
     name: pytest (GPU, MI350)
@@ -253,6 +293,44 @@ jobs:
             pytest -m "gpu or rocm" -n 4 --timeout=300 --junitxml=gpu-results.xml
           '
 
+      - name: Run CIA Launch-Watch-Autopsy hardware smoke
+        if: needs.changes.outputs.cia == 'true'
+        env:
+          # Cross-repository Actions artifacts require a token with actions:read
+          # on ROCm/rocm-systems. The same secret and fallback are used by the
+          # sanitizer nightly that consumes this bundle.
+          ROCJITSU_ARTIFACTS_TOKEN: ${{ secrets.ROCJITSU_ARTIFACTS_TOKEN || secrets.GITHUB_TOKEN }}
+          CIA_GPU_SMOKE: ${{ needs.changes.outputs.cia }}
+        run: |
+          bash scripts/ci/docker_cmd.sh exec \
+            -e ROCJITSU_REF="${ROCJITSU_REF}" \
+            -e GH_TOKEN="${ROCJITSU_ARTIFACTS_TOKEN}" \
+            -e AORTA_CIA_HARDWARE_SMOKE_REQUIRED="${CIA_GPU_SMOKE}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            trap "rm -rf .cia-gpu-smoke" EXIT
+
+            python -m pip install -e ".[tests,cia]"
+
+            export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
+            export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+
+            mkdir -p .cia-gpu-smoke
+            python scripts/sanitizers/download_sanitizer_artifacts.py \
+              --branch "${ROCJITSU_REF}" \
+              --dest .cia-gpu-smoke/rocjitsu-prebuilt \
+              --force
+            export ROCJITSU_PREBUILT="$(cd .cia-gpu-smoke/rocjitsu-prebuilt && pwd)"
+            test -f "${ROCJITSU_PREBUILT}/sha256sums.txt"
+
+            # The downloaded binaries never inherit the cross-repository token.
+            unset GH_TOKEN GITHUB_TOKEN
+            pytest tests/cia/test_cia_hardware_smoke.py \
+              -m cia_hardware --timeout=600 \
+              --junitxml=cia-hardware-results.xml
+          '
+
       # Separate step, after pytest: under `set -euo pipefail` a knob the
       # registry omits (a base-image bump is enough) aborted the script before
       # pytest ran, so the GPU gate went red with zero test results and no
@@ -282,7 +360,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: gpu-test-results-${{ github.run_id }}
-          path: gpu-results.xml
+          path: |
+            gpu-results.xml
+            cia-hardware-results.xml
           if-no-files-found: ignore
 
       - name: Tear down ROCm CI container

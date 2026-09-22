@@ -2,7 +2,7 @@
 
 This is not a transcript. Summary mode stores counts and digests for user/model
 content while retaining the decisions needed to explain a turn: route,
-selector ranking and scrubbed rationale, tool order, CIA outcomes, and critic
+selector ranking and rationale digest, tool order, CIA outcomes, and critic
 acceptance. Nothing here reads a record back or sends one anywhere.
 """
 
@@ -22,8 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from aorta._user_paths import state_home
-from aorta.probe.redaction import scrub_text
-
 logger = logging.getLogger(__name__)
 
 SESSION_LOG_ENV = "AORTA_CHAT_SESSION_LOG"
@@ -42,10 +40,33 @@ _JOB_ID = re.compile(
     # have run. Still anchored rather than free-floating: the bundle path on
     # the following line repeats the same id, and an unanchored match would
     # read it as a second job.
-    r"(?:^[ \t]*|\bJob\s+|[\"']job_id[\"']\s*:\s*[\"'])"
+    #
+    # The bare branch additionally requires the full `new_job_id()` shape --
+    # `cia-%Y%m%d-%H%M%S-<6 hex>` -- because at a line start the loose form is
+    # not a job id, it is any hyphenated word. `nan-trap value mean_sq=0`,
+    # which `cia/autopsy/adapters/rocgdb.py` emits, parsed as a job called
+    # `nan-trap`, and the lines under it supplied a category and a confidence:
+    # a phantom job wearing a real verdict, which is the error direction this
+    # function exists to prevent. It also put `jobs_root` on a tool event that
+    # named no job, so the "only where there are ids" rule the configuration
+    # note relies on stopped holding.
+    #
+    # The prefixed and quoted-key branches stay loose on purpose. There the
+    # surrounding text is the evidence that an id is what follows, so a
+    # shortened or hand-written id is still a job, and nothing else is going
+    # to appear after `"job_id":`.
+    r"(?:^[ \t]*(?=(?:cia|nan)-\d{8}-\d{6}-[0-9a-f]{6}\b)"
+    r"|\bJob\s+|[\"']job_id[\"']\s*:\s*[\"'])"
     r"(?P<id>(?:cia|nan)-[A-Za-z0-9._-]+)",
     re.M,
 )
+#: The value halves of the patterns below, for the structured read, which has
+#: the values already and needs to check them rather than find them. Written
+#: once and reused so the two reads cannot come to accept different vocabularies
+#: for the same field.
+_JOB_ID_VALUE = re.compile(r"(?:cia|nan)-[A-Za-z0-9._-]+")
+_CATEGORY_VALUE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+
 _CATEGORY = re.compile(
     r"(?:^\s*category:\s*|[\"']category[\"']\s*:\s*[\"'])"
     r"(?P<value>[A-Za-z_][A-Za-z0-9_-]*)",
@@ -152,16 +173,6 @@ def note_tool_call(tool: str, arguments: Any) -> None:
     )
 
 
-def _scrub_reason(reason: Any) -> str:
-    """Always scrub selector prose, even when normal redaction is disabled."""
-    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(
-        _as_text(reason),
-        scrub_paths=True,
-        scrub_ip_addresses=True,
-    )
-    return scrubbed
-
-
 def _parse_tool_trace(entry: Any) -> tuple[str, str, str]:
     text = _as_text(entry)
     native = _NATIVE_TRACE.match(text)
@@ -209,7 +220,34 @@ def _cia_results(output: str) -> list[dict[str, Any]]:
     the row joinable; ``jobs_root`` on the same event is what the id resolves
     against, and the report on disk is a better source for a verdict than a
     rendered string in any case.
+
+    **A verdict rendered before its own id is the case spans cannot see.**
+    A span begins at an id, so nothing ahead of the first one is read, and
+    ``json.dumps(..., sort_keys=True)`` puts ``category`` and ``confidence``
+    ahead of ``job_id`` -- the rendering the quoted-key alternatives in all
+    three patterns exist for. With one job that lost a verdict the old
+    whole-output search found; with two it gave the first job the second's
+    category, which is worse and is the exact failure this function was
+    written to remove.
+
+    Both are answered before the regex read, by parsing *output* as JSON when
+    it is JSON and taking each object's own keys. That is not a heuristic
+    about where a verdict sits relative to an id -- in an object they have no
+    order to reason about -- so it is right for any key ordering rather than
+    for the two this rendering happens to produce. Anything that is not JSON,
+    or is JSON without job ids in it, falls through to the spans below
+    unchanged.
+
+    The one-job whole-output fallback stays for the renderings that are not
+    JSON at all: a plain-text tool that prints a category above its id is the
+    same shape, and with one job there is nothing else the verdict could
+    belong to. It is restricted to that case for the same reason it is safe
+    there.
     """
+    structured = _cia_results_from_json(output)
+    if structured is not None:
+        return structured
+
     matches = list(_JOB_ID.finditer(output))
     # Insertion-ordered, so each job keeps one row at the position it was first
     # named -- the deduplication the `seen` set used to do, without the cost.
@@ -225,6 +263,8 @@ def _cia_results(output: str) -> list[dict[str, Any]]:
         )
     results: list[dict[str, Any]] = []
     for job_id, job_spans in spans.items():
+        if len(spans) == 1 and not _any_value(job_spans):
+            job_spans = [output]
         confidence = _first_value(_CONFIDENCE, job_spans)
         results.append(
             {
@@ -234,6 +274,85 @@ def _cia_results(output: str) -> list[dict[str, Any]]:
             }
         )
     return results
+
+
+def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
+    """One entry per object carrying a ``job_id``, or ``None`` if that is not what
+    *output* is.
+
+    ``None`` rather than ``[]`` for the not-applicable answer, so the caller can
+    tell "this is not JSON with job ids in it" from "this is, and it names no
+    jobs" -- collapsing those would make any JSON output suppress the regex read
+    that is the only one most tools need.
+
+    Only objects that carry a ``job_id`` are read, and only their own
+    ``category`` and ``confidence``. Nesting is walked because a tool wrapping
+    results in ``{"results": [...]}`` is the ordinary shape, but an inner
+    object's keys never leak outward: the walk descends past a container and an
+    object with an id is taken whole rather than merged with its parent's.
+
+    Validated to the same vocabulary the patterns accept, rather than taken on
+    trust -- ``{"job_id": 3}`` or ``{"confidence": "high"}`` is not a verdict
+    this record can carry, and writing it through would put a shape into the
+    log that nothing downstream expects.
+    """
+    try:
+        doc = json.loads(output)
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        raw_id = node.get("job_id")
+        if not isinstance(raw_id, str) or not _JOB_ID_VALUE.fullmatch(raw_id):
+            for value in node.values():
+                walk(value)
+            return
+        if raw_id in seen:
+            return
+        seen.add(raw_id)
+        category = node.get("category")
+        confidence = node.get("confidence")
+        results.append(
+            {
+                "job_id": raw_id,
+                "category": (
+                    category
+                    if isinstance(category, str)
+                    and _CATEGORY_VALUE.fullmatch(category)
+                    else None
+                ),
+                "confidence": (
+                    float(confidence)
+                    if type(confidence) in (int, float) and 0 <= confidence <= 1
+                    else None
+                ),
+            }
+        )
+
+    walk(doc)
+    return results or None
+
+
+def _any_value(spans: list[str]) -> bool:
+    """Whether *spans* carry either half of a verdict.
+
+    Either, not both: a result that names a category and no confidence is a
+    verdict the spans did find, and re-reading the whole output for the missing
+    half would take it from wherever it happened to sit -- including from
+    before the id, which is the text the span deliberately excludes.
+    """
+    return bool(
+        _first_value(_CATEGORY, spans) or _first_value(_CONFIDENCE, spans)
+    )
 
 
 def _first_value(pattern: re.Pattern[str], spans: list[str]) -> str | None:
@@ -325,9 +444,10 @@ def turn_events(
         {
             **_base(session_id, turn, "selection", mode, front_door),
             "ranked_tools": list(state.get("candidate_tools") or []),
-            # This sentence is the point of the decision log, but filesystem
-            # paths and addresses are never part of that point.
-            "reason": _scrub_reason(state.get("selection_rationale")),
+            # The ranking is the structured decision. The model's explanation
+            # saw the full conversation and may quote any part of it, so summary
+            # mode gives it the same content boundary as prompts and plans.
+            "reason": _content(state.get("selection_rationale"), mode),
         },
         {
             **_base(session_id, turn, "plan", mode, front_door),

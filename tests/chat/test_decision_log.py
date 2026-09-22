@@ -21,6 +21,10 @@ REASON = (
     "WaitCheck returns instruction evidence from "
     "/home/customer7/private/kernel.hip on 10.20.30.40."
 )
+SECRET_SELECTOR_REASON = (
+    "Choose triage_kernel_source because secret_kernel contains customer "
+    "credential ghp_0123456789abcdefghijklmnopqrstuvwxyz."
+)
 TOOL_ARGUMENTS = "{'source': '__global__ void secret_kernel() {}'}"
 TOOL_OUTPUT = (
     "Job cia-20260918-123456-abcd — customer run\n"
@@ -30,6 +34,16 @@ TOOL_OUTPUT = (
     "private output token 8491"
 )
 REPLY = "The private kernel has a race; add a barrier."
+DECISION_LOG_DOC = " ".join(
+    (
+        Path(__file__).resolve().parents[2]
+        / "docs"
+        / "chat"
+        / "configuration.md"
+    )
+    .read_text(encoding="utf-8")
+    .split()
+)
 
 
 def state() -> dict:
@@ -122,23 +136,27 @@ class TestSummaryModeStoresDecisionsNotContent:
         ):
             assert secret not in blob
 
-    def test_the_selector_reason_is_kept_but_always_scrubbed(self, monkeypatch):
+    def test_the_selector_reason_is_digested_not_persisted(self, monkeypatch):
         monkeypatch.setenv(decision_log.SESSION_LOG_ENV, "1")
+        secret_state = state()
+        secret_state["selection_rationale"] = SECRET_SELECTOR_REASON
         path = decision_log.record_turn(
             session_id="session-a",
             turn=1,
             query=QUERY,
             reply=REPLY,
-            state=state(),
+            state=secret_state,
         )
 
         selection = next(
             record for record in _records(path) if record["event"] == "selection"
         )
-        assert "WaitCheck returns instruction evidence" in selection["reason"]
-        assert "/home/customer7" not in selection["reason"]
-        assert "10.20.30.40" not in selection["reason"]
-        assert "<PATH:" in selection["reason"]
+        assert selection["reason"] == decision_log.summarize_text(
+            SECRET_SELECTOR_REASON
+        )
+        blob = path.read_text(encoding="utf-8")
+        assert "secret_kernel" not in blob
+        assert "ghp_0123456789abcdefghijklmnopqrstuvwxyz" not in blob
 
     def test_route_ranking_tool_order_and_critic_are_recorded(self, monkeypatch):
         monkeypatch.setenv(decision_log.SESSION_LOG_ENV, "1")
@@ -302,6 +320,10 @@ class TestFullModeIsLoudAndExplicit:
         assert "secret_kernel" in blob
         assert "private output token 8491" in blob
         assert REPLY in blob
+        selection = next(
+            record for record in _records(path) if record["event"] == "selection"
+        )
+        assert selection["reason"] == REASON
 
     def test_it_warns_once_per_session_and_names_the_file(
         self, monkeypatch, caplog
@@ -329,6 +351,26 @@ class TestFullModeIsLoudAndExplicit:
         ]
         assert len(warnings) == 1
         assert str(first) in warnings[0].message
+
+
+class TestThePublicPrivacyContractMatchesTheModes:
+    def test_summary_names_selector_rationale_as_digested_content(self):
+        assert (
+            "Questions, selector rationale, plans, tool arguments, tool output, "
+            "critic feedback, and answers are not stored in summary mode."
+            in DECISION_LOG_DOC
+        )
+        assert (
+            "character/byte/line/fence counts and a SHA-256 digest"
+            in DECISION_LOG_DOC
+        )
+
+    def test_full_names_verbatim_rationale_and_unscrubbed_locations(self):
+        assert "including selector rationale, verbatim" in DECISION_LOG_DOC
+        assert (
+            "does not scrub filesystem paths or IP addresses from the rationale"
+            in DECISION_LOG_DOC
+        )
 
 
 class TestInvokeAgentIsTheSharedRecordingSeam:
@@ -612,6 +654,199 @@ class TestEveryNamedJobIsFoundAndKeepsItsOwnVerdict:
         assert decision_log._cia_results(then_revised)[0]["category"] == "gpu_race"
 
 
+class TestOnlyARealIdCountsAsAJobBeingNamed:
+    """The line-start branch reads *any* leading token, and had to stop.
+
+    ``nan-`` is a live prefix here, so an indented numeric line beginning with
+    the word ``nan-`` was read as a job being announced. The damage is not a
+    stray row: a phantom id makes the turn look like it ran a CIA job, so the
+    record grows a ``jobs_root`` and a result list describing work that never
+    happened. The prefixed (``Job ``) and JSON forms stay deliberately loose,
+    because there the *context* is the evidence; a bare token at a line start
+    has no context, so it has to look like ``new_job_id()`` produced it.
+    """
+
+    def test_a_line_that_merely_starts_with_nan_is_not_a_job(self):
+        """Before: one result, id ``nan-trap``, wearing the verdict below it."""
+        assert (
+            decision_log._cia_results(
+                "  nan-trap value mean_sq=0\n"
+                "  category: gpu_race\n"
+                "  confidence: 0.9\n"
+            )
+            == []
+        )
+
+    def test_a_bare_id_at_a_line_start_is_still_a_job(self):
+        """The narrowness control: the tightening must not cost the listing.
+
+        A listing prints its ids bare and indented, with no ``Job`` prefix, so
+        if the lookahead were even slightly too strict this whole shape would
+        go dark -- which is the defect the line-start branch was added to fix.
+        """
+        results = decision_log._cia_results(JOB_LISTING)
+
+        assert [result["job_id"] for result in results] == [
+            "cia-20260918-064455-4fd02e",
+            "cia-20260918-071122-9ab31c",
+        ]
+
+    def test_a_prefixed_id_that_is_not_the_generated_shape_is_still_read(self):
+        """``Job `` is the context, so the id after it stays unconstrained.
+
+        Hand-written ids appear in fixtures and in a user typing a job name;
+        the lookahead is the price of a *bare* token, not of every id.
+        """
+        results = decision_log._cia_results(
+            "Job cia-a1\n  category: gpu_race\n  confidence: 0.82"
+        )
+
+        assert results == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82}
+        ]
+
+
+class TestAVerdictPrintedBeforeItsIdStillLands:
+    """Spans run forward from an id, and JSON does not promise that order.
+
+    ``json.dumps(..., sort_keys=True)`` puts ``category`` and ``confidence``
+    before ``job_id``, so every verdict sits *behind* the id that owns it and
+    the forward span sees nothing. Reading the whole output instead would fix
+    one job and break two, so the fix is structural: parse the JSON and take
+    each object whole. The line-oriented fallback below stays for the renderings
+    that are not JSON, and only where it cannot misattribute.
+    """
+
+    def _dumped(self, *jobs: dict) -> str:
+        payload = jobs[0] if len(jobs) == 1 else {"results": list(jobs)}
+        return json.dumps(payload, sort_keys=True, indent=2)
+
+    def test_one_job_dumped_with_sorted_keys_keeps_its_verdict(self):
+        """Before: ``category`` and ``confidence`` were both ``None``."""
+        output = self._dumped(
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82}
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82}
+        ]
+
+    def test_two_jobs_dumped_with_sorted_keys_do_not_swap_verdicts(self):
+        """The case a whole-output fallback cannot serve, hence the pre-pass.
+
+        With two jobs and one shared text there is no way to tell whose verdict
+        is whose, so a fallback would hand both jobs the first verdict it found
+        -- the misattribution this PR exists to remove, reintroduced by the fix
+        for its sibling. Structure is what separates them.
+        """
+        output = self._dumped(
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82},
+            {"job_id": "cia-b2", "category": "numeric_instability",
+             "confidence": 0.41},
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82},
+            {
+                "job_id": "cia-b2",
+                "category": "numeric_instability",
+                "confidence": 0.41,
+            },
+        ]
+
+    def test_a_nested_object_does_not_inherit_a_parent_verdict(self):
+        """Each object is taken whole and never merged with what encloses it.
+
+        Otherwise a summary verdict at the top level would be copied down onto
+        every job in the list beneath it, which is misattribution again -- this
+        time sourced from a field that is not even about a single job.
+        """
+        output = json.dumps(
+            {
+                "category": "gpu_race",
+                "confidence": 0.82,
+                "results": [{"job_id": "cia-a1"}],
+            },
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": None, "confidence": None}
+        ]
+
+    def test_a_json_field_of_the_wrong_type_reads_as_no_verdict(self):
+        """A number is not a category and ``"high"`` is not a confidence.
+
+        Being JSON says the shape is machine-written, not that the values are
+        the ones this record can carry, so they go through the same vocabulary
+        the line reader uses. ``None`` is the honest answer; coercing is how a
+        record ends up asserting something nobody said.
+        """
+        output = json.dumps(
+            {"job_id": "cia-x", "category": 3, "confidence": "high"}, sort_keys=True
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-x", "category": None, "confidence": None}
+        ]
+
+    def test_json_that_names_no_job_does_not_suppress_the_line_reader(self):
+        """Why the pre-pass answers ``None`` and not ``[]`` when it finds nothing.
+
+        A tool that returns JSON wrapping a *rendered* log has its ids inside a
+        string, where a structural read cannot see them and the line reader can.
+        If "not applicable" and "applicable, no jobs" collapsed into the same
+        empty answer, every such output would go dark -- the pre-pass added for
+        one shape silently disabling extraction for another.
+
+        The id is what is asserted, not the verdict: the verdict patterns are
+        line-anchored and ``json.dumps`` escapes the newlines inside the string,
+        so no reader recovers one here. Finding the job is the whole claim, and
+        it is the part the collapse would destroy.
+        """
+        output = json.dumps(
+            {
+                "ok": True,
+                "stdout": "Job cia-a1 done\n  category: gpu_race",
+            },
+            sort_keys=True,
+        )
+
+        assert [
+            result["job_id"] for result in decision_log._cia_results(output)
+        ] == ["cia-a1"]
+
+    def test_one_job_in_plain_text_recovers_a_verdict_printed_above_it(self):
+        """The fallback, and the only shape it is allowed to apply to.
+
+        Not every rendering is JSON. When exactly one job is named and its
+        forward spans yield nothing, the whole output is the span -- safe
+        precisely because there is one job to attribute to.
+        """
+        results = decision_log._cia_results(
+            "  category: gpu_race\n  confidence: 0.82\nJob cia-a1 done"
+        )
+
+        assert results == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82}
+        ]
+
+    def test_two_jobs_in_plain_text_do_not_fall_back(self):
+        """The bound on the fallback, stated as a test rather than a comment.
+
+        Both verdicts here precede both ids, so neither job can be served
+        without guessing. Two ``None``s are a record that is quiet about what
+        it does not know; two copies of ``gpu_race`` would be a record that is
+        wrong about one of them.
+        """
+        results = decision_log._cia_results(
+            "  category: gpu_race\n  confidence: 0.82\n"
+            "Job cia-a1 done\nJob cia-b2 done"
+        )
+
+        assert [result["category"] for result in results] == [None, None]
+
+
 class TestTheFieldsThatMakeARecordResolvable:
     """Four additions, each answering a question a record could not."""
 
@@ -642,11 +877,15 @@ class TestTheFieldsThatMakeARecordResolvable:
         from aorta.chat import config
 
         config.reset_settings()
-
-        tool_event = self._one(monkeypatch, "tool")
+        # `finally`, like the test below: cleanup after the assert runs only on
+        # the pass, so a failure here leaves the patched settings singleton in
+        # place for every test that follows and turns one red into many.
+        try:
+            tool_event = self._one(monkeypatch, "tool")
+        finally:
+            config.reset_settings()
 
         assert tool_event["jobs_root"] == str(tmp_path / "cia-jobs")
-        config.reset_settings()
 
     def test_the_root_is_raw_in_summary_mode_and_the_docs_say_so(
         self, monkeypatch, tmp_path

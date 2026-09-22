@@ -90,14 +90,15 @@ they capture the same decisions without changing the CLI to a streaming path:
   its own verdict;
 - `front_door`, which entry point the turn came through (`cli` or `ui`), so a
   browser demo and a scripted run are told apart rather than averaged;
-- `duration_seconds` for the whole turn, and `iterations` for how many critic
-  rounds the answer took; and
+- `duration_seconds` for the whole turn, `iterations` for how many critic
+  rounds the answer took, and whether the critic accepted the answer; and
 - a `resolution: null` attachment point keyed by `(session_id, turn)` for a
   later verified outcome.
 
-Questions, plans, tool arguments, tool output, critic feedback, and answers are
-not stored in summary mode. Each becomes only character/byte/line/fence counts
-and a SHA-256 digest. Nothing reads these files back or sends them anywhere.
+Questions, selector rationale, plans, tool arguments, tool output, critic
+feedback, and answers are not stored in summary mode. Each becomes only
+character/byte/line/fence counts and a SHA-256 digest. Nothing reads these files
+back or sends them anywhere.
 
 > [!NOTE]
 > **One field is stored raw in summary mode, and it is a filesystem path.**
@@ -118,11 +119,12 @@ and a SHA-256 digest. Nothing reads these files back or sends them anywhere.
 > `jobs_path` at a shared location — which most clusters need anyway — or
 > leave decision logging off.
 
-`AORTA_CHAT_SESSION_LOG=full` stores those values verbatim for an operator who
-explicitly needs a transcript. It emits one warning per session naming the
-file. Full mode can contain source, paths, credentials printed by tools, and
-model output; protect and remove it accordingly. Set the variable to `0` or
-leave it unset to disable all decision logging.
+`AORTA_CHAT_SESSION_LOG=full` stores those values, including selector rationale,
+verbatim for an operator who explicitly needs a transcript. Full mode does not
+scrub filesystem paths or IP addresses from the rationale. It emits one warning
+per session naming the file and can contain source, paths, addresses,
+credentials, and other model/tool output; protect and remove it accordingly.
+Set the variable to `0` or leave it unset to disable all decision logging.
 
 ## Settings
 
