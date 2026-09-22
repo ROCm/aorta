@@ -11,21 +11,24 @@
 #   uv pip install -e ".[all]"
 
 # Base dependency used by these scripts
-pyyaml>=6.0
+pyyaml==6.0.3
 
-# For analysis scripts
-matplotlib>=3.7.0
-numpy>=1.20.0
-pandas>=1.3.0
-openpyxl>=3.0.0
-seaborn>=0.12.0
-beautifulsoup4>=4.12.0
+# For analysis scripts.
+# Pins are the latest releases that still support the project's minimum Python
+# (3.10); matplotlib 3.11 / numpy 2.3+ / pandas 3.0 require >=3.11. Dependabot
+# respects requires-python, so it keeps these on the 3.10-compatible line.
+matplotlib==3.10.9
+numpy==2.2.6
+pandas==2.3.3
+openpyxl==3.1.5
+seaborn==0.13.2
+beautifulsoup4==4.15.0
 
 # For GEMM analysis (scripts/gemm_analysis/)
 git+https://github.com/AMD-AGI/TraceLens.git
 
 # For aorta-report CLI (src/aorta/report/)
-click>=8.0.0
+click==8.4.2
 
 # For hw_queue_eval (optional - install with: pip install -e ".[hw-queue]")
 # numpy>=1.20.0  # Already included above

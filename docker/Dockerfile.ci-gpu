@@ -57,9 +57,10 @@
 #
 # Pinned as tag@digest (not digest-only): the tag records which ROCm stream the
 # digest is meant to come from, so a bump proposal that silently changes streams
-# is visible in review (and anchors the docker Dependabot ecosystem to that
-# stream for as long as .github/dependabot.yml enables it); the digest keeps the
-# build reproducible. Resolved via:
+# is visible in review; the digest keeps the build reproducible. This OS/base
+# image is bumped MANUALLY -- it is intentionally NOT tracked by Dependabot (see
+# .github/dependabot.yml) so an OS change never lands unreviewed. Resolve a new
+# digest via:
 #   docker buildx imagetools inspect rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0
 FROM rocm/pytorch:rocm10.0_ubuntu26.04_py3.14_pytorch_release_2.13.0@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c
 
