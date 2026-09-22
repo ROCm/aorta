@@ -1,0 +1,68 @@
+{
+  "title": "GEMM Kernel Variance - Sweep Comparison",
+  "executive_summary": "Visual comparison of GEMM kernel performance variance between two training sweeps. This report compares kernel variance across different thread counts, channel configurations, and ranks.",
+  "html_header": "<!DOCTYPE html>\n<html>\n<head>\n    <meta charset=\"UTF-8\">\n    <title>GEMM Kernel Variance - Sweep Comparison</title>\n    <style>\n        body {\n            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;\n            max-width: 1200px;\n            margin: 0 auto;\n            padding: 20px;\n            line-height: 1.6;\n            background-color: #f5f5f5;\n        }\n        .container {\n            background-color: white;\n            padding: 30px;\n            border-radius: 8px;\n            box-shadow: 0 2px 4px rgba(0,0,0,0.1);\n        }\n        h1 {\n            border-bottom: 3px solid #333;\n            padding-bottom: 10px;\n            color: #2c3e50;\n        }\n        h2 {\n            border-bottom: 2px solid #3498db;\n            padding-bottom: 5px;\n            margin-top: 40px;\n            color: #2c3e50;\n        }\n        table {\n            border-collapse: collapse;\n            width: 100%;\n            margin: 20px 0;\n        }\n        th, td {\n            border: 1px solid #ddd;\n            padding: 12px;\n            text-align: left;\n        }\n        th {\n            background-color: #3498db;\n            color: white;\n            font-weight: 600;\n        }\n        tr:nth-child(even) {\n            background-color: #f9f9f9;\n        }\n        img {\n            max-width: 100%;\n            height: auto;\n            display: block;\n            margin: 10px auto;\n            border: 1px solid #ddd;\n            border-radius: 4px;\n            padding: 5px;\n            background-color: white;\n        }\n        .comparison-table { width: 100%; }\n        .comparison-table td { width: 50%; vertical-align: top; }\n        .comparison-table th {\n            background-color: #34495e;\n        }\n        hr {\n            border: none;\n            border-top: 2px solid #ecf0f1;\n            margin: 30px 0;\n        }\n        .info-box {\n            background-color: #e8f4f8;\n            border-left: 4px solid #3498db;\n            padding: 15px;\n            margin: 20px 0;\n            border-radius: 4px;\n        }\n        .data-section {\n            background-color: #f8f9fa;\n            padding: 20px;\n            border-radius: 4px;\n            margin: 20px 0;\n        }\n        .data-section h3 {\n            margin-top: 0;\n            color: #2c3e50;\n        }\n        @media print {\n            body { margin: 0; background-color: white; }\n            .container { box-shadow: none; }\n            h2 { page-break-before: always; }\n            h2:first-of-type { page-break-before: auto; }\n        }\n    </style>\n</head>\n<body>\n<div class=\"container\">\n",
+  "html_footer": "\n</div>\n</body>\n</html>",
+  "sections": [
+    {
+      "id": "threads",
+      "title": "Variance by Thread Count",
+      "charts": [
+        {
+          "name": "Thread Count Variance",
+          "file": "variance_by_threads_boxplot.png",
+          "alt": "Threads comparison",
+          "description": "Box plot showing GEMM kernel variance distribution across different thread counts."
+        }
+      ]
+    },
+    {
+      "id": "channels",
+      "title": "Variance by Channel Count",
+      "charts": [
+        {
+          "name": "Channel Count Variance",
+          "file": "variance_by_channels_boxplot.png",
+          "alt": "Channels comparison",
+          "description": "Box plot showing GEMM kernel variance distribution across different channel configurations."
+        }
+      ]
+    },
+    {
+      "id": "ranks",
+      "title": "Variance by Rank",
+      "charts": [
+        {
+          "name": "Rank Variance",
+          "file": "variance_by_ranks_boxplot.png",
+          "alt": "Ranks comparison",
+          "description": "Box plot showing GEMM kernel variance distribution across different GPU ranks."
+        }
+      ]
+    },
+    {
+      "id": "violin",
+      "title": "Variance Distribution (Violin Plots)",
+      "charts": [
+        {
+          "name": "Variance Distribution",
+          "file": "variance_violin_combined.png",
+          "alt": "Violin comparison",
+          "description": "Violin plots showing the full distribution of GEMM kernel variance."
+        }
+      ]
+    },
+    {
+      "id": "interaction",
+      "title": "Thread-Channel Interaction",
+      "charts": [
+        {
+          "name": "Thread-Channel Interaction",
+          "file": "variance_thread_channel_interaction.png",
+          "alt": "Interaction comparison",
+          "description": "Interaction plot showing how thread count and channel count jointly affect kernel variance."
+        }
+      ]
+    }
+  ]
+}
