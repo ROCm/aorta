@@ -114,6 +114,14 @@ jobs:
             # module it guards leaves the module unguarded.
             'src/aorta/registry/mitigations.py'
             'tests/registry/test_mitigation_variable_presence.py'
+            # The audit locates its libraries through this resolver, which is
+            # the only thing that knows both the classic `/opt/rocm` layout and
+            # the TheRock site-packages one `Dockerfile.ci-gpu` actually has.
+            # A PR that changes only the resolver changes which directories get
+            # scanned -- scanning the wrong ones reports the registry as unread
+            # -- so without this entry it would skip the sole GPU-backed check
+            # of the audit it just repointed.
+            'src/aorta/instrumentation/rocm_paths.py'
             'tests/hw_queue_eval/*'
             'tests/instrumentation/test_environment.py'
             'tests/instrumentation/test_env_knob_audit.py'

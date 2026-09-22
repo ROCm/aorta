@@ -294,7 +294,11 @@ def scan_plan(
     roots: RocmRoots | None = None,
     torch: tuple[Path | None, str] | None = None,
 ) -> tuple[list[Path], str]:
-    """``(directories to scan, why not)``. A reason is non-empty iff the list is.
+    """``(directories to scan, why not)``. A reason is non-empty iff the list is empty.
+
+    So a caller decides on the list, never on the reason: a usable plan carries
+    ``""`` because there is nothing to explain, and reading that as an error
+    would turn every successful scan into a failure.
 
     **Every one of the eighteen variables must have a library that could carry
     it, or this check does not run at all.** Fifteen are read by
@@ -556,6 +560,39 @@ def test_a_cpu_only_torch_beside_rocm_does_not_answer_either(tmp_path):
     assert "PYTORCH_NO_CUDA_MEMORY_CACHING" in why_not
 
 
+def test_the_reason_is_non_empty_exactly_when_the_plan_is_empty(tmp_path):
+    """The ``scan_plan`` contract itself, over every branch that can return.
+
+    Worth its own test because the docstring stated it backwards and nothing
+    read the pair together: each case above asserts one half, so a return that
+    carried both a usable list *and* a reason -- which a caller would read as a
+    failed scan -- passed all of them. Pinning the biconditional is what makes
+    "decide on the list, never on the reason" safe to rely on.
+    """
+    rocm = tmp_path / "_rocm_sdk_core"
+    (rocm / "lib").mkdir(parents=True)
+    torch_like = tmp_path / "torch" / "lib"
+    torch_like.mkdir(parents=True)
+    empty = tmp_path / "found-but-empty"
+    empty.mkdir()
+    missing = tmp_path / "definitely-not-rocm"
+    cpu_torch = (None, "torch 2.13.0+cpu is not a ROCm build")
+
+    plans = [
+        scan_plan(roots=_roots(rocm, rocm), torch=_rocm_torch(torch_like)),
+        scan_plan(roots=_roots(empty, empty), torch=_rocm_torch(torch_like)),
+        scan_plan(
+            roots=_roots(missing, missing, source="none"),
+            torch=_rocm_torch(torch_like),
+        ),
+        scan_plan(roots=_roots(rocm, rocm), torch=cpu_torch),
+        scan_plan(roots=_roots(missing, missing, source="none"), torch=cpu_torch),
+    ]
+    assert [bool(dirs) for dirs, _ in plans] == [True, False, False, False, False]
+    for dirs, why_not in plans:
+        assert bool(why_not) is not bool(dirs), (dirs, why_not)
+
+
 def test_a_real_rocm_torch_is_recognised_by_its_hip_version(monkeypatch):
     """``torch.version.hip`` is the discriminator, and it is read, not assumed."""
     torch = pytest.importorskip("torch")
@@ -642,6 +679,11 @@ def test_the_gpu_lane_arms_the_require_flag_and_selects_this_file():
     for pattern in (
         "'src/aorta/registry/mitigations.py'",
         "'tests/registry/test_mitigation_variable_presence.py'",
+        # Not the registry and not the test, but it decides *which directories
+        # get scanned*: `scan_plan` reads `resolve_rocm_roots` for both the
+        # classic and the TheRock layouts. A resolver-only PR repoints the
+        # audit without touching either file above.
+        "'src/aorta/instrumentation/rocm_paths.py'",
     ):
         assert pattern in workflow, (
             f"{pattern} is not in the GPU job's change filter, so a change to "
