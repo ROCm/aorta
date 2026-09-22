@@ -265,6 +265,49 @@ class TestQueuedWorkKeepsItsRecoveryIdentity:
         assert state["state"] == "running"
         assert state["attempts"] == 2
 
+    def test_restart_reclaims_deferred_work_from_a_cancelled_job(self, tmp_path, monkeypatch):
+        from aorta.cia.launch.job import update_job_status
+        from aorta.cia.launch.registry import scan_active_jobs
+
+        job, job_dir = _job(tmp_path)
+        bundle = job_dir / "bundle"
+        bundle.mkdir()
+        assert poll_mod.claim_autopsy_attempt(job_dir, 1)
+        poll_mod.record_autopsy_state(
+            job_dir,
+            "running",
+            job_id=job.job_id,
+            attempts=1,
+        )
+
+        # Model cancellation, process exit, and the recovery lease expiring
+        # before a new Watch process starts.
+        monkeypatch.setattr(poll_mod, "AUTOPSY_QUEUED_STALE_AFTER_SEC", -1)
+        poll_mod.defer_stopping_autopsy(
+            job_dir,
+            reason="Watch stopped while Autopsy was still unwinding",
+            attempt=1,
+        )
+        update_job_status(tmp_path, job.job_id, "cancelled")
+        deferred = poll_mod.autopsy_state(job_dir)
+        assert deferred["state"] == "deferred"
+        assert deferred["attempts"] == 1
+        assert scan_active_jobs(tmp_path) == []
+
+        calls = []
+        monkeypatch.setattr(poll_mod, "pause", lambda _stop, _seconds: False)
+        monkeypatch.setattr(
+            "aorta.cia.watch.trigger.trigger_autopsy",
+            lambda _bundle, recovered, _jobs_root, stop=None: calls.append(recovered.job_id),
+        )
+
+        poll_mod.poll_jobs(tmp_path, max_rounds=1)
+
+        state = poll_mod.autopsy_state(job_dir)
+        assert calls == [job.job_id]
+        assert state["state"] == "done"
+        assert state["attempts"] == 2
+
     def test_a_worker_stopped_before_start_runs_nothing(self, tmp_path, monkeypatch):
         stop = threading.Event()
         stop.set()

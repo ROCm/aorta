@@ -21,7 +21,7 @@ import yaml
 from aorta.cia.autopsy.adapters.stderr_watch import scan_stderr_text
 from aorta.cia.cancellation import Stop, pause, stopped
 from aorta.cia.launch.job import JobRecord, record_watch_files
-from aorta.cia.launch.registry import scan_active_jobs
+from aorta.cia.launch.registry import scan_active_jobs, scan_all_jobs
 from aorta.cia.watch.cursors import load_cursors, read_new_bytes, save_cursors
 from aorta.cia.watch.log_finder import LogFinder
 from aorta.cia.watch.watcher import LogWatcher
@@ -269,6 +269,7 @@ AUTOPSY_MAX_ATTEMPTS = 2
 #: attempts run out. Treating failure as terminal would have made the counter
 #: decorative.
 _AUTOPSY_TERMINAL = frozenset({"done", "gave_up"})
+_AUTOPSY_RECOVERABLE = frozenset({"deferred", "failed", "abandoned", "queued", "running"})
 
 #: Written beside the job the moment it alerts, before the work is queued.
 #: "Diagnosed once" used to live in a set inside poll_jobs, so a watcher that
@@ -872,7 +873,27 @@ def _poll_rounds(
         if only:
             active = [job for job in active if job.job_id == only]
 
-        for job in active:
+        # Scheduler status and Autopsy recovery are separate lifecycles. Triage
+        # marks a cancelled allocation terminal so Watch stops tailing its dead
+        # log, but a worker that was still unwinding may have left a durable
+        # deferred attempt. Re-scan every job record for those states so a new
+        # Watch process can reclaim the attempt after its lease expires.
+        selected = {job.job_id for job in active}
+        recoverable = []
+        for job in scan_all_jobs(jobs_root):
+            if job.job_id in selected or (only and job.job_id != only):
+                continue
+            job_state_dir = jobs_root / job.job_id
+            recorded = autopsy_state(job_state_dir)
+            if (
+                recorded.get("state") in _AUTOPSY_RECOVERABLE
+                and not _autopsy_state_is_settled(recorded)
+                and (job_state_dir / "bundle").exists()
+            ):
+                recoverable.append(job)
+                selected.add(job.job_id)
+
+        for job in [*active, *recoverable]:
             if stopped(stop):
                 print("[watch] caller gave up; ending the poll loop")
                 return
@@ -904,13 +925,7 @@ def _poll_rounds(
             # would otherwise keep its failed state for ever while the counter
             # that was meant to retry it never advanced.
             pending = recorded
-            if pending.get("state") in {
-                "deferred",
-                "failed",
-                "abandoned",
-                "queued",
-                "running",
-            }:
+            if pending.get("state") in _AUTOPSY_RECOVERABLE:
                 bundle = job_state_dir / "bundle"
                 if bundle.exists():
                     attempts = autopsy_attempts(job_state_dir) + 1

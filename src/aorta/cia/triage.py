@@ -624,9 +624,9 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
                 f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
                 "node until its time limit"
             )
-        # Terminal, so scan_active_jobs stops handing this to Watch. Leaving it
-        # 'running' would have every later round poll a log that stopped growing
-        # when the job died, until the staleness window finally retired it.
+        # Terminal scheduler status removes this from Watch's active log path.
+        # Durable unsettled Autopsy state is recovered separately; leaving the
+        # job 'running' would also make every later round poll a dead log.
         update_job_status(jobs_root, job_id, "cancelled")
         # Watch owns its own bounded Autopsy pool. Give it a bounded chance to
         # observe the same stop event and persist queued/running work before the
