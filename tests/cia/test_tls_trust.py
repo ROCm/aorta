@@ -9,16 +9,22 @@ instead of the system store, without asking and without saying so.
 Certifi is right for a site behind a TLS interception proxy whose CA certifi
 knows. It is wrong for the opposite site, whose corporate CA is in the system
 store and not in certifi, and there it breaks TLS that worked before the
-import. The choice now lives on the LiteLLM client as ``ssl_verify``.
+import. The choice now lives on the provider client's TLS context.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import json
 import os
 import pathlib
+import shutil
+import ssl
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -36,6 +42,9 @@ def no_ca_env(monkeypatch):
 @pytest.fixture
 def lm_built(monkeypatch):
     """Build an LM without reaching a network."""
+    seen = {}
+    sync_client = object()
+    async_client = object()
     monkeypatch.setattr(llm_mod.dspy, "configure", lambda **kw: None)
     monkeypatch.setattr(llm_mod, "_configured", False)
     monkeypatch.setattr(
@@ -43,10 +52,160 @@ def lm_built(monkeypatch):
         "chat_provider",
         lambda **_k: ("http://vllm:8000/v1", "EMPTY", "unused", "vllm"),
     )
+    monkeypatch.setattr(
+        llm_mod,
+        "_openai_clients",
+        lambda **kwargs: (seen.update(kwargs) or (sync_client, async_client)),
+    )
+    seen["sync_client"] = sync_client
+    seen["async_client"] = async_client
+    return seen
 
 
 def _ca_env() -> dict[str, str | None]:
     return {var: os.environ.get(var) for var in CA_VARS}
+
+
+@pytest.fixture
+def private_ca_server(tmp_path):
+    """An OpenAI-compatible HTTPS endpoint signed by a test-only private CA."""
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("the private-CA transport test needs openssl")
+
+    ca_key = tmp_path / "ca.key"
+    ca_cert = tmp_path / "ca.pem"
+    server_key = tmp_path / "server.key"
+    server_csr = tmp_path / "server.csr"
+    server_cert = tmp_path / "server.pem"
+    server_ext = tmp_path / "server.ext"
+
+    def run_openssl(*args):
+        subprocess.run(
+            [openssl, *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    run_openssl(
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-sha256",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=AORTA test CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+        "-keyout",
+        str(ca_key),
+        "-out",
+        str(ca_cert),
+    )
+    run_openssl(
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-sha256",
+        "-subj",
+        "/CN=127.0.0.1",
+        "-keyout",
+        str(server_key),
+        "-out",
+        str(server_csr),
+    )
+    server_ext.write_text(
+        "subjectAltName=IP:127.0.0.1\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n",
+        encoding="utf-8",
+    )
+    run_openssl(
+        "x509",
+        "-req",
+        "-in",
+        str(server_csr),
+        "-CA",
+        str(ca_cert),
+        "-CAkey",
+        str(ca_key),
+        "-CAcreateserial",
+        "-days",
+        "1",
+        "-sha256",
+        "-extfile",
+        str(server_ext),
+        "-out",
+        str(server_cert),
+    )
+
+    bodies = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length))
+            bodies.append(body)
+            if "ssl_verify" in body:
+                payload = {"error": "transport settings are not request fields"}
+                status = 400
+            else:
+                payload = {
+                    "id": "chatcmpl-private-ca",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": body.get("model", "test-model"),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "private-ca-ok",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                }
+                status = 200
+            encoded = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(server_cert, server_key)
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield (
+            f"https://127.0.0.1:{server.server_address[1]}/v1",
+            ca_cert,
+            bodies,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 class TestImportingIsInert:
@@ -75,14 +234,18 @@ class TestBuildingLeavesTheProcessAlone:
         lm = llm_mod.build_lm()
         assert _ca_env() == before
         assert all(value is None for value in before.values())
-        assert "certifi" in str(lm.kwargs["ssl_verify"])
+        assert "certifi" in str(lm_built["verify"])
+        assert "ssl_verify" not in lm.kwargs
+        assert lm._sync_client is lm_built["sync_client"]
+        assert lm._async_client is lm_built["async_client"]
 
     def test_an_existing_setting_is_somebody_having_decided(self, no_ca_env, lm_built, monkeypatch):
         monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/corporate.pem")
         before = _ca_env()
         lm = llm_mod.build_lm()
         assert _ca_env() == before
-        assert lm.kwargs["ssl_verify"] == "/etc/ssl/corporate.pem"
+        assert lm_built["verify"] == "/etc/ssl/corporate.pem"
+        assert "ssl_verify" not in lm.kwargs
 
     def test_the_other_variable_alone_also_counts_as_decided(
         self, no_ca_env, lm_built, monkeypatch
@@ -92,7 +255,8 @@ class TestBuildingLeavesTheProcessAlone:
         lm = llm_mod.build_lm()
         assert _ca_env() == before
         assert os.environ.get("SSL_CERT_FILE") is None
-        assert lm.kwargs["ssl_verify"] == "/etc/ssl/corporate.pem"
+        assert lm_built["verify"] == "/etc/ssl/corporate.pem"
+        assert "ssl_verify" not in lm.kwargs
 
     def test_it_can_use_system_trust_for_the_site_certifi_would_break(
         self, no_ca_env, lm_built, monkeypatch
@@ -101,7 +265,8 @@ class TestBuildingLeavesTheProcessAlone:
         before = _ca_env()
         lm = llm_mod.build_lm()
         assert _ca_env() == before
-        assert lm.kwargs["ssl_verify"] is True
+        assert lm_built["verify"] is True
+        assert "ssl_verify" not in lm.kwargs
 
     def test_a_missing_certifi_is_not_a_crash(self, no_ca_env, lm_built, monkeypatch):
         """certifi arrived transitively; it may not be there at all."""
@@ -116,7 +281,8 @@ class TestBuildingLeavesTheProcessAlone:
         before = _ca_env()
         lm = llm_mod.build_lm()
         assert _ca_env() == before
-        assert lm.kwargs["ssl_verify"] is True
+        assert lm_built["verify"] is True
+        assert "ssl_verify" not in lm.kwargs
 
     def test_build_lm_never_assigns_the_process_ca_variables(self):
         source = inspect.getsource(llm_mod.build_lm) + inspect.getsource(llm_mod._ssl_verify)
@@ -124,8 +290,74 @@ class TestBuildingLeavesTheProcessAlone:
         assert "os.environ.setdefault" not in source
 
 
-def test_certifi_is_declared_rather_than_inherited():
-    """It worked only because litellm happened to pull it in."""
+class TestEachCallGetsTheMatchingProviderClient:
+    def test_sync_calls_receive_the_sync_client(self, monkeypatch):
+        sync_client = object()
+        seen = {}
+
+        def forward(_self, prompt=None, messages=None, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(llm_mod.dspy.LM, "forward", forward)
+        lm = llm_mod.RedactingLM(model="openai/test", sync_client=sync_client)
+
+        lm.forward(messages=[{"role": "user", "content": "hello"}])
+
+        assert seen["client"] is sync_client
+
+    async def test_async_calls_receive_the_async_client(self, monkeypatch):
+        async_client = object()
+        seen = {}
+
+        async def aforward(_self, prompt=None, messages=None, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(llm_mod.dspy.LM, "aforward", aforward)
+        lm = llm_mod.RedactingLM(model="openai/test", async_client=async_client)
+
+        await lm.aforward(messages=[{"role": "user", "content": "hello"}])
+
+        assert seen["client"] is async_client
+
+
+class TestCustomCAReachesTheTransport:
+    def test_openai_route_completes_real_https_without_leaking_ca_into_json(
+        self,
+        no_ca_env,
+        private_ca_server,
+        monkeypatch,
+    ):
+        api_base, ca_cert, bodies = private_ca_server
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_cert))
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        monkeypatch.setattr(llm_mod, "chat_provider", lambda **_kwargs: None)
+        monkeypatch.setattr(llm_mod, "_legacy_env", lambda: None)
+        before = _ca_env()
+
+        lm = llm_mod.build_lm(
+            model="test-model",
+            api_base=api_base,
+            api_key="private-ca-key",
+            max_tokens=8,
+        )
+        lm.num_retries = 0
+        try:
+            result = lm.forward(
+                messages=[{"role": "user", "content": "hello"}],
+            )
+        finally:
+            lm._sync_client.close()
+            asyncio.run(lm._async_client.close())
+
+        assert result.choices[0].message.content == "private-ca-ok"
+        assert bodies and "ssl_verify" not in bodies[0]
+        assert _ca_env() == before
+
+
+def test_tls_transport_dependencies_are_declared_rather_than_inherited():
+    """The implementation imports these directly, whatever dspy happens to install."""
     try:
         import tomllib
     except ModuleNotFoundError:  # Python 3.10
@@ -134,4 +366,8 @@ def test_certifi_is_declared_rather_than_inherited():
     root = pathlib.Path(__file__).resolve().parents[2]
     data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     cia = data["project"]["optional-dependencies"]["cia"]
-    assert any(dep.split(";")[0].strip().startswith("certifi") for dep in cia), cia
+    for dependency in ("certifi", "httpx", "openai"):
+        assert any(dep.split(";")[0].strip().startswith(dependency) for dep in cia), (
+            dependency,
+            cia,
+        )

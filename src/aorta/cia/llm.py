@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import ssl
 import sys
 from typing import Any
 
@@ -50,11 +51,12 @@ def _ssl_verify() -> str | bool:
     user imported alongside -- so a Watch that needed certifi quietly changed
     HTTPS for everyone else.
 
-    So the choice is a LiteLLM client argument, ``ssl_verify``: a CA path, or
-    True for the system store. SSL_CERT_FILE / REQUESTS_CA_BUNDLE are still
-    read, because that is somebody having decided, and CIA_SSL_USE_CERTIFI=0
-    still turns certifi off for the site it would otherwise break. Nothing
-    here writes them.
+    So the choice is client configuration: a CA path, or True for the system
+    store. OpenAI-compatible routes receive concrete clients whose TLS context
+    carries that choice; other LiteLLM providers receive ``ssl_verify``.
+    SSL_CERT_FILE / REQUESTS_CA_BUNDLE are still read, because that is somebody
+    having decided, and CIA_SSL_USE_CERTIFI=0 still turns certifi off for the
+    site it would otherwise break. Nothing here writes them.
     """
     for var in _CA_ENV_VARS:
         chosen = os.environ.get(var)
@@ -68,6 +70,52 @@ def _ssl_verify() -> str | bool:
         log.debug("certifi is not installed; using system TLS trust")
         return True
     return certifi.where()
+
+
+def _ssl_context(verify: str | bool) -> ssl.SSLContext:
+    """Turn the selected trust source into an HTTP-client TLS context."""
+    if isinstance(verify, str):
+        return ssl.create_default_context(cafile=verify)
+    return ssl.create_default_context()
+
+
+def _openai_clients(
+    *,
+    api_base: str | None,
+    api_key: str,
+    verify: str | bool,
+) -> tuple[Any, Any]:
+    """OpenAI-compatible sync/async clients with per-LM TLS trust.
+
+    LiteLLM currently moves ``ssl_verify`` into ``extra_body`` on its
+    ``openai/*`` route instead of applying it to the transport. Supplying the
+    provider clients is its supported escape hatch: the CA context is attached
+    directly to each httpx pool and no TLS option enters the request JSON or
+    process-global state.
+    """
+    import httpx
+    from openai import AsyncOpenAI, OpenAI
+
+    context = _ssl_context(verify)
+    common: dict[str, Any] = {"api_key": api_key}
+    if api_base:
+        common["base_url"] = api_base
+    return (
+        OpenAI(
+            **common,
+            http_client=httpx.Client(
+                verify=context,
+                follow_redirects=True,
+            ),
+        ),
+        AsyncOpenAI(
+            **common,
+            http_client=httpx.AsyncClient(
+                verify=context,
+                follow_redirects=True,
+            ),
+        ),
+    )
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -276,6 +324,17 @@ class RedactingLM(dspy.LM):
     module reaches is not this module's business to track.
     """
 
+    def __init__(
+        self,
+        *args,
+        sync_client: Any = None,
+        async_client: Any = None,
+        **kwargs,
+    ):
+        self._sync_client = sync_client
+        self._async_client = async_client
+        super().__init__(*args, **kwargs)
+
     @staticmethod
     def _clean(items: tuple, prompt: str | None, messages: Any) -> tuple:
         return (
@@ -286,10 +345,14 @@ class RedactingLM(dspy.LM):
 
     def forward(self, prompt=None, messages=None, **kwargs):
         _, prompt, messages = self._clean((), prompt, messages)
+        if self._sync_client is not None:
+            kwargs.setdefault("client", self._sync_client)
         return super().forward(prompt=prompt, messages=messages, **kwargs)
 
     async def aforward(self, prompt=None, messages=None, **kwargs):
         _, prompt, messages = self._clean((), prompt, messages)
+        if self._async_client is not None:
+            kwargs.setdefault("client", self._async_client)
         return await super().aforward(prompt=prompt, messages=messages, **kwargs)
 
     def __call__(self, *items, prompt=None, messages=None, **kwargs):
@@ -337,17 +400,38 @@ def build_lm(
         )
     settings_base, settings_key, settings_model, provider = resolved or ("", "", "", "vllm")
 
+    resolved_base = (api_base or settings_base) or None
+    resolved_key = api_key or settings_key or "EMPTY"
+    qualified_model = _qualified_model(
+        model or settings_model or DEFAULT_MODEL,
+        provider,
+        bool(resolved_base),
+    )
+    verify = _ssl_verify()
+    transport: dict[str, Any]
+    if qualified_model.startswith("openai/"):
+        sync_client, async_client = _openai_clients(
+            api_base=resolved_base,
+            api_key=resolved_key,
+            verify=verify,
+        )
+        transport = {
+            "sync_client": sync_client,
+            "async_client": async_client,
+        }
+    else:
+        # Non-OpenAI LiteLLM providers still consume this as provider
+        # configuration; the OpenAI-compatible route instead receives concrete
+        # clients above so the option cannot leak into its JSON request body.
+        transport = {"ssl_verify": verify}
+
     return RedactingLM(
-        model=_qualified_model(
-            model or settings_model or DEFAULT_MODEL,
-            provider,
-            bool(api_base or settings_base),
-        ),
-        api_base=(api_base or settings_base) or None,
-        api_key=api_key or settings_key or "EMPTY",
+        model=qualified_model,
+        api_base=resolved_base,
+        api_key=resolved_key,
         max_tokens=max_tokens,
         cache=False,
-        ssl_verify=_ssl_verify(),
+        **transport,
     )
 
 
