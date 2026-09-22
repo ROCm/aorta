@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import queue
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, wait
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -277,6 +279,12 @@ _AUTOPSY_STATE = "autopsy.state.json"
 #: One file per attempt, created exclusively. See :func:`claim_autopsy_attempt`.
 _AUTOPSY_CLAIM = ".autopsy.claim"
 
+#: State transitions need both a process-local lock (for Watch and its worker)
+#: and an advisory file lock (for two Watch processes sharing a jobs root).
+_AUTOPSY_STATE_LOCK = ".autopsy.state.lock"
+_AUTOPSY_STATE_LOCKS: dict[Path, threading.Lock] = {}
+_AUTOPSY_STATE_LOCKS_GUARD = threading.Lock()
+
 
 def autopsy_state(job_dir: Path) -> dict:
     """What is known about this job's Autopsy, or ``{}`` if it has not alerted."""
@@ -350,23 +358,29 @@ def autopsy_attempts(job_dir: Path) -> int:
         return 0
 
 
-def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> bool:
-    """Note that this job is deferred, queued, running, or finished with Autopsy.
+@contextmanager
+def _autopsy_state_guard(job_dir: Path) -> Iterator[None]:
+    """Serialize one job's read-check-replace transitions across threads/processes."""
+    key = job_dir.resolve()
+    with _AUTOPSY_STATE_LOCKS_GUARD:
+        thread_lock = _AUTOPSY_STATE_LOCKS.setdefault(key, threading.Lock())
 
-    Written before the work is enqueued rather than after it finishes: the
-    point is to survive a crash *during* an Autopsy, which is exactly when the
-    in-memory version forgot. A job already carrying a state is skipped, so a
-    four-hour escalation is started once however many rounds run over it.
+    with thread_lock:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        with (job_dir / _AUTOPSY_STATE_LOCK).open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-    Replaced atomically so a failed update leaves the previous recoverable
-    state intact. The return value is part of admission: callers must not claim
-    work that neither a worker nor this durable record owns.
-    """
+
+def _write_autopsy_state_locked(job_dir: Path, state: str, **fields: object) -> bool:
+    """Atomically replace state while :func:`_autopsy_state_guard` is held."""
     payload = {"state": state, "ts": _utc_now(), **fields}
     target = job_dir / _AUTOPSY_STATE
     temporary = job_dir / f".{_AUTOPSY_STATE}.{uuid.uuid4().hex}.tmp"
     try:
-        job_dir.mkdir(parents=True, exist_ok=True)
         with temporary.open("x", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
             handle.flush()
@@ -383,6 +397,29 @@ def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> bool:
     return True
 
 
+def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> bool:
+    """Note that this job is deferred, queued, running, or finished with Autopsy.
+
+    Written before the work is enqueued rather than after it finishes: the
+    point is to survive a crash *during* an Autopsy, which is exactly when the
+    in-memory version forgot. A job already carrying a state is skipped, so a
+    four-hour escalation is started once however many rounds run over it.
+
+    Replaced atomically so a failed update leaves the previous recoverable
+    state intact. The return value is part of admission: callers must not claim
+    work that neither a worker nor this durable record owns.
+
+    The per-job guard also makes this the serialization point for worker and
+    shutdown transitions. Read-check-write helpers below hold the same guard.
+    """
+    try:
+        with _autopsy_state_guard(job_dir):
+            return _write_autopsy_state_locked(job_dir, state, **fields)
+    except OSError as exc:
+        print(f"[watch] could not record autopsy state for {job_dir.name}: {exc}")
+        return False
+
+
 def abandon_autopsy(job_dir: Path, *, reason: str, attempt: int | None = None) -> bool:
     """Make an accepted Autopsy recoverable after cancellation.
 
@@ -391,57 +428,88 @@ def abandon_autopsy(job_dir: Path, *, reason: str, attempt: int | None = None) -
     ``attempts`` were dropped, the next Watch would retry the same number,
     encounter that claim, and incorrectly conclude another worker owned it.
     """
-    recorded = autopsy_state(job_dir)
-    if recorded.get("state") in _AUTOPSY_TERMINAL:
-        return True
-    fields = {key: value for key, value in recorded.items() if key not in {"state", "ts", "reason"}}
-    fields.setdefault("job_id", job_dir.name)
-    if attempt is not None:
-        try:
-            recorded_attempt = int(fields.get("attempts") or 0)
-        except (TypeError, ValueError):
-            recorded_attempt = 0
-        fields["attempts"] = max(recorded_attempt, attempt)
-    return record_autopsy_state(
-        job_dir,
-        "abandoned",
-        **fields,
-        reason=reason,
-    )
+    try:
+        with _autopsy_state_guard(job_dir):
+            recorded = autopsy_state(job_dir)
+            if recorded.get("state") in _AUTOPSY_TERMINAL:
+                return True
+            fields = {
+                key: value
+                for key, value in recorded.items()
+                if key not in {"state", "ts", "reason"}
+            }
+            fields.setdefault("job_id", job_dir.name)
+            if attempt is None:
+                return _write_autopsy_state_locked(
+                    job_dir,
+                    "abandoned",
+                    **fields,
+                    reason=reason,
+                )
+            try:
+                recorded_attempt = int(fields.get("attempts") or 0)
+            except (TypeError, ValueError):
+                recorded_attempt = 0
+            # An old worker/shutdown path must not replace a newer attempt.
+            if recorded_attempt > attempt:
+                return True
+            fields["attempts"] = max(recorded_attempt, attempt)
+            return _write_autopsy_state_locked(
+                job_dir,
+                "abandoned",
+                **fields,
+                reason=reason,
+            )
+    except OSError as exc:
+        print(f"[watch] could not record autopsy state for {job_dir.name}: {exc}")
+        return False
 
 
 def defer_stopping_autopsy(job_dir: Path, *, reason: str, attempt: int) -> bool:
-    """Persist a retryable state without racing the worker still unwinding.
+    """Conditionally defer the exact accepted attempt that is still running.
 
-    A provider call already in flight may outlive Watch's bounded grace period.
-    Retrying it immediately would overlap the original attempt and could start
-    a second production sweep. The short queued-work lease is enough time for
-    the cooperative worker to finish; after it expires, a restarted Watch can
-    recover work from a process that exited with its daemon still running.
+    Worker completion and shutdown use the same per-job guard. If ``done`` wins
+    first, this observes it and leaves it terminal; if deferral wins first, the
+    worker's later ``done`` write follows it and remains final. An older
+    shutdown cannot defer a newer attempt.
     """
-    recorded = autopsy_state(job_dir)
-    if recorded.get("state") in _AUTOPSY_TERMINAL:
-        return True
-    fields = {
-        key: value
-        for key, value in recorded.items()
-        if key not in {"state", "ts", "reason", "retry_after"}
-    }
-    fields.setdefault("job_id", job_dir.name)
-    fields["attempts"] = max(autopsy_attempts(job_dir), attempt)
-    retry_after = (
-        (datetime.now(timezone.utc) + timedelta(seconds=AUTOPSY_QUEUED_STALE_AFTER_SEC))
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
-    return record_autopsy_state(
-        job_dir,
-        "deferred",
-        **fields,
-        reason=reason,
-        retry_after=retry_after,
-    )
+    try:
+        with _autopsy_state_guard(job_dir):
+            recorded = autopsy_state(job_dir)
+            if recorded.get("state") in _AUTOPSY_TERMINAL:
+                return True
+            try:
+                recorded_attempt = int(recorded.get("attempts"))
+            except (TypeError, ValueError):
+                return True
+            if recorded_attempt != attempt:
+                return True
+            if recorded.get("state") not in {"queued", "running"}:
+                return True
+
+            fields = {
+                key: value
+                for key, value in recorded.items()
+                if key not in {"state", "ts", "reason", "retry_after"}
+            }
+            fields.setdefault("job_id", job_dir.name)
+            fields["attempts"] = attempt
+            retry_after = (
+                (datetime.now(timezone.utc) + timedelta(seconds=AUTOPSY_QUEUED_STALE_AFTER_SEC))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            return _write_autopsy_state_locked(
+                job_dir,
+                "deferred",
+                **fields,
+                reason=reason,
+                retry_after=retry_after,
+            )
+    except OSError as exc:
+        print(f"[watch] could not record autopsy state for {job_dir.name}: {exc}")
+        return False
 
 
 def _submit_autopsy(

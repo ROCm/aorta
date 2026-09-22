@@ -174,6 +174,97 @@ class TestQueuedWorkKeepsItsRecoveryIdentity:
 
         assert poll_mod.autopsy_state(job_dir)["state"] == "done"
 
+    def test_shutdown_deferral_is_atomic_with_worker_completion(self, tmp_path, monkeypatch):
+        _job(tmp_path)
+        job_dir = tmp_path / "cia-cancel"
+        poll_mod.record_autopsy_state(
+            job_dir,
+            "running",
+            job_id="cia-cancel",
+            attempts=1,
+        )
+
+        defer_has_lock = threading.Barrier(2, timeout=5)
+        worker_is_calling = threading.Barrier(2, timeout=5)
+        release_defer = threading.Barrier(2, timeout=5)
+        worker_finished = threading.Event()
+        errors = []
+        real_write = poll_mod._write_autopsy_state_locked
+
+        def pause_deferred_write(job_dir, state, **fields):
+            if state == "deferred":
+                defer_has_lock.wait()
+                release_defer.wait()
+            return real_write(job_dir, state, **fields)
+
+        def defer():
+            try:
+                poll_mod.defer_stopping_autopsy(
+                    job_dir,
+                    reason="shutdown race",
+                    attempt=1,
+                )
+            except BaseException as exc:  # preserve failures from the thread
+                errors.append(exc)
+
+        def finish():
+            try:
+                worker_is_calling.wait()
+                poll_mod.record_autopsy_state(
+                    job_dir,
+                    "done",
+                    job_id="cia-cancel",
+                    attempts=1,
+                )
+            except BaseException as exc:  # preserve failures from the thread
+                errors.append(exc)
+            finally:
+                worker_finished.set()
+
+        monkeypatch.setattr(
+            poll_mod,
+            "_write_autopsy_state_locked",
+            pause_deferred_write,
+        )
+        shutdown = threading.Thread(target=defer, daemon=True)
+        shutdown.start()
+        defer_has_lock.wait()
+
+        worker = threading.Thread(target=finish, daemon=True)
+        worker.start()
+        worker_is_calling.wait()
+        worker_was_serialized = not worker_finished.wait(timeout=0.2)
+        release_defer.wait()
+
+        shutdown.join(timeout=5)
+        worker.join(timeout=5)
+
+        assert worker_was_serialized
+        assert not shutdown.is_alive()
+        assert not worker.is_alive()
+        assert errors == []
+        assert poll_mod.autopsy_state(job_dir)["state"] == "done"
+
+    def test_old_shutdown_never_defers_a_newer_attempt(self, tmp_path):
+        _job(tmp_path)
+        job_dir = tmp_path / "cia-cancel"
+        poll_mod.record_autopsy_state(
+            job_dir,
+            "running",
+            job_id="cia-cancel",
+            attempts=2,
+        )
+
+        poll_mod.defer_stopping_autopsy(
+            job_dir,
+            reason="old shutdown",
+            attempt=1,
+        )
+
+        state = poll_mod.autopsy_state(job_dir)
+        assert state["state"] == "running"
+        assert state["attempts"] == 2
+
     def test_a_worker_stopped_before_start_runs_nothing(self, tmp_path, monkeypatch):
         stop = threading.Event()
         stop.set()
