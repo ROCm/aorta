@@ -76,6 +76,9 @@ def _ssl_context(verify: str | bool) -> ssl.SSLContext:
     """Turn the selected trust source into an HTTP-client TLS context."""
     if isinstance(verify, str):
         return ssl.create_default_context(cafile=verify)
+    # No explicit CA file is deliberate: stdlib OpenSSL loads its configured
+    # default verify paths (including the OS trust directory). httpx's
+    # ``verify=True`` would instead create its own certifi-backed context.
     return ssl.create_default_context()
 
 

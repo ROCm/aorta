@@ -35,7 +35,7 @@ CA_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 @pytest.fixture
 def no_ca_env(monkeypatch):
-    for var in (*CA_VARS, "CIA_SSL_USE_CERTIFI"):
+    for var in (*CA_VARS, "SSL_CERT_DIR", "CIA_SSL_USE_CERTIFI"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -353,6 +353,76 @@ class TestCustomCAReachesTheTransport:
 
         assert result.choices[0].message.content == "private-ca-ok"
         assert bodies and "ssl_verify" not in bodies[0]
+        assert _ca_env() == before
+
+    def test_system_mode_uses_openssl_default_trust_not_certifi(
+        self,
+        no_ca_env,
+        private_ca_server,
+        monkeypatch,
+        tmp_path,
+    ):
+        import certifi
+        import httpx
+
+        api_base, ca_cert, bodies = private_ca_server
+        request_url = f"{api_base}/chat/completions"
+
+        # The private CA is not in certifi, so this is a real distinction rather
+        # than two ways of constructing the same trust source.
+        certifi_context = ssl.create_default_context(cafile=certifi.where())
+        with httpx.Client(verify=certifi_context, trust_env=False) as client:
+            with pytest.raises(httpx.ConnectError):
+                client.post(
+                    request_url,
+                    json={
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+        assert bodies == []
+
+        # OpenSSL's system trust uses a hashed certificate directory. Point its
+        # default path at a directory containing only this CA; do not provide
+        # either explicit CA-file variable that CIA treats as a custom bundle.
+        openssl = shutil.which("openssl")
+        assert openssl is not None
+        cert_hash = subprocess.run(
+            [openssl, "x509", "-hash", "-noout", "-in", str(ca_cert)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        trust_dir = tmp_path / "system-trust"
+        trust_dir.mkdir()
+        shutil.copyfile(ca_cert, trust_dir / f"{cert_hash}.0")
+
+        monkeypatch.setenv("CIA_SSL_USE_CERTIFI", "0")
+        monkeypatch.setenv("SSL_CERT_DIR", str(trust_dir))
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        monkeypatch.setattr(llm_mod, "chat_provider", lambda **_kwargs: None)
+        monkeypatch.setattr(llm_mod, "_legacy_env", lambda: None)
+        assert llm_mod._ssl_verify() is True
+        before = _ca_env()
+
+        lm = llm_mod.build_lm(
+            model="test-model",
+            api_base=api_base,
+            api_key="system-trust-key",
+            max_tokens=8,
+        )
+        lm.num_retries = 0
+        try:
+            result = lm.forward(
+                messages=[{"role": "user", "content": "hello"}],
+            )
+        finally:
+            lm._sync_client.close()
+            asyncio.run(lm._async_client.close())
+
+        assert result.choices[0].message.content == "private-ca-ok"
+        assert len(bodies) == 1
+        assert "ssl_verify" not in bodies[0]
         assert _ca_env() == before
 
 
