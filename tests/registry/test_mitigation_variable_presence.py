@@ -640,6 +640,93 @@ def test_a_readable_stack_neither_fails_nor_skips(monkeypatch, tmp_path):
     assert require_readable_stack() == [tmp_path]
 
 
+def test_directories_that_exist_but_hold_nothing_fail_the_promised_lane(
+    monkeypatch, tmp_path
+):
+    """The second door into the green skip, one step past the one above.
+
+    ``rocm_lib_dirs`` requires the directories to *exist*, not to hold
+    anything, so ``require_readable_stack`` is satisfied by a base-image bump
+    that moved the shared objects into a subdirectory -- and the fixture then
+    skipped unconditionally on the empty scan. A lane running the audit with
+    ``AORTA_REQUIRE_ROCM`` set reported it as having run when it read nothing,
+    which is the exact state the flag was added to make impossible.
+    """
+    empty = [tmp_path / "rocm", tmp_path / "torch"]
+    for directory in empty:
+        directory.mkdir()
+    assert libraries_to_scan(empty) == []
+
+    monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
+    outcome = _outcome_of(lambda: require_scanned_libraries([], empty))
+    assert isinstance(outcome, pytest.skip.Exception), outcome
+
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    outcome = _outcome_of(lambda: require_scanned_libraries([], empty))
+    assert isinstance(outcome, pytest.fail.Exception), (
+        f"expected a failure, got {type(outcome).__name__}: {outcome}"
+    )
+    assert "no shared objects" in str(outcome)
+
+
+def test_a_scan_that_found_libraries_neither_fails_nor_skips(monkeypatch, tmp_path):
+    """The narrowness control: refusing every lane would satisfy the test above."""
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    found = [tmp_path / "libamdhip64.so.7"]
+    assert require_scanned_libraries(found, [tmp_path]) == found
+
+
+def test_only_torchs_directory_is_globbed(tmp_path):
+    """``RUNTIME_SONAMES`` says which ROCm libraries are worth reading; the scan
+    now agrees with it.
+
+    The glob scanned every ``.so`` in the ROCm directories -- including the
+    GEMM libraries the constant's own comment excludes by name -- for 4.43 GB
+    of reads against 365 MB and an identical verdict. Torch's directory keeps
+    its glob: it is the side with no soname declared for it, and its three
+    variables live across several libraries rather than in one named file.
+
+    ``scan_plan`` appends torch last, which is what makes the split a
+    positional one; that ordering is asserted by ``scan_plan``'s own tests.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    declared = _fake_so(rocm / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    _fake_so(rocm / "librocblas.so", ["ROCBLAS_LAYER"])
+    globbed = _fake_so(torch_lib / "libtorch_hip.so", ["TORCH_ROCM_FA_PREFER_CK"])
+
+    scanned = libraries_to_scan([rocm, torch_lib])
+
+    assert declared.resolve() in scanned
+    assert globbed.resolve() in scanned or globbed in scanned
+    assert not [lib for lib in scanned if lib.name == "librocblas.so"], scanned
+
+
+def test_the_declared_sonames_are_not_read_twice(tmp_path):
+    """One file is one read, however many names point at it.
+
+    Two ways to arrive at the same library. The old scan resolved each soname
+    and then globbed the same directory, so every declared library was read
+    once through the resolver and again through its unversioned link. And
+    `rocm_lib_dirs` deduplicates *directories*, not libraries -- on the wheel
+    layout `core_lib_dir` and `lib_dir` are genuinely different directories
+    that can each carry a link to the same `libamdhip64`, which the directory
+    dedup cannot see.
+    """
+    rocm, also_rocm = tmp_path / "rocm", tmp_path / "libs"
+    torch_lib = tmp_path / "torch"
+    for directory in (rocm, also_rocm, torch_lib):
+        directory.mkdir()
+    real = _fake_so(rocm / "libamdhip64.so.7", ["HIP_LAUNCH_BLOCKING"])
+    (rocm / "libamdhip64.so").symlink_to(real)
+    (also_rocm / "libamdhip64.so").symlink_to(real)
+
+    scanned = libraries_to_scan([rocm, also_rocm, torch_lib])
+
+    assert scanned == [real.resolve()], scanned
+
+
 def test_the_require_flag_is_off_unless_it_says_otherwise(monkeypatch):
     """``AORTA_REQUIRE_ROCM=0`` in a shell profile must not arm it."""
     monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
@@ -717,25 +804,77 @@ def require_readable_stack() -> list[Path]:
     )
 
 
-@pytest.fixture(scope="module")
-def present_names() -> frozenset[str]:
-    dirs = require_readable_stack()
+def libraries_to_scan(dirs: list[Path]) -> list[Path]:
+    """The shared objects to read names out of, resolved from ``dirs``.
+
+    Declared sonames in the ROCm directories, and everything in torch's.
+    :func:`scan_plan` appends torch's directory last and it is the one side
+    with no soname declared for it -- torch's variables are spread across
+    ``libtorch_*``/``libc10*`` rather than concentrated in a named library --
+    so it is the only place a glob is the right instrument.
+
+    **The ROCm side is not globbed, and that is what :data:`RUNTIME_SONAMES`
+    means.** The constant says the GEMM libraries are deliberately absent
+    because no mitigation variable lives in them, and a ``*.so`` glob next to
+    it scanned ``librocblas``, ``libhipblaslt``, ``libMIOpen`` and the rest
+    anyway -- reading 4.43 GB where 365 MB answers the question, and
+    re-reading each declared soname through its unversioned symlink on top.
+    Measured on ROCm 7.0.2: 25.9 s globbed against 2.5 s declared, with an
+    identical verdict for all seventeen registry variables. The fixture is
+    module-scoped and the GPU lane runs ``-n 4``, so the two ``rocm``-marked
+    tests can land on different xdist workers and pay it twice.
+
+    Deduplicated by resolved path, because a soname and its major-versioned
+    link resolve to one file and reading it twice changes nothing but the
+    clock.
+    """
     audit = _load_audit_script()
-    found: set[str] = set()
+    *rocm_dirs, torch_lib = dirs
     scanned: list[Path] = []
-    for directory in dirs:
+    for directory in rocm_dirs:
         for soname in RUNTIME_SONAMES:
             lib = audit.resolve_library(directory, soname)
             if lib is not None:
                 scanned.append(lib)
-        scanned.extend(sorted(directory.glob("*.so")))
+    scanned.extend(sorted(torch_lib.glob("*.so")))
+    return list(dict.fromkeys(scanned))
+
+
+def require_scanned_libraries(scanned: list[Path], dirs: list[Path]) -> list[Path]:
+    """``scanned``, or the same fail-or-skip decision :func:`require_readable_stack` makes.
+
+    Separate from the fixture for the same reason that one is: the decision is
+    the point, so it has to be assertable off a GPU lane.
+
+    This skip used to be unconditional, which put the green skip back right
+    after the flag had closed it. ``rocm_lib_dirs`` only requires the
+    directories to *exist*, so a base-image bump that moves the shared objects
+    into a subdirectory leaves ``dirs`` non-empty and ``scanned`` empty, and
+    the lane that promised a stack reported an audit that read nothing as
+    having run.
+    """
+    if scanned:
+        return scanned
+    why = f"no shared objects under {[str(d) for d in dirs]}"
+    if rocm_is_required():
+        pytest.fail(
+            f"{REQUIRE_ROCM_ENV} is set, so this lane promised a stack this "
+            f"audit can read, and it cannot: {why}. Skipping here would report "
+            "the audit as having run when it ran nothing."
+        )
+    pytest.skip(why)
+
+
+@pytest.fixture(scope="module")
+def present_names() -> frozenset[str]:
+    dirs = require_readable_stack()
+    scanned = require_scanned_libraries(libraries_to_scan(dirs), dirs)
+    found: set[str] = set()
     for lib in scanned:
         try:
             found |= names_in_binary(lib)
         except (ValueError, OSError):
             continue          # not an ELF, or unreadable; neither is this test's business
-    if not scanned:
-        pytest.skip(f"no shared objects under {[str(d) for d in dirs]}")
     return frozenset(found)
 
 
@@ -815,15 +954,23 @@ def test_a_variable_shared_with_an_unlisted_mitigation_is_still_reported(monkeyp
 
 
 def test_a_known_absent_entry_that_came_back_is_flagged():
+    """With everything readable, every listed pair is a pair that came back.
+
+    Stated as ``sorted(KNOWN_ABSENT)`` rather than as the two pairs in it
+    today: hard-coding them makes fixing `tf32_off` break a test that is not
+    about `tf32_off`, and the assertion being made here is about the function,
+    not about the backlog's current contents.
+    """
+    # An empty backlog would make the assertion below `[] == []`, so it is
+    # stated: this test is only saying something while there is a list.
+    assert KNOWN_ABSENT, "nothing listed, so this test asserts nothing"
     present = set(mitigation_variables())          # everything readable
-    assert find_fixed_known_absent(present) == [
-        ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"),
-        ("tf32_off", "DISABLE_TF32"),
-    ]
+    assert find_fixed_known_absent(present) == sorted(KNOWN_ABSENT)
 
 
 def test_nothing_is_flagged_while_the_backlog_is_genuinely_absent():
-    present = set(mitigation_variables()) - {"DISABLE_TF32", "RCCL_GFX942_CHEAP_FENCE_OFF"}
+    """The narrowness control, derived from the list for the same reason."""
+    present = set(mitigation_variables()) - {v for _, v in KNOWN_ABSENT}
     assert find_fixed_known_absent(present) == []
 
 
