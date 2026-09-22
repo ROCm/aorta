@@ -514,6 +514,18 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     reconcile_stale_jobs(jobs_root)
     log.info("── Launch ──")
 
+    # Source preparation and stale-job reconciliation can both take long
+    # enough for the caller to cancel. Do not turn a cancellation that arrived
+    # during either step into a new scheduler submission.
+    if stopped(work_stop):
+        return {
+            "ok": False,
+            "stage": "launch",
+            "error": "abandoned by caller before launch",
+            "job_id": job_id,
+            "job_dir": str(job_dir),
+        }
+
     slurm_id, err = launch(
         command=command,
         job_name=job_id,
@@ -542,6 +554,28 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     record.scheduler_job_id = slurm_id
     write_job_json(record, jobs_root)
     log.info(f"submitted slurm job {slurm_id}")
+
+    # Cancellation can race with the scheduler call itself. The allocation now
+    # exists, so release it before Watch (or any later triage stage) can start.
+    if stopped(work_stop):
+        cancelled, why = cancel(slurm_id)
+        if cancelled:
+            log.info(f"cancelled slurm {slurm_id}; the allocation is released")
+            update_job_status(jobs_root, job_id, "cancelled")
+        else:
+            log.warning(
+                f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
+                "node until its time limit"
+            )
+        return {
+            "ok": False,
+            "stage": "launch",
+            "error": "abandoned by caller during launch",
+            "job_id": job_id,
+            "slurm_job_id": slurm_id,
+            "cancelled": cancelled,
+            "job_dir": str(job_dir),
+        }
 
     bundle = job_dir / "bundle"
     report_path = bundle / "report.json"

@@ -200,6 +200,65 @@ class TestQueuedWorkKeepsItsRecoveryIdentity:
 
 
 class TestNoSweepBeginsAfterCancellation:
+    def test_a_stop_during_prelaunch_work_submits_nothing(self, tmp_path, monkeypatch):
+        from aorta.cia import triage as triage_mod
+
+        stop = threading.Event()
+        launches = []
+
+        def reconcile_then_stop(_jobs_root):
+            stop.set()
+            return 0
+
+        monkeypatch.setattr(triage_mod, "reconcile_stale_jobs", reconcile_then_stop)
+        monkeypatch.setattr(
+            triage_mod,
+            "launch",
+            lambda **kwargs: launches.append(kwargs),
+        )
+
+        result = triage_mod.run_triage(
+            ["--command", "true", "--jobs-root", str(tmp_path)],
+            stop=stop,
+        )
+
+        assert launches == []
+        assert result["stage"] == "launch"
+        assert result["error"] == "abandoned by caller before launch"
+
+    def test_a_stop_racing_with_submission_cancels_before_watch(self, tmp_path, monkeypatch):
+        from aorta.cia import triage as triage_mod
+
+        stop = threading.Event()
+        cancelled = []
+
+        def launch_then_stop(**_kwargs):
+            stop.set()
+            return "12345", ""
+
+        def watch_must_not_start(**_kwargs):
+            raise AssertionError("Watch started after launch was cancelled")
+
+        monkeypatch.setattr(triage_mod, "launch", launch_then_stop)
+        monkeypatch.setattr(
+            triage_mod,
+            "cancel",
+            lambda job_id: (cancelled.append(job_id) or (True, "")),
+        )
+        monkeypatch.setattr(triage_mod.threading, "Thread", watch_must_not_start)
+
+        result = triage_mod.run_triage(
+            ["--command", "true", "--jobs-root", str(tmp_path)],
+            stop=stop,
+        )
+
+        record = json.loads((tmp_path / result["job_id"] / "job.json").read_text(encoding="utf-8"))
+        assert cancelled == ["12345"]
+        assert result["stage"] == "launch"
+        assert result["slurm_job_id"] == "12345"
+        assert result["cancelled"] is True
+        assert record["status"] == "cancelled"
+
     def test_an_already_stopped_probe_never_opens_ssh(self, tmp_path, monkeypatch):
         from aorta.cia.autopsy import probe as probe_mod
 
