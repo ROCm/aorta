@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -4127,6 +4128,12 @@ def test_the_console_line_denominates_in_what_arrived(monkeypatch, capsys):
     calls = iter(answers)
     monkeypatch.setattr(probe_seed, "call", lambda *a, **k: next(calls))
     monkeypatch.setattr(probe_seed, "probe_seed_modes", lambda *a, **k: {})
+    monkeypatch.setattr(
+        probe_seed,
+        "probe_unseeded_control",
+        lambda *a, **k: {"temperature": 1.0, "draws": 0, "delivered": 0,
+                         "distinct": 0, "errors": [], "samples": False},
+    )
 
     probe_seed.main([
         "--base-url", "http://127.0.0.1:1/v1",
@@ -5092,3 +5099,268 @@ def test_a_probe_that_draws_nothing_is_not_a_successful_probe(monkeypatch):
             ])
         # argparse's own exit code for a usage error, not a verdict of 1.
         assert refusal.value.code == 2, draws
+
+
+# --------------------------------------------------------------------------- #
+# Review pass 2026-09-23, third round: what three draws can and cannot prove
+# --------------------------------------------------------------------------- #
+
+
+def _seeded_engine(behaviour: dict | None = None):
+    """A fake ``call`` whose completion is a function of the seed it was given.
+
+    ``behaviour`` maps a seed (or ``None`` for the unseeded control) to the
+    content returned. A seed absent from the map gets a fresh unique string on
+    every draw, which is what an engine that ignores the key looks like.
+    """
+    fixed = behaviour or {}
+    counter = itertools.count()
+
+    def call(model, *, temperature, seed, seed_mode):
+        if seed in fixed:
+            return {"error": "", "content": fixed[seed]}
+        return {"error": "", "content": f'{{"draw": {next(counter)}}}'}
+
+    return call
+
+
+def test_a_seed_that_does_not_replay_is_ignored_without_needing_the_control():
+    """The one direction this probe can still conclude on an engine it cannot
+    characterise.
+
+    An honoured seed reproduces by definition, so draws that differ under a
+    fixed seed rule honouring out on their own. That matters beyond tidiness:
+    it is the finding this probe actually produced -- seeds accepted and
+    ignored -- and it is the finding that does *not* rest on the control or on
+    the repeat count. The residual it cannot see is nondeterminism outside
+    sampling, which would show here as a false IGNORED.
+    """
+    probe_seed = _load("probe_seed")
+    verdict, why = probe_seed.seed_verdict(
+        replays=False, diverges=True, control_samples=False
+    )
+    assert verdict == probe_seed.IGNORED
+    assert "different completions" in why
+
+
+def test_a_replay_on_an_engine_that_does_not_sample_decides_nothing():
+    """The false HONOURED, in its systematic form.
+
+    An engine returning the same completion whatever you ask replays under
+    every key, including one it throws away. More draws do not help -- they are
+    more of the same non-evidence -- so the control is what separates them, and
+    with the control silent the verdict has to be silent too.
+    """
+    probe_seed = _load("probe_seed")
+    verdict, why = probe_seed.seed_verdict(
+        replays=True, diverges=True, control_samples=False
+    )
+    assert verdict == probe_seed.INCONCLUSIVE
+    assert "unseeded" in why
+
+
+def test_two_seeds_landing_on_one_completion_is_not_a_verdict_of_ignored():
+    """The false negative, which the old bool reported as `no`.
+
+    A grammar-constrained decode can leave so little to choose that two seeds
+    agree while both are honoured. That is indistinguishable here from an
+    ignored seed on a low-entropy engine, and picking either is a claim the
+    experiment did not earn.
+    """
+    probe_seed = _load("probe_seed")
+    verdict, why = probe_seed.seed_verdict(
+        replays=True, diverges=False, control_samples=True
+    )
+    assert verdict == probe_seed.INCONCLUSIVE
+    assert "nothing left to choose" in why
+
+
+def test_a_replayed_diverging_seed_on_a_sampling_engine_is_still_honoured():
+    """The narrowness control for the two refusals above.
+
+    A third outcome is only worth having if it does not swallow the second.
+    Without this, `seed_verdict` returning INCONCLUSIVE unconditionally passes
+    every other test in this group, and the probe would have stopped being able
+    to report a working seed key at all.
+    """
+    probe_seed = _load("probe_seed")
+    verdict, _ = probe_seed.seed_verdict(
+        replays=True, diverges=True, control_samples=True
+    )
+    assert verdict == probe_seed.HONOURED
+
+
+def test_an_engine_that_ignores_seeds_is_reported_ignored(monkeypatch):
+    """End to end on the engine this probe was pointed at.
+
+    Recorded in the routing write-up: with the triton backend the same seed
+    twice gave different completions on all three keys, while unseeded draws
+    at the same temperature were fully diverse. That is the IGNORED branch, and
+    it survives the move away from a bool.
+    """
+    probe_seed = _load("probe_seed")
+    monkeypatch.setattr(probe_seed, "call", _seeded_engine())
+
+    control = probe_seed.probe_unseeded_control("m", 1.0, 3)
+    assert control["samples"] is True
+    modes = probe_seed.probe_seed_modes("m", 1.0, 3, control)
+
+    assert {row["verdict"] for row in modes.values()} == {probe_seed.IGNORED}
+    assert not [m for m, row in modes.items() if row["honoured"]]
+
+
+def test_a_collapsed_engine_cannot_be_used_to_rule_a_seed_out(monkeypatch):
+    """The reading the old bool got wrong, and the reason for the third value.
+
+    Every completion identical: the seed replays, two seeds agree, and unseeded
+    draws agree as well. The old code called that `no` -- a finding about the
+    seed -- when every byte of it is a finding about the temperature. Being
+    unable to tell is the correct answer and is now the reported one.
+    """
+    probe_seed = _load("probe_seed")
+    monkeypatch.setattr(
+        probe_seed, "call", lambda *a, **k: {"error": "", "content": "{}"}
+    )
+
+    control = probe_seed.probe_unseeded_control("m", 0.0, 3)
+    assert control["samples"] is False
+    modes = probe_seed.probe_seed_modes("m", 0.0, 3, control)
+
+    assert {row["verdict"] for row in modes.values()} == {probe_seed.INCONCLUSIVE}
+    assert all(row["same_seed_reproduces"] for row in modes.values())
+
+
+def test_a_working_seed_key_is_found_end_to_end(monkeypatch):
+    """The whole point of the probe, still reachable through the new verdict.
+
+    Content is a function of the seed and the unseeded control is diverse,
+    which is what an engine honouring the key looks like from outside.
+    """
+    probe_seed = _load("probe_seed")
+    monkeypatch.setattr(
+        probe_seed,
+        "call",
+        _seeded_engine({probe_seed.SEED_A: '{"a": 1}',
+                        probe_seed.SEED_B: '{"a": 2}'}),
+    )
+
+    control = probe_seed.probe_unseeded_control("m", 1.0, 3)
+    modes = probe_seed.probe_seed_modes("m", 1.0, 3, control)
+
+    assert {row["verdict"] for row in modes.values()} == {probe_seed.HONOURED}
+
+
+def test_a_missing_control_cannot_be_read_as_a_sampling_engine(monkeypatch):
+    """Fail closed where the control is absent rather than assume it passed.
+
+    `probe_seed_modes` takes the control as an argument, so a caller can omit
+    it. Defaulting that to "the engine samples" would reinstate the false
+    HONOURED through the one path that never measured anything.
+    """
+    probe_seed = _load("probe_seed")
+    monkeypatch.setattr(
+        probe_seed,
+        "call",
+        _seeded_engine({probe_seed.SEED_A: '{"a": 1}',
+                        probe_seed.SEED_B: '{"a": 2}'}),
+    )
+
+    modes = probe_seed.probe_seed_modes("m", 1.0, 3)
+
+    assert {row["verdict"] for row in modes.values()} == {probe_seed.INCONCLUSIVE}
+
+
+def test_one_draw_per_seed_is_refused_rather_than_reported():
+    """`--seed-repeats 1` is a replay claim about a single completion.
+
+    One draw is identical to itself whatever the engine did with the key, so
+    every accepted mode would report `same_seed_reproduces` and a diverse
+    engine would hand back HONOURED on no evidence at all -- the exact failure
+    this probe exists to catch, manufactured by its own flag.
+    """
+    probe_seed = _load("probe_seed")
+    for repeats in ("1", "0", "-1"):
+        with pytest.raises(SystemExit) as refusal:
+            probe_seed.main([
+                "--base-url", "http://127.0.0.1:1/v1",
+                "--model", "m",
+                "--temperatures", "1.0",
+                "--draws", "1",
+                "--seed-repeats", repeats,
+            ])
+        assert refusal.value.code == 2, repeats
+
+
+def test_an_undecided_run_does_not_print_a_finding(monkeypatch, capsys):
+    """The sentence a human pastes into the write-up, on a run that decided
+    nothing.
+
+    "No seed key is honoured" is a finding; "this run could not tell" is the
+    absence of one. Printing the first where the second is true is how a probe
+    launders its own inconclusive result into evidence -- and the write-up is
+    where that evidence goes.
+    """
+    probe_seed = _load("probe_seed")
+    monkeypatch.setattr(
+        probe_seed, "call", lambda *a, **k: {"error": "", "content": "{}"}
+    )
+
+    probe_seed.main([
+        "--base-url", "http://127.0.0.1:1/v1",
+        "--model", "m",
+        "--temperatures", "0.0",
+        "--draws", "2",
+        "--seed-repeats", "2",
+    ])
+    out = capsys.readouterr().out
+
+    assert "could not be decided" in out
+    assert "no seed key is honoured" not in out
+    assert "engine-samples=False" in out
+
+
+def test_one_seed_replaying_is_not_the_key_replaying(monkeypatch):
+    """Both seeds have to replay, not just the one that happened to.
+
+    Checking only the first seed's draws makes "reproduces" a statement about
+    one value of the parameter. An engine that replays under 1234 and samples
+    freely under 9999 is not honouring the key -- it is doing something else
+    that this probe would have reported as a working seed mode, which is the
+    accepted-but-ignored shape wearing a different hat.
+    """
+    probe_seed = _load("probe_seed")
+    monkeypatch.setattr(
+        probe_seed, "call", _seeded_engine({probe_seed.SEED_A: '{"a": 1}'})
+    )
+
+    control = probe_seed.probe_unseeded_control("m", 1.0, 3)
+    modes = probe_seed.probe_seed_modes("m", 1.0, 3, control)
+
+    assert {row["verdict"] for row in modes.values()} == {probe_seed.IGNORED}
+    assert not any(row["same_seed_reproduces"] for row in modes.values())
+
+
+def test_an_outage_in_the_control_does_not_certify_sampling(monkeypatch):
+    """A control that lost draws reports "not observed", never "ruled out".
+
+    Failed calls record `content: ""`, so counting them would make an outage
+    read as diversity -- the same defect the temperature table was fixed for,
+    arriving in the measurement every INCONCLUSIVE below now rests on. One
+    delivered completion cannot show sampling, and the verdict that consumes
+    this is a refusal to conclude rather than a finding, which is the direction
+    a half-delivered control should push.
+    """
+    probe_seed = _load("probe_seed")
+    answers = iter([
+        {"error": "", "content": '{"a": 1}'},
+        {"error": "APIConnectionError: reset", "content": ""},
+        {"error": "APIConnectionError: reset", "content": ""},
+    ])
+    monkeypatch.setattr(probe_seed, "call", lambda *a, **k: next(answers))
+
+    control = probe_seed.probe_unseeded_control("m", 1.0, 3)
+
+    assert control["delivered"] == 1
+    assert control["distinct"] == 1
+    assert control["samples"] is False
+    assert len(control["errors"]) == 2

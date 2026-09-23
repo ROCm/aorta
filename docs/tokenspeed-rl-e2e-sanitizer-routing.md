@@ -698,6 +698,21 @@ Temperature 0 still collapses, correctly. Everything above it samples.
   per-sample seed and sends it, and it currently has no effect: the plumbing is
   correct and the engine is where the gap is. A rollout is repeatable only at
   the level of its aggregate statistics, not sample by sample.
+
+  Non-reproduction is the one direction this experiment can conclude on its
+  own — an honoured seed replays by definition, so draws that differ under a
+  fixed seed rule honouring out without reference to how many draws were taken.
+  The opposite reading would not have been safe: a seed that is *accepted and
+  discarded* can replay by coincidence, and two or three agreeing draws are
+  exactly what that looks like. `probe_seed.py` therefore reports three
+  outcomes rather than a bool, draws each seed `--seed-repeats` times, and
+  takes its own unseeded control at the same temperature so a replay on an
+  engine that is not sampling is reported as undecided instead of as a finding.
+  The table above is that control for this run: 8/8 distinct at every
+  temperature above 0 on the triton backend, so the engine samples and the
+  not-honoured reading stands. The residual it cannot see is nondeterminism
+  from outside sampling — batching, for instance — which would appear here as
+  a false *ignored*.
 - **`n > 1` in one request returns identical choices** at every temperature,
   even with sampling working. Separate requests are unaffected, which is what
   the driver issues, so this costs throughput rather than correctness — one
