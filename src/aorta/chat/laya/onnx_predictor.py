@@ -29,7 +29,7 @@ ends up putting thirty of them on an interactive path.
 **Everything that can fail, fails loudly.** A missing artifact, a marker that
 does not tokenise to one token, a state long enough to truncate an option out
 of the window, a graph that returns the wrong number of scores: each raises
-:class:`~aorta.chat.laya.artifact.ArtifactUnavailable` rather than returning a
+:class:`~aorta.chat.laya.artifact.ArtifactUnavailableError` rather than returning a
 number. The seam's own ``_as_answer`` takes the same line for the same reason --
 a 0.5 invented at this level travels into a threshold comparison looking exactly
 like a measurement.
@@ -54,7 +54,7 @@ from typing import Any
 from aorta.chat.laya.artifact import (
     GRAPH_OUTPUT,
     Artifact,
-    ArtifactUnavailable,
+    ArtifactUnavailableError,
     Manifest,
     RenderTemplate,
     load_artifact,
@@ -182,7 +182,7 @@ def answers_from_scores(
     spans = marker_spans(questions)
     expected = spans[-1][1] if spans else 0
     if len(scores) != expected:
-        raise ArtifactUnavailable(
+        raise ArtifactUnavailableError(
             f"the exported graph returned {len(scores)} marker scores for "
             f"{expected} option marker(s) across {len(questions)} question(s). "
             "The graph and this build disagree about the signature; re-export."
@@ -258,7 +258,7 @@ class OnnxLayaPredictor:
         """
         try:
             return self._load().manifest.identity()
-        except ArtifactUnavailable:
+        except ArtifactUnavailableError:
             return f"laya-onnx:{self._directory}(unloadable)"
 
     # ── loading ────────────────────────────────────────────────────────────
@@ -284,7 +284,7 @@ class OnnxLayaPredictor:
         try:
             from tokenizers import Tokenizer
         except ImportError as exc:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 "the Laya ONNX path needs the 'tokenizers' package, which arrives "
                 "with fastembed in the chat-cli extra.\n"
                 "  pip install 'amd-aorta[chat-cli]'\n"
@@ -293,7 +293,7 @@ class OnnxLayaPredictor:
         try:
             return Tokenizer.from_file(str(artifact.tokenizer_path))
         except Exception as exc:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"could not read the tokenizer at {artifact.tokenizer_path}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
@@ -304,7 +304,7 @@ class OnnxLayaPredictor:
         try:
             import onnxruntime
         except ImportError as exc:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 "the Laya ONNX path needs onnxruntime, which arrives with fastembed "
                 "in the chat-cli extra.\n"
                 "  pip install 'amd-aorta[chat-cli]'\n"
@@ -321,7 +321,7 @@ class OnnxLayaPredictor:
                 providers=["CPUExecutionProvider"],
             )
         except Exception as exc:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"could not open the exported graph at {artifact.graph_path}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
@@ -336,7 +336,7 @@ class OnnxLayaPredictor:
                     marker = artifact.manifest.render.marker
                     marker_id = tokenizer.token_to_id(marker)
                     if marker_id is None:
-                        raise ArtifactUnavailable(
+                        raise ArtifactUnavailableError(
                             f"the option marker {marker!r} is not a single token in "
                             f"{artifact.tokenizer_path}. A marker that tokenises into "
                             "several pieces puts several positions where the scorer "
@@ -385,7 +385,7 @@ class OnnxLayaPredictor:
             # no positions to score. Truncating here would turn "the state was
             # too long" into "the model preferred the first few tools", which is
             # indistinguishable from a verdict.
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the rendered state and its {len(questions)} question(s) tokenise to "
                 f"{len(ids)} tokens, over the {manifest.max_len} this checkpoint was "
                 "exported for. Shorten the state; truncating it would drop option "
@@ -394,7 +394,7 @@ class OnnxLayaPredictor:
 
         positions = [index for index, token in enumerate(ids) if token == marker_id]
         if len(positions) != expected:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"rendering {len(questions)} question(s) put {len(positions)} option "
                 f"marker(s) in the sequence where {expected} were offered. The render "
                 "template and the tokenizer in this artifact disagree about the "
@@ -422,11 +422,11 @@ class OnnxLayaPredictor:
         try:
             outputs = session.run([GRAPH_OUTPUT], feed)
         except Exception as exc:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the exported Laya graph failed to run: {type(exc).__name__}: {exc}"
             ) from exc
         if not outputs:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the exported Laya graph returned nothing for {GRAPH_OUTPUT!r}"
             )
         # reshape(-1) rather than indexing a known rank: the export writes a

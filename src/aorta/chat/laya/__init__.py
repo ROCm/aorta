@@ -35,7 +35,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from aorta.chat.laya.artifact import ArtifactUnavailable
+from aorta.chat.laya.artifact import ArtifactUnavailableError
 
 if TYPE_CHECKING:  # the Protocol only; no runtime import of anything heavy
     from aorta.laya.predictor import LayaPredictor
@@ -74,7 +74,7 @@ def chat_predictor() -> LayaPredictor:
     Tests inject a predictor directly instead, which is a thing a test can do
     and an operator cannot.
 
-    Raises :class:`~aorta.chat.laya.artifact.ArtifactUnavailable` when the
+    Raises :class:`~aorta.chat.laya.artifact.ArtifactUnavailableError` when the
     artifact is absent or unreadable. Callers treat that as "no Laya tier" and
     fall back, which is why it is raised rather than logged: a node that got a
     predictor answering 0.5 to everything would gate on noise and look merely
@@ -95,7 +95,7 @@ def chat_predictor() -> LayaPredictor:
 
 
 __all__ = [
-    "ArtifactUnavailable",
+    "ArtifactUnavailableError",
     "chat_predictor",
     "reset_predictor",
 ]

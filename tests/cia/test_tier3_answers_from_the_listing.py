@@ -41,7 +41,7 @@ from aorta.cia.watch.log_finder import (
 from aorta.laya.predictor import (
     ChoiceAnswer,
     FakeLayaPredictor,
-    LayaUnavailable,
+    LayaUnavailableError,
     NoulAnswer,
 )
 
@@ -283,7 +283,7 @@ class TestTheFallbacksSurvive:
         found = finder.find(job)
 
         assert found == finder._scan_by_extension(job)[:8]
-        assert "LayaUnavailable" in capsys.readouterr().out
+        assert "LayaUnavailableError" in capsys.readouterr().out
 
     def test_it_is_not_retried_for_every_later_job(self, job, monkeypatch):
         """One finder serves the whole poll loop; a missing checkpoint stays missing."""
@@ -348,7 +348,7 @@ class _Unavailable(FakeLayaPredictor):
 
     def ask(self, states, questions):
         self.attempts += 1
-        raise LayaUnavailable("no checkpoint on this node")
+        raise LayaUnavailableError("no checkpoint on this node")
 
 
 class _AnsweringChoices(FakeLayaPredictor):

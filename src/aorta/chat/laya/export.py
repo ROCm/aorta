@@ -60,7 +60,7 @@ from aorta.chat.laya.artifact import (
     GRAPH_OUTPUT,
     MANIFEST_NAME,
     TOKENIZER_NAME,
-    ArtifactUnavailable,
+    ArtifactUnavailableError,
     Manifest,
     RenderTemplate,
     sha256_file,
@@ -85,7 +85,7 @@ _ENCODER_ATTRIBUTES = ("encoder", "enc", "backbone", "model")
 _HEAD_ATTRIBUTES = ("decision_head", "head", "scorer", "option_head")
 
 
-class ExportError(ArtifactUnavailable):
+class ExportError(ArtifactUnavailableError):
     """The export cannot proceed, and says which part of the checkpoint is why.
 
     A subclass of the artifact error so that a caller holding one ``except``

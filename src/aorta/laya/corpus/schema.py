@@ -118,7 +118,7 @@ class LabelledExample:
             "question": question,
             "label": self.label,
             "source": self.source,
-            "baselines": {name: answer for name, answer in self.baselines},
+            "baselines": dict(self.baselines),
         }
 
     @classmethod

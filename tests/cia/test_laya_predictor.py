@@ -26,7 +26,7 @@ from aorta.laya.predictor import (
     FakeLayaPredictor,
     LayaAgentPredictor,
     LayaPredictor,
-    LayaUnavailable,
+    LayaUnavailableError,
     Noul,
     NoulAnswer,
     ask_choice,
@@ -72,7 +72,7 @@ class _StubAgent:
                 answers[qid] = {
                     "type": "choice",
                     "choice": options[0],
-                    "probabilities": {option: share for option in options},
+                    "probabilities": dict.fromkeys(options, share),
                 }
         return {"answers": answers, "usage": {"input_tokens": 1}}
 
@@ -323,7 +323,7 @@ class TestTheRealFailures:
             raise OSError("no route to huggingface.co")
 
         predictor = LayaAgentPredictor("laya", load=_explode)
-        with pytest.raises(LayaUnavailable, match="laya"):
+        with pytest.raises(LayaUnavailableError, match="laya"):
             predictor.ask(["log"], [_CLEAN])
 
     def test_a_missing_answer_raises_rather_than_defaulting(self):
@@ -335,7 +335,7 @@ class TestTheRealFailures:
         been measured.
         """
         agent = _StubAgent(answers={_CLEAN.question: {"type": "noul"}})
-        with pytest.raises(LayaUnavailable, match="no 'noul' probability"):
+        with pytest.raises(LayaUnavailableError, match="no 'noul' probability"):
             ask_noul(_agent_predictor(agent), "log", _CLEAN)
 
     def test_a_choice_answer_missing_an_offered_option_raises(self):
@@ -347,16 +347,16 @@ class TestTheRealFailures:
                 }
             }
         )
-        with pytest.raises(LayaUnavailable, match="without the offered options"):
+        with pytest.raises(LayaUnavailableError, match="without the offered options"):
             ask_choice(_agent_predictor(agent), "log", _SIGNAL)
 
     def test_a_choice_answer_with_no_probabilities_raises(self):
         agent = _StubAgent(answers={_SIGNAL.question: {"type": "choice", "choice": "nan"}})
-        with pytest.raises(LayaUnavailable, match="no\n?.*'probabilities'"):
+        with pytest.raises(LayaUnavailableError, match="no\n?.*'probabilities'"):
             ask_choice(_agent_predictor(agent), "log", _SIGNAL)
 
     def test_an_unknown_checkpoint_is_refused_at_construction(self):
-        with pytest.raises(LayaUnavailable, match="unknown Laya checkpoint"):
+        with pytest.raises(LayaUnavailableError, match="unknown Laya checkpoint"):
             LayaAgentPredictor("laya-multilingual")
 
     def test_a_local_directory_is_accepted_as_a_fine_tune(self, tmp_path):
@@ -365,7 +365,7 @@ class TestTheRealFailures:
 
     def test_a_published_name_is_not_mistaken_for_a_relative_path(self):
         """``org/name`` also looks like a path, so the test is whether it is really there."""
-        with pytest.raises(LayaUnavailable, match="unknown Laya checkpoint"):
+        with pytest.raises(LayaUnavailableError, match="unknown Laya checkpoint"):
             LayaAgentPredictor("convaiinnovations/laya-multilingual")
 
 

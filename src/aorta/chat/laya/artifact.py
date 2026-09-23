@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aorta.laya.predictor import LayaUnavailable, Noul, Question
+from aorta.laya.predictor import LayaUnavailableError, Noul, Question
 
 #: Bumped when the graph signature or the manifest's required keys change in a
 #: way that makes an older artifact unreadable. Checked on load rather than
@@ -90,7 +90,7 @@ STAGING_PROCEDURE = (
 )
 
 
-class ArtifactUnavailable(LayaUnavailable):
+class ArtifactUnavailableError(LayaUnavailableError):
     """The exported artifact is missing, incomplete, or not one of ours.
 
     A subclass of the seam's own error rather than a new exception type, so a
@@ -172,18 +172,18 @@ class RenderTemplate:
             ("option_template", "{marker}"),
         ):
             if placeholder not in getattr(self, field):
-                raise ArtifactUnavailable(
+                raise ArtifactUnavailableError(
                     f"the artifact's render template has a {field} with no "
                     f"{placeholder} in it, so the rendered text would drop the "
                     "thing the model is meant to read"
                 )
         if not self.marker:
-            raise ArtifactUnavailable("the artifact's render template has an empty marker token")
+            raise ArtifactUnavailableError("the artifact's render template has an empty marker token")
 
     @classmethod
     def from_dict(cls, raw: Any) -> RenderTemplate:
         if not isinstance(raw, dict):
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the artifact manifest's 'render' is a {type(raw).__name__}, not an object"
             )
         missing = [
@@ -198,7 +198,7 @@ class RenderTemplate:
             if key not in raw
         ]
         if missing:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the artifact manifest's 'render' is missing {missing}. It is captured "
                 "from the checkpoint at export time and cannot be reconstructed here."
             )
@@ -306,12 +306,12 @@ class Manifest:
     @classmethod
     def from_dict(cls, raw: Any) -> Manifest:
         if not isinstance(raw, dict):
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"an artifact manifest must be a JSON object, got {type(raw).__name__}"
             )
         version = raw.get("artifact_version")
         if version != ARTIFACT_VERSION:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"artifact version {version!r} was exported against a different graph "
                 f"signature; this build reads version {ARTIFACT_VERSION}. Re-export it."
             )
@@ -326,7 +326,7 @@ class Manifest:
         )
         missing = [key for key in required if key not in raw]
         if missing:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the artifact manifest is missing {missing}. Every one of these is "
                 "part of what produced a probability, and an artifact that cannot "
                 "say which weights and which fit answered is not usable as evidence "
@@ -334,30 +334,30 @@ class Manifest:
             )
         temperatures = raw["temperatures"]
         if not isinstance(temperatures, dict):
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the artifact manifest's 'temperatures' is a {type(temperatures).__name__}, "
                 "not a map of calibration bucket to temperature"
             )
         try:
             fitted = {str(key): float(value) for key, value in temperatures.items()}
         except (TypeError, ValueError) as exc:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the artifact manifest has a non-numeric temperature: {exc}"
             ) from exc
         for key, value in fitted.items():
             if value <= 0.0:
-                raise ArtifactUnavailable(
+                raise ArtifactUnavailableError(
                     f"the artifact manifest fits temperature {value} for bucket {key!r}; "
                     "a temperature must be positive"
                 )
         try:
             max_len = int(raw["max_len"])
         except (TypeError, ValueError) as exc:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the artifact manifest's 'max_len' is not an integer: {exc}"
             ) from exc
         if max_len <= 0:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"the artifact manifest declares max_len={max_len}, so no question fits in it"
             )
         return cls(
@@ -403,12 +403,12 @@ def load_artifact(directory: str | Path, *, verify_digest: bool = False) -> Arti
     root = Path(directory).expanduser()
     manifest_path = root / MANIFEST_NAME
     if not manifest_path.is_file():
-        raise ArtifactUnavailable(STAGING_PROCEDURE.format(path=root))
+        raise ArtifactUnavailableError(STAGING_PROCEDURE.format(path=root))
 
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ArtifactUnavailable(f"could not read {manifest_path}: {exc}") from exc
+        raise ArtifactUnavailableError(f"could not read {manifest_path}: {exc}") from exc
 
     manifest = Manifest.from_dict(raw)
     artifact = Artifact(directory=root, manifest=manifest)
@@ -418,7 +418,7 @@ def load_artifact(directory: str | Path, *, verify_digest: bool = False) -> Arti
         (artifact.tokenizer_path, "the checkpoint's tokenizer"),
     ):
         if not path.is_file():
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"{manifest_path} describes an artifact but {what} is not beside it "
                 f"(expected {path}). Copy the whole directory, not the manifest alone."
             )
@@ -426,7 +426,7 @@ def load_artifact(directory: str | Path, *, verify_digest: bool = False) -> Arti
     if verify_digest:
         actual = sha256_file(artifact.graph_path)
         if actual != manifest.onnx_sha256:
-            raise ArtifactUnavailable(
+            raise ArtifactUnavailableError(
                 f"{artifact.graph_path} hashes to {actual[:12]} but its manifest "
                 f"records {manifest.onnx_sha256[:12]}. One of the two was replaced "
                 "without the other, so nothing here can say which weights would answer."
@@ -442,7 +442,7 @@ __all__ = [
     "STAGING_PROCEDURE",
     "TOKENIZER_NAME",
     "Artifact",
-    "ArtifactUnavailable",
+    "ArtifactUnavailableError",
     "Manifest",
     "RenderTemplate",
     "calibration_key",

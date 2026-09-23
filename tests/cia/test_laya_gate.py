@@ -22,7 +22,7 @@ from aorta.laya.gate import (
     LATENCY_BATCHES,
     LOWER_IS_BETTER,
     PRIMARY_METRIC,
-    NotMeasurable,
+    NotMeasurableError,
     TokenCensus,
     assert_measurable,
     available_baselines,
@@ -73,11 +73,11 @@ class TestTheRefusalToFabricate:
         stable across runs, varied across examples, in range. Nothing downstream
         could tell, so the refusal has to be here.
         """
-        with pytest.raises(NotMeasurable, match="hash"):
+        with pytest.raises(NotMeasurableError, match="hash"):
             assert_measurable(FakeLayaPredictor())
 
     def test_the_refusal_says_what_to_run_instead(self):
-        with pytest.raises(NotMeasurable, match="laya-typed-decisions"):
+        with pytest.raises(NotMeasurableError, match="laya-typed-decisions"):
             assert_measurable(FakeLayaPredictor())
 
     def test_a_named_checkpoint_is_measurable(self):
@@ -88,11 +88,11 @@ class TestTheRefusalToFabricate:
         assert_measurable(Real())
 
     def test_the_whole_gate_refuses_the_fake(self):
-        with pytest.raises(NotMeasurable):
+        with pytest.raises(NotMeasurableError):
             run_gate([_signal("nan", key="a")], FakeLayaPredictor())
 
     def test_latency_refuses_the_fake(self):
-        with pytest.raises(NotMeasurable):
+        with pytest.raises(NotMeasurableError):
             measure_latency(FakeLayaPredictor(), ["a log"], [_CLEAN])
 
     def test_a_census_refuses_a_predictor_that_cannot_count_tokens(self):
@@ -102,7 +102,7 @@ class TestTheRefusalToFabricate:
         required, which decides whether the single-forward-pass claim survives. A
         guess there would answer the load-bearing question.
         """
-        with pytest.raises(NotMeasurable, match="characters per token"):
+        with pytest.raises(NotMeasurableError, match="characters per token"):
             token_census([_signal("nan", key="a")], FakeLayaPredictor())
 
 
@@ -563,7 +563,7 @@ class TestLatencyShape:
             def model_id(self) -> str:
                 return "stub-checkpoint"
 
-        with pytest.raises(NotMeasurable, match="no states"):
+        with pytest.raises(NotMeasurableError, match="no states"):
             measure_latency(Real(), [], [_CLEAN])
 
 

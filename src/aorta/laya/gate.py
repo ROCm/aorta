@@ -122,7 +122,7 @@ CONTEXT_WINDOWS: tuple[int, ...] = (512, 1024)
 LATENCY_BATCHES: tuple[int, ...] = (1, 5, 30)
 
 
-class NotMeasurable(RuntimeError):
+class NotMeasurableError(RuntimeError):
     """Asked for a measurement the available predictor cannot honestly produce."""
 
 
@@ -142,7 +142,7 @@ def assert_measurable(predictor: LayaPredictor) -> None:
     examples, in range. Nothing downstream could tell, so the refusal is here.
     """
     if predictor.model_id() == "fake":
-        raise NotMeasurable(
+        raise NotMeasurableError(
             "the fake predictor answers from a hash of its inputs, so its accuracy, "
             "Brier, ECE and latency describe a hash function and not a model. Pass "
             "--backend laya-typed-decisions (which needs the [laya] extra and the "
@@ -323,7 +323,7 @@ def token_census(
     """
     counter = getattr(tokenizer, "token_count", None)
     if counter is None:
-        raise NotMeasurable(
+        raise NotMeasurableError(
             f"{type(tokenizer).__name__} cannot count tokens, and a rule of thumb about "
             "characters per token is calibrated on prose rather than on logs full of "
             "timestamps and hex addresses. Load a real checkpoint to take this measurement."
@@ -386,7 +386,7 @@ def measure_latency(
     """
     assert_measurable(predictor)
     if not states:
-        raise NotMeasurable("no states to time")
+        raise NotMeasurableError("no states to time")
     samples: list[LatencySample] = []
     predictor.ask([states[0]], list(questions))
     for batch in batches:
@@ -680,7 +680,7 @@ __all__ = [
     "GateResult",
     "GateVerdict",
     "LatencySample",
-    "NotMeasurable",
+    "NotMeasurableError",
     "RecordedBaseline",
     "TokenCensus",
     "assert_measurable",

@@ -71,14 +71,14 @@ def _guard(action: Any) -> Any:
     """
     from aorta.laya.corpus import CorpusError
     from aorta.laya.eval import EvalError
-    from aorta.laya.gate import NotMeasurable
-    from aorta.laya.predictor import LayaUnavailable
+    from aorta.laya.gate import NotMeasurableError
+    from aorta.laya.predictor import LayaUnavailableError
 
     try:
         return action()
-    except (CorpusError, EvalError, NotMeasurable) as exc:
+    except (CorpusError, EvalError, NotMeasurableError) as exc:
         raise click.ClickException(str(exc)) from exc
-    except LayaUnavailable as exc:
+    except LayaUnavailableError as exc:
         raise click.ClickException(f"{exc}\n\n{_INSTALL_HINT}") from exc
 
 

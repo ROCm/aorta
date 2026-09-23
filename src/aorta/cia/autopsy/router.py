@@ -207,7 +207,7 @@ def laya_config_from_env() -> dict[str, Any]:
     return config
 
 
-def category_question() -> "Choice":
+def category_question() -> Choice:
     """The one question this tier asks, over the whole shared vocabulary.
 
     The wording is :data:`aorta.agent.llm.LAYA_CATEGORY_QUESTION`, imported
@@ -330,7 +330,7 @@ class _LayaCategoryTier:
     def __init__(
         self,
         config: Mapping[str, Any] | None = None,
-        predictor: "LayaPredictor | None" = None,
+        predictor: LayaPredictor | None = None,
     ) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", False))
@@ -424,7 +424,7 @@ class _LayaCategoryTier:
             caveat=caveat,
         )
 
-    def _resolve(self) -> "LayaPredictor | None":
+    def _resolve(self) -> LayaPredictor | None:
         """The predictor, or None when this tier cannot run.
 
         ``fake`` is refused rather than resolved, the same refusal Watch's tier
@@ -586,7 +586,7 @@ class TriageRouter(dspy.Module):
         bundle_root: Path | str,
         *,
         laya: Mapping[str, Any] | None = None,
-        predictor: "LayaPredictor | None" = None,
+        predictor: LayaPredictor | None = None,
     ):
         # Built here, per bundle, because one of the tools is bound to a root
         # and a module shared across jobs would carry the first job's root into

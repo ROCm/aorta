@@ -557,7 +557,7 @@ class TestTemperature:
     def test_temperature_one_changes_nothing(self):
         distribution = (("nan", 0.5), ("hang", 0.3), ("oom", 0.2))
         scaled = apply_temperature(distribution, 1.0)
-        for (name, before), (also, after) in zip(distribution, scaled):
+        for (name, before), (also, after) in zip(distribution, scaled, strict=True):
             assert name == also
             assert after == pytest.approx(before)
 

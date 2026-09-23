@@ -26,7 +26,7 @@ from aorta.chat.laya.artifact import (
     GRAPH_NAME,
     MANIFEST_NAME,
     TOKENIZER_NAME,
-    ArtifactUnavailable,
+    ArtifactUnavailableError,
     Manifest,
     RenderTemplate,
 )
@@ -227,7 +227,7 @@ class TestAnswersFromScores:
         assert answer.probability == pytest.approx(1 / (1 + math.exp(-2.0)))
 
     def test_a_graph_returning_the_wrong_number_of_scores_is_refused(self):
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             answers_from_scores([_CLEAN, _SIGNAL], [1.0, 2.0], _manifest())
         assert "re-export" in str(exc.value).lower()
 
@@ -316,13 +316,13 @@ class TestItFailsLoudly:
     def test_a_marker_that_is_not_one_token_is_refused(self, tmp_path):
         """Several positions where the scorer expects one misaligns every answer."""
         predictor, _ = _predictor(tmp_path, [0.0, 1.0], marker_known=False)
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             predictor.ask(["a"], [_CLEAN])
         assert "single token" in str(exc.value)
 
     def test_a_template_the_tokenizer_disagrees_with_is_refused(self, tmp_path):
         predictor, _ = _predictor(tmp_path, [0.0, 1.0], encodes_marker=False)
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             predictor.ask(["a"], [_CLEAN])
         assert "disagree about the marker token" in str(exc.value)
 
@@ -335,7 +335,7 @@ class TestItFailsLoudly:
         as an overflow.
         """
         predictor, _ = _predictor(tmp_path, [0.0, 1.0], manifest=_manifest(max_len=8))
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             predictor.ask([" ".join(["word"] * 200)], [_CLEAN])
         message = str(exc.value)
         assert "Shorten the state" in message
@@ -344,11 +344,11 @@ class TestItFailsLoudly:
     def test_a_graph_that_raises_names_the_graph(self, tmp_path):
         session = FakeSession(raises=RuntimeError("bad input shape"))
         predictor, _ = _predictor(tmp_path, session)
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             predictor.ask(["a"], [_CLEAN])
         assert "failed to run" in str(exc.value)
 
     def test_an_absent_artifact_is_refused_at_the_first_question(self, tmp_path):
         predictor = OnnxLayaPredictor(tmp_path / "nothing")
-        with pytest.raises(ArtifactUnavailable):
+        with pytest.raises(ArtifactUnavailableError):
             predictor.ask(["a"], [_CLEAN])

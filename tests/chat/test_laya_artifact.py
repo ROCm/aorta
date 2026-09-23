@@ -23,7 +23,7 @@ from aorta.chat.laya.artifact import (
     GRAPH_NAME,
     MANIFEST_NAME,
     TOKENIZER_NAME,
-    ArtifactUnavailable,
+    ArtifactUnavailableError,
     Manifest,
     RenderTemplate,
     calibration_key,
@@ -172,26 +172,26 @@ class TestTheManifestRefuses:
     def test_a_missing_field_is_refused_rather_than_defaulted(self, key: str):
         payload = _manifest_dict()
         del payload[key]
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             Manifest.from_dict(payload)
         assert key in str(exc.value)
 
     def test_an_artifact_from_another_graph_signature_is_refused(self):
         """The quiet one: an older artifact still tokenises and still returns numbers."""
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             Manifest.from_dict(_manifest_dict(artifact_version=ARTIFACT_VERSION - 1))
         assert "Re-export" in str(exc.value)
 
     def test_a_non_positive_temperature_is_refused(self):
-        with pytest.raises(ArtifactUnavailable):
+        with pytest.raises(ArtifactUnavailableError):
             Manifest.from_dict(_manifest_dict(temperatures={"noul:2": 0.0}))
 
     def test_a_non_numeric_temperature_is_refused(self):
-        with pytest.raises(ArtifactUnavailable):
+        with pytest.raises(ArtifactUnavailableError):
             Manifest.from_dict(_manifest_dict(temperatures={"noul:2": "warm"}))
 
     def test_a_zero_context_window_is_refused(self):
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             Manifest.from_dict(_manifest_dict(max_len=0))
         assert "no question fits" in str(exc.value)
 
@@ -215,17 +215,17 @@ class TestTheRenderTemplateRefuses:
     def test_a_template_that_drops_what_it_wraps_is_refused(self, field, broken):
         render = dict(_RENDER)
         render[field] = broken
-        with pytest.raises(ArtifactUnavailable):
+        with pytest.raises(ArtifactUnavailableError):
             RenderTemplate.from_dict(render)
 
     def test_an_empty_marker_is_refused(self):
-        with pytest.raises(ArtifactUnavailable):
+        with pytest.raises(ArtifactUnavailableError):
             RenderTemplate.from_dict({**_RENDER, "marker": ""})
 
     def test_a_missing_field_names_itself(self):
         render = dict(_RENDER)
         del render["separator"]
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             RenderTemplate.from_dict(render)
         assert "separator" in str(exc.value)
 
@@ -243,7 +243,7 @@ class TestLoadingAnArtifact:
     def test_an_absent_artifact_prints_the_staging_procedure(self, tmp_path):
         """Not a traceback. It cannot be fixed by a download either, so the
         message has to carry the export, not a pip install."""
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             load_artifact(tmp_path / "nothing-here")
         message = str(exc.value)
         assert "export_artifact" in message
@@ -254,7 +254,7 @@ class TestLoadingAnArtifact:
         directory = tmp_path / "laya"
         _stage(directory)
         (directory / missing).unlink()
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             load_artifact(directory)
         assert "Copy the whole directory" in str(exc.value)
 
@@ -262,7 +262,7 @@ class TestLoadingAnArtifact:
         directory = tmp_path / "laya"
         _stage(directory)
         (directory / MANIFEST_NAME).write_text("{ not json", encoding="utf-8")
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             load_artifact(directory)
         assert MANIFEST_NAME in str(exc.value)
 
@@ -275,7 +275,7 @@ class TestLoadingAnArtifact:
         directory = tmp_path / "laya"
         _stage(directory)
         (directory / GRAPH_NAME).write_bytes(b"a different export entirely")
-        with pytest.raises(ArtifactUnavailable) as exc:
+        with pytest.raises(ArtifactUnavailableError) as exc:
             load_artifact(directory, verify_digest=True)
         assert "without the other" in str(exc.value)
 

@@ -215,7 +215,7 @@ def apply_temperature(distribution: Distribution, temperature: float) -> Distrib
     total = sum(weights)
     return tuple(
         (name, weight / total)
-        for (name, _), weight in zip(distribution, weights)
+        for (name, _), weight in zip(distribution, weights, strict=True)
     )
 
 
@@ -235,7 +235,7 @@ def negative_log_likelihood(
     if not distributions:
         return 0.0
     total = 0.0
-    for distribution, label in zip(distributions, labels):
+    for distribution, label in zip(distributions, labels, strict=True):
         scaled = dict(apply_temperature(distribution, temperature))
         total -= math.log(_clamped(scaled.get(label, 0.0)))
     return total / len(distributions)
@@ -292,7 +292,7 @@ def fit_temperatures(
     if len(examples) != len(distributions):
         raise EvalError(f"{len(examples)} examples but {len(distributions)} distributions")
     grouped: dict[str, tuple[list[Distribution], list[str]]] = defaultdict(lambda: ([], []))
-    for example, distribution in zip(examples, distributions):
+    for example, distribution in zip(examples, distributions, strict=True):
         bucket = grouped[calibration_key(example)]
         bucket[0].append(distribution)
         bucket[1].append(example.label)
@@ -309,7 +309,7 @@ def recalibrate(
     """Apply the per-bucket temperatures. A bucket with no fit is left alone. Pure."""
     return [
         apply_temperature(distribution, temperatures.get(calibration_key(example), 1.0))
-        for example, distribution in zip(examples, distributions)
+        for example, distribution in zip(examples, distributions, strict=True)
     ]
 
 
@@ -707,7 +707,7 @@ def score(
         )
     rows = [
         ScoredRow(example=example, distribution=_normalised(distribution))
-        for example, distribution in zip(examples, distributions)
+        for example, distribution in zip(examples, distributions, strict=True)
     ]
     return EvalResult(
         model_id=model_id,
@@ -782,7 +782,7 @@ def answer_all(
                 f"{type(predictor).__name__} returned {len(answers)} answers for "
                 f"{len(questions)} questions"
             )
-        for index, answer in zip(indices, answers):
+        for index, answer in zip(indices, answers, strict=True):
             distributions[index] = distribution_of(examples[index].question, answer)
     missing = [index for index, value in enumerate(distributions) if value is None]
     if missing:

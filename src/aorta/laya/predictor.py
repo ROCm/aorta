@@ -58,7 +58,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, Union
+from typing import Any, Protocol
 
 #: The option-count buckets the library fits one temperature per, in the order it
 #: tests them. Mirrors ``laya.common.temp_bucket``, whose keys look like
@@ -112,7 +112,7 @@ CHECKPOINTS: Mapping[str, tuple[str, str | None]] = {
 DEFAULT_BACKEND = "fake"
 
 
-class LayaUnavailable(RuntimeError):
+class LayaUnavailableError(RuntimeError):
     """A real predictor was asked for and the machine cannot provide one.
 
     Raised rather than degraded. A predictor that silently answers 0.5 to
@@ -181,7 +181,7 @@ class Choice:
     criteria: tuple[tuple[str, str], ...] = ()
 
 
-Question = Union[Noul, Choice]
+Question = Noul | Choice
 
 
 # ── answers ────────────────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ class ChoiceAnswer:
         return sorted(self.probabilities, key=lambda pair: -pair[1])
 
 
-Answer = Union[NoulAnswer, ChoiceAnswer]
+Answer = NoulAnswer | ChoiceAnswer
 
 
 # ── which temperature answered the question ────────────────────────────────
@@ -391,7 +391,7 @@ class Calibration:
                 }
                 for entry in self.clamped
             ],
-            "applied": {bucket: value for bucket, value in self.applied},
+            "applied": dict(self.applied),
         }
 
 
@@ -545,7 +545,7 @@ class FakeLayaPredictor:
         return ChoiceAnswer(
             probabilities=tuple(
                 (option, weight / total)
-                for option, weight in zip(question.options, weights)
+                for option, weight in zip(question.options, weights, strict=True)
             )
         )
 
@@ -589,7 +589,7 @@ class LayaAgentPredictor:
         load: Any = None,
     ) -> None:
         if checkpoint not in CHECKPOINTS and load is None and not _is_local(checkpoint):
-            raise LayaUnavailable(
+            raise LayaUnavailableError(
                 f"unknown Laya checkpoint {checkpoint!r} "
                 f"(expected one of {', '.join(sorted(CHECKPOINTS))}, or a local "
                 "directory holding a fine-tune). "
@@ -641,7 +641,7 @@ class LayaAgentPredictor:
             try:
                 import laya
             except ImportError as exc:
-                raise LayaUnavailable(
+                raise LayaUnavailableError(
                     "Laya is required for a real typed-decision predictor. "
                     "Install it with:\n"
                     "  pip install 'amd-aorta[laya]'\n"
@@ -664,14 +664,14 @@ class LayaAgentPredictor:
 
         try:
             self._loaded = loader(self._checkpoint)
-        except LayaUnavailable:
+        except LayaUnavailableError:
             raise
         except Exception as exc:
             # The weights are downloaded on first use, so this is the ordinary
             # no-egress failure as much as it is a bad checkpoint name. Naming
             # what was being loaded matters: the library's own error says which
             # file it could not fetch and not which of our tiers asked for it.
-            raise LayaUnavailable(
+            raise LayaUnavailableError(
                 f"could not load the Laya checkpoint {self.model_id()}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
@@ -782,7 +782,7 @@ class LayaAgentPredictor:
         """
         tokenizer = getattr(self._agent(), "tok", None)
         if tokenizer is None:
-            raise LayaUnavailable(
+            raise LayaUnavailableError(
                 f"{self.model_id()} exposes no tokenizer, so token lengths cannot be counted"
             )
         return len(tokenizer(text, add_special_tokens=False)["input_ids"])
@@ -863,14 +863,14 @@ def _as_answer(question: Question, payload: Any) -> Answer:
     threshold comparison as though it had been measured.
     """
     if not isinstance(payload, Mapping):
-        raise LayaUnavailable(
+        raise LayaUnavailableError(
             f"Laya returned no answer for {question.question!r} "
             f"(got {type(payload).__name__})"
         )
     if isinstance(question, Noul):
         value = payload.get("noul")
         if not isinstance(value, (int, float)):
-            raise LayaUnavailable(
+            raise LayaUnavailableError(
                 f"Laya answered the noul {question.question!r} with no 'noul' "
                 f"probability (keys: {sorted(payload)})"
             )
@@ -878,13 +878,13 @@ def _as_answer(question: Question, payload: Any) -> Answer:
 
     probabilities = payload.get("probabilities")
     if not isinstance(probabilities, Mapping):
-        raise LayaUnavailable(
+        raise LayaUnavailableError(
             f"Laya answered the choice {question.question!r} with no "
             f"'probabilities' map (keys: {sorted(payload)})"
         )
     missing = [option for option in question.options if option not in probabilities]
     if missing:
-        raise LayaUnavailable(
+        raise LayaUnavailableError(
             f"Laya answered the choice {question.question!r} without the "
             f"offered options {missing}"
         )
@@ -954,7 +954,7 @@ __all__ = [
     "FakeLayaPredictor",
     "LayaAgentPredictor",
     "LayaPredictor",
-    "LayaUnavailable",
+    "LayaUnavailableError",
     "Noul",
     "NoulAnswer",
     "Question",

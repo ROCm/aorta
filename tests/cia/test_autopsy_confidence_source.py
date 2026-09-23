@@ -34,7 +34,7 @@ from aorta.cia.autopsy.escalation import (
     LLM_SELF_REPORT,
     SWEEP_PROBE,
     Confidence,
-    UncalibratedThreshold,
+    UncalibratedThresholdError,
 )
 from aorta.laya.predictor import ChoiceAnswer, FakeLayaPredictor, NoulAnswer
 
@@ -148,12 +148,12 @@ class TestADerivedCutoffIsAccepted:
 class TestAnUnknownSourceIsNotGuessedAt:
     def test_a_source_with_no_registered_cutoff_raises(self):
         """Picking the nearest cutoff and carrying on is the failure being prevented."""
-        with pytest.raises(UncalibratedThreshold, match="no escalation threshold"):
+        with pytest.raises(UncalibratedThresholdError, match="no escalation threshold"):
             _decide(Confidence(0.5, "some_future_head"), _adapters(0.62))
 
     def test_a_fallback_that_is_not_on_the_cutoff_s_scale_raises_too(self):
         """The fallback is only safe because of what it is, not because it is second."""
-        with pytest.raises(UncalibratedThreshold, match="nothing left to gate on"):
+        with pytest.raises(UncalibratedThresholdError, match="nothing left to gate on"):
             _decide(_laya(0.9), Confidence(0.62, "some_future_head"))
 
 

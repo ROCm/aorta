@@ -127,12 +127,12 @@ class TestItFallsBackToTheLLM:
     async def test_a_predictor_that_cannot_load_falls_back(self, monkeypatch):
         """No artifact staged is an ordinary state, not an error."""
         from aorta.chat.config import settings
-        from aorta.chat.laya.artifact import ArtifactUnavailable
+        from aorta.chat.laya.artifact import ArtifactUnavailableError
 
         monkeypatch.setattr(settings, "laya_enabled", True)
 
         def _no_artifact():
-            raise ArtifactUnavailable("nothing staged")
+            raise ArtifactUnavailableError("nothing staged")
 
         monkeypatch.setattr("aorta.chat.laya.chat_predictor", _no_artifact)
         llm = MagicMock()

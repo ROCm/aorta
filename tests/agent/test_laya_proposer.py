@@ -47,7 +47,7 @@ from aorta.laya.predictor import (
     Choice,
     ChoiceAnswer,
     FakeLayaPredictor,
-    LayaUnavailable,
+    LayaUnavailableError,
     Noul,
     NoulAnswer,
 )
@@ -532,7 +532,7 @@ class TestFailures:
         "the agent decided the search was over". ``run_agent_loop`` catches it
         into an ``error`` outcome with the audit trail intact.
         """
-        with pytest.raises(LayaUnavailable, match="unknown Laya checkpoint"):
+        with pytest.raises(LayaUnavailableError, match="unknown Laya checkpoint"):
             _propose(LayaProposer(checkpoint="laya-multilingual"))
 
     def test_a_predictor_answering_the_wrong_shape_is_not_read_as_a_probability(self):

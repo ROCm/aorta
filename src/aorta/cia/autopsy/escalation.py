@@ -66,7 +66,7 @@ ESCALATION_THRESHOLD = 0.85
 THRESHOLD_SOURCES = frozenset({ADAPTER_RULES, LLM_SELF_REPORT})
 
 
-class UncalibratedThreshold(ValueError):
+class UncalibratedThresholdError(ValueError):
     """A confidence was offered to a cutoff that was not derived against it.
 
     A programming error rather than a runtime condition: the caller is meant to
@@ -206,7 +206,7 @@ def decide(
         return _below(reported, ESCALATION_THRESHOLD, "the cutoff was chosen against this source")
 
     if reported.source != LAYA:
-        raise UncalibratedThreshold(
+        raise UncalibratedThresholdError(
             f"no escalation threshold is registered for confidence source {reported.source!r}. "
             f"Register one in THRESHOLD_SOURCES if it shares a scale with "
             f"{sorted(THRESHOLD_SOURCES)}, or pass a threshold derived against it."
@@ -220,7 +220,7 @@ def decide(
         )
 
     if rule_based.source not in THRESHOLD_SOURCES:
-        raise UncalibratedThreshold(
+        raise UncalibratedThresholdError(
             f"the fallback confidence came from {rule_based.source!r}, which has no "
             "registered threshold either, so there is nothing left to gate on"
         )
@@ -250,6 +250,6 @@ __all__ = [
     "THRESHOLD_SOURCES",
     "Confidence",
     "Escalation",
-    "UncalibratedThreshold",
+    "UncalibratedThresholdError",
     "decide",
 ]

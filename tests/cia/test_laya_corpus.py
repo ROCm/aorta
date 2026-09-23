@@ -452,7 +452,7 @@ class TestProposerCorpus:
         root = agent_run(events=_CONVERGED, cells=_CONVERGED_CELLS)
         stops = [e for e in build_proposer_corpus(root).examples if e.decision == "proposer_stop"]
         assert stops
-        assert set(e.label for e in stops) == {"false"}
+        assert {e.label for e in stops} == {"false"}
 
     def test_stopping_is_labelled_true_once_the_candidates_are_exhausted(self, agent_run):
         events = [
