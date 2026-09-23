@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import stat
 from pathlib import Path
 
@@ -1326,3 +1327,30 @@ class TestCliUsesOneExplicitSessionKey:
             "turn": 6,
             "front_door": "cli",
         }
+
+
+class TestTheDocstringsPointAtCodeThatExists:
+    def test_every_func_reference_in_the_module_resolves(self):
+        """A `:func:` naming nothing is a broken link in the built docs.
+
+        `_cia_results_from_json` referred to `_cia_results_from_text`, which
+        has never existed -- the text path is `_cia_results` itself, reading
+        spans through `_first_value`. Sphinx renders an unresolved reference
+        as plain text, so the docstring kept reading correctly to anyone
+        reading the source and pointed at nothing to anyone reading the docs,
+        which is the failure mode that let it survive review.
+
+        Scoped to same-module references (`:func:`_name``): a dotted target
+        lives somewhere this test cannot resolve without importing it, and
+        guessing at that is how a link checker starts reporting noise.
+        """
+        source = Path(decision_log.__file__).read_text(encoding="utf-8")
+        referenced = set(re.findall(r":func:`(_\w+)`", source))
+        defined = set(re.findall(r"^def (\w+)", source, flags=re.MULTILINE))
+
+        assert referenced, "the module documents itself with :func: references"
+        assert referenced <= defined, (
+            f"docstrings reference {sorted(referenced - defined)}, which "
+            f"{'is' if len(referenced - defined) == 1 else 'are'} not defined "
+            "in this module"
+        )

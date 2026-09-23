@@ -297,8 +297,8 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
     log that nothing downstream expects.
 
     **A job named more than once keeps its verdict, half by half**, which is
-    the rule :func:`_cia_results_from_text` already follows and this side did
-    not. Announce-then-finish is the ordinary shape of a progress log in JSON
+    the rule the text path in :func:`_cia_results` already follows and this
+    side did not. Announce-then-finish is the ordinary shape of a progress log in JSON
     as much as in text -- a ``results`` array carrying a running row for
     ``cia-a1`` and its completed row after it -- and taking the first object
     and discarding the rest recorded the row with ``category=None``, which is
