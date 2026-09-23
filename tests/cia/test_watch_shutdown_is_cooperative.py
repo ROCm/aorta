@@ -210,11 +210,12 @@ class TestQueuedWorkKeepsItsRecoveryIdentity:
         def finish():
             try:
                 worker_is_calling.wait()
-                poll_mod.record_autopsy_state(
+                poll_mod.transition_autopsy_attempt(
                     job_dir,
                     "done",
+                    attempt=1,
+                    from_states={"running", "deferred"},
                     job_id="cia-cancel",
-                    attempts=1,
                 )
             except BaseException as exc:  # preserve failures from the thread
                 errors.append(exc)
@@ -244,6 +245,100 @@ class TestQueuedWorkKeepsItsRecoveryIdentity:
         assert not worker.is_alive()
         assert errors == []
         assert poll_mod.autopsy_state(job_dir)["state"] == "done"
+
+    @pytest.mark.parametrize(
+        ("target", "current", "from_states"),
+        [
+            ("running", "queued", {"queued"}),
+            ("failed", "running", {"running", "deferred"}),
+            ("done", "running", {"running", "deferred"}),
+        ],
+    )
+    def test_stale_worker_transitions_never_replace_a_newer_attempt(
+        self,
+        tmp_path,
+        target,
+        current,
+        from_states,
+    ):
+        _job(tmp_path)
+        job_dir = tmp_path / "cia-cancel"
+        poll_mod.record_autopsy_state(
+            job_dir,
+            current,
+            job_id="cia-cancel",
+            attempts=2,
+        )
+
+        changed = poll_mod.transition_autopsy_attempt(
+            job_dir,
+            target,
+            attempt=1,
+            from_states=from_states,
+            job_id="cia-cancel",
+        )
+
+        state = poll_mod.autopsy_state(job_dir)
+        assert changed is False
+        assert state["state"] == current
+        assert state["attempts"] == 2
+
+    def test_delayed_attempt_one_cannot_finish_over_active_attempt_two(self, tmp_path, monkeypatch):
+        stop = None
+        started = threading.Event()
+        release = threading.Event()
+        job, job_dir = _job(tmp_path)
+        bundle = job_dir / "bundle"
+        bundle.mkdir()
+        poll_mod.record_autopsy_state(
+            job_dir,
+            "queued",
+            job_id=job.job_id,
+            attempts=1,
+        )
+
+        def delayed(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=5)
+
+        monkeypatch.setattr(
+            "aorta.cia.watch.trigger.trigger_autopsy",
+            delayed,
+        )
+        old_worker = threading.Thread(
+            target=poll_mod._run_autopsy_off_the_loop,
+            args=(bundle, job, tmp_path, job_dir, stop, 1),
+            daemon=True,
+        )
+        old_worker.start()
+        assert started.wait(timeout=5)
+
+        poll_mod.defer_stopping_autopsy(
+            job_dir,
+            reason="attempt 1 outlived its recovery lease",
+            attempt=1,
+        )
+        poll_mod.record_autopsy_state(
+            job_dir,
+            "queued",
+            job_id=job.job_id,
+            attempts=2,
+        )
+        assert poll_mod.transition_autopsy_attempt(
+            job_dir,
+            "running",
+            attempt=2,
+            from_states={"queued"},
+            job_id=job.job_id,
+        )
+
+        release.set()
+        old_worker.join(timeout=5)
+
+        state = poll_mod.autopsy_state(job_dir)
+        assert not old_worker.is_alive()
+        assert state["state"] == "running"
+        assert state["attempts"] == 2
 
     def test_old_shutdown_never_defers_a_newer_attempt(self, tmp_path):
         _job(tmp_path)

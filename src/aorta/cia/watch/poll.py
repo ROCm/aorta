@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, wait
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -398,7 +398,14 @@ def _write_autopsy_state_locked(job_dir: Path, state: str, **fields: object) -> 
     return True
 
 
-def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> bool:
+def record_autopsy_state(
+    job_dir: Path,
+    state: str,
+    *,
+    expected_attempt: int | None = None,
+    from_states: Collection[str] | None = None,
+    **fields: object,
+) -> bool:
     """Note that this job is deferred, queued, running, or finished with Autopsy.
 
     Written before the work is enqueued rather than after it finishes: the
@@ -412,13 +419,44 @@ def record_autopsy_state(job_dir: Path, state: str, **fields: object) -> bool:
 
     The per-job guard also makes this the serialization point for worker and
     shutdown transitions. Read-check-write helpers below hold the same guard.
+    When *expected_attempt* is supplied, the replace happens only if both that
+    attempt and, when supplied, one of *from_states* are still current.
     """
     try:
         with _autopsy_state_guard(job_dir):
+            if expected_attempt is not None:
+                recorded = autopsy_state(job_dir)
+                try:
+                    recorded_attempt = int(recorded.get("attempts"))
+                except (TypeError, ValueError):
+                    return False
+                if recorded_attempt != expected_attempt:
+                    return False
+                if from_states is not None and recorded.get("state") not in from_states:
+                    return False
             return _write_autopsy_state_locked(job_dir, state, **fields)
     except OSError as exc:
         print(f"[watch] could not record autopsy state for {job_dir.name}: {exc}")
         return False
+
+
+def transition_autopsy_attempt(
+    job_dir: Path,
+    state: str,
+    *,
+    attempt: int,
+    from_states: Collection[str],
+    **fields: object,
+) -> bool:
+    """Replace state only while this worker still owns the recorded attempt."""
+    return record_autopsy_state(
+        job_dir,
+        state,
+        expected_attempt=attempt,
+        from_states=from_states,
+        **fields,
+        attempts=attempt,
+    )
 
 
 def abandon_autopsy(job_dir: Path, *, reason: str, attempt: int | None = None) -> bool:
@@ -693,7 +731,14 @@ def _run_autopsy_off_the_loop(
             attempt=attempts,
         )
         return
-    record_autopsy_state(job_dir, "running", job_id=job.job_id, attempts=attempts)
+    if not transition_autopsy_attempt(
+        job_dir,
+        "running",
+        attempt=attempts,
+        from_states={"queued"},
+        job_id=job.job_id,
+    ):
+        return
     try:
         trigger_autopsy(bundle, job, jobs_root, stop=stop)
     except Exception as exc:  # noqa: BLE001 - a worker that raises is silent
@@ -705,11 +750,12 @@ def _run_autopsy_off_the_loop(
             )
             return
         print(f"[watch] autopsy for {job.job_id} failed: {type(exc).__name__}: {exc}")
-        record_autopsy_state(
+        transition_autopsy_attempt(
             job_dir,
             "failed",
+            attempt=attempts,
+            from_states={"running", "deferred"},
             job_id=job.job_id,
-            attempts=attempts,
             error=str(exc)[:200],
         )
     else:
@@ -720,7 +766,13 @@ def _run_autopsy_off_the_loop(
                 attempt=attempts,
             )
             return
-        record_autopsy_state(job_dir, "done", job_id=job.job_id, attempts=attempts)
+        transition_autopsy_attempt(
+            job_dir,
+            "done",
+            attempt=attempts,
+            from_states={"running", "deferred"},
+            job_id=job.job_id,
+        )
 
 
 def poll_jobs(
