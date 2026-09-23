@@ -57,6 +57,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -69,15 +70,41 @@ _AUDIT_SCRIPT = _REPO_ROOT / "scripts" / "audit_env_knobs.py"
 #: Shared objects that read the variables the mitigation registry sets. The GEMM
 #: libraries ``audit_env_knobs.py`` already audits are deliberately not here:
 #: no mitigation variable lives in them.
+#:
+#: Not the whole scan set. :func:`sonames_to_scan` adds whatever library a
+#: :data:`KNOWN_ABSENT` entry names as its claimed consumer, which is how an
+#: exemption whose claim points outside this tuple stays falsifiable.
 RUNTIME_SONAMES = (
     "libamdhip64.so",
     "libhsa-runtime64.so",
     "librccl.so",
 )
 
+
+class Exemption(NamedTuple):
+    """Why a ``(mitigation, variable)`` pair is allowed to be absent.
+
+    ``claimed_consumer`` is the soname the *claim being excused* points at --
+    the library some part of this repo says reads the variable. It is a field
+    rather than prose in ``reason`` because
+    :func:`test_every_known_absent_claim_is_scanned` has to be able to require
+    that library to be in the scan set.
+
+    Without it the exemption is unfalsifiable. ``DISABLE_TF32`` is excused on
+    the evidence that hipBLASLt does not read it, while
+    :data:`RUNTIME_SONAMES` deliberately omits the GEMM libraries -- so the
+    one binary that could retire the entry was the one binary never opened,
+    and :func:`test_known_absent_entries_are_still_absent` could only ever
+    confirm what it already assumed.
+    """
+
+    claimed_consumer: str
+    reason: str
+
+
 #: ``(mitigation, variable)`` pairs known to be absent from every scanned
-#: binary, each with the reason. The lane must not go red over a backlog on day
-#: one -- the point is to catch the *next* one.
+#: binary, each with the claim it excuses and the reason. The lane must not go
+#: red over a backlog on day one -- the point is to catch the *next* one.
 #:
 #: **Keyed by the pair, not by the mitigation name.** A mitigation is an env-var
 #: *bundle*, so a name-keyed exemption is broader than the fact it records: it
@@ -92,18 +119,63 @@ RUNTIME_SONAMES = (
 #: :func:`test_known_absent_covers_only_the_mode_this_test_can_see` enforces
 #: that, because silencing a mode-2 entry here would make the guard look like
 #: it had checked something it cannot check.
-KNOWN_ABSENT: dict[tuple[str, str], str] = {
-    ("tf32_off", "DISABLE_TF32"): (
-        "DISABLE_TF32 appears in no ROCm or torch binary; aorta#500. The "
-        "registry attributes it to hipBLASLt and instrumentation/env_knobs.py "
-        "attributes it to pytorch, and neither holds."
+KNOWN_ABSENT: dict[tuple[str, str], Exemption] = {
+    ("tf32_off", "DISABLE_TF32"): Exemption(
+        claimed_consumer="libhipblaslt.so",
+        reason=(
+            "DISABLE_TF32 appears in no ROCm or torch binary; aorta#500. The "
+            "registry attributes it to hipBLASLt (registry/mitigations.py: "
+            "'consumed by hipBLASLt itself') and "
+            "instrumentation/env_knobs.py attributes it to pytorch, and "
+            "neither holds."
+        ),
     ),
-    ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): (
-        "RCCL_GFX942_CHEAP_FENCE_OFF appears in no binary including librccl; "
-        "the name is gfx942-scoped and the supported targets have moved on. "
-        "aorta#511."
+    ("rccl_gfx942_cheap_fence_off", "RCCL_GFX942_CHEAP_FENCE_OFF"): Exemption(
+        claimed_consumer="librccl.so",
+        reason=(
+            "RCCL_GFX942_CHEAP_FENCE_OFF appears in no binary including "
+            "librccl; the name is gfx942-scoped and the supported targets "
+            "have moved on. aorta#511."
+        ),
     ),
 }
+
+
+def exemption_sonames() -> tuple[str, ...]:
+    """Libraries only a :data:`KNOWN_ABSENT` claim puts in the scan set.
+
+    Deduplicated and order-stable, and it skips anything
+    :data:`RUNTIME_SONAMES` already carries -- ``librccl`` is already scanned
+    for its own sake, so the RCCL exemption adds nothing.
+    """
+    return tuple(
+        dict.fromkeys(
+            exemption.claimed_consumer
+            for exemption in KNOWN_ABSENT.values()
+            if exemption.claimed_consumer not in RUNTIME_SONAMES
+        )
+    )
+
+
+def sonames_to_scan() -> tuple[str, ...]:
+    """Every ROCm-side soname read, for either reason.
+
+    Two reasons, and they are not the same reason. :data:`RUNTIME_SONAMES` is
+    "this library reads mitigation variables"; :func:`exemption_sonames` is
+    "some entry in :data:`KNOWN_ABSENT` says this library reads one, and that
+    claim has to be checkable". The second set buys no coverage for
+    :func:`test_every_mitigation_variable_is_read_by_something` -- it exists so
+    the exemption list can shrink.
+
+    It is a cost. hipBLASLt is the largest single object in a ROCm install, and
+    the 2.5 s figure :func:`libraries_to_scan` quotes was measured before this
+    library joined the set; it has not been re-measured on a GPU lane since, so
+    take that number as the floor rather than the current cost. Still bounded
+    by the same rule the glob broke: named libraries, not ``*.so``, so
+    ``librocblas``, ``libMIOpen`` and the rest stay out.
+    """
+    return RUNTIME_SONAMES + exemption_sonames()
+
 
 _ENV_NAME_RE = re.compile(rb"[A-Z][A-Z0-9_]{2,}")
 
@@ -410,6 +482,51 @@ def test_known_absent_entries_name_a_variable_that_mitigation_actually_sets():
     )
 
 
+def test_every_known_absent_claim_is_scanned():
+    """An exemption may not point at a library the scan never opens.
+
+    This is the rot check's precondition, and it was not held. ``DISABLE_TF32``
+    is excused because hipBLASLt does not read it, while
+    :data:`RUNTIME_SONAMES` omitted the GEMM libraries -- so
+    :func:`test_known_absent_entries_are_still_absent` could not retire the
+    entry no matter what a future hipBLASLt did, and the exemption was
+    permanent by construction rather than by evidence.
+
+    Stated over :data:`KNOWN_ABSENT` rather than over the one pair that had the
+    defect, so the next entry cannot reintroduce it by naming a fourth library.
+    """
+    scanned = sonames_to_scan()
+    unscanned = sorted(
+        (mitigation, variable, exemption.claimed_consumer)
+        for (mitigation, variable), exemption in KNOWN_ABSENT.items()
+        if exemption.claimed_consumer not in scanned
+    )
+    assert not unscanned, (
+        f"{unscanned} excuse a variable on the evidence that a library does "
+        "not read it, and that library is not in the scan set, so the "
+        "exemption can never be retired. Add the soname to RUNTIME_SONAMES if "
+        "it reads mitigation variables in its own right; otherwise "
+        "exemption_sonames() picks it up automatically and this means the "
+        "claimed_consumer is misspelled."
+    )
+
+
+def test_exemption_sonames_does_not_restate_the_runtime_set():
+    """``librccl`` is scanned for its own sake; the RCCL entry must not re-add it.
+
+    Not cosmetic: :func:`sonames_to_scan` concatenates, so a duplicate would
+    resolve the same library twice per directory. The dedup in
+    :func:`libraries_to_scan` hides the cost afterwards, which is exactly why
+    it is worth asserting here instead.
+    """
+    assert not set(exemption_sonames()) & set(RUNTIME_SONAMES)
+    assert len(set(sonames_to_scan())) == len(sonames_to_scan())
+    assert "libhipblaslt.so" in exemption_sonames(), (
+        "the tf32_off entry's claimed consumer should be reaching the scan "
+        "set through the exemption path, not through RUNTIME_SONAMES"
+    )
+
+
 def test_known_absent_covers_only_the_mode_this_test_can_see():
     """Guard the guard's own scope.
 
@@ -677,13 +794,14 @@ def test_a_scan_that_found_libraries_neither_fails_nor_skips(monkeypatch, tmp_pa
 
 
 def test_only_torchs_directory_is_globbed(tmp_path):
-    """``RUNTIME_SONAMES`` says which ROCm libraries are worth reading; the scan
+    """``sonames_to_scan`` says which ROCm libraries are worth reading; the scan
     now agrees with it.
 
-    The glob scanned every ``.so`` in the ROCm directories -- including the
-    GEMM libraries the constant's own comment excludes by name -- for 4.43 GB
-    of reads against 365 MB and an identical verdict. Torch's directory keeps
-    its glob: it is the side with no soname declared for it, and its three
+    The glob scanned every ``.so`` in the ROCm directories -- including GEMM
+    libraries no mitigation variable and no exemption claim names -- for 4.43
+    GB of reads against 365 MB and an identical verdict. ``librocblas`` is the
+    control here and stays out under both rules. Torch's directory keeps its
+    glob: it is the side with no soname declared for it, and its three
     variables live across several libraries rather than in one named file.
 
     ``scan_plan`` appends torch last, which is what makes the split a
@@ -701,6 +819,34 @@ def test_only_torchs_directory_is_globbed(tmp_path):
     assert declared.resolve() in scanned
     assert globbed.resolve() in scanned or globbed in scanned
     assert not [lib for lib in scanned if lib.name == "librocblas.so"], scanned
+
+
+def test_a_known_absent_entrys_claimed_library_is_opened(tmp_path):
+    """The rot check's precondition, end to end and without a GPU.
+
+    ``test_every_known_absent_claim_is_scanned`` asserts the soname is in the
+    list. This asserts the list is what ``libraries_to_scan`` reads, so the day
+    hipBLASLt starts carrying ``DISABLE_TF32`` the name reaches
+    ``present_names`` and ``find_fixed_known_absent`` retires the entry. Before
+    this, that library was never opened and the entry was unfalsifiable.
+
+    ``librocblas`` sits in the same directory as the control: being a GEMM
+    library is not what gets a file read -- being named is.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    claimed = _fake_so(rocm / "libhipblaslt.so", ["DISABLE_TF32"])
+    _fake_so(rocm / "librocblas.so", ["DISABLE_TF32"])
+
+    scanned = libraries_to_scan([rocm, torch_lib])
+    assert claimed.resolve() in scanned, scanned
+    assert not [lib for lib in scanned if lib.name == "librocblas.so"], scanned
+
+    present = set()
+    for lib in scanned:
+        present |= names_in_binary(lib)
+    assert find_fixed_known_absent(present) == [("tf32_off", "DISABLE_TF32")]
 
 
 def test_the_declared_sonames_are_not_read_twice(tmp_path):
@@ -813,16 +959,20 @@ def libraries_to_scan(dirs: list[Path]) -> list[Path]:
     ``libtorch_*``/``libc10*`` rather than concentrated in a named library --
     so it is the only place a glob is the right instrument.
 
-    **The ROCm side is not globbed, and that is what :data:`RUNTIME_SONAMES`
-    means.** The constant says the GEMM libraries are deliberately absent
-    because no mitigation variable lives in them, and a ``*.so`` glob next to
-    it scanned ``librocblas``, ``libhipblaslt``, ``libMIOpen`` and the rest
-    anyway -- reading 4.43 GB where 365 MB answers the question, and
-    re-reading each declared soname through its unversioned symlink on top.
+    **The ROCm side is not globbed, and that is what :func:`sonames_to_scan`
+    means.** A ``*.so`` glob read ``librocblas``, ``libMIOpen`` and the rest
+    of the GEMM stack -- 4.43 GB where 365 MB answers the question -- and
+    re-read each declared soname through its unversioned symlink on top.
     Measured on ROCm 7.0.2: 25.9 s globbed against 2.5 s declared, with an
     identical verdict for all seventeen registry variables. The fixture is
     module-scoped and the GPU lane runs ``-n 4``, so the two ``rocm``-marked
     tests can land on different xdist workers and pay it twice.
+
+    ``libhipblaslt`` is now in the named set and was not when those numbers
+    were taken, so the declared figure is higher than 2.5 s by that library's
+    read; it is there because :data:`KNOWN_ABSENT` names it, not because a
+    glob swept it up. See :func:`sonames_to_scan` for why a claimed consumer
+    has to be opened.
 
     Deduplicated by resolved path, because a soname and its major-versioned
     link resolve to one file and reading it twice changes nothing but the
@@ -832,7 +982,7 @@ def libraries_to_scan(dirs: list[Path]) -> list[Path]:
     *rocm_dirs, torch_lib = dirs
     scanned: list[Path] = []
     for directory in rocm_dirs:
-        for soname in RUNTIME_SONAMES:
+        for soname in sonames_to_scan():
             lib = audit.resolve_library(directory, soname)
             if lib is not None:
                 scanned.append(lib)
