@@ -34,6 +34,13 @@ Covered:
   missing all of them, since a partial scan does not weaken the verdicts
   evenly -- see :class:`ScanSet`.
 
+  And the copy scanned is the copy the loader picks, not the copy the resolver
+  names: mappings this process already holds first, then ``LD_LIBRARY_PATH``
+  in its own order, then the resolver's directories. An operator library
+  supplied ahead of the resolver's is a configuration the GPU workflow appends
+  for on purpose, and reading the unloaded copy instead moved both verdicts --
+  see :func:`rocm_lib_dirs`.
+
 Not covered, and not detectable this way:
 
 * **read and refused** -- the runtime parses the value and declines. Both
@@ -317,7 +324,105 @@ def rocm_torch_lib() -> tuple[Path | None, str]:
     return lib, ""
 
 
-def rocm_lib_dirs(roots: RocmRoots | None = None) -> list[Path]:
+#: Where the kernel reports this process's mappings. A module constant so the
+#: reader can be pointed at a fixture file without monkeypatching ``Path``.
+_PROC_SELF_MAPS = Path("/proc/self/maps")
+
+
+def mapped_library_dirs(
+    sonames: tuple[str, ...] | None = None, maps_text: str | None = None
+) -> list[Path]:
+    """Directories holding an audited soname this process has actually mapped.
+
+    Ground truth rather than a model. Everything else here *predicts* which
+    copy the loader would choose; a mapping is the loader having already
+    chosen, so these directories go in front of the predicted ones. That
+    closes the cases no search-path reasoning can: a ``DT_RPATH`` on the
+    calling object outranks ``LD_LIBRARY_PATH`` entirely, and
+    ``/etc/ld.so.cache`` supplies a copy from a directory that is on no search
+    path this test can see. In both the process holds a ``libamdhip64`` the
+    resolver never names.
+
+    Only the audited sonames, so an unrelated mapping -- libc, libstdc++,
+    every ``.so`` torch pulls in -- does not become a directory to scan. A
+    directory earns its place by holding a file this audit would open anyway;
+    it is a precedence hint, not a widening of the scan.
+
+    Versioned names match the way the loader names them: ``libamdhip64.so.7``
+    is a mapping of ``libamdhip64.so``. Same rule as
+    ``instrumentation/environment.py``'s ``_loaded_lib_path_from_maps``, which
+    reads this file for the same reason -- the path torch was loaded *from* is
+    not always the path a layout says it is.
+
+    Mappings the kernel marked ``" (deleted)"`` are skipped: a file unlinked
+    after ``dlopen`` has a directory that may no longer hold it, and scanning a
+    torn-down build-artifact tree is the stale read this whole thread is about.
+    Unreadable ``/proc`` (not Linux, or a sandbox) yields ``[]``, which leaves
+    the search-path prediction to answer -- the behaviour before this existed.
+    """
+    names = sonames_to_scan() if sonames is None else sonames
+    if maps_text is None:
+        try:
+            maps_text = _PROC_SELF_MAPS.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+    dirs: list[Path] = []
+    for line in maps_text.splitlines():
+        # "addr perms offset dev inode  pathname"; the pathname is optional and
+        # is the sixth field. Bounded split so a path containing spaces stays
+        # whole rather than being truncated into a directory that exists.
+        parts = line.split(maxsplit=5)
+        if len(parts) < 6:
+            continue
+        path_str = parts[5]
+        if not path_str.startswith("/") or path_str.endswith(" (deleted)"):
+            continue
+        name = Path(path_str).name
+        if any(name == soname or name.startswith(f"{soname}.") for soname in names):
+            dirs.append(Path(path_str).parent)
+    return list(dict.fromkeys(dirs))
+
+
+def search_path_dirs(search_path: str | None = None) -> list[Path]:
+    """``LD_LIBRARY_PATH`` as the loader reads it: in order, empties are ``cwd``.
+
+    An empty element means the current directory to glibc, and it is dropped
+    only by writing it out -- a trailing colon is the common way to produce
+    one. Rendering it faithfully costs nothing (the sonames resolve in a
+    checkout in no configuration anybody has) and keeps this function's claim
+    true: this is the search path, not a tidied version of it.
+    """
+    value = (
+        os.environ.get("LD_LIBRARY_PATH", "") if search_path is None else search_path
+    )
+    if not value:
+        return []
+    return [Path(entry) if entry else Path.cwd() for entry in value.split(os.pathsep)]
+
+
+def loader_search_dirs(
+    search_path: str | None = None, maps_text: str | None = None
+) -> list[Path]:
+    """Where the loader would find an audited soname, highest precedence first.
+
+    Mapped copies first because they are decided, then ``LD_LIBRARY_PATH`` in
+    its own order for the sonames not loaded yet -- ``librccl`` is routinely
+    one of those, since RCCL is not pulled in until the first collective, so a
+    mapping-only answer would leave the audit unable to resolve it at all.
+    """
+    return list(
+        dict.fromkeys(
+            [
+                *mapped_library_dirs(maps_text=maps_text),
+                *search_path_dirs(search_path),
+            ]
+        )
+    )
+
+
+def rocm_lib_dirs(
+    roots: RocmRoots | None = None, loader_dirs: list[Path] | None = None
+) -> list[Path]:
     """The ROCm library directories to scan, in order, deduplicated.
 
     Resolved rather than hardcoded, because ``/opt/rocm`` is not where ROCm is
@@ -337,13 +442,44 @@ def rocm_lib_dirs(roots: RocmRoots | None = None) -> list[Path]:
     dedup collapses them to a single entry -- byte-identical to what the
     hardcoded constant scanned.
 
+    **The loader's directories come first, and the resolver's are the tail.**
+    The resolver alone answered the wrong question: this file's opening line
+    says a variable absent from every *loaded* runtime binary is read by
+    nobody, and the two lists are not the same list. ``gpu-tests.yml`` appends
+    the resolver's directories to any inherited ``LD_LIBRARY_PATH`` rather than
+    prepending them -- deliberately, so an operator substitution keeps winning,
+    and ``test_dev_image_appends_the_rocm_lib_dirs_rather_than_asserting_them``
+    pins that order. In that supported configuration the process loads
+    ``/operator/lib/libamdhip64.so`` while this scan read the resolver's
+    different copy, and an unloaded file's strings decided both verdicts: a
+    variable the loaded runtime does read is reported unread, and a
+    :data:`KNOWN_ABSENT` entry stays excused on a binary nothing ran.
+
+    So the order here *is* the loader's order -- mapped copies, then
+    ``LD_LIBRARY_PATH`` in its own order, then the resolver's pair -- and
+    :func:`libraries_to_scan` already takes the first directory that provides a
+    soname (:func:`test_the_first_directory_that_provides_a_soname_wins`). The
+    resolver's pair stays at the tail rather than being dropped, because it is
+    what answers when nothing is inherited, which is every lane that is not the
+    GPU one; there the list is byte-identical to what it was before. An
+    override is per soname, not all-or-nothing: an operator directory holding
+    only ``libamdhip64`` leaves ``libhsa-runtime64`` and ``librccl`` to the
+    resolver, which is again what the loader does.
+
     Empty when no ROCm install was found at all (``source == "none"``), which
-    is what keeps the CPU lane honest: see :func:`scan_plan`.
+    is what keeps the CPU lane honest: see :func:`scan_plan`. Checked *before*
+    the inherited directories are consulted, on purpose. Otherwise a CPU box
+    whose ``LD_LIBRARY_PATH`` happens to name an existing directory produces a
+    non-empty plan, and the honest skip -- the thing that stops this audit
+    reporting the registry as unread when the machine is what is missing --
+    would depend on an environment variable that has nothing to say about
+    whether ROCm is installed.
     """
     resolved = resolve_rocm_roots() if roots is None else roots
     if resolved.source == "none":
         return []
-    ordered = dict.fromkeys([resolved.core_lib_dir, resolved.lib_dir])
+    inherited = loader_search_dirs() if loader_dirs is None else loader_dirs
+    ordered = dict.fromkeys([*inherited, resolved.core_lib_dir, resolved.lib_dir])
     return [directory for directory in ordered if safe_is_dir(directory)]
 
 
@@ -368,6 +504,7 @@ def no_rocm_message(roots: RocmRoots) -> str:
 def scan_plan(
     roots: RocmRoots | None = None,
     torch: tuple[Path | None, str] | None = None,
+    loader_dirs: list[Path] | None = None,
 ) -> tuple[list[Path], str]:
     """``(directories to scan, why not)``. A reason is non-empty iff the list is empty.
 
@@ -387,10 +524,15 @@ def scan_plan(
     second exemption concept ("unread, but we did not look"), and an exemption
     that means "not checked" is how a guard turns into decoration.
 
-    Both inputs are injectable so the rules are testable on a machine with
-    neither, which every machine that is not the GPU lane is.
+    All three inputs are injectable so the rules are testable on a machine with
+    none of them, which every machine that is not the GPU lane is.
+    ``loader_dirs`` is injected as ``[]`` by the hermetic tests below rather
+    than left to default, because the default reads this process's real
+    ``LD_LIBRARY_PATH`` and mappings -- and on the one lane that has those, a
+    test asserting an exact directory list would be asserting the runner's
+    environment.
     """
-    dirs = rocm_lib_dirs(roots)
+    dirs = rocm_lib_dirs(roots, loader_dirs)
     if not dirs:
         resolved = resolve_rocm_roots() if roots is None else roots
         return [], no_rocm_message(resolved)
@@ -603,7 +745,7 @@ def test_wheel_layout_scans_both_the_core_and_the_libraries_lib_dir(tmp_path):
     torch_like.mkdir(parents=True)
 
     dirs, why_not = scan_plan(
-        roots=_roots(core, libraries), torch=_rocm_torch(torch_like)
+        roots=_roots(core, libraries), torch=_rocm_torch(torch_like), loader_dirs=[]
     )
     assert dirs == [core / "lib", libraries / "lib", torch_like]
     assert why_not == ""
@@ -618,6 +760,7 @@ def test_classic_layout_scans_one_directory(tmp_path):
     dirs, _ = scan_plan(
         roots=_roots(root, root, source="opt_rocm", layout="classic"),
         torch=_rocm_torch(torch_like),
+        loader_dirs=[],
     )
     assert dirs == [root / "lib", torch_like]
 
@@ -638,7 +781,9 @@ def test_a_torch_only_tree_does_not_answer_for_rocm_variables(tmp_path):
     torch_like.mkdir(parents=True)
     missing = tmp_path / "definitely-not-rocm"
     dirs, why_not = scan_plan(
-        roots=_roots(missing, missing, source="none"), torch=_rocm_torch(torch_like)
+        roots=_roots(missing, missing, source="none"),
+        torch=_rocm_torch(torch_like),
+        loader_dirs=[],
     )
     assert dirs == []
     assert "source='none'" in why_not          # attributable, per issue #381
@@ -656,7 +801,9 @@ def test_a_resolved_root_whose_lib_dirs_are_missing_scans_nothing(tmp_path):
     core.mkdir()
     torch_like = tmp_path / "torch" / "lib"
     torch_like.mkdir(parents=True)
-    dirs, why_not = scan_plan(roots=_roots(core, core), torch=_rocm_torch(torch_like))
+    dirs, why_not = scan_plan(
+        roots=_roots(core, core), torch=_rocm_torch(torch_like), loader_dirs=[]
+    )
     assert dirs == []
     assert "import:_rocm_sdk_core" in why_not
 
@@ -673,7 +820,9 @@ def test_a_cpu_only_torch_beside_rocm_does_not_answer_either(tmp_path):
     core = tmp_path / "_rocm_sdk_core"
     (core / "lib").mkdir(parents=True)
     dirs, why_not = scan_plan(
-        roots=_roots(core, core), torch=(None, "torch 2.13.0+cpu is not a ROCm build")
+        roots=_roots(core, core),
+        torch=(None, "torch 2.13.0+cpu is not a ROCm build"),
+        loader_dirs=[],
     )
     assert dirs == []
     assert "not a ROCm build" in why_not
@@ -699,18 +848,200 @@ def test_the_reason_is_non_empty_exactly_when_the_plan_is_empty(tmp_path):
     cpu_torch = (None, "torch 2.13.0+cpu is not a ROCm build")
 
     plans = [
-        scan_plan(roots=_roots(rocm, rocm), torch=_rocm_torch(torch_like)),
-        scan_plan(roots=_roots(empty, empty), torch=_rocm_torch(torch_like)),
+        scan_plan(
+            roots=_roots(rocm, rocm), torch=_rocm_torch(torch_like), loader_dirs=[]
+        ),
+        scan_plan(
+            roots=_roots(empty, empty), torch=_rocm_torch(torch_like), loader_dirs=[]
+        ),
         scan_plan(
             roots=_roots(missing, missing, source="none"),
             torch=_rocm_torch(torch_like),
+            loader_dirs=[],
         ),
-        scan_plan(roots=_roots(rocm, rocm), torch=cpu_torch),
-        scan_plan(roots=_roots(missing, missing, source="none"), torch=cpu_torch),
+        scan_plan(roots=_roots(rocm, rocm), torch=cpu_torch, loader_dirs=[]),
+        scan_plan(
+            roots=_roots(missing, missing, source="none"),
+            torch=cpu_torch,
+            loader_dirs=[],
+        ),
     ]
     assert [bool(dirs) for dirs, _ in plans] == [True, False, False, False, False]
     for dirs, why_not in plans:
         assert bool(why_not) is not bool(dirs), (dirs, why_not)
+
+
+# ---------------------------------------------------------------------------
+# the copy the loader picks, not the copy the resolver names
+# ---------------------------------------------------------------------------
+# Review pass 2026-09-23: the scan read the resolver's directories only, while
+# the GPU lane appends those directories *after* any inherited
+# LD_LIBRARY_PATH (gpu-tests.yml) precisely so an operator-supplied library
+# wins. Both verdicts were therefore being decided by a file the process never
+# loaded. These pin the loader's order, and pin that modelling it did not
+# quietly widen what gets scanned.
+
+
+def _maps_line(path: str) -> str:
+    """One ``/proc/self/maps`` row for *path*, with the fields the reader uses."""
+    return f"7f0000000000-7f0000001000 r-xp 00000000 fd:01 1234567 {path}"
+
+
+def test_an_inherited_library_directory_outranks_the_resolvers(tmp_path):
+    """The reviewed defect, end to end: the scanned file is the loaded one.
+
+    An operator substitution reaches the process through an inherited
+    ``LD_LIBRARY_PATH`` that the workflow appends to, so ``/operator/lib``
+    precedes the resolver's directories at load time. The assertion is on the
+    *file* rather than on the directory list, because a plan in the right order
+    that still opened the resolver's copy would be the same wrong verdict with
+    a tidier explanation.
+    """
+    operator = tmp_path / "operator" / "lib"
+    core = tmp_path / "_rocm_sdk_core" / "lib"
+    torch_like = tmp_path / "torch" / "lib"
+    for directory in (operator, core, torch_like):
+        directory.mkdir(parents=True)
+    operator_hip = _fake_so(operator / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    resolver_hip = _fake_so(core / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+
+    dirs, why_not = scan_plan(
+        roots=_roots(core.parent, core.parent),
+        torch=_rocm_torch(torch_like),
+        loader_dirs=[operator],
+    )
+    assert why_not == ""
+    assert dirs[0] == operator
+    scanned = libraries_to_scan(dirs).libraries
+    assert operator_hip in scanned
+    assert resolver_hip not in scanned
+
+
+def test_the_resolver_answers_for_the_sonames_the_override_does_not_carry(tmp_path):
+    """An override is per soname, because that is what the loader does.
+
+    A directory that supplies ``libamdhip64`` and nothing else must not take
+    the other two libraries down with it. Getting this wrong is not a smaller
+    scan: :class:`ScanSet` would report them unresolved and the lane that
+    promised a stack would go red on a configuration that works.
+    """
+    operator = tmp_path / "operator" / "lib"
+    core = tmp_path / "_rocm_sdk_core" / "lib"
+    torch_like = tmp_path / "torch" / "lib"
+    for directory in (operator, core, torch_like):
+        directory.mkdir(parents=True)
+    operator_hip = _fake_so(operator / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    _fake_so(core / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    resolver_hsa = _fake_so(core / "libhsa-runtime64.so", ["HSA_NO_SCRATCH_RECLAIM"])
+
+    dirs, _ = scan_plan(
+        roots=_roots(core.parent, core.parent),
+        torch=_rocm_torch(torch_like),
+        loader_dirs=[operator],
+    )
+    scan = libraries_to_scan(dirs)
+    assert operator_hip in scan.libraries
+    assert resolver_hsa in scan.libraries
+    assert "libhsa-runtime64.so" not in scan.unresolved
+
+
+def test_an_inherited_directory_does_not_make_a_stackless_machine_scannable(tmp_path):
+    """The honest skip must not depend on a variable that says nothing about ROCm.
+
+    ``LD_LIBRARY_PATH`` naming an existing directory is ordinary on a CPU box.
+    If that alone produced a non-empty plan, the skip that keeps this audit
+    from reporting the registry as unread when the *machine* is what is
+    missing would be gone -- traded for the ``_unreadable_stack`` message one
+    step later, which on a lane that promised a stack is a red gate for the
+    wrong reason.
+    """
+    operator = tmp_path / "operator" / "lib"
+    torch_like = tmp_path / "torch" / "lib"
+    for directory in (operator, torch_like):
+        directory.mkdir(parents=True)
+    missing = tmp_path / "definitely-not-rocm"
+
+    dirs, why_not = scan_plan(
+        roots=_roots(missing, missing, source="none"),
+        torch=_rocm_torch(torch_like),
+        loader_dirs=[operator],
+    )
+    assert dirs == []
+    assert "source='none'" in why_not
+
+
+def test_a_mapped_copy_outranks_the_search_path(tmp_path):
+    """A mapping is the loader having already chosen; a search path is a guess.
+
+    This is the case no ``LD_LIBRARY_PATH`` reasoning reaches: a ``DT_RPATH``
+    on the calling object outranks ``LD_LIBRARY_PATH``, and
+    ``/etc/ld.so.cache`` answers from a directory on no search path at all. The
+    versioned name is the realistic one -- the loader maps
+    ``libamdhip64.so.7``, never the devel symlink.
+    """
+    mapped = tmp_path / "rpath" / "lib"
+    listed = tmp_path / "operator" / "lib"
+    for directory in (mapped, listed):
+        directory.mkdir(parents=True)
+
+    dirs = loader_search_dirs(
+        search_path=str(listed),
+        maps_text="\n".join(
+            [_maps_line(str(mapped / "libamdhip64.so.7")), _maps_line("[heap]")]
+        ),
+    )
+    assert dirs == [mapped, listed]
+
+
+def test_an_unrelated_mapping_is_not_a_scan_directory(tmp_path):
+    """Precedence hint, not a widening: only directories this audit already opens.
+
+    Every ``.so`` a torch import drags in is mapped. Taking each one's
+    directory would put ``/usr/lib`` in front of the resolver's, where a stale
+    ``libamdhip64`` left by an old system package would then decide both
+    verdicts -- inventing the defect this change exists to remove.
+    """
+    assert mapped_library_dirs(
+        sonames=("libamdhip64.so",),
+        maps_text="\n".join(
+            [
+                _maps_line("/usr/lib/x86_64-linux-gnu/libc.so.6"),
+                _maps_line("/usr/lib/x86_64-linux-gnu/libstdc++.so.6"),
+                _maps_line("/somewhere/libamdhip64.so.7"),
+            ]
+        ),
+    ) == [Path("/somewhere")]
+
+
+def test_a_deleted_mapping_is_not_a_scan_directory():
+    """A file unlinked after ``dlopen`` has a directory that may not hold it.
+
+    Routine for a build-artifact tree cleaned up post-load. The kernel says so
+    in the pathname, and believing it would point the scan at a torn-down
+    directory -- the stale read this whole change is about, arriving from the
+    side meant to fix it.
+    """
+    assert (
+        mapped_library_dirs(
+            sonames=("libamdhip64.so",),
+            maps_text=_maps_line("/gone/libamdhip64.so.7 (deleted)"),
+        )
+        == []
+    )
+
+
+def test_the_search_path_is_read_in_the_loaders_own_order(tmp_path):
+    """Order is the whole point, and an empty element is the current directory.
+
+    Rendering the empty element rather than dropping it keeps this function's
+    claim true. A trailing colon is the usual way to produce one, and glibc
+    reads it as ``cwd``.
+    """
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    assert search_path_dirs(f"{first}{os.pathsep}{second}") == [first, second]
+    assert search_path_dirs(f"{first}{os.pathsep}") == [first, Path.cwd()]
+    assert search_path_dirs("") == []
 
 
 def test_a_real_rocm_torch_is_recognised_by_its_hip_version(monkeypatch):
