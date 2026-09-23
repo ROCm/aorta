@@ -29,7 +29,10 @@ Covered:
   Only where the whole stack is present to be scanned -- ROCm's libraries and a
   ROCm torch. On a lane that promises one and has not got one
   (``AORTA_REQUIRE_ROCM``) that is a failure, because a check that quietly
-  audits nothing is worse than one that is not there.
+  audits nothing is worse than one that is not there. "Whole" is per soname:
+  a stack missing one of the named libraries is refused exactly like a stack
+  missing all of them, since a partial scan does not weaken the verdicts
+  evenly -- see :class:`ScanSet`.
 
 Not covered, and not detectable this way:
 
@@ -57,7 +60,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 
 import pytest
 
@@ -772,14 +775,15 @@ def test_directories_that_exist_but_hold_nothing_fail_the_promised_lane(
     empty = [tmp_path / "rocm", tmp_path / "torch"]
     for directory in empty:
         directory.mkdir()
-    assert libraries_to_scan(empty) == []
+    scan = libraries_to_scan(empty)
+    assert scan.libraries == []
 
     monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
-    outcome = _outcome_of(lambda: require_scanned_libraries([], empty))
+    outcome = _outcome_of(lambda: require_scanned_libraries(scan, empty))
     assert isinstance(outcome, pytest.skip.Exception), outcome
 
     monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
-    outcome = _outcome_of(lambda: require_scanned_libraries([], empty))
+    outcome = _outcome_of(lambda: require_scanned_libraries(scan, empty))
     assert isinstance(outcome, pytest.fail.Exception), (
         f"expected a failure, got {type(outcome).__name__}: {outcome}"
     )
@@ -790,7 +794,7 @@ def test_a_scan_that_found_libraries_neither_fails_nor_skips(monkeypatch, tmp_pa
     """The narrowness control: refusing every lane would satisfy the test above."""
     monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
     found = [tmp_path / "libamdhip64.so.7"]
-    assert require_scanned_libraries(found, [tmp_path]) == found
+    assert require_scanned_libraries(ScanSet(found, ()), [tmp_path]) == found
 
 
 def test_only_torchs_directory_is_globbed(tmp_path):
@@ -814,7 +818,7 @@ def test_only_torchs_directory_is_globbed(tmp_path):
     _fake_so(rocm / "librocblas.so", ["ROCBLAS_LAYER"])
     globbed = _fake_so(torch_lib / "libtorch_hip.so", ["TORCH_ROCM_FA_PREFER_CK"])
 
-    scanned = libraries_to_scan([rocm, torch_lib])
+    scanned = libraries_to_scan([rocm, torch_lib]).libraries
 
     assert declared.resolve() in scanned
     assert globbed.resolve() in scanned or globbed in scanned
@@ -839,7 +843,7 @@ def test_a_known_absent_entrys_claimed_library_is_opened(tmp_path):
     claimed = _fake_so(rocm / "libhipblaslt.so", ["DISABLE_TF32"])
     _fake_so(rocm / "librocblas.so", ["DISABLE_TF32"])
 
-    scanned = libraries_to_scan([rocm, torch_lib])
+    scanned = libraries_to_scan([rocm, torch_lib]).libraries
     assert claimed.resolve() in scanned, scanned
     assert not [lib for lib in scanned if lib.name == "librocblas.so"], scanned
 
@@ -847,6 +851,92 @@ def test_a_known_absent_entrys_claimed_library_is_opened(tmp_path):
     for lib in scanned:
         present |= names_in_binary(lib)
     assert find_fixed_known_absent(present) == [("tf32_off", "DISABLE_TF32")]
+
+
+def _stack(root: Path, omit: str = "") -> list[Path]:
+    """A tree carrying every soname in the scan set except ``omit``.
+
+    Built from :func:`sonames_to_scan` rather than from a literal list, so a
+    soname added to either source lands here without this file being edited --
+    the point of these two tests is that the *set* is required, not that three
+    particular names are.
+    """
+    rocm, torch_lib = root / "rocm", root / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    for soname in sonames_to_scan():
+        if soname != omit:
+            _fake_so(rocm / soname, ["HIP_LAUNCH_BLOCKING"])
+    return [rocm, torch_lib]
+
+
+def test_a_missing_named_library_is_an_unreadable_stack_not_a_smaller_scan(
+    monkeypatch, tmp_path
+):
+    """The third door into the green skip, and the one that opened onto the rot check.
+
+    ``require_scanned_libraries`` asked whether *anything* was scanned, so a
+    stack that had lost exactly one library walked straight through: the HIP
+    and HSA libraries are enough to make the list non-empty. That is the worst
+    shape this can be in, because the verdicts disagree about it.
+    ``test_every_mitigation_variable_is_read_by_something`` gets louder and a
+    human looks at it. ``test_known_absent_entries_are_still_absent`` goes
+    quiet and passes -- and if the missing library is a ``claimed_consumer``,
+    as ``libhipblaslt`` is here, it passes *by* not reading the only binary
+    that could have retired the entry.
+
+    The last two assertions are that failure mode, made concrete: the scan
+    looks healthy and the rot check clears nobody, which is indistinguishable
+    from a hipBLASLt that was read and did not carry ``DISABLE_TF32``.
+
+    A misspelt ``claimed_consumer`` arrives in the same place and is why this
+    is checked at resolution rather than trusted from the list.
+    ``test_every_known_absent_claim_is_scanned`` requires the name to be in
+    ``sonames_to_scan()``, which ``libhipblastl.so`` satisfies; nothing before
+    this required it to resolve to a file.
+    """
+    dirs = _stack(tmp_path, omit="libhipblaslt.so")
+    scan = libraries_to_scan(dirs)
+
+    assert scan.unresolved == ("libhipblaslt.so",), scan.unresolved
+    assert scan.libraries, "the rest of the stack is present, which is the trap"
+    assert find_fixed_known_absent(
+        {name for lib in scan.libraries for name in names_in_binary(lib)}
+    ) == [], "a vacuous pass: the entry's claimed consumer was never opened"
+
+    monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
+    outcome = _outcome_of(lambda: require_scanned_libraries(scan, dirs))
+    assert isinstance(outcome, pytest.skip.Exception), outcome
+
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    outcome = _outcome_of(lambda: require_scanned_libraries(scan, dirs))
+    assert isinstance(outcome, pytest.fail.Exception), (
+        f"expected a failure, got {type(outcome).__name__}: {outcome}"
+    )
+    assert "libhipblaslt.so" in str(outcome), (
+        f"the message has to name the library to act on: {outcome}"
+    )
+
+
+def test_a_complete_stack_is_not_refused(monkeypatch, tmp_path):
+    """The narrowness control: refusing every stack would satisfy the test above.
+
+    Also pins the union rule. ``libhipblaslt`` is in the second directory and
+    nothing else is, which is the wheel layout in miniature -- resolution is
+    "found in some ROCm directory", and a per-directory rule would call this
+    complete stack incomplete twice over.
+    """
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    dirs = _stack(tmp_path, omit="libhipblaslt.so")
+    second = tmp_path / "libs"
+    second.mkdir()
+    _fake_so(second / "libhipblaslt.so", ["DISABLE_TF32"])
+    dirs.insert(-1, second)
+
+    scan = libraries_to_scan(dirs)
+
+    assert scan.unresolved == (), scan.unresolved
+    assert require_scanned_libraries(scan, dirs) == scan.libraries
 
 
 def test_the_declared_sonames_are_not_read_twice(tmp_path):
@@ -868,7 +958,7 @@ def test_the_declared_sonames_are_not_read_twice(tmp_path):
     (rocm / "libamdhip64.so").symlink_to(real)
     (also_rocm / "libamdhip64.so").symlink_to(real)
 
-    scanned = libraries_to_scan([rocm, also_rocm, torch_lib])
+    scanned = libraries_to_scan([rocm, also_rocm, torch_lib]).libraries
 
     assert scanned == [real.resolve()], scanned
 
@@ -950,7 +1040,38 @@ def require_readable_stack() -> list[Path]:
     )
 
 
-def libraries_to_scan(dirs: list[Path]) -> list[Path]:
+class ScanSet(NamedTuple):
+    """What :func:`libraries_to_scan` opened, and which sonames it could not find.
+
+    ``unresolved`` is a return value rather than a silent omission because a
+    soname that resolves in no directory does not make the scan *smaller*, it
+    makes it answer a different question. ``present_names`` is a union, so a
+    library that was never opened is indistinguishable from one that was
+    opened and carried none of the audited names -- and the two verdicts read
+    that union in opposite directions:
+
+    * :func:`find_unread_mitigations` gets *louder*. Every variable only the
+      missing library reads becomes an offender, which is a false alarm but a
+      visible one.
+    * :func:`find_fixed_known_absent` goes *quiet*, and that is the dangerous
+      direction. Every entry in :data:`KNOWN_ABSENT` stays excused, including
+      one whose claimed consumer is exactly the library that went missing --
+      so the single binary that could retire the exemption is the binary not
+      read, and the rot check passes by confirming its own assumption. That is
+      the unfalsifiability :class:`Exemption` was introduced to end, arriving
+      through the back door.
+
+    A typo reaches the same place: ``claimed_consumer="libhipblastl.so"``
+    resolves nowhere, is scanned nowhere, and excuses the entry forever.
+    :func:`test_every_known_absent_claim_is_scanned` cannot catch it -- it
+    checks the name is in the scan *list*, which a misspelling satisfies.
+    """
+
+    libraries: list[Path]
+    unresolved: tuple[str, ...]
+
+
+def libraries_to_scan(dirs: list[Path]) -> ScanSet:
     """The shared objects to read names out of, resolved from ``dirs``.
 
     Declared sonames in the ROCm directories, and everything in torch's.
@@ -977,35 +1098,37 @@ def libraries_to_scan(dirs: list[Path]) -> list[Path]:
     Deduplicated by resolved path, because a soname and its major-versioned
     link resolve to one file and reading it twice changes nothing but the
     clock.
+
+    A soname is resolved if it resolved in *any* ROCm directory, not in each
+    of them: the wheel layout splits the set across ``_rocm_sdk_core/lib`` and
+    ``_rocm_sdk_libraries_*/lib``, where ``libamdhip64`` lives in the first and
+    ``libhipblaslt`` in the second, so per-directory bookkeeping would call
+    every stack incomplete. The rest go in :attr:`ScanSet.unresolved` for
+    :func:`require_scanned_libraries` to rule on.
     """
     audit = _load_audit_script()
     *rocm_dirs, torch_lib = dirs
     scanned: list[Path] = []
+    resolved: set[str] = set()
     for directory in rocm_dirs:
         for soname in sonames_to_scan():
             lib = audit.resolve_library(directory, soname)
             if lib is not None:
+                resolved.add(soname)
                 scanned.append(lib)
     scanned.extend(sorted(torch_lib.glob("*.so")))
-    return list(dict.fromkeys(scanned))
+    return ScanSet(
+        list(dict.fromkeys(scanned)),
+        tuple(soname for soname in sonames_to_scan() if soname not in resolved),
+    )
 
 
-def require_scanned_libraries(scanned: list[Path], dirs: list[Path]) -> list[Path]:
-    """``scanned``, or the same fail-or-skip decision :func:`require_readable_stack` makes.
+def _unreadable_stack(why: str) -> NoReturn:
+    """Fail where a lane promised a stack, skip where none was promised.
 
-    Separate from the fixture for the same reason that one is: the decision is
-    the point, so it has to be assertable off a GPU lane.
-
-    This skip used to be unconditional, which put the green skip back right
-    after the flag had closed it. ``rocm_lib_dirs`` only requires the
-    directories to *exist*, so a base-image bump that moves the shared objects
-    into a subdirectory leaves ``dirs`` non-empty and ``scanned`` empty, and
-    the lane that promised a stack reported an audit that read nothing as
-    having run.
+    The same sentence in both places that can reach it, so the two doors into
+    the green skip cannot drift apart in wording or in policy.
     """
-    if scanned:
-        return scanned
-    why = f"no shared objects under {[str(d) for d in dirs]}"
     if rocm_is_required():
         pytest.fail(
             f"{REQUIRE_ROCM_ENV} is set, so this lane promised a stack this "
@@ -1013,6 +1136,44 @@ def require_scanned_libraries(scanned: list[Path], dirs: list[Path]) -> list[Pat
             "the audit as having run when it ran nothing."
         )
     pytest.skip(why)
+
+
+def require_scanned_libraries(scan: ScanSet, dirs: list[Path]) -> list[Path]:
+    """``scan.libraries``, or the fail-or-skip :func:`require_readable_stack` makes.
+
+    Separate from the fixture for the same reason that one is: the decision is
+    the point, so it has to be assertable off a GPU lane.
+
+    This skip used to be unconditional, which put the green skip back right
+    after the flag had closed it. ``rocm_lib_dirs`` only requires the
+    directories to *exist*, so a base-image bump that moves the shared objects
+    into a subdirectory leaves ``dirs`` non-empty and the scan empty, and the
+    lane that promised a stack reported an audit that read nothing as having
+    run.
+
+    A *partly* readable stack is the same defect one size down, and used to
+    pass: "did we open anything" is not "did we open the binaries this audit
+    is about". :class:`ScanSet` says why a missing soname cannot be treated as
+    a smaller scan. Both branches end at :func:`_unreadable_stack` because the
+    remedy is the same one -- fix the image, then re-run -- and neither is a
+    verdict about the registry.
+
+    Nothing-at-all is reported first even though the unresolved list would
+    also be non-empty there: on an empty tree every soname is missing, and
+    naming them all describes the symptom where "no shared objects under
+    ``<dirs>``" names the cause.
+    """
+    if not scan.libraries:
+        _unreadable_stack(f"no shared objects under {[str(d) for d in dirs]}")
+    if scan.unresolved:
+        _unreadable_stack(
+            f"{list(scan.unresolved)} resolved in none of "
+            f"{[str(d) for d in dirs[:-1]]}, so the audit would read a union "
+            "missing whatever only those libraries carry -- under which an "
+            "unread variable looks unread and a KNOWN_ABSENT entry whose "
+            "claimed consumer is one of them stays excused on no evidence"
+        )
+    return scan.libraries
 
 
 @pytest.fixture(scope="module")
