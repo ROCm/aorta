@@ -393,7 +393,9 @@ def main(argv: list[str] | None = None) -> int:
              "unreachable for any reward, and a scenario that delivered "
              "nothing, or fewer completions than were requested, cannot be "
              "told from one -- so those fail too, naming the outage rather "
-             "than advising a temperature",
+             "than advising a temperature. A group that requested a single "
+             "completion fails as well, because one draw is neither diverse "
+             "nor degenerate; rerun those with --samples 2 or more",
     )
     args = parser.parse_args(argv)
 
@@ -429,7 +431,7 @@ def check_determinism(results: list[dict[str, Any]]) -> int:
     part of why the outage case below went unnoticed: reaching it at all meant
     building a results file first, so nobody ever did.
     """
-    # Three outcomes, and the order they are tested in is the whole point.
+    # Four outcomes, and the order they are tested in is the whole point.
     # This flag answers "is the rollout sampling?", and it can only answer
     # it from completions that arrived. A scenario that delivered nothing
     # was invisible here, so a total outage left `collapsed` empty and
@@ -456,11 +458,36 @@ def check_determinism(results: list[dict[str, Any]]) -> int:
         for scenario, row in r["per_scenario"].items()
         if row["n"] < row["requested"]
     ]
+    # A group of one is fully delivered and has exactly one distinct
+    # completion, so it met the collapsed test on both counts and the operator
+    # was told to set a temperature. There is no temperature at which one draw
+    # is diverse: with `requested == 1` the question this flag asks has no
+    # observable answer, and the advice named a knob that cannot move it.
+    #
+    # `run_e2e --samples 1` is supported on purpose -- it refuses 0 and allows
+    # 1 -- so this is a results file the driver is willing to produce, not a
+    # corrupt one. Tested before `collapsed` for the same reason delivery is:
+    # "this run cannot answer the question" has to outrank "the answer looks
+    # bad", or the advice names the symptom of whichever check ran first.
+    #
+    # The matching `requested >= 2` on `collapsed` is belt and braces given
+    # that order, and deliberately so: `thin` and `collapsed` are already
+    # disjoint by construction rather than by which `if` runs first, and a
+    # reader checking what is in one of these lists should not have to read
+    # the branches below to find out. No test can kill it on its own.
+    singleton = [
+        (r["source"], scenario)
+        for r in results
+        for scenario, row in r["per_scenario"].items()
+        if row["requested"] < 2
+    ]
     collapsed = [
         (r["source"], scenario)
         for r in results
         for scenario, row in r["per_scenario"].items()
-        if row["n"] == row["requested"] and row["distinct_completions"] == 1
+        if row["requested"] >= 2
+        and row["n"] == row["requested"]
+        and row["distinct_completions"] == 1
     ]
     if missing:
         print(
@@ -483,6 +510,17 @@ def check_determinism(results: list[dict[str, Any]]) -> int:
         )
         for source, scenario, got, want in thin:
             print(f"  {source}: {scenario} delivered {got}/{want}", file=sys.stderr)
+        return 1
+    if singleton:
+        print(
+            f"\n--check-determinism cannot run: {len(singleton)} group(s) "
+            "requested a single completion, and one draw is neither diverse "
+            "nor degenerate -- within-group spread is undefined for a group "
+            "of one at any temperature. Rerun with --samples 2 or more.",
+            file=sys.stderr,
+        )
+        for source, scenario in singleton:
+            print(f"  {source}: {scenario}", file=sys.stderr)
         return 1
     if collapsed:
         print(

@@ -358,6 +358,12 @@ def label_sanitizer_report(doc: dict[str, Any], source: str | None = None) -> La
     produced them -- ``waitcheck:wait_hazard`` rather than ``wait_hazard`` -- so
     attribution reads the same way as a ``tier4:`` detector ID and cannot be
     confused with one.
+
+    **Codes are cited only by a ``fail`` or ``warn`` report.** A finding is
+    evidence that a sanitizer ran and saw something, so it cannot be the
+    justification for a verdict that says none ran. See the comment on
+    ``failures`` below for the mixed-verdict case that makes this more than a
+    restatement.
     """
     report = SanitizerReport.from_dict(doc)
     codes: list[str] = []
@@ -372,11 +378,28 @@ def label_sanitizer_report(doc: dict[str, Any], source: str | None = None) -> La
 
     verdict = report.overall_verdict.value
     # A sanitizer that did not run is an infra error, exactly as a probe trial
-    # that never validly ran is: no observation was made, so there is nothing to
-    # attribute. Keeping it in `error_detectors` mirrors the probe side, where
-    # `cited_detectors` is the union of both lists.
+    # that never validly ran is: no observation was made, so there is nothing
+    # to attribute.
+    #
+    # And nothing is what it now gets. Filing `codes` under `error_detectors`
+    # looked like it mirrored the probe side, where `cited_detectors` is the
+    # union of both lists -- but the two lists do not hold the same kind of
+    # thing. On the probe side an error detector *is* the evidence of the
+    # error: `tier1:exec_failed` is why the trial did not validly run. Here
+    # the codes are findings, and a finding is evidence that a sanitizer ran
+    # and saw something. `overall_verdict` ranks `error` above `warn`, so a
+    # report whose overall verdict is `error` can still carry findings from a
+    # *different* check that merely warned -- and those codes justify the
+    # warning, not the error. Handing them to the scorer paid full attribution
+    # credit for citing evidence of the wrong event, which is the "right
+    # answer, wrong reason" case the attribution term exists to dock, arriving
+    # through the ground truth instead of through the answer.
+    #
+    # So finding codes can only ever justify `fail` or `warn`, and an
+    # `error`/`not_checked` report cites nothing -- which is what the sentence
+    # above it always claimed.
     failures = codes if verdict in {"fail", "warn"} else []
-    errors = codes if verdict in {"error", "not_checked"} else []
+    errors: list[str] = []
     return Label(
         verdict=verdict,
         failure_detectors=failures,
@@ -476,6 +499,38 @@ def load_corpus(
                 f"{path}:{line_number}: verdict {verdict!r} is outside this "
                 f"scorer's vocabulary {sorted(SANITIZER_VERDICTS)}"
             )
+        # The same invariant `label_sanitizer_report` now holds, checked on the
+        # way back in. Rows are what the scorer actually trains against, and a
+        # corpus built before that fix carries finding codes under
+        # `error_detectors` for an `error` report -- evidence of a warning
+        # filed as the justification for an infra error. Reading it back
+        # unexamined would let the defect outlive the commit that removed it,
+        # in exactly the artifact nothing else inspects.
+        #
+        # Refused rather than dropped, matching the verdict check above: this
+        # function already treats a row outside the scorer's vocabulary as a
+        # corpus to rebuild rather than a row to repair, and `.jsonl` corpora
+        # are generated artifacts that one `build_corpus.py` run replaces.
+        # Silently emptying the list would score the run against a ground
+        # truth the file does not contain.
+        #
+        # Both lists, not just `error_detectors`, though that is the one the
+        # old code populated. The invariant is "cites nothing", and
+        # `cited_detectors` is their union, so checking one half leaves a row
+        # that reaches the scorer with the same miscitation through the other.
+        if verdict in {"error", "not_checked"}:
+            cited = [
+                *(stored.get("failure_detectors") or []),
+                *(stored.get("error_detectors") or []),
+            ]
+            if cited:
+                raise ValueError(
+                    f"{path}:{line_number}: a {verdict!r} report cites "
+                    f"{cited} as evidence, but finding codes are evidence a "
+                    "sanitizer ran and saw something, so they can only "
+                    "justify 'fail' or 'warn'. This corpus predates that "
+                    "rule; rebuild it with build_corpus.py."
+                )
         out.append((
             row["example_id"],
             Label(

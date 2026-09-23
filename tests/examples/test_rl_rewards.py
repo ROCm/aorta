@@ -1764,6 +1764,80 @@ def test_a_sanitizer_that_did_not_run_attributes_nothing(triage_reward):
         assert label.failure_detectors == []
 
 
+def _mixed_verdict_report() -> dict:
+    """A real `error` report with a real `warn` check spliced into it.
+
+    Both halves are committed survey reports, so the finding shape, the
+    sanitizer names and the verdicts are the ones aorta's own model produces --
+    only the pairing is synthetic. It has to be: every committed `error` report
+    is a ConSan load rejection whose checks found nothing, which is precisely
+    why this defect survived six reports and a full test sweep.
+    """
+    import copy
+
+    reports = _SURVEY / "reports"
+    doc = json.loads(
+        (reports / "gemm_f32_consan" / "sanitizer_report.json").read_text()
+    )
+    warned = json.loads(
+        (reports / "gemm_f32_waitcheck" / "sanitizer_report.json").read_text()
+    )
+    check = copy.deepcopy(warned["checks"][0])
+    # One finding rather than thirty-two, and none of them duplicated through
+    # `kernel_results`: the count is not what is under test and a single code
+    # makes the assertion below read as the one fact it is.
+    check["findings"] = check["findings"][:1]
+    check["kernel_results"] = []
+    doc["checks"].append(check)
+    return doc
+
+
+def test_an_error_report_cites_nothing_even_when_a_lesser_check_found_something(
+    triage_reward,
+):
+    """`error` outranks `warn`, so an `error` report can carry `warn` findings.
+
+    `overall_verdict` is the max-ranked check verdict, so a run where ConSan
+    failed to load *and* Waitcheck found hazards is an `error` report holding
+    `waitcheck:wait_hazard`. Those codes are the evidence for the warning, not
+    for the error -- nothing observed why the sanitizer did not run, because by
+    definition it did not run to observe it.
+
+    Filing them under `error_detectors` handed the scorer an oracle that paid
+    full attribution credit for citing evidence of the wrong event. That is the
+    "right answer, wrong reason" case the attribution term exists to dock,
+    arriving through the ground truth rather than through the answer, where no
+    amount of docking can reach it.
+    """
+    label = triage_reward.label_sanitizer_report(_mixed_verdict_report())
+
+    assert label.verdict == "error"
+    assert label.error_detectors == []
+    assert label.failure_detectors == []
+    assert label.cited_detectors == set()
+
+
+def test_the_warn_half_of_that_report_still_cites_its_finding(triage_reward):
+    """Narrowness: the rule is about the verdict, not about losing findings.
+
+    The same check, with the ConSan error removed so the report ranks `warn`,
+    has to cite exactly what it saw. If this fails, the fix above stopped
+    citing evidence rather than stopping the miscitation, and the attribution
+    half of the reward is measuring nothing on the one label source that has
+    real findings in it.
+    """
+    doc = _mixed_verdict_report()
+    doc["checks"] = [doc["checks"][-1]]
+    doc["overall_verdict"] = "warn"
+    doc["execution_status"] = "complete"
+
+    label = triage_reward.label_sanitizer_report(doc)
+
+    assert label.verdict == "warn"
+    assert label.failure_detectors == ["waitcheck:wait_hazard"]
+    assert label.cited_detectors == {"waitcheck:wait_hazard"}
+
+
 def test_a_rotted_report_is_rejected_rather_than_relabelled(triage_reward, tmp_path):
     """The corpus-rot signal for this source is aorta's own consistency check.
 
@@ -2633,6 +2707,78 @@ def test_a_verdict_outside_the_vocabulary_is_rejected(triage_reward, tmp_path):
     }) + "\n")
     with pytest.raises(ValueError, match="outside this scorer's vocabulary"):
         triage_reward.load_corpus(corpus)
+
+
+@pytest.mark.parametrize("verdict", ["error", "not_checked"])
+@pytest.mark.parametrize("field", ["error_detectors", "failure_detectors"])
+def test_a_corpus_row_that_pins_findings_on_an_error_is_refused(
+    triage_reward, tmp_path, verdict, field
+):
+    """The same rule, enforced on the way back in.
+
+    `label_sanitizer_report` stopped citing finding codes for a report that
+    says no sanitizer ran, but `load_corpus` reads a committed `.jsonl` and
+    trains on the label stored in it. A corpus built before that fix carries
+    the miscitation, and reading it back unexamined lets the defect outlive the
+    commit that removed it -- in the one artifact nothing else inspects,
+    because the report it was derived from need not travel with it.
+
+    Refused rather than emptied, matching the vocabulary check above: a
+    generated artifact one `build_corpus.py` run replaces is a corpus to
+    rebuild, not a row to repair, and silently dropping the list would score
+    the run against a ground truth the file does not contain.
+
+    Both fields, though `error_detectors` is the one the old code populated.
+    `cited_detectors` is their union, so a rule enforced on one half is a rule
+    a row can walk past through the other.
+    """
+    corpus = tmp_path / "triage.jsonl"
+    label = {"verdict": verdict, "failure_detectors": [], "error_detectors": []}
+    label[field] = ["waitcheck:wait_hazard"]
+    corpus.write_text(json.dumps({
+        "kind": "triage", "example_id": "triage:x", "workload_family": "f",
+        "label": label,
+    }) + "\n")
+
+    with pytest.raises(ValueError) as excinfo:
+        triage_reward.load_corpus(corpus)
+
+    message = str(excinfo.value)
+    assert "triage.jsonl:1" in message, message
+    assert "waitcheck:wait_hazard" in message, message
+    # The fix is a rebuild, and nothing else in this function can tell the
+    # reader that, so the message has to.
+    assert "build_corpus.py" in message, message
+
+
+def test_the_rows_that_corpus_check_is_not_about_still_load(triage_reward, tmp_path):
+    """Narrowness, on both axes the refusal could over-reach along.
+
+    An `error` row that cites nothing is what the builder now writes, and a
+    `fail` or `warn` row citing its findings is the evidence the attribution
+    half of the reward exists to measure. Refusing either turns a rule about
+    two verdicts into a corpus that will not load at all.
+    """
+    corpus = tmp_path / "triage.jsonl"
+    corpus.write_text("\n".join(json.dumps(row) for row in [
+        {"kind": "triage", "example_id": "triage:a", "workload_family": "f",
+         "label": {"verdict": "error", "failure_detectors": [],
+                   "error_detectors": []}},
+        {"kind": "triage", "example_id": "triage:b", "workload_family": "f",
+         "label": {"verdict": "fail", "failure_detectors": ["consan:race"],
+                   "error_detectors": []}},
+        {"kind": "triage", "example_id": "triage:c", "workload_family": "f",
+         "label": {"verdict": "warn", "failure_detectors": ["waitcheck:wait_hazard"],
+                   "error_detectors": []}},
+    ]) + "\n", encoding="utf-8")
+
+    labels = {example_id: label for example_id, label, _ in
+              triage_reward.load_corpus(corpus)}
+
+    assert set(labels) == {"triage:a", "triage:b", "triage:c"}
+    assert labels["triage:a"].cited_detectors == set()
+    assert labels["triage:b"].cited_detectors == {"consan:race"}
+    assert labels["triage:c"].cited_detectors == {"waitcheck:wait_hazard"}
 
 
 def test_shotgun_counts_the_names_offered_not_the_length_written(run_e2e):
@@ -5010,6 +5156,125 @@ def test_a_genuinely_collapsed_group_still_reports_collapse(rescore_e2e, capsys)
     assert "Set a temperature" in err, err
 
 
+def test_a_group_of_one_is_not_reported_as_a_collapsed_one(rescore_e2e, capsys):
+    """The third way to satisfy `distinct_completions == 1` without collapsing.
+
+    A group that requested one completion and got it is fully delivered, so it
+    clears both delivery checks, and one completion is one distinct completion,
+    so it met the collapsed test on both counts. The operator was told to set a
+    temperature -- and there is no temperature at which a single draw is
+    diverse. Within-group spread is undefined for a group of one, so this run
+    cannot answer the question the flag asks, at any sampling setting.
+
+    Not a corrupt results file either: `run_e2e` refuses `--samples 0` and
+    allows `--samples 1`, so this is a file the driver is willing to produce.
+    The advice has to be "rerun with more samples", which is the one thing that
+    can change the answer.
+    """
+    def row(scenario, sample, raw, reward, tier, error=""):
+        return _row(scenario, sample, raw, reward, tier, error)
+
+    one = json.dumps({
+        "category": "checkpoint_race", "hypothesis": "h",
+        "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False,
+    })
+    meta = {"candidates": ["tf32_off", "xnack", "none"], "tried": []}
+
+    singleton = rescore_e2e.analyse({
+        "meta": meta, "proposals": [row("s1", 0, one, 1.0, 5)],
+    })
+    # The premise: it looks exactly like collapse to the old test.
+    assert singleton["per_scenario"]["s1"]["requested"] == 1
+    assert singleton["per_scenario"]["s1"]["n"] == 1
+    assert singleton["per_scenario"]["s1"]["distinct_completions"] == 1
+
+    rc = rescore_e2e.check_determinism([dict(singleton, source="run.json")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "single completion" in err, err
+    assert "--samples 2" in err, err
+    # The wrong advice, and the reason this is a bug rather than a wording
+    # nit: a knob that cannot move the answer sends the operator to tune the
+    # rollout over a result the rollout did not produce. Matched on the
+    # imperative rather than on the bare word, unlike the two delivery tests
+    # above: this branch names the temperature on purpose, to say that no
+    # setting of it would help.
+    assert "Set a temperature" not in err, err
+
+
+def test_a_two_sample_group_that_really_collapsed_is_still_caught(
+    rescore_e2e, capsys
+):
+    """Narrowness: two is where collapse becomes observable, and it is checked.
+
+    The singleton branch is a `requested < 2` test placed ahead of `collapsed`,
+    so an off-by-one there -- `<= 2`, or dropping the matching `>= 2` guard on
+    `collapsed` -- silently excuses the smallest group that can actually
+    demonstrate the greedy-decoding defect the flag was written for.
+    """
+    def row(scenario, sample, raw, reward, tier, error=""):
+        return _row(scenario, sample, raw, reward, tier, error)
+
+    same = json.dumps({
+        "category": "checkpoint_race", "hypothesis": "h",
+        "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False,
+    })
+    meta = {"candidates": ["tf32_off", "xnack", "none"], "tried": []}
+
+    pair = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [row("s1", 0, same, 1.0, 5), row("s1", 1, same, 1.0, 5)],
+    })
+    assert pair["per_scenario"]["s1"]["requested"] == 2
+
+    rc = rescore_e2e.check_determinism([dict(pair, source="run.json")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "single distinct completion" in err, err
+    assert "Set a temperature" in err, err
+    assert "--samples 2" not in err, err
+
+
+def test_a_singleton_group_is_named_before_the_collapse_advice(
+    rescore_e2e, capsys
+):
+    """Order, not just presence: one unanswerable group silences the advice.
+
+    `check_determinism` returns on the first non-empty outcome, so a run
+    holding both a group of one and a genuinely collapsed group has to report
+    the group of one. The results file cannot answer the question for every
+    group, and "set a temperature" on the strength of the groups it *can*
+    answer for is advice built on a partial read of the run.
+    """
+    def row(scenario, sample, raw, reward, tier, error=""):
+        return _row(scenario, sample, raw, reward, tier, error)
+
+    same = json.dumps({
+        "category": "checkpoint_race", "hypothesis": "h",
+        "next_mitigations": ["tf32_off"], "confidence": 0.5, "stop": False,
+    })
+    meta = {"candidates": ["tf32_off", "xnack", "none"], "tried": []}
+
+    mixed = rescore_e2e.analyse({
+        "meta": meta,
+        "proposals": [
+            row("alone", 0, same, 1.0, 5),
+            row("collapsed", 0, same, 1.0, 5),
+            row("collapsed", 1, same, 1.0, 5),
+        ],
+    })
+
+    rc = rescore_e2e.check_determinism([dict(mixed, source="run.json")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "single completion" in err, err
+    assert "run.json: alone" in err, err
+    assert "Set a temperature" not in err, err
+    # And the collapsed group is not named either: the run has one report to
+    # give, and it is the one about what cannot be answered.
+    assert "single distinct completion" not in err, err
+
+
 def test_the_determinism_flag_describes_what_it_now_does(rescore_e2e, capsys):
     """The help text still described only the check the flag started with.
 
@@ -5020,8 +5285,11 @@ def test_the_determinism_flag_describes_what_it_now_does(rescore_e2e, capsys):
     whose groups are all distinct and has no reason to look for the outage,
     which is the advice-reversing case the delivery checks exist to catch.
 
-    Pinned against the branches rather than spot-checked, so adding a fourth
-    reason to fail without saying so fails here.
+    A fourth followed -- a group that requested a single completion -- and it
+    is the one an operator is likeliest to hit deliberately, because
+    `--samples 1` is a supported way to drive `run_e2e`. Pinned against the
+    branches rather than spot-checked, so adding a fifth reason to fail
+    without saying so fails here.
     """
     with pytest.raises(SystemExit):
         rescore_e2e.main(["--help"])
@@ -5031,6 +5299,7 @@ def test_the_determinism_flag_describes_what_it_now_does(rescore_e2e, capsys):
     assert "byte-identical" in flag, flag
     assert "delivered nothing" in flag, flag
     assert "fewer completions than were requested" in flag, flag
+    assert "requested a single completion" in flag, flag
 
 
 def test_an_infra_error_the_producer_recorded_stays_an_error(triage_reward):
@@ -5413,7 +5682,9 @@ def test_the_models_subcommand_still_passes_on_a_healthy_gateway(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def _drive_roundtrip(mod, tmp_path, monkeypatch, *, perturb_update=200, marker=True):
+def _drive_roundtrip(
+    mod, tmp_path, monkeypatch, *, perturb_update=200, marker=True, peer_grace="0.05"
+):
     """Run ``main`` end to end against a stub control plane.
 
     Every HTTP call in this driver goes through ``call``, so replacing that one
@@ -5471,7 +5742,7 @@ def _drive_roundtrip(mod, tmp_path, monkeypatch, *, perturb_update=200, marker=T
             "--plan-run-id", "r1",
             "--master-port", "29500",
             "--world-size", "2",
-            "--peer-grace", "0.05",
+            "--peer-grace", peer_grace,
             "--out", str(out),
         ],
     )
@@ -6046,3 +6317,108 @@ def test_an_outage_in_the_control_does_not_certify_sampling(monkeypatch):
     assert control["distinct"] == 1
     assert control["samples"] is False
     assert len(control["errors"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Review pass 2026-09-23: the opt-out a typo produces
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", ["-1", "-0.05", "-120"])
+def test_a_negative_peer_grace_is_refused_rather_than_disabling_the_check(
+    nccl_roundtrip_check, tmp_path, monkeypatch, capsys, value
+):
+    """`> 0` gates the marker check, so every negative value is a silent opt-out.
+
+    The peer's `roundN.done` markers are the only direct evidence that a
+    collective happened at all -- `decide_verdict` ranks a missing marker above
+    a perfect-looking round trip precisely because the HTTP legs can all return
+    200 on a group that never sent. Dropping them turns the strongest check in
+    this script off, and `--peer-grace -1` does exactly that while reading like
+    a request to wait.
+
+    Refused rather than clamped: clamping to 0 honours the reading nobody
+    meant, and clamping to the default waits two minutes on an argument that
+    asked for less than none. Checked next to `--replicates`, before any of the
+    run happens, because the cost of the old behaviour was a weaker verdict on
+    a run that had already been paid for.
+    """
+    # Every request this driver makes goes through `call`, so a `call` that
+    # refuses to be reached is how "nothing ran" is asserted rather than
+    # inferred. Without it the run reaches a health check against an engine
+    # that is not there and this test fails by timing out on real sockets --
+    # which is also what the argument itself used to cost.
+    def no_requests(*a, **k):
+        raise AssertionError("the run started despite an invalid --peer-grace")
+
+    monkeypatch.setattr(nccl_roundtrip_check, "call", no_requests)
+    monkeypatch.setattr(sys, "argv", [
+        "nccl_roundtrip_check.py",
+        "--model", "m",
+        "--plan", str(tmp_path / "plan.json"),
+        "--plan-run-id", "r1",
+        "--master-port", "29500",
+        "--world-size", "2",
+        "--peer-grace", value,
+        "--out", str(tmp_path / "report.json"),
+    ])
+
+    with pytest.raises(SystemExit) as excinfo:
+        nccl_roundtrip_check.main()
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "--peer-grace" in err, err
+    # The value is echoed, because a negative one usually arrives from a
+    # generated command line where the caller cannot see what was substituted.
+    assert value in err, err
+    # And the message has to say what 0 does, or the reader's next move is to
+    # try 0 expecting it to mean "no limit".
+    assert "0 is how the check is disabled" in err, err
+    # Nothing ran: the refusal is an argument error, not a verdict.
+    assert not (tmp_path / "report.json").exists()
+
+
+def test_the_documented_zero_opt_out_still_works(
+    nccl_roundtrip_check, tmp_path, monkeypatch
+):
+    """Narrowness: `0` is the opt-out `--help` names, and it has to stay one.
+
+    A `>= 0` bound would be the easy over-reach, and it would break the only
+    supported way to run this script against an engine with no peer attached.
+    Driven all the way through `main` rather than stopping at the parse, so
+    this also pins that 0 still reaches the `> 0` gate as a skipped check
+    rather than as a zero-second wait that fails every marker.
+    """
+    code, report, posted = _drive_roundtrip(
+        nccl_roundtrip_check, tmp_path, monkeypatch, marker=False, peer_grace="0"
+    )
+
+    # The marker for round 1 is deliberately absent, and with the check off
+    # that is not allowed to cost the run its verdict.
+    assert code == 0
+    assert report["verdict"] == "PROVEN"
+    assert report["weights_changed_under_perturb"] is True
+    # No `peer` block at all, rather than one recording `appeared: false`:
+    # nobody asked, which is the distinction this module keeps everywhere the
+    # peer evidence is missing. A zero-second wait would have written one.
+    assert "peer" not in report["perturb"]
+    assert "peer" not in report["restore"]
+    assert posted.count("/update_weights") == 2
+
+
+def test_the_help_names_zero_as_the_way_to_disable_it(
+    nccl_roundtrip_check, monkeypatch, capsys
+):
+    """The refusal above points the reader at `0`, so `--help` must too.
+
+    Pinned because the two texts are the whole contract: an operator who hits
+    the refusal is told 0 disables the check, and the only place that claim is
+    documented for someone who has not hit it is this help string.
+    """
+    monkeypatch.setattr(sys, "argv", ["nccl_roundtrip_check.py", "--help"])
+    with pytest.raises(SystemExit):
+        nccl_roundtrip_check.main()
+
+    flag = " ".join(capsys.readouterr().out.split()).split("--peer-grace", 1)[1]
+    assert "0 disables the check" in flag, flag

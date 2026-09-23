@@ -661,6 +661,22 @@ def main() -> int:
     args = ap.parse_args()
     if args.replicates < 1:
         ap.error("--replicates must be at least 1")
+    # `> 0` is what gates the marker check, so every negative value is a
+    # second, undocumented opt-out -- and the one a typo produces. `0` is the
+    # opt-out the help names, and it reads as one: a caller who types it has
+    # decided to accept the verdict without the markers. `-1` reads as a
+    # duration, and a caller who types it is asking to wait, not to stop
+    # asking. Refused rather than clamped for that reason: clamping to 0 would
+    # honour the reading nobody meant, and clamping to the default would wait
+    # two minutes on an argument that asked for less than none. The markers are
+    # the only direct evidence a collective happened at all, so silently
+    # dropping them weakens every verdict this script goes on to print.
+    if args.peer_grace < 0:
+        ap.error(
+            f"--peer-grace is {args.peer_grace}; it is a number of seconds to "
+            "wait, and 0 is how the check is disabled. A negative value "
+            "disables it too, which is not what it looks like it does."
+        )
 
     report: dict[str, Any] = {
         "engine_url": args.engine_url,
