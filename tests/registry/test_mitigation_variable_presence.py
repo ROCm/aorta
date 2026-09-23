@@ -821,7 +821,7 @@ def test_only_torchs_directory_is_globbed(tmp_path):
     scanned = libraries_to_scan([rocm, torch_lib]).libraries
 
     assert declared.resolve() in scanned
-    assert globbed.resolve() in scanned or globbed in scanned
+    assert globbed.resolve() in scanned
     assert not [lib for lib in scanned if lib.name == "librocblas.so"], scanned
 
 
@@ -944,23 +944,117 @@ def test_the_declared_sonames_are_not_read_twice(tmp_path):
 
     Two ways to arrive at the same library. The old scan resolved each soname
     and then globbed the same directory, so every declared library was read
-    once through the resolver and again through its unversioned link. And
-    `rocm_lib_dirs` deduplicates *directories*, not libraries -- on the wheel
-    layout `core_lib_dir` and `lib_dir` are genuinely different directories
-    that can each carry a link to the same `libamdhip64`, which the directory
-    dedup cannot see.
+    once through the resolver and again through its unversioned link. The
+    directory dedup in `rocm_lib_dirs` cannot see that: it deduplicates
+    *directories*, not libraries. Here torch's directory is ROCm's, which is
+    the case that survives first-match-wins -- the glob is still a second
+    route to a file the resolver already found.
     """
-    rocm, also_rocm = tmp_path / "rocm", tmp_path / "libs"
-    torch_lib = tmp_path / "torch"
-    for directory in (rocm, also_rocm, torch_lib):
-        directory.mkdir()
+    rocm = tmp_path / "rocm"
+    rocm.mkdir()
     real = _fake_so(rocm / "libamdhip64.so.7", ["HIP_LAUNCH_BLOCKING"])
     (rocm / "libamdhip64.so").symlink_to(real)
-    (also_rocm / "libamdhip64.so").symlink_to(real)
 
-    scanned = libraries_to_scan([rocm, also_rocm, torch_lib]).libraries
+    scanned = libraries_to_scan([rocm, rocm]).libraries
 
     assert scanned == [real.resolve()], scanned
+
+
+def test_the_first_directory_that_provides_a_soname_wins(tmp_path):
+    """Loader precedence, not a union: a second copy of a library is not read.
+
+    The scan took *every* copy of every soname across the ROCm directories and
+    unioned the names out of all of them. Where the directories hold disjoint
+    sonames -- the wheel layout's usual shape -- that is harmless. Where they
+    overlap it is a claim no process ever sees: exactly one ``libamdhip64`` is
+    loaded, and the other one's strings were answering for it.
+
+    Both verdicts move the wrong way, and quietly. A variable that only the
+    unloaded copy carries passes
+    ``test_every_mitigation_variable_is_read_by_something`` while nothing at
+    runtime reads it, which is the precise defect this file exists to catch. A
+    ``KNOWN_ABSENT`` entry can be retired by a binary that is not in the
+    process.
+
+    First-match-wins over ``rocm_lib_dirs``'s order, which is the order the
+    GPU lane puts on ``LD_LIBRARY_PATH`` -- ``gpu-tests.yml`` builds it from
+    ``dict.fromkeys([core_lib_dir, lib_dir])``, the same pair from the same
+    resolver. Not a full model of the loader, and it does not claim to be:
+    ``DT_RPATH`` and an inherited ``LD_LIBRARY_PATH`` both outrank it. It does
+    not have to be. A union is wrong by construction -- it describes no
+    process -- where first-match describes the one the lane configures.
+    """
+    first, second = tmp_path / "core", tmp_path / "libs"
+    torch_lib = tmp_path / "torch"
+    for directory in (first, second, torch_lib):
+        directory.mkdir()
+    live = _fake_so(first / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    stale = _fake_so(second / "libamdhip64.so", ["PYTORCH_CUDA_ALLOC_CONF"])
+
+    scan = libraries_to_scan([first, second, torch_lib])
+
+    assert scan.libraries == [live.resolve()], scan.libraries
+    assert stale.resolve() not in scan.libraries
+    assert "libamdhip64.so" not in scan.unresolved, (
+        "found in the first directory, so it is resolved -- winning is not "
+        "the same as being missing from the others"
+    )
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in union_of_names(scan.libraries), (
+        "a name only the unloaded copy carries must not answer for the live one"
+    )
+
+
+def test_an_unreadable_scanned_object_is_an_unreadable_stack(monkeypatch, tmp_path):
+    """The fourth door, and the last one that let a partial union look complete.
+
+    The read was wrapped in ``except (ValueError, OSError): continue``, so a
+    resolved library that was not an ELF, or that could not be opened,
+    contributed nothing and said nothing. Nothing is also what a library that
+    *was* read and carried no audited name contributes, and the union cannot
+    tell those apart -- so the scan came out looking authoritative over a
+    binary it never read.
+
+    Both shapes are covered because they arrive differently: a text file named
+    ``.so`` raises ``ValueError`` from the magic check, and a mode-000 file
+    raises ``OSError`` from ``open``. The second is skipped under a UID that
+    ignores file permissions, which is the usual shape of a container build.
+    """
+    good = _fake_so(tmp_path / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    not_elf = tmp_path / "libnot.so"
+    not_elf.write_text("INPUT(libc.so.6)\n", encoding="utf-8")
+    scanned = [good.resolve(), not_elf]
+
+    monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
+    outcome = _outcome_of(lambda: union_of_names(scanned))
+    assert isinstance(outcome, pytest.skip.Exception), outcome
+
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    outcome = _outcome_of(lambda: union_of_names(scanned))
+    assert isinstance(outcome, pytest.fail.Exception), (
+        f"expected a failure, got {type(outcome).__name__}: {outcome}"
+    )
+    assert "libnot.so" in str(outcome), (
+        f"the message has to name the file to act on: {outcome}"
+    )
+
+    unopenable = _fake_so(tmp_path / "libshy.so", ["HIP_LAUNCH_BLOCKING"])
+    unopenable.chmod(0o000)
+    if os.access(unopenable, os.R_OK):          # root, or an ACL; the mode is advisory
+        pytest.skip("this UID can read a mode-000 file, so there is nothing to refuse")
+    outcome = _outcome_of(lambda: union_of_names([good.resolve(), unopenable]))
+    assert isinstance(outcome, pytest.fail.Exception), (
+        f"expected a failure, got {type(outcome).__name__}: {outcome}"
+    )
+
+
+def test_a_fully_readable_scan_returns_the_union(tmp_path):
+    """The narrowness control: refusing every scan would satisfy the test above."""
+    first = _fake_so(tmp_path / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    second = _fake_so(tmp_path / "librccl.so", ["NCCL_DEBUG"])
+
+    assert union_of_names([first, second]) == frozenset(
+        {"HIP_LAUNCH_BLOCKING", "NCCL_DEBUG"}
+    )
 
 
 def test_the_require_flag_is_off_unless_it_says_otherwise(monkeypatch):
@@ -1095,28 +1189,39 @@ def libraries_to_scan(dirs: list[Path]) -> ScanSet:
     glob swept it up. See :func:`sonames_to_scan` for why a claimed consumer
     has to be opened.
 
-    Deduplicated by resolved path, because a soname and its major-versioned
-    link resolve to one file and reading it twice changes nothing but the
-    clock.
+    **One library per soname, from the first directory that provides it.**
+    The loop reads the soname on the outside and stops at the first hit, so
+    the directory order decides -- which is the order the GPU lane puts on
+    ``LD_LIBRARY_PATH``: ``gpu-tests.yml`` builds it from
+    ``dict.fromkeys([core_lib_dir, lib_dir])`` and :func:`rocm_lib_dirs`
+    returns that same pair in that same order. It still supports the split
+    wheel layout, because there the two directories hold disjoint sonames and
+    "first that provides it" is the only one that provides it.
 
-    A soname is resolved if it resolved in *any* ROCm directory, not in each
-    of them: the wheel layout splits the set across ``_rocm_sdk_core/lib`` and
-    ``_rocm_sdk_libraries_*/lib``, where ``libamdhip64`` lives in the first and
-    ``libhipblaslt`` in the second, so per-directory bookkeeping would call
-    every stack incomplete. The rest go in :attr:`ScanSet.unresolved` for
-    :func:`require_scanned_libraries` to rule on.
+    Taking every copy instead unioned the names out of libraries no process
+    ever loads. See :func:`test_the_first_directory_that_provides_a_soname_wins`
+    for why that moves both verdicts the wrong way.
+
+    Deduplicated by resolved path even so, because the torch directory is
+    globbed rather than resolved and an install whose torch libraries sit
+    beside ROCm's reaches the same file both ways. The glob's results are
+    resolved for that to work at all: ``libamdhip64.so`` and
+    ``libamdhip64.so.7`` are two paths to one inode, and a dedup over
+    unresolved paths kept both -- so the dedup's own claim, one file is one
+    read, did not hold on the side that needed it.
     """
     audit = _load_audit_script()
     *rocm_dirs, torch_lib = dirs
     scanned: list[Path] = []
     resolved: set[str] = set()
-    for directory in rocm_dirs:
-        for soname in sonames_to_scan():
+    for soname in sonames_to_scan():
+        for directory in rocm_dirs:
             lib = audit.resolve_library(directory, soname)
             if lib is not None:
                 resolved.add(soname)
                 scanned.append(lib)
-    scanned.extend(sorted(torch_lib.glob("*.so")))
+                break
+    scanned.extend(sorted(lib.resolve() for lib in torch_lib.glob("*.so")))
     return ScanSet(
         list(dict.fromkeys(scanned)),
         tuple(soname for soname in sonames_to_scan() if soname not in resolved),
@@ -1176,17 +1281,50 @@ def require_scanned_libraries(scan: ScanSet, dirs: list[Path]) -> list[Path]:
     return scan.libraries
 
 
-@pytest.fixture(scope="module")
-def present_names() -> frozenset[str]:
-    dirs = require_readable_stack()
-    scanned = require_scanned_libraries(libraries_to_scan(dirs), dirs)
+def union_of_names(scanned: list[Path]) -> frozenset[str]:
+    """Every audited name in ``scanned``, or the fail-or-skip an unreadable one earns.
+
+    The read used to be wrapped in ``except (ValueError, OSError): continue``
+    -- "not an ELF, or unreadable; neither is this test's business". It is
+    this test's business, and for the reason :class:`ScanSet` gives about a
+    soname that resolves nowhere: a library that was opened and could not be
+    read contributes nothing to the union, and nothing is exactly what a
+    library that was read and carried no audited name contributes. The two are
+    the same value and different facts.
+
+    :func:`require_scanned_libraries` refuses a stack that is missing a named
+    library; a named library present but unreadable is that stack wearing a
+    file. The rot check is again where it bites: an entry's
+    ``claimed_consumer`` that lands here stays excused without the one binary
+    that could retire it ever being read.
+
+    Torch's globbed objects are held to the same rule rather than tolerated as
+    incidental. Three of the eighteen variables under audit are read only by
+    them, so an unreadable one weakens the same union -- and the failure names
+    the file, which is what makes an image that ships a genuinely non-ELF
+    ``.so`` a one-line fix instead of a mystery.
+    """
     found: set[str] = set()
+    unreadable: list[str] = []
     for lib in scanned:
         try:
             found |= names_in_binary(lib)
-        except (ValueError, OSError):
-            continue          # not an ELF, or unreadable; neither is this test's business
+        except (ValueError, OSError) as exc:
+            unreadable.append(f"{lib} ({exc})")
+    if unreadable:
+        _unreadable_stack(
+            f"{len(unreadable)} of {len(scanned)} scanned objects could not be "
+            f"read: {unreadable}. Their names are missing from the union, "
+            "under which an unread variable looks unread and a KNOWN_ABSENT "
+            "entry whose claimed consumer is one of them stays excused"
+        )
     return frozenset(found)
+
+
+@pytest.fixture(scope="module")
+def present_names() -> frozenset[str]:
+    dirs = require_readable_stack()
+    return union_of_names(require_scanned_libraries(libraries_to_scan(dirs), dirs))
 
 
 @pytest.mark.rocm
