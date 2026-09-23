@@ -794,7 +794,7 @@ def test_a_scan_that_found_libraries_neither_fails_nor_skips(monkeypatch, tmp_pa
     """The narrowness control: refusing every lane would satisfy the test above."""
     monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
     found = [tmp_path / "libamdhip64.so.7"]
-    assert require_scanned_libraries(ScanSet(found, ()), [tmp_path]) == found
+    assert require_scanned_libraries(ScanSet(found, (), None), [tmp_path]) == found
 
 
 def test_only_torchs_directory_is_globbed(tmp_path):
@@ -915,6 +915,11 @@ def _stack(root: Path, omit: str = "") -> list[Path]:
     soname added to either source lands here without this file being edited --
     the point of these two tests is that the *set* is required, not that three
     particular names are.
+
+    Torch's directory gets an object too. It used to be created empty, which
+    made "a complete stack" a stack missing torch's three variables entirely --
+    the state ``ScanSet.unscanned_torch`` now refuses, and the fixture asserting
+    completeness should not be the one demonstrating the hole.
     """
     rocm, torch_lib = root / "rocm", root / "torch"
     rocm.mkdir()
@@ -922,6 +927,7 @@ def _stack(root: Path, omit: str = "") -> list[Path]:
     for soname in sonames_to_scan():
         if soname != omit:
             _fake_so(rocm / soname, ["HIP_LAUNCH_BLOCKING"])
+    _fake_so(torch_lib / "libtorch_hip.so", ["TORCH_ROCM_FA_PREFER_CK"])
     return [rocm, torch_lib]
 
 
@@ -991,6 +997,67 @@ def test_a_complete_stack_is_not_refused(monkeypatch, tmp_path):
     scan = libraries_to_scan(dirs)
 
     assert scan.unresolved == (), scan.unresolved
+    assert require_scanned_libraries(scan, dirs) == scan.libraries
+
+
+def test_an_empty_torch_directory_is_an_unreadable_stack_not_a_verdict(
+    monkeypatch, tmp_path
+):
+    """The hole `unresolved` was structurally unable to see.
+
+    `ScanSet.unresolved` names *sonames*, and only ROCm's side is resolved by
+    name -- torch's is globbed, so it has no name to be missing. A torch
+    directory that exists and holds no shared object therefore left every ROCm
+    soname resolved and `libraries` non-empty, and `require_scanned_libraries`
+    passed a scan that had read none of the three torch-owned variables. The
+    audit then reported them as registry defects and ran the exemption rot
+    check on no torch evidence at all -- two verdicts about the registry
+    derived from a stack that was never read.
+
+    `scan_plan` already refuses this shape when torch is absent or is a CPU
+    build. An empty torch directory is the same partial audit one step past
+    that gate.
+    """
+    dirs = _stack(tmp_path)
+    for lib in (tmp_path / "torch").glob("*.so*"):
+        lib.unlink()
+
+    scan = libraries_to_scan(dirs)
+
+    # The trap, stated: nothing else here has anything to complain about.
+    assert scan.unresolved == (), scan.unresolved
+    assert scan.libraries, "the ROCm half is complete, which is what hid this"
+    assert scan.unscanned_torch == tmp_path / "torch"
+
+    monkeypatch.delenv(REQUIRE_ROCM_ENV, raising=False)
+    outcome = _outcome_of(lambda: require_scanned_libraries(scan, dirs))
+    assert isinstance(outcome, pytest.skip.Exception), outcome
+
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    outcome = _outcome_of(lambda: require_scanned_libraries(scan, dirs))
+    assert isinstance(outcome, pytest.fail.Exception), (
+        f"expected a failure, got {type(outcome).__name__}: {outcome}"
+    )
+    assert "PYTORCH_NO_CUDA_MEMORY_CACHING" in str(outcome)
+
+
+def test_a_torch_directory_holding_one_object_is_not_refused(monkeypatch, tmp_path):
+    """Narrowness. One object is enough; the guard is not about how many.
+
+    Paired with the versioned-name test above rather than duplicating it: the
+    object here is named `libtorch_hip.so.2`, so a guard implemented by
+    counting `glob("*.so")` hits would refuse a wheel that is entirely correct.
+    """
+    monkeypatch.setenv(REQUIRE_ROCM_ENV, "1")
+    dirs = _stack(tmp_path)
+    torch_lib = tmp_path / "torch"
+    for lib in torch_lib.glob("*.so*"):
+        lib.unlink()
+    _fake_so(torch_lib / "libtorch_hip.so.2", ["TORCH_ROCM_FA_PREFER_CK"])
+
+    scan = libraries_to_scan(dirs)
+
+    assert scan.unscanned_torch is None
     assert require_scanned_libraries(scan, dirs) == scan.libraries
 
 
@@ -1214,10 +1281,30 @@ class ScanSet(NamedTuple):
     resolves nowhere, is scanned nowhere, and excuses the entry forever.
     :func:`test_every_known_absent_claim_is_scanned` cannot catch it -- it
     checks the name is in the scan *list*, which a misspelling satisfies.
+
+    ``unscanned_torch`` exists because ``unresolved`` cannot cover torch's
+    side. The ROCm half is named soname by soname, so a library that resolved
+    nowhere is nameable; torch's half is globbed, declares no sonames, and
+    therefore has no name to be missing. A torch directory that exists and
+    holds no shared object was consequently invisible: the ROCm set was
+    complete, ``libraries`` stayed non-empty, and
+    :func:`require_scanned_libraries` accepted a scan that had read none of the
+    three torch-owned variables. Both verdicts then moved exactly as described
+    above, with no unresolved soname to hint at it --
+    ``PYTORCH_NO_CUDA_MEMORY_CACHING`` and its two neighbours are reported as
+    registry defects, and any :data:`KNOWN_ABSENT` entry claiming a torch
+    consumer is excused by a binary nobody opened. It is ``None`` when torch's
+    directory produced at least one object and the directory itself otherwise,
+    because the path is what an operator has to go and look at.
+
+    Required rather than defaulted, so a caller has to say which state torch is
+    in. A default of ``None`` reads as "torch was fine", which is the answer
+    this field was added because nothing was entitled to assume.
     """
 
     libraries: list[Path]
     unresolved: tuple[str, ...]
+    unscanned_torch: Path | None
 
 
 #: A shared object's filename, versioned or not: ``libtorch_hip.so`` and
@@ -1312,10 +1399,12 @@ def libraries_to_scan(dirs: list[Path]) -> ScanSet:
                 resolved.add(soname)
                 scanned.append(lib)
                 break
-    scanned.extend(sorted(torch_shared_objects(torch_lib)))
+    torch_objects = torch_shared_objects(torch_lib)
+    scanned.extend(sorted(torch_objects))
     return ScanSet(
         list(dict.fromkeys(scanned)),
         tuple(soname for soname in sonames_to_scan() if soname not in resolved),
+        None if torch_objects else torch_lib,
     )
 
 
@@ -1358,6 +1447,17 @@ def require_scanned_libraries(scan: ScanSet, dirs: list[Path]) -> list[Path]:
     also be non-empty there: on an empty tree every soname is missing, and
     naming them all describes the symptom where "no shared objects under
     ``<dirs>``" names the cause.
+
+    The third branch is the same defect on torch's side, and it needed its own
+    branch because the second one cannot see it. ``unresolved`` is a list of
+    *sonames*, and torch's directory is globbed rather than resolved by name,
+    so a torch directory holding no shared object leaves every ROCm soname
+    resolved, ``libraries`` non-empty, and this function satisfied -- while
+    three of the eighteen variables went unread. :func:`scan_plan` already
+    refuses to run at all when torch is missing or is not a ROCm build, on
+    exactly the reasoning that a partial audit needs an exemption meaning "not
+    checked"; an empty torch directory is that same partial audit arriving one
+    step later, past the gate that was supposed to stop it.
     """
     if not scan.libraries:
         _unreadable_stack(f"no shared objects under {[str(d) for d in dirs]}")
@@ -1368,6 +1468,16 @@ def require_scanned_libraries(scan: ScanSet, dirs: list[Path]) -> list[Path]:
             "missing whatever only those libraries carry -- under which an "
             "unread variable looks unread and a KNOWN_ABSENT entry whose "
             "claimed consumer is one of them stays excused on no evidence"
+        )
+    if scan.unscanned_torch is not None:
+        _unreadable_stack(
+            f"{scan.unscanned_torch} holds no shared object, so the three "
+            "torch-owned variables (PYTORCH_NO_CUDA_MEMORY_CACHING, "
+            "PYTORCH_CUDA_ALLOC_CONF, TORCH_ROCM_FA_PREFER_CK) were read out "
+            "of nothing -- under which they look unread and a KNOWN_ABSENT "
+            "entry claiming a torch consumer stays excused on no evidence. "
+            "The ROCm sonames all resolved, which is why nothing else here "
+            "noticed"
         )
     return scan.libraries
 
