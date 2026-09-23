@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
+import json
 import logging
+import re
+import threading
+import time
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from typing import Any
@@ -16,29 +21,33 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool
 
+from aorta.chat.cancellation import bind_cancel_token, reset_cancel_token
 from aorta.chat.config import settings
-from aorta.chat.graph.state import AgentState
+from aorta.chat.decision_log import note_tool_call
+from aorta.chat.graph.state import AgentState, UserEvidence
 from aorta.chat.inference.vllm_client import get_chat_llm
 from aorta.chat.plugins import ChatTool, enabled_builtins, load_chat_tools
 from aorta.chat.rag.repo_map import load_repo_map
 from aorta.chat.rag.retriever import get_retriever
 from aorta.chat.redaction import redact_for_send
 
+from langgraph.config import get_stream_writer
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are the AORTA Codebase Assistant, an AI agent that helps \
-developers understand, navigate, and work with the AORTA codebase.
+developers understand, navigate, and work with the AORTA codebase{diagnosis_identity}.
 
 RULES:
-1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
-   this machine. Politely refuse anything else.
+1. Answer questions about the AORTA codebase, about the AORTA runs on this \
+   machine{diagnosis_scope}. Politely refuse work that is none of those.
 2. When referencing code, always cite file paths and line numbers.
 3. You have tools to explore the codebase: list_files, read_file, search_code, \
    grep_code and search_repo_map. You also have tools for this machine's own \
    AORTA run results: list_runs, read_run_matrix, read_run_env, and \
    search_run_artifacts. Use those when the question is about what a run did \
-   rather than what the code says.
+   rather than what the code says.{diagnostic_tools}
 4. NEVER fabricate or guess commands. Before suggesting any command, you MUST first \
    use search_code or read_file to find the actual scripts, entry points, or \
    configuration in the codebase. Only generate commands that are grounded in real \
@@ -57,6 +66,28 @@ RULES:
 10. When multiple files are relevant, list ALL of them with file paths.
 11. A run artifact that reports a field as "unknown" or "NOT RECORDED" did not \
    record it. That is not zero and not a pass -- say the run did not record it.
+12. When the user pastes a kernel, an assembly listing or a workload together with a \
+   symptom, run the matching diagnostic tool on it before you answer, however clearly \
+   you think you can see the bug by reading it. Reading produces a guess, and a guess \
+   that happens to be right is indistinguishable, to the person reading your answer, \
+   from one that is not. Only say a thing was observed if a tool observed it.
+13. When a diagnostic tool has run, answer in three labelled parts: the bug (what is wrong, in the user's own code); how we found it (which tool, and the evidence it returned -- the signal, the file and the line, the confidence); and the fix (the change, quotable verbatim). Report the confidence the tool gave rather than rounding it up: a static finding on a path that may never execute is worth less than a collision that was observed, and saying so is the difference between a report an engineer can act on and one they have to re-derive.
+14. A tool tells you what happened; the user's own paste often tells you why. \
+    When the tool has localised a failure but not explained it, and the reason \
+    is visible in the code the user gave you, say so -- naming which line you \
+    read it from, quoting that source excerpt exactly in backticks or a fenced \
+    block, and keeping it separate from what the tool observed. "Loss \
+    went NaN at step 50 (Watch, confidence 0.99); your code sets lr=5.0 on \
+    SGD, which diverges" is a better answer than stopping at unlocalized. What \
+    is forbidden is asserting a cause that neither the tools nor the paste \
+    support, not reading the code in front of you.
+15. Show the fix as the lines to add or change, not as a rewritten copy of the \
+    user's code. Reproducing assembly or a kernel from memory rewrites it: \
+    register pairs come back as v[2:3] where the user wrote v[3:4], and someone \
+    who pastes that back has taken a working program and broken the addressing \
+    to fix a wait. If you must show surrounding lines for context, copy them \
+    character for character from what the user gave you, and never from what \
+    you remember of it.
 
 RETRIEVED CONTEXT:
 {context}
@@ -75,8 +106,10 @@ You have NO tools available. Answer using only the RETRIEVED CONTEXT below \
 and the conversation so far.
 
 RULES:
-1. Only answer questions about the AORTA codebase, or about the AORTA runs on \
-   this machine. Politely refuse anything else.
+1. Answer questions about the AORTA codebase and about the AORTA runs on \
+   this machine. If the user pasted code of their own and wants it diagnosed, \
+   say that needs a diagnostic run and this answer was reached without one. \
+   Politely refuse work that is none of those.
 2. When referencing code, always cite file paths and line numbers.
 3. NEVER fabricate file paths, commands, flags, or behaviour. Everything you \
    state must be visible in the RETRIEVED CONTEXT.
@@ -94,11 +127,18 @@ ROUTER_PROMPT = """\
 Classify the user's latest message into one of two categories:
 - "question": a simple, specific question that can be answered with retrieved context \
   alone (e.g. "What does function X do?", "How is class Y structured?")
-- "action": requires using tools to search, list, read files, run commands, or find \
-  multiple items (e.g. "Find all functions that ...", "Search for ...", "List all ...", \
-  "How do I run ...", "Show me the files in ...")
+- "action": requires using tools to search, list, read files, run commands, find \
+  multiple items, or diagnose a workload on the cluster (e.g. "Find all functions that ...", \
+  "Search for ...", "List all ...", "How do I run ...", "Show me the files in ...")
 
 If the message asks to find, search, list, or enumerate multiple items, classify as action.
+
+If the message carries pasted source, assembly, a log or a stack trace along with a symptom \
+-- wrong or non-deterministic results, a crash, a hang, a loss that stops being a number -- \
+classify as action, whether or not it names a tool. Answering it means compiling that code \
+and running it under a sanitizer on a GPU, which no amount of retrieved context substitutes \
+for: retrieved context can only produce a guess that reads like a diagnosis.
+
 If in doubt, classify as action.
 
 Reply with ONLY the single word: question or action
@@ -182,29 +222,41 @@ def _summary_line(tool: BaseTool) -> str:
     return lines[0].strip() if lines else "no description"
 
 
-def _plugin_tool_help(tools: dict[str, ChatTool]) -> str:
-    """Advertise plugin-contributed tools, or return "" when there are none.
+def _undocumented_tool_help(tools: dict[str, ChatTool], documented_in: str) -> str:
+    """Describe the registered tools *documented_in* does not already cover.
 
-    The hand-written lists above cover the built-ins; a tool discovered from the
-    ``aorta.chat_tools`` entry-point group has to describe itself. Only the text
-    protocol needs this -- ``bind_tools()`` sends every tool's real schema, so
-    the native protocol offers plugin tools whether or not the prompt says so.
+    The ACTION: protocol can only reach a tool the prompt lists, so anything
+    missing here is invisible to it however well it is registered -- the model
+    answers from its own knowledge instead, plausibly, without ever running
+    anything. ``bind_tools()`` sends every tool's real schema, so the native
+    protocol is unaffected either way.
 
-    Returns the empty string when nothing is installed, so both prompts stay
+    This used to select by origin: everything from outside the ``aorta``
+    package, on the assumption that aorta's own tools were all hand-written
+    into the lists above. Tools added to the package later were then documented
+    nowhere and reachable only through the native protocol. Selecting by what
+    the prompt actually says keeps that from depending on where a tool lives.
+
+    Returns the empty string when nothing is missing, so both prompts stay
     byte-identical to what a user with no plugins had before.
     """
-    extra = [entry for entry in tools.values() if entry.source_package != "aorta"]
-    if not extra:
+    missing = [e for e in tools.values() if f"{e.name}(" not in documented_in]
+    if not missing:
         return ""
+
+    already = len(re.findall(r"^\d+\.", documented_in, re.MULTILINE))
     lines = [
-        f"{index}. {entry.name}(...) - {_summary_line(entry.tool)} "
-        f"[from {entry.source_package}]"
-        # Counted from the built-ins actually registered, not from
-        # BUILTIN_CHAT_TOOLS, whose length stopped saying how many the prompt
-        # listed once the shell tool became conditional.
-        for index, entry in enumerate(extra, start=len(enabled_builtins()) + 1)
+        f"{index}. {entry.name}(...) - {_summary_line(entry.tool)}"
+        # The origin is worth naming for a third party's tool and noise for
+        # one of ours.
+        + (f" [from {entry.source_package}]" if entry.source_package != "aorta" else "")
+        # Counted from the numbered entries the prompt actually shows, which is
+        # what len(enabled_builtins()) was reaching for: the conditional shell
+        # tool is described in an unnumbered bullet, so counting the registry
+        # would leave a gap in the sequence the model reads.
+        for index, entry in enumerate(missing, start=already + 1)
     ]
-    return "\nAdditional tools contributed by installed plugins:\n\n" + "\n".join(lines) + "\n"
+    return "\nAdditional tools:\n\n" + "\n".join(lines) + "\n"
 
 
 #: Appended to the prompts only when the shell tool is registered. Keeping it
@@ -231,20 +283,50 @@ def _shell_tool_help(fragment: str) -> str:
     return fragment if settings.enable_shell_tool else ""
 
 
-TOOL_DESCRIPTIONS = (
-    _BUILTIN_TOOL_DESCRIPTIONS
-    + _shell_tool_help(_SHELL_TOOL_ACT_HELP)
-    + _plugin_tool_help(CHAT_TOOLS)
+def _tool_help(documented: str) -> str:
+    """*documented* plus a description of anything registered it leaves out.
+
+    Composed rather than concatenated because the two questions are the same
+    one: a tool is missing from the prompt if the prompt does not describe it,
+    whoever shipped it and whether or not it is switched on. Passing the
+    already-composed text means the conditional shell tool, described in its
+    own bullet above, is not then listed a second time as undescribed.
+    """
+    return documented + _undocumented_tool_help(CHAT_TOOLS, documented)
+
+
+TOOL_DESCRIPTIONS = _tool_help(
+    _BUILTIN_TOOL_DESCRIPTIONS + _shell_tool_help(_SHELL_TOOL_ACT_HELP)
 )
-PLAN_PROMPT = (
-    _BUILTIN_PLAN_PROMPT
-    + _shell_tool_help(_SHELL_TOOL_PLAN_HELP)
-    + _plugin_tool_help(CHAT_TOOLS)
+PLAN_PROMPT = _tool_help(
+    _BUILTIN_PLAN_PROMPT + _shell_tool_help(_SHELL_TOOL_PLAN_HELP)
 )
 
 
 def _get_llm(**kwargs):
     return get_chat_llm(**kwargs)
+
+
+def _system_first(messages: list[Any]) -> list[Any]:
+    """Collapse the system messages into a single leading one.
+
+    Some providers reject a conversation whose system message is anywhere but
+    the front -- AMD's on-prem gateway answers ``System message must be at the
+    beginning`` and refuses the call, which takes out every model served from
+    it. The act nodes add a second system message ahead of the history to force
+    a behaviour for one turn: fine for the providers that allow it, fatal for
+    the ones that do not.
+
+    Merging preserves the order the instructions were added in, so the forcing
+    message still reads as an amendment to the standing prompt.
+    """
+    system = [m for m in messages if isinstance(m, SystemMessage)]
+    if not system or (len(system) == 1 and messages[0] is system[0]):
+        return messages
+
+    bodies = [str(m.content).strip() for m in system]
+    merged = SystemMessage(content="\n\n".join(b for b in bodies if b))
+    return [merged, *(m for m in messages if not isinstance(m, SystemMessage))]
 
 
 async def _send(llm: Any, messages: list[Any]) -> Any:
@@ -254,12 +336,57 @@ async def _send(llm: Any, messages: list[Any]) -> Any:
     the gate cannot be bypassed by a node added later. It takes the already-
     bound model, so the tool-calling path is covered too.
     """
-    return await llm.ainvoke(redact_for_send(messages))
+    return await llm.ainvoke(_system_first(redact_for_send(messages)))
+
+
+#: Added to rule 1 where the diagnostic tools are registered. Without it rule 1
+#: refuses everything that is not the AORTA codebase or an AORTA run -- which is
+#: what a user's own pasted kernel is -- while rules 12 and 13 tell the model to
+#: diagnose exactly that. Two products in one prompt, and nothing says which one
+#: wins.
+_DIAGNOSIS_SCOPE = ", and about GPU code the user pastes for diagnosis"
+
+#: The same admission, made in the sentence that says what this assistant is.
+#: Rule 1 was widened to take pasted code while the line above it still said
+#: "the AORTA codebase" and nothing else -- so the prompt introduced itself as
+#: one product and then listed the rules of another. A model reading the two
+#: in order has been told to refuse the thing it was just told to do, and the
+#: identity sentence is the one it weights when the rules are ambiguous.
+_DIAGNOSIS_IDENTITY = (
+    ", and diagnoses GPU kernels, assembly and workloads that developers paste"
+    " by building and running them on a GPU node"
+)
+
+#: Added to rule 3 alongside it, so the tools rules 12 and 13 lean on are named
+#: rather than assumed. Rule 3 listed the sandboxed tools only, so the three that
+#: do the work this product is for appeared nowhere in the prompt asking for it.
+_DIAGNOSTIC_TOOLS = (
+    " For a kernel, an assembly listing or a workload the user pastes, you also"
+    " have triage_kernel_source, triage_assembly_source and triage_workload,"
+    " which build and run it on a GPU node under a sanitizer. Those take minutes"
+    " and submit real cluster work, so run one when the user is asking what is"
+    " wrong with code they supplied."
+)
 
 
 def _build_system_message(context: str = "") -> SystemMessage:
+    """The prompt, describing the tools this deployment actually has.
+
+    The diagnostic clauses are conditional because the tools are: they register
+    only when ``allow_cluster_jobs`` is set. Naming them unconditionally would
+    promise a model tools it cannot call, which is what the removed run_nan_demo
+    redirect did -- a turn that dead-ends on a hallucinated call.
+    """
+    from aorta.chat.plugins import diagnostic_tools
+
+    available = "triage_kernel_source" in diagnostic_tools()
     return SystemMessage(
-        content=SYSTEM_PROMPT.format(context=context)
+        content=SYSTEM_PROMPT.format(
+            context=context,
+            diagnosis_identity=_DIAGNOSIS_IDENTITY if available else "",
+            diagnosis_scope=_DIAGNOSIS_SCOPE if available else "",
+            diagnostic_tools=_DIAGNOSTIC_TOOLS if available else "",
+        )
     )
 
 
@@ -535,6 +662,262 @@ async def router_node(state: AgentState) -> dict[str, Any]:
     return {"route": route}
 
 
+#: Numbers the tool calls in a process so a completion can be matched to the
+#: announcement it belongs to.
+_tool_calls = itertools.count(1)
+
+
+def _announce_tool(payload: dict) -> None:
+    """Put a tool progress event on the stream, if anything is listening."""
+    try:
+        get_stream_writer()(payload)
+    except RuntimeError:
+        pass  # not being streamed; nothing to announce to
+
+
+async def _execute_tool_async(tool_name: str, kwargs: dict) -> str:
+    """Run a tool through the async seam, announcing it before it blocks.
+
+    ``_execute_tool`` uses ``BaseTool.ainvoke``. LangChain sends a synchronous
+    tool through its executor there, while a native async tool remains on its
+    own coroutine. #424 originally added another executor around that call,
+    when ``_execute_tool`` itself was synchronous; after main made it async,
+    that wrapper returned a coroutine object as the tool result instead of
+    running it.
+
+    The announcement is what makes a five-minute tool visible: steps otherwise
+    appear only when a node finishes, so the one node that takes real time is
+    the one that says nothing.
+    """
+    name = _normalise_tool_name(tool_name)
+    #: Ties the completion event to its announcement. A turn calls the same
+    #: tool more than once with different arguments, so the name alone does
+    #: not say which of them has finished.
+    call = f"{name}:{next(_tool_calls)}"
+    # The name, and nothing else. The arguments used to ride along, and for
+    # triage_kernel_source those arguments are the user's entire pasted
+    # kernel -- pushed through the stream on every tool call, for a consumer
+    # that reads the name and drops the rest. Anything wanting more than the
+    # name should be added back when there is something rendering it.
+    note_tool_call(name, kwargs)
+    _announce_tool({"tool": name, "id": call})
+    started = time.monotonic()
+    cancel = threading.Event()
+
+    async def run() -> str:
+        # Bind inside the child Task. BaseTool.ainvoke carries its context into
+        # the executor used for a synchronous tool, so _run_triage receives this
+        # same event without exposing an internal argument to the model.
+        bound = bind_cancel_token(cancel)
+        try:
+            return await _execute_tool(tool_name, kwargs)
+        finally:
+            reset_cancel_token(bound)
+
+    worker = asyncio.create_task(run())
+
+    def announce_done(_worker: asyncio.Task) -> None:
+        # A callback on the work, not a finally on the waiter: cancellation of
+        # the chat task can no longer close the step while its executor callable
+        # and Slurm allocation are still alive.
+        payload = {
+            "tool": name,
+            "id": call,
+            "done": True,
+            "seconds": round(time.monotonic() - started, 1),
+        }
+        if cancel.is_set():
+            # This producer waits for the worker to exit before this callback
+            # can run, so "stopped" is a fact rather than a request. The UI also
+            # accepts "still running" from a producer with a bounded wait.
+            payload["cancelled"] = "stopped"
+        _announce_tool(payload)
+
+    worker.add_done_callback(announce_done)
+    try:
+        # Shield keeps cancellation of this waiter from cancelling the Task
+        # that represents the still-running executor callable.
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        cancel.set()
+        # Do not return through the graph until the tool has observed the token,
+        # cancelled its scheduler allocation, and exited. Repeated cancellation
+        # requests still cannot turn "asked to stop" into "has stopped".
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancel.set()
+                continue
+            except Exception:
+                break
+        raise
+
+
+
+# ──────────────────── Select ─────────────────────
+
+_SELECTOR_PROMPT = """\
+You help engineers debug GPU workloads. Below is every tool available, with
+what it does and what evidence it returns.
+
+{catalogue}
+
+Given the user's problem, choose the {limit} tools most likely to identify the
+cause, best first.
+
+Judge only on this: would the evidence that tool returns actually answer this
+problem?
+
+If nothing fits, return fewer tools, or none. A wrong tool costs a cluster job
+and sends the engineer down the wrong path.
+
+Reply as JSON and nothing else:
+{{"tools": ["first", "second"], "why": "one sentence naming the evidence that decided it"}}
+"""
+
+#: Markers that do not occur in a sentence about code. A fence is a fence, and
+#: nobody writes ``__global__`` in prose. Anywhere in the text is enough.
+_CODE_MARKERS = ("```", "__global__", "__shared__", "s_load", "v_mov")
+
+#: Keywords that are also ordinary English: "I import the model and define a
+#: class for it" is a description, not a paste. They count only at the start of
+#: a line, which is where they fall in code and almost never in a sentence.
+_LINE_START_MARKERS = ("def ", "class ", "import ")
+
+#: How many of the recent human turns to look back over for a paste. Long
+#: enough to cover a clarifying exchange about the code, short enough that a
+#: kernel from far earlier in a long session is not still deciding what the
+#: current question is allowed to reach for.
+_SOURCE_LOOKBACK = 6
+
+
+def _looks_like_pasted_source(text: str) -> bool:
+    """Whether the message carries code, as opposed to describing some."""
+    if any(marker in text for marker in _CODE_MARKERS):
+        return True
+    return any(line.lstrip().startswith(_LINE_START_MARKERS) for line in text.splitlines())
+
+
+def _recent_human_turns(messages: list) -> list[str]:
+    """The user's last few turns, oldest first.
+
+    One definition of the window, because two parts of the selector ask the
+    same question about it: whether a paste is recent enough to count, and
+    whether the model gets to see that paste. Those answers disagreeing is the
+    failure this exists to prevent.
+
+    Only the human turns. The requirement is that the *user* supplied something
+    to analyse, and the tool is going to be handed that text.
+    """
+    human = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+    return human[-_SOURCE_LOOKBACK:]
+
+
+def _conversation_has_source(messages: list) -> bool:
+    """Whether the user has pasted code in the recent part of this conversation.
+
+    The paste and the instruction to act on it are usually different turns: a
+    kernel arrives, the agent asks what block size to launch it with, and the
+    reply is "yes, run the sanitizer on it". Reading only the newest message
+    finds no code in that reply and withdraws the source tools from precisely
+    the turn that asked for them.
+    """
+    return any(_looks_like_pasted_source(text) for text in _recent_human_turns(messages))
+
+
+def _selector_view(turns: list[str]) -> str:
+    """The recent turns as one message, with the current ask last.
+
+    The requirement check looked back over this window while the model was
+    shown only the newest message, so a follow-up like "32, go ahead" kept the
+    source tools eligible and then gave the selector nothing to rank them on --
+    the kernel it was deciding about was one turn out of reach.
+
+    A single turn is passed through unchanged, which is the common case and the
+    one the prompt was written against.
+    """
+    if len(turns) <= 1:
+        return turns[-1] if turns else ""
+    earlier = "\n\n".join(turns[:-1])
+    return (
+        f"Earlier turns from the user, oldest first:\n\n{earlier}\n\n"
+        f"--- the user's current message ---\n\n{turns[-1]}"
+    )
+
+
+def _first_json_object(text: str) -> dict | None:
+    """The first JSON object in *text*, ignoring anything around it.
+
+    Models answer the question and then explain themselves, and an explanation
+    containing a brace defeats slicing between the first "{" and the last "}"
+    -- the slice then spans JSON plus prose and fails to parse as either.
+    ``raw_decode`` reads one value and stops, which is what "reply as JSON" was
+    always asking for.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+async def selector_node(state: AgentState) -> dict[str, Any]:
+    """Rank the tools by what evidence each returns.
+
+    Not a routing table. The model is shown what each tool produces and asked
+    whether that would answer this question, so a problem described in words
+    nobody anticipated still reaches the right instrument.
+
+    Advisory: on any failure the act node still sees every tool. The only thing
+    enforced is structural -- a tool that reads pasted source cannot run when
+    nothing was pasted.
+    """
+    from aorta.chat.tools.capabilities import MAX_CANDIDATES, catalogue, enforce_requirements
+
+    text = _selector_view(_recent_human_turns(state["messages"]))
+    proposed: list[str] = []
+    why = ""
+    try:
+        llm = _get_llm(temperature=0.0, streaming=False)
+        # Through _send, like every other node: this one carries the user's
+        # message verbatim, and for this package that message is pasted kernel
+        # source and the paths and hostnames around it.
+        response = await _send(
+            llm,
+            [
+                SystemMessage(
+                    content=_SELECTOR_PROMPT.format(
+                        catalogue=catalogue(), limit=MAX_CANDIDATES
+                    )
+                ),
+                HumanMessage(content=text),
+            ],
+        )
+        payload = _first_json_object(str(response.content or ""))
+        if payload:
+            tools = payload.get("tools")
+            proposed = [t for t in tools if t in TOOL_REGISTRY] if isinstance(tools, list) else []
+            why = str(payload.get("why", ""))
+    except Exception as exc:
+        logger.warning("Selector unavailable (%s); the agent will see every tool.", exc)
+
+    candidates, dropped = enforce_requirements(
+        proposed[:MAX_CANDIDATES],
+        has_pasted_source=_conversation_has_source(state["messages"]),
+    )
+    if dropped:
+        why = (
+            f"{why} Dropped {', '.join(dropped)}: "
+            "nothing was pasted in this conversation."
+        ).strip()
+    logger.info("Selector: %s", candidates or "no candidate")
+    return {"candidate_tools": candidates, "selection_rationale": why}
+
+
 # ──────────────────── Plan ───────────────────────
 
 
@@ -547,12 +930,15 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
     repo_map = await asyncio.to_thread(load_repo_map)
     last_msg = state["messages"][-1]
 
+    recommendation = _recommendation(state)
+    system = PLAN_PROMPT + f"\n\nREPOSITORY MAP:\n{repo_map}"
+    if recommendation:
+        system += f"\n\n{recommendation}"
+
     response = await _send(
         llm,
         [
-            SystemMessage(
-                content=PLAN_PROMPT + f"\n\nREPOSITORY MAP:\n{repo_map}"
-            ),
+            SystemMessage(content=system),
             HumanMessage(content=last_msg.content),
         ]
     )
@@ -1236,6 +1622,7 @@ async def _abandoned_result(state: AgentState, trace: list[str]) -> dict[str, An
             "messages": [AIMessage(content=_NO_ANSWER_MSG)],
             "command_output": "",
             "tool_trace": trace,
+            "user_evidence": [],
         }
     answer = await _fallback_retrieval_answer(state)
     if answer:
@@ -1248,6 +1635,7 @@ async def _abandoned_result(state: AgentState, trace: list[str]) -> dict[str, An
         "messages": [AIMessage(content=answer or _NO_ANSWER_MSG)],
         "command_output": "",
         "tool_trace": trace,
+        "user_evidence": [],
     }
 
 
@@ -1434,6 +1822,38 @@ async def _escalated_native_attempt(
     return outcome.result
 
 
+def _recommendation(state: AgentState) -> str:
+    """The selector's ranking, phrased so it can only widen the choice.
+
+    Without this the ranking reached the screen and nothing else:
+    ``candidate_tools`` was written by ``selector_node``, kept in state, shown
+    in the UI, and read by no node -- so the selector cost a model call per turn
+    and changed nothing about which tool ran. A ranking that does not reach the
+    model is not advisory, it is decorative.
+
+    It is advice and says so. The full tool list is still bound, and a tool the
+    selector left out is still allowed, so a bad ranking loses nothing that was
+    previously available -- which is the property that makes it safe to act on
+    an LLM's opinion of an LLM's options.
+    """
+    candidates = [c for c in (state.get("candidate_tools") or []) if c]
+    if not candidates:
+        # The selector declined, or its output could not be parsed. Saying
+        # nothing leaves the model exactly where it was before this node ran.
+        return ""
+
+    lines = [f"Most likely tools for this request, best first: {', '.join(candidates)}."]
+    why = (state.get("selection_rationale") or "").strip()
+    if why:
+        lines.append(f"Why: {why}")
+    lines.append(
+        "This is a ranking, not a restriction. Every registered tool is still "
+        "available, and one that is not listed is still the right call if the "
+        "request needs it."
+    )
+    return "\n".join(lines)
+
+
 def _act_messages(state: AgentState) -> list[Any]:
     """System framing shared by both protocols."""
     context = state.get("retrieved_context", "")
@@ -1441,6 +1861,9 @@ def _act_messages(state: AgentState) -> list[Any]:
     critic_fb = state.get("critic_feedback", "")
 
     messages: list[Any] = [_build_system_message(context)]
+    recommendation = _recommendation(state)
+    if recommendation:
+        messages.append(SystemMessage(content=recommendation))
     if plan:
         messages.append(SystemMessage(content=f"PLAN:\n{plan}"))
     if critic_fb:
@@ -1458,6 +1881,119 @@ def _last_human(state: AgentState) -> str:
         if isinstance(msg, HumanMessage):
             return msg.content
     return ""
+
+
+_INLINE_CODE_CITATION = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_FENCED_CODE_CITATION = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
+_ASSIGNMENT_CITATION = re.compile(
+    r"\b[A-Za-z_][\w.\[\]-]*\s*(?:<<=|>>=|[+\-*/%]?=)\s*"
+    r"[^\s,;:`]{1,160}"
+)
+_MAX_ANSWER_CITATIONS = 32
+_MAX_USER_EVIDENCE_ITEMS = 4
+_MAX_USER_EVIDENCE_EXCERPT = 500
+
+
+def _full_last_human_message(state: AgentState) -> str:
+    """Return the latest user turn without applying a prompt-size bound."""
+    for message in reversed(state.get("messages") or []):
+        if isinstance(message, HumanMessage) and isinstance(message.content, str):
+            return message.content
+    return ""
+
+
+def _answer_citations(answer: str) -> list[str]:
+    """Extract source-shaped excerpts that the answer presents as citations.
+
+    The generation prompt requires a line read from user code to be quoted
+    exactly. Keeping extraction deterministic means the evidence is never a
+    second model's paraphrase of the source it is meant to authenticate.
+    """
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        value = value.strip()
+        if value.startswith(("+ ", "- ")):
+            value = value[2:].strip()
+        if (
+            len(value) < 3
+            or len(value) > _MAX_USER_EVIDENCE_EXCERPT
+            or value in candidates
+        ):
+            return
+        candidates.append(value)
+
+    for match in _FENCED_CODE_CITATION.finditer(answer):
+        block = match.group(1).strip("\n")
+        add(block)
+        for line in block.splitlines():
+            add(line)
+    for match in _INLINE_CODE_CITATION.finditer(answer):
+        add(match.group(1))
+    # Keep common source citations working when a model omits Markdown despite
+    # the prompt. Only exact assignment-shaped text is considered here.
+    for match in _ASSIGNMENT_CITATION.finditer(answer):
+        add(match.group(0))
+
+    # Longer excerpts disambiguate repeated identifiers and operations first.
+    return sorted(candidates, key=len, reverse=True)[:_MAX_ANSWER_CITATIONS]
+
+
+def _capture_user_evidence(state: AgentState, answer: str) -> list[UserEvidence]:
+    """Locate exact answer citations in the full user turn.
+
+    The line is computed from the match rather than accepted from generated
+    prose. Ambiguous snippets are retained only when every occurrence fits in
+    the small evidence bound; otherwise they do not identify a useful window.
+    """
+    user_text = _full_last_human_message(state)
+    if not user_text or not answer:
+        return []
+
+    evidence: list[UserEvidence] = []
+    seen: set[tuple[str, int]] = set()
+    seen_lines: set[int] = set()
+    for excerpt in _answer_citations(answer):
+        positions: list[int] = []
+        start = 0
+        while len(positions) <= _MAX_USER_EVIDENCE_ITEMS:
+            position = user_text.find(excerpt, start)
+            if position < 0:
+                break
+            positions.append(position)
+            start = position + max(1, len(excerpt))
+
+        # A short token repeated throughout a kernel does not identify the line
+        # the answer relied on. A longer quoted line normally resolves this.
+        if len(positions) > _MAX_USER_EVIDENCE_ITEMS:
+            continue
+        for position in positions:
+            line = user_text.count("\n", 0, position) + 1
+            key = (excerpt, line)
+            if key in seen or line in seen_lines:
+                continue
+            seen.add(key)
+            seen_lines.add(line)
+            evidence.append({"excerpt": excerpt, "line": line})
+            if len(evidence) >= _MAX_USER_EVIDENCE_ITEMS:
+                return evidence
+    return evidence
+
+
+def _answer_result(
+    state: AgentState,
+    text: str,
+    tool_trace: list[str],
+) -> dict[str, Any]:
+    """Build an answer update with user-code grounding kept as data."""
+    return {
+        "messages": [AIMessage(content=text)],
+        "command_output": text,
+        "tool_trace": tool_trace,
+        # An empty list deliberately replaces citations from a rejected answer
+        # when this is a critic retry.
+        "user_evidence": _capture_user_evidence(state, text),
+    }
 
 
 _RETRY_NUDGE = (
@@ -1728,11 +2264,7 @@ async def _run_native_loop(
         if not tool_calls:
             if text:
                 return _NativeOutcome(
-                    result={
-                        "messages": [AIMessage(content=text)],
-                        "command_output": text,
-                        "tool_trace": whole_trace(),
-                    },
+                    result=_answer_result(state, text, whole_trace()),
                     answered=True,
                 )
             unproductive += 1
@@ -1767,7 +2299,7 @@ async def _run_native_loop(
                 )
                 continue
             seen.add(signature)
-            result = await _execute_tool(call["name"], call["args"])
+            result = await _execute_tool_async(call["name"], call["args"])
             trace.append(f"{_TOOL_RESULT_PREFIX}{call['name']}:\n{result}")
             messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
 
@@ -1854,11 +2386,7 @@ async def _run_native_loop(
         _log_empty_content(final, "act_node final")
         text = _NO_ANSWER_MSG
     return _NativeOutcome(
-        result={
-            "messages": [AIMessage(content=text)],
-            "command_output": text,
-            "tool_trace": whole_trace(),
-        },
+        result=_answer_result(state, text, whole_trace()),
         # A tool call is proof the protocol works even when the synthesis that
         # followed it came back empty: the model drove `tools` successfully, and
         # what failed after that is not the protocol.
@@ -1892,22 +2420,14 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
     """
     llm = _get_llm(temperature=0.1, streaming=False)
 
-    context = state.get("retrieved_context", "")
-    plan = state.get("plan", "")
-    critic_fb = state.get("critic_feedback", "")
-
-    system = _build_system_message(context)
-    messages = [system, SystemMessage(content=TOOL_DESCRIPTIONS)]
-
-    if plan:
-        messages.append(SystemMessage(content=f"PLAN:\n{plan}"))
-    if critic_fb:
-        messages.append(
-            SystemMessage(
-                content=f"PREVIOUS COMMAND FAILED:\n{critic_fb}\n"
-                "Analyze the error and retry with a corrected command."
-            )
-        )
+    # The same framing as the native protocol, rather than a second copy of it.
+    # They were built separately and drifted: the selector's ranking was added
+    # to one and not the other, so on the default tool mode the ranking reached
+    # the screen and never the model.
+    messages = _act_messages(state)
+    # This protocol has no tool-calling API, so the tools are described in the
+    # prompt. Before the ranking, which is a ranking *of* them.
+    messages.insert(1, SystemMessage(content=TOOL_DESCRIPTIONS))
 
     last_human = ""
     for msg in reversed(state["messages"]):
@@ -1991,25 +2511,17 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
                         "from context instead of spending the remaining budget.",
                         unproductive,
                     )
-                    return {
-                        "messages": [AIMessage(content=text)],
-                        "command_output": text,
-                        "tool_trace": tool_trace,
-                    }
+                    return _answer_result(state, text, tool_trace)
                 messages.append(AIMessage(content=text))
                 messages.append(HumanMessage(content=_SEARCH_REPROMPT_MSG))
                 continue
 
-            return {
-                "messages": [AIMessage(content=text)],
-                "command_output": text,
-                "tool_trace": tool_trace,
-            }
+            return _answer_result(state, text, tool_trace)
 
         unproductive = 0
         tool_name, kwargs = action
         logger.info("Act round %d: %s(%s)", round_num + 1, tool_name, kwargs)
-        result = await _execute_tool(tool_name, kwargs)
+        result = await _execute_tool_async(tool_name, kwargs)
         # The result starts on its own line so that ``Exit code: N`` stays at
         # the start of one: ``critic_node`` scans this trace with
         # ``line.startswith(_EXIT_CODE_PREFIX)``, so putting the result after
@@ -2041,11 +2553,122 @@ async def _act_text(state: AgentState) -> dict[str, Any] | _EscalateToNative:
     if not text:
         _log_empty_content(final, "act_node final")
         text = _NO_ANSWER_MSG
-    return {
-        "messages": [AIMessage(content=text)],
-        "command_output": text,
-        "tool_trace": tool_trace,
-    }
+    return _answer_result(state, text, tool_trace)
+
+
+def _last_human_message(state: AgentState) -> str:
+    """The bounded head of the user's latest turn, used as a safe fallback."""
+    text = _full_last_human_message(state)
+    if not text:
+        return "(the user's message is not available)"
+    return text if len(text) <= 4000 else text[:4000] + "\n... (truncated)"
+
+
+_CRITIC_USER_CONTEXT_LIMIT = 4000
+_CRITIC_QUESTION_HEAD_LIMIT = 600
+
+
+def _verified_user_evidence(
+    state: AgentState,
+    user_text: str,
+) -> list[tuple[UserEvidence, int]]:
+    """Re-locate carried citations, accepting only their exact source line."""
+    raw_evidence = state.get("user_evidence") or []
+    if not isinstance(raw_evidence, list):
+        return []
+
+    line_starts = [0, *(match.end() for match in re.finditer("\n", user_text))]
+    verified: list[tuple[UserEvidence, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in raw_evidence[:_MAX_USER_EVIDENCE_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        excerpt = item.get("excerpt")
+        line = item.get("line")
+        if (
+            not isinstance(excerpt, str)
+            or not excerpt
+            or len(excerpt) > _MAX_USER_EVIDENCE_EXCERPT
+            or not isinstance(line, int)
+            or isinstance(line, bool)
+            or line < 1
+            or line > len(line_starts)
+        ):
+            continue
+
+        line_start = line_starts[line - 1]
+        line_end = (
+            line_starts[line] - 1 if line < len(line_starts) else len(user_text)
+        )
+        position = user_text.find(excerpt, line_start)
+        # The excerpt may span lines, but it must begin on the carried line.
+        if position < line_start or position > line_end:
+            continue
+        key = (excerpt, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        verified.append(({"excerpt": excerpt, "line": line}, position))
+    return verified
+
+
+def _bounded_match_window(
+    text: str,
+    position: int,
+    excerpt: str,
+    limit: int,
+) -> str:
+    """Return at most *limit* characters of source containing *excerpt*."""
+    limit = max(len(excerpt), limit)
+    room = limit - len(excerpt)
+    before = room // 2
+    start = max(0, position - before)
+    end = min(len(text), start + limit)
+    if end - start < limit:
+        start = max(0, end - limit)
+    return text[start:end]
+
+
+def _critic_user_context(state: AgentState) -> str:
+    """Build bounded user context around citations verified in the full turn."""
+    user_text = _full_last_human_message(state)
+    if not user_text:
+        return "(the user's message is not available)"
+    if len(user_text) <= _CRITIC_USER_CONTEXT_LIMIT:
+        return user_text
+
+    verified = _verified_user_evidence(state, user_text)
+    if not verified:
+        return _last_human_message(state)
+
+    head = user_text[:_CRITIC_QUESTION_HEAD_LIMIT].rstrip()
+    base = (
+        "QUESTION HEAD:\n"
+        f"{head}\n"
+        "... (middle omitted; exact cited windows follow)"
+    )
+    separators = 2 * len(verified)
+    per_window = max(
+        0,
+        (
+            _CRITIC_USER_CONTEXT_LIMIT
+            - len(base)
+            - separators
+        )
+        // len(verified),
+    )
+    parts = [base]
+    for item, position in verified:
+        label = f"VERIFIED USER EVIDENCE (message line {item['line']}):\n"
+        content_limit = max(len(item["excerpt"]), per_window - len(label))
+        window = _bounded_match_window(
+            user_text,
+            position,
+            item["excerpt"],
+            content_limit,
+        )
+        parts.append(f"{label}{window}")
+    return "\n\n".join(parts)[:_CRITIC_USER_CONTEXT_LIMIT]
 
 
 # ──────────────────── Critic ─────────────────────
@@ -2064,11 +2687,22 @@ Check for these problems:
 2. Invented flags, arguments, or paths not present in the actual codebase
 3. Commands that contradict what the tools revealed about the codebase
 
+Code the user supplied is evidence too, and reading it is not inventing. If the
+response points at something visible in the user's own paste -- a learning rate,
+a missing barrier, an index -- and says that is where it read it, that is
+grounded. Reject it only if the paste does not say what the response claims, or
+if a read is dressed up as something a tool observed.
+
+For a large paste, VERIFIED USER EVIDENCE windows are exact excerpts that were
+matched against the full user turn before this prompt was bounded. Text outside
+those windows may have been omitted; do not treat an unverified paraphrase as if
+it appeared there.
+
 If the response is well-grounded in the tool results, reply with exactly: VALID
 
 If there are problems, explain what is wrong and what the correct command should \
 be based on the tool results. Do NOT invent information yourself -- only use what \
-the tools found.
+the tools found, or what the user's own code plainly shows.
 """
 
 _CRITIC_FAILURE_PROMPT = """\
@@ -2140,12 +2774,22 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 
     if command_output:
         tool_context = "\n---\n".join(tool_results[:10]) if tool_results else "(no tool results gathered)"
+        # The question, and whatever the user pasted with it. Without this the
+        # critic had only the tools and the answer, so a claim about the user's
+        # own code was unverifiable by construction and it rejected every one:
+        # "invented specific learning rate value" on a turn where lr=5.0 sat
+        # four lines from the optimiser in the paste. Telling the critic that
+        # pasted code counts as evidence does nothing while the paste is not in
+        # front of it.
+        asked = _critic_user_context(state)
         validation = await _send(
             llm,
             [
                 SystemMessage(content=_CRITIC_VALIDATION_PROMPT),
                 HumanMessage(
                     content=(
+                        f"WHAT THE USER ASKED (including any code they pasted):\n"
+                        f"{asked}\n\n"
                         f"TOOL RESULTS:\n{tool_context}\n\n"
                         f"GENERATED RESPONSE:\n{command_output}"
                     )
@@ -2153,15 +2797,36 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
             ]
         )
         verdict = validation.content.strip()
-        # Exact match, not a substring test: "INVALID" contains "VALID", and so
-        # does "not valid", so the substring form passed every rejection the
-        # critic exists to catch. The prompt asks for exactly "VALID", which
-        # makes anything else -- including an explanation -- a retry.
-        if verdict.upper() != "VALID":
+        # The first word, not the whole string and not a substring.
+        #
+        # A substring test passed every rejection the critic exists to catch,
+        # since "INVALID" contains "VALID" and so does "not valid". Requiring
+        # the whole reply to be "VALID" fixed that and broke the other side: a
+        # model asked to approve usually approves *and says why*, and every one
+        # of those explained approvals was read as a rejection. The answer then
+        # burned the whole retry budget and reached the user headed "I could not
+        # verify this answer" -- an answer the critic had in fact just passed.
+        #
+        # The first word separates them. "INVALID ..." and "not valid ..." do
+        # not begin with VALID; "VALID, because ..." does.
+        if not _critic_approved(verdict):
             logger.info("Critic rejected response, iteration %d: %s", iteration, verdict[:200])
             return {"iteration": iteration, "critic_feedback": verdict}
 
     return {"iteration": iteration, "critic_feedback": None}
+
+
+def _critic_approved(verdict: str) -> bool:
+    """Whether the critic passed the answer.
+
+    Reads the leading word so an approval that explains itself still counts,
+    and strips the punctuation and emphasis a model puts around it -- "VALID."
+    and "**VALID**" are the same verdict as "VALID".
+    """
+    words = verdict.strip().split()
+    if not words:
+        return False
+    return words[0].strip("*_`.,:;!-").upper() == "VALID"
 
 
 # ──────────────────── Exhausted retries ─────────
