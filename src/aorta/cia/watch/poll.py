@@ -19,7 +19,7 @@ from aorta.cia.launch.job import JobRecord, record_watch_files
 from aorta.cia.launch.registry import scan_active_jobs
 from aorta.cia.watch.cursors import load_cursors, read_new_bytes, save_cursors
 from aorta.cia.watch.log_finder import LogFinder
-from aorta.cia.watch.watcher import LogWatcher
+from aorta.cia.watch.watcher import LayaObservation, LogWatcher
 
 
 def _utc_now() -> str:
@@ -99,6 +99,46 @@ def _emit_skipped(events_path: Path, job, content: str, error: str) -> None:
             )
             + "\n"
         )
+
+
+def _shadow_event(job: JobRecord, observation: LayaObservation, used: dict) -> dict:
+    """One ``watchdog_shadow`` line: what Laya said, beside what Watch used.
+
+    A distinct ``event_type`` so nothing that reads this file for verdicts can
+    mistake it for one. ``watchdog_alert`` and ``watchdog_ok`` are what the
+    Autopsy trigger, the corpus builder and an operator all read; a shadow line
+    is a measurement of a tier that changed nothing, and it has to be
+    unmistakable at a glance and at a grep.
+
+    The verdict that was actually used is repeated here rather than left to be
+    joined against the line above. The join is by position in an append-only
+    file that two processes can write to, and a comparison that silently
+    mispairs is worse than one that costs a few bytes.
+    """
+    return {
+        "schema_version": "0.1",
+        "event_id": str(uuid.uuid4()),
+        "ts": _utc_now(),
+        "phase": "watchdog",
+        "event_type": "watchdog_shadow",
+        "job_id": job.job_id,
+        # Laya's own answers occupy the fields a scorer already knows how to
+        # read: the slug it chose, and p(healthy) as the confidence in it.
+        "signal": observation.signal,
+        "confidence": round(observation.clean_probability, 4),
+        # Nothing was read out of the log to quote, and inventing an excerpt
+        # from a delta the shadow tier merely scored would put unbounded log
+        # text into the events file for no reader.
+        "excerpt": "",
+        "assessment": (
+            f"Shadow only. Laya put p(healthy) at "
+            f"{observation.clean_probability:.2f} against a clean threshold of "
+            f"{observation.clean_threshold:.2f}. No control flow depended on it."
+        ),
+        "source": job.watch_files[0] if job.watch_files else "",
+        **observation.as_event_fields(),
+        **{f"watch_{key}": value for key, value in used.items()},
+    }
 
 
 def _emit_log_read_error(
@@ -455,6 +495,11 @@ def poll_jobs(
 
     interval = float(watch_cfg.get("poll_interval_sec", 30))
     confidence_threshold = float(watch_cfg.get("confidence_threshold", 0.70))
+    # Read here and not inside LogWatcher, unlike the rest of ``watch.laya``,
+    # because the archive is about a job directory and the watcher has never
+    # been told where one is. Keeping it that way is what lets the Laya tier be
+    # a pure function of the delta.
+    archive_bytes = int((watch_cfg.get("laya") or {}).get("shadow_archive_bytes", 0) or 0)
     expectations = "\n".join(
         f"- {e}" for e in watch_cfg.get("expectations", [
             "Training loss should be decreasing or stable — not NaN or diverging",
@@ -464,7 +509,10 @@ def poll_jobs(
     )
 
     finder = LogFinder(config=finder_cfg)
-    watcher = LogWatcher()
+    # The whole ``watch`` block, not just ``watch.laya``: the watcher picks the
+    # keys it owns, which is the shape ``LogFinder`` already has, and a second
+    # place that knows the nesting is a second place to get it wrong.
+    watcher = LogWatcher(watch_cfg)
     jobs_root = Path(jobs_root)
     rounds = 0
     #: Jobs that have already alerted. Autopsy is expensive and its verdict is
@@ -490,6 +538,7 @@ def poll_jobs(
             interval=interval, confidence_threshold=confidence_threshold,
             expectations=expectations, max_rounds=max_rounds, stop=stop,
             alerted=alerted, failures=failures, rounds=rounds, only=only,
+            archive_bytes=archive_bytes,
         )
     finally:
         # Why the loop ended decides what happens to work still queued.
@@ -516,7 +565,7 @@ def poll_jobs(
 
 def _poll_rounds(*, pool, capacity, queued, jobs_root, finder, watcher, interval,
                  confidence_threshold, expectations, max_rounds, stop,
-                 alerted, failures, rounds, only="") -> None:
+                 alerted, failures, rounds, only="", archive_bytes=0) -> None:
     """The rounds themselves, so the pool above owns its own lifetime."""
     while max_rounds is None or rounds < max_rounds:
         if stopped(stop):
@@ -724,6 +773,11 @@ def _poll_rounds(*, pool, capacity, queued, jobs_root, finder, watcher, interval
             confidence = float(getattr(pred, "confidence", 0.0))
             evidence = getattr(pred, "evidence", "")
             assessment = getattr(pred, "assessment", "")
+            # Present only when the Laya tier ran, which is off by default.
+            # Read with getattr for the same reason every other field here is:
+            # this loop does not know which tier answered and must not start
+            # caring.
+            observation = getattr(pred, "laya", None)
 
             print(f"[watch] {job.job_id}: {signal} confidence={confidence:.2f} — {assessment[:120]}")
 
@@ -743,6 +797,24 @@ def _poll_rounds(*, pool, capacity, queued, jobs_root, finder, watcher, interval
                     "source": job.watch_files[0] if job.watch_files else "",
                 }
                 fh.write(json.dumps(ev) + "\n")
+                if observation is not None:
+                    # Written after the verdict rather than before it, so a
+                    # reader scanning for what Watch decided meets the decision
+                    # first and the measurement second.
+                    fh.write(
+                        json.dumps(
+                            _shadow_event(
+                                job,
+                                observation,
+                                {
+                                    "signal": signal,
+                                    "healthy": healthy,
+                                    "confidence": confidence,
+                                },
+                            )
+                        )
+                        + "\n"
+                    )
 
             if should_alert(healthy, confidence, confidence_threshold):
                 print(f"[watch] {job.job_id}: ALERT {signal} — triggering autopsy")
@@ -810,6 +882,28 @@ def _poll_rounds(*, pool, capacity, queued, jobs_root, finder, watcher, interval
 
             # A healthy assessment has no downstream admission to secure. The
             # event is on disk, so this chunk is done.
+            #
+            # It is also the only place in Watch where a full-length delta that
+            # nobody alerted on is still in memory. ``write_bundle`` runs on the
+            # branch above, so every long delta ever persisted belongs to a
+            # failure and the clean-gate has no negative class to be measured
+            # against. Archiving here is off unless an operator asked for it
+            # and is bounded by ``archive_clean_delta``; the cursor is saved
+            # either way, so a full archive costs nothing but the archive.
+            if archive_bytes > 0:
+                from aorta.cia.watch.bundle_writer import archive_clean_delta
+
+                archive_clean_delta(
+                    job_dir,
+                    job_id=job.job_id,
+                    delta=new_content,
+                    healthy=healthy,
+                    signal=signal,
+                    confidence=confidence,
+                    source=job.watch_files[0] if job.watch_files else "",
+                    laya=observation.as_event_fields() if observation is not None else None,
+                    limit_bytes=archive_bytes,
+                )
             save_cursors(job_dir, cursors)
 
         if pause(stop, interval):

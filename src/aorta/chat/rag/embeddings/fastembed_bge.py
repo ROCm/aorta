@@ -10,7 +10,10 @@ so the retrieval quality is BGE's rather than MiniLM's and the hazard is gone by
 construction rather than by warning.
 
 One thing the swap does *not* preserve is bit-identical vectors. fastembed
-sources this model from ``qdrant/bge-small-en-v1.5-onnx-q``, which is quantised
+sources this model from a Qdrant re-host (``qdrant/bge-small-en-v1.5-onnx-q``
+through fastembed 0.8.0, recased to ``Qdrant/bge-small-en-v1.5-onnx-Q`` in
+0.8.1 -- which is why :func:`_source_repo` asks the registry rather than
+carrying the name), and that re-host is quantised
 (67 MB against the 130 MB fp32 weights). Same architecture, same 384 dimensions,
 near-identical rankings -- but not the same numbers, which is precisely why
 :func:`FastembedBgeProvider.collection_name` encodes the provider *and* the
@@ -142,9 +145,20 @@ def model_is_cached(model: str | None = None) -> bool:
 def _source_repo(model: str) -> str:
     """The HuggingFace repo fastembed actually downloads ``model`` from.
 
-    fastembed re-hosts ONNX conversions under its own org, so
-    ``BAAI/bge-small-en-v1.5`` is fetched from ``qdrant/bge-small-en-v1.5-onnx-q``
-    and that is the name the cache directory carries.
+    fastembed re-hosts ONNX conversions under a Qdrant org, so
+    ``BAAI/bge-small-en-v1.5`` is fetched from something like
+    ``Qdrant/bge-small-en-v1.5-onnx-Q`` and that is the name the cache
+    directory carries.
+
+    Read from the registry and never written down, which is load-bearing
+    rather than tidy: upstream recased that repository between 0.8.0
+    (``qdrant/...-onnx-q``) and 0.8.1 (``Qdrant/...-onnx-Q``), and the extra
+    floors fastembed without pinning it. Anything holding the old literal on a
+    case-sensitive filesystem reports a warm cache as cold. Note that the
+    honest answer after such a rename *is* "cold": fastembed downloads into
+    the new directory, so the weights genuinely have to arrive again, and a
+    case-insensitive match here would tell an operator their cache was warm
+    while the next run spent 65 MB finding out otherwise.
 
     Falls back to the model id whenever the registry cannot be read at all --
     fastembed absent, a partial install, or the *private*

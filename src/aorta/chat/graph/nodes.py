@@ -635,11 +635,126 @@ def _parse_route(route_text: str) -> str | None:
     return named[0] if len(named) == 1 else None
 
 
+def _laya_tier() -> Any | None:
+    """The Laya predictor, or ``None`` when this install has no tier.
+
+    Three ways to have none, and all three are ordinary rather than exceptional:
+    the flag is off (the default), the chat extra is present but no artifact has
+    been staged, or the artifact is there and unreadable. Each returns ``None``
+    and the caller runs the LLM path it ran before, which is why this logs at
+    warning and does not raise -- Laya is a tier, not a dependency.
+
+    Imported here rather than at module scope for the reason every model import
+    in this tree is: ``onnxruntime`` is in ``_HEAVY_PREFIXES`` and the artifact
+    is hundreds of megabytes, so a chat session that never enables it must not
+    pay for the import.
+    """
+    from aorta.chat.config import settings
+
+    if not settings.laya_enabled:
+        return None
+    try:
+        from aorta.chat.laya import chat_predictor
+
+        return chat_predictor()
+    except Exception as exc:
+        # Broad, and on purpose: the failures here are "no artifact", "no
+        # onnxruntime", "a manifest from a different build", and a node whose
+        # job is to classify an English sentence must not be the thing that
+        # takes a conversation down because a staged file was half-copied.
+        logger.warning("Laya tier unavailable (%s); falling back to the LLM.", exc)
+        return None
+
+
+def _laya_model_id(predictor: Any) -> str:
+    """What answered, for a log line or a rationale -- and never a raise.
+
+    :meth:`LayaPredictor.model_id`'s own docstring says it exists so that a run
+    which failed to load still says which weights it was reaching for, and
+    :class:`~aorta.chat.laya.onnx_predictor.OnnxLayaPredictor` catches its own
+    unavailability to honour that. The Protocol already has three
+    implementations and will get more, though, and this was called outside the
+    ``try`` in both tiers: a predictor whose ``ask`` succeeded and whose
+    ``model_id`` raised took the whole turn down, which is precisely the
+    failure the fallback exists to prevent, arriving while assembling the
+    sentence that describes it.
+
+    Degraded rather than fallen back, because the answer is already in hand.
+    Throwing away a good verdict and paying for a remote round-trip because a
+    label could not be formatted would be the wrong trade -- and a label that
+    says it could not be determined still satisfies what Decision 22 asks of
+    it, which is that a report never attribute a number to weights that did
+    not produce it.
+    """
+    try:
+        return str(predictor.model_id())
+    except Exception as exc:
+        logger.warning("Laya predictor could not name itself (%s).", exc)
+        return f"<unidentified predictor: {type(exc).__name__}>"
+
+
+async def _laya_route(text: str) -> str | None:
+    """The route Laya gives for *text*, or ``None`` to fall back to the LLM.
+
+    Off the event loop. This coroutine is awaited from a Chainlit request
+    handler and a forward pass is CPU work -- the model card's own CPU figure is
+    in the hundreds of milliseconds, which is two orders of magnitude cheaper
+    than the remote round-trip it replaces and still far too long to hold the
+    loop for, with another session's tokens waiting behind it. Same reasoning as
+    ``retrieve_node``'s two ``to_thread`` calls.
+    """
+    predictor = _laya_tier()
+    if predictor is None:
+        return None
+
+    from aorta.chat.config import settings
+    from aorta.chat.laya.questions import ROUTER_QUESTION
+    from aorta.laya.predictor import ask_noul
+
+    threshold = settings.laya_router_threshold
+    try:
+        answer = await asyncio.to_thread(ask_noul, predictor, text, ROUTER_QUESTION)
+    except Exception as exc:
+        logger.warning("Laya router failed (%s); falling back to the LLM.", exc)
+        return None
+
+    # `.at()` rather than a bare comparison, so the threshold is named where it
+    # is applied: NoulAnswer deliberately has no default reading, because the
+    # thresholds on either side of this integration gate opposite directions.
+    route = "action" if answer.at(threshold) else "question"
+    logger.info(
+        "Router classified as: %s [%s: p(action)=%.2f at threshold %.2f]",
+        route,
+        _laya_model_id(predictor),
+        answer.probability,
+        threshold,
+    )
+    return route
+
+
 async def router_node(state: AgentState) -> dict[str, Any]:
-    """Classify intent: pure Q&A vs action-requiring."""
-    llm = _get_llm(temperature=0.0, streaming=False)
+    """Classify intent: pure Q&A vs action-requiring.
+
+    Two tiers. Laya answers one noul when the flag is on and an artifact is
+    staged; otherwise the LLM answers the prompt it always did. The LLM path is
+    kept rather than replaced because Laya is off by default and because the
+    measurement that would justify enabling it has not been run.
+
+    The two fallback constants below the prompt have no analogue on the Laya
+    path, and that is the point of it: a noul returns a probability, so there is
+    no reply to fail to parse and no empty reply to classify. ``If in doubt,
+    classify as action`` becomes :data:`~aorta.chat.laya.questions.DEFAULT_ROUTER_THRESHOLD`,
+    which is a number that can be re-derived against a corpus rather than a
+    sentence that cannot. They stay where they are for the LLM path, which still
+    has both populations to handle.
+    """
     last_msg = state["messages"][-1]
 
+    route = await _laya_route(str(last_msg.content))
+    if route is not None:
+        return {"route": route}
+
+    llm = _get_llm(temperature=0.0, streaming=False)
     response = await _send(
         llm,
         [
@@ -865,22 +980,15 @@ def _first_json_object(text: str) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-async def selector_node(state: AgentState) -> dict[str, Any]:
-    """Rank the tools by what evidence each returns.
+async def _llm_selection(text: str) -> tuple[list[str], str]:
+    """The tools the LLM ranks for *text*, and its one-sentence reason.
 
-    Not a routing table. The model is shown what each tool produces and asked
-    whether that would answer this question, so a problem described in words
-    nobody anticipated still reaches the right instrument.
-
-    Advisory: on any failure the act node still sees every tool. The only thing
-    enforced is structural -- a tool that reads pasted source cannot run when
-    nothing was pasted.
+    Lifted out of :func:`selector_node` unchanged when Laya became a second way
+    to produce the same pair. Every failure returns an empty ranking rather than
+    propagating, which is what makes the node advisory: see the caller.
     """
-    from aorta.chat.tools.capabilities import MAX_CANDIDATES, catalogue, enforce_requirements
+    from aorta.chat.tools.capabilities import MAX_CANDIDATES, catalogue
 
-    text = _selector_view(_recent_human_turns(state["messages"]))
-    proposed: list[str] = []
-    why = ""
     try:
         llm = _get_llm(temperature=0.0, streaming=False)
         # Through _send, like every other node: this one carries the user's
@@ -901,9 +1009,131 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
         if payload:
             tools = payload.get("tools")
             proposed = [t for t in tools if t in TOOL_REGISTRY] if isinstance(tools, list) else []
-            why = str(payload.get("why", ""))
+            return proposed, str(payload.get("why", ""))
     except Exception as exc:
         logger.warning("Selector unavailable (%s); the agent will see every tool.", exc)
+    return [], ""
+
+
+async def _laya_selection(text: str) -> tuple[list[str], str] | None:
+    """The same pair from Laya, or ``None`` to fall back to the LLM.
+
+    **N independent nouls, not one choice over N tools.** The reason is the
+    ``head_max_len`` budget split -- every option of one question shares one
+    token budget -- plus Laya 0.3.5's clamped ``choice:11+`` bucket, which a
+    single choice over the registry falls into on a full install though not on
+    a bare one. :mod:`aorta.chat.laya.questions` has the measured counts and
+    the reason that split matters.
+
+    **It costs one forward pass, not N.** The Protocol's asymmetry is that M
+    questions about one *state* share that state's encoding, while N states
+    cannot -- so asking one question per tool about one conversation is a single
+    pass, and ``ask_one`` is the call that says so. Rewriting this as one state
+    per tool would be N passes for the same answer.
+    """
+    predictor = _laya_tier()
+    if predictor is None:
+        return None
+
+    from aorta.chat.config import settings
+    from aorta.chat.laya.questions import tool_question
+    from aorta.chat.tools.capabilities import MAX_CANDIDATES, describe_tools
+    from aorta.laya.predictor import NoulAnswer, ask_one
+
+    # The same descriptions the LLM prompt is rendered from, so that a
+    # comparison between the two paths is a comparison of models rather than of
+    # how each was told what a tool does.
+    described = describe_tools(dict(TOOL_REGISTRY))
+    if not described:
+        return None
+    names = list(described)
+    questions = [tool_question(name, described[name]) for name in names]
+
+    threshold = settings.laya_selector_threshold
+    # Both contract checks live inside this guard, and that placement is the
+    # fix rather than an accident of layout. They exist to catch a predictor
+    # that broke the Protocol, so the ways they can fail are exactly the ways a
+    # broken predictor fails: a non-iterable where a list of answers was
+    # promised raises ``TypeError`` out of the ``isinstance`` sweep, and an
+    # answer object with no ``__len__`` raises out of the count. Checked
+    # outside, a check written to prevent a crash caused one.
+    try:
+        answers = await asyncio.to_thread(ask_one, predictor, text, questions)
+        if len(answers) != len(questions):
+            # ``zip`` below would truncate to the shorter of the two rather
+            # than raise. The pairing stays correct, so this is silent
+            # under-ranking rather than mis-ranking -- a predictor answering
+            # one of nine nouls produced a confident one-tool shortlist with
+            # nothing anywhere saying eight tools went unscored. Refused for
+            # the same reason as the type break: it is the Protocol's "one list
+            # of answers per state, aligned with the questions" not holding.
+            raise ValueError(
+                f"answered {len(answers)} of {len(questions)} tool nouls"
+            )
+        if not all(isinstance(answer, NoulAnswer) for answer in answers):
+            # The check ``ask_noul`` performs, carried along rather than
+            # borrowed: going through that helper would cost one forward pass
+            # per tool, which is the whole thing this shape exists to avoid.
+            raise TypeError(
+                "answered the selector's nouls with "
+                f"{sorted({type(answer).__name__ for answer in answers})}"
+            )
+    except Exception as exc:
+        logger.warning("Laya selector failed (%s); falling back to the LLM.", exc)
+        return None
+
+    ranked = sorted(
+        # strict: the length check above already proved these match, so this
+        # states the invariant rather than defending against it.
+        zip(names, (answer.probability for answer in answers), strict=True),
+        key=lambda pair: -pair[1],
+    )
+    kept = [(name, p) for name, p in ranked if p >= threshold][:MAX_CANDIDATES]
+    # Templated, because Laya never emits a token and a sentence built from the
+    # answers is more honest than one built from nothing -- the same call
+    # ``LayaProposer`` makes for ``hypothesis``. It also happens to be the only
+    # rationale this node can produce that carries none of the user's own text,
+    # which is worth something given that ``decision_log.py`` digests this field
+    # in summary mode precisely because the LLM's version quotes the question.
+    model_id = _laya_model_id(predictor)
+    if kept:
+        scored = ", ".join(f"p({name})={probability:.2f}" for name, probability in kept)
+        why = f"[{model_id}: {scored} at threshold {threshold:.2f}]"
+    else:
+        why = f"[{model_id}: no tool reached the {threshold:.2f} threshold]"
+    return [name for name, _ in kept], why
+
+
+async def selector_node(state: AgentState) -> dict[str, Any]:
+    """Rank the tools by what evidence each returns.
+
+    Not a routing table. The model is shown what each tool produces and asked
+    whether that would answer this question, so a problem described in words
+    nobody anticipated still reaches the right instrument.
+
+    Two tiers, as in ``router_node``: Laya answers one noul per tool when the
+    flag is on and an artifact is staged, and the LLM answers the prompt it
+    always did otherwise -- including when Laya is present but fails, since a
+    tier that cannot answer must not cost the turn its ranking.
+
+    Advisory: on any failure the act node still sees every tool. That property
+    is structural rather than defensive, and it survives the Laya tier
+    unchanged, because both tiers converge on the same empty list and
+    ``_recommendation`` renders an empty list as no system message at all --
+    leaving the model exactly where it was before this node ran. A shortlist
+    that *removed* a tool would dead-end the turn that needed it, with no way
+    for the model to recover, since it would not know the tool existed. The only
+    narrowing that ever happens is structural: a tool that reads pasted source
+    cannot run when nothing was pasted.
+    """
+    from aorta.chat.tools.capabilities import MAX_CANDIDATES, enforce_requirements
+
+    text = _selector_view(_recent_human_turns(state["messages"]))
+
+    selection = await _laya_selection(text)
+    if selection is None:
+        selection = await _llm_selection(text)
+    proposed, why = selection
 
     candidates, dropped = enforce_requirements(
         proposed[:MAX_CANDIDATES],

@@ -21,6 +21,7 @@ from aorta.cia.autopsy.adapters.rocgdb import (
     parse_rocgdb_session,
 )
 from aorta.cia.autopsy.adapters.stderr_watch import StderrWatchAdapter
+from aorta.cia.autopsy import escalation
 from aorta.cia.autopsy.reporter import build_report
 
 
@@ -127,6 +128,16 @@ def run_autopsy(
         all_next.extend(art.next_probes)
         all_gaps.extend(art.tooling_gaps)
 
+    # The adapters' own figure, which exists for every bundle whether or not any
+    # model runs. It is the source the 0.85 escalation cutoff was chosen
+    # against -- the prompt's `~0.62` is the same 0.62 `merge_watchdog_matrix`
+    # hard-codes -- so it is what `escalation.decide` falls back to when the
+    # reported confidence comes from somewhere that cutoff does not describe.
+    rule_based = escalation.Confidence(classification.confidence, escalation.ADAPTER_RULES)
+    reported = rule_based
+    laya_threshold: float | None = None
+    laya_fields: dict[str, Any] | None = None
+
     # LLM router — re-classifies based on all adapter evidence
     if use_llm and all_evidence:
         try:
@@ -146,6 +157,23 @@ def run_autopsy(
             )
             next_probe = getattr(pred, "next_probe", "none")
             next_probe_reason = getattr(pred, "next_probe_reason", "")
+            # Which of the two things behind the router produced that number.
+            # The tier writes itself onto the prediction when it answered, and
+            # its absence is how Autopsy says the model self-reported -- the
+            # distinction the escalation cutoff has always depended on and has
+            # never until now been able to see.
+            observation = getattr(pred, "laya", None)
+            if observation is None:
+                reported = escalation.Confidence(confidence, escalation.LLM_SELF_REPORT)
+            else:
+                reported = escalation.Confidence(
+                    confidence,
+                    escalation.LAYA,
+                    observation.model_id,
+                    caveat=observation.caveat,
+                )
+                laya_threshold = observation.escalation_threshold
+                laya_fields = observation.as_report_fields()
         except Exception as e:
             # A verdict reached without the router is a weaker claim than one
             # reached with it, and the difference is invisible in the category
@@ -172,6 +200,7 @@ def run_autopsy(
             rationale = classification.rationale
             next_probe = all_next[0]["tool"] if all_next else "none"
             next_probe_reason = ""
+            reported = rule_based
     else:
         category = classification.category
         if category == "unknown" and matrix_adapter.tooling_gaps:
@@ -181,14 +210,20 @@ def run_autopsy(
         next_probe = all_next[0]["tool"] if all_next else "none"
         next_probe_reason = ""
 
-    # Escalate: run production Aorta probe if confidence is low and probe recommended
-    if next_probe == "aorta sweep run" and confidence < 0.85 and job is not None:
-        print(f"[autopsy] confidence={confidence:.2f} — escalating to Aorta production sweep")
+    # Escalate: run the production Aorta sweep when the router recommended one
+    # and the confidence behind it is low. Which confidence that is, and against
+    # which cutoff, is `escalation.decide`'s to answer -- the two were an
+    # unwritten pairing until a third source of the number arrived.
+    decision = escalation.decide(
+        next_probe, reported, rule_based=rule_based, laya_threshold=laya_threshold
+    )
+    if decision.escalate and job is not None:
+        print(f"[autopsy] {decision.reason} — escalating to Aorta production sweep")
         from aorta.cia.autopsy.probe import run_aorta_probe
         matrix_path = run_aorta_probe(bundle_root, job, head_node=head_node, stop=stop)
         if matrix_path:
             # Re-run with the new production matrix (use_llm stays True, no infinite loop
-            # because production matrix will raise confidence above 0.85)
+            # because a production matrix classifies above the cutoff)
             return run_autopsy(
                 bundle_root, kb_version=kb_version, use_llm=use_llm,
                 job=None, head_node=head_node,
@@ -218,6 +253,15 @@ def run_autopsy(
         evidence=all_evidence,
         next_probes=all_next,
         tooling_gaps=all_gaps,
+        confidence_source=reported.as_report_fields(),
+        escalation=decision.as_report_fields(),
+        laya=laya_fields,
+        # The rationale is the one field of this report a person actually
+        # reads, so it is where a "this number is not calibrated" has to end
+        # up. Passed separately rather than concatenated here because
+        # ``build_report`` caps the rationale and the cap must not be what
+        # deletes the disclosure.
+        rationale_caveat=reported.caveat,
     )
     return report
 

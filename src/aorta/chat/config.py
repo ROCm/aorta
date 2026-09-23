@@ -52,6 +52,13 @@ from pydantic_settings import (
 
 from aorta._user_paths import chat_cache_dir, chat_config_path
 
+# One definition of each threshold, beside the question it applies to. Repeating
+# the numbers here would be two constants to keep in step with a fit that has
+# not been produced yet, which is the drift this integration is trying to avoid
+# rather than introduce. The import costs ``dataclasses``: nothing under
+# ``aorta.chat.laya`` imports a model runtime at module scope.
+from aorta.chat.laya.questions import DEFAULT_ROUTER_THRESHOLD, DEFAULT_SELECTOR_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 #: Prefix on every environment variable this class reads.
@@ -334,6 +341,36 @@ class Settings(BaseSettings):
     max_retry_iterations: int = 3
     max_act_rounds: int = 5
     max_act_rounds_search: int = 8
+
+    # --- Laya: the local calibrated router and selector (Decision 22) ---
+    # Off by default, and this default is load-bearing rather than cautious.
+    # The Phase 1 measurement that would justify turning it on -- accuracy
+    # against the current LLM router, the temperature fit, the CPU latency on
+    # the hardware this runs on -- has not been run for either chat decision,
+    # and there is no chat corpus to run it against. Nothing here has ever
+    # answered from real weights. On, it replaces two remote round-trips per
+    # turn with two local forward passes; off, both nodes behave exactly as
+    # they did before this landed.
+    laya_enabled: bool = False
+    # The directory holding the exported ONNX artifact. Not downloadable and
+    # not shipped: it is produced from a fine-tuned checkpoint by
+    # aorta/chat/laya/export.py on a machine that has torch, and copied here.
+    # STAGING_PROCEDURE in aorta/chat/laya/artifact.py is what a user sees when
+    # it is absent, following the pattern `aorta chat doctor` uses for the
+    # embedding weights.
+    laya_artifact_path: str = Field(default_factory=lambda: str(chat_cache_dir() / "laya"))
+    # Re-hash the graph on load and refuse when it disagrees with the manifest.
+    # Off by default because it costs a second or two on a few-hundred-megabyte
+    # file and a user is waiting on the first routed turn. Worth turning on
+    # wherever a verdict gets published: Decision 22's Rule 2 is about the case
+    # where one of the manifest and the graph was replaced and the other was
+    # not, which produces a plausible answer rather than an error.
+    laya_verify_digest: bool = False
+    # Both thresholds are imported rather than repeated, and neither is a
+    # calibration figure -- see the constants for which error each prefers and
+    # why re-deriving them is the first thing to do once a fit exists.
+    laya_router_threshold: float = DEFAULT_ROUTER_THRESHOLD
+    laya_selector_threshold: float = DEFAULT_SELECTOR_THRESHOLD
 
     # --- Repo map ---
     repo_map_path: str = Field(default_factory=lambda: str(chat_cache_dir() / "repo_map.md"))

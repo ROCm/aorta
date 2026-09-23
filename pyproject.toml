@@ -154,6 +154,48 @@ agent = [
     "litellm>=1.0.0",
 ]
 
+# Laya: the local, non-autoregressive decision model behind `aorta laya`.
+#
+# Its own extra rather than a line in `cia`, for one reason: it resolves torch.
+# `[cia]` is not torch-gated in CI (cpu-tests.yml installs it with no assertion),
+# so a torch dependency there would be permitted -- and would also be paid for by
+# every headless Watch and Autopsy install that has no use for a local
+# classifier. `[chat-cli]` is a harder case: nightly.yml and release.yml fail the
+# build if a chat-cli install resolves torch at all, so nothing reachable from
+# that extra may depend on this one. `aorta/laya/predictor.py` imports laya
+# inside the method that loads a checkpoint, and `tests/cli/test_chat_boundaries.py`
+# asserts the import graph stays clean.
+#
+# The checkpoint is NOT pinned here. Weights arrive from the Hugging Face hub at
+# first use and are addressed by repository and subfolder, and pinning them by
+# digest -- along with recording the checkpoint identity in every report -- is
+# Decision 22's job. A version range on the library is not that pin: the same
+# version can load different weights tomorrow.
+#
+# >=0.3.5 rather than >=0.3.4, and the reason is calibration rather than hygiene.
+# 0.3.4 applies the temperature table a checkpoint ships verbatim, and the shipped
+# `choice:11+` bucket is 0.1006 -- a temperature below 1 sharpens logits instead of
+# softening them, so that bucket multiplies them about tenfold and publishes a 0.24
+# top probability as 0.99. The probe agent's candidate list is 21 registered
+# mitigations, so that is the bucket Track B's `choice` lands in, not a corner case.
+# 0.3.5 clamps every fitted temperature to [0.5, 5.0] and warns when it has to.
+# Reading a calibrated probability is the entire reason for this dependency, so a
+# release that hands back an uncalibrated one is below the floor.
+#
+# It is also the only release `aorta/laya/predictor.py` has been verified against.
+# 0.3.3, 0.3.4 and 0.3.5 shipped on three consecutive days, moving both the Python
+# and the transformers floor inside that window, so "the API I read in the wheel"
+# and "the API an install resolves" are worth keeping the same thing.
+# `tests/cia/test_laya_predictor.py` fails if this floor and that verification drift.
+#
+# Deliberately not in `all`, on the same grounds as the chat-* extras: `all` is
+# what the dev and CI stacks install, and adding ~2.7 GB of torch wheels to every
+# lint job to support one offline measurement is not a trade worth making. Ask for
+# it explicitly.
+laya = [
+    "laya>=0.3.5",
+]
+
 # ── aorta chat ────────────────────────────────────────────────────────────
 # Split by interface, not by backend: a user knows whether they want a terminal
 # or a browser, not whether they want ONNX or torch.

@@ -11,6 +11,97 @@ watch:
   # were settings that changed nothing.
   poll_interval_sec: 60
 
+  # The Laya tier: a local, typed, calibrated classifier sitting between the
+  # sanitizer regex and the ReAct assessment. It decides whether to spend an
+  # LLM call, never what the answer is -- Laya generates no text, so it can
+  # produce neither the `evidence` a bundle persists nor the `assessment` an
+  # operator reads, and it therefore only ever short-circuits toward clean.
+  # Track A of docs/plans/laya-system1-integration.md; the weights live where
+  # docs/laya-packaging.md (Decision 22) says they may.
+  laya:
+    # The gate. False, and it stays false until the Phase 1 measurement exists.
+    #
+    # What has to be true before anyone sets this to true:
+    #   1. A corpus with a real healthy class. `shadow_archive_bytes` below is
+    #      how that gets collected; today every full-length delta on disk is a
+    #      failure, because write_bundle only runs after an alert.
+    #   2. A temperature fit per (question type, option count), recorded with
+    #      the checkpoint digest, so `clean_threshold` means something. The
+    #      gate reads the healthy noul, which is the `noul:2` bucket, so the
+    #      specific check is that the chosen checkpoint does not clamp it --
+    #      `predictor.calibration().is_clamped("noul:2")` must be False, and
+    #      not None, which means nobody asked. A clamped bucket means laya
+    #      refused the shipped temperature and substituted a bound, so the
+    #      probability is not calibrated and thresholding it is guesswork.
+    #      Every verdict already discloses this inline; the gate is where it
+    #      has to be acted on rather than disclosed.
+    #   3. A measured false-clean rate on shadow traffic -- not accuracy. The
+    #      two errors are not symmetric: declining to gate costs one LLM call,
+    #      and a wrong clean can cost an alert outright (see below).
+    #   4. A shadow period long enough to include a real failure. A gate scored
+    #      only on healthy traffic has not been scored.
+    enabled: false
+
+    # Shadow mode: ask Laya on every delta the regex does not answer, write the
+    # answer to the events file as `watchdog_shadow`, and change nothing else.
+    # This is what produces the comparison that condition 3 above needs. It
+    # costs one local forward pass per delta and no LLM call either way.
+    shadow: false
+
+    # How sure Laya must be that a delta is healthy before the gate skips the
+    # LLM call. Separate from `confidence_threshold` above and deliberately so:
+    # that one escalates when the assessment is unhealthy AND at least that
+    # sure, this one stays quiet when the delta is healthy AND at least this
+    # sure. They gate opposite directions, and one number serving both would be
+    # an inversion bug that reads as correct.
+    #
+    # 0.90 is a policy, not a fitted number -- nothing here has scored a Laya
+    # checkpoint against a ROCm log yet.
+    #
+    # Bounded failure, stated more carefully than the plan does. A false clean
+    # is usually described as delaying an alert by one poll interval
+    # (poll_interval_sec, 60s above). Against this poll loop that is optimistic:
+    # a healthy verdict commits the file cursor, so the gated bytes are never
+    # read again. A condition that keeps printing -- a hang, a stall, repeated
+    # OOM retries -- is seen on the next round and the one-interval figure
+    # holds. A single line printed once is lost. That is why a delta the
+    # deterministic NaN scanner flags is never gated however sure Laya is, and
+    # why raising this is the safe direction and lowering it is not.
+    clean_threshold: 0.90
+
+    # A checkpoint name from aorta.laya.predictor.CHECKPOINTS, or a local
+    # directory holding a fine-tune.
+    #
+    # "fake" is refused here rather than resolved, unlike everywhere else a
+    # backend is named in this tree. FakeLayaPredictor answers from a hash of
+    # the question and the log: stable, arbitrary, and indistinguishable from a
+    # model with an opinion. Behind the gate that is a coin flip deciding
+    # whether a log is read; behind shadow it is hash noise written into the
+    # events file for someone to score later.
+    backend: "laya-typed-decisions"
+
+    # Keep the deltas that did NOT alert, so the clean-gate can one day be
+    # measured. Bytes per job, and 0 means off.
+    #
+    # This is the only knob here that needs no model, and that is the point:
+    # the measurement blocking `enabled` is blocked on data, not on weights.
+    # write_bundle runs only after an alert, so every full-length delta on disk
+    # is a failure and the only healthy ones anywhere are watchdog_ok excerpts
+    # capped at 500 characters -- against bundles of up to 4000. A classifier
+    # scored on that corpus can win by measuring length.
+    #
+    # What gets written, and its bounds, are in `archive_clean_delta` in
+    # bundle_writer.py: one JSONL record per non-alerting delta under
+    # <job_dir>/laya_clean_deltas.jsonl, each delta truncated to the same 4000
+    # characters write_bundle uses so the two classes are length-comparable,
+    # each scrubbed by the same redaction Watch applies to anything it sends to
+    # a provider, and the file capped at this many bytes per job.
+    #
+    # 0 by default because it is a new artifact holding log text: an operator
+    # turns it on for the jobs they mean to collect from, and it stops on its
+    # own at the cap rather than growing with the run.
+    shadow_archive_bytes: 0
+
   # The model comes from the environment (LITELLM_MODEL), and Autopsy binds its
   # own; a key here would be read by nothing while looking like the place to
   # set it.
@@ -43,3 +134,42 @@ log_finder:
 
   # Cap on number of files to monitor simultaneously.
   max_files: 8
+
+  # Tier 3: score the directory listing with Laya instead of spending a
+  # dspy.Predict call on it. Tiers 0 through 2 -- the scheduler query, the
+  # explicit globs above, the extension scan -- are unaffected either way, and
+  # the extension scan remains the final fallback.
+  #
+  # Off, and it stays off until Phase 1 of the Laya plan measures this decision
+  # against the extension scan. Nothing in this repository has scored it, and a
+  # tier enabled on the strength of its design is a tier nobody can defend when
+  # Watch reads the wrong file.
+  #
+  # Note what turning this on does NOT change: the answer space. Tier 3 has
+  # been restricted to files that were actually in the listing regardless of
+  # which engine ranks them, so the hallucinated-path hazard is closed with
+  # this flag off. What the flag buys is one local forward pass instead of a
+  # remote LLM round-trip, and whatever ranking difference comes with it.
+  laya:
+    enabled: false
+
+    # A checkpoint name from aorta.laya.predictor.CHECKPOINTS, or a local
+    # directory holding a fine-tune.
+    #
+    # "fake" is refused here rather than resolved, as it is for watch.laya
+    # above and for the same reason: FakeLayaPredictor answers from a hash of
+    # the question and the listing, so it is stable, arbitrary, and
+    # indistinguishable from a model with an opinion. Here that is a hash
+    # choosing which files Watch tails, and Watch grants the parent of each one
+    # as a root for its own file tools.
+    backend: "laya-typed-decisions"
+
+    # How sure the classifier must be that a listed file is a log. A
+    # placeholder at the indifference point of a probability, not a fitted
+    # number -- the per-question-type temperature refit that makes a Laya
+    # probability mean what it says has not been run here.
+    #
+    # Bounded failure: too high and every file is rejected, which falls back to
+    # the extension scan; too low and Watch tails up to max_files of whatever
+    # the job directory happens to contain, and reads somebody's fixtures.
+    min_probability: 0.5

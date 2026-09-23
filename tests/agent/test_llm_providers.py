@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from aorta.agent.llm import (
+    AGENT_LLM_BACKENDS,
     CHAT_PROVIDER_BACKENDS,
     ChatProviderProposer,
     FakeLLMProposer,
@@ -325,12 +326,15 @@ class TestCliSurface:
     def test_the_llm_backend_choice_matches_the_registry(self):
         """The Click choice is hard-coded so `aorta --help` stays cheap.
 
-        This is the test that comment promises: it fails if the two drift.
+        This is the test that comment promises: it fails if the two drift. It is
+        also the only thing standing between adding a backend to
+        ``make_proposer`` and it being unreachable from the command line --
+        Click rejects an unlisted value before ``make_proposer`` is ever called.
         """
         from aorta.cli.agent_mitigate import mitigate
 
         option = next(p for p in mitigate.params if p.name == "llm_backend")
-        assert set(option.type.choices) == {"fake", *CHAT_PROVIDER_BACKENDS}
+        assert set(option.type.choices) == set(AGENT_LLM_BACKENDS)
 
     def test_fake_remains_the_click_default(self):
         from aorta.cli.agent_mitigate import mitigate

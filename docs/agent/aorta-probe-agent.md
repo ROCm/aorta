@@ -85,8 +85,10 @@ flowchart TD
    `aorta.registry.get_mitigation`. Raw shell or argv changes are rejected.
 3. **Bounded autonomy** — `max_iterations` and `max_walltime_sec` caps;
    optional approval gate before running mitigations flagged as needing ack.
-4. **Optional LLM dependency** — LiteLLM lives behind the `[agent]` extra;
-   a deterministic fake proposer supports offline tests with zero API calls.
+4. **Optional model dependency** — every backend that reaches a model lives
+   behind an extra (`[chat-cli]` for `openai` / `vllm` / `litellm`, `[agent]`
+   for the standalone `litellm` path, `[laya]` for the local encoder); a
+   deterministic fake proposer supports offline tests with zero API calls.
 
 ---
 
@@ -139,7 +141,8 @@ Standalone today; integration is a one-slide handoff, not a hard dependency.
 src/aorta/agent/
   __init__.py
   loop.py      # orchestration -> run_recipe
-  llm.py       # AgentStep, FakeLLMProposer, LiteLLMProposer
+  llm.py       # AgentStep + the LLMProposer implementations:
+               #   FakeLLMProposer, LayaProposer, ChatProviderProposer, LiteLLMProposer
   policy.py    # budget, registry filter, approval
   state.py     # agent_log.jsonl, wake()
   report.py    # agent_report.md writer
@@ -160,8 +163,10 @@ aorta agent mitigate \
   python3 my_repro.py --steps 100
 ```
 
-Install LLM support: `pip install 'amd-aorta[agent]'` (pulls `litellm`).
-Default backend is `fake` (deterministic, offline-safe).
+Default backend is `fake` (deterministic, offline-safe, no extra required).
+`--llm-backend` also takes `laya`, `litellm`, `openai` and `vllm`; see
+[agentic-testing-guide.md](agentic-testing-guide.md#are-we-using-an-actual-llm)
+for what each needs installed.
 
 ### State file
 
@@ -189,5 +194,5 @@ audit. `wake()` replays tried mitigations and last category.
 ## Related docs
 
 - [agentic-testing-guide.md](agentic-testing-guide.md) — usage, examples, LLM vs fake, under the hood
-- [`docs/probe-188/usage.md`](../probe-188/usage.md) for probe-mode recipes
+- [`docs/probe/usage.md`](../probe/usage.md) for probe-mode recipes
 - `src/aorta/agent/` for the implementation.

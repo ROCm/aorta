@@ -66,22 +66,41 @@ def _summary(description: str) -> str:
     return text.strip()
 
 
+def describe_tools(tools: dict[str, object] | None = None) -> dict[str, str]:
+    """Each tool's one-line description, by name, in a stable order.
+
+    Split out of :func:`catalogue` when the selector gained a second consumer:
+    the LLM path wants one block of text to put in a prompt, and the Laya path
+    wants one question per tool. Deriving the second from the first would mean
+    parsing the block back apart, and writing it twice would mean two answers to
+    "what does this tool say it does" -- which is the drift that makes a
+    comparison between the two paths a comparison of descriptions rather than of
+    models.
+
+    A tool whose description renders empty is omitted from both, so a
+    contributed tool with no docstring is invisible to the ranking rather than
+    offered to it by name alone. Sorted, so the question order does not depend
+    on entry-point discovery order.
+    """
+    if tools is None:
+        from aorta.chat.plugins import load_chat_tools
+
+        tools = {name: entry.tool for name, entry in load_chat_tools().items()}
+    described = {}
+    for name, tool in sorted(tools.items()):
+        summary = _summary(getattr(tool, "description", ""))
+        if summary:
+            described[name] = summary
+    return described
+
+
 def catalogue(tools: dict[str, object] | None = None) -> str:
     """The tool descriptions the selector ranks, one per line.
 
     Generated from the live registry, so a tool contributed through the
     ``aorta.chat_tools`` entry point is rankable without being named here.
     """
-    if tools is None:
-        from aorta.chat.plugins import load_chat_tools
-
-        tools = {name: entry.tool for name, entry in load_chat_tools().items()}
-    lines = []
-    for name, tool in sorted(tools.items()):
-        summary = _summary(getattr(tool, "description", ""))
-        if summary:
-            lines.append(f"- {name}: {summary}")
-    return "\n".join(lines)
+    return "\n".join(f"- {name}: {summary}" for name, summary in describe_tools(tools).items())
 
 
 def _declared(tool: object) -> frozenset[str] | None:

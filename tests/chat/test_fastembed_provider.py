@@ -39,6 +39,18 @@ from aorta.chat.rag.embeddings.fastembed_bge import (
 )
 
 
+def _source_repo_slug() -> str:
+    """The cache directory name this install's fastembed would actually write.
+
+    Asked of fastembed rather than written down. Upstream has renamed the
+    re-hosted repository once already -- 0.8.0's ``qdrant/...-onnx-q`` became
+    0.8.1's ``Qdrant/...-onnx-Q`` -- and the extra floors the dependency
+    without pinning it, so a literal here is a fixture that stops matching on
+    whichever day the next rename resolves.
+    """
+    return fastembed_bge._model_dir_slug(fastembed_bge._source_repo(DEFAULT_MODEL))
+
+
 class _FakeModel:
     """Stands in for ``fastembed.TextEmbedding``, recording what it was asked."""
 
@@ -240,14 +252,23 @@ class TestModelCacheProbe:
     def test_weights_under_the_source_repo_name_count(self, monkeypatch, tmp_path: Path):
         """fastembed downloads from its own re-host, not from the model id.
 
-        ``BAAI/bge-small-en-v1.5`` arrives from
-        ``qdrant/bge-small-en-v1.5-onnx-q``, so that is the directory name the
-        cache actually carries.
+        ``BAAI/bge-small-en-v1.5`` arrives from a Qdrant re-host, so that is
+        the directory name the cache actually carries.
+
+        The name is asked of fastembed rather than written down, because the
+        literal it used to be written as has already gone stale once: 0.8.0
+        ships ``qdrant/bge-small-en-v1.5-onnx-q`` and 0.8.1 ships
+        ``Qdrant/bge-small-en-v1.5-onnx-Q``. On a case-sensitive filesystem a
+        fixture seeded at the old spelling no longer matches, and since
+        ``fastembed>=0.4.0`` is unpinned with no lockfile, that failure was not
+        one machine's environment -- it was every chat-tests leg from the day
+        upstream renamed it. ``_source_repo`` has its own test class above, so
+        deriving it here is not circular.
         """
         monkeypatch.setenv("HF_HOME", str(tmp_path))
         weights = (
             tmp_path
-            / "models--qdrant--bge-small-en-v1.5-onnx-q"
+            / _source_repo_slug()
             / "snapshots"
             / "abc"
             / "model_optimized.onnx"
@@ -259,7 +280,7 @@ class TestModelCacheProbe:
     def test_a_hub_seeded_cache_is_recognised_too(self, monkeypatch, tmp_path: Path):
         """Plain huggingface_hub writes under $HF_HOME/hub, not beside it."""
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        weights = tmp_path / "hub" / "models--qdrant--bge-small-en-v1.5-onnx-q" / "m.onnx"
+        weights = tmp_path / "hub" / _source_repo_slug() / "m.onnx"
         weights.parent.mkdir(parents=True)
         weights.write_bytes(b"\x00")
         assert fastembed_bge.model_is_cached(DEFAULT_MODEL)

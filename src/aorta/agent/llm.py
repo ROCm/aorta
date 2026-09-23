@@ -2,13 +2,31 @@
 
 ``FakeLLMProposer`` round-robins registered mitigations (offline tests).
 ``LiteLLMProposer`` calls LiteLLM when ``amd-aorta[agent]`` is installed.
+``LayaProposer`` answers the same decision from a local calibrated encoder when
+``amd-aorta[laya]`` is.
+
+**Every model import in this module is deferred, and the rule is tested.**
+``tests/cli/test_chat_boundaries.py`` imports this module in a clean interpreter
+and fails if any of ``_HEAVY_PREFIXES`` -- torch, onnxruntime, fastembed, the
+langchain stack, pydantic, chainlit -- reaches ``sys.modules``. The reason is
+``--llm-backend=fake``: it is the default, it is what the test suite and
+``--dry-run`` depend on, and it has to keep working on a base install of
+``pip install amd-aorta``, which is ``pyyaml`` plus ``click``. So the chat seam
+lives inside ``ChatProviderProposer._chat_model`` and the Laya seam inside
+``LayaProposer.propose``, and neither costs anything to anyone who does not
+select it.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:  # Annotations only: `from __future__ import annotations` means
+    # this costs nothing at run time, which is what the import-boundary probe
+    # above measures.
+    from aorta.laya.predictor import LayaPredictor
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
 StopReason = Literal[
@@ -372,6 +390,17 @@ class LiteLLMProposer:
 #: ``--llm-provider`` mean the same thing on both front doors.
 CHAT_PROVIDER_BACKENDS: frozenset[str] = frozenset({"litellm", "openai", "vllm"})
 
+#: Every value ``--llm-backend`` accepts, which is what :func:`make_proposer`
+#: resolves.
+#:
+#: Exported because the Click choice in ``aorta/cli/agent_mitigate.py`` is
+#: hard-coded -- that decorator runs at import time and ``aorta --help`` must not
+#: pay for this module -- so the two can drift silently. The hard-coded list is
+#: checked against this one in ``tests/agent/test_llm_providers.py``, which is
+#: the only thing standing between adding a backend here and it being
+#: unreachable from the command line.
+AGENT_LLM_BACKENDS: frozenset[str] = frozenset({"fake", "laya"}) | CHAT_PROVIDER_BACKENDS
+
 _CHAT_EXTRA_HINT = (
     "--llm-backend={backend} is configured through the shared chat provider "
     "layer, which needs the chat-cli extra.\n"
@@ -447,6 +476,286 @@ class ChatProviderProposer:
         return _step_from_content(getattr(response, "content", None), remaining)
 
 
+#: The three questions a Laya proposer asks, spelled as text rather than as
+#: :class:`aorta.laya.predictor.Choice` / ``Noul`` instances so that naming them
+#: costs no import.
+#:
+#: Public because ``aorta/laya/corpus/proposer.py`` labels a corpus against these
+#: same three questions, and the two have to be the same strings. If they drift,
+#: the encoder is fine-tuned on one question and asked another -- which does not
+#: fail, it just answers slightly worse for a reason nobody would look for. That
+#: module already imports :data:`PROBE_CATEGORIES` from here; the questions
+#: belong in the same place, and ``tests/agent/test_laya_proposer.py`` fails if
+#: the two copies stop matching.
+LAYA_MITIGATION_QUESTION = (
+    "Which of these candidate mitigations will make this failure stop reproducing?"
+)
+LAYA_CATEGORY_QUESTION = "Which category of failure is this?"
+LAYA_STOP_QUESTION = (
+    "Should the mitigation search stop here, rather than trying another "
+    "registered mitigation?"
+)
+LAYA_STOP_WHEN_TRUE = "no untried mitigation can plausibly clear this failure"
+LAYA_STOP_WHEN_FALSE = "at least one untried mitigation is still worth running"
+
+#: What ``--llm-backend=laya`` loads when ``--llm-model`` names nothing.
+#:
+#: The fine-tuned checkpoint rather than the base one, because the model card's
+#: own numbers put base ``laya`` below a majority-class baseline on its typed
+#: decisions and call it "a fast base to specialise, not a zero-shot decision
+#: engine". Defaulting to the weaker of the two would make the first thing anyone
+#: tries the worst version of it.
+DEFAULT_LAYA_CHECKPOINT = "laya-typed-decisions"
+
+#: How much of the stop noul's probability mass it takes to end the search.
+#:
+#: Above the 0.5 midpoint because the two mistakes do not cost the same. A false
+#: stop ends an investigation and reports a category nobody went on to test; a
+#: false continue costs one more probe cell, and ``AgentPolicy`` already bounds
+#: how many of those there can be. So the asymmetry is paid for in cells.
+#:
+#: **This number is not a calibration figure and must not be reported as one.**
+#: Nothing here applies the per-(question type, option count) temperature fit
+#: that Phase 1 exists to produce, so it is a policy choice about which error to
+#: prefer, made in the absence of a fit rather than derived from one. Re-derive
+#: it when there is one -- and read ``docs/laya-packaging.md`` on why a
+#: probability is a function of the checkpoint *and* the fit applied to it.
+#:
+#: Whether the stop noul's own bucket was trustworthy is not a thing this
+#: constant can know. An earlier revision of this comment asserted that a noul
+#: is at least not in the bucket the library clamps, which is true of today's
+#: published checkpoint and is not a property of nouls. The step asks
+#: ``Calibration.caveat`` per question instead, so a checkpoint that clamped the
+#: noul bucket says so on the very step that thresholded against it.
+DEFAULT_LAYA_STOP_THRESHOLD = 0.75
+
+
+class LayaProposer:
+    """Proposer on a local calibrated encoder (requires ``pip install 'amd-aorta[laya]'``).
+
+    The same decision as :class:`FakeLLMProposer` and :class:`ChatProviderProposer`,
+    reached without generating a token. ``AgentStep`` happens to be almost exactly
+    the shape Laya answers in: ``next_mitigations`` is a choice over the
+    candidates that are actually left, ``category`` a choice over
+    :data:`PROBE_CATEGORIES`, ``stop`` a noul, and ``confidence`` the probability
+    the chosen answer carries rather than a float a prompt asked a model to
+    invent. All three are one forward pass, because Laya batches M questions over
+    one state -- see :class:`aorta.laya.predictor.LayaPredictor`.
+
+    **``confidence`` is not yet a calibrated probability, and the step says so
+    out loud.** Two separate things are wrong with it, and the disclosure is in
+    two halves because the two things are known at different times.
+
+    The first is the *question*: a probability read off an N-way choice is not
+    comparable to a noul's or to an LLM's self-report without N. The argmax of a
+    21-way answer is a strong preference at 0.24 and pure noise at 0.048, and
+    both look like "low confidence" to a threshold picked for a producer with a
+    different answer shape. N and the library's bucket for it
+    (``aorta.laya.predictor.bucket_for``) are pure and offline, so they are on
+    every step whether or not a checkpoint ever loaded.
+
+    The second is the *checkpoint*: whether that bucket's shipped temperature was
+    trustworthy. ``Calibration.caveat`` answers it from the checkpoint's own
+    tables, and that is deliberately not re-derived here. An earlier revision
+    hardcoded "eleven or more options is the broken bucket", which is true of the
+    published checkpoint and false for exactly the artifact Phase 1 exists to
+    produce -- a fine-tune with a sane ``choice:11+`` and a broken
+    ``choice:3-5``. That version would have gone quiet on the bucket that was
+    actually broken while still warning about one that was fine.
+
+    The number itself is kept, because it is the best ranking signal available
+    and a 0.0 would destroy information while colliding with ``_safe_stop``'s.
+    Anything downstream that thresholds ``AgentStep.confidence`` must read the
+    hypothesis before trusting it. A figure that looks calibrated and is not is
+    precisely the defect this integration exists to remove, and shipping one here
+    under a new name would be worse than the self-reported float it replaces.
+
+    ``hypothesis`` stays templated, following :class:`FakeLLMProposer`'s. Laya
+    never emits text, so there is nothing to ask it for, and a sentence built
+    from the answers is more honest than one built from nothing. It is also the
+    only field the caveat above can ride on without a call-site change.
+
+    **The candidate list is the answer space, so this proposer cannot name a
+    mitigation that was not offered.** ``_step_from_content`` filters the LLM
+    backends' replies for exactly that reason; here the filter is structural.
+    ``PolicyValidation`` still re-checks every name downstream, and should: this
+    class is one of three proposers and the guard has to hold for all of them.
+    """
+
+    def __init__(
+        self,
+        *,
+        checkpoint: str | None = None,
+        device: str | None = None,
+        stop_threshold: float = DEFAULT_LAYA_STOP_THRESHOLD,
+        predictor: LayaPredictor | None = None,
+    ) -> None:
+        self._checkpoint = checkpoint or DEFAULT_LAYA_CHECKPOINT
+        self._device = device
+        self._stop_threshold = stop_threshold
+        # Injected by tests against ``FakeLayaPredictor``, which needs no weights
+        # and no extra. Nothing on the CLI path reaches this argument, so a run
+        # cannot end up reporting a hash function's output as a verdict.
+        self._predictor = predictor
+
+    def _laya_predictor(self) -> LayaPredictor:
+        """Resolve the predictor once, importing the seam here and not above.
+
+        Deferred for the reason this module's docstring gives, and cached for a
+        second one: the loop calls :meth:`propose` once per iteration, up to
+        ``--max-iterations``, and a checkpoint rebuilt per call would cost
+        seconds per iteration -- the card measures a 7.4 s median reload on CPU.
+        The weights load on the first question and stay loaded, which is
+        :class:`aorta.laya.predictor.LayaAgentPredictor`'s own behaviour.
+        """
+        if self._predictor is None:
+            from aorta.laya.predictor import make_predictor
+
+            # ``checkpoint=`` rather than ``backend=`` so that ``--llm-model``
+            # can name either a published checkpoint or a local fine-tune
+            # directory. It also means ``fake`` is unreachable from here, which
+            # is deliberate.
+            self._predictor = make_predictor(
+                checkpoint=self._checkpoint, device=self._device
+            )
+        return self._predictor
+
+    def propose(
+        self,
+        *,
+        symptom: str | None,
+        cell_summaries: list[dict[str, Any]],
+        candidates: list[str],
+        tried: list[str],
+    ) -> AgentStep:
+        remaining = _remaining_candidates(candidates, tried)
+        # Checked before the import, so an exhausted loop neither loads weights
+        # nor requires the extra to be installed. Mirrors both siblings.
+        if not remaining:
+            return _exhausted_step()
+
+        from aorta.laya.predictor import (
+            Choice,
+            ChoiceAnswer,
+            Noul,
+            NoulAnswer,
+            ask_one,
+            bucket_for,
+        )
+
+        mitigation_q = Choice(
+            question=LAYA_MITIGATION_QUESTION, options=tuple(remaining)
+        )
+        # The derived probe set, not AUTOPSY_CATEGORIES. Offering a category the
+        # agent has no way to reach teaches it to guess one, and the guess
+        # validates -- see the comment above PROBE_CATEGORIES.
+        category_q = Choice(
+            question=LAYA_CATEGORY_QUESTION, options=tuple(sorted(PROBE_CATEGORIES))
+        )
+        stop_q = Noul(
+            question=LAYA_STOP_QUESTION,
+            when_true=LAYA_STOP_WHEN_TRUE,
+            when_false=LAYA_STOP_WHEN_FALSE,
+        )
+
+        predictor = self._laya_predictor()
+        # The user half of the prompt the LLM backends send, verbatim, because
+        # that is what `aorta/laya/corpus/proposer.py` recorded as the state when
+        # it built the training corpus. Serialising it a second way here would be
+        # train/serve skew introduced by a helper nobody would suspect -- and it
+        # would also stop a Phase 1 comparison between the two backends being a
+        # comparison, since they would then differ in their input as well as in
+        # their model.
+        _system, state = _build_prompt(symptom, cell_summaries, remaining, tried)
+        mitigation, category, stopping = ask_one(
+            predictor, state, [mitigation_q, category_q, stop_q]
+        )
+        # The check ``ask_noul`` and ``ask_choice`` perform, carried along rather
+        # than borrowed: asking through those helpers would cost three forward
+        # passes where the whole point is one. A predictor answering the wrong
+        # shape must not have its answer read as a probability.
+        if not (
+            isinstance(mitigation, ChoiceAnswer)
+            and isinstance(category, ChoiceAnswer)
+            and isinstance(stopping, NoulAnswer)
+        ):
+            raise TypeError(
+                f"{type(predictor).__name__} answered the proposer's three questions with "
+                f"{type(mitigation).__name__}, {type(category).__name__} and "
+                f"{type(stopping).__name__}"
+            )
+
+        model_id = predictor.model_id()
+        # Read *after* the answers, and the order is load-bearing. `calibration()`
+        # deliberately does not load a checkpoint -- an accessor should not cost
+        # seven seconds of model build -- so asked before the first forward pass
+        # it reports "not loaded yet" and every step would disclose an unknown
+        # calibration on a run whose calibration was perfectly knowable. By here
+        # `ask_one` has touched the weights, so the tables it diffs are there.
+        calibration = predictor.calibration()
+
+        # `.at()` rather than a bare boolean, so the threshold is named at the
+        # point it is applied; NoulAnswer deliberately has no default reading.
+        if stopping.at(self._stop_threshold):
+            return AgentStep(
+                category=category.option,
+                # The stop noul gets its own caveat rather than inheriting the
+                # choice's. Which bucket clamped is a fact about the checkpoint,
+                # so a fine-tune that clamped the noul bucket has to say so on
+                # the step that thresholded against it.
+                hypothesis=(
+                    "Stopping: no untried mitigation looks likely to clear this failure. "
+                    f"[{model_id}: p(stop)={stopping.probability:.2f} "
+                    f"at threshold {self._stop_threshold:.2f} "
+                    f"({bucket_for(stop_q)}){calibration.caveat(stop_q)}]"
+                ),
+                next_mitigations=[],
+                # Named rather than left to the loop to infer. `_resolve_stop_outcome`
+                # falls back to reading the hypothesis text when `stop_reason` is
+                # None, and a proposer that knows why it stopped should not make it
+                # guess from prose.
+                stop=True,
+                stop_reason="agent_requested",
+                confidence=stopping.probability,
+            )
+
+        next_m = mitigation.option
+        last = cell_summaries[-1] if cell_summaries else {}
+        detectors = list(last.get("failure_detectors_fired") or [])
+        return AgentStep(
+            category=category.option,
+            # `FakeLLMProposer`'s sentence, plus what answered it. Decision 22
+            # asks that every report a Laya verdict reaches records which
+            # checkpoint produced it *inline*, because a report gets copied,
+            # archived and attached to a ticket away from anything beside it --
+            # and `hypothesis` is the only field on an AgentStep that both
+            # `agent_log.jsonl` and `agent_report.md` carry through unchanged.
+            # The width and its bucket come from the question and are printed
+            # whatever the checkpoint turns out to be; the caveat comes from the
+            # checkpoint and is empty when there is nothing to say. Splitting
+            # them is what lets a run whose weights failed to load still carry
+            # the half of the disclosure that never needed them.
+            hypothesis=(
+                f"Try mitigation {next_m!r} based on detectors {detectors!r}."
+                + (f" Symptom: {symptom}" if symptom else "")
+                + f" [{model_id}: p({next_m})={mitigation.probability:.2f} "
+                f"of {len(remaining)} candidates ({bucket_for(mitigation_q)}), "
+                f"p(stop)={stopping.probability:.2f}"
+                f"{calibration.caveat(mitigation_q)}]"
+            ),
+            next_mitigations=[next_m],
+            # Off the head that answered the decision this step reports -- the
+            # probability of the mitigation being proposed, not of the stop that
+            # was declined. No temperature fit is applied on this path, and the
+            # hypothesis says whether the checkpoint's own fit for this bucket
+            # survived, so the number ranks candidates and does not measure
+            # certainty. This is the field that would otherwise be read as
+            # though it did.
+            confidence=mitigation.probability,
+            stop=False,
+        )
+
+
 def _chat_layer_available() -> bool:
     """Whether the chat provider layer can be imported at all.
 
@@ -476,31 +785,46 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
     breaking an install that used to work. ``vllm`` and ``openai`` are new, have
     no such history, and say plainly which extra they need.
 
+    ``laya`` is the odd one out: it is not a provider at all but a local
+    encoder, so it reads no chat settings and ``model`` names a *checkpoint*
+    rather than a model on someone's endpoint.
+
     ``fake`` stays the default and stays fully offline -- it imports nothing and
     reaches nothing, which is what makes the test suite and ``--dry-run``
     hermetic.
     """
     if backend == "fake":
         return FakeLLMProposer()
+    if backend == "laya":
+        return LayaProposer(checkpoint=model)
     if backend == "litellm" and not _chat_layer_available():
         return LiteLLMProposer(model=model or "gpt-4o-mini")
     if backend in CHAT_PROVIDER_BACKENDS:
         return ChatProviderProposer(backend, model=model)
     raise ValueError(
         f"unknown agent LLM backend: {backend!r} "
-        f"(expected one of {', '.join(sorted({'fake', *CHAT_PROVIDER_BACKENDS}))})"
+        f"(expected one of {', '.join(sorted(AGENT_LLM_BACKENDS))})"
     )
 
 
 __all__ = [
+    "AGENT_LLM_BACKENDS",
     "AUTOPSY_CATEGORIES",
+    "DEFAULT_LAYA_CHECKPOINT",
+    "DEFAULT_LAYA_STOP_THRESHOLD",
     "EVIDENCE_ONLY_CATEGORIES",
+    "LAYA_CATEGORY_QUESTION",
+    "LAYA_MITIGATION_QUESTION",
+    "LAYA_STOP_QUESTION",
+    "LAYA_STOP_WHEN_FALSE",
+    "LAYA_STOP_WHEN_TRUE",
     "PROBE_CATEGORIES",
     "CHAT_PROVIDER_BACKENDS",
     "AgentStep",
     "ChatProviderProposer",
     "FakeLLMProposer",
     "LLMProposer",
+    "LayaProposer",
     "LiteLLMProposer",
     "StopReason",
     "make_proposer",

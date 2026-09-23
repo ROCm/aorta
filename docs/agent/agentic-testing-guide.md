@@ -7,7 +7,7 @@ the hood, and how to read the output.
 For the high-level design rationale, see
 [aorta-probe-agent.md](aorta-probe-agent.md). For probe-mode mechanics
 (recipes, classifiers, artifacts), see
-[probe-188/usage.md](../probe-188/usage.md).
+[probe/usage.md](../probe/usage.md).
 
 > **Command name.** `aorta agent` is now a namespace: `aorta agent <name>`
 > dispatches to one of the agents registered under the `aorta.agents`
@@ -44,19 +44,44 @@ external LLM is involved.
 
 **By default: no.**
 
-| Setting | LLM used? | How decisions are made |
-|---------|-----------|-------------------------|
-| Default (`--llm-backend fake`) | **No** | Deterministic `FakeLLMProposer`: heuristics on detector IDs + round-robin through registered mitigations |
-| `--llm-backend litellm` | **Yes** | LiteLLM calls your configured model; requires `pip install 'amd-aorta[agent]'` and provider API keys |
+There are five values for `--llm-backend`, and only three of them call a
+remote model:
+
+| `--llm-backend` | Remote call? | Needs | How decisions are made |
+|-----------------|--------------|-------|-------------------------|
+| `fake` *(default)* | **No** | nothing — base install | Deterministic `FakeLLMProposer`: heuristics on detector IDs + round-robin through registered mitigations |
+| `laya` | **No** | `amd-aorta[laya]` + staged weights | `LayaProposer` runs a local calibrated encoder. Three typed questions, one forward pass, no tokens generated |
+| `litellm` | **Yes** | `amd-aorta[chat-cli]`, or `amd-aorta[agent]` alone | Shared chat provider layer, falling back to a direct LiteLLM call when the chat extra is absent |
+| `openai` | **Yes** | `amd-aorta[chat-cli]` | Shared chat provider layer |
+| `vllm` | **Yes** | `amd-aorta[chat-cli]` | Shared chat provider layer, against a model you host |
 
 The CLI default is **`fake`** so tests, CI, and local smoke runs work with
-**zero API calls** and fully reproducible behavior.
+**zero API calls** and fully reproducible behavior. `fake` is also the only
+backend that needs no extra at all: it imports nothing and reaches nothing,
+which is what makes the test suite and `--dry-run` hermetic.
 
-### When an LLM *is* used (optional)
+`litellm`, `openai` and `vllm` read the **shared chat provider layer** — the
+same `~/.config/aorta/chat.toml` or `AORTA_CHAT_*` settings `aorta chat` uses,
+so an endpoint, gateway header or auth scheme is configured once and both front
+doors read it. `litellm` is the exception that also still works on an
+`[agent]`-only install, because that combination shipped before `aorta.chat`
+existed and must keep working.
 
-The LLM runs at **one stage only**: the **proposer step**, after probe has
-already executed a cell and the **deterministic 5-tier classifier** has
-written `result.json`.
+> **Adding a backend?** `AGENT_LLM_BACKENDS` in `src/aorta/agent/llm.py` is the
+> source of truth. The `click.Choice` list in `src/aorta/cli/agent_mitigate.py`
+> is deliberately hard-coded rather than imported from it, because that
+> decorator runs at import time and `aorta --help` must not pay for that
+> module's imports — so the two can drift silently, and
+> `tests/agent/test_llm_providers.py` asserts they have not. That test is the
+> only thing standing between adding a backend to `make_proposer` and it being
+> unreachable from the command line, since Click rejects an unlisted value
+> before `make_proposer` is ever called.
+
+### When a model *is* used (optional)
+
+Whichever backend you pick, the model runs at **one stage only**: the
+**proposer step**, after probe has already executed a cell and the
+**deterministic 5-tier classifier** has written `result.json`.
 
 ```mermaid
 sequenceDiagram
@@ -64,7 +89,7 @@ sequenceDiagram
     participant Loop as agent loop
     participant Probe as run_recipe / probe
     participant Classifier as 5-tier classifier
-    participant Proposer as fake or LiteLLM
+    participant Proposer as fake / laya / LLM backend
 
     CLI->>Loop: argv + ticket + policy
     Loop->>Probe: run none-none cell
@@ -80,31 +105,48 @@ sequenceDiagram
     end
 ```
 
-**The LLM never:**
+**The proposer never:**
 
 - Sets `pass` / `fail` (only the classifier does).
 - Changes your repro command (argv stays fixed).
 - Proposes raw shell or env outside the **mitigations registry**.
 
-**The LLM only:**
+**The proposer only:**
 
 - Labels the failure (`rccl_hang`, `illegal_mem`, …).
 - Writes a short hypothesis string.
 - Picks **registered mitigation names** from the candidate list.
 - Says whether to stop searching.
 
-Install optional LLM support:
+Those boundaries hold for every backend. `AgentPolicy.validate_step()` re-checks
+every proposed name against the registry regardless of which proposer produced
+it — three implementations share one guard, so it has to.
+
+Install the backend you want:
 
 ```bash
+# Remote model through the shared chat provider settings (openai / vllm / litellm)
+pip install 'amd-aorta[chat-cli]'
+
+# litellm also still works on the older, chat-free extra
 pip install 'amd-aorta[agent]'
-export OPENAI_API_KEY=...   # or other provider LiteLLM supports
+export OPENAI_API_KEY=...   # or another provider LiteLLM supports
+
+# Local calibrated encoder, no network at propose time
+pip install 'amd-aorta[laya]'
 ```
 
 Then:
 
 ```bash
 aorta agent mitigate --llm-backend litellm --llm-model gpt-4o-mini ...
+aorta agent mitigate --llm-backend vllm ...
+aorta agent mitigate --llm-backend laya ...
 ```
+
+For `openai` and `vllm`, `--llm-model` is optional: the chat profile already
+names a model. For `laya` it names a **checkpoint**, not a model on an
+endpoint — see [Example 3b](#example-3b--local-encoder-backend-laya).
 
 ---
 
@@ -122,8 +164,16 @@ The **`fake`** backend still implements a full agent loop:
 | **Guardrails** | `AgentPolicy`: max iterations, wall time, registry-only names, optional approval gate |
 
 So “agentic” here means **autonomous search over a mitigation space**, not
-“must call Claude/GPT.” The LLM is an **optional upgrade** for smarter
+“must call Claude/GPT.” A model is an **optional upgrade** for smarter
 mitigation ordering and richer hypotheses — not a requirement.
+
+`laya` sits between the two. It is a learned model, so it orders mitigations by
+something better than registry order, but it never generates text and never
+leaves the machine, so it keeps the offline property `fake` has. What it cannot
+do is write a hypothesis: `LayaProposer` templates that string the same way
+`FakeLLMProposer` does, because a model that emits no tokens has nothing to say.
+If the prose in `agent_report.md` is what you are after, you want one of the
+three LLM backends.
 
 ---
 
@@ -144,11 +194,12 @@ Useful flags:
 
 | Flag | Purpose |
 |------|---------|
-| `--symptom "..."` | Hint for proposer (fake or LLM) |
+| `--symptom "..."` | Hint for the proposer (any backend) |
 | `--max-iterations N` | Cap mitigation proposals (default 8) |
 | `--mitigation NAME` | Restrict search (repeatable) |
 | `--mitigations-file sidecar.json` | Extra registered mitigations |
-| `--llm-backend litellm` | Enable real LLM proposer |
+| `--llm-backend NAME` | Proposer backend: `fake` (default), `laya`, `litellm`, `openai`, `vllm` |
+| `--llm-model NAME` | Model for the selected backend; a **checkpoint name or local fine-tune directory** for `laya`. Defaults to whatever the chat profile configures (`gpt-4o-mini` on the standalone `litellm` path, `laya-typed-decisions` for `laya`) |
 | `--dry-run` | Plan cells without executing |
 | `--bundle` | Run `aorta bundle` after loop (needs recipe redaction) |
 | `-v` / `-vv` | Progress logging |
@@ -248,7 +299,7 @@ Re-run the repro with mitigation `tf32_off` applied (see cell `tf32_off-none` pr
 
 ---
 
-### Example 3 — Symptom hint + LLM backend
+### Example 3 — Symptom hint + remote LLM backend
 
 Command:
 
@@ -284,6 +335,64 @@ The LLM may pick `nccl_launch_order_implicit` first because the symptom
 mentions RCCL — unlike fake mode, which always takes the first untried name
 in sorted allowlist order.
 
+Swap `--llm-backend litellm --llm-model gpt-4o-mini` for `--llm-backend openai`
+or `--llm-backend vllm` to route the same call through the chat profile's
+configured provider instead.
+
+---
+
+### Example 3b — Local encoder backend (`laya`)
+
+Same loop, same artifacts, no network call at the propose step:
+
+```bash
+pip install 'amd-aorta[laya]'
+
+PYTHONPATH=src aorta agent mitigate \
+  --output /tmp/agent_out \
+  --ticket smoke-laya \
+  --symptom "RCCL hang after checkpoint" \
+  --llm-backend laya \
+  --mitigation none \
+  --mitigation nccl_launch_order_implicit \
+  --mitigation tf32_off \
+  -- \
+  ./my_training_repro.sh
+```
+
+**What happens under the hood:**
+
+1. Baseline cell runs and fails; the classifier populates detectors, exactly as
+   in Example 3.
+2. `LayaProposer` builds **three typed questions over one state**: a choice over
+   the mitigations that are actually left, a choice over `PROBE_CATEGORIES`, and
+   a yes/no on whether to stop searching.
+3. All three are answered in **one forward pass** — the encoder batches
+   questions over a shared state — and each answer carries a probability rather
+   than a number a prompt asked a model to invent.
+4. `AgentPolicy.validate_step()` re-checks the proposed name, as it does for
+   every backend.
+
+Two properties worth knowing before you read the output:
+
+- **It cannot name a mitigation that was not offered.** The candidate list *is*
+  the answer space, so the filtering the LLM backends do after the fact is
+  structural here.
+- **The stop threshold is a policy choice, not a measurement.**
+  `DEFAULT_LAYA_STOP_THRESHOLD` sits above the 0.5 midpoint because the two
+  mistakes cost differently: a false stop ends an investigation and reports a
+  category nobody went on to test, while a false continue costs one more probe
+  cell, and `AgentPolicy` already bounds how many of those there can be. Nothing
+  on this path applies the per-question-type temperature fit that would make the
+  probabilities calibrated, so treat the threshold as an error preference made in
+  the absence of a fit — not as a figure derived from one. See
+  [`docs/laya-packaging.md`](../laya-packaging.md) on why a probability is a
+  function of the checkpoint *and* the fit applied to it.
+
+`--llm-model` selects the checkpoint; it defaults to the fine-tuned
+`laya-typed-decisions` rather than the base checkpoint, whose published numbers
+sit below a majority-class baseline on typed decisions.
+
 ---
 
 ### Example 4 — Resume after interrupt
@@ -313,7 +422,7 @@ PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail 
 | `baseline_pass` | `none-none` passed | No mitigations needed |
 | `converged` | Some `{mitigation}-none` passed | Ship that mitigation to customer / gate |
 | `exhausted_candidates` | No mitigations left in allowlist/registry | Manual matrix or new sidecar mitigations |
-| `agent_stop` | Proposer set `stop` (LLM or fake) | Read `agent_report.md` hypothesis |
+| `agent_stop` | Proposer set `stop` (any backend) | Read `agent_report.md` hypothesis |
 | `approval_required` | Mitigation needs ack (`--require-approval`) | Operator approves, re-run |
 | `walltime_exhausted` | `--max-walltime-sec` hit | Re-run same ticket to resume |
 | `policy_stop` | e.g. `--max-iterations` hit | Increase budget or narrow allowlist |
@@ -330,7 +439,7 @@ aorta agent mitigate (CLI)
             ├── run_recipe()      same engine as aorta probe
             │       └── SubprocessWorkload + 5-tier classifier
             ├── _read_cell_summaries()  from trial_*/result.json
-            ├── proposer.propose()       fake OR LiteLLM
+            ├── proposer.propose()       fake | laya | litellm/openai/vllm
             ├── AgentPolicy.validate_step()
             └── write_agent_report()
 ```
@@ -346,7 +455,7 @@ agent:
 4. **Tier 4** — built-in stderr regex catalogue
 5. **Tier 5** — recipe `custom_patterns`
 
-See [classifier.md](../probe-188/classifier.md).
+See [classifier.md](../probe/classifier.md).
 
 ### Mitigations registry
 
@@ -372,15 +481,23 @@ chain (`capture` fields), recommended next action.
 
 ---
 
-## Fake vs LiteLLM — decision guide
+## Which backend — decision guide
 
-| Use **fake** (default) when… | Use **litellm** when… |
-|------------------------------|------------------------|
-| CI, unit tests, offline dev | You want symptom-aware mitigation ordering |
-| Reproducible demo | Large registry — LLM can prioritize likely fixes |
-| No API keys / air-gapped | Richer hypotheses in `agent_report.md` |
+| Pick… | When |
+|-------|------|
+| **`fake`** *(default)* | CI, unit tests, offline dev, reproducible demos. No extra, no keys, no weights, no network. The only backend a base install can run |
+| **`laya`** | You want symptom-aware ordering without a network call or an API key: an air-gapped node, a customer site, or a loop you do not want metered. Needs the `[laya]` extra and staged weights |
+| **`litellm`** | You already configure a provider through LiteLLM, or you are on an `[agent]`-only install where the chat extra is absent |
+| **`openai`** | The chat profile already points at OpenAI and you want one place to configure it |
+| **`vllm`** | You host the model yourself and want the prose without the third party |
 
-Both backends share the same loop, policy, probe engine, and artifact layout.
+All five share the same loop, policy, probe engine, and artifact layout, and all
+five are subject to the same registry check on whatever they propose.
+
+Two axes decide it in practice. **Does a remote call cost you anything** — money,
+an egress rule, or a customer's data leaving their machine — rules out the three
+LLM backends. **Do you need prose in `agent_report.md`** rules out `fake` and
+`laya`, both of which template the hypothesis rather than writing one.
 
 ---
 
@@ -389,7 +506,7 @@ Both backends share the same loop, policy, probe engine, and artifact layout.
 | | `aorta probe` | `aorta agent mitigate` |
 |---|---------------|---------------|
 | Matrix | You write full YAML axes | Grows axis iteration by iteration |
-| Who picks next mitigation | You | Proposer (fake or LLM) |
+| Who picks next mitigation | You | Proposer (`fake`, `laya`, or an LLM backend) |
 | Verdict | Classifier | Classifier (unchanged) |
 | argv | Opaque, fixed | Opaque, fixed |
 | Resume | Per ticket dir | Same + `agent_log.jsonl` |
@@ -410,8 +527,8 @@ fresh `--ticket` or inspect `agent_log.jsonl`.
 
 **`ImportError: LiteLLM` / `does not provide the extra 'agent'`** — your venv
 has an **old** `aorta` wheel (e.g. from PyPI) without the `[agent]` extra.
-`PYTHONPATH=src` loads new agent code, but `litellm` was never installed.
-From the **aorta repo root** on branch `feature/aorta-probe-agent`:
+`PYTHONPATH=src` loads new agent code, but `litellm` was never installed. From
+the **aorta repo root**:
 
 ```bash
 pip install -e '.[agent]'
@@ -420,6 +537,31 @@ pip install litellm
 ```
 
 Then retry `--llm-backend litellm`.
+
+**`--llm-backend=openai is configured through the shared chat provider layer`** —
+`openai` and `vllm` read the chat profile, so they need `amd-aorta[chat-cli]`.
+Install it, then configure the endpoint once in `~/.config/aorta/chat.toml` or
+`AORTA_CHAT_*`; `aorta chat doctor` will tell you whether that configuration
+resolves. `litellm` does not hit this, because it falls back to a direct call
+when the chat extra is absent.
+
+**`LayaUnavailable: Laya is required for a real typed-decision predictor`** —
+`--llm-backend=laya` needs `pip install 'amd-aorta[laya]'`. It is a separate
+extra because it resolves torch, which nothing reachable from `[chat-cli]` is
+allowed to do.
+
+**`LayaUnavailable: could not load the Laya checkpoint …`** — the extra is
+installed but the weights are not. They download on first use, so this is the
+ordinary no-egress failure as often as it is a bad checkpoint name. Stage the
+checkpoint from a machine with egress, or pass `--llm-model` pointing at a local
+fine-tune directory. Note that a `laya` run loads weights on the **first
+proposer call**, not at startup, so this surfaces after the baseline cell has
+already run rather than immediately.
+
+**A `laya` run stops earlier or later than you expected** — the stop threshold
+is a policy choice about which error to prefer, not a calibrated cutoff; see
+[Example 3b](#example-3b--local-encoder-backend-laya). Raise `--max-iterations`
+if you want the search to keep going regardless.
 
 **All mitigations fail** — expected for hard repros; outcome
 `exhausted_candidates`; inspect `failure_detectors_fired` in
@@ -430,6 +572,6 @@ Then retry `--llm-backend litellm`.
 ## Related docs
 
 - [aorta-probe-agent.md](aorta-probe-agent.md) — design deck + build phases
-- [probe-188/usage.md](../probe-188/usage.md) — probe recipes and artifacts
-- [probe-188/classifier.md](../probe-188/classifier.md) — detector IDs
-- [probe-188/bundle.md](../probe-188/bundle.md) — packaging for handoff
+- [probe/usage.md](../probe/usage.md) — probe recipes and artifacts
+- [probe/classifier.md](../probe/classifier.md) — detector IDs
+- [probe/bundle.md](../probe/bundle.md) — packaging for handoff

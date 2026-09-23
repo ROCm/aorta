@@ -659,13 +659,20 @@ class TestStructure:
 
 class TestEmbeddingModelCache:
     def _seed(self, tmp_path: Path) -> None:
-        weights = (
-            tmp_path
-            / "hf"
-            / "hub"
-            / "models--qdrant--bge-small-en-v1.5-onnx-q"
-            / "model_optimized.onnx"
-        )
+        """Write weights where this install's fastembed would have put them.
+
+        The directory name is derived rather than spelled out: upstream
+        renamed the re-hosted repo between 0.8.0 (``qdrant/...-onnx-q``) and
+        0.8.1 (``Qdrant/...-onnx-Q``), and on a case-sensitive filesystem a
+        fixture pinned to the old spelling seeds a directory the probe
+        correctly reports as absent. ``model_is_cached`` reads the name off
+        fastembed's own registry, so it was right the whole time and only the
+        fixture was wrong.
+        """
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        slug = fastembed_bge._model_dir_slug(fastembed_bge._source_repo(MODEL))
+        weights = tmp_path / "hf" / "hub" / slug / "model_optimized.onnx"
         weights.parent.mkdir(parents=True)
         weights.write_bytes(b"\x00")
 
