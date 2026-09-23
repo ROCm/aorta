@@ -36,9 +36,7 @@ def unreachable_router(monkeypatch):
         def __init__(self, *args, **kwargs):
             raise ConnectionError("connection refused")
 
-    monkeypatch.setattr(
-        "aorta.cia.autopsy.router.TriageRouter", _Unreachable, raising=False
-    )
+    monkeypatch.setattr("aorta.cia.autopsy.router.TriageRouter", _Unreachable, raising=False)
     return _Unreachable
 
 
@@ -57,9 +55,9 @@ def test_a_bundle_still_classifies_without_the_router(evidenced_bundle, unreacha
 
     report, _ = _run(evidenced_bundle, caplog)
     assert report["category"] in AUTOPSY_CATEGORIES
-    assert report["category"] != "unknown", (
-        "a NaN in the log should still classify without the router"
-    )
+    assert (
+        report["category"] != "unknown"
+    ), "a NaN in the log should still classify without the router"
 
 
 def test_the_degradation_is_logged(evidenced_bundle, unreachable_router, caplog):
@@ -107,3 +105,38 @@ def test_a_healthy_router_records_no_gap(evidenced_bundle, monkeypatch, caplog):
     report, _ = _run(evidenced_bundle, caplog)
     gaps = report.get("tooling_gaps") or []
     assert not any(g.get("missing_signal") == "LLM_ROUTER_REVIEW" for g in gaps)
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_the_per_bundle_router_is_closed_in_a_finally(
+    evidenced_bundle,
+    monkeypatch,
+    caplog,
+    raises,
+):
+    closes = []
+
+    class _Prediction:
+        category = "gpu_race"
+        confidence = 0.95
+        rationale = "SAN_CONSAN_RACE in aorta/sanitizer_report.json"
+        next_probe = "none"
+        next_probe_reason = ""
+
+    class _Router:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __call__(self, **kwargs):
+            if raises:
+                raise RuntimeError("provider failed after opening a socket")
+            return _Prediction()
+
+        def close(self):
+            closes.append(True)
+
+    monkeypatch.setattr("aorta.cia.autopsy.router.TriageRouter", _Router, raising=False)
+
+    _run(evidenced_bundle, caplog)
+
+    assert closes == [True]

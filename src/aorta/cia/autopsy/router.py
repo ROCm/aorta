@@ -10,15 +10,16 @@ from aorta.agent.llm import AUTOPSY_CATEGORIES
 from aorta.cia.autopsy.adapters.base import resolve_in_bundle as _resolve_in_bundle
 from aorta.cia.llm import build_lm
 
-
 # ---------------------------------------------------------------------------
 # Tools — the rule-based adapters become callable tools for the LLM
 # ---------------------------------------------------------------------------
+
 
 def classify_matrix(matrix_json: str) -> dict:
     """Run the rule-based AortaMatrixAdapter classifier on a matrix JSON string.
     Returns {category, confidence, signals, rationale}."""
     from aorta.cia.autopsy.adapters.aorta_matrix import classify_matrix as _classify
+
     try:
         matrix = json.loads(matrix_json)
         result = _classify(matrix)
@@ -36,6 +37,7 @@ def scan_stderr(log_text: str) -> dict:
     """Run regex patterns on log text to detect NaN, hang, OOM signals.
     Returns {signal, alert, hits}."""
     from aorta.cia.autopsy.adapters.stderr_watch import scan_stderr_text
+
     scan = scan_stderr_text(log_text)
     return {
         "signal": scan.signal,
@@ -48,6 +50,7 @@ def scan_sanitizer(report_json: str) -> dict:
     """Run the rule-based sanitizer classifier on a sanitizer_report.json string.
     Returns {category, confidence, signals, rationale, per_sanitizer}."""
     from aorta.cia.autopsy.adapters.sanitizer_report import classify_sanitizer
+
     try:
         report = json.loads(report_json)
         result = classify_sanitizer(report)
@@ -185,12 +188,17 @@ class TriageDecision(dspy.Signature):
     - Do not guess — cite specific signal slugs and evidence URIs in rationale.
     - next_probe must be exactly 'aorta sweep run' or 'none'.
     """
-    evidence_json: str = dspy.InputField(desc="JSON list of adapter evidence items with signals and URIs")
+
+    evidence_json: str = dspy.InputField(
+        desc="JSON list of adapter evidence items with signals and URIs"
+    )
     job_context: str = dspy.InputField(desc="job_id, node, recipe")
 
     category: str = dspy.OutputField(desc=_CATEGORY_DESC)
     confidence: float = dspy.OutputField(desc="0.0-1.0")
-    rationale: str = dspy.OutputField(desc="One paragraph citing specific signal slugs and evidence URIs")
+    rationale: str = dspy.OutputField(
+        desc="One paragraph citing specific signal slugs and evidence URIs"
+    )
     next_probe: str = dspy.OutputField(desc="'aorta sweep run' or 'none'")
     next_probe_reason: str = dspy.OutputField(desc="Why this probe is needed, or empty if none")
 
@@ -226,7 +234,8 @@ class TriageRouter(dspy.Module):
         )
         # Bound to this module rather than configured globally: whichever agent
         # reached DSPy first would otherwise decide what Autopsy reasons with.
-        self.react.set_lm(build_lm(max_tokens=self.MAX_TOKENS))
+        self.lm = build_lm(max_tokens=self.MAX_TOKENS)
+        self.react.set_lm(self.lm)
 
     def forward(self, evidence: list[dict[str, Any]], job_context: str) -> dspy.Prediction:
         prediction = self.react(
@@ -235,3 +244,17 @@ class TriageRouter(dspy.Module):
         )
         prediction.category = coerce_category(getattr(prediction, "category", ""))
         return prediction
+
+    def close(self) -> None:
+        """Release this bundle's synchronous LM transport."""
+        close = getattr(self.lm, "close", None)
+        if close is not None:
+            close()
+
+    async def aclose(self) -> None:
+        """Release this bundle's sync and async LM transports."""
+        aclose = getattr(self.lm, "aclose", None)
+        if aclose is not None:
+            await aclose()
+            return
+        self.close()

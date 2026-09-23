@@ -14,7 +14,6 @@ import. The choice now lives on the provider client's TLS context.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import os
@@ -45,6 +44,7 @@ def lm_built(monkeypatch):
     seen = {}
     sync_client = object()
     async_client = object()
+    async_builds = []
     monkeypatch.setattr(llm_mod.dspy, "configure", lambda **kw: None)
     monkeypatch.setattr(llm_mod, "_configured", False)
     monkeypatch.setattr(
@@ -52,13 +52,20 @@ def lm_built(monkeypatch):
         "chat_provider",
         lambda **_k: ("http://vllm:8000/v1", "EMPTY", "unused", "vllm"),
     )
-    monkeypatch.setattr(
-        llm_mod,
-        "_openai_clients",
-        lambda **kwargs: (seen.update(kwargs) or (sync_client, async_client)),
-    )
+
+    def build_clients(**kwargs):
+        seen.update(kwargs)
+
+        def build_async_client():
+            async_builds.append(True)
+            return async_client
+
+        return sync_client, build_async_client
+
+    monkeypatch.setattr(llm_mod, "_openai_clients", build_clients)
     seen["sync_client"] = sync_client
     seen["async_client"] = async_client
+    seen["async_builds"] = async_builds
     return seen
 
 
@@ -237,7 +244,8 @@ class TestBuildingLeavesTheProcessAlone:
         assert "certifi" in str(lm_built["verify"])
         assert "ssl_verify" not in lm.kwargs
         assert lm._sync_client is lm_built["sync_client"]
-        assert lm._async_client is lm_built["async_client"]
+        assert lm._async_client is None
+        assert lm_built["async_builds"] == []
 
     def test_an_existing_setting_is_somebody_having_decided(self, no_ca_env, lm_built, monkeypatch):
         monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/corporate.pem")
@@ -322,6 +330,68 @@ class TestEachCallGetsTheMatchingProviderClient:
         assert seen["client"] is async_client
 
 
+class TestProviderClientLifecycle:
+    def test_close_releases_the_sync_client_once(self):
+        class SyncClient:
+            closes = 0
+
+            def close(self):
+                self.closes += 1
+
+        sync_client = SyncClient()
+        lm = llm_mod.RedactingLM(model="openai/test", sync_client=sync_client)
+
+        lm.close()
+        lm.close()
+
+        assert sync_client.closes == 1
+        assert lm._sync_client is None
+
+    async def test_async_client_is_lazy_and_aclose_releases_both(self, monkeypatch):
+        class SyncClient:
+            closes = 0
+
+            def close(self):
+                self.closes += 1
+
+        class AsyncClient:
+            closes = 0
+
+            async def close(self):
+                self.closes += 1
+
+        sync_client = SyncClient()
+        async_client = AsyncClient()
+        builds = []
+        seen = []
+
+        async def aforward(_self, prompt=None, messages=None, **kwargs):
+            seen.append(kwargs["client"])
+            return []
+
+        monkeypatch.setattr(llm_mod.dspy.LM, "aforward", aforward)
+        lm = llm_mod.RedactingLM(
+            model="openai/test",
+            sync_client=sync_client,
+            async_client_factory=lambda: (builds.append(True) or async_client),
+        )
+        assert builds == []
+
+        await lm.aforward(messages=[{"role": "user", "content": "one"}])
+        await lm.aforward(messages=[{"role": "user", "content": "two"}])
+
+        assert builds == [True]
+        assert seen == [async_client, async_client]
+
+        await lm.aclose()
+        await lm.aclose()
+
+        assert sync_client.closes == 1
+        assert async_client.closes == 1
+        assert lm._sync_client is None
+        assert lm._async_client is None
+
+
 class TestCustomCAReachesTheTransport:
     def test_openai_route_completes_real_https_without_leaking_ca_into_json(
         self,
@@ -348,8 +418,7 @@ class TestCustomCAReachesTheTransport:
                 messages=[{"role": "user", "content": "hello"}],
             )
         finally:
-            lm._sync_client.close()
-            asyncio.run(lm._async_client.close())
+            lm.close()
 
         assert result.choices[0].message.content == "private-ca-ok"
         assert bodies and "ssl_verify" not in bodies[0]
@@ -417,8 +486,7 @@ class TestCustomCAReachesTheTransport:
                 messages=[{"role": "user", "content": "hello"}],
             )
         finally:
-            lm._sync_client.close()
-            asyncio.run(lm._async_client.close())
+            lm.close()
 
         assert result.choices[0].message.content == "private-ca-ok"
         assert len(bodies) == 1

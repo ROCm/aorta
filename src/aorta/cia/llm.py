@@ -4,6 +4,8 @@ import logging
 import os
 import ssl
 import sys
+import threading
+from collections.abc import Callable
 from typing import Any
 
 try:
@@ -87,8 +89,8 @@ def _openai_clients(
     api_base: str | None,
     api_key: str,
     verify: str | bool,
-) -> tuple[Any, Any]:
-    """OpenAI-compatible sync/async clients with per-LM TLS trust.
+) -> tuple[Any, Callable[[], Any]]:
+    """A sync client and lazy async-client factory with per-LM TLS trust.
 
     LiteLLM currently moves ``ssl_verify`` into ``extra_body`` on its
     ``openai/*`` route instead of applying it to the transport. Supplying the
@@ -103,22 +105,24 @@ def _openai_clients(
     common: dict[str, Any] = {"api_key": api_key}
     if api_base:
         common["base_url"] = api_base
-    return (
-        OpenAI(
-            **common,
-            http_client=httpx.Client(
-                verify=context,
-                follow_redirects=True,
-            ),
+    sync_client = OpenAI(
+        **common,
+        http_client=httpx.Client(
+            verify=context,
+            follow_redirects=True,
         ),
-        AsyncOpenAI(
+    )
+
+    def build_async_client() -> Any:
+        return AsyncOpenAI(
             **common,
             http_client=httpx.AsyncClient(
                 verify=context,
                 follow_redirects=True,
             ),
-        ),
-    )
+        )
+
+    return sync_client, build_async_client
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -332,11 +336,38 @@ class RedactingLM(dspy.LM):
         *args,
         sync_client: Any = None,
         async_client: Any = None,
+        async_client_factory: Callable[[], Any] | None = None,
         **kwargs,
     ):
         self._sync_client = sync_client
         self._async_client = async_client
+        self._async_client_factory = async_client_factory
+        self._async_client_lock = threading.Lock()
         super().__init__(*args, **kwargs)
+
+    def _get_async_client(self) -> Any:
+        if self._async_client is None and self._async_client_factory is not None:
+            with self._async_client_lock:
+                if self._async_client is None and self._async_client_factory is not None:
+                    self._async_client = self._async_client_factory()
+        return self._async_client
+
+    def close(self) -> None:
+        """Close sync transport resources owned by this LM. Idempotent."""
+        client, self._sync_client = self._sync_client, None
+        with self._async_client_lock:
+            self._async_client_factory = None
+        if client is not None:
+            client.close()
+
+    async def aclose(self) -> None:
+        """Close both sync and already-created async transport resources."""
+        with self._async_client_lock:
+            client, self._async_client = self._async_client, None
+            self._async_client_factory = None
+        self.close()
+        if client is not None:
+            await client.close()
 
     @staticmethod
     def _clean(items: tuple, prompt: str | None, messages: Any) -> tuple:
@@ -354,8 +385,9 @@ class RedactingLM(dspy.LM):
 
     async def aforward(self, prompt=None, messages=None, **kwargs):
         _, prompt, messages = self._clean((), prompt, messages)
-        if self._async_client is not None:
-            kwargs.setdefault("client", self._async_client)
+        async_client = self._get_async_client()
+        if async_client is not None:
+            kwargs.setdefault("client", async_client)
         return await super().aforward(prompt=prompt, messages=messages, **kwargs)
 
     def __call__(self, *items, prompt=None, messages=None, **kwargs):
@@ -413,14 +445,14 @@ def build_lm(
     verify = _ssl_verify()
     transport: dict[str, Any]
     if qualified_model.startswith("openai/"):
-        sync_client, async_client = _openai_clients(
+        sync_client, async_client_factory = _openai_clients(
             api_base=resolved_base,
             api_key=resolved_key,
             verify=verify,
         )
         transport = {
             "sync_client": sync_client,
-            "async_client": async_client,
+            "async_client_factory": async_client_factory,
         }
     else:
         # Non-OpenAI LiteLLM providers still consume this as provider
