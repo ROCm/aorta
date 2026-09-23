@@ -4713,8 +4713,31 @@ def test_a_group_of_one_is_allowed_and_says_why_it_looks_collapsed(
 
     # The CLI accepts it, and says which of the two causes this is. The drives
     # are stubbed because the question here is the argument, not the rollout.
+    #
+    # The recorder is stubbed for the same reason and one more: it imports
+    # `litellm` in its constructor, and `litellm` is not on the CPU lane --
+    # `aorta[chat]` carries it. Leaving it real made this test pass here and
+    # fail every CPU job with a `ModuleNotFoundError` that has nothing to do
+    # with `--samples 1`. It is reached *after* the warning is printed, so the
+    # claim was already true at the point the import ended the run; a red lane
+    # whose failure is a dependency is still a red lane nobody can read.
     corpus, _ = _build(build_corpus, tmp_path, _SURVEY)
+
+    class _NoTransport:
+        """The recorder's surface that `main` touches, and nothing else."""
+
+        def __init__(self, **_kwargs):
+            self.calls = []
+            self.seed_mode = None
+
+        def install(self):
+            pass
+
+        def restore(self):
+            pass
+
     monkeypatch.setattr(run_e2e, "drive_proposals", lambda *a, **k: [])
+    monkeypatch.setattr(run_e2e, "RecordingLiteLLM", _NoTransport)
     out = tmp_path / "one.json"
     assert run_e2e.main([
         "--corpus", str(corpus / "triage.jsonl"),
