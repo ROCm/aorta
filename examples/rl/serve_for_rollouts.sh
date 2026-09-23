@@ -420,8 +420,8 @@ up() {
       # status through an EXIT trap, which is why this looked correct.
       #
       # A `||` list suppresses `set -e` for its left-hand side, so the status
-      # can be read and `backends`'s own code -- 57 for sampling, 59 for
-      # grammar -- still reaches the caller.
+      # can be read and `backends`'s own code -- 57 and 60 for sampling, 59 and
+      # 61 for grammar -- still reaches the caller.
       rc=0
       backends || rc=$?
       if [ "${rc}" -ne 0 ]; then
@@ -567,7 +567,12 @@ models() {
 # greedy engine answers every sampled request with HTTP 200 and the argmax, so
 # there is no failure to notice downstream -- only completions that are all
 # identical, which reads as a model property rather than a server setting.
-# Returns non-zero when the engine reports greedy and greedy was not asked for.
+# Returns non-zero when either backend is unreadable, or when the value the
+# engine reports is not the value this script asked for. Equality, not a
+# blocklist: the first version failed only on `greedy` reported with something
+# else asked for, which answers "did it fall back to the bad value" and leaves
+# "did the override apply" unasked -- so a deterministic control run pinned to
+# `greedy` and silently served by `triton` exited 0.
 # It only *reports*; the caller decides what that means, because the two callers
 # want different things -- `up` owns a container and must tear it down, while
 # the standalone `backends` command does not own one and must not touch it.
@@ -633,6 +638,32 @@ backends() {
     echo
     return 57
   fi
+  if [ "${reported}" != "${SAMPLING}" ]; then
+    # The other direction, which the greedy-only test let through. `greedy`
+    # asked for and `triton` reported passed both conjuncts above and exited
+    # 0: the check was "did the engine fall back to the bad value", and the
+    # question is "did the engine apply what we asked for". Those coincide
+    # only when the requested value is the good one.
+    #
+    # It is not a hypothetical shape. `--sampling-backend` is a request the
+    # engine may decline -- an unrecognised name, a build without that
+    # kernel -- and declining it is exactly the case where the flag was worth
+    # passing. A deterministic control run pinned to `greedy` that silently
+    # gets `triton` is the same wasted GPU-hours as the reverse, with the
+    # added cost that the run is recorded as deterministic.
+    #
+    # 60, a code this script has not used. Not 57: that means "the engine
+    # ignored the sampling parameters", a statement about request handling
+    # that is not what happened here. Not 58 either -- `up` already returns 58
+    # for a model id the engine does not advertise, and `tokenspeed_serve`
+    # reads 58 as `rollout_sampling_backend_mismatch`, so the number is
+    # overloaded enough without a third meaning.
+    echo "FAIL: asked for --sampling-backend ${SAMPLING} but the engine reports" \
+         "'${reported}'; the override did not apply, so this engine is not the" \
+         "one the run is recorded against" >&2
+    echo
+    return 60
+  fi
 
   # The grammar backend, checked for the same reason and with a larger blast
   # radius than the sampling one. `LiteLLMProposer.propose` sends
@@ -659,6 +690,22 @@ backends() {
          "aorta agent cannot be served at all" >&2
     echo
     return 59
+  fi
+  if [ "${grammar}" != "${GRAMMAR}" ]; then
+    # Same widening as the sampling side, and the same reason: `none` asked
+    # for and `xgrammar` reported is an override that did not apply. Lower
+    # stakes than its sampling twin -- a grammar backend that is present when
+    # `none` was asked for still serves -- but a run whose recorded
+    # configuration is not the engine's is not a run anyone can read back.
+    #
+    # 61, for the reason 60 is not 57: `up` distinguishes the backends by exit
+    # code, and one number per determinate wrong answer is what makes the two
+    # halves of a bring-up failure tellable apart from the log alone.
+    echo "FAIL: asked for --grammar-backend ${GRAMMAR} but the engine reports" \
+         "'${grammar}'; the override did not apply, so this engine is not the" \
+         "one the run is recorded against" >&2
+    echo
+    return 61
   fi
   echo
 }

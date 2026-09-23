@@ -283,8 +283,22 @@ def grade_recipe_text(
     text: str,
     *,
     corpus: dict[str, str] | None = None,
+    sidecar_files: tuple[Path, ...] = (),
 ) -> Grade:
-    """Grade one candidate recipe. Never raises -- a bad candidate is a low tier."""
+    """Grade one candidate recipe. Never raises -- a bad candidate is a low tier.
+
+    ``sidecar_files`` is the operator's ``--mitigations-file`` set, the same
+    argument ``aorta triage`` and ``aorta probe`` pass to ``load_recipe``.
+    Without it this grader is a *standalone-recipe* grader and nothing said so:
+    a recipe naming a sidecar-supplied mitigation is well-formed, runnable, and
+    accepted by every aorta CLI, and it failed tier 3 here as an unknown
+    registry name. On a training run that is a correct candidate taught to be
+    a wrong one, and the tier it stops at -- `tier3_registry` -- reads as the
+    model inventing a mitigation.
+
+    Empty by default, which keeps the standalone case exactly as it was: no
+    sidecars offered, so a name outside the registry really is unresolvable.
+    """
     grade = Grade()
 
     # Tier 1 -- YAML.
@@ -308,7 +322,11 @@ def grade_recipe_text(
         # Tiers 2 and 3 -- `load_recipe` checks the schema *and* resolves
         # registry names, so the two are separated by which error it raises.
         try:
-            recipe = load_recipe(path)
+            # `sidecar_files or None`, which is how every aorta CLI calls it:
+            # `load_recipe` writes what it is given onto `recipe.sidecar_files`,
+            # so this is also what makes the explicit re-resolution below able
+            # to see them.
+            recipe = load_recipe(path, sidecar_files=sidecar_files or None)
         except (UnknownMitigationError, UnknownEnvironmentError) as exc:
             grade.tier = 2
             grade.failed_at = "tier3_registry"
@@ -344,16 +362,14 @@ def grade_recipe_text(
         # registered name the loader had just accepted.
         #
         # Both lookups are threaded, which they were not: `get_mitigation` was
-        # called bare while `get_environment` was given the sidecars. The
-        # asymmetry could not bite today, and the reason is worth stating so the
-        # threading is not mistaken for dead weight and removed. `load_recipe`
-        # is called above *without* `sidecar_files`, so `recipe.sidecar_files`
-        # is always empty here and a sidecar-only name fails inside the loader
-        # at this same tier, with this same exception type. So this fixes the
-        # contract rather than an observed misgrade -- which is exactly what
-        # this block is for, per the paragraph above: it exists so that a loader
-        # which stopped resolving eagerly, or a caller which starts threading
-        # sidecars in, fails the tier honestly instead of silently passing it.
+        # called bare while `get_environment` was given the sidecars. That
+        # asymmetry was unobservable while `load_recipe` was called without
+        # `sidecar_files` -- `recipe.sidecar_files` was always empty, so a
+        # sidecar-only name failed inside the loader at this same tier with
+        # this same exception type, and the threading here was insurance for a
+        # caller that did not exist. It exists now: `grade_recipe_text` takes
+        # the operator's files and hands them to the loader, so
+        # `recipe.sidecar_files` is populated and both lookups read it.
         #
         # Note also what is *not* affected: mitigations contributed through the
         # `aorta.mitigations` entry-point group are merged by `load_mitigations`
@@ -703,7 +719,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--recipes-root", type=Path, default=None,
                         help="corpus root for the novelty gate "
                              "(default: <repo>/recipes)")
+    # Named as `aorta triage` and `aorta probe` name it, and forwarded to the
+    # same `load_recipe` argument, because a candidate is graded against the
+    # registry view it would actually run under. Without this the grader was
+    # standalone-recipes-only and did not say so, and a recipe naming a
+    # sidecar mitigation was marked down at tier 3 for inventing a name the
+    # operator had supplied.
+    parser.add_argument("--mitigations-file", type=Path, action="append",
+                        default=[], dest="sidecars", metavar="PATH",
+                        help="JSON sidecar of ad-hoc mitigation/environment "
+                             "definitions to resolve names against (repeatable)")
     args = parser.parse_args(argv)
+    sidecars = tuple(args.sidecars)
 
     # The gate is on by default: it is part of the reward, not a diagnostic, and
     # a scorer that silently omits it pays full marks for retrieval.
@@ -753,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
             # shipped a gate that passes the inputs it never looked at.
             worst = max(worst, MAX_TIER)
             continue
-        grade = grade_recipe_text(text, corpus=corpus)
+        grade = grade_recipe_text(text, corpus=corpus, sidecar_files=sidecars)
         results[str(path)] = grade.as_dict()
         worst = max(worst, MAX_TIER - grade.tier)
         # The tier deficit is not the reward, and for the one input this gate

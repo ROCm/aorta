@@ -146,6 +146,42 @@ class Score:
         }
 
 
+def _detector_list(doc: dict[str, Any], key: str) -> list[str]:
+    """``doc[key]`` as a list of detector IDs, or a refusal naming the shape.
+
+    ``list(doc.get(key) or [])`` accepted anything iterable, and the shape that
+    matters is a string: a writer that emitted ``"failure_detectors_fired":
+    "tier1:sigsegv"`` instead of a one-element list produced
+    ``['t', 'i', 'e', 'r', '1', ...]``, and every character went into
+    ``partition_detectors`` as a detector ID. None are known, so they all sort
+    to the failure side, the trial is labelled a reproduction, and fourteen
+    fabricated IDs become the *ground truth* the attribution F1 is measured
+    against -- a model naming the real detector scores zero against them.
+
+    Nothing downstream can notice. The label is well-formed, the verdict is a
+    legal verdict, and the only evidence is the ID list itself, which no longer
+    resembles what the archive said. That is the corpus rot this module keeps
+    refusing to let through quietly, so this raises rather than coercing, and
+    the directory loaders turn it into a named skip beside their other ones.
+
+    A missing key and a JSON ``null`` are still the empty list: absent is a
+    real state for both fields -- a clean run fired no failure detectors -- and
+    is what the archive means, not a shape it got wrong.
+    """
+    value = doc.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise TypeError(
+            f"{key} is a JSON {type(value).__name__}, not a list; "
+            f"a bare string would be read one character per detector ID"
+        )
+    bad = [repr(item) for item in value if not isinstance(item, str)]
+    if bad:
+        raise TypeError(f"{key} holds non-string detector ID(s): {bad}")
+    return list(value)
+
+
 def label_run(doc: dict[str, Any], source: str | None = None) -> Label:
     """Recompute the verdict for one ``result.json`` through aorta's resolver.
 
@@ -178,8 +214,8 @@ def label_run(doc: dict[str, Any], source: str | None = None) -> Label:
     this function otherwise exists to re-derive and is the one case where the
     producer knows something the resolver does not.
     """
-    stored_failures = list(doc.get("failure_detectors_fired") or [])
-    stored_errors = list(doc.get("error_detectors_fired") or [])
+    stored_failures = _detector_list(doc, "failure_detectors_fired")
+    stored_errors = _detector_list(doc, "error_detectors_fired")
 
     # Held back from the re-split rather than re-classified afterwards, so the
     # resolver is never asked about an ID it documents itself as not owning.
@@ -280,6 +316,19 @@ def load_runs(root: Path) -> list[tuple[str, dict[str, Any]]]:
         if not isinstance(doc, dict):
             print(f"  skipped {path}: root is a JSON {type(doc).__name__}, not "
                   f"an object, so it carries no detector lists to label",
+                  file=sys.stderr)
+            continue
+        # The detector lists, checked here for the reason the root shape is:
+        # this is the seam that reports rejections, and `label_run` is called
+        # later over the whole batch with nothing between it and the sweep. A
+        # malformed list is worse than an unreadable file, because it does not
+        # raise -- see `_detector_list` -- so it has to be refused where a
+        # refusal costs one run and gets named.
+        try:
+            for key in ("failure_detectors_fired", "error_detectors_fired"):
+                _detector_list(doc, key)
+        except TypeError as exc:
+            print(f"  skipped {path}: malformed detector list ({exc})",
                   file=sys.stderr)
             continue
         out.append((str(path), doc))

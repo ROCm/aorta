@@ -349,14 +349,20 @@ python examples/rl/triage_reward.py   --corpus examples/rl/corpus/triage.jsonl
 python examples/rl/proposal_reward.py --corpus examples/rl/corpus/proposal.jsonl
 ```
 
-**`corpus/` holds a README and nothing else** — `*.jsonl` is gitignored
-repo-wide and these are run outputs, not fixtures, so the two commands above
-need a corpus built first. Without a GPU, point `--results` at
+**`corpus/` holds no generated rows** — `*.jsonl` is gitignored repo-wide and
+these are run outputs, not fixtures, so the two commands above need a corpus
+built first. Without a GPU, point `--results` at
 `recipes/sanitizers/survey/reports`, the six survey reports this repo does
 commit; that exercises every scorer path on a smaller, less balanced set.
-`corpus/README.md` is the provenance record for the nine-scenario sweep the
-measurements in the docs were taken against — what was in it, and the tool
-defects those runs surfaced.
+
+The two files the directory *does* commit are input and provenance, not rows:
+`scenario_labels.json`, the hand-written ground-truth autopsy category per
+scenario — kept beside the corpus rather than as a column in a row, because
+`build_corpus.py` rewrites the rows and a label written into one is lost on
+the next rebuild; `tests/agent/test_autopsy_categories.py` holds it to the
+`aorta.agent.llm` vocabulary — and `corpus/README.md`, the provenance record
+for the nine-scenario sweep the measurements in the docs were taken against:
+what was in it, and the tool defects those runs surfaced.
 
 ### One example is one scenario, not one finding
 

@@ -1,10 +1,14 @@
 # First real labelled corpus
 
-> **The artifacts are not committed — this directory holds only this file.**
-> `.gitignore` excludes `*.jsonl` repo-wide, and the three files described below
-> are the output of a GPU sanitizer sweep, not a checked-in fixture. So the
-> commands in this file do not run from a fresh checkout until you have built a
-> corpus. Two ways to get one, in order of effort:
+> **The artifacts are not committed — this directory holds no corpus rows.**
+> `.gitignore` excludes `*.jsonl` and `*.json` repo-wide, and the three files
+> described below are the output of a GPU sanitizer sweep, not a checked-in
+> fixture. The two files that *are* committed here are this provenance record
+> and `scenario_labels.json` — hand-written ground-truth labels, which
+> `.gitignore` re-admits by name precisely because they are input that must
+> survive a rebuild rather than output of one. So the commands in this file do
+> not run from a fresh checkout until you have built a corpus. Two ways to get
+> one, in order of effort:
 >
 > ```bash
 > # (a) No GPU. Six scenarios, from the survey reports committed in this repo.

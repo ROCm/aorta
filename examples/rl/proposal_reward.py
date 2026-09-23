@@ -120,7 +120,7 @@ import argparse
 import json
 import math
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -211,12 +211,38 @@ REQUIRED_KEYS: dict[str, type | tuple[type, ...]] = {
 
 @dataclass
 class Proposal:
-    """One model output, plus the loop state it was produced against."""
+    """One model output, plus the loop state it was produced against.
+
+    ``sidecar_files`` is part of that state, not a scoring option. The loop
+    the model was answering ran with some ``AgentPolicy``, and
+    ``--mitigations-file`` puts names in that policy's registry view that are
+    in no other. Scoring against a bare registry answers a question about a
+    *different* loop: every sidecar name reads as hallucinated at tier 4, and
+    the bare ``AgentPolicy()`` replay records ``policy_stop`` for a proposal
+    the real policy accepted. Both errors point the same way -- a correct
+    proposal scored as a wrong one -- so a run using sidecars trains against
+    its own ad-hoc mitigations being punished.
+
+    Empty by default, because a corpus row that recorded no sidecars was
+    produced without them; the default is the fact, not an assumption.
+    """
 
     name: str
     raw: str
     candidates: list[str] = field(default_factory=list)
     tried: list[str] = field(default_factory=list)
+    sidecar_files: tuple[Path, ...] = ()
+
+    @property
+    def extra_files(self) -> list[Path] | None:
+        """``sidecar_files`` in the shape the registry takes.
+
+        ``None`` rather than ``[]`` for "no sidecars", which is what
+        ``AgentPolicy.validate_step`` passes and what ``get_mitigation``
+        documents; keeping one spelling means the two lookups here and the one
+        inside the policy cannot disagree about what empty means.
+        """
+        return list(self.sidecar_files) or None
 
     @property
     def offered(self) -> list[str]:
@@ -327,7 +353,9 @@ def delivered(row: dict[str, Any]) -> bool:
     return not row.get("transport_error")
 
 
-def _consumer_outcome_of_raw(raw: str, offered: list[str]) -> str:
+def _consumer_outcome_of_raw(
+    raw: str, offered: list[str], extra_files: list[Path] | None = None
+) -> str:
     """What the real proposer would do with this reply, fences and all.
 
     Answers a different question from the tier ladder, and has to be computed
@@ -348,10 +376,12 @@ def _consumer_outcome_of_raw(raw: str, offered: list[str]) -> str:
         return "silent_stop"
     if not isinstance(raw_obj, dict):
         return "silent_stop"
-    return _consumer_outcome(raw_obj, offered)
+    return _consumer_outcome(raw_obj, offered, extra_files)
 
 
-def _consumer_outcome(raw_obj: dict[str, Any], offered: list[str]) -> str:
+def _consumer_outcome(
+    raw_obj: dict[str, Any], offered: list[str], extra_files: list[Path] | None = None
+) -> str:
     """What `run_agent_loop` would do with this proposal.
 
     Replays the two filters the real path applies, in order: the proposer's
@@ -377,7 +407,14 @@ def _consumer_outcome(raw_obj: dict[str, Any], offered: list[str]) -> str:
         stop_reason=step.stop_reason,
     )
     try:
-        AgentPolicy().validate_step(step)
+        # The policy the loop ran with, not a bare one. `validate_step` resolves
+        # every name through `get_mitigation(extra_files=self.sidecar_files)`,
+        # so a default-constructed policy refuses `--mitigations-file` names and
+        # this records `policy_stop` for a proposal the real loop accepted --
+        # which is the opposite of what this function claims to report.
+        AgentPolicy(
+            sidecar_files=tuple(extra_files) if extra_files else ()
+        ).validate_step(step)
     except PolicyViolation:
         return "policy_stop"
     if step.stop or not step.next_mitigations:
@@ -405,18 +442,20 @@ def score_proposal(proposal: Proposal) -> Score:
         score.stopped_at = "tier1_json"
         score.detail = f"does not parse: {exc.msg}"
         score.consumer_outcome = _consumer_outcome_of_raw(
-            proposal.raw, proposal.offered
+            proposal.raw, proposal.offered, proposal.extra_files
         )
         return score
     if not isinstance(raw_obj, dict):
         score.stopped_at = "tier1_json"
         score.detail = f"parsed as {type(raw_obj).__name__}, not an object"
         score.consumer_outcome = _consumer_outcome_of_raw(
-            proposal.raw, proposal.offered
+            proposal.raw, proposal.offered, proposal.extra_files
         )
         return score
     score.tier = 1
-    score.consumer_outcome = _consumer_outcome(raw_obj, proposal.offered)
+    score.consumer_outcome = _consumer_outcome(
+        raw_obj, proposal.offered, proposal.extra_files
+    )
 
     # Tier 2 -- the demanded keys, with the demanded types. Checked against the
     # raw object rather than the coerced AgentStep: from_dict would have
@@ -436,6 +475,30 @@ def score_proposal(proposal: Proposal) -> Score:
     if mistyped:
         score.stopped_at = "tier2_schema"
         score.detail = f"wrong type(s): {sorted(mistyped)}"
+        return _finish(score)
+    # The element type, which `list` does not carry. `REQUIRED_KEYS` can only
+    # say "a list", so `{"next_mitigations": [1, 2, 3]}` and
+    # `[{"name": "..."}]` cleared this tier, and tier 4 then read them through
+    # `[str(m) for m in ...]` -- a coercion that turns `1` into `"1"` and a
+    # dict into its repr, so the names that reached `get_mitigation` were names
+    # the reply never wrote. They are unknown, so the score is wrong in the
+    # forgiving direction rather than the harsh one: the reply is charged for
+    # hallucinating `"1"`, tier 4's `unknown` list reports a name with no
+    # source in the output, and a reader comparing the two cannot reconstruct
+    # what happened.
+    #
+    # Refused here, at the tier that exists for exactly this -- "the demanded
+    # keys, with the demanded types", checked against the raw object precisely
+    # because `from_dict` would repair the shape. A coercion three tiers later
+    # is that same repair, written by hand.
+    non_strings = [
+        f"next_mitigations[{index}]={type(name).__name__}"
+        for index, name in enumerate(raw_obj["next_mitigations"])
+        if not isinstance(name, str)
+    ]
+    if non_strings:
+        score.stopped_at = "tier2_schema"
+        score.detail = f"wrong type(s): {non_strings}"
         return _finish(score)
     score.tier = 2
 
@@ -476,7 +539,10 @@ def score_proposal(proposal: Proposal) -> Score:
             "alongside it are never tried"
         )
         return _finish(score)
-    names = [str(m) for m in raw_obj["next_mitigations"]]
+    # No `str(m)`. Tier 2 has already refused a list holding anything else, so
+    # the coercion could only ever have fired on a reply that never got here --
+    # and leaving it in would keep the door open for the next caller.
+    names = list(raw_obj["next_mitigations"])
     score.n_mitigations = len(names)
     # What the loop will charge for, after the consumer's own normalisation.
     # Reported alongside the written count rather than replacing it: a gap
@@ -496,7 +562,12 @@ def score_proposal(proposal: Proposal) -> Score:
     unknown: list[str] = []
     for name in names:
         try:
-            get_mitigation(name)
+            # The sidecars the loop ran with. Without them a `--mitigations-file`
+            # name -- registered, offered, and runnable by the real loop -- is
+            # reported here as an "unregistered mitigation ... silently dropped
+            # by the proposer", so a correct proposal is docked a tier for
+            # naming a mitigation the operator supplied on purpose.
+            get_mitigation(name, extra_files=proposal.extra_files)
         except UnknownMitigationError:
             unknown.append(name)
     if unknown:
@@ -529,7 +600,7 @@ def score_proposal(proposal: Proposal) -> Score:
     # unrepresentable confidence landing on tier 5, where it belongs, instead
     # of being reported as a policy violation.
     try:
-        AgentPolicy().validate_step(
+        AgentPolicy(sidecar_files=proposal.sidecar_files).validate_step(
             AgentStep(
                 category=category,
                 hypothesis=str(raw_obj["hypothesis"]),
@@ -890,12 +961,21 @@ def baselines() -> list[dict[str, Any]]:
     return rows
 
 
-def load_corpus(path: Path) -> list[tuple[Proposal, str]]:
+def load_corpus(
+    path: Path, sidecar_files: tuple[Path, ...] = ()
+) -> list[tuple[Proposal, str]]:
     """Load a `build_corpus.py` proposal JSONL, with each row's workload family.
 
     The corpus stores the raw model output verbatim, so scoring a corpus row is
     the same code path as scoring a fixture: nothing about the ladder is
     corpus-specific, which is what makes the two comparable.
+
+    ``sidecar_files`` is the registry view the rows were produced against, and
+    a row may carry its own under ``proposal.sidecar_files`` -- a row wins,
+    because the row records what that loop actually ran with and the argument
+    is only the caller's best guess for rows that recorded nothing. Scored
+    without either, every ``--mitigations-file`` name in the corpus reads as
+    hallucinated; see :class:`Proposal`.
     """
     out: list[tuple[Proposal, str]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -912,16 +992,25 @@ def load_corpus(path: Path) -> list[tuple[Proposal, str]]:
                 raw=spec["raw"],
                 candidates=list(spec.get("candidates") or []),
                 tried=list(spec.get("tried") or []),
+                sidecar_files=(
+                    tuple(Path(p) for p in spec["sidecar_files"])
+                    if spec.get("sidecar_files")
+                    else sidecar_files
+                ),
             ),
             row.get("workload_family", "unknown"),
         ))
     return out
 
 
-def run_demo(as_json: bool, corpus: Path | None = None) -> int:
+def run_demo(
+    as_json: bool,
+    corpus: Path | None = None,
+    sidecar_files: tuple[Path, ...] = (),
+) -> int:
     families: dict[str, int] = {}
     if corpus is not None:
-        rows = load_corpus(corpus)
+        rows = load_corpus(corpus, sidecar_files)
         if not rows:
             print(f"no proposal examples in {corpus}", file=sys.stderr)
             return 2
@@ -929,7 +1018,13 @@ def run_demo(as_json: bool, corpus: Path | None = None) -> int:
         for _, family in rows:
             families[family] = families.get(family, 0) + 1
     else:
-        proposals = list(FIXTURES)
+        # The built-in fixtures name registry mitigations only, so sidecars
+        # cannot change what they score -- but they are applied anyway, because
+        # the alternative is a flag that silently means nothing on the default
+        # invocation and something on `--corpus`.
+        proposals = [
+            replace(fixture, sidecar_files=sidecar_files) for fixture in FIXTURES
+        ]
 
     scored = [(f, score_proposal(f)) for f in proposals]
     if as_json:
@@ -1003,8 +1098,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--corpus", type=Path, default=None,
                         help="proposal.jsonl written by build_corpus.py")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    # Spelled as `aorta agent` spells it, because it means the same thing: the
+    # ad-hoc mitigations the loop's registry view included. A corpus produced
+    # by a run that used them must be scored with them, or every sidecar name
+    # in it is docked a tier for not existing.
+    parser.add_argument(
+        "--mitigations-file", type=Path, action="append", default=[], dest="sidecars",
+        metavar="PATH",
+        help="JSON sidecar of ad-hoc mitigations the scored run was given "
+             "(repeatable); names in it resolve exactly as they did for the loop",
+    )
     args = parser.parse_args(argv)
-    return run_demo(args.json, args.corpus)
+    return run_demo(args.json, args.corpus, tuple(args.sidecars))
 
 
 if __name__ == "__main__":

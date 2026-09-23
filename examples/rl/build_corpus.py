@@ -271,23 +271,48 @@ def collect(root: Path) -> list[Scenario]:
                 file=sys.stderr,
             )
             continue
-        # Claimed here, after the file has been shown to be a report, and not
-        # when its path was first seen. A rejected file contributes no
-        # scenario, so it makes nothing ambiguous -- but reserving the id on
-        # sight meant a corrupt `run-a/foo/sanitizer_report.json` made the
-        # valid `run-b/foo/sanitizer_report.json` a collision, and this
-        # refusal aborts the build. The loader's two rules contradicted each
-        # other: one archive-local corruption, skipped on its own line, then
-        # took the whole corpus down through a guard about *two good reports*.
-        if scenario_id in seen:
-            raise DuplicateScenario(
-                f"two reports share the scenario id {scenario_id!r}: "
-                f"{seen[scenario_id]} and {path}. The corpus id keys the label "
-                "map and the GRPO groups in run_e2e, so emitting both would "
-                "score one report against the other's label. Build them into "
-                "separate corpora, or rename one case directory."
+        # Validated against the model rather than against `dict`, and used for
+        # exactly one decision: whether this path may claim the scenario id.
+        # `{}` is an object, so the type check above passes it, and every
+        # later stage agrees it is not a report -- `label_sanitizer_report`
+        # rejects it, `triage_example` prints `rejected` and the scenario is
+        # dropped. But the id was claimed before anyone asked, so a truncated
+        # `run-a/foo/sanitizer_report.json` made the *valid*
+        # `run-b/foo/sanitizer_report.json` a duplicate and aborted the whole
+        # build, over a scenario the build was going to discard anyway. A
+        # truncated writer is the ordinary way to produce one: the bytes are
+        # valid JSON at every prefix that closes a brace, so waiting for a
+        # `JSONDecodeError` never catches it.
+        #
+        # Not skipped, deliberately. A document that is not a report is still
+        # a *rejected* report, and the build counts those: rejecting every
+        # report found is an empty corpus, which exits 1 rather than writing a
+        # corpus nobody can train on. Dropping these here would spend that
+        # signal to buy a guard that only needs the id withheld.
+        try:
+            SanitizerReport.from_dict(doc)
+        except (ValueError, KeyError, TypeError) as exc:
+            print(
+                f"  not a report, so it claims no scenario id: {path} "
+                f"({type(exc).__name__}: {exc})",
+                file=sys.stderr,
             )
-        seen[scenario_id] = path
+        else:
+            # Claimed here, after the file has been shown to be a report, and
+            # not when its path was first seen. The loader's two rules used to
+            # contradict each other: one archive-local corruption, worth a
+            # line on stderr and one scenario, then took the whole corpus down
+            # through a guard about *two good reports*.
+            if scenario_id in seen:
+                raise DuplicateScenario(
+                    f"two reports share the scenario id {scenario_id!r}: "
+                    f"{seen[scenario_id]} and {path}. The corpus id keys the "
+                    "label map and the GRPO groups in run_e2e, so emitting "
+                    "both would score one report against the other's label. "
+                    "Build them into separate corpora, or rename one case "
+                    "directory."
+                )
+            seen[scenario_id] = path
         scenarios.append(
             Scenario(
                 case=case,
@@ -472,6 +497,31 @@ def proposal_examples(
 CORPUS_FILES = ("triage.jsonl", "proposal.jsonl", "manifest.json")
 
 
+def _is_generated(name: str) -> bool:
+    """Whether ``name`` in an `--out` directory is this script's output.
+
+    Wider than :data:`CORPUS_FILES` because the set has changed -- a
+    `triage.v1.jsonl` left by an earlier version of this script is stale
+    output, and a rebuild that leaves it readable beside a fresh corpus is the
+    shape :func:`discard_corpus` exists to prevent. The shape of the name is
+    the only evidence available: rows are `*.jsonl`, and the summary is a
+    `manifest*.json`.
+
+    Narrow enough to be *the* rule for what a rebuild may destroy, which is
+    what :func:`publish` needs. `examples/rl/corpus` -- the `--out` in every
+    documented invocation -- commits two files this script does not produce,
+    `README.md` and `scenario_labels.json`, and the second is hand-written
+    ground truth that nothing regenerates. Matching on the output shape rather
+    than listing them by name means the next committed input beside a corpus
+    survives too, without an allowlist anybody has to remember to extend.
+    """
+    return (
+        name in CORPUS_FILES
+        or name.endswith(".jsonl")
+        or (name.startswith("manifest") and name.endswith(".json"))
+    )
+
+
 def _holds_a_corpus(out: Path) -> bool:
     """Whether ``out`` already holds a corpus this script produced.
 
@@ -524,6 +574,27 @@ def publish(out: Path, payload: dict[str, str]) -> None:
     between them, which no amount of care removes without a real transaction;
     what it does remove is the window where `out` exists and is half of two
     builds. A failed second rename puts the previous corpus back.
+
+    **Everything in `out` that :func:`_is_generated` does not claim is carried
+    across first.** Swapping directories replaces the directory, not the three
+    names, and the `--out` in every documented invocation is
+    `examples/rl/corpus`, which commits two files this script does not
+    produce: `README.md`, the provenance record, and `scenario_labels.json`,
+    the hand-written ground truth `.gitignore` re-admits by name. A rebuild
+    deleted both. The labels are the worse loss -- they are input, not output,
+    and nothing regenerates them -- but a build that leaves `git status`
+    showing two deletions is wrong either way.
+
+    Stale *output* is still destroyed, which is the other half and the reason
+    the test for it is next to the test for this one. A `triage.v1.jsonl` from
+    an earlier version of this script is not a file worth keeping; it is a
+    readable, well-formed corpus row file that no longer corresponds to
+    anything, which is the failure this whole area keeps arguing against.
+    :func:`_is_generated` is where the two are told apart.
+
+    Copied rather than moved, so a failure before the swap leaves `out`
+    untouched rather than half-emptied; the copies cost a provenance record,
+    not a corpus.
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     staging = out.with_name(f".{out.name}.staging-{os.getpid()}")
@@ -532,6 +603,14 @@ def publish(out: Path, payload: dict[str, str]) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
     staging.mkdir(parents=True)
     try:
+        if out.is_dir():
+            for entry in out.iterdir():
+                if entry.name in payload or _is_generated(entry.name):
+                    continue
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.copytree(entry, staging / entry.name, symlinks=True)
+                else:
+                    shutil.copy2(entry, staging / entry.name, follow_symlinks=False)
         for name, text in payload.items():
             (staging / name).write_text(text, encoding="utf-8")
         if out.exists():

@@ -279,6 +279,33 @@ def main() -> int:
     if args.src is None:
         args.src = args.rank
 
+    # Range-checked up here with the other argument errors, and for the same
+    # reason they are: an out-of-range rank is a command-line error whose cost
+    # was a timeout on both sides. `rendezvous` takes `world_size` as how many
+    # peers to wait for and `rank` as which one this is, and checks neither
+    # against the other -- `--rank 3` in a `--world-size 2` run joins a store
+    # that will never see a third peer, and `--world-size 3` against a TP=1
+    # engine waits for a peer nobody launched. Either way this peer publishes a
+    # plan that looks complete, the driver POSTs `/update_weights` against it,
+    # and both halves then sit in their own 30-minute timeouts over a typo.
+    # `--src` is the same mistake one level up: a broadcast root that is not in
+    # the group is a root no rank can match, so the collective never completes.
+    # Ordered rank-then-src because `--src` defaults to `--rank`: checking rank
+    # first means a defaulted `--src` is already in range by the time it is
+    # reached, so this message names `--src` only when `--src` was passed.
+    if args.world_size < 2:
+        raise SystemExit(
+            f"--world-size is {args.world_size}; this peer plus the engine's "
+            "first rank is already 2, and a group this peer is alone in has "
+            "nobody to broadcast to"
+        )
+    for flag, value in (("--rank", args.rank), ("--src", args.src)):
+        if not 0 <= value < args.world_size:
+            raise SystemExit(
+                f"{flag} is {value}, which is not a rank in a --world-size "
+                f"{args.world_size} group; expected 0..{args.world_size - 1}"
+            )
+
     # Validated here, before the torch import and before the rendezvous, rather
     # than inside `build_round` where it used to be. `build_round` is called
     # only after `join_group` has returned, so a typo in `--rounds` was rejected

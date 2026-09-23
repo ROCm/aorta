@@ -351,78 +351,61 @@ def test_an_unknown_environment_still_fails_tier_3(recipe_reward):
     assert grade.failed_at == "tier3_registry", grade.reason
 
 
-def _sidecar_threaded(recipe_reward, monkeypatch, tmp_path, mitigations):
-    """Make the loader receive sidecars, which `grade_recipe_text` does not do.
-
-    `load_recipe(path)` is called with no `sidecar_files`, so `recipe.sidecar_files`
-    is empty on every real candidate and the tier-3 block's sidecar threading is
-    unreachable from outside. That is why the asymmetry it had -- `get_mitigation`
-    bare while `get_environment` was given the sidecars -- could not misgrade
-    anything today: a sidecar-only name fails inside the loader first, at this
-    same tier and with this same exception.
-
-    The block exists for the case where that stops being true, which is stated in
-    its own comment: a loader that stops resolving eagerly, or a caller that
-    starts threading sidecars in, must fail the tier honestly rather than pass it
-    silently. So the seam is what to drive, and threading the loader is how to
-    reach it.
-    """
+def _mitigations_file(tmp_path, mitigations):
+    """A `--mitigations-file` sidecar, in the shape the registry reads."""
     side = tmp_path / "extra_mitigations.json"
     side.write_text(
         json.dumps({"version": 1, "mitigations": mitigations}), encoding="utf-8"
     )
-    real = recipe_reward.load_recipe
-    monkeypatch.setattr(
-        recipe_reward,
-        "load_recipe",
-        lambda path, **kw: real(path, sidecar_files=(side,), **kw),
-    )
+    return side
 
 
-def test_a_sidecar_supplied_mitigation_survives_tier_3(
-    recipe_reward, monkeypatch, tmp_path
-):
-    """`get_mitigation` was called bare while `get_environment` got the sidecars.
-
-    Upstream threads both: `_validate_names_resolve` in `aorta/triage/recipe.py`
-    passes `extra_files` to `get_mitigation` and `get_environment` alike, so a
-    recipe whose mitigation is defined in a sidecar is valid. Re-resolving one
-    axis without the sidecars contradicted the loader that had just accepted it,
-    and marked the recipe down to tier 2 -- the tier that means the schema is
-    wrong.
-
-    Not a misgrade anyone could have observed, and the helper above says why.
-    What it is is the seam going wrong in the direction that matters for widening
-    the action space: sidecar registries are one of the two ways a mitigation can
-    exist without being a builtin.
-    """
-    _sidecar_threaded(
-        recipe_reward, monkeypatch, tmp_path, {"sidecar_only_knob": {"SIDECAR_ONLY": "1"}}
-    )
-    text = yaml.safe_dump(
+def _sidecar_recipe(ticket, mitigation):
+    return yaml.safe_dump(
         {
             "schema_version": 1,
-            "ticket": "SIDECAR-1",
+            "ticket": ticket,
             "workload": "gpu_smoke",
             "trials": 1,
             "steps": 1,
             "cells": [
-                {
-                    "name": "side",
-                    "mitigations": ["sidecar_only_knob"],
-                    "environment": "local",
-                }
+                {"name": "side", "mitigations": [mitigation], "environment": "local"}
             ],
         }
     )
-    grade = recipe_reward.grade_recipe_text(text)
+
+
+def test_a_sidecar_supplied_mitigation_survives_tier_3(recipe_reward, tmp_path):
+    """The grader was standalone-recipes-only and nothing said so.
+
+    `load_recipe` was called with no `sidecar_files`, so a recipe naming a
+    mitigation the operator supplied through `--mitigations-file` -- valid,
+    runnable, and accepted by `aorta triage` and `aorta probe` -- failed tier 3
+    here as an unregistered name. On a training run that is a correct candidate
+    taught to be wrong, and `tier3_registry` reads as the model having invented
+    a mitigation.
+
+    `grade_recipe_text` now takes the same argument the CLIs take and forwards
+    it to the same place, so the candidate is graded against the registry view
+    it would actually run under. That also makes the tier-3 block's own sidecar
+    threading reachable: `recipe.sidecar_files` is populated, so `get_mitigation`
+    and `get_environment` re-resolve against what the loader used.
+    """
+    side = _mitigations_file(tmp_path, {"sidecar_only_knob": {"SIDECAR_ONLY": "1"}})
+    text = _sidecar_recipe("SIDECAR-1", "sidecar_only_knob")
+
+    without = recipe_reward.grade_recipe_text(text)
+    assert without.failed_at == "tier3_registry", without.reason
+    assert "sidecar_only_knob" in without.reason
+
+    grade = recipe_reward.grade_recipe_text(text, sidecar_files=(side,))
 
     assert grade.tier >= 3, (grade.tier, grade.failed_at, grade.reason)
     assert grade.failed_at != "tier3_registry", grade.reason
 
 
 def test_an_unknown_mitigation_still_fails_tier_3_with_sidecars_threaded(
-    recipe_reward, monkeypatch, tmp_path
+    recipe_reward, tmp_path
 ):
     """Narrowness: threading the sidecars must not switch the mitigation axis off.
 
@@ -430,29 +413,37 @@ def test_an_unknown_mitigation_still_fails_tier_3_with_sidecars_threaded(
     builtins nor the sidecar has to stay a tier-3 failure, or the fix has stopped
     checking rather than started checking correctly.
     """
-    _sidecar_threaded(
-        recipe_reward, monkeypatch, tmp_path, {"sidecar_only_knob": {"SIDECAR_ONLY": "1"}}
-    )
-    text = yaml.safe_dump(
-        {
-            "schema_version": 1,
-            "ticket": "SIDECAR-2",
-            "workload": "gpu_smoke",
-            "trials": 1,
-            "steps": 1,
-            "cells": [
-                {
-                    "name": "bad",
-                    "mitigations": ["no_such_mitigation"],
-                    "environment": "local",
-                }
-            ],
-        }
-    )
-    grade = recipe_reward.grade_recipe_text(text)
+    side = _mitigations_file(tmp_path, {"sidecar_only_knob": {"SIDECAR_ONLY": "1"}})
+    text = _sidecar_recipe("SIDECAR-2", "no_such_mitigation")
+
+    grade = recipe_reward.grade_recipe_text(text, sidecar_files=(side,))
 
     assert grade.tier == 2
     assert grade.failed_at == "tier3_registry", grade.reason
+
+
+def test_the_recipe_cli_forwards_its_mitigations_file(recipe_reward, tmp_path, capsys):
+    """The flag is the whole point: a grader nobody can pass sidecars to has none.
+
+    Spelled as `aorta triage --mitigations-file` spells it, repeatable for the
+    same reason, and forwarded to `load_recipe`'s own argument -- so scoring a
+    candidate from a sidecar run is the same flag rather than a second concept.
+    """
+    side = _mitigations_file(tmp_path, {"sidecar_only_knob": {"SIDECAR_ONLY": "1"}})
+    recipe = tmp_path / "candidate.yaml"
+    recipe.write_text(_sidecar_recipe("SIDECAR-CLI", "sidecar_only_knob"), "utf-8")
+
+    recipe_reward.main([str(recipe), "--json", "--no-novelty-gate"])
+    bare = json.loads(capsys.readouterr().out)[str(recipe)]
+
+    recipe_reward.main(
+        [str(recipe), "--json", "--no-novelty-gate", "--mitigations-file", str(side)]
+    )
+    supplied = json.loads(capsys.readouterr().out)[str(recipe)]
+
+    assert bare["failed_at"] == "tier3_registry", bare["reason"]
+    assert supplied["failed_at"] != "tier3_registry", supplied["reason"]
+    assert supplied["tier"] >= 3, supplied
 
 
 def test_an_unreadable_recipe_fails_the_novelty_gate_closed(recipe_reward, tmp_path):
@@ -735,6 +726,107 @@ def test_a_detector_recorded_on_the_wrong_side_is_re_partitioned(triage_reward):
     assert label.error_detectors == ["tier1:timeout"]
     assert label.failure_detectors == []
     assert label.verdict == "error"
+
+
+@pytest.mark.parametrize(
+    "key", ["failure_detectors_fired", "error_detectors_fired"]
+)
+def test_a_detector_field_written_as_a_bare_string_is_refused(triage_reward, key):
+    """One character per detector ID is corpus rot nothing downstream can see.
+
+    `list(doc.get(key) or [])` accepted any iterable, and a writer that emitted
+    `"failure_detectors_fired": "tier1:sigsegv"` instead of a one-element list
+    got `['t', 'i', 'e', 'r', ...]`. Every character went through
+    `partition_detectors` as an ID; none are known, so all fourteen sorted to
+    the failure side, the trial was labelled a reproduction, and those
+    fabricated IDs became the *ground truth* the attribution F1 is scored
+    against -- a model naming the real detector scores zero against them.
+
+    The label that comes out is well-formed and the verdict is a legal verdict,
+    so the refusal has to happen here or not at all.
+    """
+    doc = triage_reward._run("stringy", "fail", [], [])
+    doc[key] = "tier1:sigsegv"
+
+    with pytest.raises(TypeError) as excinfo:
+        triage_reward.label_run(doc)
+
+    # The message has to name the field and the shape: the operator's next move
+    # is to find the writer that emitted it.
+    assert key in str(excinfo.value)
+    assert "not a list" in str(excinfo.value)
+
+
+def test_a_detector_list_holding_a_non_string_is_refused_too(triage_reward):
+    """A list is the right container and still the wrong contents.
+
+    `partition_detectors` matches IDs by prefix, so a `None` or an int in the
+    list is an unmatchable value that lands on the failure side exactly as a
+    stray character does -- same fabrication, one shape further in.
+    """
+    doc = triage_reward._run("listy", "fail", [], [])
+    doc["error_detectors_fired"] = ["tier1:timeout", None, 7]
+
+    with pytest.raises(TypeError) as excinfo:
+        triage_reward.label_run(doc)
+
+    assert "non-string detector ID(s)" in str(excinfo.value)
+    # Both offenders named, not just the first: a writer emitting one bad type
+    # usually emits the rest of them too.
+    assert "None" in str(excinfo.value) and "7" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("absent", [{}, {"failure_detectors_fired": None}])
+def test_a_detector_field_the_archive_never_recorded_is_still_empty(
+    triage_reward, absent
+):
+    """Narrowness: absent is a real state, not a shape the writer got wrong.
+
+    A clean run fires no failure detectors, and a missing key and a JSON null
+    are both how an archive says so. Refusing either would reject the most
+    common document in the corpus.
+    """
+    doc = triage_reward._run("clean", "pass", [], [])
+    doc.pop("failure_detectors_fired")
+    doc.update(absent)
+
+    label = triage_reward.label_run(doc)
+
+    assert label.verdict == "pass"
+    assert label.failure_detectors == []
+
+
+def test_a_well_formed_detector_list_is_untouched(triage_reward):
+    """Narrowness: the shape the archive actually writes must still pass."""
+    doc = triage_reward._run("good", "fail", ["tier1:sigsegv"], ["tier1:timeout"])
+    label = triage_reward.label_run(doc)
+    assert label.failure_detectors == ["tier1:sigsegv"]
+    assert label.error_detectors == ["tier1:timeout"]
+
+
+def test_a_run_with_a_rotted_detector_field_is_skipped_not_fatal(
+    triage_reward, tmp_path
+):
+    """The sweep loses the rotted run, not the directory.
+
+    `TypeError` is raised from `label_run`, which the sweep calls from outside
+    the loader's `try` -- the same shape as the `AttributeError` that made one
+    non-object `result.json` score none of the directory. So the loader checks
+    the field itself and turns it into a named skip beside its other ones.
+    """
+    (tmp_path / "good").mkdir()
+    (tmp_path / "good" / "result.json").write_text(
+        json.dumps(triage_reward._run("ok", "fail", ["tier1:exit_nonzero"], []))
+    )
+    rotted = triage_reward._run("rotted", "fail", [], [])
+    rotted["failure_detectors_fired"] = "tier1:sigsegv"
+    (tmp_path / "rotted").mkdir()
+    (tmp_path / "rotted" / "result.json").write_text(json.dumps(rotted))
+
+    runs = triage_reward.load_runs(tmp_path)
+
+    assert [src for src, _ in runs] == [str(tmp_path / "good" / "result.json")]
+    assert triage_reward.label_run(runs[0][1]).verdict == "fail"
 
 
 def test_a_correct_answer_earns_the_full_reward(triage_reward):
@@ -1058,6 +1150,237 @@ def test_coerced_fields_still_lose_reward_even_though_the_consumer_accepts(
     score = proposal_reward.score_proposal(proposal)
     assert score.stopped_at == "tier2_schema"
     assert score.consumer_outcome == "accepted"
+
+
+@pytest.mark.parametrize(
+    ("why", "mitigations", "detail"),
+    [
+        ("ints", [1, 2], "next_mitigations[0]=int"),
+        ("objects", [{"name": "tf32_off"}], "next_mitigations[0]=dict"),
+        # The mixed case is the one a coercion hides best: the first name is
+        # real, so the proposal looks right in every summary that prints one.
+        ("a good name and a null", ["tf32_off", None], "next_mitigations[1]=NoneType"),
+        ("a nested list", [["tf32_off"]], "next_mitigations[0]=list"),
+    ],
+)
+def test_mitigation_names_that_are_not_strings_stop_at_the_schema_tier(
+    proposal_reward, why, mitigations, detail
+):
+    """`REQUIRED_KEYS` can say `list`; it cannot say "a list of what".
+
+    So a reply naming `[1, 2]` cleared tier 2, and tier 4 read it through
+    `[str(m) for m in ...]` -- `1` became `"1"`, an object became its repr, and
+    `get_mitigation` was asked about names the reply never wrote. The reply was
+    then charged for hallucinating them, which is wrong in the *forgiving*
+    direction: it earns two tiers of credit for a schema it did not meet, and
+    the `unknown` list reports names with no source in the output, so a reader
+    comparing the two cannot tell what the model actually said.
+
+    Refused at tier 2, which is the tier that reads the raw object rather than
+    the coerced `AgentStep` precisely so a repaired type is caught rather than
+    scored. A hand-written `str()` three tiers down is that same repair.
+    """
+    proposal = proposal_reward.Proposal(
+        why,
+        json.dumps(
+            {
+                "category": "rccl_hang",
+                "hypothesis": "h",
+                "next_mitigations": mitigations,
+                "confidence": 0.5,
+                "stop": False,
+            }
+        ),
+        ["tf32_off"],
+    )
+    score = proposal_reward.score_proposal(proposal)
+
+    assert score.stopped_at == "tier2_schema", score.detail
+    assert score.tier == 1
+    assert detail in score.detail
+
+
+def test_a_list_of_strings_is_still_a_schema_the_tier_accepts(proposal_reward):
+    """Narrowness. The refusal is about the element type, not about the list.
+
+    Including the empty list, which is a *legal* reply -- the implicit spelling
+    of a decision to stop -- and has to keep reaching tier 4, where the ladder
+    already has a verdict for it. A guard that refused it here would move that
+    verdict and change what an empty proposal scores.
+    """
+    for mitigations, expected in ((["tf32_off"], "tier5"), ([], "tier4_registry")):
+        proposal = proposal_reward.Proposal(
+            f"{len(mitigations)} name(s)",
+            json.dumps(
+                {
+                    "category": "rccl_hang",
+                    "hypothesis": "h",
+                    "next_mitigations": mitigations,
+                    "confidence": 0.5,
+                    "stop": False,
+                }
+            ),
+            ["tf32_off"],
+        )
+        score = proposal_reward.score_proposal(proposal)
+        assert score.tier >= 2, (mitigations, score.stopped_at, score.detail)
+        assert score.stopped_at != "tier2_schema", (mitigations, score.detail)
+        assert expected in (score.stopped_at or "tier5"), (mitigations, score.stopped_at)
+
+
+def _sidecar(tmp_path, name="rl_sidecar_flag"):
+    """A `--mitigations-file` sidecar defining one ad-hoc mitigation."""
+    path = tmp_path / "mitigations.json"
+    path.write_text(
+        json.dumps({"version": 1, "mitigations": {name: {"RL_SIDECAR": "1"}}}),
+        encoding="utf-8",
+    )
+    return path
+
+
+_SIDECAR_PROPOSAL = json.dumps(
+    {
+        "category": "rccl_hang",
+        "hypothesis": "h",
+        "next_mitigations": ["rl_sidecar_flag"],
+        "confidence": 0.5,
+        "stop": False,
+    }
+)
+
+
+def test_a_sidecar_mitigation_is_not_a_hallucination(proposal_reward, tmp_path):
+    """Scored against a bare registry, `--mitigations-file` names read as invented.
+
+    The loop the model answered ran with some `AgentPolicy`, and a sidecar puts
+    names in that policy's registry view that are in no other. This module
+    imported `get_mitigation` and `AgentPolicy` precisely so it could not drift
+    from the consumer -- and then called both without the sidecars, which is
+    the drift in a different place: the same names, resolved against a
+    different registry.
+
+    Both halves point the same way, which is what makes it costly. Tier 4 calls
+    a runnable mitigation "unregistered ... silently dropped by the proposer",
+    and the replay records `policy_stop` for a step the real policy returned
+    normalised. So a run using ad-hoc mitigations trains the model away from
+    the very names the operator supplied them to make available.
+    """
+    sidecar = _sidecar(tmp_path)
+    candidates = ["rl_sidecar_flag", "none"]
+
+    bare = proposal_reward.score_proposal(
+        proposal_reward.Proposal("no sidecar", _SIDECAR_PROPOSAL, candidates)
+    )
+    assert bare.stopped_at == "tier4_registry", bare.detail
+    assert "rl_sidecar_flag" in bare.detail
+    assert bare.consumer_outcome == "policy_stop"
+
+    scored = proposal_reward.score_proposal(
+        proposal_reward.Proposal(
+            "with sidecar",
+            _SIDECAR_PROPOSAL,
+            candidates,
+            sidecar_files=(sidecar,),
+        )
+    )
+    assert scored.tier == proposal_reward.MAX_TIER, (scored.stopped_at, scored.detail)
+    assert scored.reward == 1.0
+    assert scored.consumer_outcome == "accepted"
+
+
+def test_a_corpus_row_carries_the_sidecars_its_loop_ran_with(
+    proposal_reward, tmp_path
+):
+    """Two sources, and the row wins.
+
+    The row records what that loop actually ran with; the CLI argument is the
+    caller's guess for rows that recorded nothing. A corpus that mixes runs --
+    which is the ordinary shape, since `--out` is one directory per sweep and
+    not per policy -- needs both, and needs the per-row fact to be the one that
+    decides.
+    """
+    sidecar = _sidecar(tmp_path)
+    corpus = tmp_path / "proposal.jsonl"
+    corpus.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "kind": "proposal",
+                    "workload_family": "synthetic_hip_lds",
+                    "proposal": {
+                        "name": name,
+                        "raw": _SIDECAR_PROPOSAL,
+                        "candidates": ["rl_sidecar_flag", "none"],
+                        "tried": [],
+                        **({"sidecar_files": [str(sidecar)]} if on_row else {}),
+                    },
+                }
+            )
+            for name, on_row in (("row-carries-it", True), ("row-is-silent", False))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    on_row, silent = (p for p, _ in proposal_reward.load_corpus(corpus))
+    assert on_row.sidecar_files == (sidecar,)
+    assert silent.sidecar_files == (), "a row that recorded none has none"
+
+    # The argument fills the silent row and does not override the other.
+    on_row, silent = (
+        p for p, _ in proposal_reward.load_corpus(corpus, (tmp_path / "other.json",))
+    )
+    assert on_row.sidecar_files == (sidecar,)
+    assert silent.sidecar_files == (tmp_path / "other.json",)
+
+
+def test_the_scorer_cli_takes_the_sidecars_the_run_was_given(
+    proposal_reward, tmp_path, capsys
+):
+    """End to end, because the threading is only worth anything at the entry point.
+
+    `--mitigations-file` is spelled as `aorta agent` spells it and forwarded to
+    the same place, so scoring a corpus from a sidecar run is the same command
+    with the same flag rather than a second concept to learn.
+    """
+    sidecar = _sidecar(tmp_path)
+    corpus = tmp_path / "proposal.jsonl"
+    corpus.write_text(
+        json.dumps(
+            {
+                "kind": "proposal",
+                "workload_family": "synthetic_hip_lds",
+                "proposal": {
+                    "name": "sidecar-name",
+                    "raw": _SIDECAR_PROPOSAL,
+                    "candidates": ["rl_sidecar_flag", "none"],
+                    "tried": [],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        proposal_reward.main(["--corpus", str(corpus), "--json"]) == 0
+    )
+    bare = json.loads(capsys.readouterr().out)
+
+    assert (
+        proposal_reward.main(
+            ["--corpus", str(corpus), "--json", "--mitigations-file", str(sidecar)]
+        )
+        == 0
+    )
+    supplied = json.loads(capsys.readouterr().out)
+
+    def _tier(payload):
+        rows = payload["proposals"] if "proposals" in payload else payload["scores"]
+        return rows[0]["tier"]
+
+    assert _tier(bare) < proposal_reward.MAX_TIER
+    assert _tier(supplied) == proposal_reward.MAX_TIER
 
 
 def test_prose_around_the_object_earns_nothing(proposal_reward):
@@ -1730,6 +2053,73 @@ def test_a_successful_rebuild_replaces_the_corpus_rather_than_merging_into_it(
     assert manifest["scenarios"] == 6
     assert not (out / "triage.v1.jsonl").exists()
     assert (out / "triage.jsonl").is_file()
+
+
+def test_a_rebuild_keeps_the_files_it_did_not_write(build_corpus, tmp_path):
+    """The other half of the test above, and the one the swap got wrong.
+
+    `publish` replaces the *directory*, not the three names in it, so a
+    rebuild deleted everything else in `--out`. The `--out` in every
+    documented invocation is `examples/rl/corpus`, which commits two files
+    this script does not produce: `README.md`, the provenance record for the
+    sweep the published measurements were taken against, and
+    `scenario_labels.json`, hand-written ground truth that `.gitignore`
+    re-admits by name. The labels are the worse loss -- they are input, and
+    nothing regenerates them -- so a rebuild silently destroyed the one file
+    in that directory a rebuild cannot reproduce.
+
+    `_is_generated` is the line, not an allowlist of those two names: a
+    committed input beside a future corpus survives without anyone
+    remembering to extend a list, and stale `*.jsonl` output is still forfeit.
+    """
+    out = tmp_path / "corpus"
+    out.mkdir()
+    (out / "README.md").write_text("provenance\n", encoding="utf-8")
+    (out / "scenario_labels.json").write_text('{"schema_version": 1}\n', encoding="utf-8")
+    (out / "notes").mkdir()
+    (out / "notes" / "sweep.txt").write_text("kept too\n", encoding="utf-8")
+    # Generated, and from a naming scheme `CORPUS_FILES` no longer lists: still
+    # destroyed, or this fix would have traded one silent staleness for another.
+    (out / "triage.v1.jsonl").write_text("from the version before\n", encoding="utf-8")
+
+    _, manifest = _build(build_corpus, tmp_path, _SURVEY)
+
+    assert manifest["scenarios"] == 6
+    assert (out / "README.md").read_text(encoding="utf-8") == "provenance\n"
+    assert (
+        out / "scenario_labels.json"
+    ).read_text(encoding="utf-8") == '{"schema_version": 1}\n'
+    assert (out / "notes" / "sweep.txt").read_text(encoding="utf-8") == "kept too\n"
+    assert not (out / "triage.v1.jsonl").exists()
+    assert (out / "triage.jsonl").is_file()
+
+
+def test_a_failed_publish_leaves_the_files_it_did_not_write_alone(
+    build_corpus, tmp_path
+):
+    """Carrying entries across must not put them at risk to do it.
+
+    Moving them into staging would have been cheaper and would have emptied
+    `--out` before the swap, so a failure between the two left the provenance
+    record in a scratch directory the `finally` then deletes -- destroying it
+    on exactly the path that was supposed to change nothing.
+    """
+    out = tmp_path / "corpus"
+    out.mkdir()
+    (out / "README.md").write_text("provenance\n", encoding="utf-8")
+    for name in build_corpus.CORPUS_FILES:
+        (out / name).write_text(f"previous {name}\n", encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        build_corpus.publish(
+            out,
+            {"triage.jsonl": "fresh\n", "proposal.jsonl": None},  # None: dies here
+        )
+
+    assert (out / "README.md").read_text(encoding="utf-8") == "provenance\n"
+    for name in build_corpus.CORPUS_FILES:
+        assert (out / name).read_text(encoding="utf-8") == f"previous {name}\n"
+    assert not list(tmp_path.glob(".corpus.*")), "a scratch directory was left behind"
 
 
 def test_every_example_carries_a_workload_family(build_corpus, tmp_path):
@@ -2438,16 +2828,17 @@ def test_a_rejected_restore_update_is_named_rather_than_scored(
     assert verdict == "RESTORE_UPDATE_REJECTED"
 
 
-def _peer_argv(tmp_path, rounds):
+def _peer_argv(tmp_path, rounds, rank="0", world_size="2", src=None):
     return [
         sys.executable,
         str(_EXAMPLES / "nccl_weight_peer.py"),
         "--run-id",
         "R1",
         "--rank",
-        "0",
+        rank,
         "--world-size",
-        "2",
+        world_size,
+        *(() if src is None else ("--src", src)),
         "--master-address",
         "127.0.0.1",
         "--master-port",
@@ -2520,6 +2911,90 @@ def test_a_valid_rounds_argument_passes_the_new_check(tmp_path):
 
     assert "unknown round kind" not in output, output
     assert "--rounds is empty" not in output, output
+
+
+@pytest.mark.parametrize(
+    ("rounds", "kwargs", "expected"),
+    [
+        # A group this peer is alone in: the rendezvous completes immediately
+        # and there is no engine rank to broadcast to.
+        ("perturb,restore", {"world_size": "1"}, "--world-size is 1"),
+        ("perturb,restore", {"world_size": "0"}, "--world-size is 0"),
+        # A rank outside the group. The store never sees the peer this one
+        # thinks it is, so both halves wait out their own timeouts.
+        (
+            "perturb,restore",
+            {"rank": "2", "world_size": "2"},
+            "--rank is 2, which is not a rank in a --world-size 2 group",
+        ),
+        (
+            "perturb,restore",
+            {"rank": "-1"},
+            "--rank is -1, which is not a rank in a --world-size 2 group",
+        ),
+        # A broadcast root that is in no rank's group is a root no rank can
+        # match, so the collective cannot complete even once both sides join.
+        # `recv` rather than a sending round on purpose: a sending round with
+        # `--src != --rank` is already a role error, and its message names
+        # `--src` too, so it would pass this assertion with no bounds check at
+        # all. `recv` *wants* a `--src` that is not this peer, which leaves the
+        # range as the only thing that can reject 5.
+        (
+            "recv",
+            {"rank": "0", "world_size": "2", "src": "5"},
+            "--src is 5, which is not a rank in a --world-size 2 group",
+        ),
+    ],
+)
+def test_a_rank_outside_the_group_is_rejected_before_the_rendezvous(
+    tmp_path, rounds, kwargs, expected
+):
+    """`--world-size`, `--rank` and `--src` were taken entirely on trust.
+
+    `rendezvous` reads `world_size` as how many peers to wait for and `rank` as
+    which one this is, and validates neither against the other. So a typo in
+    either published a plan that looked complete, the driver POSTed
+    `/update_weights` against it, and both halves then sat in their own
+    30-minute timeouts -- the same cost a misspelled `--rounds` used to have,
+    for the same reason, one argument over.
+
+    Ordering is the assertion again: `--model-path` points at nothing, so the
+    load fails before any later check is reached. This message can only appear
+    if the bounds are checked up here with the other argument errors, ahead of
+    the torch import, the store and the group.
+    """
+    proc = subprocess.run(
+        _peer_argv(tmp_path, rounds, **kwargs),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode != 0, output
+    assert expected in output, output
+    assert not (tmp_path / "plan.json").exists(), "the plan must not be published"
+
+
+def test_a_rank_inside_the_group_passes_the_bounds_check(tmp_path):
+    """Narrowness: a peer at a non-zero rank in a wider group is legitimate.
+
+    Rank 0 in a world of 2 is the smallest valid layout, not the only one --
+    the module documents a TP=N engine occupying ranks `1..N` with
+    `world_size` `N + 1`, so refusing anything but the default would reject
+    every real topology. This gets past the bounds and fails later on the
+    unloadable model path, which is the point.
+    """
+    proc = subprocess.run(
+        _peer_argv(tmp_path, "perturb,restore", rank="3", world_size="8", src="3"),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert "--world-size is" not in output, output
+    assert "is not a rank in a" not in output, output
 
 
 def _serve_stubs(
@@ -2754,7 +3229,12 @@ def test_a_greedy_engine_is_fatal_to_the_rollout_server(tmp_path):
     (bin_dir / "curl").chmod(0o755)
 
     harness = tmp_path / "drive.sh"
-    harness.write_text(f'CONTROL=1\nSAMPLING=triton\n{body}\nbackends\n')
+    # Both variables, because both are compared against what the engine
+    # reports and both have a default in the script -- an unset `GRAMMAR` here
+    # is a harness the real script never produces.
+    harness.write_text(
+        f'CONTROL=1\nSAMPLING=triton\nGRAMMAR=xgrammar\n{body}\nbackends\n'
+    )
     proc = subprocess.run(
         ["bash", str(harness)],
         capture_output=True,
@@ -2842,6 +3322,133 @@ def test_a_none_grammar_backend_is_fatal(tmp_path, info, why):
     assert "grammar" in (proc.stdout + proc.stderr).lower(), why
 
 
+@pytest.mark.parametrize(
+    ("sampling", "grammar", "info", "code", "needle"),
+    [
+        # The case the greedy-only test let through: `greedy` asked for, and
+        # an engine that did not apply it. Both conjuncts of the old check are
+        # satisfied -- reported is not greedy -- so it exited 0.
+        (
+            "greedy",
+            "xgrammar",
+            '{"sampling_backend":"triton","grammar_backend":"xgrammar"}',
+            60,
+            "sampling-backend greedy",
+        ),
+        # Neither value is the degraded one, so no blocklist can catch this.
+        (
+            "triton",
+            "xgrammar",
+            '{"sampling_backend":"flashinfer","grammar_backend":"xgrammar"}',
+            60,
+            "sampling-backend triton",
+        ),
+        # The grammar side of the same hole.
+        (
+            "triton",
+            "none",
+            '{"sampling_backend":"triton","grammar_backend":"xgrammar"}',
+            61,
+            "grammar-backend none",
+        ),
+        # Spaced, so the compact-JSON stub is not what makes this pass.
+        (
+            "greedy",
+            "xgrammar",
+            '{ "sampling_backend" : "triton" , "grammar_backend" : "xgrammar" }',
+            60,
+            "sampling-backend greedy",
+        ),
+    ],
+)
+def test_a_backend_the_engine_did_not_apply_is_fatal_either_way(
+    tmp_path, sampling, grammar, info, code, needle
+):
+    """The check was a blocklist and the question is an equality.
+
+    `[ reported = greedy ] && [ SAMPLING != greedy ]` asks "did the engine
+    fall back to the bad value", which coincides with "did the override apply"
+    only when the requested value is the good one. So `TS_SAMPLING=greedy` --
+    a deterministic control run, the case where pinning the backend matters
+    most -- served by an engine reporting `triton` passed, and the run was
+    recorded as deterministic while being sampled.
+
+    Declining an override is not hypothetical: an unrecognised backend name or
+    a build without that kernel is exactly when the flag was worth passing,
+    and it is the case the engine answers by ignoring it.
+
+    Distinct codes per backend, continuing what 57 and 59 started: `up`
+    propagates `backends`'s own status, so the number alone tells the two
+    halves of a bring-up failure apart.
+    """
+    script = _EXAMPLES / "serve_for_rollouts.sh"
+    body = subprocess.run(
+        ["awk", "/^(_backend_field|backends)\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(f"#!/usr/bin/env bash\nprintf '%s' '{info}'\n")
+    (bin_dir / "curl").chmod(0o755)
+
+    harness = tmp_path / "drive.sh"
+    harness.write_text(
+        f"CONTROL=1\nSAMPLING={sampling}\nGRAMMAR={grammar}\n{body}\nbackends\n"
+    )
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == code, output
+    assert needle in output, output
+
+
+def test_an_engine_that_applied_both_overrides_is_silent(tmp_path):
+    """Narrowness for the equality above: agreement is still exit 0.
+
+    Including `greedy` and `none` on both sides, which the widened check has
+    to keep allowing -- they are legitimate requests, and a check that refused
+    the values rather than the disagreement would ban a deterministic control
+    run outright.
+    """
+    script = _EXAMPLES / "serve_for_rollouts.sh"
+    body = subprocess.run(
+        ["awk", "/^(_backend_field|backends)\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(
+        '#!/usr/bin/env bash\n'
+        'printf \'%s\' \'{"sampling_backend":"greedy","grammar_backend":"none"}\'\n'
+    )
+    (bin_dir / "curl").chmod(0o755)
+
+    harness = tmp_path / "drive.sh"
+    harness.write_text(
+        f"CONTROL=1\nSAMPLING=greedy\nGRAMMAR=none\n{body}\nbackends\n"
+    )
+    proc = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def test_an_explicitly_requested_none_grammar_is_allowed(tmp_path):
     """`TS_GRAMMAR=none` is a caller saying they do not need JSON responses.
 
@@ -2913,7 +3520,9 @@ def test_backends_does_not_fail_open(tmp_path, stub, why):
     (bin_dir / "curl").chmod(0o755)
 
     harness = tmp_path / "drive.sh"
-    harness.write_text(f"CONTROL=1\nSAMPLING=triton\n{body}\nbackends\n")
+    harness.write_text(
+        f"CONTROL=1\nSAMPLING=triton\nGRAMMAR=xgrammar\n{body}\nbackends\n"
+    )
     proc = subprocess.run(
         ["bash", str(harness)],
         capture_output=True,
@@ -4547,8 +5156,11 @@ def _graded_as(recipe_reward, monkeypatch, tmp_path, grade):
     (root / "committed.yaml").write_text(recipe_reward._GOOD, encoding="utf-8")
     candidate = tmp_path / "candidate.yaml"
     candidate.write_text(recipe_reward._GOOD, encoding="utf-8")
+    # `**_` rather than a named `sidecar_files`: the stub stands in for the
+    # grader's whole signature, and pinning it here means every keyword `main`
+    # learns to forward breaks seven tests that are about the exit code.
     monkeypatch.setattr(
-        recipe_reward, "grade_recipe_text", lambda text, corpus=None: grade
+        recipe_reward, "grade_recipe_text", lambda text, corpus=None, **_: grade
     )
     return recipe_reward.main([str(candidate), "--recipes-root", str(root)])
 
@@ -5071,6 +5683,53 @@ def test_a_corrupt_twin_does_not_make_the_good_report_a_collision(
     assert [s.scenario_id for s in scenarios] == ["gemm_f32_waitcheck"]
     assert scenarios[0].report_path.parent.parent.name == "runB"
     assert "skipped" in capsys.readouterr().err
+
+
+def test_an_object_that_is_not_a_report_does_not_make_the_good_one_a_collision(
+    build_corpus, tmp_path, capsys
+):
+    """The same fault as above, one layer in, and the layer the fix stopped at.
+
+    Claiming the id after `isinstance(doc, dict)` fixed unparseable twins and
+    left `{}` -- which is an object, and is not a report. `SanitizerReport`
+    rejects it, `triage_example` prints `rejected` and drops the scenario, so
+    it contributes nothing; but the id was already reserved, so the valid
+    `runB/<case>/sanitizer_report.json` was refused as a duplicate and the
+    whole build aborted over a scenario that was going to be discarded.
+
+    A truncated writer is the ordinary way to produce this: the bytes are
+    valid JSON at every prefix that closes a brace, so `json.JSONDecodeError`
+    is exactly the wrong thing to wait for.
+
+    The id is withheld rather than the scenario dropped. A document that is
+    not a report is still a *rejected* report, and
+    `test_a_corpus_with_nothing_in_it_is_a_failed_build` depends on that
+    count: rejecting every report found has to exit 1 rather than write an
+    empty corpus. Both paths are collected, and only the valid one keys
+    `seen`.
+    """
+    results = tmp_path / "results"
+    source = (
+        _SURVEY / "reports" / "gemm_f32_waitcheck" / "sanitizer_report.json"
+    ).read_text()
+    (results / "runA" / "gemm_f32_waitcheck").mkdir(parents=True)
+    (results / "runA" / "gemm_f32_waitcheck" / "sanitizer_report.json").write_text("{}")
+    (results / "runB" / "gemm_f32_waitcheck").mkdir(parents=True)
+    (results / "runB" / "gemm_f32_waitcheck" / "sanitizer_report.json").write_text(
+        source
+    )
+
+    # The assertion is that this returns at all: it used to raise
+    # `DuplicateScenario` and take the build with it.
+    scenarios = build_corpus.collect(results)
+
+    assert [s.scenario_id for s in scenarios] == ["gemm_f32_waitcheck"] * 2
+    assert {s.report_path.parent.parent.name for s in scenarios} == {"runA", "runB"}
+    assert "claims no scenario id" in capsys.readouterr().err
+    # And the valid report is the one that survives to a row, which is the
+    # scenario the abort was costing.
+    assert build_corpus.triage_example(scenarios[0], {}, {}) is None
+    assert build_corpus.triage_example(scenarios[1], {}, {}) is not None
 
 
 def test_two_good_reports_sharing_a_case_name_are_still_refused(
