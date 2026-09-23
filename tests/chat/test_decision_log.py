@@ -775,6 +775,106 @@ class TestAVerdictPrintedBeforeItsIdStillLands:
             {"job_id": "cia-a1", "category": None, "confidence": None}
         ]
 
+    def test_a_job_named_twice_in_json_keeps_the_verdict_of_its_later_row(self):
+        """The JSON twin of ``test_one_job_named_twice_is_recorded_once``.
+
+        Announce-then-finish is no less ordinary in a ``results`` array than in
+        a progress log, and taking the first object and discarding the rest
+        recorded ``cia-a1`` with ``category: None`` -- the record asserting
+        that a job which reached a verdict reached none, about output that
+        states the verdict two lines down.
+        """
+        output = json.dumps(
+            {
+                "results": [
+                    {"job_id": "cia-a1", "status": "running"},
+                    {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82},
+                ]
+            },
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82}
+        ]
+
+    def test_a_later_row_fills_only_the_half_the_earlier_one_left_empty(self):
+        """First valid value wins, per half -- the text reader's rule exactly.
+
+        Per half rather than per object, because a row that names a category
+        and no confidence is a verdict that *was* found; and first rather than
+        last, so a stale row printed after a final one cannot overwrite an
+        answer that was already being reported.
+        """
+        output = json.dumps(
+            {
+                "results": [
+                    {"job_id": "cia-a1", "category": "gpu_race"},
+                    {"job_id": "cia-a1", "category": "numeric_instability",
+                     "confidence": 0.41},
+                ]
+            },
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.41}
+        ]
+
+    def test_a_repeated_job_keeps_the_position_its_first_mention_earned(self):
+        """Document order is the order the jobs were announced in.
+
+        Re-appending on the later mention would reorder the rows against the
+        output they were read from, which is the one thing a reader uses to
+        pair a row with what they saw.
+        """
+        output = json.dumps(
+            {
+                "results": [
+                    {"job_id": "cia-a1"},
+                    {"job_id": "cia-b2", "category": "gpu_race", "confidence": 0.5},
+                    {"job_id": "cia-a1", "category": "hang", "confidence": 0.9},
+                ]
+            },
+            sort_keys=True,
+        )
+
+        assert [row["job_id"] for row in decision_log._cia_results(output)] == [
+            "cia-a1",
+            "cia-b2",
+        ]
+
+    def test_a_locator_for_an_already_recorded_job_is_still_walked_through(self):
+        """A pointer at a job is not a mention of its verdict, ever.
+
+        The locator check runs before the merge on purpose. With the order the
+        other way a bundle pointer whose id was already recorded returned at
+        the duplicate check and never descended, so a *different* job nested
+        under it was dropped -- the id being known turning the walk off for
+        everything below it.
+        """
+        output = json.dumps(
+            {
+                "results": [{"job_id": "cia-a1", "category": "gpu_race",
+                             "confidence": 0.82}],
+                "bundle": {
+                    "job_id": "cia-a1",
+                    "root": "/jobs/cia-a1",
+                    "child": {"job_id": "cia-b2", "category": "hang",
+                              "confidence": 0.3},
+                },
+            },
+            # Key order left alone here, unlike its neighbours: the claim is
+            # that the locator is descended into *after* its id is already
+            # recorded, and sorting would put `bundle` first and walk it before
+            # anything had claimed `cia-a1`.
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82},
+            {"job_id": "cia-b2", "category": "hang", "confidence": 0.3},
+        ]
+
     def test_a_json_field_of_the_wrong_type_reads_as_no_verdict(self):
         """A number is not a category and ``"high"`` is not a confidence.
 
@@ -1087,6 +1187,63 @@ class TestTheFieldsThatMakeARecordResolvable:
             "configuration.md documents summary mode without naming jobs_root, "
             "so an operator reading it would not know an absolute path "
             "containing their username is retained."
+        )
+
+    def test_full_mode_keeps_the_rationale_verbatim_and_the_docs_say_so(
+        self, monkeypatch
+    ):
+        """The same pairing as above, for the field the page described wrongly.
+
+        ``configuration.md`` promised the selector's reason had "filesystem
+        paths and IP addresses always scrubbed regardless of ``--no-redact``".
+        The decision log runs no scrubber in either mode -- ``_content`` either
+        summarises or returns the text -- and ``--no-redact`` governs what is
+        sent *to the model*, not what is written here. So an operator was
+        promised a protection that does not exist, on the mode that needs it
+        most, two paragraphs above the page's own correct warning.
+
+        The behaviour is right: full mode exists to keep a transcript. Both
+        halves are pinned together so the next rewrite cannot re-promise it.
+        """
+        monkeypatch.setenv(decision_log.SESSION_LOG_ENV, "full")
+        rationale = "read /home/pat/secrets.log after reaching 10.1.2.3"
+        turn_state = state()
+        turn_state["selection_rationale"] = rationale
+        path = decision_log.record_turn(
+            session_id="session-a",
+            turn=1,
+            query=QUERY,
+            reply=REPLY,
+            state=turn_state,
+        )
+        selection = next(
+            record for record in _records(path) if record["event"] == "selection"
+        )
+
+        assert selection["reason"] == rationale, (
+            "full mode stores the rationale as it was written; nothing here "
+            "scrubs it"
+        )
+
+        # Joined into one line first: the claim was split across a wrap, and a
+        # re-wrap must not be able to slip it past this test.
+        doc = " ".join(
+            (
+                Path(__file__).resolve().parents[2]
+                / "docs"
+                / "chat"
+                / "configuration.md"
+            )
+            .read_text(encoding="utf-8")
+            .split()
+        )
+        assert "scrubbed regardless of `--no-redact`" not in doc, (
+            "configuration.md promises the decision log scrubs the selector "
+            "rationale. It does not, in either mode."
+        )
+        assert "verbatim and unscrubbed" in doc, (
+            "the bullet has to say what full mode actually retains, or an "
+            "operator reading the list stops before the warning below it"
         )
 
     def test_a_tool_that_named_no_job_carries_no_root(self, monkeypatch):

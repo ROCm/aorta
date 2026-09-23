@@ -83,8 +83,11 @@ Both the browser and CLI record from the state returned by `invoke_agent`, so
 they capture the same decisions without changing the CLI to a streaming path:
 
 - route and selector-ranked tools;
-- the selector's own reason, with filesystem paths and IP addresses always
-  scrubbed regardless of `--no-redact`;
+- the selector's own reason — summarised in summary mode like every other
+  free-text field, and stored **verbatim and unscrubbed** in full mode. The
+  decision log runs no scrubber of its own in either mode, and `--no-redact`
+  does not reach it: that flag governs what is sent *to the model*, not what
+  is written here;
 - tool execution order, and one row per CIA job with its ID, category and
   confidence — a turn that starts three jobs records three rows, each carrying
   its own verdict;

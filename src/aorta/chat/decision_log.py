@@ -295,6 +295,29 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
     trust -- ``{"job_id": 3}`` or ``{"confidence": "high"}`` is not a verdict
     this record can carry, and writing it through would put a shape into the
     log that nothing downstream expects.
+
+    **A job named more than once keeps its verdict, half by half**, which is
+    the rule :func:`_cia_results_from_text` already follows and this side did
+    not. Announce-then-finish is the ordinary shape of a progress log in JSON
+    as much as in text -- a ``results`` array carrying a running row for
+    ``cia-a1`` and its completed row after it -- and taking the first object
+    and discarding the rest recorded the row with ``category=None``, which is
+    the record asserting that a job which reached a verdict reached none.
+
+    First *valid* value wins, per half and not per object, exactly as
+    :func:`_first_value` does across text spans: a later object fills a half
+    the earlier one left empty and can never replace one it filled. So
+    widening the read cannot change a verdict that was already being reported,
+    and a stale row appearing after a final one cannot overwrite it. The row
+    keeps the position of the object that introduced the id, because document
+    order is the order the jobs were announced in.
+
+    Merging across objects that share an id is not the merging
+    :func:`test_a_nested_object_does_not_inherit_a_parent_verdict` forbids.
+    That one is a parent's verdict reaching a *different* job nested under it,
+    which is misattribution; this is one job's own two mentions. The locator
+    check below runs before the merge for that reason -- a pointer at a job is
+    not a mention of its verdict, whether or not the id is already known.
     """
     try:
         doc = json.loads(output)
@@ -302,7 +325,7 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
         return None
 
     results: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    rows: dict[str, dict[str, Any]] = {}
 
     def walk(node: Any) -> None:
         if isinstance(node, list):
@@ -315,8 +338,6 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
         if not isinstance(raw_id, str) or not _JOB_ID_VALUE.fullmatch(raw_id):
             for value in node.values():
                 walk(value)
-            return
-        if raw_id in seen:
             return
         # A *locator* is not a result row. ``build_report`` writes
         # ``{"bundle": {"job_id": ..., "root": ...}, "category": ...,
@@ -346,25 +367,30 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
             for value in node.values():
                 walk(value)
             return
-        seen.add(raw_id)
         category = node.get("category")
         confidence = node.get("confidence")
-        results.append(
-            {
-                "job_id": raw_id,
-                "category": (
-                    category
-                    if isinstance(category, str)
-                    and _CATEGORY_VALUE.fullmatch(category)
-                    else None
-                ),
-                "confidence": (
-                    float(confidence)
-                    if type(confidence) in (int, float) and 0 <= confidence <= 1
-                    else None
-                ),
-            }
-        )
+        verdict = {
+            "category": (
+                category
+                if isinstance(category, str) and _CATEGORY_VALUE.fullmatch(category)
+                else None
+            ),
+            "confidence": (
+                float(confidence)
+                if type(confidence) in (int, float) and 0 <= confidence <= 1
+                else None
+            ),
+        }
+        known = rows.get(raw_id)
+        if known is not None:
+            # Fill, never replace: the earlier object's answer is the reported
+            # one, and only a half it left empty is still open.
+            for half, value in verdict.items():
+                if known[half] is None:
+                    known[half] = value
+            return
+        rows[raw_id] = row = {"job_id": raw_id, **verdict}
+        results.append(row)
 
     walk(doc)
     return results or None
