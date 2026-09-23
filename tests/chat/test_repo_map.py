@@ -17,11 +17,7 @@ class TestExtractPythonSignatures:
     def test_extracts_class_with_methods(self, tmp_path):
         py_file = tmp_path / "mod.py"
         py_file.write_text(
-            "class Foo:\n"
-            "    def bar(self):\n"
-            "        pass\n"
-            "    def baz(self, x):\n"
-            "        pass\n",
+            "class Foo:\n    def bar(self):\n        pass\n    def baz(self, x):\n        pass\n",
             encoding="utf-8",
         )
         sigs = _extract_python_signatures(py_file)
@@ -107,5 +103,6 @@ class TestGenerateRepoMap:
         mock_settings.aorta_path = str(tmp_path / "nope")
         mock_settings.repo_map_path = str(tmp_path / "map.md")
         import pytest
+
         with pytest.raises(FileNotFoundError):
             generate_repo_map(codebase_path=tmp_path / "nope")

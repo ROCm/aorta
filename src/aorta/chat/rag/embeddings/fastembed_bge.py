@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -215,10 +216,32 @@ class FastembedBgeEmbeddings(Embeddings):
         # HF_HOME after constructing the provider is still honoured.
         self.cache_dir = cache_dir
         self._model: TextEmbedding | None = None
+        self._model_lock = threading.Lock()
 
     def _get_model(self) -> TextEmbedding:
+        """The model, loading it once even if several threads ask at once.
+
+        Locked because retrieval is no longer confined to one thread.
+        ``VectorStore``'s async default runs the synchronous search through
+        ``run_in_executor``, so two Chainlit sessions whose *first* queries
+        overlap arrive here on different threads, both see ``None``, and both
+        load an ONNX model -- one of which is then thrown away, having spent
+        the memory and the startup latency.
+
+        Double-checked rather than locking unconditionally: this is called on
+        every embed, and once the model exists the lock would serialise
+        concurrent embedding for no reason. The first read is safe without the
+        lock because the attribute is only ever assigned a fully-built model,
+        never mutated into one.
+        """
         if self._model is None:
-            self._model = _text_embedding(self.model_name, self.cache_dir or model_cache_dir())
+            with self._model_lock:
+                # Re-checked inside: another thread may have loaded it while
+                # this one waited, and that is the whole case being fixed.
+                if self._model is None:
+                    self._model = _text_embedding(
+                        self.model_name, self.cache_dir or model_cache_dir()
+                    )
         return self._model
 
     def _embed(self, texts: list[str]) -> list[list[float]]:

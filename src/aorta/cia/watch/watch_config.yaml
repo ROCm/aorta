@@ -1,0 +1,45 @@
+# Watch agent configuration — all fields have sensible defaults.
+# Override per-job by passing --config <path> to `watchdog poll`.
+
+watch:
+  confidence_threshold: 0.70
+
+  # A constant. There was an adaptive scheme described here -- an interval
+  # tuned to the observed step cadence, backing off while a log was quiet --
+  # along with the two bounds it would have needed. None of it was implemented,
+  # so the description was of behaviour a reader could not get and the bounds
+  # were settings that changed nothing.
+  poll_interval_sec: 60
+
+  # The model comes from the environment (LITELLM_MODEL), and Autopsy binds its
+  # own; a key here would be read by nothing while looking like the place to
+  # set it.
+
+  # Semantic expectations — plain English; LLM maps these to whatever
+  # the workload calls throughput/loss/step in its own log format.
+  expectations:
+    - "Training loss should be decreasing or stable — not NaN, inf, or sharply diverging"
+    - "Training steps should be advancing — not stuck printing the same step repeatedly"
+    - "No out-of-memory errors, GPU faults, or process crashes"
+    - "Throughput should not drop more than 50% from the peak seen so far"
+    - "No NCCL/RCCL collective timeouts or rank stalls"
+    # Sanitizer sweeps (`mode: sanitizer`) are short and fail by verdict rather than
+    # by crashing, so the interesting event is the guardrail refusing the run.
+    - "A sanitizer sweep must not report 'sanitizer guardrail not clean' — that means a sanitizer verdict was fail or error"
+    - "No ConSan race findings such as 'auto replay diagnostic conflict=true'"
+    - "No waitcheck hazards such as 'missing s_waitcnt'"
+    - "A sanitizer run must actually execute — 'not_checked' with a reason like rj_waitcheck_not_found means the RocJITsu backend is missing, which is a tooling gap and not a pass"
+
+log_finder:
+  # Optional explicit paths (globs, {job_id} substituted at runtime).
+  # Leave empty for auto-discovery.
+  paths: []
+
+  # File extensions to include in extension-based scan.
+  extensions: [".log", ".txt", ".out", ".err"]
+
+  # Never watch these.
+  exclude: [".ckpt", ".bin", ".pt", ".safetensors", ".pkl", ".npz", ".npy"]
+
+  # Cap on number of files to monitor simultaneously.
+  max_files: 8

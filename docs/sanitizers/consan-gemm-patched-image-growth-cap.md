@@ -97,8 +97,11 @@ So the rejection is a deliberate, tunable capacity policy with two spellings:
 * `RJ_CONSAN_MAX_PATCHED_IMAGE_GROWTH_PERCENT=P` → ceiling of `P`% of the
   *original input image*, which scales with the object.
 
-AORTA sets neither. `run_consan` pins only `RJ_CONSAN_MODE`, `RJ_CONSAN_POLICY`
-and `RJ_CONSAN_LOG`; everything else is inherited from the ambient environment.
+AORTA does not expose either growth limit. `run_consan` clears every inherited
+`RJ_CONSAN_*` control, then pins the default mode, policy, logging and
+deterministic `max` preset so the evidence/verdict contract cannot vary with the
+caller's shell. A direct hook invocation can still set the two growth controls
+above when reproducing the historical capacity investigation below.
 Note the default ceiling itself moved between bundles — 402,653,184 (384 MiB) on
 `7d2c61e7` versus 419,430,400 (400 MiB) on `97c1640b` — so it is not a constant
 to rely on either.
@@ -245,8 +248,14 @@ Not a defect report. Filed as
    overlap (#10378) and a growth-ceiling rejection are different problems with
    different owners and different fixes, and they are indistinguishable from the
    status code, the exit code, and therefore from any dashboard built on them.
-   Only the human-readable line above the rejection separates them. The request
-   is a stable `cause=` token appended to the `load rejection` line — additive,
+   Only the human-readable line above the rejection separates them. The
+   dashboard's per-kernel `Detail` column does not close this gap: it surfaces
+   the backend's own refusal text where a check emits one (a Waitcheck
+   `waitcheck_backend_exit_N` quotes its `stderr` tail), but the exit-92
+   rejection reaches the report as the bare token
+   `consan_strict_load_rejection` with no prose and no `kernel_results`, so both
+   causes still render the same empty `Detail` and the same observation. The
+   request is a stable `cause=` token appended to the `load rejection` line — additive,
    no status renumbering, no change to any run's outcome. A distinct status per
    rejection class would also work but is behaviour-visible for anything already
    matching 4112, so it was explicitly offered as the non-preferred alternative.

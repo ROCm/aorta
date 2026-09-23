@@ -24,7 +24,7 @@ Two modes, mirroring the two committed HIP loaders:
     all -- ConSan instruments a code object when it is loaded.
 
 ``dispatch``
-    Additionally launch the kernel once, for record/replay's dynamic coverage.
+    Additionally launch the kernel once, for ConSan's dynamic coverage.
     This needs the argument signature, which Triton does **not** always write to
     the metadata JSON (it is absent in 3.7.1), so pass ``--launch-spec`` when the
     metadata has no ``signature`` -- preferably as an array of ``[name, type]``
@@ -33,7 +33,7 @@ Two modes, mirroring the two committed HIP loaders:
     closed for the same reason ``daily-consan-lds-dispatch.yaml`` did (zero
     captured records -> exit 86, ROCm/rocm-systems#9972); that is fixed in
     ``15275dad`` and that lane now passes. What still fails closed is an object
-    with no MOI-admissible sites -- ordinary global loads/stores alone give
+    with no ConSan-admissible sites -- ordinary global loads/stores alone give
     ``access=0/0``, so strict ``moi_require_records`` exits 86 regardless of the
     driver.
 

@@ -46,7 +46,7 @@ sanitizer_plan:
     # lenient, not strict, because consan_gemm_load is a LOAD-ONLY driver: it calls
     # hipModuleLoad/hipModuleUnload and never dispatches (consan_load.hip states the
     # contract -- production StreamK GEMM kernels need hipBLASLt to launch). strict
-    # sets RJ_CONSAN_MOI_REQUIRE_RECORDS, which demands visible dynamic records, so a
+    # sets RJ_CONSAN_REQUIRE_RECORDS, which demands visible dynamic records, so a
     # driver that never dispatches produces no dispatch packet and no records and
     # strict fails closed with combined_hook_exit_86 no matter how healthy the run
     # was. That is what #450 observed: error/error, zero findings, every single time.
@@ -107,11 +107,11 @@ sanitizer_plan:
     #
     # Dynamic race evidence over a dispatching GEMM is genuinely out of scope here and
     # is tracked separately; daily-consan-lds-dispatch.yaml is the end-to-end control
-    # that proves the record/replay path works on a caller-supplied object.
+    # that proves the default detector works on a caller-supplied object.
     consan_policy: lenient
     on_missing_backend: fail
     # Raised from the 300s cap of #364, which was chosen only because ROCm/rocm-systems#9964
-    # made MOI inventory non-terminating: every ceiling produced the same
+    # made ConSan inventory non-terminating: every ceiling produced the same
     # combined_hook_timeout, so a short one bought the identical row for a fraction of
     # the nightly. #9964 is fixed, so a ceiling that clears the run is now meaningful.
     #

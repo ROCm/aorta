@@ -699,7 +699,7 @@ ConSan simply cannot instrument them yet.
 
 #### Why the recipes default to `consan_policy: lenient`
 
-`strict` sets `RJ_CONSAN_MOI_REQUIRE_RECORDS`, which demands visible dynamic
+`strict` sets `RJ_CONSAN_REQUIRE_RECORDS`, which demands visible dynamic
 records. The loader runs in `load` mode: it loads and instruments the object but
 never dispatches it, so there is no dispatch packet and no records, and strict
 fails closed with `combined_hook_exit_86` however healthy the run was — measured,
@@ -708,7 +708,7 @@ not assumed:
 ```
 ConSan analysis verdict applicable=true static_complete=true dynamic_complete=false
                         access=77/77 barrier=12/12 visible_evidence=0
-RJ_CONSAN_MOI_REQUIRE_RECORDS requested, but 1 auto MOI report buffer(s)
+RJ_CONSAN_REQUIRE_RECORDS requested, but 1 auto report buffer(s)
 contained zero visible records and no kernel dispatch packet was observed
 ```
 
