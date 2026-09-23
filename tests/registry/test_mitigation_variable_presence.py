@@ -825,6 +825,61 @@ def test_only_torchs_directory_is_globbed(tmp_path):
     assert not [lib for lib in scanned if lib.name == "librocblas.so"], scanned
 
 
+def test_a_versioned_torch_object_is_scanned_like_an_unversioned_one(tmp_path):
+    """A runtime-only torch wheel was scanned as an empty directory.
+
+    ``glob("*.so")`` matched ``libtorch_hip.so`` and nothing else, but a wheel
+    that ships only ``libtorch_hip.so.2`` is the layout
+    ``_loaded_lib_path_from_maps`` exists to handle -- this repository already
+    knows torch appears that way. Missing it is the scan shrinking silently:
+    ``ScanSet.unresolved`` reports ROCm sonames that resolved nowhere, and
+    torch's side declares no sonames, so nothing is unresolved and nothing is
+    missing. `TORCH_ROCM_FA_PREFER_CK` is then reported unread for an install
+    that reads it.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    _fake_so(rocm / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    versioned = _fake_so(torch_lib / "libtorch_hip.so.2", ["TORCH_ROCM_FA_PREFER_CK"])
+    # Multi-component versions are the same layout; a `.so.debug` sidecar and a
+    # `.so.orig` backup are not shared objects and are not ELF, so widening the
+    # glob must not pick them up -- they would take the scan to
+    # `_unreadable_stack` and turn a cosmetic file into a red lane.
+    multi = _fake_so(torch_lib / "libc10_hip.so.2.4", ["PYTORCH_MIOPEN_SUGGEST_NHWC"])
+    (torch_lib / "libtorch_hip.so.debug").write_bytes(b"not an elf")
+    (torch_lib / "libtorch_hip.so.orig").write_bytes(b"not an elf")
+
+    scanned = libraries_to_scan([rocm, torch_lib]).libraries
+
+    assert versioned.resolve() in scanned, scanned
+    assert multi.resolve() in scanned, scanned
+    assert not [lib for lib in scanned if lib.suffix in {".debug", ".orig"}], scanned
+    # And the name reaches the union, which is the whole point of opening it.
+    assert "TORCH_ROCM_FA_PREFER_CK" in union_of_names(scanned)
+
+
+def test_one_inode_is_read_once_however_many_names_it_has(tmp_path):
+    """Narrowness for the widened glob: a devel install ships both names.
+
+    ``libtorch_hip.so`` is a symlink to ``libtorch_hip.so.2`` wherever the
+    devel package is installed, so matching versioned names too would have
+    doubled every read on exactly the installs that were already working. The
+    resolve is what keeps "one file is one read" true, which is the same claim
+    the ROCm side makes by resolving through ``resolve_library``.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    _fake_so(rocm / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    real = _fake_so(torch_lib / "libtorch_hip.so.2", ["TORCH_ROCM_FA_PREFER_CK"])
+    (torch_lib / "libtorch_hip.so").symlink_to(real)
+
+    scanned = libraries_to_scan([rocm, torch_lib]).libraries
+
+    assert [lib for lib in scanned if "libtorch_hip" in lib.name] == [real.resolve()]
+
+
 def test_a_known_absent_entrys_claimed_library_is_opened(tmp_path):
     """The rot check's precondition, end to end and without a GPU.
 
@@ -1165,6 +1220,42 @@ class ScanSet(NamedTuple):
     unresolved: tuple[str, ...]
 
 
+#: A shared object's filename, versioned or not: ``libtorch_hip.so`` and
+#: ``libtorch_hip.so.2`` both match, ``libtorch_hip.so.debug`` does not. The
+#: version part is required to be numeric for that reason -- a ``*.so*`` glob
+#: on its own sweeps up debug sidecars and ``.so.orig`` backups, which are not
+#: ELF and would take the whole scan to :func:`_unreadable_stack`.
+_SHARED_OBJECT_RE = re.compile(r"\.so(\.\d+)*$")
+
+
+def torch_shared_objects(torch_lib: Path) -> set[Path]:
+    """Every shared object in torch's directory, versioned names included.
+
+    ``glob("*.so")`` dropped the SONAME-versioned layout, which is not a
+    hypothetical layout: ``instrumentation/environment.py`` matches
+    ``libtorch_hip.so.2`` by name in ``_loaded_lib_path_from_maps`` precisely
+    because torch ships it that way. A wheel carrying only the versioned file
+    was therefore scanned as an *empty directory*, and this is the failure the
+    scan set is least able to report -- :class:`ScanSet` only knows a ROCm
+    soname resolved nowhere, and torch's side declares no sonames at all, so
+    nothing was unresolved and nothing was missing. The scan simply got
+    smaller, which moves both verdicts the wrong way: a variable only torch
+    reads is reported unread, and a :data:`KNOWN_ABSENT` entry whose claimed
+    consumer is a torch library stays excused by the binary that was not read.
+
+    Resolved here rather than by the caller because that is what makes the
+    widened pattern safe: ``libtorch_hip.so`` and ``libtorch_hip.so.2`` are two
+    names for one inode on a devel install, and reading both would be the same
+    double read the ROCm side already refuses. A set, so the dedup happens
+    before the caller's ordering does.
+    """
+    return {
+        lib.resolve()
+        for lib in torch_lib.glob("*.so*")
+        if _SHARED_OBJECT_RE.search(lib.name)
+    }
+
+
 def libraries_to_scan(dirs: list[Path]) -> ScanSet:
     """The shared objects to read names out of, resolved from ``dirs``.
 
@@ -1221,7 +1312,7 @@ def libraries_to_scan(dirs: list[Path]) -> ScanSet:
                 resolved.add(soname)
                 scanned.append(lib)
                 break
-    scanned.extend(sorted(lib.resolve() for lib in torch_lib.glob("*.so")))
+    scanned.extend(sorted(torch_shared_objects(torch_lib)))
     return ScanSet(
         list(dict.fromkeys(scanned)),
         tuple(soname for soname in sonames_to_scan() if soname not in resolved),
@@ -1402,24 +1493,53 @@ def test_a_variable_shared_with_an_unlisted_mitigation_is_still_reported(monkeyp
     }
 
 
-def test_a_known_absent_entry_that_came_back_is_flagged():
+def _synthetic_exemption(monkeypatch) -> tuple[str, str]:
+    """A ``KNOWN_ABSENT`` entry supplied by the test rather than borrowed.
+
+    The two tests below are about :func:`find_fixed_known_absent`, and the
+    backlog is only their fixture. Borrowing it made them say nothing once it
+    was empty -- and guarding that with ``assert KNOWN_ABSENT`` turned the
+    empty backlog into a permanent red, which is worse: an empty backlog is
+    this lane's *success* condition, both defects closed, and reaching it must
+    not be the thing that breaks the test that watched for it.
+
+    Added to the live mapping rather than replacing it, so the real entries are
+    still covered by the equality below while there are any.
+    """
+    monkeypatch.setitem(
+        BUILTIN_MITIGATIONS, "synthetic_mitigation", {"SYNTHETIC_ABSENT": "1"}
+    )
+    monkeypatch.setitem(
+        KNOWN_ABSENT,
+        ("synthetic_mitigation", "SYNTHETIC_ABSENT"),
+        Exemption(
+            claimed_consumer="libamdhip64.so",
+            reason="fixture for this test; never reaches the real backlog",
+        ),
+    )
+    return ("synthetic_mitigation", "SYNTHETIC_ABSENT")
+
+
+def test_a_known_absent_entry_that_came_back_is_flagged(monkeypatch):
     """With everything readable, every listed pair is a pair that came back.
 
-    Stated as ``sorted(KNOWN_ABSENT)`` rather than as the two pairs in it
-    today: hard-coding them makes fixing `tf32_off` break a test that is not
-    about `tf32_off`, and the assertion being made here is about the function,
-    not about the backlog's current contents.
+    Stated as ``sorted(KNOWN_ABSENT)`` rather than as the pairs in it today:
+    hard-coding them makes fixing `tf32_off` break a test that is not about
+    `tf32_off`, and the assertion being made here is about the function.
     """
-    # An empty backlog would make the assertion below `[] == []`, so it is
-    # stated: this test is only saying something while there is a list.
-    assert KNOWN_ABSENT, "nothing listed, so this test asserts nothing"
+    synthetic = _synthetic_exemption(monkeypatch)
     present = set(mitigation_variables())          # everything readable
+    # Named explicitly as well as compared, so the test still asserts something
+    # specific on the day the real backlog is empty.
+    assert synthetic in find_fixed_known_absent(present)
     assert find_fixed_known_absent(present) == sorted(KNOWN_ABSENT)
 
 
-def test_nothing_is_flagged_while_the_backlog_is_genuinely_absent():
-    """The narrowness control, derived from the list for the same reason."""
+def test_nothing_is_flagged_while_the_backlog_is_genuinely_absent(monkeypatch):
+    """The narrowness control, on the same supplied entry for the same reason."""
+    synthetic = _synthetic_exemption(monkeypatch)
     present = set(mitigation_variables()) - {v for _, v in KNOWN_ABSENT}
+    assert synthetic[1] not in present
     assert find_fixed_known_absent(present) == []
 
 
