@@ -1166,19 +1166,55 @@ shrink as the record-only metrics are promoted on evidence. It got larger rather
 than smaller when the excursion was measured, which strengthens the case below
 for a per-metric scope.
 
-**7. Promote the record-only metrics on evidence, not on schedule.** After
-another ten nightlies under the live gate there are twenty more observations.
-Take them in two groups, because they are blocked on different things:
+**7. Promote the record-only metrics on evidence, not on schedule.** The nine
+are blocked on three different things, and only one group is waiting on nights
+that have not happened yet. The groups are the ones in the current-state box at
+the top of this file; this is what to *do* about each.
 
-- `median_ttft_ms`, `output_throughput` and `step_time_ms.max` are blocked on the
-  step-0 excursion, not on their spread — which is already good enough. The
-  `warmup_steps: 2` change is intended to remove the blocker, so promote them
-  once the step-3 window shows twenty cell-runs with no excursion. That window
-  *is* the re-taken one; there is no separate re-take to schedule.
-- The remaining `p99_*` metrics are blocked on having no repeat data. Promote any
-  whose window spread is comparable to its median's. `p99_ttft_ms` gated is worth
-  more than `median_ttft_ms` gated, because tail latency is what a serving
-  regression damages first — we just have no basis for a bound on it yet.
+- **Evidence in hand — `median_ttft_ms`, `output_throughput`.** Nothing to
+  wait for. Their only blocker was the step-0 excursion and the completed
+  2026-09-08..09-17 window cleared it in all twenty cell-runs
+  ([step 4](#the-rollout-sequence)). They are unarmed because the first bless
+  was kept attributable, not because the measurement is missing. Promoting
+  them is an ordinary PR against the window already recorded here: step 6's
+  derivations, on the table in step 4, with no new nights.
+
+  Mind the policy. `median_ttft_ms` is `max` and takes `max × 1.25` on the
+  window maximum; `output_throughput` is `min` and takes `min × 0.85` on the
+  window **minimum**. Both derivations are checked against this document by
+  `test_each_blessed_bound_is_its_windows_extremum_times_the_policys_margin`.
+
+- **Analysis first, and possibly a second window — `p99_ttft_ms`,
+  `p99_tpot_ms`, `p99_e2el_ms`.** Not a shortage of nights: the nightly
+  harvests every allowlisted metric, so the completed window recorded these too.
+  [Step 3](#the-rollout-sequence) only asked for five metrics to be written
+  down, so nobody has computed their spread — that is the gap, and it is an
+  afternoon with the dashboard rather than ten more nights. Read the ten
+  nights that exist, then decide: promote any whose spread is comparable to
+  its median's, and take a second window only if a p99 over 32 requests turns
+  out too wide to size a margin from. That is the real risk here — a p99 over
+  32 requests is the 32nd of 32 order statistics — but it is a finding to
+  make, not an assumption to act on.
+
+- **No window will unblock these — `median_e2el_ms`, `request_throughput`,
+  `total_token_throughput`, `tokens_per_sec`.** Held back on *redundancy*, not
+  on evidence: each is determined by a metric already gated, so arming them
+  adds reason lines to one event rather than detection. What has to change is
+  the argument in [the per-metric table](#per-metric-gate-record-only-or-never),
+  not the number of nights.
+
+Do the middle group rather than skipping it, and do not let the easy group
+crowd it out: a gated `p99_ttft_ms` is worth more than a gated `median_ttft_ms`,
+because tail latency is what a serving regression damages first. The first
+group is the one with no work left in it, not the one with the most value in
+it.
+
+`step_time_ms.max` is not one of the nine and does not belong to any of these
+groups. The window cleared its excursion blocker too, but it fails on a second
+and independent ground: it is not a recorded metric, no per-night series
+accumulates for it, and a bound synthesised from one night's mean at bless time
+is not something a window measured. Promoting it needs that to change, not more
+observations.
 
 If the hand-editing recurs every refresh rather than converging, the fix is a
 per-metric scope alongside `--perf-gate-entry`. That is the point to build it —

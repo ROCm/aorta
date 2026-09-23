@@ -959,10 +959,18 @@ def _gated_serving_metrics() -> dict[str, set[str]]:
 #: while both documents went on claiming "gated on **both** cells".
 _SERVING_CELLS = frozenset({"baseline", "no-scratch-reclaim"})
 
-#: `max × 1.25` on the window maximum, from step 6 of the rollout doc. Stated
-#: here so the derivation check below has something to check against; the doc
-#: text is asserted alongside it so the two cannot drift.
+#: The two derivations step 6 of the rollout doc documents: `max × 1.25` on the
+#: window maximum for a `max` metric, `min × 0.85` on the window minimum for a
+#: `min` one. Stated here so the derivation check below has something to check
+#: against; the doc text for both is asserted alongside them so they cannot
+#: drift.
+#:
+#: Only `max` is armed today. `_FLOOR_MARGIN` is here because step 7 names
+#: `output_throughput` -- a `min` metric -- as ready for promotion, and a check
+#: that only knows ceilings would fail that promotion for having the wrong
+#: policy rather than the wrong number.
 _BLESS_MARGIN = 1.25
+_FLOOR_MARGIN = 0.85
 
 _BACKTICKED = re.compile(r"`([A-Za-z0-9_.]+)`")
 
@@ -1108,7 +1116,63 @@ def test_the_docs_name_exactly_the_serving_metrics_that_are_gated():
         )
 
 
-def test_the_rollout_doc_does_not_send_step_seven_back_for_another_window():
+def _unquoted(doc: str) -> str:
+    """``doc`` with markdown blockquote markers stripped, line by line.
+
+    The current-state box is a blockquote, so its table's rows begin ``> |``
+    and `_table_rows` -- which requires a line to start with ``|`` -- reads
+    none of them. Stripping here rather than loosening `_table_rows` keeps
+    that function's other callers reading exactly the tables they read today.
+    """
+    return "\n".join(
+        line.lstrip()[1:].lstrip() if line.lstrip().startswith(">") else line
+        for line in doc.splitlines()
+    )
+
+
+def _bullets(section: str) -> list[str]:
+    """Top-level ``- `` items in ``section``, each with its indented continuation.
+
+    A bullet ends at the first non-blank line that is not indented, so prose
+    *after* the list is not absorbed into the last item. Splitting on ``\\n- ``
+    instead gave the final bullet everything to the end of the section, which
+    made a paragraph below the list look like part of it -- and a check that
+    reads which names a bullet carries would then read names that belong to the
+    commentary.
+    """
+    items: list[str] = []
+    current: list[str] | None = None
+    for line in section.splitlines():
+        if line.startswith("- "):
+            if current is not None:
+                items.append("\n".join(current))
+            current = [line]
+        elif current is not None:
+            if line.strip() and not line.startswith(" "):
+                items.append("\n".join(current))
+                current = None
+            else:
+                current.append(line)
+    if current is not None:
+        items.append("\n".join(current))
+    return items
+
+
+def _step_seven(doc: str) -> str:
+    """Step 7's text, from its numbered heading to the next `##` section.
+
+    Sliced rather than grepped for over the whole file because the claim being
+    checked is about *where* a statement is. The current-state box and step 7
+    are allowed to say different things about different metrics; what they may
+    not do is give contradictory instructions about the same ones, and that is
+    only visible if the two regions are read separately.
+    """
+    start = doc.index("**7. Promote the record-only metrics")
+    end = doc.index("\n## ", start)
+    return doc[start:end]
+
+
+def test_step_seven_groups_the_nine_the_way_the_current_state_box_does():
     """The doc gave two answers about when step 7 may begin, and they disagreed.
 
     The header said the nine record-only metrics are "what the next window is
@@ -1117,17 +1181,73 @@ def test_the_rollout_doc_does_not_send_step_seven_back_for_another_window():
     `output_throughput`. Following the header costs ten nights nobody needs; the
     two halves were added by different commits and nothing read them together.
 
-    Narrow on purpose, and in both directions: the blanket instruction must
-    stay gone, and the two metrics it was wrong about must still be named as
-    deferred rather than blocked. A reworded sentence passes; the old one, and
-    a rewrite that quietly drops the distinction, do not.
+    Fixing the header was not enough, and the first spelling of this test only
+    checked the header. Step 7 went on saying "after another ten nightlies"
+    and calling the `p99_*` metrics blocked on repeat data the window in fact
+    recorded -- so the instruction a step-7 author actually follows still sent
+    them back for nights nobody needs, and the tripwire passed because it was
+    looking at one sentence somewhere else in the file.
+
+    So this checks the partition rather than any sentence. The current-state
+    box states three groups of the nine; step 7's bullets must name the same
+    three, each whole and none merged. A reword passes. Splitting a group,
+    merging two, or dropping a metric does not -- and neither does the
+    original defect, because the old step 7 put `median_ttft_ms` and
+    `output_throughput` in a bullet with the `p99_*` reasoning about
+    excursions.
     """
     doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
-    stale = "need another window before any of them can be promoted"
-    assert stale not in doc, (
-        f"the rollout doc still says the nine {stale!r}, which step 4 of the "
-        "same document contradicts for median_ttft_ms and output_throughput."
+
+    groups = _table_rows(
+        _unquoted(doc), ("record-only metric", "what step 7 is waiting for")
     )
+    assert groups, (
+        "the rollout doc has no `| record-only metric | what step 7 is waiting "
+        "for |` box, so what step 7 must agree with cannot be read and this "
+        "check would compare against nothing."
+    )
+    expected = [frozenset(_BACKTICKED.findall(row[0])) for row in groups]
+    assert all(expected) and len(set(expected)) == len(expected), (
+        f"the current-state box's groups are not distinct and non-empty: {expected}"
+    )
+    nine = frozenset().union(*expected)
+    assert len(nine) == 9, (
+        f"the box names {len(nine)} record-only metrics, not nine: {sorted(nine)}. "
+        "Update this count with the rollout rather than around it."
+    )
+
+    bullets = _bullets(_step_seven(doc))
+    assert bullets, "step 7 has no bullet list to read its groups out of"
+    found = [g for g in (frozenset(_BACKTICKED.findall(b)) & nine for b in bullets) if g]
+    assert sorted(map(sorted, found)) == sorted(map(sorted, expected)), (
+        f"step 7 groups the nine as {sorted(map(sorted, found))} while the "
+        f"current-state box groups them as {sorted(map(sorted, expected))}. The "
+        "two have to give the same answer about the same metric: the box is "
+        "what a reader sees first and step 7 is what a promoter acts on."
+    )
+
+    # The two instructions that were false while the header check above passed.
+    # Kept as literals because they are the specific wrong things this document
+    # said, and a grep is the honest way to say "not that again".
+    for stale, why in (
+        (
+            "need another window before any of them can be promoted",
+            "step 4 of the same document contradicts it for median_ttft_ms and "
+            "output_throughput",
+        ),
+        (
+            "After another ten nightlies",
+            "the completed window already holds what two of the nine need, and "
+            "step 7 must not open by scheduling ten more",
+        ),
+        (
+            "blocked on having no repeat data",
+            "the nightly harvests every allowlisted metric, so the window "
+            "recorded the p99 series; what is missing is the analysis of it",
+        ),
+    ):
+        assert stale not in doc, f"the rollout doc still says {stale!r}: {why}."
+
     assert "deferred to a separate PR" in doc, (
         "nothing records that median_ttft_ms and output_throughput are held "
         "back for attributability rather than for evidence, so a step-7 author "
@@ -1164,7 +1284,7 @@ def test_the_rollout_doc_does_not_still_say_the_window_is_outstanding():
     )
 
 
-def test_each_blessed_ceiling_is_the_window_maximum_times_the_margin():
+def test_each_blessed_bound_is_its_windows_extremum_times_the_policys_margin():
     """The numbers themselves, not just the prose around them.
 
     The other tripwires here guard the *docs* against drifting from the
@@ -1173,11 +1293,22 @@ def test_each_blessed_ceiling_is_the_window_maximum_times_the_margin():
     -- so a transposed digit passed every test in the tree and would have been
     found by a nightly that stopped failing, or started.
 
-    The window maxima are committed in `tokenspeed-gating-rollout.md`, so the
-    derivation is checkable rather than merely stated: each ceiling must be its
-    cell's and metric's window maximum times the documented margin. That also
-    makes the next hand-written bless show its working, which is the habit
-    worth having rather than this particular set of four numbers being right.
+    The window extrema are committed in `tokenspeed-gating-rollout.md`, so the
+    derivation is checkable rather than merely stated: each bound must be its
+    cell's and metric's window extremum times the margin its policy documents.
+    That also makes the next hand-written bless show its working, which is the
+    habit worth having rather than this particular set of four numbers being
+    right.
+
+    **Both policies, though only `max` is armed today.** Step 6 documents two
+    derivations -- `max × 1.25` on the window maximum and `min × 0.85` on the
+    window minimum -- and step 7 names `output_throughput`, a `min` metric, as
+    one of the two whose evidence is already in hand. Asserting `policy ==
+    "max"` for every armed key would have failed that promotion *even when its
+    floor was derived exactly as the document says*, which makes this test an
+    obstacle to the rollout it exists to protect. The policy is read from the
+    baseline entry and picks the column and the multiplier; an unknown policy
+    is a failure rather than a skip, so a third one cannot arrive unchecked.
 
     Both directions of coverage are asserted -- a gated key with no window row
     is a bound nothing sized, and a window row with no gated key is a metric
@@ -1186,21 +1317,28 @@ def test_each_blessed_ceiling_is_the_window_maximum_times_the_margin():
     doc = (
         nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md"
     ).read_text("utf-8")
-    assert f"`max × {_BLESS_MARGIN}`" in doc, (
-        f"the rollout doc no longer states the margin as max x {_BLESS_MARGIN}, "
-        "so the derivation checked below is not the one it documents."
-    )
+    for margin, policy in ((_BLESS_MARGIN, "max"), (_FLOOR_MARGIN, "min")):
+        assert f"`{policy} × {margin}`" in doc, (
+            f"the rollout doc no longer states the {policy} margin as "
+            f"{policy} x {margin}, so the derivation checked below is not the "
+            "one it documents."
+        )
 
     rows = _table_rows(
         doc, ("cell", "metric", "min", "median", "max", "max/median", "full range")
     )
     assert rows, "the rollout doc has no per-cell window table to derive from"
-    maxima = {
-        (row[0].strip("`"), row[1].strip("`")): float(row[4]) for row in rows
+    #: policy -> {(cell, metric): the extremum that policy's bound anchors on}.
+    #: `min` anchors on the window minimum and `max` on the maximum: a floor is
+    #: sized by the worst throughput seen, a ceiling by the worst latency.
+    window = {
+        "min": {(row[0].strip("`"), row[1].strip("`")): float(row[2]) for row in rows},
+        "max": {(row[0].strip("`"), row[1].strip("`")): float(row[4]) for row in rows},
     }
+    margins = {"max": _BLESS_MARGIN, "min": _FLOOR_MARGIN}
 
     gated = _gated_serving_metrics()
-    measured = {(cell, metric) for cell, metric in maxima}
+    measured = set(window["max"])
     armed = {(cell, name) for cell, names in gated.items() for name in names}
     assert armed == measured, (
         f"gated keys {sorted(armed)} and window rows {sorted(measured)} do not "
@@ -1215,14 +1353,17 @@ def test_each_blessed_ceiling_is_the_window_maximum_times_the_margin():
     )["baselines"]
     for cell, metric in sorted(armed):
         spec = baselines[f"tokenspeed_serve_smoke::{cell}"]["metrics"][metric]
-        assert spec["policy"] == "max", (
-            f"{cell}/{metric} is policy {spec['policy']!r}; the derivation "
-            "below is the one for a max ceiling."
+        policy = spec["policy"]
+        assert policy in margins, (
+            f"{cell}/{metric} is policy {policy!r}, which step 6 of the "
+            f"rollout doc gives no derivation for; it documents {sorted(margins)}. "
+            "Add the rule there and the margin here rather than exempting the key."
         )
-        expected = round(maxima[(cell, metric)] * _BLESS_MARGIN, 4)
+        anchor = window[policy][(cell, metric)]
+        expected = round(anchor * margins[policy], 4)
         assert spec["value"] == expected, (
-            f"{cell}/{metric} is blessed at {spec['value']} but the window "
-            f"maximum {maxima[(cell, metric)]} x {_BLESS_MARGIN} is {expected}."
+            f"{cell}/{metric} is policy {policy} and blessed at {spec['value']}, "
+            f"but its window {policy} {anchor} x {margins[policy]} is {expected}."
         )
 
 
