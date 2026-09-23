@@ -174,12 +174,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--temperatures", type=float, nargs="+",
                         default=[0.0, 0.6, 1.0])
-    parser.add_argument("--draws", type=int, default=5)
+    parser.add_argument("--draws", type=int, default=5,
+                        help="completions per temperature; must be at least 1")
     parser.add_argument("--seed-probe-temperature", type=float, default=1.0,
                         help="seed behaviour is only observable where sampling "
                              "is non-trivial, so probe it away from 0")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
+    # `--draws 0` made every counter in the temperature table honest and
+    # meaningless at once: no request is sent, `delivered 0/0` and `distinct
+    # 0/0` print, and the probe exits 0 as though it had measured something. A
+    # recorded diversity measurement over zero completions is the shape this
+    # tool exists to refuse -- it is what "distinct 1/5 out of four transport
+    # failures" was, with the sample size taken to its limit. Rejected at the
+    # boundary rather than defended at every counter, the same way `run_e2e`
+    # bounds `--replicates`.
+    if args.draws < 1:
+        parser.error("--draws must be at least 1")
 
     os.environ["OPENAI_API_BASE"] = args.base_url
     os.environ["OPENAI_API_KEY"] = args.api_key

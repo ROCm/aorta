@@ -5003,3 +5003,92 @@ def test_a_shared_provider_install_is_refused_not_mismeasured(run_e2e, monkeypat
     assert "ChatProviderProposer" in message
     assert "litellm.completion" in message
     assert "response_format" in message
+
+
+# --------------------------------------------------------------------------- #
+# Review pass 2026-09-23, second round
+# --------------------------------------------------------------------------- #
+
+
+def test_a_corrupt_twin_does_not_make_the_good_report_a_collision(
+    build_corpus, tmp_path, capsys
+):
+    """The loader's two rules contradicted each other on one archive.
+
+    The id was claimed when the path was first seen, before the file had been
+    shown to be a report. So a corrupt `runA/<case>/sanitizer_report.json` --
+    skipped on its own line, one scenario lost, exactly as intended -- then
+    made the valid `runB/<case>/sanitizer_report.json` a duplicate, and this
+    refusal aborts the whole build. A file that contributes no scenario cannot
+    make anything ambiguous, which is the only thing the collision guard is
+    about.
+    """
+    results = tmp_path / "results"
+    source = (
+        _SURVEY / "reports" / "gemm_f32_waitcheck" / "sanitizer_report.json"
+    ).read_text()
+    (results / "runA" / "gemm_f32_waitcheck").mkdir(parents=True)
+    (results / "runA" / "gemm_f32_waitcheck" / "sanitizer_report.json").write_text(
+        "{not json"
+    )
+    (results / "runB" / "gemm_f32_waitcheck").mkdir(parents=True)
+    (results / "runB" / "gemm_f32_waitcheck" / "sanitizer_report.json").write_text(
+        source
+    )
+
+    scenarios = build_corpus.collect(results)
+
+    assert [s.scenario_id for s in scenarios] == ["gemm_f32_waitcheck"]
+    assert scenarios[0].report_path.parent.parent.name == "runB"
+    assert "skipped" in capsys.readouterr().err
+
+
+def test_two_good_reports_sharing_a_case_name_are_still_refused(
+    build_corpus, tmp_path
+):
+    """Narrowness. Moving the claim must not retire the guard.
+
+    Two well-formed reports under one case name is the failure nothing
+    downstream can see -- `run_e2e` keys its label map and its GRPO groups on
+    the id, so one report is scored against the other's label -- and it is
+    still a refusal.
+    """
+    results = tmp_path / "results"
+    source = (
+        _SURVEY / "reports" / "gemm_f32_waitcheck" / "sanitizer_report.json"
+    ).read_text()
+    for run in ("runA", "runB"):
+        case = results / run / "gemm_f32_waitcheck"
+        case.mkdir(parents=True)
+        (case / "sanitizer_report.json").write_text(source)
+
+    with pytest.raises(build_corpus.DuplicateScenario, match="gemm_f32_waitcheck"):
+        build_corpus.collect(results)
+
+
+def test_a_probe_that_draws_nothing_is_not_a_successful_probe(monkeypatch):
+    """`--draws 0` printed `delivered 0/0  distinct 0/0` and exited 0.
+
+    Every counter is computed over the completions that came back, so with
+    none asked for they are all honest and all meaningless -- and a recorded
+    diversity measurement over zero completions is the exact shape this tool
+    was written to refuse, with the sample size taken to its limit. Rejected at
+    the boundary, so no counter downstream has to defend against it.
+    """
+    probe_seed = _load("probe_seed")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("no request should be sent for an empty probe")
+
+    monkeypatch.setattr(probe_seed, "call", fail_if_called)
+
+    for draws in ("0", "-1"):
+        with pytest.raises(SystemExit) as refusal:
+            probe_seed.main([
+                "--base-url", "http://127.0.0.1:1/v1",
+                "--model", "m",
+                "--temperatures", "1.0",
+                "--draws", draws,
+            ])
+        # argparse's own exit code for a usage error, not a verdict of 1.
+        assert refusal.value.code == 2, draws

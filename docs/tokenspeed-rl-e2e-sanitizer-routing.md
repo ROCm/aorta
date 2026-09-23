@@ -819,12 +819,20 @@ the policy cannot fake by looking cheap — which means running the mitigation.
 
 ### 5.6 Still open, unchanged
 
-3. **The category axis still has no labels**, so tier 3 cannot be made
-   *correct*-sensitive rather than *membership*-sensitive. This is the same
-   blocker, unchanged, and it now has a measured consequence rather than a
-   predicted one: 8 of 9 scenarios have no right answer available in the closed
-   set. Widening the set to cover kernel-level races is the smallest fix. Fix 1
-   is built to become correctness-sensitive the moment this lands.
+3. **The labels exist now; nothing scores against them yet.** *Updated
+   2026-09-22.* The measurement stands as taken and is kept here as one: against
+   the eight-category set, 8 of 9 scenarios had no right answer available in the
+   closed set, which is the whole reason tier 3 could only be
+   *membership*-sensitive rather than *correct*-sensitive.
+   [PR #484](https://github.com/ROCm/aorta/pull/484) has since merged and
+   removed both halves of that gap — it widened the set to eleven, including the
+   `gpu_race` label for the kernel-level races the measurement pointed at, and
+   it added hand-written per-scenario ground truth in
+   `examples/rl/corpus/scenario_labels.json`. So the blocker is no longer that
+   labels do not exist. What remains is wiring: no grader reads that file, so
+   tier 3 still scores membership in the closed set rather than agreement with
+   the scenario's label. Fix 1 was built to take that comparison and needs no
+   redesign to accept it.
 4. **Default `--grammar-backend xgrammar` wherever a recipe serves a model an
    agent will call**, or make `LiteLLMProposer` degrade when `response_format`
    is refused. Right now the two halves of the integration disagree and only

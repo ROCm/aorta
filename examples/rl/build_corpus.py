@@ -248,15 +248,6 @@ def collect(root: Path) -> list[Scenario]:
     for path in sorted(root.rglob("sanitizer_report.json")):
         case = path.parent.name
         scenario_id = case
-        if scenario_id in seen:
-            raise DuplicateScenario(
-                f"two reports share the scenario id {scenario_id!r}: "
-                f"{seen[scenario_id]} and {path}. The corpus id keys the label "
-                "map and the GRPO groups in run_e2e, so emitting both would "
-                "score one report against the other's label. Build them into "
-                "separate corpora, or rename one case directory."
-            )
-        seen[scenario_id] = path
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -280,6 +271,23 @@ def collect(root: Path) -> list[Scenario]:
                 file=sys.stderr,
             )
             continue
+        # Claimed here, after the file has been shown to be a report, and not
+        # when its path was first seen. A rejected file contributes no
+        # scenario, so it makes nothing ambiguous -- but reserving the id on
+        # sight meant a corrupt `run-a/foo/sanitizer_report.json` made the
+        # valid `run-b/foo/sanitizer_report.json` a collision, and this
+        # refusal aborts the build. The loader's two rules contradicted each
+        # other: one archive-local corruption, skipped on its own line, then
+        # took the whole corpus down through a guard about *two good reports*.
+        if scenario_id in seen:
+            raise DuplicateScenario(
+                f"two reports share the scenario id {scenario_id!r}: "
+                f"{seen[scenario_id]} and {path}. The corpus id keys the label "
+                "map and the GRPO groups in run_e2e, so emitting both would "
+                "score one report against the other's label. Build them into "
+                "separate corpora, or rename one case directory."
+            )
+        seen[scenario_id] = path
         scenarios.append(
             Scenario(
                 case=case,

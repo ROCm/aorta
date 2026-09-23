@@ -200,17 +200,27 @@ committed — `*.jsonl` is gitignored and it is a GPU run output — so rebuild 
 before reproducing anything; `examples/rl/corpus/README.md` gives both routes,
 including a no-GPU one over the survey reports this repo does commit.
 
-**Widening the failure taxonomy from 8 categories to 11 is written and open, not
-landed.** [PR #484](https://github.com/ROCm/aorta/pull/484) adds `kernel_race`,
-`nondeterminism` and `numeric_instability` with 54 new tests, derives the set
-from a single name-to-description mapping so the labels and the guidance the
-model is given cannot drift apart, and fixes a real pre-existing routing bug —
-the substring `barrier` used to route GPU-side evidence to a checkpoint-I/O
-category and now routes to `kernel_race`. **Until it merges this checkout has
-eight categories**, and the two use cases that need the new ones stay at
-`unknown`. Nothing here needs editing when it lands: the reward code reads the
-set by import (`proposal_reward.py`, `run_e2e.py`), so the new members are
-picked up automatically.
+**Widening the failure taxonomy from 8 categories to 11 has landed.**
+[PR #484](https://github.com/ROCm/aorta/pull/484) merged on 2026-09-22. The
+three names that went in are **`gpu_race`, `numeric_silent` and `tooling_gap`**
+— not the `kernel_race` / `nondeterminism` / `numeric_instability` triple this
+document predicted while the PR was open, and the difference matters in both
+directions. `gpu_race` and `numeric_silent` are the review's names for the first
+and third; `tooling_gap` is new, and separates *the instrument could not answer*
+from `unknown`'s *evidence that fits no label*, which the old set conflated.
+**`nondeterminism` was held out**: the detector keeps the spellings that would
+route to it, but with no member of that name in the closed set the leg would
+emit a category nothing validates, so it falls through to `unknown`. That one
+decision is the remaining half of the ask in
+[rl-post-training-decisions.md](rl-post-training-decisions.md).
+
+The set is derived from a single name-to-description mapping, so the labels and
+the guidance the model is given cannot drift apart, and #484 fixed a real
+pre-existing routing bug on the way — the substring `barrier` used to route
+GPU-side evidence to a checkpoint-I/O category and now routes to `gpu_race`. The
+reward code reads the set by import (`proposal_reward.py`, `run_e2e.py`), so it
+picked the new members up with no edit. **This branch is behind main and still
+has eight**; rebase before quoting a category list from a live run.
 
 **We found and fixed a genuine engine defect.** TokenSpeed picks its sampling
 backend like this:
@@ -302,8 +312,10 @@ use cases; that section records the table, maps each row to what is actually
 built, and recommends **sanitizer (and race) selection and routing** as the
 starting slice, because it is the only row already scaffolded end to end and
 their independent reasoning for ranking it "very strong" is the same reason it
-turned out cheap. Two of the six rows are blocked by the category question
-below, which is why that question is now ranked first among the open items.
+turned out cheap. Two of the six rows were blocked by the category question
+below, which is why that question is ranked first among the open items; since
+[#484](https://github.com/ROCm/aorta/pull/484) merged on 2026-09-22 it is one,
+and the question has narrowed to whether `nondeterminism` belongs in the set.
 
 **State.** Commit `4aac332` on `explore/tokenspeed-rl-rollouts`. **Unpushed, no
 PR.** Both reward scorers are validated end to end against real data:
@@ -316,6 +328,16 @@ compute node; its JSONL is a run output rather than a committed fixture, and
 `examples/rl/corpus/README.md` records the provenance and how to rebuild. 48 tests pass under `tests/examples/test_rl_rewards.py`.
 
 ### The blocker: read this before spending another node-hour
+
+> **Mostly cleared 2026-09-22 by [#484](https://github.com/ROCm/aorta/pull/484).**
+> The section below is kept as written because its argument is what the fix was
+> chosen against, and because the measurements in §5 were taken under it. What
+> changed: the set is now eleven names and includes `gpu_race`,
+> `numeric_silent` and `tooling_gap`, and
+> `examples/rl/corpus/scenario_labels.json` on main carries a hand-written
+> category per scenario — so the category axis is no longer at zero coverage,
+> and option 1 below is the route that was taken. What is left of the blocker is
+> narrower and stated at the end of this section.
 
 **The sanitizer label space is disjoint from the eight autopsy categories.** The
 sanitizers answer `pass` / `warn` / `fail` / `error` / `not_checked`. The agent's
@@ -352,6 +374,25 @@ equivalent:
 
 Do not pick between these by generating more data. None of the three is
 distinguished by a larger corpus.
+
+**What is left of this blocker, as of 2026-09-22.** Option 1 was taken, by
+writing the table rather than finding one: #484 defines the eleven names against
+one gloss apiece, and `examples/rl/corpus/scenario_labels.json` assigns a
+category to each of the nine scenarios — three `gpu_race`, two `tooling_gap`,
+four honestly `unknown`, the last being the zero-finding controls, where
+`unknown` is the right answer rather than a gap in the set. So "no example of
+any category to learn from, and no labeller to assign one" no longer holds, and
+neither does the claim that no corpus size can fix it. Two things survive:
+
+- **Nothing scores against those labels yet.** The grader's tier 3 still asks
+  whether the category is a member of the set, not whether it is the *right*
+  member, so a run can score 1.0 while naming a category the labels contradict.
+  Wiring that comparison in is the next reward change, and it needs no node
+  time — see [§5.6 of the routing report](tokenspeed-rl-e2e-sanitizer-routing.md#56-still-open-unchanged).
+- **The corpus is still pass-heavy and still sanitizer-shaped.** Four of nine
+  rows are `unknown` controls, so the *label* axis has coverage but the
+  *category* axis has three distinct non-trivial values across nine rows. The
+  variety argument below is unchanged by #484.
 
 ### The degenerate floor is 0.5333, and it is provisional
 
@@ -400,10 +441,11 @@ cannot be trusted, so any reward computed from stop reasons is unsafe.
 
 ### Still needs Manoj
 
-In priority order: whether a `category` labeller or rule table exists, and
-whether the eight-category set should be extended at all — that is the blocker
-above, and it now gates two of the six prioritised use cases, so it is the one
-worth asking first. Then the chatbot's response schema; what Sleuth is; model
+In priority order: **whether `nondeterminism` belongs in the closed set** — the
+rest of this ask was answered by [#484](https://github.com/ROCm/aorta/pull/484)
+on 2026-09-22, which extended the eight-category set to eleven and wrote the
+rule table aorta now owns, so what gated two of the six prioritised use cases
+now gates one. Then the chatbot's response schema; what Sleuth is; model
 choice; who stands up the trainer; and whether Toyota is a separate demo. Detail
 in [Assumptions to confirm with Manoj](#assumptions-to-confirm-with-manoj).
 
@@ -713,6 +755,28 @@ keys: category, hypothesis, next_mitigations (list of strings), confidence
 'thermal_throttle', 'unknown'].
 ```
 
+That is the prompt as this branch renders it, and it is the one every
+measurement in §5 was taken against. On main since
+[#484](https://github.com/ROCm/aorta/pull/484) the tail is longer but the names
+in it are **the same eight**, and the reason is worth being exact about. #484
+split the vocabulary: `AUTOPSY_CATEGORIES` is eleven, and what the probe agent
+is offered is `PROBE_CATEGORIES = AUTOPSY_CATEGORIES - EVIDENCE_ONLY_CATEGORIES`
+— which removes exactly the three that landed, because `gpu_race`,
+`numeric_silent` and `tooling_gap` are things an *instrument* establishes, not
+things a mitigation sweep can infer from a verdict moving. Offering the probe a
+label it has no way to reach teaches it to guess one, and the guess validates.
+What did change in the prompt is that each name now arrives with its one-line
+gloss via `format_category_guidance` instead of as a bare list, because several
+members are near neighbours and the name alone does not separate them.
+
+Two consequences for this document. The proposer-side measurements in §5 are
+**not** invalidated by #484 — the candidate set the model chose from is
+unchanged. But tier 3 validates membership in `AUTOPSY_CATEGORIES`, which *is*
+now eleven, so on main a proposal is graded against a wider set than the one it
+was offered, and `examples/rl/corpus/scenario_labels.json` labels scenarios with
+the evidence-only names the probe cannot propose. That mismatch is real and is
+the wiring work, not a defect in either set.
+
 The user message is `json.dumps(..., indent=2)` of exactly four keys —
 `symptom`, `cell_summaries`, `candidates`, `already_tried`. `candidates` is
 already narrowed to what is still available (allowlist minus tried minus the
@@ -846,7 +910,7 @@ chatbot's root-cause-and-fix as the **target** one.
 
 | | Current (`aorta agent` proposer) | Target (CIA chatbot) |
 |---|---|---|
-| Root cause | `category`, one of eight closed labels | Free-text root cause, shown to an operator |
+| Root cause | `category`, one closed label — eight on this branch, eleven on main since [#484](https://github.com/ROCm/aorta/pull/484) | Free-text root cause, shown to an operator |
 | Fix | `next_mitigations`, registered names only | "The fix", presumably prose plus an action |
 | Evidence shown | `cell_summaries`: detector IDs, verdict, capture excerpt, exit code | Output logs from Waitcheck / ConSan / ASAN / UBSan / ROCgdb / RocJITsu |
 | Consumer | A search loop that runs the next probe cell | A human reading a chat response |
@@ -862,7 +926,8 @@ Where they diverge is worth naming plainly, because it is the ceiling on
 automatic reward:
 
 **The target's root cause is free text; the current one is a closed label.** A
-category from eight options is gradable by exact match. "The GEMM kernel is
+category from a closed set — eight here, eleven on main — is gradable by exact
+match, and widening the set does not change that; it only moves the ceiling. "The GEMM kernel is
 missing an `s_waitcnt` before reading LDS at offset 0x2f0" is not, by any
 mechanism in [4.1](#41-the-gate-on-both-halves--proposal-validity) or
 [4.2](#42-the-root-cause-half--triage-classification).
@@ -981,8 +1046,8 @@ question and their answers hold up. What follows is the orthogonal question of
 | Sanitizer (and Race) selection and routing | Very strong | **Scaffolded end to end** | nothing — start here |
 | Mitigation-sweep planning | Very strong | Reward built, corpus absent | [#449](https://github.com/ROCm/aorta/issues/449), a run archive |
 | WaitCheck repair | Moderate | Data exists, attribution does not | [#451](https://github.com/ROCm/aorta/issues/451), case variety |
-| nondeterminism triage | Strong for RL training | **Blocked** | the `category` vocabulary and a labeller |
-| NaN/numerics triage | Strong | **Blocked**, one asset exists | the `category` vocabulary and a labeller |
+| nondeterminism triage | Strong for RL training | **Blocked** | the `category` vocabulary — `nondeterminism` was held out of [#484](https://github.com/ROCm/aorta/pull/484) and is the one name still undecided |
+| NaN/numerics triage | Strong | **Unblocked on vocabulary** since #484 (`numeric_silent`), one asset exists | a failing reproducer in the corpus, and scoring against the labels |
 | QPS regression investigation | Strong but complex (deferred) | Infrastructure most complete of all six | reward design only |
 
 **Sanitizer (and Race) selection and routing — their "very strong" is correct,
@@ -1046,22 +1111,39 @@ workload-level symptoms, so they live in the autopsy `category` space — the ax
 at exactly zero coverage
 ([the blocker](#the-blocker-read-this-before-spending-another-node-hour)): the
 label spaces are disjoint, and every archived probe run is a `pass`. "Strong for
-RL training" is true in principle and unimplementable today.
+RL training" was true in principle and unimplementable as this branch stands;
+the two paragraphs below say which half of that has since changed and which has
+not.
 
-It is worse than a missing labeller, and this is the part worth being precise
-about. The eight categories are `checkpoint_race`, `illegal_mem`,
+It was worse than a missing labeller, and this is the part worth being precise
+about. On this branch the eight categories are `checkpoint_race`, `illegal_mem`,
 `launch_error`, `oom_fragment`, `perf_regression`, `rccl_hang`,
 `thermal_throttle`, `unknown`. **There is no numerics category and no
 nondeterminism category.** A NaN failure and a nondeterministic result both
-classify as `unknown` today, which is not a label a reward can teach against.
-So these two rows need the vocabulary *extended*, not merely populated — a
-design decision about what the closed set should contain, upstream of any
-labelling work.
+classify as `unknown`, which is not a label a reward can teach against. So these
+two rows needed the vocabulary *extended*, not merely populated — a design
+decision about what the closed set should contain, upstream of any labelling
+work.
 
-These two rows are what promote the category question from an open item to the
-top blocker: it now gates **two of six prioritised use cases**, which is why it
-is ranked first in
-[Assumptions](#assumptions-to-confirm-with-manoj) rather than bundled.
+**Half of that extension landed on 2026-09-22.**
+[PR #484](https://github.com/ROCm/aorta/pull/484) added `numeric_silent` —
+*"arithmetic that came out wrong without the workload saying so"*, which is the
+Shampoo NaN below, exactly — so **the NaN/numerics row is no longer blocked on
+the vocabulary** and what it needs now is the reproducer and a scorer, ordinary
+work rather than a decision someone else owns. `gpu_race` landed with it and
+covers the TF32 kernel-race half of the same flagship example.
+**`nondeterminism` was held out**, so that row is still blocked and still blocked
+on a decision: the detector keeps the spellings that would route to it, but with
+no member of that name the leg emits nothing and the symptom falls through to
+`unknown`. The argument for adding it is that it is the one label of this group
+a probe can establish without an instrument — repeat a cell, get different
+verdicts — which would place it in `PROBE_CATEGORIES` rather than beside the
+evidence-only three.
+
+So the category question has gone from gating **two of six** prioritised use
+cases to gating **one**, and that is why it is still ranked first in
+[Assumptions](#assumptions-to-confirm-with-manoj) rather than bundled — a
+narrower ask, not a closed one.
 
 *One concrete asset exists for the NaN row, and its shape matters because it is
 the only reproducer identified so far for a blocked use case.*
@@ -2000,7 +2082,7 @@ needs a decision or an artifact that is not ours:
 
 | # | Blocked on | Why it blocks | Costs if wrong |
 |---|---|---|---|
-| [A1](#a1) | **A labeller or rule table for the autopsy `category` — and whether the closed set is even complete** | Ranked first: it now gates **two of six** prioritised use cases. nondeterminism triage and NaN/numerics triage are workload-level symptoms, and the eight categories contain no numerics and no nondeterminism slot, so both classify as `unknown` ([4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is)) | Two prioritised use cases stay unimplementable at any corpus size, and the root-cause half of the contract stays unscored |
+| [A1](#a1) | **Whether `nondeterminism` belongs in the autopsy `category` set** — the rest of A1 was answered by [#484](https://github.com/ROCm/aorta/pull/484) on 2026-09-22 | Ranked first. It gated **two of six** prioritised use cases; #484 added `numeric_silent`, `gpu_race` and `tooling_gap` and wrote the rule table, unblocking NaN/numerics triage, so it now gates **one** — nondeterminism triage, whose symptoms still fall through to `unknown` ([4.0](#40-the-six-prioritised-use-cases-and-how-ready-each-one-is)) | One prioritised use case stays unimplementable at any corpus size; and the root-cause half of the contract stays unscored until the landed labels are wired into tier 3 |
 | [A4](#a4) | **A corpus of failing runs** | Both substantive rewards need labelled failures; the survey found 18 archived runs and **one** real defect among them ([4.6](#46-what-the-corpus-actually-contains)) | Nothing substantive can be trained. Generation is cheap, so this is now bounded by workload variety |
 | [A1](#a1) | The chatbot's response schema; what Sleuth is | Structured-versus-free-text decides whether the reward stays fully automatic ([3.4](#34-the-current-contract-versus-the-target-one)) | A presentation layer; verdict and attribution survive intact |
 | [A3](#a3) | Model choice | Sets the memory and throughput arithmetic in [5](#5-cost-does-the-claim-hold) and [5b](#5b-what-disaggregation-actually-costs) | The cost table, not the design |
@@ -2018,6 +2100,15 @@ started without it. It is also no longer purely a question of *who labels* —
 with no numerics or nondeterminism category in the closed set, the prior
 question is whether the set should be extended, which is a design decision
 rather than a data-gathering one.
+
+**Answered in part, 2026-09-22.** That design decision was taken:
+[#484](https://github.com/ROCm/aorta/pull/484) extended the set to eleven and
+aorta owns the rule table, and `examples/rl/corpus/scenario_labels.json` labels
+the nine scenarios against it, so *who labels* has an answer too. A1 keeps its
+ranking on one remaining clause — whether `nondeterminism` joins the set — and
+on the wiring that follows from the rest of it: tier 3 still scores membership
+rather than agreement with those labels, so the root-cause half of the contract
+is unscored for a different reason than it was a month ago.
 
 A4 remains worth separating from the rest, because it is the only item that
 needs no decision from anyone — it needs work, and
@@ -2082,6 +2173,19 @@ Three things remain genuinely open, none of them blocking:
 
   Until it is closed the reward scores verdict and attribution, which are
   genuinely derived, and leaves category unscored.
+
+  **Updated 2026-09-22.** Both prior questions now have answers.
+  [#484](https://github.com/ROCm/aorta/pull/484) extended the closed set to
+  eleven — `numeric_silent` for the NaN row, `gpu_race` for intra-kernel races,
+  `tooling_gap` for *the instrument could not answer* — and aorta owns the
+  resulting rule table, each name defined against one gloss so the labels and
+  the guidance the model is given cannot drift apart. `who labels` was answered
+  by hand: `examples/rl/corpus/scenario_labels.json` carries a ground-truth
+  category per scenario. **`nondeterminism` was held out**, so nondeterminism
+  triage is the one use case still classified to `unknown` and the one clause of
+  A1 still open. Category also remains unscored, but for a different reason:
+  the labels exist and nothing reads them yet, which is wiring rather than a
+  question for anyone outside this workstream.
 
 Also noted and deliberately not designed for: **MCP is a plausible serving
 path.** If CIA reaches aorta over MCP, a post-trained model might be reached
@@ -2253,7 +2357,12 @@ path stops at Phase 3 no matter what the engine does.
   used by the offline fake proposer. Training against that would teach the
   heuristic, so the triage reward stops at verdict and attribution
   ([A1](#a1)). This is a genuine hole in an otherwise fully-labelled signal, and
-  it needs human labels or an owned rule table to close.
+  it needs human labels or an owned rule table to close. — *Closed by human
+  labels on 2026-09-22: `examples/rl/corpus/scenario_labels.json`, written by
+  hand against the eleven-name set from
+  [#484](https://github.com/ROCm/aorta/pull/484). `category` is still unscored,
+  but now because tier 3 checks membership rather than agreement, not because
+  there is nothing to agree with.*
 - **The format reward can be saturated without diagnosing anything.** A fixed
   valid proposal scores 1.0 at
   [4.1](#41-the-gate-on-both-halves--proposal-validity) and is accepted

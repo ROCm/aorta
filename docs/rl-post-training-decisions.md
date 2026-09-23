@@ -35,12 +35,25 @@ framework.
    out of memory, if it's too big" — is met on paper, before a node-hour is
    spent. I want your agreement to start on Qwen3-8B rather than discovering
    this by OOM.
-2. **Extend the eight failure categories, or tell me who owns them.** They
-   contain no numerics slot and no nondeterminism slot, so two of the six
-   prioritised use cases classify as `unknown` and cannot be trained at any
-   corpus size. Your own flagship example — "numerical instability from training
-   coming from … race conditions introduced in TF32 kernels" — is exactly that
-   shape. This blocks corpus work, which is the critical path.
+2. **Decide the nondeterminism slot, or tell me who owns it.** *Narrowed
+   2026-09-22: half of this ask has been answered in the repo.*
+   [PR #484](https://github.com/ROCm/aorta/pull/484) merged and took the set
+   from eight names to eleven, adding `numeric_silent`, `gpu_race` and
+   `tooling_gap`. So your flagship example — "numerical instability from
+   training coming from … race conditions introduced in TF32 kernels" — now has
+   both of its halves in the vocabulary and is no longer forced to `unknown`;
+   corpus work on it is unblocked and
+   `examples/rl/corpus/scenario_labels.json` carries per-scenario ground truth
+   against the merged set. **What is still open is nondeterminism**, which #484
+   held out as an unresolved vocabulary question rather than rejecting: the
+   detector keeps the spellings that route to it, but with no `nondeterminism`
+   member in `AUTOPSY_CATEGORY_GUIDANCE` the leg would emit a name outside the
+   closed set, so it falls through to `unknown`. The case for adding it is that
+   it is the only one of this group a *probe* can establish on its own — repeat
+   a cell, get different verdicts — which would put it in `PROBE_CATEGORIES`
+   rather than beside the evidence-only three, and that is the decision I need.
+   Until it is made, nondeterminism triage classifies as `unknown` and cannot be
+   trained at any corpus size.
 3. **Who stands up the trainer.** No trainer exists here, and slime on MI355X is
    a real bring-up, not an afternoon. If it is me, it displaces the corpus work
    in item 2.
@@ -375,16 +388,18 @@ several steps later. It is a natural fit for GRPO, which scores whole sequences,
 and the agent's own outcome labels (`converged`, `exhausted_candidates`) are a
 ready-made terminal reward.
 
-I have not built it and I would not start it before item 2 is answered, because
-half the trajectories worth generating end in categories that do not exist yet.
-**Which shape do you want for the first run?** Single-step is ready now;
-trajectories are the thing you actually described.
+I have not built it. Before #484 landed I would not have started it at all,
+because half the trajectories worth generating ended in categories that did not
+exist; with `numeric_silent` and `gpu_race` in the set that objection now covers
+only the nondeterminism use case, so this is a scoping question rather than a
+blocked one. **Which shape do you want for the first run?** Single-step is ready
+now; trajectories are the thing you actually described.
 
 ## Blockers, stated plainly
 
 | Blocker | Status | Who |
 |---|---|---|
-| **The eight failure categories have no numerics and no nondeterminism slot** | Two of the six prioritised use cases classify as `unknown` and are untrainable at any corpus size. Your TF32-race example is exactly that shape | **You**, or whoever owns the set |
+| **The eleven failure categories have no nondeterminism slot** | Narrowed by [#484](https://github.com/ROCm/aorta/pull/484) on 2026-09-22: `numeric_silent` and `gpu_race` landed, so the TF32-race example is trainable and only nondeterminism triage still classifies as `unknown` | **You**, or whoever owns the set |
 | **No weight transport has been proven to move a tensor** | The path we measured was deleted upstream. The SGLang-dialect path looks correct in source and is unmeasured. Disk transport needs no collective | Me — half a day on one node |
 | **The engine image is six weeks stale for this purpose** | Predates GLM-5.3-Flash support and the upstream consolidation. Bump the RL recipes only; the gating baseline window holds the smoke recipe's digest | Me, after the window |
 | **The corpus is 54 single-step examples** | Generation costs ten minutes a sweep, so this is bounded by workload variety, not node-hours. Not one archived artifact comes from a workload the CIA diagram names | Me, once the category question lands |
