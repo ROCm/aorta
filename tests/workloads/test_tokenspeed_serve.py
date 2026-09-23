@@ -4396,6 +4396,135 @@ def test_the_read_back_asserts_the_backend_asked_for(
         assert "rollout_sampling" not in output, output
 
 
+@pytest.mark.parametrize(
+    ("label", "handler"),
+    [
+        # The endpoint is absent: an engine build that does not offer it.
+        ("missing_endpoint", "self.send_response(404); self.end_headers()"),
+        # Present, answers, and says nothing about the backend.
+        (
+            "no_key",
+            "self.send_response(200); self.end_headers();"
+            " self.wfile.write(b'{\"model\":\"m\"}')",
+        ),
+        # Present and answers with something that is not JSON at all.
+        (
+            "unparseable",
+            "self.send_response(200); self.end_headers();"
+            " self.wfile.write(b'<html>gateway timeout</html>')",
+        ),
+    ],
+)
+def test_an_unreadable_backend_fails_the_rollout_rather_than_warning(
+    tmp_path, label, handler
+):
+    """A rollout that cannot verify its backend must not publish one.
+
+    This warned and continued until the #496 review. The argument for warning
+    was that `/get_server_info` is an engine convenience rather than a
+    contract, so a build without it is not evidence that sampling is broken.
+    True, and the wrong test: it is not evidence that sampling *works* either,
+    and this read-back is the only check that can tell the difference. Every
+    audit downstream counts requests and tokens, and those are identical under
+    sampled and argmax decoding -- which is the reason exits 57 and 58 exist at
+    all.
+
+    So warning published a cell labelled with the requested backend on no
+    evidence that any sampling happened, in exactly the case where the evidence
+    was unavailable. An unverifiable claim is a stronger reason to stop than a
+    refuted one: 57 and 58 at least say what ran.
+
+    Three ways to be unreadable, because they are three different operator
+    situations and the old code collapsed all of them into a warning: no
+    endpoint, an endpoint that answers without the key, and one that answers
+    with something that is not JSON. One verdict, since the next move is the
+    same for all three, but the HTTP code and the response body are reported so
+    which one it was is attributable.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "tokenspeed"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "version" ]; then echo fake; exit 0; fi\n'
+        'if [ "$1" = "serve" ]; then\n'
+        "  port=\"\"\n"
+        "  while [ $# -gt 0 ]; do\n"
+        '    if [ "$1" = "--control-port" ]; then port="$2"; fi\n'
+        "    shift\n"
+        "  done\n"
+        '  exec python3 -c "\n'
+        "import http.server, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        if self.path.startswith('/get_server_info'):\n"
+        f"            {handler}\n"
+        "            return\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n"
+        '" "${port}"\n'
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    with socket.socket() as probe, socket.socket() as probe2:
+        probe.bind(("127.0.0.1", 0))
+        probe2.bind(("127.0.0.1", 0))
+        gateway, control = probe.getsockname()[1], probe2.getsockname()[1]
+
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_PORT": str(gateway),
+            "TS_CONTROL_PORT": str(control),
+            "TS_READY_TIMEOUT": "60",
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SAMPLING_BACKEND": "triton",
+            "TS_BENCH_WARMUP_STEPS": "0",
+        },
+        timeout=300,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == 60, output
+    assert "rollout_sampling_backend_unverified" in output, output
+    assert "asked=triton" in output, output
+    # Not the refuted verdicts: nothing here says the engine ignored sampling or
+    # substituted a backend, and claiming either would be inventing a finding.
+    assert "rollout_sampling_ignored" not in output, output
+    assert "rollout_sampling_backend_mismatch" not in output, output
+    # It must not have proceeded to measure.
+    assert "TS_BENCH_STEP_START" not in output, output
+
+
+def test_exit_sixty_is_a_named_reason_on_the_host(tmp_path):
+    """The script's verdict has to survive the trip back into `failure_details`.
+
+    An exit code the host does not know maps to no reason, so the one failure
+    that says "this rollout is unverifiable" would arrive as a bare number --
+    which is how it would get read as a flake and retried.
+    """
+    assert mod._EXIT_REASONS[60] == "rollout_sampling_backend_unverified"
+
+    script = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text("utf-8")
+    for code, reason in mod._EXIT_REASONS.items():
+        assert f"exit {code}" in script, (
+            f"the host maps exit {code} to {reason!r} but the script never "
+            "exits with it; the two lists have drifted."
+        )
+
+
 def test_an_unknown_sampling_backend_is_a_recipe_error(tmp_path):
     """Rejected on the host, where it reads as the recipe error it is. Left to
     the container it is an argparse failure after the weights have loaded, which
@@ -5730,24 +5859,37 @@ def _script_bench_argv(tmp_path: Path, env: dict) -> list[str]:
     # and never assembles a bench command -- so the stub answers 200 on the
     # control port for as long as the run needs it, then the bench step fails and
     # the script stops without anything having touched a GPU.
+    #
+    # `/get_server_info` gets the backend the stub was launched with, because a
+    # rollout run now refuses to continue past phase 2b when the engine will not
+    # say which sampling backend it is using (exit 60). An engine that honours
+    # `--sampling-backend` reports it back, so echoing the flag is what a working
+    # server does -- and it keeps this helper about the bench argv it is named
+    # for rather than about the read-back, which has its own tests.
     fake.write_text(
         "#!/usr/bin/env bash\n"
         f'printf "%s\\n" "$@" >> "{argv_log}"\n'
         'if [ "$1" = "version" ]; then echo fake; exit 0; fi\n'
         'if [ "$1" = "serve" ]; then\n'
         "  port=\"\"\n"
+        "  backend=\"\"\n"
         "  while [ $# -gt 0 ]; do\n"
         '    if [ "$1" = "--control-port" ]; then port="$2"; fi\n'
+        '    if [ "$1" = "--sampling-backend" ]; then backend="$2"; fi\n'
         "    shift\n"
         "  done\n"
         '  exec python3 -c "\n'
-        "import http.server, sys\n"
+        "import http.server, json, sys\n"
         "class H(http.server.BaseHTTPRequestHandler):\n"
         "    def do_GET(self):\n"
-        "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "        if self.path.startswith('/get_server_info'):\n"
+        "            body = json.dumps({'sampling_backend': sys.argv[2]}).encode()\n"
+        "        else:\n"
+        "            body = b'ok'\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(body)\n"
         "    def log_message(self, *a): pass\n"
         "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n"
-        '" "${port}"\n'
+        '" "${port}" "${backend}"\n'
         "fi\n"
         "exit 1\n",
         encoding="utf-8",

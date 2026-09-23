@@ -225,6 +225,7 @@ _EXIT_REASONS: dict[int, str] = {
     57: "rollout_sampling_ignored",
     58: "rollout_sampling_backend_mismatch",
     59: "rollout_length_basis_unusable",
+    60: "rollout_sampling_backend_unverified",
     64: "usage_error",
 }
 

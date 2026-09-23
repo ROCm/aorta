@@ -388,8 +388,11 @@ follow-up:
   back off `/get_server_info` after bring-up, failing the step if the engine
   disagrees — exit 57 `rollout_sampling_ignored` when it reports `greedy`, exit
   58 `rollout_sampling_backend_mismatch` when it reports a different sampling
-  backend. Benchmark cells are left on the engine default, where argmax is what
-  is wanted.
+  backend, and exit 60 `rollout_sampling_backend_unverified` when it will not
+  say at all. The third is a failure for the same reason as the first two: the
+  read-back is the only thing that can tell them apart, so an engine that does
+  not answer leaves the cell's backend label resting on nothing. Benchmark
+  cells are left on the engine default, where argmax is what is wanted.
 - **`rollout_samples > 1` does not give you independent samples, and this is
   the biggest caveat on the page.** TokenSpeed returns *identical* choices for
   `n > 1` within a single request. So `rollout_samples: 8` produces one
@@ -491,6 +494,24 @@ parameters did nothing" and routes differently for whoever reads the failure.
 The comparison is an exact match rather than a family: the engine echoes the
 requested name verbatim and refuses names it does not know rather than falling
 back, so there is no legitimate substitution to tolerate.
+
+Exit 60 / `rollout_sampling_backend_unverified` is the third from that
+read-back, and it fires when `/get_server_info` is unreachable, answers
+without the key, or answers with something unparseable. This warned and
+continued until #496 review; the argument for warning was that the endpoint is
+an engine convenience rather than a contract, so a build without it is not
+evidence that sampling is broken. That is true and it is the wrong test. It is
+not evidence that sampling *works* either, and since the read-back is the only
+check that separates 57 from 58 from a correct run — the audits count requests
+and tokens, which are identical under sampled and argmax decoding — warning
+published a cell labelled with the requested backend on no evidence that any
+sampling happened, in exactly the case where the evidence was unavailable.
+
+An unverifiable claim is a stronger reason to stop than a refuted one, not a
+weaker one: 57 and 58 at least tell the reader what ran. The operator's move
+on a 60 is to make the endpoint answer, not to read the numbers. There is no
+opt-out flag, deliberately — a switch meaning "publish the label without
+checking it" is the state this guard exists to end.
 
 Recipes: `tokenspeed-serve-rollout-smoke.yaml` (the shape check to run first)
 and `tokenspeed-serve-rollout.yaml` (batching-comparison and long-form cells —

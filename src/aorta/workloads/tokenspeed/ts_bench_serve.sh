@@ -37,6 +37,8 @@
 #       for, so the cell's numbers would carry the wrong backend's name
 #   59  a rollout step's output_lens holds one entry per request rather than
 #       per completion, so the per-completion floor cannot be derived from it
+#   60  the engine would not say which sampling backend it is using, so 57 and
+#       58 cannot be ruled out and the label would rest on nothing
 #   64  usage / environment error (missing tokenspeed CLI, bad config)
 #
 # Two ports, for the reason `ts_serve_probe.sh` documents at length: `tokenspeed
@@ -975,15 +977,43 @@ fi
 # checked after the fact from what the run exported. Rollout only: a benchmark
 # cell wants greedy and asks for nothing.
 if [ "${ROLLOUT}" = "1" ]; then
-  server_info="$(curl -s --max-time 10 "${CONTROL}/get_server_info" 2>/dev/null || echo '{}')"
+  info_code="$(http_code "${CONTROL}/get_server_info")"
+  server_info="$(curl -s --max-time 10 "${CONTROL}/get_server_info" 2>/dev/null || echo '')"
   reported="$(printf '%s' "${server_info}" \
     | tr ',{}' '\n\n\n' \
     | sed -n 's/.*"sampling_backend"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1)"
   if [ -z "${reported}" ]; then
-    # Not fatal: the endpoint is an engine convenience, not a contract, and a
-    # build without it is not evidence that sampling is broken.
-    echo "TS_BENCH_WARN: could not read sampling_backend from ${CONTROL}/get_server_info"
+    # Fail, and the earlier "not fatal, the endpoint is a convenience" reading
+    # had it backwards. It is true that a build without `/get_server_info` is
+    # not evidence that sampling is broken. It is not evidence that sampling
+    # works either, and that is the whole question: this readback is the ONLY
+    # check that distinguishes the requested backend from a greedy fallback,
+    # because nothing downstream can. The audits count requests and tokens, and
+    # those are identical under sampled and argmax decoding.
+    #
+    # So warning here published a rollout labelled `SAMPLING_BACKEND` on no
+    # evidence that any sampling happened -- in precisely the case where the
+    # evidence was unavailable. An unverifiable claim is a stronger reason to
+    # stop than a refuted one, not a weaker one: a mismatch at least tells the
+    # reader what ran.
+    #
+    # Distinct from 57 and 58 on purpose, and the split routes the same way
+    # those two do. 57 says sampling was ignored, 58 says it happened under
+    # another name; 60 says nobody can tell which, and the operator's next move
+    # is to make the endpoint answer rather than to look at the numbers. A
+    # benchmark cell is unaffected -- it asks for nothing and never reaches
+    # here.
+    echo "TS_BENCH_FAIL: rollout_sampling_backend_unverified asked=${SAMPLING_BACKEND} http=${info_code}"
+    echo "  ${CONTROL}/get_server_info did not report a sampling_backend, so"
+    echo "  there is no evidence the engine honoured --sampling-backend. Nothing"
+    echo "  later in this run can substitute for it: request and token counts are"
+    echo "  identical whether the engine sampled or returned the argmax, so"
+    echo "  publishing would label the cell ${SAMPLING_BACKEND} on no evidence."
+    echo "--- first 400 bytes of the response ---"
+    printf '%.400s\n' "${server_info:-<empty>}"
+    tail -n 40 "${SERVER_LOG}" 2>/dev/null
+    exit 60
   else
     echo "TS_BENCH_INFO: sampling_backend=${reported} (asked for ${SAMPLING_BACKEND})"
     # Assert what was asked for, not the absence of the one known-bad value.
