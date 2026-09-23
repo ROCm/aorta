@@ -6,15 +6,32 @@ sanitizer corpus, and scores every output with the two existing graders. The
 question is not what the model scores -- it is whether the scoring can *train*
 anything, which is a different measurement and needs the group structure below.
 
-What makes this the real path
------------------------------
-The proposals come from `aorta.agent.llm.LiteLLMProposer`, not from a prompt
-written here. `propose()` owns the system prompt, the user payload, the
-`response_format` and the post-filter, so what is measured is the contract the
-policy will actually have to satisfy. Pointing it at a self-hosted engine needs
-no code change: `OPENAI_API_BASE` and `OPENAI_API_KEY`, and a `model` carrying
-litellm's `openai/` routing prefix -- which is stripped on the wire, so the
-remainder has to be exactly what the engine advertises.
+What makes this the real path, and which real path it is
+--------------------------------------------------------
+The proposals come from the proposer `aorta agent` itself builds -- through
+`make_proposer("litellm", ...)`, not by naming a class here -- so `propose()`
+owns the system prompt, the user payload, the `response_format` and the
+post-filter, and what is measured is the contract the policy will actually have
+to satisfy.
+
+There are now two such proposers, and this harness measures one of them. Phase
+5b put `litellm` onto the shared chat provider layer: with `aorta[chat]`
+installed, `aorta agent --llm-backend litellm` builds a `ChatProviderProposer`,
+which sends no `response_format` and parses fence-tolerantly; without it, the
+shipped fallback is the direct `LiteLLMProposer`. Tier 1 grades whether the
+reply is a bare JSON object, so those are different measurements, and the
+recorder below wraps `litellm.completion` -- the boundary the direct path
+crosses. This harness therefore scopes itself to the agent-only installation
+and *refuses to run* on a chat install rather than reporting one path's numbers
+under the other's name. See `agent_proposer`.
+
+Pointing it at a self-hosted engine needs no code change on that path:
+`OPENAI_API_BASE` and `OPENAI_API_KEY`, and a `model` carrying litellm's
+`openai/` routing prefix -- which is stripped on the wire, so the remainder has
+to be exactly what the engine advertises. Those two variables configure the
+direct path only; the shared provider layer is configured through the chat
+profile instead, which is the other half of why the two are not one
+measurement.
 
 `propose()` returns an `AgentStep`, already coerced by `from_dict` and already
 filtered against the offered set. That is the wrong input for
@@ -90,7 +107,11 @@ from triage_reward import (  # noqa: E402
     score_answer,
 )
 
-from aorta.agent.llm import AUTOPSY_CATEGORIES, LiteLLMProposer  # noqa: E402
+from aorta.agent.llm import (  # noqa: E402
+    AUTOPSY_CATEGORIES,
+    LiteLLMProposer,
+    make_proposer,
+)
 from aorta.registry import load_mitigations  # noqa: E402
 
 # The candidate set and tried list `build_corpus.py` uses for every scenario.
@@ -365,6 +386,47 @@ def failure_kind(stopped_at: str, detail: str, tier: int) -> str:
 # The two drives
 # --------------------------------------------------------------------------- #
 
+def agent_proposer(model: str) -> LiteLLMProposer:
+    """The proposer ``aorta agent`` builds for ``--llm-backend litellm``.
+
+    Built through ``make_proposer`` rather than by naming ``LiteLLMProposer``
+    here, because those two stopped being the same thing. Phase 5b put
+    ``litellm`` onto the shared chat provider layer, so
+    ``make_proposer("litellm")`` returns a ``ChatProviderProposer`` whenever the
+    chat extra is installed and falls back to ``LiteLLMProposer`` only on an
+    agent-only install. Naming the class here measured whichever proposer *this
+    file* picked and reported it as "the real path" -- on any installation with
+    ``aorta[chat]``, that is not the path ``aorta agent`` takes.
+
+    The two are not interchangeable for this measurement, which is why this
+    refuses rather than adapts. ``LiteLLMProposer`` sends ``response_format``,
+    and whether the reply is a bare JSON object is most of what tier 1 grades;
+    ``ChatProviderProposer`` has no ``response_format`` to lean on and parses
+    fence-tolerantly instead. A reward measured through one is not a reward for
+    the other.
+
+    Adapting would also fail silently rather than loudly. The recorder wraps
+    ``litellm.completion``, which is the boundary ``LiteLLMProposer`` crosses
+    and not one the chat layer is obliged to, so a run on a chat install would
+    collect empty ``Recorded()`` objects and score every sample as a tier-1
+    failure -- an entire results file of zeros that reads like a finding about
+    the model.
+    """
+    proposer = make_proposer("litellm", model=model)
+    if not isinstance(proposer, LiteLLMProposer):
+        raise SystemExit(
+            "this harness records the direct litellm path, but `aorta agent "
+            "--llm-backend litellm` on this installation builds "
+            f"{type(proposer).__name__} -- the shared chat provider layer, "
+            "which having `aorta.chat` installed selects. Its requests need "
+            "not cross the `litellm.completion` boundary this harness records, "
+            "and it sends no `response_format`, so the scores would describe "
+            "neither path. Re-run on an install without the `chat` extra, or "
+            "extend the recorder to the shared provider boundary first."
+        )
+    return proposer
+
+
 def drive_proposals(
     rows: list[dict[str, Any]],
     *,
@@ -377,7 +439,7 @@ def drive_proposals(
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
     """Sample a group of real proposals per scenario, through the real proposer."""
-    proposer = LiteLLMProposer(model=model)
+    proposer = agent_proposer(model)
     candidates = list(candidates or CANDIDATES)
     tried = list(tried or TRIED)
     offered = [c for c in candidates if c not in tried and c != "none"]

@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -260,6 +262,24 @@ def collect(root: Path) -> list[Scenario]:
         except (OSError, json.JSONDecodeError) as exc:
             print(f"  skipped {path}: unreadable ({exc})", file=sys.stderr)
             continue
+        if not isinstance(doc, dict):
+            # `[]`, `"partial"`, `null` and `0` are all valid JSON and none of
+            # them is a report. Without this the document went into `Scenario`
+            # unexamined and `doc.get("checks")` raised `AttributeError` three
+            # lines down -- which no caller catches, so ONE truncated artifact
+            # anywhere under `--results` aborted the entire build with a
+            # traceback rather than costing the corpus one scenario.
+            #
+            # Skipped on the same terms as an unparseable one, because it is
+            # the same fault: a file that is not a report. `json.JSONDecodeError`
+            # only means the bytes were not JSON, and the bytes being JSON was
+            # never the question.
+            print(
+                f"  skipped {path}: not a report ({type(doc).__name__} at the "
+                "top level, expected an object)",
+                file=sys.stderr,
+            )
+            continue
         scenarios.append(
             Scenario(
                 case=case,
@@ -439,6 +459,86 @@ def proposal_examples(
     return out
 
 
+#: The files a corpus is made of. `manifest.json` is written last on the
+#: success path and is what :func:`_holds_a_corpus` keys on.
+CORPUS_FILES = ("triage.jsonl", "proposal.jsonl", "manifest.json")
+
+
+def _holds_a_corpus(out: Path) -> bool:
+    """Whether ``out`` already holds a corpus this script produced.
+
+    The manifest is the key rather than the directory existing, so `--out`
+    pointed at a directory that is not a corpus is never mistaken for one --
+    and so nothing this script did not write is ever removed by
+    :func:`discard_corpus`.
+    """
+    return (out / "manifest.json").is_file()
+
+
+def discard_corpus(out: Path) -> bool:
+    """Remove the corpus at ``out``, if there is one. Returns whether there was.
+
+    The fail-closed guarantee this script claims -- a build that refuses to
+    publish leaves nothing for a later step to consume -- held only for a
+    first build. On a rebuild the refusal came *before* `mkdir`, which was the
+    whole argument, and left the previous `triage.jsonl`, `proposal.jsonl` and
+    manifest exactly where a trainer looks for them. The command exited 1 and
+    the corpus on disk was still readable, still well-formed, and now stale:
+    the worst of the shapes this file keeps arguing against, because it is
+    indistinguishable from a good corpus at the point of use.
+
+    Deleting is the destructive option and it is the consistent one. A
+    successful build already replaces all three files unconditionally, so this
+    directory's previous contents were forfeit the moment the command was run;
+    the failure path was the only one pretending otherwise. Scoped to the
+    files above for the same reason :func:`_holds_a_corpus` exists -- `--out`
+    given someone's home directory removes three names that are not there.
+    """
+    if not _holds_a_corpus(out):
+        return False
+    for name in CORPUS_FILES:
+        (out / name).unlink(missing_ok=True)
+    return True
+
+
+def publish(out: Path, payload: dict[str, str]) -> None:
+    """Write the corpus beside ``out``, then swap it in.
+
+    Writing in place published a torn corpus on any failure after the first
+    `open`: `triage.jsonl` from this build beside a `proposal.jsonl` and a
+    manifest from the last one, with the exit code saying the build failed and
+    the directory saying otherwise. The scenario ids line up well enough for
+    `run_e2e` to key its label map on them, so the mismatch is not detectable
+    downstream -- it is just wrong.
+
+    Two renames on one filesystem: the previous corpus moves aside and the
+    staged one takes its place. The window where `out` does not exist is
+    between them, which no amount of care removes without a real transaction;
+    what it does remove is the window where `out` exists and is half of two
+    builds. A failed second rename puts the previous corpus back.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staging = out.with_name(f".{out.name}.staging-{os.getpid()}")
+    previous = out.with_name(f".{out.name}.previous-{os.getpid()}")
+    for scratch in (staging, previous):
+        shutil.rmtree(scratch, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        for name, text in payload.items():
+            (staging / name).write_text(text, encoding="utf-8")
+        if out.exists():
+            out.rename(previous)
+        try:
+            staging.rename(out)
+        except OSError:
+            if previous.exists():
+                previous.rename(out)
+            raise
+    finally:
+        for scratch in (staging, previous):
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, required=True,
@@ -461,6 +561,8 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = collect(args.results)
     if not scenarios:
         print(f"no sanitizer reports under {args.results}", file=sys.stderr)
+        if discard_corpus(args.out):
+            print(f"  removed the previous corpus at {args.out}", file=sys.stderr)
         return 1
 
     triage: list[dict[str, Any]] = []
@@ -491,8 +593,11 @@ def main(argv: list[str] | None = None) -> int:
     # like a run, and `recipe_reward`'s novelty gate refuses an empty corpus
     # root for exactly this reason one layer over.
     #
-    # Refused before `mkdir`, so a failed build leaves no directory for a later
-    # step to find and mistake for a good one.
+    # Refused before anything is written, so a failed build leaves no corpus
+    # for a later step to find and mistake for a good one -- and `discard_corpus`
+    # is what extends that from "no directory is created" to "no corpus is
+    # left", which are the same sentence only on a machine that has never run
+    # this command before.
     if not triage:
         print(
             f"all {len(scenarios)} discovered report(s) were rejected, so there "
@@ -500,13 +605,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.out}. Check --baselines matches this results tree.",
             file=sys.stderr,
         )
+        if discard_corpus(args.out):
+            print(
+                f"  removed the previous corpus at {args.out}: this build "
+                "refused to publish, so anything still there is stale and "
+                "would train as if it were this run's",
+                file=sys.stderr,
+            )
         return 1
-
-    args.out.mkdir(parents=True, exist_ok=True)
-    for name, rows in (("triage.jsonl", triage), ("proposal.jsonl", proposals)):
-        with (args.out / name).open("w", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row) + "\n")
 
     families: dict[str, int] = {}
     verdicts: dict[str, int] = {}
@@ -537,8 +643,13 @@ def main(argv: list[str] | None = None) -> int:
         "ground_truth_disagreements": disagreements,
         "run_meta": run_meta,
     }
-    (args.out / "manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    publish(
+        args.out,
+        {
+            "triage.jsonl": "".join(json.dumps(row) + "\n" for row in triage),
+            "proposal.jsonl": "".join(json.dumps(row) + "\n" for row in proposals),
+            "manifest.json": json.dumps(manifest, indent=2) + "\n",
+        },
     )
     print(json.dumps(manifest, indent=2))
     return 0

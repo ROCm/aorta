@@ -438,6 +438,42 @@ def _lifecycle_failure(lifecycle: dict[str, Any]) -> str | None:
     return None
 
 
+def round_one_verdict(
+    perturb_lifecycle: dict[str, Any], peer_sent_perturb: bool | None
+) -> str | None:
+    """The verdict the perturb round decides on its own, or ``None`` to go on.
+
+    The top two rungs of ``decide_verdict``'s ladder, lifted out so ``main`` can
+    read them *before* it posts the restore update instead of only after the
+    whole run. Both already outrank everything the restore round could
+    contribute, so consulting them early costs no evidence -- but continuing
+    past them costs correctness on real hardware.
+
+    Broadcasts are ordered. A rejected perturb lifecycle or a missing round-1
+    marker both mean the peer may still be blocked in its round-1 send, and the
+    two rounds carry identical tensor shapes, so the restore update matches
+    that *pending perturb* payload: the engine receives the zeroed weights
+    while this driver labels the step "restore", round 2 is the one left
+    blocked, and the JSON records a restore that was accepted. Nothing in the
+    report would say which round's payload actually landed, and the engine is
+    left holding weights nobody asked for. Stopping is the only remedy that
+    does not require tearing down and recreating both group participants first,
+    which this driver cannot do -- it does not own the peer.
+    """
+    perturb_bad = _lifecycle_failure(perturb_lifecycle)
+    if perturb_bad is not None:
+        # Named by leg, because "the update was rejected" and "the engine never
+        # entered the update state" are different failures to chase.
+        return (
+            "UPDATE_REJECTED"
+            if perturb_bad == "update"
+            else f"LIFECYCLE_REJECTED_{perturb_bad.upper()}"
+        )
+    if peer_sent_perturb is False:
+        return "HTTP_OK_BUT_PEER_NEVER_SENT"
+    return None
+
+
 def decide_verdict(
     *,
     baseline: dict[str, Any],
@@ -549,16 +585,12 @@ def decide_verdict(
         all(t in set(baseline_seen) for t in restore_seen) if comparable else None
     )
 
-    if perturb_bad is not None:
-        # Named by leg, because "the update was rejected" and "the engine never
-        # entered the update state" are different failures to chase.
-        verdict = (
-            "UPDATE_REJECTED"
-            if perturb_bad == "update"
-            else f"LIFECYCLE_REJECTED_{perturb_bad.upper()}"
-        )
-    elif peer_sent_perturb is False:
-        verdict = "HTTP_OK_BUT_PEER_NEVER_SENT"
+    # The first two rungs live in `round_one_verdict` so that `main` can apply
+    # exactly this naming when it stops after the perturb round, rather than a
+    # second copy of it that can drift.
+    round_one = round_one_verdict(perturb_lifecycle, peer_sent_perturb)
+    if round_one is not None:
+        verdict = round_one
     elif restore_bad is not None:
         verdict = (
             "RESTORE_UPDATE_REJECTED"
@@ -759,6 +791,47 @@ def main() -> int:
     report["after_perturb"] = perturbed
     log(f"after perturb: {perturbed['text']!r} ({perturbed['distinct']} distinct)")
     flush()
+
+    # Consulted here, before the second collective, rather than left to
+    # `decide_verdict` at the end of the run. The verdict is the same either
+    # way; what differs is whether the restore update was posted into a group
+    # whose first round may never have completed. See `round_one_verdict` for
+    # what that does to the engine's weights.
+    stopped = round_one_verdict(report["perturb"], peer_sent_perturb)
+    if stopped is not None:
+        report["verdict"] = stopped
+        # `None`, the same withdrawal `decide_verdict` makes for these two
+        # verdicts. The perturb completions exist and are in the report, but
+        # nothing was established about the weights behind them.
+        report["weights_changed_under_perturb"] = None
+        report["weights_recovered_under_restore"] = None
+        report["stopped_after_round"] = perturb_round
+        # Recorded as a declined step rather than left absent, the same way
+        # `lifecycle_update` records the legs it declines to post: "the driver
+        # crashed here" and "the driver refused to post these" are very
+        # different things for a reader to have to infer from a truncated
+        # record.
+        report["restore"] = {
+            "label": "restore",
+            "skipped": ["start", "update", "finish"],
+            "skipped_reason": (
+                "the perturb round did not complete, so the peer may still be "
+                "blocked in its round-1 broadcast; this update has the same "
+                "shapes and would have been matched against that pending "
+                "payload instead of a restore"
+            ),
+        }
+        report["update_seconds"] = {
+            "perturb": _update_seconds(report["perturb"]),
+            "restore": None,
+        }
+        flush()
+        log(f"stopped after round {perturb_round}: restore not attempted")
+        log(f"VERDICT: {report['verdict']}")
+        # 1, not 2: the exit code follows the verdict, and these are the same
+        # verdicts the full path already returns 1 for. 2 is for a run that
+        # never reached a verdict about the transfer at all.
+        return 1
 
     report["restore"] = lifecycle_update(args.control_url, plan, "restore")
     posted_restore = _log_step(report["restore"])

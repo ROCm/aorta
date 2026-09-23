@@ -66,14 +66,20 @@ The short version:
   split is more like 70/30 than 95/5, which caps what optimising the rollout
   half can buy.
 - **The consumer contract is pinned from source, and the integration seam is
-  measured.** `aorta agent`'s `LiteLLMProposer` is the contract that exists
-  today; its prompt, schema and validation are transcribed in
-  [3.1](#31-what-the-current-consumer-sends), and
-  [3.4](#34-the-current-contract-versus-the-target-one) reconciles it with the
-  chatbot's root-cause-and-fix target — they are the same pair, compressed.
-  Pointing the agent at a self-hosted model needs **no code change** — two
-  environment variables — verified against a mock OpenAI endpoint rather than
-  assumed.
+  measured.** `aorta agent` builds its proposer through
+  `make_proposer("litellm", ...)`, and since Phase 5b that resolves **two**
+  ways: `ChatProviderProposer` on the shared chat provider layer when
+  `aorta[chat]` is installed, and the direct `LiteLLMProposer` as the shipped
+  fallback when it is not. The prompt, schema and validation transcribed in
+  [3.1](#31-what-the-current-consumer-sends) are the direct path's, and
+  [3.4](#34-the-current-contract-versus-the-target-one) reconciles them with the
+  chatbot's root-cause-and-fix target — they are the same pair, compressed. The
+  two paths differ in one way this document depends on: the direct path sends
+  `response_format: {"type": "json_object"}` and the shared one does not, so
+  format-validity numbers measured on one are not numbers for the other.
+  Pointing the agent at a self-hosted model needs **no code change** either way,
+  but the configuration is not the same — see
+  [3.3](#33-pointing-it-at-a-self-hosted-model-no-code-change).
 
 Related: [TokenSpeed under AORTA](tokenspeed.md) for the probe routes and the
 container's operational hazards, [TokenSpeed serving benchmarks](tokenspeed-serving.md)
@@ -776,6 +782,28 @@ verdict. That is what makes this a safe first consumer.
 
 This was recorded as an open integration gap. It is now measured, and the answer
 is better than expected.
+
+**Which proposer `--llm-backend litellm` builds, first.** `make_proposer` prefers
+the shared chat provider layer and falls back to the direct proposer only when
+the chat extra is absent (`src/aorta/agent/llm.py`), so there are two supported
+configurations and they are configured in different places:
+
+| Installation | Proposer | Configured by | Sends `response_format` |
+|---|---|---|---|
+| `aorta[agent]`, no `chat` extra | `LiteLLMProposer` | `OPENAI_API_BASE` / `OPENAI_API_KEY` | yes |
+| `aorta[chat]` present | `ChatProviderProposer` | the chat profile — `AORTA_CHAT_REMOTE_LLM_BASE_URL`, `AORTA_CHAT_REMOTE_LLM_MODEL`, `AORTA_CHAT_REMOTE_LLM_API_KEY` | no |
+
+Both reach a self-hosted engine with no code change. What does *not* carry over
+is the measurement: `response_format` is most of what the format gate in
+[4.1](#41-the-gate-on-both-halves--proposal-validity) scores, so a validity rate
+measured on one path is not a claim about the other. The shared path compensates
+with fence-tolerant parsing, which is a different mechanism with a different
+failure distribution and has not been measured here. `examples/rl/run_e2e.py`
+therefore scopes itself to the agent-only row and refuses to run on the other,
+rather than reporting one path's numbers under the other's name.
+
+The agent-only row is the one verified below, and the one the rest of this
+section describes.
 
 `LiteLLMProposer` passes neither `api_base` nor `api_key`, so it inherits
 LiteLLM's environment resolution. Setting two variables is sufficient:
@@ -2094,11 +2122,14 @@ handle whatever the domain presents.
 therefore the deliverable. The output is not a standalone artifact judged on its
 own terms — it is a model that **drops into the existing loop and beats a
 general-purpose one there**. That is a narrower and much more testable claim,
-and this repository already has both halves of the test: the contract is
-`LiteLLMProposer`'s, transcribed from source in
-[3.1](#31-what-the-current-consumer-sends), and pointing the agent at a
-self-hosted model needs **no code change** — `OPENAI_API_BASE` and
-`OPENAI_API_KEY`, verified against a mock endpoint rather than assumed
+and this repository already has both halves of the test: the contract is the
+one `make_proposer("litellm", ...)` builds — `LiteLLMProposer`'s on an
+agent-only install, transcribed from source in
+[3.1](#31-what-the-current-consumer-sends), and `ChatProviderProposer`'s, which
+asks for the same schema without `response_format`, wherever `aorta[chat]` is
+installed — and pointing the agent at a self-hosted model needs **no code
+change** on either, though the two read different configuration and only the
+first is measured here
 ([3.3](#33-pointing-it-at-a-self-hosted-model-no-code-change)). So "beats a
 general-purpose one" can be measured on the real consumer from the day a
 checkpoint exists, with no integration work in between.

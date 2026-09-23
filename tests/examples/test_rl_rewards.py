@@ -1566,6 +1566,171 @@ def test_a_corpus_with_nothing_in_it_is_a_failed_build(build_corpus, tmp_path, c
     assert not out.exists()
 
 
+def _refuse(build_corpus, tmp_path, out):
+    """Run a build that finds reports and rejects every one of them."""
+    results = tmp_path / "rejected" / "consan-racy"
+    results.mkdir(parents=True)
+    (results / "sanitizer_report.json").write_text(
+        json.dumps({"not": "a sanitizer report"}), encoding="utf-8"
+    )
+    return build_corpus.main([
+        "--results", str(results.parent),
+        "--baselines", str(
+            Path(__file__).resolve().parents[2]
+            / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+        ),
+        "--out", str(out),
+    ])
+
+
+def test_a_non_object_report_costs_one_scenario_not_the_whole_build(
+    build_corpus, tmp_path, capsys
+):
+    """One truncated artifact used to abort the corpus with a traceback.
+
+    `json.loads` returns whatever the file holds, and `[]`, `"partial"`,
+    `null` and `0` are all valid JSON. Only `OSError` and `JSONDecodeError`
+    were caught, so a syntactically valid non-object reached `Scenario` and
+    `doc.get("checks")` raised `AttributeError` -- uncaught, out through
+    `main`, no corpus written at all.
+
+    Costing the build every *other* scenario over one bad file is the wrong
+    trade in both directions: a sweep of fifty reports with one truncated
+    write produces nothing, and the traceback names `AttributeError` rather
+    than the file. The bytes being JSON was never the question, so this is
+    skipped on the same terms as a file that is not JSON at all.
+
+    The surviving scenario is the point of the second half -- a rule that
+    rejected the whole directory would satisfy the first assertion too.
+    """
+    results = tmp_path / "results"
+    (results / "consan-racy").mkdir(parents=True)
+    (results / "consan-racy" / "sanitizer_report.json").write_text(
+        json.dumps(["not", "an", "object"]), encoding="utf-8"
+    )
+    for report in sorted(_SURVEY.rglob("sanitizer_report.json")):
+        case = results / report.parent.name
+        case.mkdir(parents=True)
+        (case / "sanitizer_report.json").write_text(
+            report.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+    out = tmp_path / "corpus"
+    code = build_corpus.main([
+        "--results", str(results),
+        "--baselines", str(
+            Path(__file__).resolve().parents[2]
+            / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+        ),
+        "--out", str(out),
+    ])
+    err = capsys.readouterr().err
+
+    assert code == 0, err
+    assert "not a report" in err and "consan-racy" in err, err
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["scenarios"] == 6, manifest
+
+
+def test_a_refused_rebuild_does_not_leave_the_previous_corpus_consumable(
+    build_corpus, tmp_path, capsys
+):
+    """The fail-closed guarantee held only for a first build.
+
+    `test_a_corpus_with_nothing_in_it_is_a_failed_build` asserts no directory
+    is created, which is the whole story exactly once. On a rebuild the
+    refusal came before `mkdir` and left the previous `triage.jsonl`,
+    `proposal.jsonl` and manifest in place -- readable, well-formed, and now
+    stale. The command exited 1 and the corpus on disk said otherwise, which
+    is worse than either alone: a trainer pointed at `--out` cannot tell this
+    from a build that succeeded, and trains on the run before last while the
+    pipeline reports a failure nobody is looking at.
+    """
+    out, first = _build(build_corpus, tmp_path, _SURVEY)
+    assert first["scenarios"] == 6
+    capsys.readouterr()
+
+    code = _refuse(build_corpus, tmp_path, out)
+    err = capsys.readouterr().err
+
+    assert code == 1, err
+    assert "removed the previous corpus" in err, err
+    for name in build_corpus.CORPUS_FILES:
+        assert not (out / name).exists(), f"{name} survived a refused build"
+
+
+def test_a_refused_build_leaves_a_directory_that_is_not_a_corpus_alone(
+    build_corpus, tmp_path, capsys
+):
+    """The narrowness control: removing whatever `--out` names would pass above.
+
+    `--out` is an operator-supplied path and a typo is the normal way it ends
+    up somewhere that matters. Keyed on the manifest, so this only ever
+    removes the three names it wrote.
+    """
+    out = tmp_path / "not-a-corpus"
+    out.mkdir()
+    bystander = out / "notes.txt"
+    bystander.write_text("mine", encoding="utf-8")
+
+    code = _refuse(build_corpus, tmp_path, out)
+    err = capsys.readouterr().err
+
+    assert code == 1, err
+    assert "removed the previous corpus" not in err, err
+    assert bystander.read_text(encoding="utf-8") == "mine"
+
+
+def test_a_build_that_dies_mid_write_does_not_publish_half_of_it(
+    build_corpus, tmp_path
+):
+    """Writing in place published one build's triage beside another's proposals.
+
+    Every failure after the first `open` left `--out` holding a mix of two
+    builds, with the exit code saying the build failed and the directory
+    saying it had not. The scenario ids line up well enough for `run_e2e` to
+    key its label map on them, so nothing downstream detects the mismatch.
+
+    Staged beside `--out` and swapped in, so the previous corpus is what
+    survives a failed build rather than a splice of both. The payload here
+    fails on the second file, which is the case in-place writing got wrong.
+    """
+    out = tmp_path / "corpus"
+    out.mkdir()
+    for name in build_corpus.CORPUS_FILES:
+        (out / name).write_text(f"previous {name}\n", encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        build_corpus.publish(
+            out,
+            {"triage.jsonl": "fresh\n", "proposal.jsonl": None},  # None: dies here
+        )
+
+    for name in build_corpus.CORPUS_FILES:
+        assert (out / name).read_text(encoding="utf-8") == f"previous {name}\n"
+    assert not list(tmp_path.glob(".corpus.*")), "a scratch directory was left behind"
+
+
+def test_a_successful_rebuild_replaces_the_corpus_rather_than_merging_into_it(
+    build_corpus, tmp_path
+):
+    """A stale file from the last build is gone, not left for a reader to find.
+
+    In-place writing only ever truncated the three names it was about to
+    write, so anything else a previous build (or a previous *version* of this
+    script) had put there stayed, and stayed readable.
+    """
+    out = tmp_path / "corpus"
+    out.mkdir()
+    (out / "triage.v1.jsonl").write_text("from the version before\n", encoding="utf-8")
+
+    _, manifest = _build(build_corpus, tmp_path, _SURVEY)
+
+    assert manifest["scenarios"] == 6
+    assert not (out / "triage.v1.jsonl").exists()
+    assert (out / "triage.jsonl").is_file()
+
+
 def test_every_example_carries_a_workload_family(build_corpus, tmp_path):
     """Stratification is free now and expensive to retrofit, so it is enforced."""
     out, manifest = _build(build_corpus, tmp_path, _SURVEY)
@@ -4599,3 +4764,242 @@ def test_the_models_subcommand_still_passes_on_a_healthy_gateway(tmp_path):
     assert "Qwen/Qwen3-8B" in output, output
     # The status must not be printed as though it were part of the body.
     assert "200" not in proc.stdout.replace("Qwen/Qwen3-8B", ""), proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Review pass 2026-09-23: the second collective into a group still on round 1
+# --------------------------------------------------------------------------- #
+
+
+def _drive_roundtrip(mod, tmp_path, monkeypatch, *, perturb_update=200, marker=True):
+    """Run ``main`` end to end against a stub control plane.
+
+    Every HTTP call in this driver goes through ``call``, so replacing that one
+    function is enough to run the whole sequence in-process and record exactly
+    which requests were posted -- which is the thing under test here. Asserting
+    on the verdict alone would not catch it: the verdict was already right, and
+    the defect was the update posted on the way to it.
+    """
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "names": ["w"],
+                "dtype_names": ["float32"],
+                "shapes": [[1]],
+            }
+        )
+    )
+    if marker:
+        mod.peer_round_marker(str(plan), 1).write_text(
+            json.dumps({"run_id": "r1", "kind": "perturb"})
+        )
+    # Round 2's marker is always in place, so a restore that does get posted
+    # comes back healthy: nothing about the *second* round is what stops it.
+    mod.peer_round_marker(str(plan), 2).write_text(
+        json.dumps({"run_id": "r1", "kind": "restore"})
+    )
+
+    posted: list[str] = []
+    # Baseline A, perturb B, restore A -- a clean round trip, three draws each.
+    texts = ["A"] * 3 + ["B"] * 3 + ["A"] * 3
+
+    def fake_call(base, method, path, body=None, timeout=mod.TIMEOUT_S):
+        posted.append(path)
+        if path == "/v1/completions":
+            drawn = sum(1 for p in posted if p == "/v1/completions") - 1
+            return 200, {"choices": [{"text": texts[min(drawn, len(texts) - 1)]}]}, 0.01
+        if path == "/update_weights":
+            # The first lifecycle is the perturb; a second one is the restore
+            # this test is asking about.
+            if sum(1 for p in posted if p == "/start_weight_update") == 1:
+                return perturb_update, {"detail": "stub"}, 0.01
+        return 200, {"ok": True}, 0.01
+
+    monkeypatch.setattr(mod, "call", fake_call)
+    out = tmp_path / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nccl_roundtrip_check.py",
+            "--model", "m",
+            "--plan", str(plan),
+            "--plan-run-id", "r1",
+            "--master-port", "29500",
+            "--world-size", "2",
+            "--peer-grace", "0.05",
+            "--out", str(out),
+        ],
+    )
+    code = mod.main()
+    return code, json.loads(out.read_text()), posted
+
+
+def test_a_rejected_perturb_update_does_not_post_a_second_collective(
+    nccl_roundtrip_check, tmp_path, monkeypatch
+):
+    """The restore would have consumed the perturb payload, not replaced it.
+
+    Broadcasts are ordered. A rejected perturb update leaves the peer possibly
+    still blocked in its round-1 send, and both rounds carry identical shapes,
+    so the restore update matches *that* pending payload: the engine receives
+    the zeroed weights while the driver labels the step "restore", and round 2
+    is the one left blocked. `decide_verdict` already named this run correctly
+    at the end -- the damage was done by the update posted on the way there,
+    which is why this asserts on the requests and not only on the verdict.
+    """
+    code, report, posted = _drive_roundtrip(
+        nccl_roundtrip_check, tmp_path, monkeypatch, perturb_update=500
+    )
+
+    assert posted.count("/start_weight_update") == 1
+    assert posted.count("/update_weights") == 1
+    assert report["verdict"] == "UPDATE_REJECTED"
+    assert report["stopped_after_round"] == 1
+    # Recorded as a declined step, not left absent: "the driver crashed here"
+    # and "the driver refused to post this" are different things to conclude.
+    assert report["restore"]["skipped"] == ["start", "update", "finish"]
+    assert "pending" in report["restore"]["skipped_reason"]
+    assert "after_restore" not in report
+    # The same withdrawal `decide_verdict` makes for this verdict.
+    assert report["weights_changed_under_perturb"] is None
+    assert report["weights_recovered_under_restore"] is None
+    # The exit code follows the verdict: this is the code the full path
+    # returned for `UPDATE_REJECTED` before the run learned to stop early.
+    assert code == 1
+
+
+def test_a_missing_round_one_marker_also_stops_before_the_restore(
+    nccl_roundtrip_check, tmp_path, monkeypatch
+):
+    """The other half, and the one a status-code check cannot see.
+
+    Here every leg came back 200 and the engine is satisfied -- but the peer's
+    round-1 marker never appeared, which says no collective was matched. That
+    is the same blocked peer as above reached by a different route, so posting
+    the restore into it has the same consequence.
+    """
+    code, report, posted = _drive_roundtrip(
+        nccl_roundtrip_check, tmp_path, monkeypatch, marker=False
+    )
+
+    assert posted.count("/start_weight_update") == 1
+    assert report["verdict"] == "HTTP_OK_BUT_PEER_NEVER_SENT"
+    assert report["perturb"]["peer"]["appeared"] is False
+    assert report["restore"]["skipped"] == ["start", "update", "finish"]
+    assert code == 1
+
+
+def test_a_completed_perturb_round_still_gets_its_restore(
+    nccl_roundtrip_check, tmp_path, monkeypatch
+):
+    """Narrowness. A guard that stops every run proves nothing at all.
+
+    Accepted lifecycle plus a round-1 marker is the case the whole driver
+    exists to measure, and it must still post both rounds and reach a real
+    verdict.
+    """
+    code, report, posted = _drive_roundtrip(nccl_roundtrip_check, tmp_path, monkeypatch)
+
+    assert posted.count("/start_weight_update") == 2
+    assert posted.count("/finish_weight_update") == 2
+    assert report["verdict"] == "PROVEN"
+    assert "stopped_after_round" not in report
+    assert report["weights_changed_under_perturb"] is True
+    assert report["weights_recovered_under_restore"] is True
+    assert code == 0
+
+
+@pytest.mark.parametrize(
+    "lifecycle,peer,expected",
+    [
+        (_lifecycle(start=500), None, "LIFECYCLE_REJECTED_START"),
+        (_lifecycle(update=500), None, "UPDATE_REJECTED"),
+        (_lifecycle(finish=500), None, "LIFECYCLE_REJECTED_FINISH"),
+        (_lifecycle(), False, "HTTP_OK_BUT_PEER_NEVER_SENT"),
+        (_lifecycle(), True, None),
+        # `None` is "the check was not performed", which the ladder is explicit
+        # is evidence either way -- so it must not stop the run.
+        (_lifecycle(), None, None),
+    ],
+)
+def test_the_early_stop_names_the_verdict_the_full_run_would_have(
+    nccl_roundtrip_check, lifecycle, peer, expected
+):
+    """The drift guard: one ladder, read from two places.
+
+    `main` now decides whether to continue from the same two rungs
+    `decide_verdict` uses to name the run, so a copy of that naming in `main`
+    would be free to drift from the verdict the report carries. This pins the
+    helper to both its answers -- the verdict strings, and the `None` that
+    means the perturb round completed and the restore may be posted.
+    """
+    assert nccl_roundtrip_check.round_one_verdict(lifecycle, peer) == expected
+
+    # And when it does name a verdict, it is the one the full ladder reaches
+    # from the same evidence -- with an otherwise perfect round trip below it,
+    # so nothing except these two rungs can be supplying the answer.
+    if expected is not None:
+        assert nccl_roundtrip_check.decide_verdict(
+            baseline=_gen("A"),
+            perturbed=_gen("B"),
+            restored=_gen("A"),
+            perturb_lifecycle=lifecycle,
+            restore_lifecycle=_lifecycle(),
+            peer_sent_perturb=peer,
+            peer_sent_restore=True,
+        )[0] == expected
+
+
+def test_the_harness_builds_the_proposer_the_agent_would_build(run_e2e, monkeypatch):
+    """`LiteLLMProposer` and "what `aorta agent` uses" stopped being one thing.
+
+    Phase 5b put `litellm` onto the shared chat provider layer, so
+    `make_proposer("litellm")` returns `ChatProviderProposer` when the chat
+    extra is installed and the direct `LiteLLMProposer` only as the agent-only
+    fallback. Naming the class here measured whichever one this file picked,
+    under a docstring calling it the real path.
+    """
+    from aorta.agent.llm import LiteLLMProposer
+
+    asked = []
+
+    def fake_make_proposer(backend, *, model=None):
+        asked.append((backend, model))
+        return LiteLLMProposer(model=model)
+
+    monkeypatch.setattr(run_e2e, "make_proposer", fake_make_proposer)
+    proposer = run_e2e.agent_proposer("openai/Qwen/Qwen3-8B")
+
+    assert asked == [("litellm", "openai/Qwen/Qwen3-8B")]
+    assert isinstance(proposer, LiteLLMProposer)
+
+
+def test_a_shared_provider_install_is_refused_not_mismeasured(run_e2e, monkeypatch):
+    """The fail-open version of this is a results file of zeros.
+
+    The recorder wraps `litellm.completion`, the boundary the direct proposer
+    crosses; the chat layer need not cross it. Recording nothing means every
+    sample carries an empty `Recorded()` and scores as a tier-1 failure -- a
+    whole run of zero reward that reads like a finding about the model rather
+    than a harness pointed at the wrong seam. And the two paths differ in the
+    thing tier 1 grades: one sends `response_format` and the other does not.
+    """
+    from aorta.agent.llm import ChatProviderProposer
+
+    monkeypatch.setattr(
+        run_e2e,
+        "make_proposer",
+        lambda backend, *, model=None: ChatProviderProposer(backend, model=model),
+    )
+
+    with pytest.raises(SystemExit) as refusal:
+        run_e2e.agent_proposer("openai/Qwen/Qwen3-8B")
+
+    message = str(refusal.value)
+    # Names what was built, and both reasons the measurement would not transfer.
+    assert "ChatProviderProposer" in message
+    assert "litellm.completion" in message
+    assert "response_format" in message

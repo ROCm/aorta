@@ -306,8 +306,17 @@ workstream and this one.**
 
 `tokenspeed_serve` already stands up exactly this kind of server — that is the
 workload the whole TokenSpeed effort has been building and measuring. And
-pointing `aorta agent` at a self-hosted model needs **no code change**, only two
-environment variables:
+pointing `aorta agent` at a self-hosted model needs **no code change** in either
+of the two configurations it now supports.
+
+`--llm-backend litellm` does not resolve to one proposer any more. Phase 5b put
+it on the shared chat provider layer, so `make_proposer` returns
+`ChatProviderProposer` wherever `aorta[chat]` is installed and falls back to the
+direct `LiteLLMProposer` only on an `[agent]`-only install — and the two are
+configured in different places.
+
+**Agent-only install** (the direct path, which inherits LiteLLM's own
+environment resolution):
 
 ```bash
 export OPENAI_API_BASE=http://<engine-host>:<port>/v1
@@ -315,10 +324,24 @@ export OPENAI_API_KEY=unused-but-must-be-set
 aorta agent --llm-backend litellm --llm-model openai/<served-model-name> ...
 ```
 
-This was verified against a mock OpenAI-compatible endpoint rather than assumed:
-the request arrives at `POST /v1/chat/completions` on the self-hosted address
-with `response_format: {"type": "json_object"}` intact, and the reply parses
-back into an `AgentStep` unchanged.
+**With the chat extra installed** (the shared layer, which reads the chat
+profile and ignores the two variables above):
+
+```bash
+export AORTA_CHAT_REMOTE_LLM_BASE_URL=http://<engine-host>:<port>/v1
+export AORTA_CHAT_REMOTE_LLM_MODEL=<served-model-name>
+export AORTA_CHAT_REMOTE_LLM_API_KEY=unused-but-must-be-set
+aorta agent --llm-backend litellm ...
+```
+
+The first was verified against a mock OpenAI-compatible endpoint rather than
+assumed: the request arrives at `POST /v1/chat/completions` on the self-hosted
+address with `response_format: {"type": "json_object"}` intact, and the reply
+parses back into an `AgentStep` unchanged. The shared path sends no
+`response_format` — it parses the reply fence-tolerantly instead — so the
+format-validity measurements in this document are claims about the agent-only
+row and not about both. That is also why `examples/rl/run_e2e.py` refuses to run
+on a chat install rather than scoring one path and labelling it the other.
 
 **The one gotcha:** the `openai/` prefix is stripped on the wire, so the name
 after the slash must match what the engine advertises, not what the CLI default
