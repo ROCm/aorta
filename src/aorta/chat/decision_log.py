@@ -318,6 +318,34 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
             return
         if raw_id in seen:
             return
+        # A *locator* is not a result row. ``build_report`` writes
+        # ``{"bundle": {"job_id": ..., "root": ...}, "category": ...,
+        # "confidence": ...}`` -- the id under a child object and the verdict
+        # beside it, on the parent -- so walking the child as the row recorded
+        # the id, left both halves ``None``, claimed the output, and never fell
+        # through. A raw dump of the in-tree autopsy report was therefore
+        # joinable and wrong, which is worse than not joinable: the record
+        # asserts "this job reached no verdict" about a report whose whole
+        # purpose is to carry one. Prefixed ``read_autopsy_report`` output
+        # escaped it only because its header makes ``json.loads`` fail.
+        #
+        # Declining rather than merging, and the distinction is the one
+        # ``test_a_nested_object_does_not_inherit_a_parent_verdict`` pins:
+        # taking a parent's verdict for a nested id is how a summary label gets
+        # copied onto every job under it. So the id stays unclaimed here and
+        # the walk continues, leaving the answer to a later object that does
+        # carry a verdict, or to the line reader.
+        #
+        # Both conjuncts are load-bearing. ``root`` is what makes this a
+        # pointer at a job rather than a report about one, and without it a
+        # bare ``{"job_id": ...}`` inside a results list -- which must be taken,
+        # verdict-less and unmerged -- would be declined too. Requiring neither
+        # verdict key means a locator that grew one is read as the row it has
+        # become.
+        if "root" in node and "category" not in node and "confidence" not in node:
+            for value in node.values():
+                walk(value)
+            return
         seen.add(raw_id)
         category = node.get("category")
         confidence = node.get("confidence")

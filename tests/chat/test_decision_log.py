@@ -11,6 +11,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from aorta.chat import decision_log
+from aorta.cia.autopsy.reporter import build_report
 
 QUERY = (
     "customer kernel at /home/customer7/private/kernel.hip on 10.20.30.40\n"
@@ -845,6 +846,157 @@ class TestAVerdictPrintedBeforeItsIdStillLands:
         )
 
         assert [result["category"] for result in results] == [None, None]
+
+
+class TestTheInTreeAutopsyReportIsReadAsTheVerdictItIs:
+    """`report.json` puts the id under `bundle` and the verdict beside it.
+
+    The walker takes "an object carrying a `job_id`" as a result row, which is
+    right for every shape above and wrong for this one: the id-bearing object
+    is a *locator* -- `{"job_id": ..., "root": ...}` -- and the verdict lives on
+    its parent. Walking it as the row recorded the id, left `category` and
+    `confidence` `None`, claimed the output as structured, and never fell
+    through to the line reader that would have found them. A record that is
+    joinable and wrong is worse than one that is not joinable: it asserts that
+    this job reached no verdict, about the one file whose purpose is to carry
+    one.
+
+    Built from `build_report` rather than from a literal, so the day the report
+    schema moves these tests move with it instead of pinning a shape nothing
+    emits.
+    """
+
+    def _report(self, **overrides) -> dict:
+        fields = {
+            "session_id": "session-a",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "bundle_job_id": "cia-20260101-000000-abcdef",
+            "bundle_root": "/jobs/cia-20260101-000000-abcdef",
+            "kb_version": None,
+            "category": "gpu_race",
+            "confidence": 0.82,
+            "rationale": "consan named the kernel",
+            "evidence": [{"source": "consan", "detail": "race at 0x28"}],
+            "next_probes": [{"mitigation": "hsa_no_sdma"}],
+            "tooling_gaps": [],
+        }
+        fields.update(overrides)
+        return build_report(**fields)
+
+    @pytest.mark.parametrize("sort_keys", [False, True])
+    def test_a_raw_report_dump_keeps_its_verdict(self, sort_keys):
+        """Before: the id landed and both halves of the verdict were dropped.
+
+        Both key orders, because `sort_keys=True` is the rendering the whole
+        JSON pre-pass exists for and insertion order is what `json.dumps`
+        gives by default -- and the defect was indifferent to which.
+        """
+        output = json.dumps(self._report(), sort_keys=sort_keys, indent=2)
+
+        assert decision_log._cia_results(output) == [
+            {
+                "job_id": "cia-20260101-000000-abcdef",
+                "category": "gpu_race",
+                "confidence": 0.82,
+            }
+        ]
+
+    def test_the_locator_does_not_claim_the_output_from_the_line_reader(self):
+        """The mechanism, asserted separately from the result.
+
+        The structural read now finds no result row in a report, so it answers
+        `None` -- "this is not JSON with a result object in it" -- and the line
+        reader gets its turn. Asserting only the verdict above would pass just
+        as well if the fix had merged the parent's keys downward, which is the
+        thing `test_a_nested_object_does_not_inherit_a_parent_verdict` forbids.
+        """
+        output = json.dumps(self._report(), sort_keys=True)
+
+        assert decision_log._cia_results_from_json(output) is None
+
+    def test_a_locator_key_that_sorts_after_the_verdict_still_lands(self):
+        """Why declining is safe here, and not a swap of one ordering bug for another.
+
+        Handing this back to the line reader looks like a return to the
+        span-order dependence the pre-pass was added to remove. It is not, and
+        the reason is that a report names exactly one job: rename `bundle` to
+        anything sorting after `category` and the forward span yields nothing,
+        so the one-job whole-output fallback answers -- which is safe precisely
+        because there is one job to attribute to.
+        """
+        report = json.loads(json.dumps(self._report()))
+        report["source"] = report.pop("bundle")
+        output = json.dumps(report, sort_keys=True)
+
+        assert decision_log._cia_results(output) == [
+            {
+                "job_id": "cia-20260101-000000-abcdef",
+                "category": "gpu_race",
+                "confidence": 0.82,
+            }
+        ]
+
+    def test_locators_that_carry_their_own_verdicts_are_still_results(self):
+        """Narrowness, and the reason the predicate names the verdict keys too.
+
+        Declining every object with a `root` key would drop a verdict an object
+        genuinely states about itself. The decline is for a locator that says
+        nothing about the outcome, not for every object that points at a
+        directory.
+
+        Two jobs, because one would not discriminate: with a single job the
+        line reader's whole-output fallback recovers the verdict anyway, so a
+        version of this check that declined on `root` alone would still pass.
+        With two, declining hands `cia-a1` the span that runs into `cia-b2`'s
+        keys -- the misattribution the structural read exists to prevent.
+        """
+        output = json.dumps(
+            {
+                "results": [
+                    {
+                        "job_id": "cia-a1",
+                        "root": "/jobs/cia-a1",
+                        "category": "gpu_race",
+                        "confidence": 0.82,
+                    },
+                    {
+                        "job_id": "cia-b2",
+                        "root": "/jobs/cia-b2",
+                        "category": "numeric_silent",
+                        "confidence": 0.41,
+                    },
+                ]
+            },
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82},
+            {"job_id": "cia-b2", "category": "numeric_silent", "confidence": 0.41},
+        ]
+
+    def test_a_bare_id_in_a_results_list_is_still_taken_verdictless(self):
+        """The other half of the narrowness, and the one that costs the most.
+
+        `test_a_nested_object_does_not_inherit_a_parent_verdict` requires this
+        row to be recorded with two `None`s rather than handed the summary
+        verdict above it. Declining on "no verdict keys" alone would instead
+        drop it into the line reader, where one job plus the whole-output
+        fallback hands it exactly the `gpu_race` that test forbids. `root` is
+        what separates the two cases.
+        """
+        output = json.dumps(
+            {
+                "category": "gpu_race",
+                "confidence": 0.82,
+                "results": [{"job_id": "cia-a1"}],
+            },
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": None, "confidence": None}
+        ]
 
 
 class TestTheFieldsThatMakeARecordResolvable:
