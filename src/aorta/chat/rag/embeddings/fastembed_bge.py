@@ -118,7 +118,88 @@ def _model_dir_slug(model: str) -> str:
     return "models--" + model.replace("/", "--")
 
 
-def model_is_cached(model: str | None = None) -> bool:
+def _model_description(model: str) -> Any | None:
+    """FastEmbed's registry entry for *model*, or None when it cannot be read."""
+    try:
+        from fastembed import TextEmbedding
+
+        for description in TextEmbedding._list_supported_models():
+            if description.model.casefold() == model.casefold():
+                return description
+    except Exception:
+        logger.debug(
+            "could not read fastembed's model registry for %s",
+            model,
+            exc_info=True,
+        )
+    return None
+
+
+def _cached_model_path(model: str, cache_dir: Path | None = None) -> Path | None:
+    """A complete snapshot FastEmbed can load directly, including legacy casing."""
+    description = _model_description(model)
+    model_file = getattr(description, "model_file", None)
+    if not isinstance(model_file, str):
+        return None
+    required_files = [
+        Path(model_file),
+        Path("tokenizer.json"),
+        Path("tokenizer_config.json"),
+        *(Path(name) for name in (getattr(description, "additional_files", ()) or ())),
+    ]
+    if any(path.is_absolute() or ".." in path.parts for path in required_files):
+        return None
+
+    source_repo = getattr(getattr(description, "sources", None), "hf", None) or model
+    candidates = {
+        _model_dir_slug(model).casefold(),
+        _model_dir_slug(source_repo).casefold(),
+    }
+    root = Path(cache_dir) if cache_dir is not None else model_cache_dir()
+
+    def loadable(snapshot: Path) -> bool:
+        try:
+            return snapshot.is_dir() and all(
+                (snapshot / relative_path).is_file() for relative_path in required_files
+            )
+        except OSError:
+            return False
+
+    for base in (root, root / "hub"):
+        try:
+            repositories = list(base.iterdir())
+        except OSError:
+            continue
+        for repository in repositories:
+            if repository.name.casefold() not in candidates:
+                continue
+            if loadable(repository):
+                return repository
+
+            snapshots = repository / "snapshots"
+            try:
+                revision = (repository / "refs" / "main").read_text(encoding="utf-8").strip()
+            except OSError:
+                revision = ""
+            if revision and Path(revision).name == revision:
+                preferred = snapshots / revision
+                if loadable(preferred):
+                    return preferred
+            try:
+                available = sorted(snapshots.iterdir(), key=lambda path: path.name)
+            except OSError:
+                continue
+            for snapshot in available:
+                if loadable(snapshot):
+                    return snapshot
+    return None
+
+
+def model_is_cached(
+    model: str | None = None,
+    *,
+    cache_dir: Path | None = None,
+) -> bool:
     """Whether the ONNX weights are already on disk.
 
     Deliberately a filesystem check rather than a ``TextEmbedding(...)``
@@ -132,31 +213,11 @@ def model_is_cached(model: str | None = None) -> bool:
     registered source from ``qdrant/...-onnx-q`` to ``Qdrant/...-onnx-Q``.
     HuggingFace preserves that spelling in the cache directory, but upgrading
     must not make the existing lowercase cache invisible on a case-sensitive
-    filesystem.
+    filesystem. The answer is the loadable snapshot path used by
+    :func:`_text_embedding`, not a looser second interpretation of the cache.
     """
     model = model or settings.embedding_model
-    root = model_cache_dir()
-    candidates = {
-        _model_dir_slug(model).casefold(),
-        _model_dir_slug(_source_repo(model)).casefold(),
-    }
-    for base in (root, root / "hub"):
-        try:
-            directories = list(base.iterdir())
-        except OSError:
-            continue
-        for directory in directories:
-            if directory.name.casefold() not in candidates:
-                continue
-            try:
-                if directory.is_dir() and any(directory.rglob("*.onnx")):
-                    return True
-            except OSError:
-                # A missing or unreadable candidate is not a warm cache. This
-                # probe is also called while explaining model-load failures, so
-                # it must not replace the useful error with a filesystem one.
-                continue
-    return False
+    return _cached_model_path(model, cache_dir) is not None
 
 
 def _source_repo(model: str) -> str:
@@ -175,14 +236,11 @@ def _source_repo(model: str) -> str:
     failure being explained with an unrelated one and the operator would lose
     :data:`PRE_SEED_PROCEDURE` entirely.
     """
-    try:
-        from fastembed import TextEmbedding
-    except Exception:  # absent, or an install too broken to import
+    description = _model_description(model)
+    if description is None:
         return model
     try:
-        for description in TextEmbedding._list_supported_models():
-            if description.model == model:
-                return getattr(description.sources, "hf", None) or model
+        return getattr(description.sources, "hf", None) or model
     except Exception:
         logger.debug(
             "could not read fastembed's model registry; treating %s as its own "
@@ -204,10 +262,20 @@ def _text_embedding(model: str, cache_dir: Path | None) -> TextEmbedding:
     """
     from fastembed import TextEmbedding
 
+    resolved_cache = cache_dir or model_cache_dir()
+    specific_model_path = _cached_model_path(model, resolved_cache)
     try:
-        return TextEmbedding(model_name=model, cache_dir=str(cache_dir) if cache_dir else None)
+        return TextEmbedding(
+            model_name=model,
+            cache_dir=str(cache_dir) if cache_dir else None,
+            **(
+                {"specific_model_path": str(specific_model_path)}
+                if specific_model_path is not None
+                else {}
+            ),
+        )
     except Exception as exc:
-        if model_is_cached(model):
+        if model_is_cached(model, cache_dir=resolved_cache):
             raise
         raise ModelUnavailableError(
             PRE_SEED_PROCEDURE.format(model=model, cache=model_cache_dir())
