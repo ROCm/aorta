@@ -41,6 +41,11 @@ Covered:
   for on purpose, and reading the unloaded copy instead moved both verdicts --
   see :func:`rocm_lib_dirs`.
 
+  For a soname this process has mapped, that is the *file*, not a directory to
+  search again: co-installed majors put two copies in one directory and the
+  resolver would answer for the wrong one. See :func:`mapped_libraries` and
+  :func:`libraries_to_scan`.
+
 Not covered, and not detectable this way:
 
 * **read and refused** -- the runtime parses the value and declines. Both
@@ -329,24 +334,36 @@ def rocm_torch_lib() -> tuple[Path | None, str]:
 _PROC_SELF_MAPS = Path("/proc/self/maps")
 
 
-def mapped_library_dirs(
+def mapped_libraries(
     sonames: tuple[str, ...] | None = None, maps_text: str | None = None
-) -> list[Path]:
-    """Directories holding an audited soname this process has actually mapped.
+) -> dict[str, Path]:
+    """``{soname: the exact file this process mapped for it}``.
 
     Ground truth rather than a model. Everything else here *predicts* which
     copy the loader would choose; a mapping is the loader having already
-    chosen, so these directories go in front of the predicted ones. That
-    closes the cases no search-path reasoning can: a ``DT_RPATH`` on the
-    calling object outranks ``LD_LIBRARY_PATH`` entirely, and
+    chosen. That closes the cases no search-path reasoning can: a ``DT_RPATH``
+    on the calling object outranks ``LD_LIBRARY_PATH`` entirely, and
     ``/etc/ld.so.cache`` supplies a copy from a directory that is on no search
     path this test can see. In both the process holds a ``libamdhip64`` the
     resolver never names.
 
+    **The file, not its directory.** Keeping only the directory and handing it
+    back to ``resolve_library`` re-runs a *choice* over a fact:
+    ``audit_env_knobs.resolve_library`` deliberately prefers the unversioned
+    link and otherwise the highest installed major, so with ``libamdhip64.so.6``
+    and ``libamdhip64.so.7`` co-installed -- a case that resolver exists to
+    handle -- it would hand back ``.so.7`` while the process is running
+    ``.so.6``, and an unloaded file would decide both verdicts again. One
+    directory up, this is the same defect as scanning the resolver's copy
+    instead of the operator's.
+
     Only the audited sonames, so an unrelated mapping -- libc, libstdc++,
-    every ``.so`` torch pulls in -- does not become a directory to scan. A
-    directory earns its place by holding a file this audit would open anyway;
-    it is a precedence hint, not a widening of the scan.
+    every ``.so`` torch pulls in -- is not a file to scan. A mapping earns its
+    place by being a library this audit would open anyway; it is a precedence
+    fact, not a widening of the scan.
+
+    First mapping wins, because a soname is loaded once: later rows are further
+    segments of the same file.
 
     Versioned names match the way the loader names them: ``libamdhip64.so.7``
     is a mapping of ``libamdhip64.so``. Same rule as
@@ -355,18 +372,19 @@ def mapped_library_dirs(
     not always the path a layout says it is.
 
     Mappings the kernel marked ``" (deleted)"`` are skipped: a file unlinked
-    after ``dlopen`` has a directory that may no longer hold it, and scanning a
-    torn-down build-artifact tree is the stale read this whole thread is about.
-    Unreadable ``/proc`` (not Linux, or a sandbox) yields ``[]``, which leaves
-    the search-path prediction to answer -- the behaviour before this existed.
+    after ``dlopen`` is not there to read, and scanning a torn-down
+    build-artifact tree is the stale read this whole change is about, arriving
+    from the side meant to fix it. Unreadable ``/proc`` (not Linux, or a
+    sandbox) yields ``{}``, which leaves the search-path prediction to answer
+    -- the behaviour before this existed.
     """
     names = sonames_to_scan() if sonames is None else sonames
     if maps_text is None:
         try:
             maps_text = _PROC_SELF_MAPS.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return []
-    dirs: list[Path] = []
+            return {}
+    found: dict[str, Path] = {}
     for line in maps_text.splitlines():
         # "addr perms offset dev inode  pathname"; the pathname is optional and
         # is the sixth field. Bounded split so a path containing spaces stays
@@ -378,9 +396,31 @@ def mapped_library_dirs(
         if not path_str.startswith("/") or path_str.endswith(" (deleted)"):
             continue
         name = Path(path_str).name
-        if any(name == soname or name.startswith(f"{soname}.") for soname in names):
-            dirs.append(Path(path_str).parent)
-    return list(dict.fromkeys(dirs))
+        for soname in names:
+            if soname in found:
+                continue
+            if name == soname or name.startswith(f"{soname}."):
+                found[soname] = Path(path_str)
+                break
+    return found
+
+
+def mapped_library_dirs(
+    sonames: tuple[str, ...] | None = None, maps_text: str | None = None
+) -> list[Path]:
+    """The directories :func:`mapped_libraries` found, deduplicated, in order.
+
+    The exact mapped file is what gets scanned for a soname that has one; this
+    is for the sonames that do *not*. ``librccl`` is routinely unmapped -- RCCL
+    is not pulled in until the first collective -- and it is far likelier to
+    sit beside the ``libamdhip64`` the process did load than in the directory a
+    resolver names, so the mapped directories lead the search path.
+    """
+    return list(
+        dict.fromkeys(
+            lib.parent for lib in mapped_libraries(sonames, maps_text).values()
+        )
+    )
 
 
 def search_path_dirs(search_path: str | None = None) -> list[Path]:
@@ -531,10 +571,26 @@ def scan_plan(
     ``LD_LIBRARY_PATH`` and mappings -- and on the one lane that has those, a
     test asserting an exact directory list would be asserting the runner's
     environment.
+
+    **The loader order is read after torch has been imported, and the ordering
+    is load-bearing.** Importing a ROCm torch is what maps ``libamdhip64`` and
+    ``libhsa-runtime64`` into this process; a snapshot taken before it finds
+    nothing mapped, reports that the loader has chosen nothing, and leaves the
+    whole ground-truth layer silently inert -- so an RPATH- or cache-selected
+    copy would be replaced by the resolver's again, which is the defect it was
+    added to fix. It is inert exactly where it is needed most, on a fresh
+    xdist worker or a direct run of this file, and nothing would have said so.
+
+    Which is why the gate below asks the resolver on its own first. "Is there
+    a ROCm install at all" is the question :func:`no_rocm_message` answers and
+    it must keep answering before torch is touched, or a CPU box would be told
+    its torch is the problem. The consequence is deliberate: a resolver whose
+    lib dirs are missing is refused even when an inherited directory holds the
+    libraries, because the inherited path says nothing about whether ROCm is
+    installed and the honest skip must not start depending on it.
     """
-    dirs = rocm_lib_dirs(roots, loader_dirs)
-    if not dirs:
-        resolved = resolve_rocm_roots() if roots is None else roots
+    resolved = resolve_rocm_roots() if roots is None else roots
+    if not rocm_lib_dirs(resolved, loader_dirs=[]):
         return [], no_rocm_message(resolved)
     torch_lib, torch_why = rocm_torch_lib() if torch is None else torch
     if torch_lib is None:
@@ -543,6 +599,7 @@ def scan_plan(
             "(PYTORCH_NO_CUDA_MEMORY_CACHING, PYTORCH_CUDA_ALLOC_CONF, "
             "TORCH_ROCM_FA_PREFER_CK) have no library that could carry them."
         )
+    dirs = rocm_lib_dirs(resolved, loader_dirs)
     dirs.append(torch_lib)
     return dirs, ""
 
@@ -1457,6 +1514,214 @@ def test_the_first_directory_that_provides_a_soname_wins(tmp_path):
     )
 
 
+def test_the_mapped_file_is_scanned_not_the_highest_major_beside_it(tmp_path):
+    """Directory precedence is not enough when the copies share a directory.
+
+    ``resolve_library`` prefers the unversioned link and otherwise the highest
+    installed major -- correctly, for a runtime-only tree. Handed a directory
+    with ``.so.6`` and ``.so.7`` co-installed it therefore answers ``.so.7``,
+    and if the mapping was reduced to its directory on the way in, the process
+    running ``.so.6`` has its verdicts decided by a file it never loaded. Both
+    move the wrong way at once here: ``.so.7``'s name would look read and
+    ``.so.6``'s would look unread.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    loaded = _fake_so(rocm / "libamdhip64.so.6", ["HIP_LAUNCH_BLOCKING"])
+    newer = _fake_so(rocm / "libamdhip64.so.7", ["PYTORCH_CUDA_ALLOC_CONF"])
+
+    scan = libraries_to_scan(
+        [rocm, torch_lib], mapped_libraries(maps_text=_maps_line(str(loaded)))
+    )
+
+    assert scan.libraries == [loaded.resolve()], scan.libraries
+    assert newer.resolve() not in scan.libraries
+    assert "libamdhip64.so" not in scan.unresolved
+    names = union_of_names(scan.libraries)
+    assert "HIP_LAUNCH_BLOCKING" in names
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in names, (
+        "the unloaded higher major must not answer for the mapped one"
+    )
+    # And the directory-only answer really is the other file, so this test
+    # fails for the reason it claims rather than by accident of layout.
+    assert _load_audit_script().resolve_library(rocm, "libamdhip64.so") == newer.resolve()
+
+
+def test_a_mapping_outranks_a_copy_in_an_earlier_directory(tmp_path):
+    """A mapping is decided; directory order is only a prediction.
+
+    ``DT_RPATH`` outranks ``LD_LIBRARY_PATH`` outright, so the first directory
+    on the search path can be the one the loader did not use. First-match-wins
+    over the directories is the fallback for sonames with no mapping, not a
+    rule that gets to overrule one.
+    """
+    first, second = tmp_path / "search", tmp_path / "rpath"
+    torch_lib = tmp_path / "torch"
+    for directory in (first, second, torch_lib):
+        directory.mkdir()
+    predicted = _fake_so(first / "libamdhip64.so", ["PYTORCH_CUDA_ALLOC_CONF"])
+    actual = _fake_so(second / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+
+    scan = libraries_to_scan(
+        [first, second, torch_lib], mapped_libraries(maps_text=_maps_line(str(actual)))
+    )
+
+    assert scan.libraries == [actual.resolve()], scan.libraries
+    assert predicted.resolve() not in scan.libraries
+
+
+def test_a_soname_with_no_mapping_still_resolves_from_the_directories(tmp_path):
+    """Narrowness: a mapped soname does not switch the others off.
+
+    ``librccl`` is unmapped until the first collective, so a mapping-only scan
+    would report it unresolved on a perfectly good stack and take the lane to
+    ``_unreadable_stack`` -- a red lane about the audit, not about the
+    registry.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    hip = _fake_so(rocm / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+    rccl = _fake_so(rocm / "librccl.so", ["NCCL_DEBUG"])
+
+    scan = libraries_to_scan(
+        [rocm, torch_lib], mapped_libraries(maps_text=_maps_line(str(hip)))
+    )
+
+    assert hip.resolve() in scan.libraries
+    assert rccl.resolve() in scan.libraries, (
+        "an unmapped soname is answered by the search path, as the loader "
+        "would answer it on the first collective"
+    )
+    assert "librccl.so" not in scan.unresolved
+
+
+def test_a_mapped_path_that_no_longer_exists_falls_back_to_the_search_path(tmp_path):
+    """The snapshot is a moment in the past; the scan happens after it.
+
+    A mapping can outlive its file. Trusting the path would leave the soname
+    unresolved and fail a lane whose stack is fine, and the search path still
+    has the answer the loader would give a second process today.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    on_disk = _fake_so(rocm / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
+
+    scan = libraries_to_scan(
+        [rocm, torch_lib], {"libamdhip64.so": tmp_path / "gone" / "libamdhip64.so.7"}
+    )
+
+    assert scan.libraries == [on_disk.resolve()], scan.libraries
+    assert "libamdhip64.so" not in scan.unresolved
+
+
+def test_the_mappings_are_read_after_torch_is_imported(monkeypatch, tmp_path):
+    """Ordering, asserted rather than left to the order of two lines.
+
+    Importing a ROCm torch is what maps ``libamdhip64`` and
+    ``libhsa-runtime64`` into this process. A snapshot taken first finds
+    neither, reports that the loader has chosen nothing, and leaves the whole
+    ground-truth layer inert on a fresh xdist worker -- inert exactly where it
+    matters, and silent about it.
+    """
+    core = tmp_path / "_rocm_sdk_core"
+    (core / "lib").mkdir(parents=True)
+    torch_like = tmp_path / "torch" / "lib"
+    torch_like.mkdir(parents=True)
+    order: list[str] = []
+    module = sys.modules[__name__]
+
+    def record_torch():
+        order.append("torch")
+        return torch_like, ""
+
+    def record_maps(search_path=None, maps_text=None):
+        order.append("maps")
+        return []
+
+    monkeypatch.setattr(module, "rocm_torch_lib", record_torch)
+    monkeypatch.setattr(module, "loader_search_dirs", record_maps)
+
+    # loader_dirs is left to default on purpose: injecting it is what every
+    # other test here does, and it is exactly what would hide this ordering.
+    dirs, why_not = scan_plan(roots=_roots(core, core))
+
+    assert why_not == ""
+    assert dirs[-1] == torch_like
+    assert order == ["torch", "maps"], (
+        "the loader snapshot has to be taken after the import that populates it"
+    )
+
+
+def test_a_machine_with_no_rocm_is_refused_before_torch_is_imported(
+    monkeypatch, tmp_path
+):
+    """The other half of that ordering, and why the gate asks the resolver alone.
+
+    "Is there a ROCm install at all" is :func:`no_rocm_message`'s question and
+    it has to keep being answered first, or a CPU box is told its torch is the
+    problem -- and pays a torch import to be told it.
+    """
+    imported: list[str] = []
+    missing = tmp_path / "definitely-not-rocm"
+
+    def record_torch():
+        imported.append("torch")
+        return tmp_path, ""
+
+    monkeypatch.setattr(sys.modules[__name__], "rocm_torch_lib", record_torch)
+
+    dirs, why_not = scan_plan(roots=_roots(missing, missing, source="none"))
+
+    assert dirs == []
+    assert "no ROCm library directory was found" in why_not
+    assert imported == [], "nothing should have been imported to answer this"
+
+
+def test_the_audited_union_is_read_from_the_mapped_copies(monkeypatch, tmp_path):
+    """The fixture's own path, end to end, on a machine with no ROCm.
+
+    Two seams -- what the plan found, and what is mapped -- and everything
+    between them is the real code the GPU lane runs. Without this the exact-file
+    rule could be correct in :func:`libraries_to_scan` and simply never handed a
+    mapping, which is the same wrong verdict with a working function behind it.
+
+    The snapshot is also asserted to be taken after the plan, because the plan
+    is what imports torch and populates the thing being snapshotted.
+    """
+    dirs = _stack(tmp_path)
+    rocm = dirs[0]
+    # Two majors in one directory: resolve_library answers .so.7, the process
+    # is running .so.6, and only the mapping can tell them apart.
+    (rocm / "libamdhip64.so").unlink()
+    loaded = _fake_so(rocm / "libamdhip64.so.6", ["HIP_LAUNCH_BLOCKING"])
+    _fake_so(rocm / "libamdhip64.so.7", ["PYTORCH_CUDA_ALLOC_CONF"])
+    order: list[str] = []
+    module = sys.modules[__name__]
+
+    def record_plan():
+        order.append("plan")
+        return dirs
+
+    def record_maps(sonames=None, maps_text=None):
+        order.append("maps")
+        return {"libamdhip64.so": loaded}
+
+    monkeypatch.setattr(module, "require_readable_stack", record_plan)
+    monkeypatch.setattr(module, "mapped_libraries", record_maps)
+
+    names = loaded_stack_names()
+
+    assert order == ["plan", "maps"]
+    assert "HIP_LAUNCH_BLOCKING" in names
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in names, (
+        "the fixture read the unloaded major, so the mapping never reached "
+        "libraries_to_scan"
+    )
+
+
 def test_an_unreadable_scanned_object_is_an_unreadable_stack(monkeypatch, tmp_path):
     """The fourth door, and the last one that let a partial union look complete.
 
@@ -1674,7 +1939,7 @@ def torch_shared_objects(torch_lib: Path) -> set[Path]:
     }
 
 
-def libraries_to_scan(dirs: list[Path]) -> ScanSet:
+def libraries_to_scan(dirs: list[Path], mapped: dict[str, Path] | None = None) -> ScanSet:
     """The shared objects to read names out of, resolved from ``dirs``.
 
     Declared sonames in the ROCm directories, and everything in torch's.
@@ -1697,6 +1962,34 @@ def libraries_to_scan(dirs: list[Path]) -> ScanSet:
     read; it is there because :data:`KNOWN_ABSENT` names it, not because a
     glob swept it up. See :func:`sonames_to_scan` for why a claimed consumer
     has to be opened.
+
+    **A mapped soname is scanned as the file the process mapped, not as a
+    directory to search again.** :func:`mapped_libraries` reports the exact
+    path; handing back only its directory would re-run
+    ``audit_env_knobs.resolve_library`` over it, and that function deliberately
+    prefers the unversioned link and otherwise the highest installed major
+    (``scripts/audit_env_knobs.py``). With ``libamdhip64.so.6`` and
+    ``libamdhip64.so.7`` co-installed in one directory -- the case that
+    fallback exists for -- it hands back ``.so.7`` while the process is running
+    ``.so.6``, so an unloaded file decides both verdicts: a variable the loaded
+    runtime does read is reported unread, and a :data:`KNOWN_ABSENT` entry
+    stays excused on a binary nothing ran. That is the defect the loader order
+    was added to fix, surviving one directory further in.
+
+    The mapped path is re-checked with ``is_file()`` rather than trusted. The
+    snapshot is a moment in the past and a mapping can outlive its file -- an
+    unlink after ``dlopen`` is a live mapping of nothing on disk -- so a stale
+    entry falls through to the search path below instead of turning into an
+    unresolved soname and failing the lane over a file that was there.
+
+    ``mapped`` defaults to *no* mapped libraries rather than to a live read of
+    this process, which is the opposite default from ``loader_dirs`` one layer
+    up and is deliberate. The fixture passes the real snapshot at the single
+    call site that should have one; every other caller is a hermetic test
+    handing this function a ``tmp_path`` tree, and there a live read would let
+    a ``libamdhip64`` mapped by some *earlier* test's torch import be scanned
+    in place of the fake object under test -- a verdict that depends on what
+    else ran in the worker.
 
     **One library per soname, from the first directory that provides it.**
     The loop reads the soname on the outside and stops at the first hit, so
@@ -1721,9 +2014,15 @@ def libraries_to_scan(dirs: list[Path]) -> ScanSet:
     """
     audit = _load_audit_script()
     *rocm_dirs, torch_lib = dirs
+    loaded = {} if mapped is None else mapped
     scanned: list[Path] = []
     resolved: set[str] = set()
     for soname in sonames_to_scan():
+        exact = loaded.get(soname)
+        if exact is not None and exact.is_file():
+            resolved.add(soname)
+            scanned.append(exact.resolve())
+            continue
         for directory in rocm_dirs:
             lib = audit.resolve_library(directory, soname)
             if lib is not None:
@@ -1853,10 +2152,29 @@ def union_of_names(scanned: list[Path]) -> frozenset[str]:
     return frozenset(found)
 
 
+def loaded_stack_names() -> frozenset[str]:
+    """The union the two GPU-lane tests read: every audited name in the loaded stack.
+
+    A function rather than a fixture body, for the same reason
+    :func:`require_readable_stack` is one: the ordering it encodes is the whole
+    content, and a decision that can only be exercised on a ROCm machine is a
+    decision nothing checks.
+
+    The mapping snapshot is taken **after** :func:`require_readable_stack`,
+    never before. That call runs :func:`scan_plan`, which imports torch, and
+    that import is what maps ``libamdhip64`` and ``libhsa-runtime64`` into this
+    process; a snapshot taken first finds neither and answers, wrongly and
+    silently, that the loader has chosen nothing -- leaving the exact-file rule
+    in :func:`libraries_to_scan` with nothing to apply.
+    """
+    dirs = require_readable_stack()
+    scan = libraries_to_scan(dirs, mapped_libraries())
+    return union_of_names(require_scanned_libraries(scan, dirs))
+
+
 @pytest.fixture(scope="module")
 def present_names() -> frozenset[str]:
-    dirs = require_readable_stack()
-    return union_of_names(require_scanned_libraries(libraries_to_scan(dirs), dirs))
+    return loaded_stack_names()
 
 
 @pytest.mark.rocm
