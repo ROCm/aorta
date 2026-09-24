@@ -137,6 +137,11 @@ cia = [
     # verify against. It arrived transitively through litellm, which is not a
     # promise litellm makes.
     "certifi",
+    # CIA injects OpenAI-compatible clients so custom CA trust reaches the
+    # transport instead of LiteLLM's request body. These are direct imports,
+    # not implementation details we can rely on dspy-ai to keep installing.
+    "httpx>=0.27",
+    "openai>=1.50.0",
     # The agents read the same profile as the rest of aorta chat, which is what
     # makes configuring chat configure them -- and aorta/chat/config.py needs
     # these to parse it. They were reaching this extra two hops out, through

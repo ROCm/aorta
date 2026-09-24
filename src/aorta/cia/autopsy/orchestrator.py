@@ -138,6 +138,7 @@ def run_autopsy(
 
     # LLM router — re-classifies based on all adapter evidence
     if use_llm and all_evidence:
+        router = None
         try:
             from aorta.cia.autopsy.router import TriageRouter
 
@@ -180,6 +181,14 @@ def run_autopsy(
             confidence = classification.confidence
             rationale = classification.rationale
             next_probe = all_next[0]["tool"] if all_next else "none"
+        finally:
+            if router is not None:
+                try:
+                    close = getattr(router, "close", None)
+                    if close is not None:
+                        close()
+                except Exception as exc:
+                    log.warning("Could not close the Autopsy router LM: %s", exc)
     else:
         category = classification.category
         if category == "unknown" and matrix_adapter.tooling_gaps:
