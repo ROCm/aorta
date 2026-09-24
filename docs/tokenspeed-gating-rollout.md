@@ -2,16 +2,56 @@
 
 [`tokenspeed_serve`](tokenspeed-serving.md) reports TTFT, TPOT, ITL and
 throughput, and the serving metric names are already in the nightly's gating
-allowlist. A serving recipe is now in `config/ci/nightly_eval_matrix.yaml`, but
-nothing is gated, because no serving baseline has been blessed. This document is
-the sequence for changing that, and the reasoning behind the numbers it picks.
+allowlist. A serving recipe is in `config/ci/nightly_eval_matrix.yaml`, and this
+document is the sequence that took it from record-only to gated, plus the
+reasoning behind the numbers it picks.
 
-The reason it is a document rather than a commit is that we do not yet have a
-window to derive thresholds from. A threshold derived from a single observation
-encodes whichever night it was taken on, and the nightly then fails on the
-difference between two healthy runs. That failure is worse than no gate: it
-trains everyone to ignore the alert, and the first real regression arrives into a
-channel nobody reads.
+> [!IMPORTANT]
+> **Current state: two metrics are gated, nine are not.**
+> `config/ci/regression_baselines.yaml` carries `median_tpot_ms` and
+> `p99_itl_ms` as `max` ceilings on **both** `tokenspeed_serve_smoke` cells
+> (`baseline` and `no-scratch-reclaim`), derived from the ten-night window
+> 2026-09-08..09-17. A run over either fails the nightly, and the breaching
+> observation is still recorded and charted like any other night's, so the
+> trend reads straight through the failure.
+>
+> **Nine auto-gateable metrics stay record-only and still only charted**:
+> `median_ttft_ms`, `p99_ttft_ms`, `p99_tpot_ms`, `median_e2el_ms`,
+> `p99_e2el_ms`, `output_throughput`, `request_throughput`,
+> `total_token_throughput` and `tokens_per_sec`. So does **`step_time_ms.max`,
+> which was pruned deliberately** rather than overlooked: it is what
+> `--perf-gate` always writes, it is not a recorded metric at all — no per-night
+> series accumulates for it, it is synthesised at bless time from one night's
+> mean — and the measured step-0 compile excursion (2825 ms) clears any ceiling
+> a clean night gives it. `median_itl_ms` is absent for a different reason
+> again: `_NO_AUTO_GATE` keeps the refresher from ever writing it, because it
+> measures ~0 here.
+>
+> Steps 1–6 below are done. Step 7 — promoting the nine on evidence — is not,
+> and **the nine are not waiting on the same thing**. None of them is waiting
+> on nights that have not happened yet — each group starts from evidence the
+> completed window already holds, and a second window is a possible outcome
+> for the three `p99_*` metrics only if analysing the first shows it is needed:
+>
+> | record-only metric | what step 7 is waiting for |
+> |---|---|
+> | `median_ttft_ms`, `output_throughput` | **Nothing. The evidence is in hand.** Their only blocker was the step-0 compile excursion, and the completed 2026-09-08..09-17 window clears it ([step 4](#the-rollout-sequence)). They are deferred to a separate PR so the first armed gate stays attributable, not deferred for data. |
+> | `p99_ttft_ms`, `p99_tpot_ms`, `p99_e2el_ms` | **Analysis of a window, and possibly a second one.** The blocker is that a p99 over 32 requests is the 32nd of 32 order statistics with no repeat measurement behind it. The completed window recorded them — the nightly harvests every allowlisted metric — but [step 3](#the-rollout-sequence) only asked for five metrics to be written down, so nobody has computed their spread. Read the existing ten nights first; another window is needed only if that spread is too wide to size a margin from. |
+> | `median_e2el_ms`, `request_throughput`, `total_token_throughput`, `tokens_per_sec` | **No window will unblock these.** They are held back on *redundancy*, not on evidence: each is determined by a metric already gated, so arming them adds reason lines to one event rather than detection. Promoting them needs the argument in [the per-metric table](#per-metric-gate-record-only-or-never) to change, not more nights. |
+>
+> Nothing else in the matrix changed: every other entry is unchanged and still
+> correctness-only.
+
+The reason it was a document rather than a commit is that there was no window to
+derive thresholds from. A threshold derived from a single observation encodes
+whichever night it was taken on, and the nightly then fails on the difference
+between two healthy runs. That failure is worse than no gate: it trains everyone
+to ignore the alert, and the first real regression arrives into a channel nobody
+reads. The window has since been taken — 2026-09-08..09-17, ten nights, all
+twenty cell-runs — and the two bounds it sized are in
+`config/ci/regression_baselines.yaml`. The argument is kept because it is the
+one step 7 still has to satisfy for the nine record-only metrics, and because it
+is the procedure for the next workload's first bless.
 
 Measuring the cell rather than reasoning about it has since made that case
 stronger and the first bless smaller. One cell-run in thirteen carries a
@@ -39,8 +79,8 @@ Two consequences that decide the shape of this rollout:
   matrix once it can actually *pass* on the runner. Adding one that cannot is not
   a soft landing; it is a nightly that is red every night. That constraint is
   what shaped this entry: it declares `needs_docker_daemon: true` so that a
-  runner without the socket **skips** it rather than failing — see [What blocks
-  this today](#what-blocks-this-today).
+  runner without the socket **skips** it rather than failing — see [What blocked
+  this, and what remains](#what-blocked-this-and-what-remains).
 - **Blessing is all-or-nothing per refresh, unless it is scoped.**
   `refresh_baselines.py` rebuilds the whole baseline file and `--perf-gate` armed
   every entry in it. Running it to bless serving would, in the same PR, derive
@@ -140,13 +180,13 @@ measurement of the exact cell the staged nightly entry runs, taken from the
 > this section measures. So read everything below as **the rationale for that
 > change, not as the baseline to bless against**: the table is the evidence that
 > a step-0 excursion reaches the metrics at `warmup_steps: 1`, and it is retained
-> for that purpose. It is *not* a prediction of what the record-only window will
-> show, because the window is taken at a different setting — one whose whole
-> purpose is to remove the excursion these thirteen cell-runs contain. Nothing
-> here is deleted or restated at the new setting; there is no measurement at
-> `warmup_steps: 2` yet, and inventing one would be worse than having none. The
-> ten-night window is what produces it. See step 3 of
-> [the rollout sequence](#the-rollout-sequence).
+> for that purpose. It was *not* a prediction of what the record-only window
+> would show, because the window was taken at a different setting — one whose
+> whole purpose is to remove the excursion these thirteen cell-runs contain.
+> Nothing here is deleted or restated at the new setting. The measurement this
+> was waiting for is the ten-night window at `warmup_steps: 2`,
+> 2026-09-08..09-17, and it lives in step 4 of
+> [the rollout sequence](#the-rollout-sequence) rather than here.
 
 **Twelve of the thirteen are very clean.** Tighter than the cross-sweep numbers
 above, because these are the same recipe on the same node:
@@ -240,7 +280,7 @@ listed here as record-only can still carry a hand-written per-trial bound today.
 |---|---|---|---|
 | `median_tpot_ms` | max | **Gate** | Reproduced to 1.57% and 0.26% across sweeps, 3.08% over 12 same-node cell-runs, and the docs already name it "the better-behaved per-token metric". It is steady-state decode cost with no queueing term, which is why it is the tightest number we have — and it is measured between tokens, so the step-0 compile excursion does not enter it (1.01× on the excursion run). The one gate the measurement leaves standing. |
 | `p99_itl_ms` | max | **Gate** | Promoted from record-only for the same reason: 1.00× on the excursion run, 5.43% clean spread. It is the useful half of the ITL pair, it catches tail stalls that a median cannot, and it is the only other metric whose definition excludes the excursion. Gating it and `median_tpot_ms` together covers per-token latency at both the centre and the tail without touching anything duration-derived. |
-| `mean_step_time_ms` (`step_time_ms.max`) | max | **Record-only** (was: gate) | The bench step `duration`, and therefore the metric the excursion hits hardest: 2825 ms against a 1462 ms ceiling, 2.4× over. It is still the bound `--perf-gate` always writes, so arming it is the *default* — which is exactly why the rollout sequence below has to prune it by hand until `warmup_steps` is proven to cover the excursion. |
+| `mean_step_time_ms` (`step_time_ms.max`) | max | **Record-only** (was: gate) | The bench step `duration`, and therefore the metric the excursion hits hardest: 2825 ms against a 1462 ms ceiling, 2.4× over. It is still the bound `--perf-gate` always writes, so arming it is the *default* — which is exactly why the rollout sequence below prunes it by hand. The window has since shown `warmup_steps: 2` covers the excursion, and it stays pruned anyway: it is not a recorded metric, so no per-night series of it exists for a window to measure ([step 4](#the-rollout-sequence)). |
 | `output_throughput` | min | **Record-only** (was: gate) | Reproduced to 2.63% and 0.30%, and it is the headline number — but it is tokens over the step duration, so the excursion drags it to 0.73× clean and through a 0.85 floor. Nothing is wrong with the metric; it simply cannot be gated while a five-second compile can land inside the window it divides by. |
 | `median_ttft_ms` | max | **Record-only** (was: gate) | The original entry said "if one gate flaps, expect it to be this one", and that was right for the wrong reason — not a flap but a 10.26× excursion, 465.30 against a 58.59 ceiling. It carries queueing delay the others do not, and its first request is the one that waits for the compile. |
 | `p99_ttft_ms` | max | **Record-only** | A p99 over 32 requests is the 32nd of 32 order statistics — effectively the maximum, and we have no repeat measurement of it. The load sweep shows it moving 194 → 2139 ms across shapes and 315 → 426 ms for a 2× concurrency change, so it is responsive to things a gate should not fire on. Promote on evidence from the record-only window. |
@@ -260,9 +300,12 @@ Two gates, then — `median_tpot_ms` and `p99_itl_ms`, the per-token pair — an
 everything else charted, including three metrics that would have been gated
 before the excursion was measured. That is a deliberately smaller first bless
 than the plan originally proposed: the two that remain are the two whose
-definitions exclude the failure mode we can actually demonstrate, and the three
-that were dropped can be promoted from the record-only window as soon as it shows
-the excursion is gone. The gap between "gated" and
+definitions exclude the failure mode we can actually demonstrate. Of the
+dropped ones, `median_ttft_ms` and `output_throughput` can be promoted from the
+record-only window once it shows the excursion is gone, which the
+2026-09-08..09-17 window has ([step 4](#the-rollout-sequence)).
+`step_time_ms.max` does not follow them: it is not a recorded metric, so no
+window measures it. The gap between "gated" and
 "invisible" is covered by the dashboard's *What changed* view, which reports any
 metric that moved more than 10% between the two most recent runs without failing
 the job. A 10% throughput drift is real, is not a gate breach under these
@@ -412,13 +455,17 @@ step-0 excursion the second option is genuinely available, because the excursion
 is positional: raising `warmup_steps` from 1 to 2 discards it by construction.
 
 **That has now been done** — the recipe sets `warmup_steps: 2` — which is what
-should let the three duration-derived metrics be promoted later. The cost is that
-it changes the measurement: every number in this document was taken at
-`warmup_steps: 1`, so none of them is a baseline any more, and the ten-night
-record-only window has to be taken afresh at the new setting before anything is
-blessed. That is a deliberate trade. Carrying the excursion into the window
-instead would have meant either blessing a bimodal cell or spending ten nights
-establishing a distribution we already intended to change.
+lets `median_ttft_ms` and `output_throughput` be promoted later.
+(`step_time_ms.max`, the third metric the excursion blocked, stays pruned for a
+reason `warmup_steps` does not touch; see step 4.) The cost was that
+it changed the measurement: every number taken before the change was at
+`warmup_steps: 1`, so none of them could be a baseline, and the ten-night
+record-only window had to be taken afresh at the new setting before anything was
+blessed. It was: the 2026-09-08..09-17 window is at `warmup_steps: 2`, and the
+two gates are blessed from it ([step 4](#the-rollout-sequence)). That was a
+deliberate trade. Carrying the excursion into the window instead would have
+meant either blessing a bimodal cell or spending ten nights establishing a
+distribution we already intended to change.
 
 For the concurrency-64 stall no such fix exists — it has no position to discard —
 which is why that cell stays out of the nightly entirely rather than being gated
@@ -442,12 +489,23 @@ stack change is caught:
 Those rows are in `tests/ci/test_eval_lib.py`, run against the real comparator,
 so the claim is checked rather than asserted.
 
-## What blocks this today
+## What blocked this, and what remains
 
-Nothing, as of 2026-09-03. The matrix entry is live, the socket is signed off
-for the nightly lane, and `nightly-eval.yml` sets `docker_socket: true`. What
-remains is the measurement: ten record-only nights, from
-[step 3](#the-rollout-sequence) onward.
+Nothing blocks the first bless any more: the matrix entry is live, the socket is
+signed off for the nightly lane, `nightly-eval.yml` sets `docker_socket: true`,
+and the ten-night measurement is taken (2026-09-08..09-17, all ten scheduled
+`workflow_run` events, all ten green). The two ceilings that window sized are in
+`config/ci/regression_baselines.yaml`.
+
+What remains is [step 7](#the-rollout-sequence), and **not one of the nine
+record-only metrics is blocked on a measurement this window failed to take.**
+Two of them (`median_ttft_ms`, `output_throughput`) have their evidence already
+and are deferred only so the first armed gate stays attributable; three are
+waiting on the *analysis* of nights already recorded; four are held back on a
+redundancy argument no number will settle. The table in the
+[current-state box](#turning-on-nightly-perf-gating-for-tokenspeed-serving) at
+the top says which is which — read it before opening a step-7 PR, because
+"wait for another window" is the first answer for none of the nine.
 
 This section is kept because the *shape* of the plumbing is what the sign-off
 was given against, and because the argument is worth being able to re-read.
@@ -864,9 +922,14 @@ docker exec aorta-ci-gpu aorta sweep run \
 
 ## The rollout sequence
 
-Steps 1–2a are **done**: the entry is live and the nightly lane has the socket,
-so the first nightly after this merges starts recording. Everything from step 3
-is the part this document is really specifying.
+Steps 1–6 are **done**: the entry is live, the nightly lane has the socket, the
+ten-night window was taken 2026-09-08..09-17, and the two bounds it sized are in
+`config/ci/regression_baselines.yaml`. **Step 7 is the only one outstanding.**
+
+The steps are kept written as instructions rather than rewritten as history:
+they are the procedure for the *next* bless (step 7 here, and any other
+workload's first bless), and what each one was checked against is the part worth
+being able to re-read.
 
 **1. ~~Promote the entry.~~ Done.** It is in `entries` with `min_gpus: 1`,
 `timeout_sec: 3600` and `needs_docker_daemon: true`.
@@ -914,7 +977,9 @@ branch — that argument is what bounds this one. The dashboard also makes the
 absence visible rather than silent: on a lane without the socket the entry
 reports `skip` with `needs a docker daemon: ...` in its reasons.
 
-**3. Let it record for ten nightlies, at `warmup_steps: 2`.** It will report
+**3. ~~Let it record for ten nightlies, at `warmup_steps: 2`.~~ Done** —
+2026-09-08 to 09-17, ten consecutive scheduled `workflow_run` events, every one
+green, no `workflow_dispatch` inside the range. While it ran it reported
 `recording` on the dashboard.
 
 > The window is only valid at the setting the gate will run at, and that setting
@@ -942,39 +1007,77 @@ and the reason for the digest hold.
 
 Watch the *Workloads* view and write the numbers down; the ten values
 of `median_tpot_ms` and `p99_itl_ms` per cell are the input to step 4, and the
-ten of `median_ttft_ms`, `output_throughput` and `mean_step_time_ms` are what
-decides whether the three record-only metrics can be promoted later. Two cells,
-so twenty observations of each. A `fail` during this window is a real failure —
+ten of `median_ttft_ms` and `output_throughput` are what decides whether those
+two record-only metrics can be promoted later. The ten of `mean_step_time_ms`
+are what step 4 reads to tell whether the excursion is gone. Two cells, so
+twenty observations of each. A `fail` during this window is a real failure —
 the entry is unbaselined but the harness is fail-closed — and must be fixed
 rather than waited out.
 
-**4. Check the window before blessing, and check it for bimodality first.**
-Compute, per cell and per metric, the extremum and the ratio of extremum to
-median. Two separate checks:
+**4. ~~Check the window before blessing, and check it for bimodality first.~~
+Done, and both checks passed** — with one number that looks alarming and is not,
+recorded below the checks. Compute, per cell and per metric, the extremum and
+the ratio of extremum to median. Two separate checks:
 
 - *Spread.* If either gated metric shows a window spread above about 10%, do not
   bless it — the margin was sized for a 3% spread and a 10% one means something
   is varying that we have not identified. Demote it in step 5 and investigate.
 - *Bimodality.* Look at the per-step times, not only the per-cell summary. If any
   night's first measured step stands well clear of its other two, the compile
-  excursion is still reachable and the three record-only metrics stay
-  record-only regardless of how good their spread looks — a clean ten-night
+  excursion is still reachable and `median_ttft_ms` and `output_throughput`
+  stay record-only regardless of how good their spread looks — a clean ten-night
   window over a bimodal cell is the exact situation where the extremum anchor
   gives a threshold with no detection power. See
   [the bimodal-cell section](#the-extremum-anchor-has-no-good-answer-on-a-bimodal-cell).
 
+What the 2026-09-08..09-17 window actually showed, per cell and per gated metric:
+
+| cell | metric | min | median | max | max/median | full range |
+|---|---|---|---|---|---|---|
+| `baseline` | `median_tpot_ms` | 1.7373 | 1.8906 | 1.9138 | 1.0122 | **9.33%** |
+| `baseline` | `p99_itl_ms` | 34.1259 | 34.7533 | 35.4296 | 1.0195 | 3.75% |
+| `no-scratch-reclaim` | `median_tpot_ms` | 1.8604 | 1.8945 | 1.9196 | 1.0132 | 3.13% |
+| `no-scratch-reclaim` | `p99_itl_ms` | 33.9241 | 34.9653 | 35.8309 | 1.0248 | 5.45% |
+
+> **The 9.33% is not the spread-check failing, and the reason generalises.** Both
+> metrics are `max` policy, so the number that sizes a ceiling and the number
+> that can breach it is the **upside** deviation, not the full range. That 9.33%
+> is a single *low* outlier on 09-13 — the cell ran faster than usual — against
+> a ceiling it therefore cannot approach. Upside deviation never exceeds **2.48%**
+> anywhere in the window, which is what the 10% check is about. Read the
+> `max/median` column, not `full range`, when applying this check to a `max`
+> metric; the reverse for a `min` one.
+
+Bimodality: clean. `mean_step_time_ms` stayed within **1113.98–1148.66 ms across
+all twenty cell-runs** and the step-0 compile excursion did not recur once, so
+`warmup_steps: 2` did what it was changed to do.
+
 If the window shows no excursion in twenty cell-runs, that is reasonable evidence
-it has stopped happening, and the three can be promoted with the same margins.
+it has stopped happening, and `median_ttft_ms` and `output_throughput` can be
+promoted with the same margins.
+
+> **It did, and they were still not promoted in the first bless — deliberately.**
+> The window clears the *excursion* blocker on `median_ttft_ms` and
+> `output_throughput`, so the evidence for promoting them is now in hand and
+> promoting them is an ordinary step-7 PR. `step_time_ms.max` is not in that
+> list, and a clean window does not put it there: it is not a recorded metric,
+> no per-night series exists for it, and a bound synthesised from one night's
+> mean at bless time is not something this window measured. Arming the first
+> gate on the two metrics whose definitions exclude the failure mode we can
+> demonstrate, and promoting `median_ttft_ms` and `output_throughput` on their
+> own evidence in their own diff, keeps a gate that fires attributable to the
+> change that armed it.
 
 This window is the first measurement at `warmup_steps: 2`, so it is also the
 test of whether that change did what it was supposed to. Two outcomes worth
 telling apart: no excursion in twenty cell-runs is the expected result and clears
-the three duration-derived metrics for promotion in step 7; an excursion that
+`median_ttft_ms` and `output_throughput` for promotion in step 7; an excursion that
 still appears at position 0 means two discarded steps are not enough to cover
 the compile, which is new information and should be investigated rather than
 absorbed by raising `warmup_steps` again.
 
-**5. Bless, scoped to this entry only.**
+**5. ~~Bless, scoped to this entry only.~~ Done, by hand** — see the note
+immediately below for why a refresher run was never an option for this entry.
 
 > [!IMPORTANT]
 > **For `tokenspeed_serve_smoke`, this is a hand-written baseline, not a
@@ -1045,10 +1148,13 @@ correctness-only mode: omitting `--perf-gate` means "do not arm new gates", not
 `perf_gate_entry` accepts several names, comma- or space-separated, mapping to
 one `--perf-gate-entry` each. For this rollout it should be exactly one.
 
-**6. Write the two bounds, then merge.** Whether the numbers come from a
-refresher diff or are written by hand (as they are for this entry — see the note
-in step 5), the same two edits apply, because the refresher derives bounds from
-the *single* run it just did and from every auto-gateable metric it observed:
+**6. ~~Write the two bounds, then merge.~~ Done** — the four keys now in
+`config/ci/regression_baselines.yaml` are `max × 1.25` on the window maximum of
+each cell's `median_tpot_ms` and `p99_itl_ms`, and nothing else was written.
+Whether the numbers come from a refresher diff or are written by hand (as they
+are for this entry — see the note in step 5), the same two edits apply, because
+the refresher derives bounds from the *single* run it just did and from every
+auto-gateable metric it observed:
 
 - Replace each bound with one derived from the ten-run window: `max × 1.25` for a
   `max` metric, `min × 0.85` for a `min` metric.
@@ -1073,19 +1179,57 @@ shrink as the record-only metrics are promoted on evidence. It got larger rather
 than smaller when the excursion was measured, which strengthens the case below
 for a per-metric scope.
 
-**7. Promote the record-only metrics on evidence, not on schedule.** After
-another ten nightlies under the live gate there are twenty more observations.
-Take them in two groups, because they are blocked on different things:
+**7. Promote the record-only metrics on evidence, not on schedule.** The nine
+are blocked on three different things, and none of the groups is waiting on
+nights that have not happened yet: each starts from evidence the completed
+window already holds, and a second window is an outcome the middle group's
+analysis might reach, not a precondition for doing it. The groups are the ones
+in the current-state box at the top of this file; this is what to *do* about
+each.
 
-- `median_ttft_ms`, `output_throughput` and `step_time_ms.max` are blocked on the
-  step-0 excursion, not on their spread — which is already good enough. The
-  `warmup_steps: 2` change is intended to remove the blocker, so promote them
-  once the step-3 window shows twenty cell-runs with no excursion. That window
-  *is* the re-taken one; there is no separate re-take to schedule.
-- The remaining `p99_*` metrics are blocked on having no repeat data. Promote any
-  whose window spread is comparable to its median's. `p99_ttft_ms` gated is worth
-  more than `median_ttft_ms` gated, because tail latency is what a serving
-  regression damages first — we just have no basis for a bound on it yet.
+- **Evidence in hand — `median_ttft_ms`, `output_throughput`.** Nothing to
+  wait for. Their only blocker was the step-0 excursion and the completed
+  2026-09-08..09-17 window cleared it in all twenty cell-runs
+  ([step 4](#the-rollout-sequence)). They are unarmed because the first bless
+  was kept attributable, not because the measurement is missing. Promoting
+  them is an ordinary PR against the window already recorded here: step 6's
+  derivations, on the table in step 4, with no new nights.
+
+  Mind the policy. `median_ttft_ms` is `max` and takes `max × 1.25` on the
+  window maximum; `output_throughput` is `min` and takes `min × 0.85` on the
+  window **minimum**. Both derivations are checked against this document by
+  `test_each_blessed_bound_is_its_windows_extremum_times_the_policys_margin`.
+
+- **Analysis first, and possibly a second window — `p99_ttft_ms`,
+  `p99_tpot_ms`, `p99_e2el_ms`.** Not a shortage of nights: the nightly
+  harvests every allowlisted metric, so the completed window recorded these too.
+  [Step 3](#the-rollout-sequence) only asked for five metrics to be written
+  down, so nobody has computed their spread — that is the gap, and it is an
+  afternoon with the dashboard rather than ten more nights. Read the ten
+  nights that exist, then decide: promote any whose spread is comparable to
+  its median's, and take a second window only if a p99 over 32 requests turns
+  out too wide to size a margin from. That is the real risk here — a p99 over
+  32 requests is the 32nd of 32 order statistics — but it is a finding to
+  make, not an assumption to act on.
+
+- **No window will unblock these — `median_e2el_ms`, `request_throughput`,
+  `total_token_throughput`, `tokens_per_sec`.** Held back on *redundancy*, not
+  on evidence: each is determined by a metric already gated, so arming them
+  adds reason lines to one event rather than detection. What has to change is
+  the argument in [the per-metric table](#per-metric-gate-record-only-or-never),
+  not the number of nights.
+
+Do the middle group rather than skipping it, and do not let the easy group
+crowd it out: a gated `p99_ttft_ms` is worth more than a gated `median_ttft_ms`,
+because tail latency is what a serving regression damages first. The first
+group is the one with no work left in it, not the one with the most value in
+it.
+
+`step_time_ms.max` is not one of the nine and does not belong to any of these
+groups, and a clean window does not clear it: it is not a recorded metric, no
+per-night series accumulates for it, and a bound synthesised from one night's
+mean at bless time is not something a window measured. Promoting it needs that
+to change, not more observations.
 
 If the hand-editing recurs every refresh rather than converging, the fix is a
 per-metric scope alongside `--perf-gate-entry`. That is the point to build it —
