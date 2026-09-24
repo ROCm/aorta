@@ -238,6 +238,14 @@ def _resolve_stop_outcome(
     instead of a bare ``None``.
     """
     reason: StopReason | None = step.stop_reason
+    if reason == "proposal_unresolved":
+        # The loop owns this reason, not the proposer. It is a statement about
+        # what the candidate filter did with the names, so it is derived below
+        # from the step's own fields and never taken as given. The model-reply
+        # path already refuses it (`AgentStep.from_dict`); this closes the same
+        # door for a proposer object that constructs an `AgentStep` directly,
+        # which could otherwise label a genuine stop as a filter failure.
+        reason = None
     if reason is None:
         if _baseline_passed(summaries):
             reason = "baseline_pass"

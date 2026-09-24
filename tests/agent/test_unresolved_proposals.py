@@ -306,6 +306,22 @@ class TestStopAttribution:
         outcome, _message, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
         assert (outcome, reason) == ("agent_stop", "agent_requested")
 
+    def test_a_proposer_cannot_claim_the_loops_reason(self):
+        """FAILS BEFORE THE FIX: a custom proposer that sets the reason itself
+        on a stop with nothing dropped was reported as a filter failure."""
+        step = self._step(stop=True, stop_reason="proposal_unresolved")
+        outcome, _message, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert (outcome, reason) == ("agent_stop", "agent_requested")
+
+    def test_a_claimed_reason_is_rederived_not_ignored(self):
+        """Narrowness: the claim is discarded, not the facts. When the filter
+        really did empty the list and the proposer did not ask to stop, the
+        loop still arrives at proposal_unresolved on its own."""
+        step = self._step(stop_reason="proposal_unresolved",
+                          unresolved_mitigations=[UNREGISTERED])
+        outcome, _message, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert (outcome, reason) == ("proposal_unresolved", "proposal_unresolved")
+
     def test_the_operator_message_names_the_baseline_as_a_cause(self):
         """The filter also drops ``none``: a registered, allowed, untried name
         that is still never a candidate. The message must not tell the operator
