@@ -637,11 +637,21 @@ def _submit_autopsy(
             reason="Watch stopped after claiming the Autopsy attempt",
         )
 
-    record_autopsy_state(
+    queued_persisted = record_autopsy_state(
         job_dir,
         "queued",
         **{**fields, "attempts": attempt},
     )
+    if not queued_persisted:
+        capacity.release()
+        try:
+            (job_dir / f"{_AUTOPSY_CLAIM}.{attempt}").unlink(missing_ok=True)
+        except OSError as exc:
+            print(
+                f"[watch] could not release failed Autopsy claim for "
+                f"{job.job_id} attempt {attempt}: {exc}"
+            )
+        return False
     if stopped(stop):
         capacity.release()
         return abandon_autopsy(
