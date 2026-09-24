@@ -106,6 +106,13 @@ def test_the_cli_exits_non_zero_when_the_record_does_not_reproduce(
     assert rescore.main(["--wire", str(wire), "--replay"]) == 1
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_non_finite_recorded_reward_is_a_mismatch(scenario, bad):
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    rows[0]["reward"] = bad
+    assert rescore.replay(rows, [scenario], AgentPolicy())["max_reward_diff"] == float("inf")
+
+
 def test_a_moved_terminal_alone_is_a_non_zero_exit(tmp_path, scenario, monkeypatch):
     """Same steps, same reward, a different terminal: still not a reproduction."""
     rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])

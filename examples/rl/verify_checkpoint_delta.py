@@ -152,8 +152,11 @@ def optimiser_bound(lr: float, steps: int, beta1: float = 0.9, beta2: float = 0.
     """
     if not (math.isfinite(lr) and lr > 0):
         raise ValueError("lr must be a finite number > 0")
-    if not all(math.isfinite(b) and 0.0 <= b < 1.0 for b in (beta1, beta2)):
-        raise ValueError("betas must be finite and in [0, 1)")
+    if not (math.isfinite(beta1) and 0.0 <= beta1 < 1.0):
+        raise ValueError("beta1 must be finite and in [0, 1)")
+    if not (math.isfinite(beta2) and 0.0 < beta2 < 1.0):
+        # The bound divides by beta2: it needs a positive second-moment decay.
+        raise ValueError("beta2 must be finite and in (0, 1)")
     worst = adam_step_ceiling(steps, beta1, beta2)
     if worst > SLACK * steps:
         raise ValueError(
@@ -355,9 +358,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--lr must be a finite number > 0, got {args.lr!r}")
     if args.steps < 1:
         parser.error(f"--steps must be >= 1, got {args.steps}")
-    for name, beta in (("beta1", beta1), ("beta2", beta2)):
-        if not (math.isfinite(beta) and 0.0 <= beta < 1.0):
-            parser.error(f"--betas: {name} must be finite and in [0, 1), got {beta!r}")
+    if not (math.isfinite(beta1) and 0.0 <= beta1 < 1.0):
+        parser.error(f"--betas: beta1 must be finite and in [0, 1), got {beta1!r}")
+    if not (math.isfinite(beta2) and 0.0 < beta2 < 1.0):
+        # Open at 0 as well as 1: the ceiling's derivation divides by beta2.
+        parser.error(f"--betas: beta2 must be finite and in (0, 1), got {beta2!r}")
     try:
         bound = optimiser_bound(args.lr, args.steps, beta1, beta2)
     except ValueError as exc:

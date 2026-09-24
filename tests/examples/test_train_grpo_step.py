@@ -368,6 +368,9 @@ def test_episode_rollouts_templates_each_prompt_and_delegates_to_the_env(tmp_pat
     (["--kl-beta", "-0.1"], "--kl-beta"),
     (["--top-p", "1.5"], "--top-p"),
     (["--temperature", "0"], "--temperature"),
+    (["--clip", "-1"], "--clip"),
+    (["--clip", "nan"], "--clip"),
+    (["--kl-beta", "nan"], "--kl-beta"),
 ])
 def test_a_configuration_that_cannot_produce_a_checked_update_is_refused(
     tmp_path, capsys, flags, fragment
@@ -397,6 +400,12 @@ def test_a_fresh_run_into_a_used_out_is_refused_before_it_touches_anything(tmp_p
     assert trainer.main(["--out", str(out)]) == trainer.EXIT_REFUSED
     assert "already holds ['wire.jsonl']" in capsys.readouterr().err
     assert (out / "wire.jsonl").read_text() == '{"iteration": 1}\n'
+
+
+def test_a_positive_clip_is_a_valid_configuration():
+    """Narrowness: the refusal is for negative and non-finite clips only."""
+    args = trainer.build_parser().parse_args(["--out", "x", "--clip", "1.0"])
+    assert trainer.validate_args(args) is None
 
 
 def test_the_shipped_defaults_are_a_valid_configuration():

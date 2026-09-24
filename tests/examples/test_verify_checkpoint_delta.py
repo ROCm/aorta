@@ -130,6 +130,7 @@ def test_an_unsound_ceiling_is_a_refusal_not_a_verdict(tmp_path, capsys):
     ["--lr", "nan"], ["--lr", "inf"], ["--lr", "0"], ["--lr", "-1e-6"],
     ["--betas", "nan,0.999"], ["--betas", "0.9,1.0"], ["--betas", "0.9,inf"],
     ["--betas", "-0.1,0.999"], ["--betas", "0.9"], ["--steps", "0"],
+    ["--betas", "0.9,0"],
 ])
 def test_a_non_finite_or_out_of_range_input_is_a_usage_error(tmp_path, flags):
     """A NaN ceiling fails every comparison and an infinite one permits any
@@ -143,6 +144,12 @@ def test_a_non_finite_or_out_of_range_input_is_a_usage_error(tmp_path, flags):
     assert exc.value.code == 2
 
 
+def test_a_small_positive_beta2_is_accepted(tmp_path):
+    """Narrowness: beta2 is open at 0, not required to be the default."""
+    pre, post = pair(tmp_path, nudge=1e-5)
+    assert run(pre, post, "--betas", "0.9,0.99") == 0
+
+
 def test_a_zero_beta1_is_a_valid_adam_setting(tmp_path):
     """Narrowness: the range is [0, 1), and 0 is in it."""
     pre, post = pair(tmp_path, nudge=1e-5)
@@ -153,8 +160,10 @@ def test_the_bound_refuses_non_finite_inputs_directly():
     for lr in (float("nan"), float("inf")):
         with pytest.raises(ValueError, match="finite"):
             vcd.optimiser_bound(lr, 17)
-    with pytest.raises(ValueError, match="betas"):
+    with pytest.raises(ValueError, match="beta1"):
         vcd.optimiser_bound(1e-6, 17, beta1=float("nan"))
+    with pytest.raises(ValueError, match="beta2"):
+        vcd.optimiser_bound(1e-6, 17, beta2=0.0)
 
 
 def test_steps_and_lr_are_required():

@@ -507,8 +507,13 @@ def validate_args(args: argparse.Namespace) -> str | None:
         return "--group must be >= 2: a group of one has no advantage to learn from"
     if not args.lr > 0:
         return "--lr must be > 0"
-    if args.kl_beta < 0:
-        return "--kl-beta must be >= 0; a negative coefficient pays the policy to drift"
+    if not (math.isfinite(args.kl_beta) and args.kl_beta >= 0):
+        return "--kl-beta must be finite and >= 0; a negative coefficient pays the policy to drift"
+    if not (math.isfinite(args.clip) and args.clip >= 0):
+        # A negative clip takes the clipping branch for every positive norm and
+        # makes the coefficient negative, reversing every gradient -- an ascent
+        # step the advisory cosine check would report but not stop.
+        return "--clip must be finite and >= 0 (0 disables clipping)"
     if not 0.0 < args.top_p <= 1.0:
         return "--top-p must be in (0, 1]"
     if not args.temperature > 0:

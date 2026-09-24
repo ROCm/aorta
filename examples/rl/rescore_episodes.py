@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -326,7 +327,13 @@ def replay(
 
         total = env.score(episode).total
         recorded = float(group[0]["reward"])
-        max_reward_diff = max(max_reward_diff, abs(total - recorded))
+        # A non-finite reward on either side is a mismatch, not a match:
+        # `abs(nan - x)` is NaN, and `max(0.0, nan)` keeps 0.0, so a damaged
+        # record would otherwise read as reproducing exactly.
+        difference = abs(total - recorded)
+        max_reward_diff = max(
+            max_reward_diff, difference if math.isfinite(difference) else math.inf
+        )
         was, now = group[0].get("terminal", "?"), episode.terminal
         moves[(was, now)] += 1
         bucket = per_scenario.setdefault(
