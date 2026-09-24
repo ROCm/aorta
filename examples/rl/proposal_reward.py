@@ -147,16 +147,20 @@ TIER_STEP = 1.0 / MAX_TIER
 # * **Excluding `unknown` from tier 3's accepted set** (the first option in the
 #   report's §5). It drops an abstention to 0.4 while any in-set category, right
 #   or wrong, still earns 1.0 -- a 0.6 gradient pointing straight at "invent a
-#   confident label". On this corpus that is not hypothetical: 8 of the 9
-#   scenarios have no correct category available in the closed set, so the
-#   policy it trains is one that emits a wrong label instead of an honest
-#   `unknown`. Strictly worse for an operator, and worse for the agent loop,
-#   which routes on the category.
+#   confident label". On this corpus that is not hypothetical: no category a
+#   probe step may commit to is correct on any of the nine scenarios -- four
+#   are labelled `unknown`, and the other five carry evidence-only labels that
+#   `AgentPolicy` refuses from a probe step (see `REFERENCE_CATEGORY` in
+#   rescore_e2e.py) -- so the policy it trains is one that emits a wrong label
+#   instead of an honest `unknown`. Strictly worse for an operator, and worse
+#   for the agent loop, which routes on the category.
 # * **Gating the credit on "the evidence genuinely does not support a category"**
-#   (the second option in §5). Not implementable: that predicate needs the
-#   per-scenario category labels which do not exist. It is the labelling blocker
-#   wearing a different hat, so §5 offered it as an alternative to fix 1 when it
-#   is really a restatement of fix 3.
+#   (the second option in §5). Not implementable when this was decided: that
+#   predicate needs per-scenario category labels, and there were none. #484 has
+#   since committed them as `examples/rl/corpus/scenario_labels.json`; nothing
+#   here reads them yet. It was the labelling blocker wearing a different hat,
+#   so §5 offered it as an alternative to fix 1 when it is really a restatement
+#   of fix 3.
 # * **Coupling the credit to `confidence`**, docking an abstention that also
 #   claims certainty. Genuinely attractive -- incoherence is checkable without
 #   labels, and it does not push the policy towards a confident wrong label,
@@ -170,9 +174,11 @@ TIER_STEP = 1.0 / MAX_TIER
 # What survives the rejections is still not clean, and the honest statement of
 # the residue is: partial credit keeps a wrong-but-specific label worth more
 # than an honest abstention (a full step against half a step). It shrinks that
-# perverse gradient rather than removing it, and it is the formulation that
-# degrades gracefully -- when the category set is widened to cover kernel-level
-# races, the same term becomes correctness-sensitive with no rewrite.
+# perverse gradient rather than removing it. It was also expected to become
+# correctness-sensitive with no rewrite once the set covered kernel-level
+# races. #484 widened the set and it did not: the race label it added,
+# `gpu_race`, is evidence-only, so a probe step still may not name it and this
+# term still sees membership.
 ABSTENTION_CATEGORY = "unknown"
 ABSTENTION_CREDIT = 0.5
 

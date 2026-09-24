@@ -138,6 +138,179 @@ def test_canonicalising_still_separates_recipes_that_differ(recipe_reward):
     assert recipe_reward.canonicalise(base) != recipe_reward.canonicalise(changed)
 
 
+_REPO = Path(__file__).resolve().parents[2]
+
+_TWO_CELLS = (
+    "schema_version: 1\n"
+    "ticket: T\n"
+    "workload: tokenspeed_serve\n"
+    "trials: 1\n"
+    "{confound}"
+    "cells:\n"
+    "  - name: {first}\n"
+    "    mitigations: [none]\n"
+    "    environment: local\n"
+    "    workload_config:\n"
+    "      max_concurrency: {conc}\n"
+    "  - name: {second}\n"
+    "    mitigations: [none]\n"
+    "    environment: local\n"
+    "    workload_config:\n"
+    "      max_concurrency: 16\n"
+)
+
+
+def _two_cells(first="conc-8", second="conc-16", conc=8, baseline=None):
+    confound = f"confound:\n  baseline_cell: {baseline}\n" if baseline else ""
+    return _TWO_CELLS.format(
+        confound=confound, first=first, second=second, conc=conc
+    )
+
+
+def _pad_cell_names(text: str, pad: int) -> str:
+    data = yaml.safe_load(text)
+    for cell in data["cells"]:
+        cell["name"] = f"{cell['name']}-{'x' * pad}"
+    return yaml.safe_dump(data, sort_keys=False)
+
+
+def test_padding_cell_names_cannot_buy_a_committed_recipe_out_of_the_gate(
+    recipe_reward,
+):
+    """The review's reproduction, on the committed recipe it was measured on.
+
+    Before the cells were relabelled, forty characters on each of this recipe's
+    six cell names took a verbatim copy from similarity 1.000 to 0.691 and its
+    novelty multiplier from 0.0 to 1.0: full reward for retrieval. Names have
+    no length limit, so any gate threshold was a pad length away.
+    """
+    rel = "recipes/tokenspeed/tokenspeed-serve-load.yaml"
+    committed = (_REPO / rel).read_text(encoding="utf-8")
+    padded = _pad_cell_names(committed, 40)
+    assert padded != committed
+
+    assert recipe_reward.canonicalise(padded) == recipe_reward.canonicalise(committed)
+    grade = recipe_reward.grade_recipe_text(padded, corpus={rel: committed})
+    assert grade.nearest_committed == (rel, pytest.approx(1.0))
+    assert grade.novelty_multiplier == 0.0
+    assert grade.memorised is True
+
+
+def test_renaming_the_baseline_cell_moves_its_reference_with_it(recipe_reward):
+    """`confound.baseline_cell` is a second copy of a cell name.
+
+    Relabelling the cells alone would leave the padded name in the reference,
+    which is one field of unlimited length -- the same hole, one field wide.
+    """
+    original = _two_cells(baseline="conc-16")
+    long_name = "renamed-" + "y" * 200
+    renamed = _two_cells(first="also-renamed", second=long_name, baseline=long_name)
+    assert recipe_reward.canonicalise(renamed) == recipe_reward.canonicalise(original)
+
+
+def test_which_cell_is_the_baseline_still_separates_recipes(recipe_reward):
+    """Narrowness: relabelling must not erase what the runner reads from a name.
+
+    The confound classifier measures every row against the baseline, so two
+    recipes that differ only in which cell that is measure different things.
+    Dropping `cells[*].name` outright, as suggested in review, made the
+    by-prefix pair below identical.
+    """
+    canon = recipe_reward.canonicalise
+    prefix = recipe_reward._BASELINE_CELL_PREFIX
+
+    # Chosen by an explicit reference.
+    assert canon(_two_cells(baseline="conc-8")) != canon(_two_cells(baseline="conc-16"))
+    # Chosen by the prefix, with no reference.
+    assert canon(_two_cells(first=f"{prefix}a", second="b")) != canon(
+        _two_cells(first="a", second=f"{prefix}b")
+    )
+    # A reference naming no cell is a tier 2 rejection, not a cell to invent a
+    # label for; it is kept as written rather than guessed at.
+    dangling = yaml.safe_load(canon(_two_cells(baseline="no-such-cell")))
+    assert dangling["confound"]["baseline_cell"] == "no-such-cell"
+
+
+def test_the_kept_prefix_is_the_one_the_runner_picks_a_baseline_by(recipe_reward):
+    """Tripwire against the runner: `_BASELINE_CELL_PREFIX` is a copied literal.
+
+    If `resolve_baseline` stopped reading it, or read a different one, the
+    canonical form would be keeping the wrong part of a name. Both cells
+    carry `[none]`, so without the prefix rule the first would win.
+    """
+    from aorta.triage.confound import resolve_baseline
+    from aorta.triage.recipe import Cell
+
+    prefix = recipe_reward._BASELINE_CELL_PREFIX
+    by_prefix = [
+        Cell(name="plain", mitigations=("none",), environment="local"),
+        Cell(name=f"{prefix}x", mitigations=("none",), environment="local"),
+    ]
+    assert resolve_baseline(by_prefix, None).name == f"{prefix}x"
+
+    # `baseline` alone -- the first cell of tokenspeed-serve-gptoss.yaml -- is
+    # not a baseline by name, so the canonical form must not mark it as one.
+    bare = prefix.rstrip("-")
+    not_by_prefix = [
+        Cell(name="plain", mitigations=("none",), environment="local"),
+        Cell(name=bare, mitigations=("none",), environment="local"),
+    ]
+    assert resolve_baseline(not_by_prefix, None).name == "plain"
+    labels = [
+        c["name"]
+        for c in yaml.safe_load(
+            recipe_reward.canonicalise(_two_cells(first=bare, second=f"{prefix}x"))
+        )["cells"]
+    ]
+    assert labels == ["cell-0", f"{prefix}cell-1"]
+
+
+def test_relabelling_keeps_every_cell_field_but_the_name(recipe_reward):
+    """Narrowness: cells that differ in configuration must still differ.
+
+    Checked on every cell of a committed recipe, field for field, so a
+    relabelling that dropped or rewrote anything but the name would show here
+    rather than as two different recipes quietly scoring as one.
+    """
+    committed = (_REPO / "recipes/tokenspeed/tokenspeed-serve-load.yaml").read_text(
+        encoding="utf-8"
+    )
+    original = yaml.safe_load(committed)["cells"]
+    canonical = yaml.safe_load(recipe_reward.canonicalise(committed))["cells"]
+    assert len(canonical) == len(original)
+    for before, after in zip(original, canonical, strict=True):
+        assert {k: v for k, v in after.items() if k != "name"} == {
+            k: v for k, v in before.items() if k != "name"
+        }
+
+    canon = recipe_reward.canonicalise
+    assert canon(_two_cells(conc=8)) != canon(_two_cells(conc=32))
+    assert canon(_two_cells(conc=8)) != canon(_two_cells(first="a", second="b", conc=32))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("cells: not-a-list\n", {"cells": "not-a-list"}),
+        (
+            "cells: [1, [2], {name: 7}, {mitigations: [none]}]\n",
+            {"cells": [1, [2], {"name": 7}, {"mitigations": ["none"]}]},
+        ),
+        (
+            "confound: {baseline_cell: [a]}\ncells: [{name: a}]\n",
+            {"confound": {"baseline_cell": ["a"]}, "cells": [{"name": "cell-0"}]},
+        ),
+        (
+            "confound: not-a-mapping\ncells: [{name: a}]\n",
+            {"confound": "not-a-mapping", "cells": [{"name": "cell-0"}]},
+        ),
+    ],
+)
+def test_relabelling_passes_malformed_shapes_through(recipe_reward, text, expected):
+    """It runs on model output, including text that fails tier 2."""
+    assert yaml.safe_load(recipe_reward.canonicalise(text)) == expected
+
+
 def test_unparseable_text_canonicalises_without_raising(recipe_reward):
     broken = "ticket: [unclosed\n"
     assert recipe_reward.canonicalise(broken) == broken
@@ -1582,10 +1755,11 @@ def test_every_fixture_earns_the_reward_it_is_meant_to(proposal_reward):
 # `unknown` is a member of the closed autopsy set, so a proposal that refuses
 # the classification task used to clear the tier that exists to test it and
 # reach 1.0. The trap in fixing this is that on the committed corpus `unknown`
-# is frequently the *honest* answer -- 8 of 9 scenarios have no correct category
-# available -- so a penalty that pushes the policy towards a confident wrong
-# label is worse than the saturation it removes. These tests pin the ordering
-# that keeps that from happening.
+# is the *honest* answer a probe step can give on every scenario -- four are
+# labelled `unknown` and the other five carry evidence-only labels a probe step
+# may not assert -- so a penalty that pushes the policy towards a confident
+# wrong label is worse than the saturation it removes. These tests pin the
+# ordering that keeps that from happening.
 # --------------------------------------------------------------------------- #
 
 
@@ -2377,6 +2551,122 @@ def test_a_link_to_a_directory_is_followed_rather_than_replaced(
     )
 
 
+_VERDICT_BASELINES = (
+    Path(__file__).resolve().parents[2]
+    / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+)
+
+
+def _build_with_run_meta(build_corpus, tmp_path, run_meta):
+    out = tmp_path / "corpus"
+    argv = [
+        "--results", str(_SURVEY), "--baselines", str(_VERDICT_BASELINES),
+        "--out", str(out),
+    ]
+    if run_meta is not None:
+        argv += ["--run-meta", str(run_meta)]
+    return out, build_corpus.main(argv)
+
+
+def _run_meta_file(tmp_path, body):
+    path = tmp_path / "run_meta.json"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _not_a_run_meta_file(tmp_path, shape):
+    if shape == "misspelled":
+        _run_meta_file(tmp_path, '{"image": "img@sha256:abc"}')
+        return tmp_path / "run_meta.jsno"
+    if shape == "directory":
+        (tmp_path / "run_meta.json").mkdir()
+        return tmp_path / "run_meta.json"
+    (tmp_path / "run_meta.json").symlink_to("nowhere.json")
+    return tmp_path / "run_meta.json"
+
+
+@pytest.mark.parametrize("shape", ["misspelled", "directory", "dangling-link"])
+def test_a_run_meta_that_is_not_a_file_is_a_usage_error(
+    build_corpus, tmp_path, capsys, shape
+):
+    """A misspelled `--run-meta` built a corpus without the provenance asked for.
+
+    `args.run_meta.exists()` sent it down the branch an omitted flag takes, so
+    the build exited 0 and every row's provenance was silently short the keys
+    the caller had supplied -- no provenance, recorded as though none had been
+    given. Refused before the build, like a wrong `--out`, so nothing is
+    published.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        _build_with_run_meta(
+            build_corpus, tmp_path, _not_a_run_meta_file(tmp_path, shape)
+        )
+    assert excinfo.value.code == 2
+    assert "--run-meta" in capsys.readouterr().err
+    assert not (tmp_path / "corpus").exists(), "a corpus was published anyway"
+
+
+@pytest.mark.parametrize(
+    ("body", "said"),
+    [
+        ('["image"]', "JSON array"),
+        ("null", "JSON null"),
+        ('"img@sha256:abc"', "JSON string"),
+        ("7", "JSON number"),
+        ("image=img@sha256:abc", "could not be read as JSON"),
+        ('{"report": "nightly-0910", "image": "x"}', "sets 'report'"),
+    ],
+)
+def test_run_meta_that_cannot_be_recorded_is_refused_before_the_build(
+    build_corpus, tmp_path, capsys, body, said
+):
+    """The object is splatted into every row's provenance, after `report`.
+
+    A list or a `null` raised `TypeError` from `triage_example` once the whole
+    results tree had been read. An object setting `report` was worse: it exited
+    0 having replaced every example's pointer back to its own source report
+    with one string.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        _build_with_run_meta(build_corpus, tmp_path, _run_meta_file(tmp_path, body))
+    assert excinfo.value.code == 2
+    assert said in capsys.readouterr().err
+    assert not (tmp_path / "corpus").exists(), "a corpus was published anyway"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (None, {}),
+        ("{}", {}),
+        ('{"image": "img@sha256:abc", "commit": "7b2d7a8c"}',
+         {"image": "img@sha256:abc", "commit": "7b2d7a8c"}),
+    ],
+)
+def test_usable_run_meta_reaches_every_example_and_the_manifest(
+    build_corpus, tmp_path, body, expected
+):
+    """Narrowness: omitting the flag is still `{}`, and a real object lands.
+
+    Every row keeps its own `report`, so the shared keys are added beside the
+    per-example pointer rather than in place of it.
+    """
+    run_meta = None if body is None else _run_meta_file(tmp_path, body)
+    out, code = _build_with_run_meta(build_corpus, tmp_path, run_meta)
+    assert code == 0
+
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["run_meta"] == expected
+    for name in ("triage.jsonl", "proposal.jsonl"):
+        rows = [json.loads(x) for x in (out / name).read_text().splitlines() if x]
+        assert rows
+        for row in rows:
+            provenance = dict(row["provenance"])
+            report = provenance.pop("report")
+            assert report.endswith("sanitizer_report.json"), report
+            assert provenance == expected
+
+
 def test_every_example_carries_a_workload_family(build_corpus, tmp_path):
     """Stratification is free now and expensive to retrofit, so it is enforced."""
     out, manifest = _build(build_corpus, tmp_path, _SURVEY)
@@ -2756,12 +3046,88 @@ def test_the_contract_perfect_reference_still_tops_the_ladder(rescore_e2e):
 
     Worth reading with `REFERENCE_CATEGORY`'s comment: this reference is perfect
     against *this reward*, and on the committed corpus its category is knowingly
-    wrong, because the closed set has no name for a kernel-level data race.
+    wrong -- as is every category a probe step may commit to, because the race
+    label the corpus uses is one a probe step may not assert.
     """
     doc = _recorded({"s": [_completion()]})
     result = rescore_e2e.analyse(doc)
     assert result["references"]["oracle_contract_perfect"]["reward"] == 1.0
     assert result["criteria"]["2_reference_at_top"]["holds"] is True
+
+
+def _probe_step_refuses(category: str) -> bool:
+    """Put the category to the real consumer, not to a copy of its set."""
+    from aorta.agent.llm import AgentStep
+    from aorta.agent.policy import AgentPolicy, PolicyViolation
+
+    try:
+        AgentPolicy().validate_step(
+            AgentStep(
+                category=category, hypothesis="h", next_mitigations=[],
+                confidence=0.5, stop=False,
+            )
+        )
+    except PolicyViolation:
+        return True
+    return False
+
+
+def test_the_reference_category_is_one_a_probe_step_may_commit_to(
+    rescore_e2e, proposal_reward
+):
+    """The reference is the contract's ceiling, so the consumer must accept it.
+
+    Review suggested moving it to `gpu_race`, the label #484 gives the corpus's
+    three race scenarios. That label is evidence-only, and on the tree with #484
+    the reference then failed tier 4, reaching tier 3 for 0.6, so criterion 2 would
+    have compared the model against something that is not the ceiling. Asked of
+    `AgentPolicy` rather than of a copied category set, so a taxonomy change
+    that withdraws the name from probe steps fails here -- and nothing pins the
+    literal, since any committable category is an equally arbitrary ceiling.
+    """
+    from aorta.agent.llm import AUTOPSY_CATEGORIES
+
+    category = rescore_e2e.REFERENCE_CATEGORY
+    assert category in AUTOPSY_CATEGORIES
+    assert category != proposal_reward.ABSTENTION_CATEGORY, "the reference commits"
+    assert not _probe_step_refuses(category)
+
+
+def test_no_category_a_probe_may_commit_to_is_right_on_any_labelled_scenario(
+    rescore_e2e, proposal_reward
+):
+    """Holds `REFERENCE_CATEGORY`'s comment to the labels file it describes.
+
+    The comment said "wrong on 8 of 9" and "the closed set has no category for
+    that failure" after #484 had added `gpu_race` and labelled the corpus with
+    it; the recount is 9 of 9. What makes the reference unfixable rather than
+    merely stale is that the race label is refused from a probe step. If a label
+    ever becomes one a probe step may commit to, this fails, and the reference
+    should move onto it -- which is the change review asked for, once it is one
+    the consumer would accept.
+
+    The labels arrive with #484 through this PR's base, so this skips on a tree
+    without them and runs on the PR's merge ref, which is what CI checks out.
+    """
+    path = _REPO / "examples/rl/corpus/scenario_labels.json"
+    if not path.is_file():
+        pytest.skip("scenario_labels.json is not on this tree; it lands with #484")
+    labels = {
+        name: row["category"]
+        for name, row in json.loads(path.read_text(encoding="utf-8"))["scenarios"].items()
+    }
+    assert len(labels) == 9, sorted(labels)
+
+    reference = rescore_e2e.REFERENCE_CATEGORY
+    assert [name for name, label in labels.items() if label == reference] == []
+
+    committed = set(labels.values()) - {proposal_reward.ABSTENTION_CATEGORY}
+    assert committed, "every row is `unknown`; the comment's argument no longer applies"
+    assert {c for c in committed if not _probe_step_refuses(c)} == set(), (
+        "a scenario now carries a label a probe step may commit to; "
+        "REFERENCE_CATEGORY should move onto it"
+    )
+    assert labels["consan-racy"] in committed
 
 
 def test_an_abstaining_one_name_constant_is_the_hard_case_for_criterion_one(

@@ -662,6 +662,68 @@ def publish(out: Path, payload: dict[str, str]) -> None:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+_JSON_TYPE_NAMES = {
+    list: "array", str: "string", int: "number", float: "number",
+    bool: "boolean", type(None): "null",
+}
+
+
+def load_run_meta(path: Path | None) -> dict[str, Any]:
+    """The provenance shared by every example, or a refusal naming why.
+
+    An omitted `--run-meta` is `{}`: a corpus with no shared provenance is a
+    real thing to build. A *supplied* one that could not be used is not the
+    same request, and it used to be treated as one -- `args.run_meta.exists()`
+    sent a misspelled path down the omitted branch, so the build exited 0 and
+    published a corpus without the provenance the caller had asked for, with
+    nothing in the output to say so. That is the absence of the evidence
+    stored as though it had been supplied and happened to be empty.
+
+    So every way a supplied file can fail is refused, and all of them before
+    the build rather than some during it:
+
+    * not a file -- missing, a directory, a dangling link. The directory case
+      was already a traceback, which is at least loud; the others were not.
+    * not JSON, or not a JSON object. The object is splatted into every row's
+      `provenance`, so a list or a `null` raised `TypeError` from inside
+      `triage_example` after the whole results tree had been read.
+    * an object setting `report`. That key is each example's own source
+      report and the splat comes after it, so `{"report": "nightly-0910"}`
+      replaced every row's pointer back to its report with one string and the
+      build exited 0. Refused rather than splatted first: putting the row's
+      value last would keep the pointer and silently drop the caller's key,
+      which is the same defect aimed at a different field.
+
+    An empty object is accepted: it says "no shared provenance" explicitly,
+    which is what omitting the flag says.
+    """
+    if path is None:
+        return {}
+    if not path.is_file():
+        raise ValueError(
+            f"--run-meta {path} is not a file. Omit --run-meta to build without "
+            "shared provenance; a path that does not resolve is not the same "
+            "request."
+        )
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"--run-meta {path} could not be read as JSON ({exc})") from exc
+    if not isinstance(meta, dict):
+        kind = _JSON_TYPE_NAMES.get(type(meta), type(meta).__name__)
+        raise ValueError(
+            f"--run-meta {path} holds a JSON {kind}; it must be an object, whose "
+            "keys are added to every example's provenance."
+        )
+    if "report" in meta:
+        raise ValueError(
+            f"--run-meta {path} sets 'report', which is each example's own "
+            "source report; it would replace that path on every row. Rename "
+            "the key."
+        )
+    return meta
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, required=True,
@@ -671,7 +733,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True,
                         help="corpus output directory")
     parser.add_argument("--run-meta", type=Path, default=None,
-                        help="JSON of provenance shared by every example")
+                        help="JSON object of provenance shared by every example; "
+                             "must exist if given")
     args = parser.parse_args(argv)
     # `publish` checks again at the swap. Here so a wrong `--out` is a usage
     # error before the build rather than a traceback after it.
@@ -679,13 +742,12 @@ def main(argv: list[str] | None = None) -> int:
         publish_target(args.out)
     except NotADirectoryError as exc:
         parser.error(str(exc))
+    try:
+        run_meta = load_run_meta(args.run_meta)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     baselines = json.loads(args.baselines.read_text(encoding="utf-8"))
-    run_meta = (
-        json.loads(args.run_meta.read_text(encoding="utf-8"))
-        if args.run_meta and args.run_meta.exists()
-        else {}
-    )
 
     scenarios = collect(args.results)
     if not scenarios:

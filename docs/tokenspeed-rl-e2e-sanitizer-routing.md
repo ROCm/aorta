@@ -340,9 +340,15 @@ The one scenario that got a real category was `consan-racy`, on all 5 samples:
 `checkpoint_race`, for an intra-wave LDS race between instructions `0x8` and
 `0x28`. That is the closest of the eight available names and still not right,
 which is [the blocker](tokenspeed-rl-post-training.md#the-blocker-read-this-before-spending-another-node-hour)
-showing through from the other side: there is no autopsy category for a
-kernel-level data race, so the honest answers here are `unknown` and a wrong
+showing through from the other side: there was no autopsy category for a
+kernel-level data race, so the honest answers here were `unknown` and a wrong
 label. The model picked both, and the reward paid 1.0 for each.
+
+*Updated 2026-09-24.* [PR #484](https://github.com/ROCm/aorta/pull/484) has
+since added `gpu_race` and labels this scenario with it, but that does not give
+a probe step a right answer here: `gpu_race` is evidence-only, and
+`AgentPolicy.validate_step` refuses it from a probe step, so the honest answer a
+proposal can give is still `unknown`.
 
 **Shotgunning.** On the corpus's 2-name set, 20 of 45 named both. On the
 20-name registry the lists ran to 1, 3, 7, 9 and **11 mitigations at once** —
@@ -593,6 +599,18 @@ of 9 scenarios its category is *knowingly wrong*, because the closed set has no
 name for the failure. There is no policy on this corpus that is both honest and
 top-scoring: the ceiling is 1.0, the honest ceiling is 0.9, and the 0.1 between
 them is what the reward currently charges for telling the truth.
+
+*Updated 2026-09-24.* Recounted against `examples/rl/corpus/scenario_labels.json`,
+the reference is wrong on all nine: four rows are labelled `unknown` and five
+carry `gpu_race` or `tooling_gap`, and it names neither. Moving it onto
+`gpu_race` would not make it right where it counts, because both labels are
+evidence-only: `AgentPolicy` refuses them from a probe step, and the reference
+then fails tier 4, reaching tier 3 for a reward of 0.6, which is no longer the
+ceiling. No
+category a probe step may commit to is right on any row, so the conclusion above
+holds more strongly than when it was written. `rescore_e2e.py` keeps
+`checkpoint_race` for that reason, and a test holds its comment to the labels
+file.
 
 **Criterion 3 fails, and no reward change can fix it** — see below.
 
@@ -847,7 +865,12 @@ the policy cannot fake by looking cheap — which means running the mitigation.
    labels do not exist. What remains is wiring: no grader reads that file, so
    tier 3 still scores membership in the closed set rather than agreement with
    the scenario's label. Fix 1 was built to take that comparison and needs no
-   redesign to accept it.
+   redesign to accept it. One thing the wiring has to handle, found
+   2026-09-24: five of the nine labels (`gpu_race` three times, `tooling_gap`
+   twice) are evidence-only, which a probe step may not assert, so on those rows
+   the best answer a proposal can give is `unknown`. A comparison that scores
+   agreement with the label verbatim would mark the honest answer wrong on five
+   of nine.
 4. **Default `--grammar-backend xgrammar` wherever a recipe serves a model an
    agent will call**, or make `LiteLLMProposer` degrade when `response_format`
    is refused. Right now the two halves of the integration disagree and only

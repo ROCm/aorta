@@ -349,6 +349,13 @@ python examples/rl/triage_reward.py   --corpus examples/rl/corpus/triage.jsonl
 python examples/rl/proposal_reward.py --corpus examples/rl/corpus/proposal.jsonl
 ```
 
+`--run-meta` is optional: a JSON object whose keys — image digest, commit,
+runner — are added to every example's `provenance`. Omit it rather than
+pointing it at a file you have not written. A path that is not a file, JSON
+that is not an object, and an object setting `report` (each example's own
+source report) are refused before the build; the first of those used to be
+read as "no provenance" and exit 0.
+
 **`corpus/` holds no generated rows** — `*.jsonl` is gitignored repo-wide and
 these are run outputs, not fixtures, so the two commands above need a corpus
 built first. Without a GPU, point `--results` at

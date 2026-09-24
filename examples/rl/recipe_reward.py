@@ -55,14 +55,25 @@ pure cliff lets a policy park just underneath it, and a pure taper never
 actually refuses to pay for a verbatim copy.
 
 Similarity is measured on a *canonical* form -- YAML re-parsed and re-emitted
-with sorted keys, comments gone, and the arbitrary `ticket` label dropped -- so
-the obvious evasions do not work. Renaming the ticket, reordering keys,
-reindenting, or stripping comments leaves a copied recipe at ~1.0 similarity and
-a reward of zero. Only changing what the recipe *does* moves it.
+with sorted keys, comments gone, the arbitrary `ticket` label dropped, and each
+cell's name replaced by its position -- so the obvious evasions do not work.
+Renaming the ticket or the cells, reordering keys, reindenting, or stripping
+comments leaves a copied recipe at ~1.0 similarity and a reward of zero.
 
-What the gate still cannot do: it measures distance from the committed corpus,
-which is a proxy for the training corpus and not the same set. It also cannot
-tell a novel recipe from a novel *useless* one -- tier 6, "does this express the
+What the gate still cannot do: `SequenceMatcher.ratio()` is `2M / (|a| + |b|)`,
+so added length dilutes it wherever the length goes. Canonicalising removes the
+labels, where padding changes nothing, but a *behavioural* value has no length
+limit either: a verbatim copy of `tokenspeed-serve-load.yaml` with 1000
+characters appended to `workload_config.work_dir` measures 0.708 and keeps its
+full reward. That value is not stripped because it is not a label -- it moves
+the scratch directory -- and closing the hole means a similarity length cannot
+dilute, such as how much of the committed recipe the candidate contains. That
+also changes what the gate pays for a genuine extension of a committed recipe,
+so it is a decision about the reward rather than a patch to the canonical form.
+
+Beyond that, it measures distance from the committed corpus, which is a proxy
+for the training corpus and not the same set. It also cannot tell a novel
+recipe from a novel *useless* one -- tier 6, "does this express the
 asked-for shape", needs a rubric or a judge model and is deliberately still
 unimplemented, because inventing an automatic proxy for it is how reward hacking
 starts. A real run still needs held-out prompts and tier-6 grading; the gate
@@ -112,6 +123,15 @@ MEMORISATION_HARD = 0.95
 # candidates differing only here are the same recipe for novelty purposes, so
 # renaming the ticket cannot buy a policy out of the gate.
 _IDENTITY_KEYS = ("ticket",)
+
+# The one part of a cell name the runner reads. With no
+# `confound.baseline_cell`, `aorta.triage.confound.resolve_baseline` anchors the
+# confound classifier on the first cell whose name starts with this, so it
+# decides which row every other row's slowdown is measured against. Everything
+# after it is a label. The literal lives in that function rather than in a
+# constant this module could import; a test drives `resolve_baseline` with it so
+# a change there fails here instead of silently widening what renaming buys.
+_BASELINE_CELL_PREFIX = "baseline-"
 
 TIER_NAMES = {
     0: "does not parse",
@@ -464,10 +484,11 @@ def canonicalise(text: str) -> str:
 
     Re-emitting the parsed YAML with sorted keys collapses the whole class of
     cosmetic edits -- comments, indentation, key order, quoting style -- and
-    dropping the identity fields collapses renaming. What survives is the
-    recipe's actual content, so similarity measures copying rather than
-    formatting. Unparseable text is compared raw; it cannot score above tier 0
-    anyway, so its novelty is moot.
+    dropping the identity fields and relabelling the cells (see
+    :func:`_relabel_cells`) collapses renaming. What survives is the recipe's
+    actual content, so similarity measures copying rather than formatting.
+    Unparseable text is compared raw; it cannot score above tier 0 anyway, so
+    its novelty is moot.
     """
     try:
         data = yaml.safe_load(text)
@@ -475,7 +496,70 @@ def canonicalise(text: str) -> str:
         return text
     if isinstance(data, dict):
         data = {k: v for k, v in data.items() if k not in _IDENTITY_KEYS}
+        data = _relabel_cells(data)
     return yaml.safe_dump(data, sort_keys=True, default_flow_style=False)
+
+
+def _relabel_cells(data: dict[str, Any]) -> dict[str, Any]:
+    """Replace each cell's name with its position, keeping what the runner reads.
+
+    A cell name is a label -- the `cells/<name>/` directory, the `matrix.md`
+    row, a store namespace -- and never reaches the workload's config. Left in
+    the canonical form it was the cheapest evasion the gate had: names have no
+    length limit, so padding each one in a verbatim copy of
+    `tokenspeed-serve-load.yaml` by 40 characters took its similarity from
+    1.000 to 0.691 and its novelty multiplier from 0.0 to 1.0.
+
+    Relabelled rather than dropped, which is what the review suggested, because
+    two parts of a name are not labels. The `baseline-` prefix picks the
+    confound baseline when nothing names one (see `_BASELINE_CELL_PREFIX`), so
+    it is kept: dropping it would make a recipe that measures every row against
+    its first cell identical to one that measures them against its last. And
+    `confound.baseline_cell` names a cell, so it is rewritten to the label its
+    cell received: left alone it would carry the padded name a second time,
+    and deleted it would erase which cell is the baseline. It is rewritten
+    only when it names a cell of this recipe's own `cells:` list. A probe-mode
+    recipe has none -- its cells are synthesised from registered axis names,
+    which are not free text -- and a name matching no cell is a recipe
+    `load_recipe` rejects at tier 2.
+
+    Cell order is kept, as it always was: cells run in list order and the
+    labels are positional, so a copy with its cells reordered is still a
+    different text. A first match wins on a duplicated name, as it does in
+    `resolve_baseline`; the loader rejects duplicates anyway.
+
+    Not relabelled: `custom_patterns[*].id`. It reads like a label and is not
+    one -- it is emitted as the detector ID `custom:<id>` in every result, the
+    agent's category heuristic reads its text, and `disable_detectors` can name
+    it, so renaming it changes what the recipe reports. There is no free-text
+    `description` or `notes` to strip at any level: the loader rejects unknown
+    keys in the recipe, each cell, `confound`, and every nested block, so a
+    candidate carrying one fails tier 2.
+
+    Everything unexpected passes through unchanged -- a non-list `cells`, a
+    cell that is not a mapping, a name that is not a string -- because this
+    runs on arbitrary model output, including text that will fail tier 2.
+    """
+    cells = data.get("cells")
+    if not isinstance(cells, list):
+        return data
+    labels: dict[str, str] = {}
+    relabelled: list[Any] = []
+    for index, cell in enumerate(cells):
+        if isinstance(cell, dict) and isinstance(cell.get("name"), str):
+            name = cell["name"]
+            prefix = _BASELINE_CELL_PREFIX if name.startswith(_BASELINE_CELL_PREFIX) else ""
+            label = f"{prefix}cell-{index}"
+            labels.setdefault(name, label)
+            cell = {**cell, "name": label}
+        relabelled.append(cell)
+    data = {**data, "cells": relabelled}
+    confound = data.get("confound")
+    if isinstance(confound, dict):
+        baseline = confound.get("baseline_cell")
+        if isinstance(baseline, str) and baseline in labels:
+            data["confound"] = {**confound, "baseline_cell": labels[baseline]}
+    return data
 
 
 def novelty_multiplier(similarity: float) -> float:

@@ -75,11 +75,26 @@ from proposal_reward import (  # noqa: E402
 # Deliberately arbitrary, and the arbitrariness is the finding. This reward
 # scores category *membership*, not correctness, so no choice here is better
 # than another as far as the score can tell. `checkpoint_race` is the name the
-# real model picked for `consan-racy` -- the nearest available label for a
-# kernel-level data race, and still the wrong one, because the closed set has no
-# category for that failure. So the "perfect" reference is a confidently wrong
-# label on 8 of 9 scenarios, which is the labelling blocker showing through:
-# until it is fixed, the top of this ladder is not a correct answer.
+# real model picked for `consan-racy` under the eight-name set it was measured
+# against -- the nearest label available then for a kernel-level data race.
+#
+# #484 has since added `gpu_race` and labels that scenario and both waitcheck
+# races with it, and the reference still does not use it, because a probe step
+# may not. `gpu_race` is evidence-only: `AgentPolicy.validate_step` accepts
+# `PROBE_CATEGORIES`, the set without the three names a probe cannot establish
+# by changing environment variables, so a proposal naming it fails tier 4 --
+# measured, it reaches tier 3 for a reward of 0.6 -- and the reference would stop
+# being the contract ceiling that criterion 2 compares the model against.
+#
+# So against `examples/rl/corpus/scenario_labels.json` this reference is wrong
+# on all nine scenarios, and so is every other category a probe step may commit
+# to: four rows are labelled `unknown` and the other five carry `gpu_race` or
+# `tooling_gap`, both evidence-only. The honest probe answer on every row is
+# `unknown`, which the partial credit on `ABSTENTION_CATEGORY` caps at 0.9.
+# Whatever is chosen here, the top of this ladder is not a correct answer on
+# this corpus, which is why it measures form rather than diagnosis. The test
+# holding this comment to the labels file is
+# `test_no_category_a_probe_may_commit_to_is_right_on_any_labelled_scenario`.
 REFERENCE_CATEGORY = "checkpoint_race"
 
 # "at or near the top" for criterion 2.
@@ -122,13 +137,14 @@ def reference_policies(offered: list[str]) -> dict[str, str]:
             0.8,
         ),
         # The best answer available to a policy that is honest about this
-        # corpus, where 8 of 9 scenarios have no correct category in the closed
-        # set. The gap between this and the row above is the price the reward
-        # currently puts on declining, and it is worth looking at directly.
+        # corpus, where no category a probe step may commit to is correct on
+        # any of the nine scenarios (see REFERENCE_CATEGORY). The gap between
+        # this and the row above is the price the reward currently puts on
+        # declining, and it is worth looking at directly.
         "honest_abstainer": _body(
             ABSTENTION_CATEGORY,
             offered[:1],
-            "No category in the closed set covers this failure; one mitigation to probe it.",
+            "No category a probe step may assert covers this failure; one mitigation to probe it.",
             0.4,
         ),
         # The two two-line constants from the first run, verbatim.
