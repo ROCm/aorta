@@ -1394,6 +1394,354 @@ def test_the_docs_say_which_serving_metrics_are_not_gated():
         )
 
 
+#: What the completed 2026-09-08..09-17 window cleared for promotion: the
+#: step-0 excursion was the only blocker on these two, and it did not recur in
+#: twenty cell-runs. A fact about that window, so it stays true after step 7
+#: promotes them.
+_CLEARED_BY_THE_WINDOW = frozenset({"median_ttft_ms", "output_throughput"})
+
+#: The step-time bound under both of its names -- the key `--perf-gate` writes
+#: and the observation it is compared against. The excursion blocked it too,
+#: but no window clears it: the bound is synthesised at bless time from one
+#: night's mean, so there is no per-night series of it for a window to measure.
+_STEP_TIME_BOUND = frozenset({"step_time_ms.max", "mean_step_time_ms"})
+
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_BREAK = re.compile(r"\s*(?:;|:(?!//)|—)\s*")
+
+#: A clause saying the window cleared a metric: "clears the excursion blocker
+#: on", "window cleared it", "clears X for promotion". Affirmative forms only.
+#: English negates these as "does not clear", and the bare verb is kept out of
+#: the match, so a sentence explaining why a metric is *not* cleared is not
+#: read as claiming it is.
+_CLEARED_CLAIM = re.compile(
+    r"\bclear(?:s|ed)\b.*\b(?:blocker|for\s+promotion)\b|\bblocker\b.*\bclear(?:s|ed)\b"
+)
+
+#: A clause saying a metric can be promoted, by the same rule: "can be
+#: promoted", "lets X be promoted", "evidence for promoting", and "pruned
+#: until X" -- which says when the pruning ends. Not "cannot be promoted" and
+#: not "promoting it needs".
+_PROMOTABLE_CLAIM = re.compile(
+    r"\b(?:can|could|should|may|will)\s+be\s+promoted\b"
+    r"|\blets?\b.*\bbe\s+promoted\b"
+    r"|\bfor\s+promotion\b"
+    r"|\bevidence\s+for\s+promoting\b"
+    r"|\bprune\w*\b.*\buntil\b"
+)
+
+
+def _prose_blocks(doc: str) -> list[list[list[str]]]:
+    """``doc`` as blocks of sentences of clauses, so a claim can be read in place.
+
+    A block is a paragraph, a bullet or one table row -- the unit a pronoun can
+    reach back across. Blockquote markers and emphasis are dropped so the
+    current-state box and `**bold**` leads read like any other prose; backticks
+    are kept, because they carry the metric names.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+
+    def close() -> None:
+        if current:
+            blocks.append(" ".join(current))
+            current.clear()
+
+    for line in _unquoted(doc).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("|", "- ")):
+            close()
+        if stripped.startswith("|"):
+            blocks.append(stripped)
+        elif stripped:
+            current.append(stripped)
+    close()
+    return [
+        [_CLAUSE_BREAK.split(s) for s in _SENTENCE_BREAK.split(block.replace("*", ""))]
+        for block in blocks
+    ]
+
+
+def _claims(doc: str, pattern: re.Pattern, universe: frozenset) -> list[tuple[str, frozenset]]:
+    """``(clause, metrics it is about)`` for every clause ``pattern`` matches.
+
+    A clause is about the ``universe`` names it spells out, or -- when it says
+    "it", "them" or "their" -- about the names in the nearest earlier clause of
+    the same block that spelled any out. That fallback is the whole reason
+    this reads blocks rather than grepping lines: "The window cleared its
+    excursion blocker too" names nothing, and was false because of the
+    sentence before it.
+    """
+    found: list[tuple[str, frozenset]] = []
+    for block in _prose_blocks(doc):
+        about: frozenset = frozenset()
+        for sentence in block:
+            for clause in sentence:
+                named = frozenset(_BACKTICKED.findall(clause)) & universe
+                if named:
+                    about = named
+                if pattern.search(clause):
+                    found.append((clause, about))
+    return found
+
+
+def test_the_rollout_doc_says_the_window_cleared_exactly_two_metrics():
+    """The window cleared `median_ttft_ms` and `output_throughput`, and nothing else.
+
+    The rollout doc said otherwise in nine places. Three made the step-time
+    bound cleared or promotable -- "clears the *excursion* blocker on
+    `median_ttft_ms`, `output_throughput` and `step_time_ms.max`", "The window
+    cleared its excursion blocker too" with the name one sentence earlier, and
+    "prune it by hand until `warmup_steps` is proven to cover the excursion" --
+    and six more said "the three" where the set is two. Each sat near text
+    explaining why `step_time_ms.max` is the exception, so a reader got both
+    answers a paragraph apart: it is not a recorded metric, and a clean window
+    has no series of it to clear.
+
+    Read as claims, not as vocabulary. Every clause asserting that the window
+    cleared a metric, or that a metric can be promoted, is resolved to the
+    metrics it is about; the cleared set must be exactly the two, and neither
+    kind of claim may be about the step-time bound. Sentences that say why it
+    is *not* cleared use the negated verb and are not claims. A bare count is
+    checked separately, because "the three can be promoted" names nothing to
+    resolve.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+
+    rows = _table_rows(doc, ("Metric", "Policy", "First bless", "Why"))
+    dropped = {n for row in rows if "(was: gate)" in row[2] for n in _BACKTICKED.findall(row[0])}
+    assert dropped == _CLEARED_BY_THE_WINDOW | _STEP_TIME_BOUND, (
+        f"the per-metric table marks {sorted(dropped)} as dropped from the "
+        "original gate set; this check assumes the excursion blocked "
+        "median_ttft_ms, output_throughput and the step-time bound. Update the "
+        "constants with the table rather than around it."
+    )
+    universe = frozenset(dropped)
+
+    cleared = frozenset().union(*(about for _, about in _claims(doc, _CLEARED_CLAIM, universe)))
+    assert cleared == _CLEARED_BY_THE_WINDOW, (
+        f"the rollout doc says the window cleared {sorted(cleared)}; it cleared "
+        f"{sorted(_CLEARED_BY_THE_WINDOW)}. step_time_ms.max is not a recorded "
+        "metric, so there is no per-night series of it for a window to clear."
+    )
+
+    for pattern in (_CLEARED_CLAIM, _PROMOTABLE_CLAIM):
+        for clause, about in _claims(doc, pattern, universe):
+            assert not about & _STEP_TIME_BOUND, (
+                f"the rollout doc says the step-time bound is cleared or "
+                f"promotable from the window: {clause!r}. It is synthesised at "
+                "bless time from one night's mean, and step 4 and step 7 both "
+                "say no window measures it."
+            )
+
+    promotion = re.compile(
+        f"{_CLEARED_CLAIM.pattern}|{_PROMOTABLE_CLAIM.pattern}|\\bstay\\s+record-only\\b"
+    )
+    for clause, _ in _claims(doc, promotion, universe):
+        assert not re.search(r"\b(?:the|all)\s+three\b", clause), (
+            f"the rollout doc counts the metrics the window decides as three: "
+            f"{clause!r}. It decides two; name them."
+        )
+
+
+#: How the rollout doc said some of the nine were waiting on nights not yet
+#: run: a count of groups that are waiting, or a count of metrics for which
+#: "the next window" is the right answer or "another window" the wrong one.
+#: Parameterised over the count so a reworded "two groups are waiting" is
+#: caught as well as the original "only one group is waiting". A count that is
+#: itself the object of "of the" is not the subject -- "none of the three
+#: groups is waiting" says zero -- so it is excluded by look-behind.
+_NUMBER = r"(?:one|two|three|four|five|six|seven|eight|nine|some)"
+_WAITING_ON_NEW_NIGHTS = re.compile(
+    rf"(?<!of the )\b(?:only\s+)?{_NUMBER}\s+"
+    rf"(?:of\s+(?:them|the\s+nine|the\s+(?:{_NUMBER}\s+)?groups)\s+|groups?\s+)"
+    r"(?:is|are)\s+waiting\b"
+    rf"|\bright\s+answer\s+for\s+(?:only\s+)?{_NUMBER}\b"
+    rf"|\bwrong\s+answer\s+for\s+{_NUMBER}\s+of\b",
+    re.I,
+)
+
+
+def test_the_rollout_doc_does_not_say_any_group_waits_for_new_nights():
+    """None of the three groups waits on nights that have not happened yet.
+
+    The current-state box and step 7 agree on that group by group: two
+    metrics have their evidence, three need the *analysis* of the recorded
+    window and a second one only if that analysis says so, four are held on
+    redundancy. Three summary sentences disagreed with them -- "'the next
+    window' is the right answer for only three of them", "the wrong answer for
+    six of the nine", and step 7's own opening, "only one group is waiting on
+    nights that have not happened yet" -- each implying the `p99_*` group
+    should wait before reading what it already has.
+
+    The partition check above cannot see this: the groups were right and the
+    sentences summarising them were wrong. So this reads every sentence for a
+    count of groups or metrics described as waiting. It is a pattern over how
+    this document quantifies waiting, not a parse of meaning, and says so.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+    for block in _prose_blocks(doc):
+        for clauses in block:
+            sentence = " ".join(clauses)
+            assert not _WAITING_ON_NEW_NIGHTS.search(sentence), (
+                f"the rollout doc says part of the nine is waiting on new "
+                f"nights: {sentence!r}. The current-state box and step 7 give "
+                "every group a way forward from the recorded window."
+            )
+
+
+#: Opposing a failure to a chart: "not a chart", "rather than a chart", "not
+#: charted", "instead of a chart entry".
+_NOT_CHARTED = re.compile(
+    r"\b(?:not|rather\s+than|instead\s+of)\s+(?:a\s+)?chart(?:s|ed|\s+entry|\s+entries)?\b",
+    re.I,
+)
+
+
+def test_the_docs_say_a_breach_fails_the_nightly_and_stays_charted():
+    """A gate breach is a verdict, and the observation behind it stays on the chart.
+
+    Three places said a run over a serving ceiling is "a nightly failure, not a
+    chart" (or "rather than a chart", or "not a chart entry"). The failure half
+    is right. The other half is not -- see the next test for the path -- and it
+    sends an operator looking for the breached value somewhere other than the
+    metric history it is drawn in.
+
+    Two halves, per text: no sentence about a failure opposes it to charting,
+    and some sentence about a failure says the observation is still charted,
+    so deleting the clause is not a way to pass. The dashboard text is read
+    from `DASHBOARD_METADATA` rather than from source, because the source
+    splits it across string literals and a grep would read the seams.
+    """
+    dashboard_metadata = _load("dashboard_metadata")
+    texts = {
+        relative: (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        for relative in ("docs/tokenspeed-gating-rollout.md", "docs/tokenspeed-serving.md")
+    }
+    texts["scripts/ci/dashboard_metadata.py (tokenspeed_serve_smoke success criteria)"] = (
+        dashboard_metadata.DASHBOARD_METADATA["workloads"]["tokenspeed_serve_smoke"]["repro"][
+            "success_criteria"
+        ]
+    )
+    for where, text in texts.items():
+        failures = [
+            " ".join(clauses)
+            for block in _prose_blocks(text)
+            for clauses in block
+            if re.search(r"\bfail", " ".join(clauses))
+        ]
+        conflated = [s for s in failures if _NOT_CHARTED.search(s)]
+        assert not conflated, (
+            f"{where} opposes a gate failure to charting: {conflated[0]!r}. "
+            "nightly_eval.py records the failing cell with its metrics and "
+            "gen_dashboard.py charts every entry, so the breach is both."
+        )
+        assert any(re.search(r"\bcharted\b", s) for s in failures), (
+            f"{where} no longer says that a breached observation stays charted; "
+            "an operator reading it cannot tell where to find the value that "
+            "failed the run."
+        )
+
+
+def test_a_serving_gate_breach_fails_the_nightly_and_stays_charted(tmp_path, monkeypatch):
+    """What the docs now say a breach does, checked on the path that does it.
+
+    A night over the `median_tpot_ms` ceiling is driven through the real
+    `nightly_eval.main()` against the committed baselines, and its results
+    file through the real dashboard renderer beside a clean night's. The run
+    must exit non-zero, the results file must still carry the breached value,
+    and that cell's `median_tpot_ms` history must be the chart of both nights.
+    A harness that drops a failing cell's metrics, or a history that skips
+    failed nights, fails this -- and would make the prose wrong again in the
+    other direction.
+
+    The results file reaches the dashboard through two workflow steps that
+    are YAML rather than Python -- the artifact upload and the publisher --
+    and both have to run on a failed eval for any of this to hold, so they are
+    asserted too.
+    """
+    import sys
+
+    import yaml
+
+    gen_dashboard = _load("gen_dashboard")
+    workflows = nightly_eval.REPO_ROOT / ".github/workflows"
+    publish = yaml.safe_load((workflows / "nightly-eval.yml").read_text("utf-8"))["jobs"]["publish"]
+    assert "always()" in publish["if"], (
+        "nightly-eval.yml's publish job no longer runs after a failed eval, so a "
+        "breaching night never reaches the history the docs say it is charted in."
+    )
+    uploads = [
+        step
+        for step in yaml.safe_load((workflows / "eval-reusable.yml").read_text("utf-8"))["jobs"][
+            "eval"
+        ]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+        and "gpu-nightly-results.json" in step["with"]["path"]
+    ]
+    assert [step.get("if") for step in uploads] == ["always()"], (
+        "eval-reusable.yml does not upload gpu-nightly-results.json after a failed "
+        "eval, so the publisher has nothing to record."
+    )
+
+    baselines = yaml.safe_load(nightly_eval.BASELINES.read_text("utf-8"))["baselines"]
+    ceiling = baselines["tokenspeed_serve_smoke::baseline"]["metrics"]["median_tpot_ms"]["value"]
+    healthy, breach = 1.8906, round(ceiling * 1.5, 4)
+    entry = {e["name"]: e for e in _real_matrix()["entries"]}["tokenspeed_serve_smoke"]
+
+    real_evaluate = nightly_eval.evaluate
+    monkeypatch.setattr(
+        nightly_eval, "evaluate",
+        lambda _matrix, blessed, work: real_evaluate({"entries": [entry]}, blessed, work),
+    )
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(nightly_eval, "docker_daemon", lambda: (True, "stubbed"))
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {"amd_aorta_version": "x"})
+
+    def night(label: str, tpot: float) -> tuple[int, dict]:
+        def fake_run_entry(e, out_dir):
+            mpath = out_dir / e["name"] / "matrix.json"
+            _write_matrix(mpath, [
+                {"name": cell, "error": None, "passed_count": 1, "failed_count": 0,
+                 "error_count": 0, "mean_step_time_ms": 1130.0,
+                 "metrics_summary": {"median_tpot_ms": {"mean": value},
+                                     "p99_itl_ms": {"mean": 34.75}}}
+                for cell, value in (("baseline", tpot), ("no-scratch-reclaim", healthy))
+            ])
+            return 0, mpath, False
+
+        out = tmp_path / f"{label}.json"
+        monkeypatch.setattr(nightly_eval, "run_entry", fake_run_entry)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["nightly_eval.py", "--out", str(out), "--work-dir", str(tmp_path / label)],
+        )
+        rc = nightly_eval.main()
+        doc = json.loads(out.read_text("utf-8"))
+        doc["generated_at"] = f"2026-09-{label}T11:30:00+00:00"
+        return rc, doc
+
+    clean_rc, clean = night("18", healthy)
+    breach_rc, breached = night("19", breach)
+
+    assert clean_rc == 0 and clean["summary"]["fail"] == 0, clean["summary"]
+    assert breach_rc == 1, "a night over the median_tpot_ms ceiling did not fail the nightly"
+    assert breached["summary"]["fail"] == 1, breached["summary"]
+    cell = {e["cell"]: e for e in breached["entries"]}["baseline"]
+    assert cell["verdict"] == "fail"
+    assert any("median_tpot_ms" in reason for reason in cell["reasons"]), cell["reasons"]
+    assert cell["metrics"]["summary"]["median_tpot_ms"] == breach, (
+        "the failing cell reached the results file without the value that failed it"
+    )
+
+    html = gen_dashboard.build_dashboard_html([clean, breached])
+    chart = gen_dashboard._svg_sparkline([healthy, breach])
+    assert chart.startswith("<svg") and chart in html, (
+        "the dashboard does not chart the breaching night in the cell's "
+        "median_tpot_ms history; the docs say it does."
+    )
+
+
 def test_pending_entries_are_valid_and_loadable():
     """Validated exactly like a live entry, so promoting one is a move, not a bet.
 

@@ -1013,7 +1013,9 @@ on both cells** (`baseline` and `no-scratch-reclaim`):
 | `p99_itl_ms` | `max` | the tail half of the same pair; also excursion-immune |
 
 Ceilings are `window maximum × 1.25`, from the ten-night window
-2026-09-08..09-17. A run over either is a nightly **failure**, not a chart entry.
+2026-09-08..09-17. A run over either is a nightly **failure**, and the breaching
+observation is still written to that night's results and charted in the
+metric's history like any other, so the trend reads straight through it.
 
 Everything else this workload reports is still **record-only** — captured,
 charted, and not gated. That is nine auto-gateable metrics (`median_ttft_ms`,
