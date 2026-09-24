@@ -183,6 +183,15 @@ class TestDefaultIsUnchanged:
         assert ChatProviderProposer("vllm")._profile.name == "default"
         assert LiteLLMProposer()._profile.name == "default"
 
+    def test_positional_callers_of_agent_config_keep_their_mapping(self):
+        """``AgentConfig`` is exported; the new field must not shift existing ones."""
+        config = AgentConfig(
+            Path("o"), None, (), None, AgentPolicy(), "fake", None, ("tf32_off",), None, True, True
+        )
+        assert config.mitigations_allowlist == ("tf32_off",)
+        assert (config.dry_run, config.run_bundle) == (True, True)
+        assert config.prompt_profile == "default"
+
     def test_default_messages_are_the_shipped_prompt(self):
         profile = get_prompt_profile("default")
         got = _profile_prompt(profile, SYMPTOM, copy.deepcopy(SUMMARIES), REMAINING, TRIED)

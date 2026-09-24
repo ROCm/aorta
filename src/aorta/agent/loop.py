@@ -48,12 +48,13 @@ class AgentConfig:
     # None means "no opinion": the chat provider settings decide, and the
     # standalone litellm path applies its own gpt-4o-mini default.
     llm_model: str | None = None
-    # Which messages a real backend is sent; see aorta.agent.prompt_profiles.
-    prompt_profile: str = DEFAULT_PROMPT_PROFILE
     mitigations_allowlist: tuple[str, ...] | None = None
     recipe_path: Path | None = None
     dry_run: bool = False
     run_bundle: bool = False
+    # Which messages a real backend is sent; see aorta.agent.prompt_profiles.
+    # Last, so positional callers of this exported dataclass keep their mapping.
+    prompt_profile: str = DEFAULT_PROMPT_PROFILE
 
 
 @dataclass
