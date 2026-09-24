@@ -1722,6 +1722,84 @@ def test_the_audited_union_is_read_from_the_mapped_copies(monkeypatch, tmp_path)
     )
 
 
+def test_a_mapped_torch_object_replaces_the_wheel_copy(tmp_path):
+    """Torch's side gets the exact-file rule the ROCm side already had.
+
+    An inherited ``LD_LIBRARY_PATH`` maps ``libtorch_hip`` from an operator
+    directory as readily as it maps ``libamdhip64``, and the wheel's own copy
+    then sits unread in ``torch/lib``. Globbing the wheel regardless let that
+    unloaded copy supply torch's variables, so the audit passed for code this
+    process was not running. The marker names differ so the assertion can say
+    which file was read.
+    """
+    dirs = _stack(tmp_path)
+    wheel = dirs[-1] / "libtorch_hip.so"
+    beside = _fake_so(dirs[-1] / "libc10_hip.so", ["PYTORCH_MIOPEN_SUGGEST_NHWC"])
+    operator = tmp_path / "operator"
+    operator.mkdir()
+    loaded = _fake_so(operator / "libtorch_hip.so.2", ["PYTORCH_CUDA_ALLOC_CONF"])
+
+    scan = libraries_to_scan(
+        dirs, mapped_libraries(torch_sonames(dirs[-1]), maps_text=_maps_line(str(loaded)))
+    )
+
+    assert loaded.resolve() in scan.libraries
+    assert wheel.resolve() not in scan.libraries, (
+        "the wheel's libtorch_hip was read although the process mapped another copy"
+    )
+    assert beside.resolve() in scan.libraries, (
+        "an unmapped torch object was replaced by another object's mapping"
+    )
+    names = union_of_names(scan.libraries)
+    assert "PYTORCH_CUDA_ALLOC_CONF" in names
+    assert "TORCH_ROCM_FA_PREFER_CK" not in names
+
+
+def test_an_unmapped_or_vanished_torch_object_is_still_read_from_the_wheel(tmp_path):
+    """The narrowness half: replacement is per soname, and only by a real file.
+
+    ``libc10_hip`` is not mapped, so its wheel copy is still the one to read;
+    and a mapping whose file has since gone falls back to the wheel rather than
+    dropping the object -- the same ``is_file()`` rule the ROCm side applies.
+    """
+    dirs = _stack(tmp_path)
+    c10 = _fake_so(dirs[-1] / "libc10_hip.so", ["PYTORCH_MIOPEN_SUGGEST_NHWC"])
+    gone = tmp_path / "operator" / "libtorch_hip.so"
+
+    scan = libraries_to_scan(
+        dirs, mapped_libraries(torch_sonames(dirs[-1]), maps_text=_maps_line(str(gone)))
+    )
+
+    assert c10.resolve() in scan.libraries
+    assert (dirs[-1] / "libtorch_hip.so").resolve() in scan.libraries
+    assert scan.unscanned_torch is None
+
+
+def test_the_fixture_asks_where_torchs_objects_were_mapped(monkeypatch, tmp_path):
+    """The snapshot is taken for torch's sonames, not only for ROCm's.
+
+    :func:`mapped_libraries` defaults to :func:`sonames_to_scan`, which names
+    only the ROCm side, so a fixture calling it bare hands
+    :func:`libraries_to_scan` no torch mapping to apply and the rule above
+    never runs on the GPU lane.
+    """
+    dirs = _stack(tmp_path)
+    asked: list[tuple[str, ...]] = []
+    module = sys.modules[__name__]
+
+    def record_maps(sonames=None, maps_text=None):
+        asked.append(tuple(sonames or ()))
+        return {}
+
+    monkeypatch.setattr(module, "require_readable_stack", lambda: dirs)
+    monkeypatch.setattr(module, "mapped_libraries", record_maps)
+
+    loaded_stack_names()
+
+    assert asked and "libtorch_hip.so" in asked[0], asked
+    assert set(sonames_to_scan()) <= set(asked[0]), asked
+
+
 def test_an_unreadable_scanned_object_is_an_unreadable_stack(monkeypatch, tmp_path):
     """The fourth door, and the last one that let a partial union look complete.
 
@@ -1939,6 +2017,24 @@ def torch_shared_objects(torch_lib: Path) -> set[Path]:
     }
 
 
+def _soname_of(name: str) -> str:
+    """``libtorch_hip.so.2`` -> ``libtorch_hip.so``: the name a mapping is keyed by."""
+    return re.sub(r"(\.\d+)+$", "", name)
+
+
+def torch_sonames(torch_lib: Path) -> tuple[str, ...]:
+    """The sonames torch's directory provides, for :func:`mapped_libraries` to look up.
+
+    :func:`sonames_to_scan` names only the ROCm side, so a snapshot taken with
+    it never reports where ``libtorch_cpu``, ``libc10_hip`` or ``libtorch_hip``
+    were mapped from -- and an inherited ``LD_LIBRARY_PATH`` can map them from
+    an operator directory as readily as it can ``libamdhip64``. Derived from
+    the directory rather than listed, for the reason torch's side is globbed
+    at all: its variables are spread across libraries no list here owns.
+    """
+    return tuple(sorted({_soname_of(lib.name) for lib in torch_shared_objects(torch_lib)}))
+
+
 def libraries_to_scan(dirs: list[Path], mapped: dict[str, Path] | None = None) -> ScanSet:
     """The shared objects to read names out of, resolved from ``dirs``.
 
@@ -2030,7 +2126,15 @@ def libraries_to_scan(dirs: list[Path], mapped: dict[str, Path] | None = None) -
                 scanned.append(lib)
                 break
     torch_objects = torch_shared_objects(torch_lib)
-    scanned.extend(sorted(torch_objects))
+    # A torch object the process mapped from elsewhere is scanned as that file,
+    # by the same exact-file rule as the ROCm side, and the wheel's copy it
+    # replaced is not read at all: an unloaded copy supplying torch's three
+    # names would pass the audit for code this process is not running. The
+    # same rule covers a ROCm library a ROCm wheel bundles in torch/lib -- the
+    # mapped copy was already scanned above, and the bundled one is not.
+    for obj in sorted(torch_objects):
+        exact = loaded.get(_soname_of(obj.name))
+        scanned.append(exact.resolve() if exact is not None and exact.is_file() else obj)
     return ScanSet(
         list(dict.fromkeys(scanned)),
         tuple(soname for soname in sonames_to_scan() if soname not in resolved),
@@ -2168,7 +2272,9 @@ def loaded_stack_names() -> frozenset[str]:
     in :func:`libraries_to_scan` with nothing to apply.
     """
     dirs = require_readable_stack()
-    scan = libraries_to_scan(dirs, mapped_libraries())
+    scan = libraries_to_scan(
+        dirs, mapped_libraries(sonames_to_scan() + torch_sonames(dirs[-1]))
+    )
     return union_of_names(require_scanned_libraries(scan, dirs))
 
 
