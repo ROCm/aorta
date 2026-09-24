@@ -88,6 +88,23 @@ is pinned by a test. Two preconditions matter most:
 That second rule relies on the `proposal_unresolved` stop reason, which this
 change adds to `src/aorta/agent` as a separate commit.
 
+Two further rules fix defects found after the evaluation below was recorded:
+
+- **The read of the evidence is paid once per episode, on step 1.**
+  `verdict_correct` / `verdict_wrong` and `detector_attribution` were first paid
+  on every step. A refuted step costs 0.7 and a correct copied read pays up to
+  2.0, so past step 2 every step of delay raised the return: a policy that
+  copies the triage from its prompt and walks five knobs that fix nothing before
+  the cover scored +14.97 on the six resolvable scenarios. Every cell shown
+  during an episode carries the baseline's verdict, so a later read adds no
+  fact. Under the repaired rule that padded search scores +3.63, and a one-step
+  episode scores exactly what a single completion does.
+- **A reply that sets `stop: true` proposes nothing.** The loop stops before it
+  runs any name in it, so those names fire no name event and no resolver
+  award, and do not count toward the resolver rates. A stop that names the
+  resolver ends the episode unresolved and is scored as giving up: the policy
+  had the answer and declined to try it.
+
 **The corpus** is seven archived probe matrices. Each has 22 cells × 4 trials,
 all 21 registered mitigations measured, a failing baseline, and no cell whose
 trials disagree; `load_scenario` checks all of that. The corpus has six
@@ -129,7 +146,7 @@ did.
   all seven scenarios, fp32 weights.
 - The trainer used was the exploratory version this one is derived from. It
   had the same optimiser, sampling and checks, plus modes this version drops.
-  There are three differences:
+  There are four differences:
   - This version refuses to write a checkpoint from an iteration whose checks
     failed. The checks passed on all 17 iterations, so that difference was
     never exercised.
@@ -140,6 +157,10 @@ did.
     decoded reply, which can differ from the sampled tokens and never included
     the end-of-reply token. This version scores the exact sampled IDs, through
     and including the stop token.
+  - **The checkpoint was trained under the previous reward**, which paid the
+    read of the evidence on every step and scored the names in a stopping
+    reply. The evaluation below is re-scored under the repaired reward; the
+    training signal the checkpoint learned from was not.
 - The 17 iterations were accumulated across three chained runs, so the Adam
   moments restarted twice.
 - Every iteration passed the trainer's checks. The pair passes
@@ -150,20 +171,30 @@ did.
   scenario per column. Weights were fixed, sampling was at the training
   settings (t = 0.7, top_p = 0.95), and each scenario was seeded from its own
   name.
-- The recorded episodes of both columns replay through the code in this change
-  with identical steps, terminals and rewards, 896 of 896
-  (`rescore_episodes.py --replay`).
+- Both columns were recorded under the previous reward. Replayed through the
+  code in this change, all 896 episodes take identical steps and end on
+  identical terminals, and the reward column below is their **re-score under
+  the repaired reward**, not the recorded value. `rescore_episodes.py --replay`
+  on those columns therefore reports a reward difference and exits 1, by
+  design. None of the recorded replies stops while naming a mitigation, so the
+  stop rule moves no recorded number; the change is entirely the read-once
+  rule.
 
 | scenario | step-1 rate, base → trained | z | reward, base → trained |
 |---|---|---|---|
-| `nan_uninit_workspace` | 0.328 → 0.953 | +7.37 | +4.42 → +7.75 |
-| `reference_mismatch` | 0.203 → 0.672 | +5.35 | +4.26 → +6.77 |
-| `queue_stale_read` | 0.656 → 0.828 | +2.22 | +6.75 → +7.21 |
-| `scratch_exhaustion` | 0.688 → 0.781 | +1.20 | +3.38 → +4.73 |
-| `stream_stale_read` | 0.625 → 0.688 | +0.74 | +7.02 → +6.98 |
-| `xnack_page_fault` | 0.203 → **0.016** | **−3.40** | +4.97 → +3.83 |
-| `cancellation_nan` (unresolvable) | – | – | −4.34 → −0.83 |
-| **pooled / mean over the six resolvable** | **0.451 → 0.656** | **+5.73** | **+5.13 → +6.21** |
+| `nan_uninit_workspace` | 0.328 → 0.953 | +7.37 | +2.86 → +7.66 |
+| `reference_mismatch` | 0.203 → 0.672 | +5.35 | +1.20 → +5.80 |
+| `queue_stale_read` | 0.656 → 0.828 | +2.22 | +5.97 → +6.86 |
+| `scratch_exhaustion` | 0.688 → 0.781 | +1.20 | +3.26 → +4.66 |
+| `stream_stale_read` | 0.625 → 0.688 | +0.74 | +6.11 → +6.35 |
+| `xnack_page_fault` | 0.203 → **0.016** | **−3.40** | +0.50 → −2.55 |
+| `cancellation_nan` (unresolvable) | – | – | −12.31 → −9.89 |
+| **pooled / mean over the six resolvable** | **0.451 → 0.656** | **+5.73** | **+3.32 → +4.80** |
+
+The step-1 rates are not reward and did not change with the repair. A second
+evaluation of the same pair with another seed (20260925, n = 64) agrees:
+pooled step-1 rate 0.440 → 0.677 (z = +6.61), `xnack_page_fault` 0.172 →
+0.031 (z = −2.63), and reward on the six resolvable scenarios +3.03 → +4.66.
 
 On the unresolvable scenario the earned claim `terminal_unresolvable_correct`
 went from 41 to 54 of 64 episodes. `name_not_offered` fell from 70 to 17 events
@@ -172,19 +203,21 @@ stayed at 17 → 16.
 
 **What this shows.** Training measurably changes behaviour on the scenarios it
 trained on. The pooled step-1 rate rises at z = +5.73, and the mean reward on
-the six resolvable scenarios rises by about one point.
+the six resolvable scenarios rises from +3.32 to +4.80, about one and a half
+points.
 
 **What it does not show.**
 
 - **P1 is falsified.** `xnack_page_fault`, the one scenario whose resolver is
   not also a resolver somewhere else in the corpus, gets significantly
   *worse*.
-- **A constant policy does as well as the trained model.** The constant that
-  proposes the three names `gpu_max_hw_queues_2`,
-  `pytorch_no_cuda_memory_caching` and `xnack` on step 1 names a resolver on
-  every resolvable scenario, and scores +6.20 on each. That is a step-1 rate of
-  1.000 and a reward of +6.20, against the trained model's 0.656 and +6.21. The
-  constant reads nothing, and it ties.
+- **A constant policy does better than the trained model.** Three names,
+  `gpu_max_hw_queues_2`, `pytorch_no_cuda_memory_caching` and `xnack`, fix all
+  six scenarios that have a fix. A reply naming all three scores +6.20 on each
+  without citing any detectors, and +8.20 when it copies the verdict and
+  detectors from the prompt, as the model does. Proposing them one per step in
+  a fixed order scores +8.47. The trained model scores +4.80 on the same
+  scenarios (seed 20260923, n = 64). The constants read nothing.
 - The four distinct resolvers fit in one reply, so this corpus cannot
   distinguish a policy that learned to debug from one that learned the answer
   key.
@@ -192,11 +225,9 @@ the six resolvable scenarios rises by about one point.
   What the evaluation controls is that the weights are fixed and the two
   columns are paired. It does not turn the training corpus into a test set.
 
-The other constants mostly behave as P6 predicted. Seven of the ten score lower
-as an episode than as a single reply. The exceptions are the cover itself, the
-constant that names the whole menu and stops (which earns the unresolvable
-claim on one scenario), and the bare unresolvability claim, which is
-unchanged. Reproduce with `rescore_episodes.py --constants`, which needs only
+The other constants behave as P6 predicted. Eight of the ten score lower as an
+episode than as a single reply. The exceptions are the cover itself, and the
+bare unresolvability claim, which is unchanged. Reproduce with `rescore_episodes.py --constants`, which needs only
 the archives.
 
 ## What this cannot fix

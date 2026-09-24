@@ -249,15 +249,19 @@ def registered_mitigations() -> list[str]:
 def runnable_names(raw: str, offered: Sequence[str]) -> list[str]:
     """The names in a reply that would actually become probe cells.
 
-    Replays the two filters the shipped path applies: an unparseable reply
-    yields nothing, and a name outside ``offered`` is dropped before the loop
-    sees it. A hallucinated name therefore cannot count as naming a resolver.
+    Replays what the shipped path does with a reply: an unparseable reply
+    yields nothing, a name outside ``offered`` is dropped before the loop sees
+    it, and a reply that sets ``stop: true`` runs nothing at all, because the
+    loop stops before it grows the axis. So neither a hallucinated name nor a
+    name in a stopping reply counts as naming a resolver.
     """
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:
         return []
     if not isinstance(obj, dict):
+        return []
+    if obj.get("stop") is True:
         return []
     proposed = obj.get("next_mitigations")
     if not isinstance(proposed, list):
@@ -697,8 +701,9 @@ class Episode:
                 stop_reason=resolved,
                 proposed_nothing=not step.next_mitigations,
                 unresolvable=self.scenario.unresolvable,
+                # Nothing from a step that stopped: its names were never run.
                 resolver_named=any(
-                    set(s.parsed.next_mitigations if s.parsed else [])
+                    set(s.parsed.next_mitigations if s.parsed and not s.stop else [])
                     & self.scenario.resolvers
                     for s in self.steps
                 ),
@@ -871,6 +876,8 @@ def score(episode: Episode) -> EventScore:
         episode.as_logged(),
         scenario.grid,
         StepContext(offered_mitigations=frozenset(scenario.offered)),
+        # Every step's label is passed; `score_episode` reads only the first,
+        # because the evidence is paid once per episode.
         labels={s.n: scenario.label for s in episode.steps},
         points=POINTS,
     )

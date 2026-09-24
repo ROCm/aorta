@@ -56,6 +56,9 @@ Per step -- decided by the reply plus the ground truth
     Each step costs a whole probe matrix, so the same answer reached sooner is
     worth more; the bonus decays to zero rather than turning negative, so a late
     correct answer is never worse than no answer at all.
+A reply that sets ``stop: true`` proposes nothing: the loop stops before it
+runs any name in it, so those names fire no name event and no resolver award.
+
 ``name_refuted`` (-0.5, per name)
     A named mitigation is an asserted causal hypothesis, and the matrix ran it
     and refuted it.
@@ -77,6 +80,24 @@ Per step -- decided by the reply plus the ground truth
     an attribution is a *set*. Graded by ``triage_reward.set_f1`` and mapped to
     ``2*f1 - 1``; see :func:`attribution_points` for why grading does not breach
     the decidability rule.
+
+**In an episode the read is scored on the first step only.** Both events were
+first paid on every step. A refuted step costs ``name_refuted`` plus one
+``cell_spent``, less than a correct copied read, and the earliness bonus stops
+at step 2, so every step of delay past the second raised the return: a policy
+that reads nothing about the fix and walks through knobs that fix nothing
+before the cover outscored every trained checkpoint. The claim is about the
+baseline failure, and every cell shown during an episode carries the
+baseline's verdict (a passing cell ends the episode first), so a later read
+adds no fact; paying it again pays for one fact *k* times, which is why
+``resolver_named`` is paid once. Step 1 is the single-step task byte for byte,
+so an episode's read and a single completion's are the same quantity.
+``score_completion`` and every one-step episode are unchanged, and no value in
+``POINTS`` moved. Rejected: raising the per-step cost (a constant fitted to
+beat another constant, and it taxes the genuine long search on the
+unresolvable scenario), decaying the read per step (still collectable at small
+*k*), averaging it (dilutes a wrong first read), and paying it on the last step
+(which can be a stop the loop manufactured).
 
 Per episode -- decided by the terminal state, at most one fires
 ---------------------------------------------------------------
@@ -601,9 +622,18 @@ def step_events(
         return events, None
 
     parsed = AgentStep.from_dict(obj)
+    # A reply that stops proposes nothing to run. The loop takes the stop
+    # before it grows the axis, so no name in a stopping reply ever becomes a
+    # cell: scoring those names -- charging a refuted one or paying a resolver
+    # -- would score text the environment discards, the same reason an
+    # un-offered name cannot resolve anything. So a stop naming the resolver
+    # earns nothing for it: the policy had the answer and declined to try it,
+    # and the episode ends unresolved. `stop` is read through `from_dict`, so
+    # only a genuine JSON `true` counts, exactly as in the loop.
+    proposed = [] if parsed.stop else parsed.next_mitigations
     # De-duplicated: a reply naming one mitigation twice made one proposal, and
     # the loop would buy one cell for it.
-    for name in dict.fromkeys(parsed.next_mitigations):
+    for name in dict.fromkeys(proposed):
         fired = _classify_name(
             name, context.offered_mitigations, context.tried_mitigations, grid
         )
@@ -617,7 +647,7 @@ def step_events(
     # and paying it here would reward an action the loop discards. The same
     # holds for a name already on the axis: the filter drops it too.
     runnable = [
-        m for m in parsed.next_mitigations
+        m for m in proposed
         if m in context.offered_mitigations and m not in context.tried_mitigations
     ]
     if grid is not None and not resolver_already_named:
@@ -882,8 +912,11 @@ def episode_from_log(
                     stop=bool(event.get("stop")),
                 )
             )
-            # The names the loop could actually run: what survived the filter.
-            if set(event.get("next_mitigations") or []) & set(resolvers):
+            # The names the loop could actually run: what survived the filter,
+            # and nothing from a step that stopped (see `step_events`).
+            if not event.get("stop") and set(event.get("next_mitigations") or []) & set(
+                resolvers
+            ):
                 resolver_named = True
         elif etype == "mitigation_tried":
             name = str(event.get("mitigation"))
@@ -959,10 +992,14 @@ def score_episode(
     are "already tried" from step *n+1* on -- by reading each step's own
     ``mitigation_axis_before`` rather than accumulating, so a resumed run that
     inherited a populated axis is scored against what was really on it.
+
+    ``labels`` is read for the first step only: the read of the evidence is
+    paid once per episode (module docstring). Labels for later steps are
+    ignored rather than refused, so the rule lives here and in no caller.
     """
     score = EventScore(terminal=episode.terminal, cells=episode.cells)
     resolver_named = False
-    for logged in episode.steps:
+    for index, logged in enumerate(episode.steps):
         here = StepContext(
             offered_mitigations=context.offered_mitigations,
             tried_mitigations=frozenset(
@@ -975,7 +1012,7 @@ def score_episode(
             here,
             grid,
             step=logged.n,
-            label=(labels or {}).get(logged.n),
+            label=(labels or {}).get(logged.n) if index == 0 else None,
             resolver_already_named=resolver_named,
             points=points,
         )

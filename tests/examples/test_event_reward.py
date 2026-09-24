@@ -391,6 +391,34 @@ def test_the_award_is_withheld_once_it_has_been_paid(grid):
                  resolver_already_named=True) == []
 
 
+def test_a_stopping_reply_that_names_the_resolver_earns_nothing_for_it(grid):
+    """The loop stops before it runs any name in a stopping reply, so the
+    resolver was never tried: no award, no earliness bonus."""
+    assert _fire(_raw(next_mitigations=[RESOLVER], stop=True), grid) == []
+
+
+def test_a_stopping_reply_is_not_charged_for_its_names_either(grid):
+    """Symmetric: a name that never runs is neither paid nor charged."""
+    assert _fire(_raw(next_mitigations=[REFUTED, "invented"], stop=True), grid) == []
+
+
+def test_the_same_reply_without_stop_still_earns_the_award(grid):
+    """Narrowness: the rule is about stopping, not about naming the resolver."""
+    assert _fire(_raw(next_mitigations=[RESOLVER], stop=False), grid) == [
+        "resolver_named", "resolver_named_on_step_1",
+    ]
+
+
+def test_a_stop_naming_the_resolver_ends_the_episode_as_giving_up(tmp_path, grid):
+    run = _write_log(
+        tmp_path / "STOPNAMED",
+        [_llm_step([RESOLVER], stop=True), _stopped()],
+    )
+    episode = episode_from_log(run, grid, OFFERED)
+    assert episode.terminal == "gave_up"
+    assert not score_episode(episode, grid, _context()).fired("resolver_named")
+
+
 def test_a_resolver_that_was_not_offered_earns_nothing(grid):
     """It never becomes a cell, so it cannot have fixed anything."""
     context = _context(offered_mitigations=OFFERED - {RESOLVER})
@@ -757,3 +785,29 @@ def test_the_cli_refuses_to_score_an_episode_without_a_menu(tmp_path, matrix, ca
     assert event_reward.main(
         ["--matrix", str(matrix), "--episode", str(run), "--offered", ",".join(OFFERED)]
     ) == 0
+
+
+def test_an_episode_reads_its_labels_on_the_first_step_only(grid):
+    """Labels for later steps are ignored by the scorer, not by its callers."""
+    from event_reward import LoggedEpisode, LoggedStep
+
+    def step(n, names, axis):
+        return LoggedStep(
+            n=n, raw=_raw(next_mitigations=names, verdict="fail", detectors=NAN),
+            mitigation_axis_before=axis, stop=False,
+        )
+
+    episode = LoggedEpisode(
+        run_dir=Path("."),
+        steps=[
+            step(1, [REFUTED], [BASELINE]),
+            step(2, ["xnack"], [BASELINE, REFUTED]),
+            step(3, [RESOLVER], [BASELINE, REFUTED, "xnack"]),
+        ],
+        terminal="converged", terminal_why="test", cells=4,
+    )
+    label = Label(verdict="fail", failure_detectors=list(NAN))
+    score = score_episode(episode, grid, _context(), labels={1: label, 2: label, 3: label})
+    read = [(e.name, e.step) for e in score.events
+            if e.name in ("verdict_correct", "verdict_wrong", "detector_attribution")]
+    assert read == [("verdict_correct", 1), ("detector_attribution", 1)]

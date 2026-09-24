@@ -256,6 +256,21 @@ def test_the_iteration_budget_ends_an_episode_as_a_withheld_terminal(tmp_path):
     assert len(episode.steps) == 2
 
 
+def test_a_stop_that_names_the_resolver_neither_converges_nor_earns_it(tmp_path):
+    """The loop stops before running it, so the episode ends unresolved and
+    the step-1 resolver rate does not count it."""
+    scenario = make_scenario(build_archive(tmp_path, resolver=ALPHA))
+    episode = drive(scenario, [reply([ALPHA], stop=True)])
+    assert episode.terminal == "gave_up"
+    assert not env.score(episode).fired("resolver_named")
+    group, _samples, _wire = env.rollout_scenario(
+        scenario, 2, AgentPolicy(), by_round([reply([ALPHA], stop=True)]),
+        advantage_fn=grpo_advantages,
+    )
+    assert group["step1_resolver_rate"] == 0.0
+    assert group["converged_rate"] == 0.0
+
+
 def test_an_explicit_stop_on_a_solvable_scenario_is_giving_up(tmp_path):
     episode = drive(make_scenario(build_archive(tmp_path, resolver=ALPHA)),
                     [reply([], stop=True), reply([ALPHA])])
@@ -319,6 +334,7 @@ def test_an_exhausted_menu_still_asks_the_policy(tmp_path):
         (None, [reply(MENU), reply([ALPHA])]),
         (ALPHA, [reply([BRAVO]), reply([], stop=True)]),
         (DELTA, [reply([ALPHA, "invented"]), reply([ALPHA])]),
+        (ALPHA, [reply([ALPHA], stop=True)]),
     ],
 )
 def test_the_driver_terminal_matches_episode_from_log(tmp_path, resolver, replies):
@@ -649,6 +665,9 @@ def test_the_single_reply_column_charges_the_episode_cell_accounting(tmp_path):
 
 def test_runnable_names_replays_the_filter():
     assert env.runnable_names(reply([ALPHA, "invented"]), MENU) == [ALPHA]
+    assert env.runnable_names(reply([ALPHA], stop=True), MENU) == [], "a stop runs nothing"
+    stop_as_text = json.dumps({"next_mitigations": [ALPHA], "stop": "true"})
+    assert env.runnable_names(stop_as_text, MENU) == [ALPHA], "only a JSON true stops"
     assert env.runnable_names("prose", MENU) == []
     assert env.runnable_names(json.dumps({"next_mitigations": ALPHA}), MENU) == []
 
@@ -689,3 +708,81 @@ def test_the_baseline_label_is_the_cell_label_on_every_corpus_entry():
     for scenario in env.load_corpus(REAL):
         cell = scenario.root / "none-none"
         assert label_trials(read_trial_results(cell)).verdict == scenario.label.verdict == "fail"
+
+
+# ---------------------------------------------------------------------------
+# the evidence is read once per episode: a slower search must not pay
+# ---------------------------------------------------------------------------
+#
+# The verdict and attribution events used to be paid on every step. A refuted
+# step costs less than they pay and the earliness bonus stops at step 2, so a
+# policy that copies the triage from its prompt gained on every step it
+# delayed. `reply()` copies this archive's triage exactly, so every episode
+# below is a reads-nothing policy with the triage matched.
+
+
+def _padded(k: int) -> list[str]:
+    """``k`` names that fix nothing, one per step, then the resolver."""
+    return [reply([name]) for name in (ALPHA, BRAVO, CHARLIE)[:k]] + [reply([DELTA])]
+
+
+def test_padding_a_reads_nothing_episode_never_raises_its_return(tmp_path):
+    """The tripwire: the same answer reached later must score strictly less."""
+    scenario = make_scenario(build_archive(tmp_path, resolver=DELTA))
+    totals = []
+    for k in range(4):
+        # Two identical episodes, because the normaliser needs a group of two.
+        group, samples, _wire = env.rollout_scenario(
+            scenario, 2, AgentPolicy(max_iterations=8), by_round(_padded(k)),
+            advantage_fn=grpo_advantages,
+        )
+        assert len(samples) == 2 * (k + 1) and group["converged_rate"] == 1.0
+        totals.append(group["rewards"][0])
+    assert all(a > b for a, b in zip(totals, totals[1:], strict=False)), totals
+
+
+def test_the_evidence_is_paid_once_per_episode_on_its_first_step(tmp_path):
+    scenario = make_scenario(build_archive(tmp_path, resolver=DELTA))
+    group, _samples, _wire = env.rollout_scenario(
+        scenario, 4, AgentPolicy(max_iterations=8), by_round(_padded(2)),
+        advantage_fn=grpo_advantages,
+    )
+    assert group["steps_total"] == 12
+    assert group["events"]["verdict_correct"] == 4
+    assert group["events"]["detector_attribution"] == 4
+
+
+def test_a_wrong_first_read_is_charged_and_not_repaired_by_a_later_copy(tmp_path):
+    """Narrowness: the read is decided once, not deleted, and later proposals still score."""
+    scenario = make_scenario(build_archive(tmp_path, resolver=DELTA))
+    wrong = json.dumps(
+        {"verdict": "pass", "detectors": [], "category": "unknown", "hypothesis": "h",
+         "next_mitigations": [ALPHA], "confidence": 0.5, "stop": False}
+    )
+    episode = drive(scenario, [wrong, reply([BRAVO]), reply([DELTA])])
+    score = score_episode(
+        episode.as_logged(), scenario.grid,
+        StepContext(offered_mitigations=frozenset(MENU)),
+        labels={s.n: scenario.label for s in episode.steps},
+    )
+    fired = [(e.name, e.step) for e in score.events]
+    assert ("verdict_wrong", 1) in fired and ("detector_attribution", 1) in fired
+    assert not any(name == "verdict_correct" for name, _ in fired)
+    assert ("name_refuted", 2) in fired and ("resolver_named", 3) in fired
+
+
+def test_a_one_step_episode_reads_the_evidence_as_a_single_completion_does(tmp_path):
+    from event_reward import score_completion
+
+    scenario = make_scenario(build_archive(tmp_path, resolver=DELTA))
+    raw = reply([DELTA])
+    context = StepContext(offered_mitigations=frozenset(MENU))
+    in_episode = score_episode(
+        drive(scenario, [raw]).as_logged(), scenario.grid, context,
+        labels={1: scenario.label},
+    )
+    single = score_completion(raw, scenario.grid, context, label=scenario.label)
+    read = ("verdict_correct", "verdict_wrong", "detector_attribution")
+    assert [(e.name, e.points) for e in in_episode.events if e.name in read] == [
+        (e.name, e.points) for e in single.events if e.name in read
+    ] == [("verdict_correct", 1.0), ("detector_attribution", 1.0)]
