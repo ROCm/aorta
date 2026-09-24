@@ -464,6 +464,7 @@ async def on_message(message: cl.Message):
                 on_step=show_step,
                 session_id=decision_session,
                 turn=decision_turn,
+                front_door="ui",
             )
     except Exception:
         logger.exception("Agent graph error")

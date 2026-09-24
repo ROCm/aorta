@@ -336,7 +336,7 @@ async def _ask_once(
     try:
         with suppress:
             decision = (
-                {"session_id": session_id, "turn": turn}
+                {"session_id": session_id, "turn": turn, "front_door": "cli"}
                 if session_id is not None
                 else {}
             )
