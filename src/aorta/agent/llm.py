@@ -166,7 +166,8 @@ class AgentStep:
     stop: bool
     stop_reason: StopReason | None = None
     #: Names the model proposed that the candidate filter dropped -- not in the
-    #: registry, already tried, or outside the operator's allowlist. Set by the
+    #: registry, already tried, outside the operator's allowlist, or the
+    #: ``none`` baseline, which the filter never offers. Set by the
     #: proposer, never by the model (see from_dict). Without this the loop
     #: cannot say which name failed to resolve, so an affected run can be
     #: detected but not repaired; with it, ``next_mitigations`` plus this list

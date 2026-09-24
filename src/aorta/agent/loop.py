@@ -241,15 +241,24 @@ def _resolve_stop_outcome(
     if reason is None:
         if _baseline_passed(summaries):
             reason = "baseline_pass"
-        elif not step.next_mitigations and step.unresolved_mitigations:
+        elif (
+            not step.stop
+            and not step.next_mitigations
+            and step.unresolved_mitigations
+        ):
             # aorta#449: the proposer named mitigations and every one was
             # dropped, so the empty list is a name-resolution failure rather
             # than a decision. Ordered ahead of the "No remaining" heuristic
             # because it reads the names instead of guessing from prose, and
             # ahead of the agent_requested fallthrough because that credits
-            # the model with a decision it did not make. Unreachable when the
-            # model set stop itself: that request is honoured, and the dropped
-            # names are logged either way.
+            # the model with a decision it did not make.
+            #
+            # `not step.stop` is checked here rather than relied on upstream.
+            # `_step_from_content` fills in `agent_requested` for a stop, but
+            # a proposer written against the `LLMProposer` protocol can return
+            # `stop=True` with no reason and still carry dropped names; that
+            # stop is the agent's own request and must not be re-attributed.
+            # The dropped names are logged either way.
             reason = "proposal_unresolved"
         elif not step.next_mitigations and "No remaining" in step.hypothesis:
             reason = "exhausted_candidates"
@@ -288,8 +297,9 @@ def _resolve_stop_outcome(
             "proposal_unresolved",
             "Search stopped because none of the mitigations the proposer "
             f"named could be resolved: {sorted(set(step.unresolved_mitigations))}. "
-            "They are unregistered, already tried, or outside the candidate "
-            "allowlist, so the loop had nothing left to run -- this is NOT "
+            "Each is unregistered, already tried, outside the candidate "
+            "allowlist, or the `none` baseline (which is always on the axis and "
+            "never a candidate), so the loop had nothing left to run -- this is NOT "
             "the agent concluding the search. Check the names against "
             "`aorta mitigations list` and the --mitigation allowlist; see "
             "unresolved_mitigations in agent_log.jsonl.",

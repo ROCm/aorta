@@ -214,7 +214,7 @@ audit. `wake()` replays tried mitigations and last category.
 | `converged` | A non-baseline mitigation cell passed |
 | `exhausted_candidates` | No more registered mitigations left to try |
 | `agent_stop` | Proposer ended search for another reason |
-| `proposal_unresolved` | Every mitigation the proposer named was dropped by the candidate filter (unregistered, already tried, or outside the allowlist). An agent-side name-resolution failure, not a decision by the model — the names are in `unresolved_mitigations` in `agent_log.jsonl` |
+| `proposal_unresolved` | Every mitigation the proposer named was dropped by the candidate filter (unregistered, already tried, outside the allowlist, or the `none` baseline, which is never a candidate), and the proposer did not ask to stop. An agent-side name-resolution failure, not a decision by the model — the names are in `unresolved_mitigations` in `agent_log.jsonl` |
 
 ### Tests
 
