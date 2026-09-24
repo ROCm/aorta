@@ -1,0 +1,634 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-24T11:28:57.959085+00:00",
+  "build": {
+    "amd_aorta_version": "0.3.1rc20260924",
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "rocm": "10.0.0",
+    "upstream_run_id": "35991524495",
+    "head_sha": "1680309d023be4843a3fe9cd176a014eafbe059c",
+    "wheel_file": "amd_aorta-0.3.1rc20260924-py3-none-any.whl",
+    "lane": "gate",
+    "base_image": null
+  },
+  "summary": {
+    "total": 18,
+    "pass": 16,
+    "fail": 0,
+    "record": 2,
+    "skip": 0
+  },
+  "entries": [
+    {
+      "entry": "gpu_smoke",
+      "recipe": "recipes/ci/gpu-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 197.51345925033092,
+        "mean_wall_clock_sec": 3.585640825331211,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "sum": 8.0,
+          "expected": 8.0,
+          "n": 8.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/gpu_smoke/CI-GPU-SMOKE/gpu_smoke/2026-09-24T11-13-54/matrix.json",
+      "duration_sec": 11.82779,
+      "error": null
+    },
+    {
+      "entry": "inference_offline",
+      "recipe": "recipes/inference/example-inference-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 45.599516946822405,
+        "mean_wall_clock_sec": 10.454433791339397,
+        "step_time_source": "per_step",
+        "summary": {
+          "parameter_count": 33170432.0,
+          "batch_size": 4.0,
+          "prompt_len": 128.0,
+          "generate_tokens": 32.0,
+          "prefill_latency_ms": 1.2107477523386478,
+          "decode_latency_ms": 1.2309203495181376,
+          "tokens_per_sec": 3249.6010010443492,
+          "decoded_tokens": 496.0,
+          "step_time_p50": 43.80447044968605,
+          "step_time_p99": 51.12981924787164,
+          "logits_checksum": 33904201.0
+        }
+      },
+      "deltas": {
+        "metrics": {
+          "logits_checksum": {
+            "observed": 33904201.0,
+            "policy": "equal",
+            "value": 33904201.0
+          }
+        }
+      },
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/inference_offline/EXAMPLE-INFERENCE-SMOKE/inference/2026-09-24T11-14-06/matrix.json",
+      "duration_sec": 19.139571,
+      "error": null
+    },
+    {
+      "entry": "training_ddp",
+      "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 1457.353552337736,
+        "mean_wall_clock_sec": 12.244112940505147,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "parameter_count": 656896.0,
+          "final_loss": 6.936877250671387,
+          "step_time_p50": 1.408042386174202,
+          "step_time_p99": 59.78139031678438
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_ddp/EXAMPLE-TRAINING-DDP/training/2026-09-24T11-14-26/matrix.json",
+      "duration_sec": 23.594328,
+      "error": null
+    },
+    {
+      "entry": "training_fsdp",
+      "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 1370.8570459857583,
+        "mean_wall_clock_sec": 11.95381861180067,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "parameter_count": 2361856.0,
+          "final_loss": 254.41094970703125,
+          "step_time_p50": 5.866125226020813,
+          "step_time_p99": 26.91183727234602
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_fsdp/EXAMPLE-TRAINING-FSDP/training/2026-09-24T11-14-50/matrix.json",
+      "duration_sec": 23.042961,
+      "error": null
+    },
+    {
+      "entry": "race",
+      "recipe": "recipes/race/race_smoke.yaml",
+      "cell": "smoke",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 1542.0917987823486,
+        "mean_wall_clock_sec": 13.207843258976936,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "avg_step_time_ms": 1542.0917987823486,
+          "layers_verified": 15.0,
+          "layer_checksum_mismatches": 0.0,
+          "eff_num_heads": 4.0,
+          "eff_ffn_size": 2048.0,
+          "eff_seq_len": 512.0,
+          "eff_batch_size": 1.0,
+          "effective_h2d_tensor_size": 1000000.0,
+          "declared_h2d_tensor_size": 1000000.0,
+          "corruption_details_omitted": 0.0,
+          "rank": 0.0,
+          "world_size": 2.0,
+          "local_world_size": 2.0,
+          "node_count": 1.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/race/RACE-SMOKE/race/2026-09-24T11-15-13/matrix.json",
+      "duration_sec": 22.8944,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "baseline-bf16-24L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 10815.676802769303,
+        "mean_wall_clock_sec": 20.737237583845854,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-24T11-15-36/matrix.json",
+      "duration_sec": 85.128688,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "bf16-12L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 7896.924881264567,
+        "mean_wall_clock_sec": 16.359997427091002,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 12.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-24T11-15-36/matrix.json",
+      "duration_sec": 85.128688,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "tf32_off-bf16-24L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 8035.627663135529,
+        "mean_wall_clock_sec": 18.087002677842975,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-24T11-15-36/matrix.json",
+      "duration_sec": 85.128688,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "moe4-bf16-12L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 8400.35661868751,
+        "mean_wall_clock_sec": 20.091133480891585,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 12.0,
+          "num_experts": 4.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-09-24T11-15-36/matrix.json",
+      "duration_sec": 85.128688,
+      "error": null
+    },
+    {
+      "entry": "training_ddp_8gpu",
+      "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 1443.9164455980062,
+        "mean_wall_clock_sec": 13.53980896808207,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "parameter_count": 656896.0,
+          "final_loss": 6.936975479125977,
+          "step_time_p50": 1.2376047670841217,
+          "step_time_p99": 47.82240893691778
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_ddp_8gpu/EXAMPLE-TRAINING-DDP/training/2026-09-24T11-17-01/matrix.json",
+      "duration_sec": 28.054682,
+      "error": null
+    },
+    {
+      "entry": "training_fsdp_8gpu",
+      "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 1480.442297179252,
+        "mean_wall_clock_sec": 13.317964490503073,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "parameter_count": 2361856.0,
+          "final_loss": 254.3743896484375,
+          "step_time_p50": 5.57241216301918,
+          "step_time_p99": 40.33463813364506
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_fsdp_8gpu/EXAMPLE-TRAINING-FSDP/training/2026-09-24T11-17-29/matrix.json",
+      "duration_sec": 28.453284,
+      "error": null
+    },
+    {
+      "entry": "race_8gpu",
+      "recipe": "recipes/race/race_smoke.yaml",
+      "cell": "smoke",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 1875.442361831665,
+        "mean_wall_clock_sec": 18.56190954335034,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "avg_step_time_ms": 1875.442361831665,
+          "layers_verified": 15.0,
+          "layer_checksum_mismatches": 0.0,
+          "eff_num_heads": 4.0,
+          "eff_ffn_size": 2048.0,
+          "eff_seq_len": 512.0,
+          "eff_batch_size": 1.0,
+          "effective_h2d_tensor_size": 1000000.0,
+          "declared_h2d_tensor_size": 1000000.0,
+          "corruption_details_omitted": 0.0,
+          "rank": 0.0,
+          "world_size": 8.0,
+          "local_world_size": 8.0,
+          "node_count": 1.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/race_8gpu/RACE-SMOKE/race/2026-09-24T11-17-57/matrix.json",
+      "duration_sec": 28.80327,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "baseline-bf16-24L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 10057.215156033635,
+        "mean_wall_clock_sec": 23.21594830416143,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-24T11-18-26/matrix.json",
+      "duration_sec": 102.207159,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "bf16-12L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 9372.360656037927,
+        "mean_wall_clock_sec": 21.009988974779844,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 12.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-24T11-18-26/matrix.json",
+      "duration_sec": 102.207159,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "tf32_off-bf16-24L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 9818.806992843747,
+        "mean_wall_clock_sec": 22.942715166136622,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-24T11-18-26/matrix.json",
+      "duration_sec": 102.207159,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "moe4-bf16-12L",
+      "verdict": "pass",
+      "reasons": [],
+      "metrics": {
+        "mean_step_time_ms": 9870.907623320818,
+        "mean_wall_clock_sec": 25.300318740308285,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 12.0,
+          "num_experts": 4.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-09-24T11-18-26/matrix.json",
+      "duration_sec": 102.207159,
+      "error": null
+    },
+    {
+      "entry": "tokenspeed_serve_smoke",
+      "recipe": "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml",
+      "cell": "baseline",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 1116.4604388177395,
+        "mean_wall_clock_sec": 267.3723781351,
+        "step_time_source": "per_step",
+        "summary": {
+          "num_prompts": 32.0,
+          "input_len": 512.0,
+          "output_len": 128.0,
+          "max_concurrency": 8.0,
+          "num_warmups": 1.0,
+          "bench_steps": 3.0,
+          "warmup_steps": 2.0,
+          "server_startup_sec": 198.0,
+          "duration": 1.1164604388177395,
+          "total_input_tokens": 16384.0,
+          "total_output_tokens": 4096.0,
+          "request_throughput": 28.668492300076508,
+          "output_throughput": 3669.567014409793,
+          "total_token_throughput": 18347.835072048965,
+          "max_output_tokens_per_s": 3655.3333333333335,
+          "max_concurrent_requests": 32.0,
+          "mean_ttft_ms": 46.07539129210636,
+          "median_ttft_ms": 45.55391396085421,
+          "std_ttft_ms": 39.98003941356085,
+          "p50_ttft_ms": 45.55391396085421,
+          "p90_ttft_ms": 50.42344735314449,
+          "p99_ttft_ms": 192.75966731831457,
+          "mean_tpot_ms": 1.775108182465467,
+          "median_tpot_ms": 1.848490412525461,
+          "std_tpot_ms": 0.3385824916230213,
+          "p50_tpot_ms": 1.848490412525461,
+          "p90_tpot_ms": 1.9534957358061174,
+          "p99_tpot_ms": 1.9766489420271922,
+          "mean_itl_ms": 1.8188174170134712,
+          "median_itl_ms": 0.0018598511815071106,
+          "std_itl_ms": 6.160158033023696,
+          "p50_itl_ms": 0.0018598511815071106,
+          "p90_itl_ms": 1.9240060821175575,
+          "p99_itl_ms": 34.70302872980634,
+          "mean_e2el_ms": 271.51413046522066,
+          "median_e2el_ms": 269.84944225599367,
+          "std_e2el_ms": 16.91799978764317,
+          "p50_e2el_ms": 269.84944225599367,
+          "p90_e2el_ms": 293.0844871948163,
+          "p99_e2el_ms": 297.5839739417036,
+          "completed_total": 96.0,
+          "failed_total": 0.0,
+          "tokens_per_sec": 3669.567014409793,
+          "container_elapsed_sec": 264.04802725836635
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/tokenspeed_serve_smoke/TOKENSPEED-SERVE-SMOKE/tokenspeed_serve/2026-09-24T11-20-08/matrix.json",
+      "duration_sec": 530.045775,
+      "error": null
+    },
+    {
+      "entry": "tokenspeed_serve_smoke",
+      "recipe": "recipes/tokenspeed/tokenspeed-serve-bench-smoke.yaml",
+      "cell": "no-scratch-reclaim",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 1118.508451928695,
+        "mean_wall_clock_sec": 254.56878776475787,
+        "step_time_source": "per_step",
+        "summary": {
+          "num_prompts": 32.0,
+          "input_len": 512.0,
+          "output_len": 128.0,
+          "max_concurrency": 8.0,
+          "num_warmups": 1.0,
+          "bench_steps": 3.0,
+          "warmup_steps": 2.0,
+          "server_startup_sec": 187.0,
+          "duration": 1.118508451928695,
+          "total_input_tokens": 16384.0,
+          "total_output_tokens": 4096.0,
+          "request_throughput": 28.60964113295223,
+          "output_throughput": 3662.0340650178855,
+          "total_token_throughput": 18310.170325089424,
+          "max_output_tokens_per_s": 3599.0,
+          "max_concurrent_requests": 32.0,
+          "mean_ttft_ms": 44.659956300165504,
+          "median_ttft_ms": 42.762499302625656,
+          "std_ttft_ms": 39.54443622214578,
+          "p50_ttft_ms": 42.762499302625656,
+          "p90_ttft_ms": 49.0136786053578,
+          "p99_ttft_ms": 190.2938248030844,
+          "mean_tpot_ms": 1.806855210734976,
+          "median_tpot_ms": 1.8938797406285142,
+          "std_tpot_ms": 0.3382216159702323,
+          "p50_tpot_ms": 1.8938797406285142,
+          "p90_tpot_ms": 1.942127561221129,
+          "p99_tpot_ms": 1.9615776692651545,
+          "mean_itl_ms": 1.8505701632176337,
+          "median_itl_ms": 0.0016801059246063232,
+          "std_itl_ms": 6.55881076625344,
+          "p50_itl_ms": 0.0016801059246063232,
+          "p90_itl_ms": 1.8876357624928157,
+          "p99_itl_ms": 34.0797425682346,
+          "mean_e2el_ms": 274.1305680635075,
+          "median_e2el_ms": 285.2171054109931,
+          "std_e2el_ms": 17.637083514158217,
+          "p50_e2el_ms": 285.2171054109931,
+          "p90_e2el_ms": 290.6097972144683,
+          "p99_e2el_ms": 292.9002426130076,
+          "completed_total": 96.0,
+          "failed_total": 0.0,
+          "tokens_per_sec": 3662.0340650178855,
+          "container_elapsed_sec": 251.29209140874445
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/tokenspeed_serve_smoke/TOKENSPEED-SERVE-SMOKE/tokenspeed_serve/2026-09-24T11-20-08/matrix.json",
+      "duration_sec": 530.045775,
+      "error": null
+    }
+  ]
+}
