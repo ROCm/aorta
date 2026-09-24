@@ -246,11 +246,15 @@ class TestRlEpisodeIsFrozen:
 
         A category the prompt offers and ``validate_step`` refuses would end
         the search on a policy violation the first time the model used it.
+        A category added to ``PROBE_CATEGORIES`` later is not an error: the
+        frozen prompt keeps the list the checkpoint was trained on, and the
+        digest above already pins it.
         """
         match = re.search(r"`category` must be one of (\[[^\]]*\])", RL_EPISODE_SYSTEM)
         assert match is not None
         offered = ast.literal_eval(match.group(1))
-        assert offered == sorted(PROBE_CATEGORIES)
+        assert offered
+        assert set(offered) <= PROBE_CATEGORIES
         policy = AgentPolicy()
         for category in offered:
             step = AgentStep(category, "", [], 0.5, False)
