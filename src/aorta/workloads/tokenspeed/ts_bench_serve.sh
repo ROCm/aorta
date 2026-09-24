@@ -73,7 +73,9 @@
 #   TS_ROLLOUT            1 for RL-rollout-shaped load: several sampled
 #                         completions per prompt at temperature > 0, stopping
 #                         on EOS. Sends the sampling parameters as
-#                         --extra-body and reserves that flag  (default 0)
+#                         --extra-body and reserves that flag. Without it, a
+#                         non-empty "(rollout only)" variable is exit 64
+#                                                           (default 0)
 #   TS_ROLLOUT_SAMPLES    completions per prompt, the `n` of the OpenAI
 #                         sampling API                    (rollout only)
 #   TS_SAMPLING_BACKEND   --sampling-backend for the server. Rollout only, and
@@ -82,7 +84,8 @@
 #                         appended                        (rollout only)
 #   TS_TEMPERATURE        sampling temperature            (rollout only)
 #   TS_TOP_P              nucleus sampling mass, omitted when unset
-#   TS_MIN_MEAN_OUTPUT_TOKENS  floor on mean tokens per *completion* per step,
+#                                                         (rollout only)
+#   TS_MIN_MEAN_OUTPUT_TOKENS  (rollout only) floor on mean tokens per *completion* per step,
 #                         0 to disable. Read from the mean of the export's
 #                         output_lens, one entry per completion, so nothing is
 #                         assumed about whether the gateway's
@@ -533,6 +536,46 @@ for pair in "TS_ROLLOUT=${ROLLOUT}" "TS_SAVE_DETAILED=${SAVE_DETAILED}"; do
     exit 64
   fi
 done
+# Rollout-only variables are refused outside rollout rather than ignored, which
+# is the host's `_validated_rollout` contract and has to be this script's too:
+# the host never exports these without TS_ROLLOUT=1, so only a direct run gets
+# here, and it must not run on a weaker contract than a recipe. Ignoring them was
+# not harmless either way. Outside rollout no sampling body and no
+# `--sampling-backend` are sent, so a temperature, top_p or backend changed
+# nothing while the caller believed it had; and the floor and the sample count
+# were worse than ignored, because `audit_result_json` reads both, so a benchmark
+# was audited against a rollout it never ran and could fail as SHORTLEN or
+# BADBASIS.
+#
+# The same names as the host's `_ROLLOUT_ONLY_KEYS`, as `TS_<KEY>`; a test holds
+# the two lists together.
+#
+# "Set" means non-empty. Every read of these below is `${X:-default}` or `-n`,
+# so an empty value is indistinguishable from an unset one in both modes: it
+# changes nothing and claims nothing, and refusing it would also break `X=` as
+# the way to neutralise an inherited export. Any non-empty value is refused,
+# including a default such as TS_ROLLOUT_SAMPLES=1, as the host refuses the key
+# whatever it holds.
+ROLLOUT_ONLY_VARS=( TS_ROLLOUT_SAMPLES TS_SAMPLING_BACKEND TS_TEMPERATURE TS_TOP_P TS_MIN_MEAN_OUTPUT_TOKENS )
+if [ "${ROLLOUT}" != "1" ]; then
+  rollout_only_set=""
+  for name in "${ROLLOUT_ONLY_VARS[@]}"; do
+    if [ -n "${!name:-}" ]; then
+      rollout_only_set="${rollout_only_set:+${rollout_only_set}, }${name}"
+    fi
+  done
+  if [ -n "${rollout_only_set}" ]; then
+    echo "TS_BENCH_FAIL: usage ${rollout_only_set} require TS_ROLLOUT=1"
+    echo "  Outside rollout this script sends no sampling parameters, so these"
+    echo "  would either be ignored or change what the audit checks without"
+    echo "  changing what ran. Set TS_ROLLOUT=1, or unset them."
+    if [ -n "${TS_SAMPLING_BACKEND:-}" ]; then
+      echo "  To pin a backend for a benchmark, pass --sampling-backend in"
+      echo "  TS_SERVE_ARGS instead."
+    fi
+    exit 64
+  fi
+fi
 case "${MIN_MEAN_OUTPUT_TOKENS}" in
   ''|*[!0-9]*)
     echo "TS_BENCH_FAIL: usage TS_MIN_MEAN_OUTPUT_TOKENS must be a non-negative integer, got '${MIN_MEAN_OUTPUT_TOKENS}'"

@@ -154,6 +154,20 @@ _MAX_ROLLOUT_TEMPERATURE = 2.0
 # about what a good length is.
 _DEFAULT_MIN_MEAN_OUTPUT_TOKENS = 8
 
+# The config keys that only mean something under `rollout: true`, rejected
+# outside it. Each travels to the container as `TS_<KEY>`, and
+# ts_bench_serve.sh refuses the same names by its own `ROLLOUT_ONLY_VARS`
+# when TS_ROLLOUT is not 1 -- a test holds the two lists together, so a key
+# added here without the script learning it fails rather than leaving a direct
+# run on a weaker contract.
+_ROLLOUT_ONLY_KEYS = (
+    "rollout_samples",
+    "sampling_backend",
+    "temperature",
+    "top_p",
+    "min_mean_output_tokens",
+)
+
 # The engine's `--sampling-backend` choices. `flashinfer*` are CUDA-only, so
 # `triton` is the portable option that honours sampling parameters on ROCm, and
 # it is the default under rollout for the reason set out where it is read.
@@ -339,6 +353,11 @@ _PROTOCOL_ENV_KEYS = frozenset(
         # the computed set cannot reach them.
         "TS_ROLLOUT",
         "TS_ROLLOUT_SAMPLES",
+        # Absent-when-off like its siblings, so on a benchmark cell only this
+        # set reserves it. The script also refuses it outside rollout, but only
+        # once the container is up, and as a usage error that does not name
+        # the mitigation which set it.
+        "TS_SAMPLING_BACKEND",
         "TS_TEMPERATURE",
         "TS_TOP_P",
         "TS_MIN_MEAN_OUTPUT_TOKENS",
@@ -1143,15 +1162,8 @@ class TokenSpeedServeWorkload(Workload):
         cfg = self.config
         self._rollout = self._bool("rollout", False)
 
-        rollout_only = (
-            "rollout_samples",
-            "sampling_backend",
-            "temperature",
-            "top_p",
-            "min_mean_output_tokens",
-        )
         if not self._rollout:
-            present = [key for key in rollout_only if key in cfg]
+            present = [key for key in _ROLLOUT_ONLY_KEYS if key in cfg]
             if present:
                 raise ValueError(
                     f"tokenspeed_serve: {', '.join(present)} require rollout: true. "
@@ -2600,6 +2612,11 @@ class TokenSpeedServeWorkload(Workload):
         ``p90`` and ``p99`` depend on ``percentile_metrics`` and
         ``metric_percentiles`` -- requiring them here would fail a cell for a
         legitimate recipe choice.
+
+        Only meaningful for a step whose request counts are sound, and the
+        caller does not ask otherwise: after a shortfall the length array's
+        cardinality and the metrics' positivity no longer follow from the
+        counts, so a verdict from here would contradict the shortfall's.
         """
         required = [
             "duration",
@@ -3169,7 +3186,20 @@ class TokenSpeedServeWorkload(Workload):
             # in the same result that had just printed the contradicting numbers.
             # Reusing the audit's own condition rather than restating it, so the
             # sentence is true by construction instead of by maintenance.
-            missing = self._missing_core_metrics(record)
+            #
+            # And the measurement audit itself waits for sound counts, for the
+            # same reason. Its rules are written for a step that served every
+            # request: `output_lens` must hold `completed` or `completed * n`
+            # entries, but a shortfall step records a zero for each failed
+            # request, so its array is neither -- and a step that served nothing
+            # has no throughput or TTFT to be positive. Run after a shortfall,
+            # those rules called a correctly shaped export `result_json_unusable`
+            # beside the `served_request_shortfall` that explained it. The
+            # container audit prints SHORTFALL and stops, so this is also where
+            # the two layers now agree. The cost is that a shortfall step whose
+            # export is *also* corrupt reports only the shortfall -- which is
+            # what the container already reports, and the step fails either way.
+            missing = [] if shortfall else self._missing_core_metrics(record)
 
             if (
                 self._rollout

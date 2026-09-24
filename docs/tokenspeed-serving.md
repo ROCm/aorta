@@ -310,7 +310,9 @@ What follows is the configuration.
 The sampling keys are **rejected outside the mode** rather than ignored. Outside
 it no sampling parameters are sent at all, so a `temperature` in an ordinary
 serving recipe would have changed nothing while the trial published it as that
-cell's configuration.
+cell's configuration. `ts_bench_serve.sh` refuses their `TS_*` variables without
+`TS_ROLLOUT=1` for the same reason (exit 64), so a direct run keeps the recipe's
+contract — and the floor and sample count would otherwise still reach its audit.
 
 `ignore_eos` defaults to `false` under `rollout`, and an explicit `true` is
 refused. The two cannot both mean what they say: ignoring EOS pins every
@@ -591,6 +593,9 @@ for `duration` (greater than zero), `mean_ttft_ms`, `median_ttft_ms`,
 `mean_tpot_ms` / `median_tpot_ms` whenever a second output token can exist —
 TPOT averages inter-token gaps, of which a single-token response has none. A step
 missing any of them is reported as `result_json_unusable` rather than as a pass.
+This audit, `output_lens` validity included, runs only once the request counts are
+sound: a shortfall step is reported as `served_request_shortfall` alone, in both
+layers, because its export is shaped by the requests that failed.
 
 "Whenever a second output token can exist" is decided from `output_len > 1` only
 for `random` with `ignore_eos: true`, the one configuration that actually pins

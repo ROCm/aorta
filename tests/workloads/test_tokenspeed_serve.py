@@ -4591,6 +4591,29 @@ def test_a_mitigation_cannot_redefine_the_rollout_contract(tmp_path):
             wl._container_env()
 
 
+@pytest.mark.parametrize("name", [f"TS_{key.upper()}" for key in mod._ROLLOUT_ONLY_KEYS])
+def test_a_benchmark_cell_reserves_the_rollout_variables_too(tmp_path, name):
+    """The same keys on the cell that sets none of them.
+
+    Every one is absent on a benchmark cell, so only `_PROTOCOL_ENV_KEYS` can
+    reserve it there, and `TS_SAMPLING_BACKEND` was missing from it: a
+    mitigation or a `docker_args -e` spelling it reached a container that sends
+    no backend outside rollout, so the cell was named for a knob that changed
+    nothing. The script now refuses it as well, but only once the container is
+    up and without naming the mitigation that set it.
+
+    Unowned `TS_*` knobs still pass through -- see
+    `test_mitigation_env_wins_over_unowned_tokenspeed_vars`.
+    """
+    wl = _make(tmp_path, _aorta_trial_env={name: "triton"})
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    with pytest.raises(ValueError, match=name):
+        wl._container_env()
+    with pytest.raises(ValueError, match=name):
+        _make(tmp_path, docker_args=["-e", f"{name}=triton"]).setup()
+
+
 def test_a_collapsed_policy_fails_the_rollout_floor(tmp_path, monkeypatch):
     """The served-request audit stops being sufficient once EOS is respected.
 
@@ -5109,6 +5132,145 @@ def test_the_floor_still_fires_when_the_counts_are_sound(tmp_path, monkeypatch):
     assert [d["reason"] for d in result.failure_details] == [
         "rollout_output_too_short"
     ], result.failure_details
+
+
+def _partial_shortfall_bench_doc() -> dict:
+    # A zero per failed request, which `_valid_output_lens` documents as what the
+    # bench records: 32 entries against `completed: 16`, so neither legitimate
+    # cardinality -- exactly because 16 requests failed.
+    doc = _bench_doc(completed=16, failed=16)
+    doc["output_lens"] = [128] * 16 + [0] * 16
+    return doc
+
+
+def _total_outage_bench_doc() -> dict:
+    # What a step that served nothing plausibly exports. The bench source is not
+    # available here, so these zeros are an assumption -- which is why the fix
+    # gates the audit on the counts rather than relaxing the rules it contains:
+    # whatever the bench writes for a total outage, the shortfall is the verdict.
+    doc = _bench_doc(completed=0, failed=32, throughput=0.0, ttft=0.0)
+    doc.update(
+        request_throughput=0.0,
+        total_token_throughput=0.0,
+        mean_ttft_ms=0.0,
+        mean_tpot_ms=0.0,
+        median_tpot_ms=0.0,
+        total_output_tokens=0,
+        output_lens=[0] * 32,
+    )
+    return doc
+
+
+def _corrupt_duration_shortfall_doc() -> dict:
+    doc = _bench_doc(completed=16, failed=16)
+    doc["duration"] = "abc"
+    return doc
+
+
+@pytest.mark.parametrize(
+    ("make_wl", "doc", "samples"),
+    [
+        pytest.param(
+            lambda p: _make(p, num_prompts=32),
+            _partial_shortfall_bench_doc(),
+            1,
+            id="benchmark-partial",
+        ),
+        pytest.param(
+            lambda p: _make(p, num_prompts=32, save_detailed=True),
+            _partial_shortfall_bench_doc(),
+            1,
+            id="benchmark-partial-save-detailed",
+        ),
+        pytest.param(
+            lambda p: _rollout(p, num_prompts=32, rollout_samples=4),
+            _rollout_doc(
+                completed=16,
+                failed=16,
+                total_output_tokens=2048,
+                output_lens=[32] * 64 + [0] * 64,
+            ),
+            4,
+            id="rollout-partial",
+        ),
+        # The rules beyond the length array: a step that served nothing has no
+        # throughput or TTFT to be positive, so the positivity audit contradicted
+        # the shortfall the same way.
+        pytest.param(
+            lambda p: _make(p, num_prompts=32), _total_outage_bench_doc(), 1, id="total-outage"
+        ),
+        # The deliberate cost. The duration really is corrupt, but the container
+        # reports SHORTFALL for this export and stops, and the step fails either
+        # way; one verdict per shortfall step is what both layers now give.
+        pytest.param(
+            lambda p: _make(p, num_prompts=32),
+            _corrupt_duration_shortfall_doc(),
+            1,
+            id="partial-with-corrupt-duration",
+        ),
+    ],
+)
+def test_a_shortfall_is_not_also_called_an_unusable_export(
+    tmp_path, monkeypatch, make_wl, doc, samples
+):
+    """A shortfall step keeps its own verdict, in both layers.
+
+    The measurement audit's rules are written for a step that served every
+    request. Run after a shortfall they called a correctly shaped export
+    `result_json_unusable` beside the `served_request_shortfall` that explained
+    it, while the container, which prints SHORTFALL before looking at anything
+    else, gave one verdict for the same export.
+    """
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=samples
+    )
+    assert verdict.startswith("SHORTFALL"), verdict
+
+    wl = make_wl(tmp_path)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "served_request_shortfall"
+    ], result.failure_details
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # Sound counts, and an array that is neither shape: still a broken export.
+        pytest.param({"output_lens": [128] * 16}, id="short-array"),
+        # Sound counts, and a step that served everything reporting no output.
+        pytest.param({"output_throughput": 0.0}, id="zero-throughput"),
+    ],
+)
+def test_sound_counts_still_get_the_measurement_audit(tmp_path, monkeypatch, overrides):
+    """Narrowness for the test above: gating on the shortfall must not retire the
+    audit. With every request served, both rules are the ones that apply."""
+    doc = _bench_doc()
+    doc.update(overrides)
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
+def test_a_clean_step_with_a_full_length_array_passes(tmp_path, monkeypatch):
+    """Narrowness: a present array is still read, and accepted, once the counts
+    are sound -- one entry per completed request, in both layers."""
+    doc = _bench_doc()
+    doc["output_lens"] = [128] * 32
+    assert _run_script_audit(tmp_path, doc, expected=32).startswith("OK")
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert result.passed, result.failure_details
 
 
 _OVERSIZED_INT = 10**1000
@@ -5989,6 +6151,138 @@ def test_the_script_rejects_ignore_eos_false_on_random_without_rollout(tmp_path)
     output = proc.stdout + proc.stderr
     assert proc.returncode == 64, output
     assert "cannot take effect with TS_DATASET=random" in output, output
+
+
+# A value the rollout path accepts for each rollout-only variable, and for two of
+# them the default as well: the host refuses a rollout-only key whatever it
+# holds, so `rollout_samples: 1` is refused outside the mode even though it is
+# what the mode would have used. Keyed by env name and looked up from the host's
+# `_ROLLOUT_ONLY_KEYS`, so a key added there without a value here fails at
+# collection rather than going untested.
+_ROLLOUT_ONLY_ENV_VALUES = {
+    "TS_ROLLOUT_SAMPLES": ("4", "1"),
+    "TS_SAMPLING_BACKEND": ("triton",),
+    "TS_TEMPERATURE": ("1.0",),
+    "TS_TOP_P": ("0.9",),
+    "TS_MIN_MEAN_OUTPUT_TOKENS": ("8", "0"),
+}
+
+
+def _rollout_only_env_names() -> list[str]:
+    return [f"TS_{key.upper()}" for key in mod._ROLLOUT_ONLY_KEYS]
+
+
+# The PATH check sits after the whole usage block and before the model loads,
+# and this environment has no TokenSpeed, so a configuration the script accepts
+# stops there -- see `_run_bench_script`.
+_REACHED_STARTUP = "'tokenspeed' not on PATH"
+
+
+def _run_script_before_startup(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run ts_bench_serve.sh as a hand-run would, with exactly `env` set.
+
+    Inherited `TS_*` variables are dropped, because a test about which
+    variables the script refuses must not depend on what the shell running the
+    suite happens to export.
+    """
+    inherited = {k: v for k, v in os.environ.items() if not k.startswith("TS_")}
+    return subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={**inherited, "TS_OUT_DIR": str(tmp_path / "out"), **env},
+        timeout=120,
+    )
+
+
+@pytest.mark.parametrize("rollout", [None, "0"], ids=["rollout-unset", "rollout-0"])
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [(name, value) for name in _rollout_only_env_names() for value in _ROLLOUT_ONLY_ENV_VALUES[name]],
+)
+def test_the_script_refuses_a_rollout_only_variable_outside_rollout(
+    tmp_path, rollout, name, value
+):
+    """The host's rollout-only contract, enforced where a direct run enters.
+
+    `_validated_rollout` refuses these keys without `rollout: true`, and the host
+    never exports them then, so only a hand-run could supply them -- which is
+    the run that used to get a weaker contract. Temperature, top_p and backend
+    were silently ignored; the floor and the sample count still reached
+    `audit_result_json`, so a benchmark could fail as SHORTLEN or BADBASIS
+    against a rollout it never ran.
+    """
+    env = {name: value}
+    if rollout is not None:
+        env["TS_ROLLOUT"] = rollout
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert f"usage {name} require TS_ROLLOUT=1" in output, output
+    assert _REACHED_STARTUP not in output, output
+    # The backend is the one variable with a legitimate benchmark-side route,
+    # so it is the one whose refusal names it -- and only it.
+    assert ("TS_SERVE_ARGS" in output) == (name == "TS_SAMPLING_BACKEND"), output
+
+
+def test_the_script_names_every_rollout_only_variable_it_refuses(tmp_path):
+    """One refusal naming all of them, as the host's names every present key,
+    rather than one per run for someone fixing them in turn."""
+    env = {name: _ROLLOUT_ONLY_ENV_VALUES[name][0] for name in _rollout_only_env_names()}
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    refusal = next(line for line in output.splitlines() if "require TS_ROLLOUT=1" in line)
+    for name in env:
+        assert name in refusal, refusal
+
+
+def test_the_script_and_the_host_agree_on_the_rollout_only_names():
+    """Two lists, held together here, in both directions.
+
+    A key the host adds without the script refusing it leaves a direct run on
+    the weaker contract again; a name the script refuses that the host does not
+    would reject a hand-run the recipe path accepts.
+    """
+    text = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text(encoding="utf-8")
+    declared = re.search(r"^ROLLOUT_ONLY_VARS=\(([^)]*)\)", text, re.MULTILINE)
+    assert declared, "ROLLOUT_ONLY_VARS not found in the script"
+    assert set(declared.group(1).split()) == set(_rollout_only_env_names())
+
+
+def test_an_empty_rollout_only_variable_is_not_a_setting(tmp_path):
+    """Narrowness: "set" means non-empty.
+
+    Every read of these in the script is `${X:-default}` or `-n`, so an empty
+    value is indistinguishable from an unset one in either mode -- it changes
+    nothing and claims nothing. Refusing it would also break `X=` as the way to
+    neutralise an inherited export.
+    """
+    env = dict.fromkeys(_rollout_only_env_names(), "")
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert "require TS_ROLLOUT=1" not in output, output
+    assert _REACHED_STARTUP in output, output
+
+
+def test_rollout_only_variables_are_still_accepted_under_rollout(tmp_path):
+    """Narrowness: the refusal is about the mode, not the names."""
+    env = {name: _ROLLOUT_ONLY_ENV_VALUES[name][0] for name in _rollout_only_env_names()}
+    env.update(TS_ROLLOUT="1", TS_IGNORE_EOS="0", TS_SAVE_DETAILED="1")
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert "require TS_ROLLOUT=1" not in output, output
+    assert _REACHED_STARTUP in output, output
+
+
+def test_mode_neutral_variables_are_still_accepted_outside_rollout(tmp_path):
+    """Narrowness: `save_detailed` and `seed` are not rollout-only on the host,
+    and a benchmark may set them, so the script must not treat everything
+    near the sampling knobs as rollout-only."""
+    proc = _run_script_before_startup(tmp_path, {"TS_SAVE_DETAILED": "1", "TS_SEED": "3"})
+    output = proc.stdout + proc.stderr
+    assert "require TS_ROLLOUT=1" not in output, output
+    assert _REACHED_STARTUP in output, output
 
 
 @pytest.mark.parametrize("spelling", ["1e0", "1E-5", ".5", "1.", ".", "", "0.5.0", "abc"])
