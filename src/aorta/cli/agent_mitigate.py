@@ -197,6 +197,19 @@ class _MitigateCommand(click.Command):
     ),
 )
 @click.option(
+    "--prompt-profile",
+    # Hard-coded for the reason --llm-backend is; tests/agent/test_prompt_profiles.py
+    # fails if this list and aorta.agent.prompt_profiles.PROMPT_PROFILES drift.
+    type=click.Choice(["default", "rl-episode"]),
+    default="default",
+    show_default=True,
+    help=(
+        "Which prompt a real backend is sent. rl-episode is the prompt the probe "
+        "policy is post-trained on: use it only with a checkpoint trained on it. "
+        "--symptom is not sent under rl-episode."
+    ),
+)
+@click.option(
     "--mitigation",
     "mitigation_allowlist",
     multiple=True,
@@ -241,6 +254,7 @@ def mitigate(
     max_walltime_sec: float | None,
     llm_backend: str,
     llm_model: str | None,
+    prompt_profile: str,
     mitigation_allowlist: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
     require_approval: bool,
@@ -267,6 +281,7 @@ def mitigate(
             policy=policy,
             llm_backend=llm_backend,
             llm_model=llm_model,
+            prompt_profile=prompt_profile,
             mitigations_allowlist=mitigation_allowlist or None,
             recipe_path=recipe,
             dry_run=dry_run,
