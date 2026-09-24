@@ -345,6 +345,7 @@ def replay(
     return {
         "episodes": sum(b["episodes"] for b in per_scenario.values()),
         "mismatched_steps": mismatched_steps,
+        "terminals_moved": sum(n for (a, b), n in moves.items() if a != b),
         "max_reward_diff": max_reward_diff,
         "moves": {f"{a} -> {b}": n for (a, b), n in sorted(moves.items())},
         "per_scenario": per_scenario,
@@ -451,8 +452,13 @@ def main(argv: list[str] | None = None) -> int:
             result["replay"] = replay(rows, scenarios, policy)
             print_replay(result["replay"])
             # Non-zero when the record does not reproduce, so a script can
-            # tell "the rule moved these numbers" from "nothing moved".
-            if result["replay"]["mismatched_steps"] or result["replay"]["max_reward_diff"] > 1e-9:
+            # tell "the rule moved something" from "nothing moved".
+            # Any difference counts: a reclassified terminal with the same
+            # step count and the same total is still a record that did not
+            # reproduce, and the terminal is what the next reader acts on.
+            replayed = result["replay"]
+            if (replayed["mismatched_steps"] or replayed["terminals_moved"]
+                    or replayed["max_reward_diff"] > 1e-9):
                 status = 1
         else:
             result["wire"] = summarise(rows, scenarios)

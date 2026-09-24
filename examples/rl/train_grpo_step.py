@@ -55,6 +55,10 @@ The checks
 ==========
 Every iteration, before a checkpoint is written:
 
+``trained_tensors_are_finite``
+    No trained tensor holds a NaN or an inf after the step. A finite gradient
+    does not guarantee a finite update, and a non-finite weight reads as
+    "moved" to the check below.
 ``every_trained_tensor_moved``
     A per-tensor float64 fingerprint (sum, sum of squares, sum of absolutes)
     before and after the step; any trained tensor whose fingerprint is
@@ -113,6 +117,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -139,6 +144,7 @@ FROZEN_PREFIXES = ("model.embed_tokens",)
 #: The checks that gate a checkpoint. `step_descends_the_gradient` is advisory.
 GATING_CHECKS = (
     "every_trained_tensor_moved",
+    "trained_tensors_are_finite",
     "frozen_control_unchanged",
     "gradient_is_finite_and_nonzero",
 )
@@ -422,8 +428,18 @@ def update_checks(
     A frozen set that is empty fails ``frozen_control_unchanged`` rather than
     passing it vacuously: "the control did not move" and "there was no
     control" must not read the same.
+
+    ``trained_tensors_are_finite`` is its own check because "moved" cannot see
+    it: a finite gradient with an update that overflows leaves NaN or inf in
+    the weights, a NaN fingerprint compares unequal to everything, and the
+    tensor reads as having moved. It is read off the post-step fingerprints --
+    a sum over a tensor holding a NaN or an inf is itself non-finite -- so it
+    costs no second pass over the weights.
     """
     unmoved = sorted(n for n in fp_pre if fp_pre[n] == fp_post.get(n))
+    non_finite = sorted(
+        n for n, moments in fp_post.items() if not all(math.isfinite(m) for m in moments)
+    )
     frozen_moved = sorted(n for n in frozen_pre if frozen_pre[n] != frozen_post.get(n))
     finite = grad_norm == grad_norm and grad_norm not in (float("inf"), float("-inf"))
     return {
@@ -432,6 +448,11 @@ def update_checks(
             "unmoved": len(unmoved),
             "unmoved_examples": unmoved[:5],
             "passed": bool(fp_pre) and not unmoved,
+        },
+        "trained_tensors_are_finite": {
+            "non_finite": len(non_finite),
+            "non_finite_examples": non_finite[:5],
+            "passed": bool(fp_post) and not non_finite,
         },
         "frozen_control_unchanged": {
             "tensors": sorted(frozen_pre),

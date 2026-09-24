@@ -281,6 +281,23 @@ def test_a_clean_update_passes_every_gating_check():
     assert gating_passed(checks(fp(1.0, 2.0), fp(1.1, 2.1)))
 
 
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+def test_a_non_finite_weight_after_the_step_fails_even_though_it_moved(bad):
+    """A NaN fingerprint compares unequal to everything, so "moved" passes on
+    exactly the tensor that is damaged; the finiteness check is what catches it."""
+    result = checks(fp(1.0, 2.0), fp(1.1, bad))
+    assert result["every_trained_tensor_moved"]["passed"], "the defect: it reads as moved"
+    assert not result["trained_tensors_are_finite"]["passed"]
+    assert result["trained_tensors_are_finite"]["non_finite_examples"] == ["t1"]
+    assert not gating_passed(result)
+    assert "trained_tensors_are_finite" in trainer.GATING_CHECKS
+
+
+def test_large_finite_weights_are_finite():
+    """Narrowness: magnitude is not damage."""
+    assert checks(fp(1.0), fp(1e30))["trained_tensors_are_finite"]["passed"]
+
+
 def test_an_unmoved_trained_tensor_fails():
     result = checks(fp(1.0, 2.0), fp(1.1, 2.0))
     assert not result["every_trained_tensor_moved"]["passed"]

@@ -106,6 +106,20 @@ def test_the_cli_exits_non_zero_when_the_record_does_not_reproduce(
     assert rescore.main(["--wire", str(wire), "--replay"]) == 1
 
 
+def test_a_moved_terminal_alone_is_a_non_zero_exit(tmp_path, scenario, monkeypatch):
+    """Same steps, same reward, a different terminal: still not a reproduction."""
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    for row in rows:
+        row["terminal"] = "other"
+    result = rescore.replay(rows, [scenario], AgentPolicy())
+    assert result["max_reward_diff"] == 0.0 and result["mismatched_steps"] == 0
+    assert result["terminals_moved"] == 2
+    wire = tmp_path / "wire.jsonl"
+    wire.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(rescore.env, "load_corpus", lambda *_a, **_k: [scenario])
+    assert rescore.main(["--wire", str(wire), "--replay"]) == 1
+
+
 def test_an_eval_column_is_read_as_a_wire(tmp_path, scenario):
     rows = recorded(scenario, [reply([CHARLIE])])
     column = tmp_path / "after.json"

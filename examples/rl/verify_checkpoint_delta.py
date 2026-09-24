@@ -150,8 +150,10 @@ def optimiser_bound(lr: float, steps: int, beta1: float = 0.9, beta2: float = 0.
     exceeds the ceiling, because a ceiling below what the optimiser can
     legitimately do would report healthy tensors as damaged.
     """
-    if lr <= 0:
-        raise ValueError("lr must be > 0")
+    if not (math.isfinite(lr) and lr > 0):
+        raise ValueError("lr must be a finite number > 0")
+    if not all(math.isfinite(b) and 0.0 <= b < 1.0 for b in (beta1, beta2)):
+        raise ValueError("betas must be finite and in [0, 1)")
     worst = adam_step_ceiling(steps, beta1, beta2)
     if worst > SLACK * steps:
         raise ValueError(
@@ -342,7 +344,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="how many offending elements to locate per tensor")
     args = parser.parse_args(argv)
 
-    beta1, beta2 = (float(x) for x in args.betas.split(","))
+    try:
+        beta1, beta2 = (float(x) for x in args.betas.split(","))
+    except ValueError:
+        parser.error(f"--betas must be two numbers, got {args.betas!r}")
+    # Usage errors, not verdicts: a NaN ceiling makes every `top > ceiling`
+    # comparison false and an infinite one permits any displacement, so a
+    # non-finite input would turn the ceiling into a pass for everything.
+    if not (math.isfinite(args.lr) and args.lr > 0):
+        parser.error(f"--lr must be a finite number > 0, got {args.lr!r}")
+    if args.steps < 1:
+        parser.error(f"--steps must be >= 1, got {args.steps}")
+    for name, beta in (("beta1", beta1), ("beta2", beta2)):
+        if not (math.isfinite(beta) and 0.0 <= beta < 1.0):
+            parser.error(f"--betas: {name} must be finite and in [0, 1), got {beta!r}")
     try:
         bound = optimiser_bound(args.lr, args.steps, beta1, beta2)
     except ValueError as exc:
