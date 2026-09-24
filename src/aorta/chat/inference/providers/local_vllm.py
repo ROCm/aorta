@@ -19,10 +19,19 @@ from aorta.chat.inference.unreachable import BackendUnreachableError
 
 logger = logging.getLogger(__name__)
 
-#: ``preflight``'s budget. Minutes, because a large model on a cold page cache
-#: legitimately takes that long to start serving and the interactive path would
-#: rather wait than refuse.
-PREFLIGHT_TIMEOUT = 300
+#: ``preflight``'s budget. It was 300s, on the reasoning that a large model on
+#: a cold page cache legitimately takes that long to start serving. True, but
+#: it does not follow that the session should wait for it: preflight starts the
+#: session whatever the outcome, so the whole budget buys a later welcome
+#: message and nothing else. A backend still warming up is discovered by the
+#: first request either way, and one that answers at 61s is not worse off than
+#: one that answers at 299s -- both are ready before anybody has finished
+#: typing a question.
+#:
+#: Sixty covers a proxy restart and most warm-ups. What made the old value
+#: expensive was that the wait sat in ``on_chat_start``, so a down backend cost
+#: it once per browser tab; the UI now waits once per process.
+PREFLIGHT_TIMEOUT = 60
 PREFLIGHT_INTERVAL = 5
 
 #: ``probe``'s budget, which is a diagnostic's budget rather than a session's:
@@ -41,6 +50,15 @@ class LocalVLLMBackend:
     """Chat backend for the OpenAI-compatible endpoint vLLM exposes."""
 
     name = "vllm"
+
+    native_requirement = (
+        "It needs the vLLM server restarted with --enable-auto-tool-choice and a\n"
+        "--tool-call-parser; a stock server does not accept the 'tools' parameter."
+    )
+
+    @property
+    def model_name(self) -> str:
+        return settings.vllm_model
 
     def get_chat_model(
         self,
@@ -79,6 +97,19 @@ class LocalVLLMBackend:
         base = settings.vllm_base_url.rstrip("/").removesuffix("/v1")
         return base + "/health"
 
+    def _health_headers(self) -> dict[str, str]:
+        """Credentials for the readiness probe, the same the chat client uses.
+
+        This asked anonymously. A bare vLLM does not mind, but a gateway in
+        front of one does: LiteLLM answers an unauthenticated ``/health`` with
+        500, which is indistinguishable here from a server that is not up. So
+        the poll failed every time against a proxy that was serving perfectly,
+        spent the whole budget, and the session started late having learned
+        nothing -- the one failure mode the budget was meant to cover.
+        """
+        key = settings.vllm_api_key
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
     async def _await_health(self, timeout: float, interval: float) -> bool:
         """Poll ``/health`` until it answers 200. Returns whether it ever did.
 
@@ -89,7 +120,7 @@ class LocalVLLMBackend:
         logger.info("Waiting for vLLM at %s ...", url)
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=self._health_headers()) as client:
             while (remaining := deadline - loop.time()) > 0:
                 try:
                     resp = await client.get(url, timeout=min(_REQUEST_TIMEOUT, remaining))
@@ -140,7 +171,7 @@ class LocalVLLMBackend:
             "  export AORTA_CHAT_VLLM_BASE_URL=http://<host>:<port>/v1\n"
             "or set vllm_base_url in the profile: aorta chat config init "
             "--profile local-vllm\n"
-            "To use a hosted provider instead: aorta chat ask --llm-provider openai \"...\""
+            'To use a hosted provider instead: aorta chat ask --llm-provider openai "..."'
         )
 
     def describe(self) -> str:

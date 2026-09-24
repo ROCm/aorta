@@ -19,6 +19,7 @@ import sysconfig
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from aorta.chat.config import ENV_PREFIX, SECRET_FIELDS, ConfigFileError, Settings
 
@@ -121,6 +122,99 @@ class TestPrecedence:
             Settings()
         assert str(chat_profile) in str(exc.value)
         assert "config init" in str(exc.value)
+
+
+class TestBlankEmbeddingModelIsRejected:
+    """An empty embedding model name is refused where it enters, not downstream.
+
+    It used to be accepted, and then reasoned about as though it were a model
+    name by every consumer in turn: ``doctor`` printed a pre-warm command
+    calling ``TextEmbedding("")``, which raises ``Model  is not supported in
+    TextEmbedding``; ``manifest.remedy_lines`` offered ``index build`` on both
+    the local and the remote arm, and the build resolves the same empty name
+    and fails before the first chunk; ``collection_name()`` hashed ``""`` into
+    a plausible-looking collection and ``describe()`` rendered ``local BGE
+    embeddings ( on onnxruntime)``.
+
+    Four consumers, one bad value. These tests pin the decision at the single
+    place that makes all four unreachable, so a fifth consumer added later
+    inherits the guarantee instead of the bug.
+    """
+
+    @pytest.mark.parametrize("field", ["embedding_model", "remote_embedding_model"])
+    @pytest.mark.parametrize("blank", ["", "   ", "\t", "\n"])
+    def test_a_blank_model_name_is_refused(self, field, blank):
+        """Both providers' model settings, and whitespace-only as well as empty.
+
+        Whitespace-only is in here because a name of spaces is exactly as
+        unusable as an empty one while looking non-empty to every ``if not
+        model`` in the tree -- accepting it would move the defect rather than
+        fix it. Both fields, because the remote arm has the same hole: a blank
+        ``remote_embedding_model`` was offered ``index build`` too, which sends
+        every chunk of the corpus to an embeddings API with no model named.
+        """
+        with pytest.raises(ValidationError) as exc:
+            Settings(**{field: blank})
+        assert field in str(exc.value)
+        assert "must name an embedding model" in str(exc.value)
+
+    def test_the_message_says_what_to_do_instead(self):
+        """A rejection a user cannot act on just moves the dead end earlier."""
+        with pytest.raises(ValidationError) as exc:
+            Settings(embedding_model="")
+        message = str(exc.value)
+        assert "Remove the setting to take the default" in message
+        assert "index build" in message and "index fetch" in message
+
+    def test_it_refuses_the_value_from_the_environment_too(self, monkeypatch):
+        """The constructor is not the only door; ``AORTA_CHAT_*`` is the common one."""
+        monkeypatch.setenv(f"{ENV_PREFIX}EMBEDDING_MODEL", "")
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_a_model_name_is_not_stripped(self):
+        """Rejecting a name with stray whitespace is the job; rewriting one is not.
+
+        ``model_id()`` and ``vector_identity()`` return this setting verbatim
+        and ``collection_name()`` hashes it, so stripping would silently change
+        an install's embedding identity and mismatch the index it already
+        built. ``manifest._custom_local_model`` compares unstripped for the
+        same reason.
+        """
+        assert Settings(embedding_model=" BAAI/bge-small-en-v1.5 ").embedding_model == (
+            " BAAI/bge-small-en-v1.5 "
+        )
+
+    def test_an_ordinary_custom_model_still_loads(self):
+        """The guard is against blankness, not against configuring the model."""
+        assert Settings(embedding_model="BAAI/bge-base-en-v1.5").embedding_model == (
+            "BAAI/bge-base-en-v1.5"
+        )
+
+    def test_unset_still_takes_the_shipped_default(self):
+        """ "Remove the setting" is the advice the message gives, so it has to work."""
+        assert Settings().embedding_model == Settings.model_fields["embedding_model"].default
+
+    def test_the_pre_warm_command_can_no_longer_be_built_on_a_blank_name(self, monkeypatch):
+        """The leak site that opened this, tied back to the boundary that closes it.
+
+        Asserted through the real settings rather than a monkeypatched
+        attribute: what the fix guarantees is that no *configuration* produces
+        a blank model, and going through ``Settings`` is the only way to test
+        that claim. Monkeypatching ``settings.embedding_model`` bypasses
+        validation and would pass either way.
+        """
+        monkeypatch.setenv(f"{ENV_PREFIX}EMBEDDING_MODEL", "")
+        with pytest.raises(ValidationError):
+            Settings()
+
+        # And the command really is unusable for the value that used to reach
+        # it -- the other half of the claim, which is why the guard is worth
+        # having at all.
+        from fastembed import TextEmbedding
+
+        with pytest.raises(ValueError, match="not supported"):
+            TextEmbedding("")
 
 
 class TestLaziness:

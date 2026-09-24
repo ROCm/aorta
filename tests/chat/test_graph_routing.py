@@ -1,14 +1,219 @@
-"""Tests for route_after_critic() and graph structure."""
+"""Tests for router_node(), route_after_critic() and graph structure."""
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from langchain_core.messages import AIMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END
 
 from aorta.chat.graph.graph import build_graph, route_after_critic
-from aorta.chat.graph.nodes import finalize_node
+from aorta.chat.graph.nodes import _parse_route, finalize_node, router_node
+
+
+async def _route_reply(reply: str) -> str:
+    """The branch ``router_node`` lands on when the model answers *reply*.
+
+    Drives the node rather than reimplementing its decision, so a test that
+    claims a reply moved is reporting where it actually goes.
+    """
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(return_value=AIMessage(content=reply))
+    with patch("aorta.chat.graph.nodes._get_llm", return_value=llm):
+        result = await router_node(
+            {"messages": [HumanMessage(content="where are the tokenspeed docs?")]}
+        )
+    return result["route"]
+
+
+class TestParseRoute:
+    """The classification itself, without a model in the way."""
+
+    def test_a_bare_route_name_parses(self):
+        assert _parse_route("question") == "question"
+        assert _parse_route("action") == "action"
+
+    def test_a_name_inside_a_sentence_still_parses(self):
+        assert _parse_route("this is an action") == "action"
+
+    def test_an_empty_reply_names_nothing(self):
+        assert _parse_route("") is None
+
+    def test_a_reply_naming_neither_names_nothing(self):
+        assert _parse_route("let me look at the code") is None
+
+    def test_a_reply_naming_both_is_ambiguous_rather_than_a_winner(self):
+        """Substring matching has to be symmetric to be honest.
+
+        ``"question" in text`` alone called this one ``question`` while
+        ``"action" in text`` alone would have called it ``action``; neither is a
+        classification the model made.
+        """
+        assert _parse_route("action, not question") is None
+
+
+class TestRouterNodeFallback:
+    """Which branch a reply that classified nothing lands on.
+
+    There are two such replies and they are not the same failure, which is the
+    distinction this class exists to pin.
+
+    An **empty** reply used to go to ``action``, by omission: ``"question" if
+    "question" in reply else "action"``. That is the branch a model returning
+    empty content cannot drive, and empty content is exactly what such a model
+    returns -- so a router that failed to answer routed into the one branch
+    guaranteed to fail.
+
+    A **content-bearing** reply we could not parse is the opposite case: the
+    model did classify, and the substring match failed to recognise how it said
+    so. Those still go to ``action``. Sending them to ``question`` fixed nothing
+    and removed tool access from a model that was asking for tools.
+    """
+
+    @pytest.mark.parametrize("reply", ["question", "action"])
+    async def test_a_real_classification_is_honoured(self, reply):
+        assert await _route_reply(reply) == reply
+
+    @pytest.mark.parametrize("reply", ["", "   ", "\n\t "])
+    async def test_an_empty_reply_takes_the_answerable_branch(self, reply):
+        """Nothing was classified, so prefer the branch that can still answer.
+
+        ``question`` degrades to a retrieval-only answer; ``action`` to none.
+        Whitespace counts as empty because the reply is stripped first -- the
+        model said nothing either way.
+        """
+        assert await _route_reply(reply) == "question"
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "let me check",
+            "action or question",  # named both, so it parsed to neither
+            "act",
+            "use the shell to fix it",
+            "tool",
+        ],
+    )
+    async def test_a_content_bearing_reply_keeps_its_tools(self, reply):
+        """The regression this narrowing removes.
+
+        Each of these is a model that answered the router; we just could not
+        read the answer. ``action`` is the only branch with tool access, and an
+        unreadable reply is not evidence that none were wanted.
+        """
+        assert await _route_reply(reply) == "action"
+
+    @pytest.mark.parametrize("reply", ["", "let me check"])
+    async def test_the_fallback_is_reported_rather_than_silent(self, reply, caplog):
+        """Both fallbacks are logged, not just the empty one."""
+        with caplog.at_level("WARNING"):
+            await _route_reply(reply)
+        assert "does not name exactly one route" in caplog.text
+
+
+class TestOnlyUnclassifiedRepliesChanged:
+    """The bound on this change, and the reason it is not a reweighting.
+
+    Gap 3c also proposed biasing the router away from ``action``. The reported
+    symptom does not support that: the reply was a real ``'action'``, the prompt
+    asked for ``action`` on a "find"-shaped question, and the query died in the
+    act loop rather than in the classifier. Reweighting would move queries the
+    model *did* classify, which is exactly what
+    https://github.com/ROCm/aorta/issues/433 warns regresses in mirror image.
+
+    So no reply that named **exactly one** route moves: for every one of those
+    -- which is every reply the model is asked for, and every reply either
+    issue's repro produced -- the new rule agrees with the old one.
+
+    Two populations do move, and it is worth being exact about them rather than
+    calling the change "empty replies only", which is what an earlier revision
+    of this docstring claimed:
+
+    * **empty or whitespace** -- was ``action`` by omission, now ``question``.
+      The reasoning-channel case, and the point of the change.
+    * **naming both routes** -- was ``question`` by substring precedence, now
+      ``action``. Not intended by the narrowing and not the empty case; it
+      follows from ``_parse_route`` treating "names both" as ambiguous, which
+      is a separate decision pinned by
+      ``TestParseRoute.test_a_reply_naming_both_is_ambiguous_rather_than_a_winner``.
+      Those two decisions cannot both hold *and* leave the moved set at empty
+      replies only. See https://github.com/ROCm/aorta/issues/494.
+
+    A reply that named neither route but *said something* does not move.
+    That population was briefly sent to ``question`` too, which took tools away
+    from a model that had asked for them; narrowing the fallback gave it back.
+
+    The parametrisations below name the boundary rather than asserting a single
+    destination for every unparsed reply, so collapsing them again would fail
+    here rather than pass quietly.
+    """
+
+    @staticmethod
+    def _old_rule(route_text: str) -> str:
+        """Verbatim from before: ``"question" if "question" in reply else "action"``."""
+        return "question" if "question" in route_text else "action"
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "question",
+            "action",
+            "Question",
+            "this is an action",
+            "question.",
+            "the answer is: action",
+            # #433's repro shape: a run question the model calls a question.
+            "question -- it asks about a run on this machine",
+        ],
+    )
+    def test_a_real_classification_is_decided_exactly_as_before(self, reply):
+        lowered = reply.strip().lower()
+        assert _parse_route(lowered) == self._old_rule(lowered)
+
+    @pytest.mark.parametrize(
+        "reply",
+        ["action or question", "this is a question, not an action"],
+    )
+    async def test_a_reply_naming_both_routes_also_moved(self, reply):
+        """The second moved population, recorded rather than glossed.
+
+        Substring precedence used to hand these to ``question`` because
+        ``"question" in text`` was tested first. ``_parse_route`` now calls
+        naming both routes ambiguous, so they reach the fallback, and the
+        fallback sends a content-bearing reply to ``action``.
+
+        Whether that is the right destination is open -- "this is a question,
+        not an action" is a model fairly clearly saying *question* -- but
+        ``action`` is the conservative direction, since it keeps both retrieval
+        and tools, where ``question`` has no tools at all.
+        """
+        lowered = reply.strip().lower()
+        assert _parse_route(lowered) is None, "it named both, so it classified neither"
+        assert self._old_rule(lowered) == "question", "substring precedence used to win"
+        assert await _route_reply(reply) == "action"
+
+    @pytest.mark.parametrize("reply", ["", "   "])
+    async def test_an_empty_reply_moved(self, reply):
+        """The intended case: the old rule sent it to the branch it could not drive."""
+        lowered = reply.strip().lower()
+        assert _parse_route(lowered) is None, "it classified nothing"
+        assert self._old_rule(lowered) == "action"
+        assert await _route_reply(reply) == "question"
+
+    @pytest.mark.parametrize("reply", ["let me check", "unsure", "act"])
+    async def test_a_reply_that_said_something_did_not_move(self, reply):
+        """The bound on the moved set, and what the narrowing restored.
+
+        These classify nothing either -- ``_parse_route`` returns ``None`` for
+        all three -- so the *parser* treats them exactly like an empty reply.
+        The router does not, and that is the point: they still land where they
+        always did.
+        """
+        lowered = reply.strip().lower()
+        assert _parse_route(lowered) is None, "it classified nothing"
+        assert self._old_rule(lowered) == "action"
+        assert await _route_reply(reply) == "action"
 
 
 class TestRouteAfterCritic:

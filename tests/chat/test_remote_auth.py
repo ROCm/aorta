@@ -71,9 +71,7 @@ class TestDescribeAuth:
         assert describe_auth(auth_header=APIM_HEADER) == f"{APIM_HEADER} header"
 
     def test_extra_header_names_are_listed(self):
-        described = describe_auth(
-            auth_header=APIM_HEADER, extra_headers={"user": "alice"}
-        )
+        described = describe_auth(auth_header=APIM_HEADER, extra_headers={"user": "alice"})
         assert described == f"{APIM_HEADER} header, plus user"
 
     def test_the_secret_never_appears_in_the_description(self):
@@ -154,18 +152,14 @@ def amd_gateway(monkeypatch):
     """Configure both remote flows the way an APIM-fronted gateway needs."""
     monkeypatch.setattr(settings, "remote_llm_model", "GPT-oss-20B")
     monkeypatch.setattr(settings, "remote_llm_api_key", "sk-super-secret")
-    monkeypatch.setattr(
-        settings, "remote_llm_base_url", "https://gateway.example.com/v1"
-    )
+    monkeypatch.setattr(settings, "remote_llm_base_url", "https://gateway.example.com/v1")
     monkeypatch.setattr(settings, "remote_llm_auth_header", APIM_HEADER)
     monkeypatch.setattr(settings, "remote_llm_extra_headers", {"user": "alice"})
     monkeypatch.setattr(settings, "llm_max_tokens", None)
     monkeypatch.setattr(settings, "llm_timeout", 120.0)
     monkeypatch.setattr(settings, "llm_max_retries", 2)
     monkeypatch.setattr(settings, "remote_embedding_api_key", "sk-super-secret")
-    monkeypatch.setattr(
-        settings, "remote_embedding_base_url", "https://gateway.example.com/v1"
-    )
+    monkeypatch.setattr(settings, "remote_embedding_base_url", "https://gateway.example.com/v1")
     monkeypatch.setattr(settings, "remote_embedding_auth_header", APIM_HEADER)
     monkeypatch.setattr(settings, "remote_embedding_extra_headers", {"user": "alice"})
 
@@ -182,9 +176,7 @@ class TestChatBackendWiring:
         llm = RemoteOpenAIBackend().get_chat_model(streaming=False)
         assert llm.openai_api_key.get_secret_value() == PLACEHOLDER_API_KEY
 
-    def test_a_plain_bearer_provider_sends_no_extra_headers(
-        self, monkeypatch, no_network
-    ):
+    def test_a_plain_bearer_provider_sends_no_extra_headers(self, monkeypatch, no_network):
         monkeypatch.setattr(settings, "remote_llm_api_key", "sk-real")
         monkeypatch.setattr(settings, "remote_llm_auth_header", "")
         monkeypatch.setattr(settings, "remote_llm_extra_headers", {})

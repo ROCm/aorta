@@ -16,30 +16,73 @@
 # `perf.md` are what bound a rollout iteration's duration, and the
 # `generated_tokens_p50` / `_p90` / `_p99` / `_max` columns are what size the KV
 # cache and set how long the slowest completion holds a batch open.
-# `mean_output_tokens_per_request` is the same quantity read from the always-
-# present counters, so it is the one to trust if the two disagree.
+# `mean_output_tokens_per_request` is the request-level reading, computed from
+# counters every export version carries, and it is the one to trust for
+# throughput accounting. It is *not* the same quantity as `generated_tokens_*`:
+# it sums all `n` choices where this gateway does, while each
+# `generated_tokens_*` length is a single completion. So expect the two to
+# disagree by about `n`, and do not read that as a reason to distrust the
+# distribution -- an `n`-fold gap is the agreement, not the fault. The header
+# block below covers the denominator at length.
 #
 # The confound ratio in `matrix.md` is not meaningful here. Cells differ by
 # sample count and prompt shape, so they legitimately do different amounts of
 # work -- read `perf.md`.
 #
-# Two things to know before reading the numbers.
+# ===========================================================================
+# READ THIS BEFORE QUOTING ANYTHING FROM `samples-4` OR `samples-8`.
+#
+# These cells do NOT compare sample counts. TokenSpeed returns identical
+# choices for `n > 1` within a single request, so a cell asking for four or
+# eight samples per prompt gets one distinct completion repeated four or eight
+# times. What varies across `samples-1`, `samples-4` and `samples-8` is the
+# batching and scheduling overhead of carrying that many copies -- which is a
+# real serving measurement, and is not the thing the cell names describe.
+#
+# So: throughput, concurrency behaviour, KV-cache occupancy and the
+# per-completion cost of a larger group are all still measured here. Anything
+# that depends on the completions actually differing -- sampling diversity,
+# group variance, anything a GRPO advantage would be computed over -- is not.
+#
+# ⚠ This is NOT the greedy-default defect this recipe's PR fixes, and the two
+# must not be conflated. That one was the engine defaulting `--sampling-backend`
+# to `greedy` off NVIDIA and silently discarding `temperature`, `top_p`, `top_k`
+# and `seed`; it is fixed, the backend is now pinned to `triton`, and the
+# workload reads it back off `/get_server_info` -- failing with exit 57
+# (`rollout_sampling_ignored`) if the engine reports `greedy`, or exit 58
+# (`rollout_sampling_backend_mismatch`) if it reports some other backend than
+# was asked for. The `n > 1` collapse is a separate upstream defect that
+# SURVIVES that fix -- it reproduces at every temperature with sampling working.
+# A future reader should not assume the sampling-backend fix resolved it,
+# because it does not. Separate requests are unaffected, which is why the RL
+# driver on the stacked branch issues one request per sample rather than one
+# batched request per group; for that driver this costs throughput rather than
+# correctness. Recorded in `docs/tokenspeed-serving.md` and, with the measurement
+# behind it, in `docs/tokenspeed-rl-e2e-sanitizer-routing.md` on the follow-up.
+#
+# Kept rather than removed because the cells do exercise the serving path and
+# the defect is upstream, not ours. Renaming them would hide a real engine
+# limitation behind a tidier recipe.
+# ===========================================================================
+#
+# Two more things to know before reading the numbers.
 #
 # On `dataset: random` the length distribution is not a property of the model.
 # The prompts are random tokens, so nothing induces an end-of-sequence token and
 # every completion runs to `output_len`; `generated_tokens_*` will read as a
-# constant at the cap. Throughput, the concurrency behaviour and the sample-count
-# comparison are all still valid -- those depend on the request shape rather than
-# on where generation stops. A distribution that means something needs prompts a
-# model would answer.
+# constant at the cap. Throughput and the concurrency behaviour are still valid
+# -- those depend on the request shape rather than on where generation stops.
+# A distribution that means something needs prompts a model would answer.
 #
-# The `samples-1` cell is a control, not a wasted one. The bench derives a
-# request's output length from the response's `usage.completion_tokens`, which
-# was measured on gfx950 to sum across all `n` choices -- so the throughput
-# figures here cover the whole rollout rather than one sample of it. That is one
-# gateway version's behaviour, and comparing `mean_output_tokens_per_request`
-# between this cell and `samples-4` is what keeps it observable if it changes.
-# The same comparison is also the per-completion cost of a larger group.
+# The `samples-1` cell is a control, and it is the cell that still does its job
+# in full. The bench derives a request's output length from the response's
+# `usage.completion_tokens`, which was measured on gfx950 to sum across all `n`
+# choices -- so the throughput figures here cover the whole rollout rather than
+# one sample of it. That summing is real whether or not the choices differ, so
+# comparing `mean_output_tokens_per_request` between this cell and `samples-4`
+# still keeps it observable if the gateway's behaviour changes, and still gives
+# the per-completion cost of carrying a larger group. What that comparison does
+# not give is anything about sampling, per the block above.
 schema_version: 1
 ticket: TOKENSPEED-SERVE-ROLLOUT
 workload: tokenspeed_serve
@@ -102,8 +145,13 @@ cells:
       rollout_samples: 1
       num_prompts: 32
 
-  # The rollout shape proper: a group of four sampled completions per prompt,
-  # which is the smallest group size a GRPO-style advantage is computed over.
+  # The rollout request shape: four completions per prompt, which is the
+  # smallest group size a GRPO-style advantage would be computed over.
+  #
+  # ⚠ "Would be", not "is". Per the block at the top of this file, the four
+  # completions come back identical, so there is no group variance here and no
+  # advantage could be computed from this cell. What it measures against
+  # `samples-1` is the cost of carrying four copies through the scheduler.
   - name: samples-4
     mitigations: [none]
     environment: local
@@ -111,11 +159,16 @@ cells:
       rollout_samples: 4
       num_prompts: 32
 
-  # Eight samples over half the prompts: the same number of completions as
+  # Eight completions over half the prompts: the same number of completions as
   # `samples-4`, reached with a larger group over fewer prompts. Which of the
-  # two costs less per completion is a scheduling question -- more samples per
-  # prompt share a prefill, more prompts do not -- and this is the pair that
+  # two costs less per completion is a scheduling question -- more completions
+  # per prompt share a prefill, more prompts do not -- and this is the pair that
   # answers it.
+  #
+  # This pairing survives the `n > 1` defect intact, and it is the reason these
+  # cells are worth keeping: prefill sharing and scheduler cost do not depend on
+  # the completions differing from one another. Read it as a batching
+  # comparison, not a sample-count one.
   - name: samples-8
     mitigations: [none]
     environment: local
@@ -126,6 +179,10 @@ cells:
   # Long-form generation, which is what a reasoning-style rollout produces. The
   # 4096-token allowance is where the tail of the length distribution starts to
   # matter to the KV cache rather than being absorbed by it.
+  #
+  # The tail this reports is a tail across prompts, not across samples: the four
+  # completions of any one prompt are the same length because they are the same
+  # completion. On `dataset: random` they would all sit at the cap in any case.
   - name: long-form
     mitigations: [none]
     environment: local

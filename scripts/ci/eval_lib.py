@@ -72,8 +72,15 @@ _METRIC_POLICIES: dict[str, str] = {
     # generation at temperature 1.0 they are the policy's choice and vary between
     # runs by construction, so a margin-derived floor would flap; and on the
     # `random` dataset both rollout recipes use, nothing induces EOS, so the
-    # value is pinned near `output_len * n` and a floor under it would measure
-    # the recipe rather than the engine. Neither reading is a regression signal.
+    # values are pinned by the recipe and a floor under them would measure the
+    # recipe rather than the engine. Neither reading is a regression signal.
+    #
+    # The two families are pinned near *different* values, and the distinction
+    # matters to anyone reading them side by side: `mean_output_tokens_per_request`
+    # sits near `output_len * n` where the gateway sums `usage.completion_tokens`
+    # across all `n` choices, while each `generated_tokens_*` length is one
+    # completion and sits near `output_len`. So an `n`-fold disagreement between
+    # them is the expected reading rather than a fault.
     #
     # The real invariant they were reaching for -- a collapsed policy that
     # answers every request with an immediate EOS -- is already enforced in the

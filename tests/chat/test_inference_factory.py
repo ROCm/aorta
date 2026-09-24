@@ -121,8 +121,7 @@ class TestProviderSelection:
         with pytest.raises(ValueError) as exc:
             get_backend("gemini")
         assert str(exc.value) == (
-            "unknown LLM provider: 'gemini' "
-            "(expected one of litellm, openai, vllm)"
+            "unknown LLM provider: 'gemini' (expected one of litellm, openai, vllm)"
         )
 
     def test_unknown_provider_in_settings_also_raises(self, monkeypatch):
@@ -150,18 +149,14 @@ class TestChatFacade:
         assert llm.temperature == 0.5
         assert llm.streaming is False
 
-    def test_get_chat_llm_follows_the_provider_setting(
-        self, monkeypatch, remote_llm_settings
-    ):
+    def test_get_chat_llm_follows_the_provider_setting(self, monkeypatch, remote_llm_settings):
         monkeypatch.setattr(settings, "llm_provider", "openai")
         assert chat.get_chat_llm().model_name == "gpt-4o-mini"
 
     def test_vllm_client_still_exports_the_pre_provider_names(self):
         """The shim keeps old imports working after the facade refactor."""
         assert vllm_client.get_chat_llm is chat.get_chat_llm
-        assert (
-            vllm_client.get_async_openai_client is local_vllm.get_async_openai_client
-        )
+        assert vllm_client.get_async_openai_client is local_vllm.get_async_openai_client
         assert vllm_client.stream_chat is local_vllm.stream_chat
 
     def test_nodes_llm_entry_point_forwards_to_the_facade(self):
@@ -204,9 +199,7 @@ class TestRemoteOpenAIBackend:
         assert RemoteOpenAIBackend().get_chat_model().openai_api_base is None
 
     @pytest.mark.asyncio
-    async def test_preflight_makes_no_network_call(
-        self, remote_llm_settings, no_network
-    ):
+    async def test_preflight_makes_no_network_call(self, remote_llm_settings, no_network):
         """Validating config must cost nothing against a metered endpoint."""
         await RemoteOpenAIBackend().preflight()
 
@@ -216,9 +209,7 @@ class TestRemoteOpenAIBackend:
 
     def test_describe_names_the_endpoint(self, monkeypatch, remote_llm_settings):
         assert "provider default endpoint" in RemoteOpenAIBackend().describe()
-        monkeypatch.setattr(
-            settings, "remote_llm_base_url", "https://openrouter.ai/api/v1"
-        )
+        monkeypatch.setattr(settings, "remote_llm_base_url", "https://openrouter.ai/api/v1")
         assert "https://openrouter.ai/api/v1" in RemoteOpenAIBackend().describe()
 
 
@@ -263,9 +254,7 @@ class TestRemoteLiteLLMBackend:
                 RemoteLiteLLMBackend().get_chat_model()
         assert str(exc.value) == LITELLM_IMPORT_MESSAGE
 
-    @pytest.mark.skipif(
-        not _LITELLM_INSTALLED, reason="the litellm extra is not installed"
-    )
+    @pytest.mark.skipif(not _LITELLM_INSTALLED, reason="the litellm extra is not installed")
     def test_chat_litellm_is_importable_when_the_extra_is_present(self):
         """Guards the langchain-community<0.4 pin.
 

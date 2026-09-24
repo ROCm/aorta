@@ -32,8 +32,17 @@ import os
 from pathlib import Path
 from typing import Annotated, Any
 
-import tomllib
-from pydantic import Field, ValidationError, field_validator
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10; supplied by the [cia] extra
+    import tomli as tomllib
+from pydantic import (
+    AliasChoices,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -91,7 +100,7 @@ def read_profile(path: Path | None = None) -> dict[str, Any]:
 
 
 class _TomlProfileSource(PydanticBaseSettingsSource):
-    """Reads ``$XDG_CONFIG_HOME/aorta/chat.toml`` with stdlib ``tomllib``.
+    """Reads ``$XDG_CONFIG_HOME/aorta/chat.toml`` with tomllib/tomli.
 
     Ranked below the environment so a CI job or a one-off shell export always
     wins over the file, and above the built-in defaults so the file is what
@@ -113,12 +122,33 @@ class _TomlProfileSource(PydanticBaseSettingsSource):
         raise NotImplementedError
 
 
+def _either(chat_name: str, agent_name: str | None = None) -> AliasChoices:
+    """Accept this setting under the chat prefix or the agents' own name.
+
+    These knobs name facts both halves need: where job records go, which node
+    to pin to, which GPU the work is built for. Naming them twice is how they
+    come to disagree -- a profile key that Launch never sees, or a CIA_* value
+    the chat tools ignore -- so one field answers to both spellings and there is
+    only one value to disagree about.
+
+    The chat name wins when both are set, being the more specific of the two.
+    *agent_name* defaults to *chat_name*, for a field already named after the
+    agents' variable.
+    """
+    return AliasChoices(f"{ENV_PREFIX}{chat_name}", agent_name or chat_name)
+
+
 class Settings(BaseSettings):
     """Every knob ``aorta chat`` reads. Construct via :func:`get_settings`."""
 
     model_config = SettingsConfigDict(
         env_prefix=ENV_PREFIX,
         extra="ignore",
+        # A field with a validation_alias is matched by that alias alone, so
+        # without this the profile key and the constructor argument -- both of
+        # which use the field's own name -- would be silently ignored for every
+        # aliased field below, and the value would come back as the default.
+        populate_by_name=True,
     )
 
     # --- LLM provider selector ---
@@ -149,6 +179,44 @@ class Settings(BaseSettings):
     # (SECRET_MAPPING_FIELDS).
     remote_llm_auth_header: str = ""
     remote_llm_extra_headers: Annotated[dict[str, str], NoDecode] = {}
+
+    # --- Cluster Intelligence Agents ---
+    # Every one of these is empty or a duration by default. A guessed path or a
+    # guessed node is worse than an unset one: it does not fail, it runs
+    # somewhere nobody meant and reports nothing useful.
+    #: Where job records and bundles are written. Empty means the agents'
+    #: own default. Must be readable from every node that runs work.
+    jobs_path: str = Field("", validation_alias=_either("JOBS_PATH", "CIA_JOBS_ROOT"))
+    #: Pin work to one node. Empty lets the scheduler choose, which is correct
+    #: everywhere except a demo.
+    cia_demo_node: str = Field("", validation_alias=_either("CIA_DEMO_NODE"))
+    #: Which GPU the submitted work is built for. Read by the chat tools for the
+    #: assembler target and handed to the agents as ``--arch``.
+    gpu_arch: str = Field("gfx950", validation_alias=_either("GPU_ARCH", "CIA_GPU_ARCH"))
+    #: Which interpreter runs a pasted workload on the node. Empty means the
+    #: one serving the chat, which is only right when they are the same
+    #: environment -- and they are usually not. This server needs langchain and
+    #: Chainlit; a training run needs a ROCm build of torch. Running a pasted
+    #: script under the server's own interpreter got "Torch not compiled with
+    #: CUDA enabled" and a job that exited before reaching the bug it was
+    #: submitted to find, which reads downstream as a workload with no NaN in
+    #: it rather than as a workload that never ran.
+    workload_python: str = Field(
+        "", validation_alias=_either("WORKLOAD_PYTHON", "CIA_WORKLOAD_PYTHON")
+    )
+    #: The sanitizer backend. Unset means the sweep will report that it could
+    #: not run, which is the honest outcome -- not that it found nothing.
+    rocjitsu_build: str = ""
+    #: Preloaded into the sanitized process. ConSan's hook is dlopened into one
+    #: that has already loaded the host libstdc++, so without the newer one the
+    #: tool library fails to load and the run reports a guardrail it never
+    #: exercised.
+    rocjitsu_preload: str = ""
+    #: Ceiling on one triage. The agents have their own internal timeouts; this
+    #: is the backstop that keeps a wedged cluster job from hanging a chat turn.
+    triage_timeout: int = 1800
+    #: Ceiling on a single static analysis, which needs no GPU and no queue.
+    waitcheck_timeout: int = 300
 
     # --- Tool-calling protocol ---
     # "text"   act_node asks for `ACTION: tool(arg="v")` lines and parses them.
@@ -229,6 +297,16 @@ class Settings(BaseSettings):
     # is a deliberate act by the operator, not a default anyone inherits by
     # installing the extra.
     enable_shell_tool: bool = False
+    #: Register the tools that submit work to the cluster. Off by default, for
+    #: the same reason the shell tool is: they are outside the bound every other
+    #: tool keeps. They write under ``jobs_root`` rather than the source root,
+    #: reach a scheduler over SSH, and run source the user pasted on a GPU node
+    #: -- and a single chat turn can start a job that occupies one for minutes.
+    #: That is the product, but it is not something to inherit by installing an
+    #: extra. While off they are absent from the registry and the prompts, not
+    #: refused at call time, so nothing the model is told about can be talked
+    #: into reaching for them.
+    allow_cluster_jobs: bool = False
     # NoDecode turns off pydantic-settings' JSON decoding for this field so the
     # comma-separated form loads; the validator below accepts both that and a
     # JSON list.
@@ -350,9 +428,72 @@ class Settings(BaseSettings):
             headers[name.strip()] = header_value.strip()
         return headers
 
+    @field_validator("embedding_model", "remote_embedding_model", mode="after")
+    @classmethod
+    def _reject_blank_embedding_model(cls, value: str, info: ValidationInfo) -> str:
+        """An embedding model name is required; blank is not a value either side accepts.
+
+        Rejected here, at the one place the setting enters the process, rather
+        than at the places a blank leaks to. It leaked to at least three, and
+        each of them reasoned about it as though it were a model name: the
+        pre-warm remedy in ``doctor`` built ``TextEmbedding("")``, which raises
+        ``Model  is not supported in TextEmbedding``; the local arm of
+        ``manifest.remedy_lines`` offered ``index build``, which resolves the
+        same empty name through ``FastembedBgeEmbeddings`` and fails before the
+        first chunk; and the remote arm offered the same build with an empty
+        model in every embeddings API call. Patching those three would have
+        left the fourth to be found later -- ``collection_name()`` already
+        hashes ``""`` into a plausible-looking collection, and ``describe()``
+        renders ``local BGE embeddings ( on onnxruntime)``.
+
+        Whitespace-only is rejected with it. A name of spaces is as unusable as
+        an empty one, and accepting it here would just move the same defect
+        behind a value that looks non-empty to every ``if not model`` in the
+        tree.
+
+        The value is otherwise returned verbatim -- deliberately not stripped.
+        ``model_id()`` and ``vector_identity()`` return this setting as it is
+        and ``collection_name()`` hashes it, so stripping would silently change
+        an install's embedding identity and mismatch the index it already
+        built. Rejecting a name with stray whitespace is this validator's job;
+        rewriting one is not.
+
+        Not applied to the LLM model settings. An empty ``vllm_model`` or
+        ``remote_llm_model`` is a different question -- the tool-mode check
+        reads them and cannot distinguish an empty model from a provider it has
+        no model setting for at all -- and that path reports its own verdict
+        rather than relying on this.
+        """
+        if not value.strip():
+            # Named, not quoted: the rejected value is empty, but
+            # _unresolvable_settings_reason exists because pydantic appends
+            # input_value to whatever this says, and the field name is the
+            # actionable half regardless.
+            raise ValueError(
+                f"{info.field_name} must name an embedding model. It is empty, and an "
+                "empty name selects no model: the embedder raises on it and both "
+                "'aorta chat index build' and 'aorta chat index fetch' fail before "
+                "the first chunk. Remove the setting to take the default, or name a "
+                "model."
+            )
+        return value
+
     @property
     def aorta_root(self) -> Path:
         return Path(self.aorta_path).resolve()
+
+    @property
+    def jobs_root(self) -> Path:
+        """Rendezvous root for job records and bundles.
+
+        Defers to the agents' own default when unset, rather than repeating it
+        here -- two spellings of the same default is how they drift apart.
+        """
+        if self.jobs_path.strip():
+            return Path(self.jobs_path).expanduser().resolve()
+        from aorta.cia.launch.cluster import default_jobs_root
+
+        return Path(default_jobs_root()).expanduser().resolve()
 
     @property
     def index_file(self) -> Path:

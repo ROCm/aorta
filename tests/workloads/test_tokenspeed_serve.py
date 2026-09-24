@@ -1201,6 +1201,47 @@ def test_script_exit_codes_map_to_named_reasons(tmp_path, monkeypatch, exit_code
     assert any(d["reason"] == reason for d in result.failure_details)
 
 
+def test_the_exit_code_table_and_the_script_header_agree():
+    """`_EXIT_REASONS` says it is "kept in lockstep with the script's header
+    comment", and nothing was checking that.
+
+    The two are a restatement of one protocol across a language boundary, so
+    lockstep is the only thing that makes the second copy safe to read -- and a
+    claim maintained by hand is the claim that drifts. Derived from both sides
+    here rather than spelled out a third time, so adding a code to either half
+    fails until the other names it.
+
+    `0` is the script's success path and has no failure reason, which is why it
+    is the one code excluded rather than an exception list.
+    """
+    header = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text(encoding="utf-8")
+    header = header.split("# Two ports,", 1)[0]
+    documented = {int(code) for code in re.findall(r"^#   (\d+)  ", header, re.MULTILINE)}
+
+    assert documented - {0} == set(mod._EXIT_REASONS), (
+        "the script header and _EXIT_REASONS disagree about which exit codes exist: "
+        f"header-only={sorted(documented - {0} - set(mod._EXIT_REASONS))} "
+        f"table-only={sorted(set(mod._EXIT_REASONS) - documented)}"
+    )
+
+
+@pytest.mark.parametrize("exit_code", sorted(mod._EXIT_REASONS))
+def test_every_named_exit_code_is_one_the_script_can_produce(exit_code):
+    """The other direction, and the one the mapping test above cannot see.
+
+    `_stub_docker` can return any code, so a reason mapped to a code no branch of
+    the script ever exits with passes every other test here while documenting a
+    verdict that cannot happen. `64` is the shared usage exit and appears many
+    times; the rollout verdicts appear once or twice each.
+    """
+    script = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text(encoding="utf-8")
+    body = script.split("# Two ports,", 1)[1]
+    produced = re.search(rf"^\s*exit {exit_code}\b", body, re.MULTILINE) or re.search(
+        rf"^\s*overall={exit_code}\b", body, re.MULTILINE
+    )
+    assert produced, f"no branch of ts_bench_serve.sh exits {exit_code}"
+
+
 def test_bring_up_failure_is_reported_as_did_not_run(tmp_path, monkeypatch):
     """A server that never came up measured nothing; folding it into the matrix
     as a data point would be worse than reporting it as did-not-run."""
@@ -2605,7 +2646,16 @@ def test_a_failure_without_a_step_still_points_at_an_iteration(tmp_path, monkeyp
 
 
 def _run_script_audit(
-    tmp_path: Path, doc: dict, *, expected: int = 32, min_mean_output: int = 0
+    tmp_path: Path,
+    doc: dict,
+    *,
+    expected: int = 32,
+    min_mean_output: int = 0,
+    rollout_samples: int = 1,
+    dataset: str = "random",
+    # Generous by default so a fixture's lengths are not capped unless a
+    # test is specifically about the cap.
+    output_len: int = 100000,
 ) -> str:
     """Drive `audit_result_json` out of ts_bench_serve.sh directly.
 
@@ -2630,11 +2680,54 @@ def _run_script_audit(
     harness.write_text(
         f"NUM_PROMPTS={expected}\n"
         f"MIN_MEAN_OUTPUT_TOKENS={min_mean_output}\n"
+        f"ROLLOUT_SAMPLES={rollout_samples}\n"
+        f"DATASET={dataset}\n"
+        f"OUTPUT_LEN={output_len}\n"
         f'{body}\naudit_result_json "$1"\n'
     )
     proc = subprocess.run(["bash", str(harness), str(export)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip()
+
+
+def _run_bench_script(
+    tmp_path: Path,
+    *,
+    min_mean: int,
+    output_len,
+    dataset: str = "random",
+    samples: int = 4,
+) -> subprocess.CompletedProcess:
+    """Run ts_bench_serve.sh far enough to reach its pre-startup validation.
+
+    There is no TokenSpeed in this environment, so a configuration the script
+    accepts stops at the `'tokenspeed' not on PATH` check -- which is exactly the
+    signal these tests want, since that check sits after the usage block and
+    before the model loads. A usage error therefore shows up as its own message,
+    and anything the script tolerates shows up as the PATH one.
+    """
+    env = {
+        **os.environ,
+        "TS_OUT_DIR": str(tmp_path),
+        "TS_ROLLOUT": "1",
+        "TS_IGNORE_EOS": "0",
+        "TS_TEMPERATURE": "1.0",
+        "TS_SAVE_DETAILED": "1",
+        "TS_ROLLOUT_SAMPLES": str(samples),
+        "TS_MIN_MEAN_OUTPUT_TOKENS": str(min_mean),
+        "TS_OUTPUT_LEN": str(output_len),
+        "TS_DATASET": dataset,
+    }
+    if dataset == "sharegpt":
+        staged = tmp_path / "sharegpt.json"
+        staged.write_text("[]")
+        env["TS_DATASET_PATH"] = str(staged)
+    return subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 def test_the_in_container_audit_passes_a_clean_export(tmp_path):
@@ -3924,23 +4017,55 @@ def test_an_explicit_hf_home_is_left_where_it_was_pointed(tmp_path):
 # ---------------------------------------------------------------- rollout mode
 
 
+# The export the bench writes without `--save-detailed` has no `output_lens`
+# key at all. `None` already means "generate a healthy array" here, so the
+# absent case needs a spelling of its own rather than borrowing `[]`.
+_OMIT = object()
+
+
 def _rollout_doc(
     *,
     completed: int = 32,
     total_output_tokens: int = 8192,
     output_lens: list[int] | None = None,
+    samples: int = mod._DEFAULT_ROLLOUT_SAMPLES,
     **overrides,
 ) -> dict:
     """A `--save-detailed` export from an EOS-respecting sampled run.
 
     Differs from `_bench_doc` in the two fields a rollout is read through: the
     generated-token total is a property of the policy rather than of the recipe,
-    and `output_lens` carries the per-request lengths that only appear with
+    and `output_lens` carries the per-completion lengths that only appear with
     `--save-detailed`.
+
+    `output_lens` is populated by default, and has to be: rollout defaults
+    `save_detailed` on, so an export without the array is
+    `result_json_unusable` rather than a rollout with no distribution. The
+    default spreads `total_output_tokens` evenly over `completed * samples`
+    completions, which is the summed-usage shape these fixtures describe. Pass
+    `samples=` to match a cell's `rollout_samples`, or `output_lens=` to state
+    the array directly.
+
+    `output_lens=_OMIT` is how a test asks for the *missing*-array case. It used
+    to be spelled `output_lens=[]`, which writes the key with an empty list --
+    the same absent-versus-present-but-unusable conflation the two audits were
+    corrected for, reproduced in the fixture that tests them. A test that means
+    "the bench stripped the array" has to produce a document with no key in it,
+    or it is testing the other case under the first one's name.
     """
     doc = _bench_doc(completed=completed)
     doc["total_output_tokens"] = total_output_tokens
-    if output_lens is not None:
+    if output_lens is None:
+        count = max(1, completed * samples)
+        # Distributed with the remainder spread, so `sum(output_lens)` equals
+        # `total_output_tokens` exactly. A fixture whose two fields disagree is
+        # not an export any gateway would write, and it would make the floor's
+        # reading look arbitrary.
+        base, extra = divmod(max(0, int(total_output_tokens)), count)
+        output_lens = [base + 1] * extra + [base] * (count - extra)
+    if output_lens is _OMIT:
+        doc.pop("output_lens", None)
+    else:
         doc["output_lens"] = output_lens
     doc.update(overrides)
     return doc
@@ -4085,13 +4210,334 @@ def test_rollout_env_carries_the_sampling_contract(tmp_path):
 
     assert env["TS_ROLLOUT"] == "1"
     assert env["TS_ROLLOUT_SAMPLES"] == "8"
-    assert env["TS_TOP_P"] == "0.950000"
+    assert env["TS_SAMPLING_BACKEND"] == "triton"
+    assert env["TS_TOP_P"] == "0.95"
     assert "e" not in env["TS_TEMPERATURE"], env["TS_TEMPERATURE"]
     assert float(env["TS_TEMPERATURE"]) == pytest.approx(0.00001)
     # Defaulted on inside the mode: the per-request `output_lens` array the
     # length distribution is computed from is stripped from the export without it.
     assert env["TS_SAVE_DETAILED"] == "1"
     assert env["TS_MIN_MEAN_OUTPUT_TOKENS"] == "8"
+
+
+@pytest.mark.parametrize("value", [1e-7, 1e-5, 1.5e-6, 0.95, 0.7, 1.0, 2.0])
+def test_the_temperature_reaches_the_container_undamaged(tmp_path, value):
+    """Six fractional digits are not enough, and the shortfall is not cosmetic.
+
+    `format(1e-7, "f")` is `'0.000000'`: a plain decimal the script accepts, and
+    zero. Zero temperature is the one value this workload rejects by name, so
+    the serializer was reintroducing it after validation had passed, and the
+    cell would have run `n` copies of the argmax while reporting itself as
+    sampled at 1e-7.
+    """
+    wl = _rollout(tmp_path, temperature=value)
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    spelled = wl._container_env()["TS_TEMPERATURE"]
+
+    assert "e" not in spelled, spelled
+    assert float(spelled) == value
+    assert float(spelled) > 0
+
+
+def test_rollout_asks_the_server_for_a_sampling_backend(tmp_path):
+    """The engine's own default is `greedy` off NVIDIA, and greedy accepts the
+    sampling parameters and discards them -- HTTP 200, `n` identical choices,
+    nothing in the log. Every audit in this workload reads counts and lengths,
+    none of which differ, so the setting has to be made rather than checked."""
+    wl = _rollout(tmp_path, rollout_samples=8)
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+
+    assert wl._container_env()["TS_SAMPLING_BACKEND"] == "triton"
+
+
+def test_greedy_is_refused_under_rollout(tmp_path):
+    """The other route to the run `temperature: 0` is rejected for.
+
+    Greedy is a backend the engine offers and not one this mode can use: it
+    returns the argmax and ignores the sampling parameters, so the cell would
+    publish `n` repetitions of one decode as a sampled rollout. Accepting it
+    would have made the whole `sampling_backend` key a way to reinstate the
+    default this change exists to move away from.
+    """
+    with pytest.raises(ValueError, match="greedy"):
+        _rollout(tmp_path, sampling_backend="greedy").setup()
+
+
+def test_the_container_also_refuses_greedy_under_rollout(tmp_path):
+    """Both layers, because the engine read-back cannot be what catches it.
+
+    The `/get_server_info` check fires only when the engine reports greedy and
+    greedy is *not* what was asked for. A run that asked for it passes that
+    check by construction, so the refusal has to happen before the server
+    starts.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SAMPLING_BACKEND": "greedy",
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert "greedy" in output, output
+
+
+@pytest.mark.parametrize(
+    ("asked", "reported", "expected_exit", "expected_reason"),
+    [
+        ("triton", "triton", None, None),
+        # The hole: sampling really is on, so the old greedy-only test passed
+        # this, and the cell published triton_full's numbers under triton's name.
+        # A distinct verdict from the greedy case, because here the measurement
+        # is real and only its label is wrong.
+        ("triton", "triton_full", 58, "rollout_sampling_backend_mismatch"),
+        ("triton_full", "triton", 58, "rollout_sampling_backend_mismatch"),
+        ("triton", "greedy", 57, "rollout_sampling_ignored"),
+    ],
+)
+def test_the_read_back_asserts_the_backend_asked_for(
+    tmp_path, asked, reported, expected_exit, expected_reason
+):
+    """Assert what was requested, not the absence of the one known-bad value.
+
+    Exact match rather than a family, and the engine's own resolution is the
+    reason: `_resolve_backend_name` returns `server_args.sampling_backend or
+    _get_default_backend_name()`, the CLI value verbatim when set, and
+    `create_sampling_backend` raises on a name it does not know rather than
+    falling back to a neighbour. So there is no legitimate path from `triton` to
+    `triton_full`, and treating them as one family would reintroduce the
+    looseness that let greedy through, across two backends with different
+    implementations and different performance.
+    """
+    argv_log = tmp_path / "argv.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "tokenspeed"
+    # A stub server that answers /health, /health_generate and, crucially,
+    # /get_server_info with a backend name the test chooses -- which is the only
+    # way to exercise a disagreement without a real engine.
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$@" >> "{argv_log}"\n'
+        'if [ "$1" = "version" ]; then echo fake; exit 0; fi\n'
+        'if [ "$1" = "serve" ]; then\n'
+        "  port=\"\"\n"
+        "  while [ $# -gt 0 ]; do\n"
+        '    if [ "$1" = "--control-port" ]; then port="$2"; fi\n'
+        "    shift\n"
+        "  done\n"
+        '  exec python3 -c "\n'
+        "import http.server, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers()\n"
+        "        if self.path.startswith('/get_server_info'):\n"
+        f"            self.wfile.write(b'{{\\\"sampling_backend\\\":\\\"{reported}\\\"}}')\n"
+        "        else:\n"
+        "            self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n"
+        '" "${port}"\n'
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    with socket.socket() as probe, socket.socket() as probe2:
+        probe.bind(("127.0.0.1", 0))
+        probe2.bind(("127.0.0.1", 0))
+        gateway, control = probe.getsockname()[1], probe2.getsockname()[1]
+
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_PORT": str(gateway),
+            "TS_CONTROL_PORT": str(control),
+            "TS_READY_TIMEOUT": "60",
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SAMPLING_BACKEND": asked,
+            "TS_BENCH_WARMUP_STEPS": "0",
+        },
+        timeout=300,
+    )
+    output = proc.stdout + proc.stderr
+
+    if expected_exit is not None:
+        assert proc.returncode == expected_exit, output
+        assert expected_reason in output, output
+        assert f"asked={asked}" in output and f"engine={reported}" in output, output
+        # The greedy label must not be reused for a backend substitution: it
+        # asserts the sampling parameters did nothing, which is false there.
+        if expected_reason != "rollout_sampling_ignored":
+            assert "rollout_sampling_ignored" not in output, output
+    else:
+        # Neither verdict: the run goes on to the bench step, which the stub fails.
+        assert proc.returncode not in (57, 58), output
+        assert "rollout_sampling" not in output, output
+
+
+@pytest.mark.parametrize(
+    ("label", "handler"),
+    [
+        # The endpoint is absent: an engine build that does not offer it.
+        ("missing_endpoint", "self.send_response(404); self.end_headers()"),
+        # Present, answers, and says nothing about the backend.
+        (
+            "no_key",
+            "self.send_response(200); self.end_headers();"
+            " self.wfile.write(b'{\"model\":\"m\"}')",
+        ),
+        # Present and answers with something that is not JSON at all.
+        (
+            "unparseable",
+            "self.send_response(200); self.end_headers();"
+            " self.wfile.write(b'<html>gateway timeout</html>')",
+        ),
+    ],
+)
+def test_an_unreadable_backend_fails_the_rollout_rather_than_warning(
+    tmp_path, label, handler
+):
+    """A rollout that cannot verify its backend must not publish one.
+
+    This warned and continued until the #496 review. The argument for warning
+    was that `/get_server_info` is an engine convenience rather than a
+    contract, so a build without it is not evidence that sampling is broken.
+    True, and the wrong test: it is not evidence that sampling *works* either,
+    and this read-back is the only check that can tell the difference. Every
+    audit downstream counts requests and tokens, and those are identical under
+    sampled and argmax decoding -- which is the reason exits 57 and 58 exist at
+    all.
+
+    So warning published a cell labelled with the requested backend on no
+    evidence that any sampling happened, in exactly the case where the evidence
+    was unavailable. An unverifiable claim is a stronger reason to stop than a
+    refuted one: 57 and 58 at least say what ran.
+
+    Three ways to be unreadable, because they are three different operator
+    situations and the old code collapsed all of them into a warning: no
+    endpoint, an endpoint that answers without the key, and one that answers
+    with something that is not JSON. One verdict, since the next move is the
+    same for all three, but the HTTP code and the response body are reported so
+    which one it was is attributable.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "tokenspeed"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "version" ]; then echo fake; exit 0; fi\n'
+        'if [ "$1" = "serve" ]; then\n'
+        "  port=\"\"\n"
+        "  while [ $# -gt 0 ]; do\n"
+        '    if [ "$1" = "--control-port" ]; then port="$2"; fi\n'
+        "    shift\n"
+        "  done\n"
+        '  exec python3 -c "\n'
+        "import http.server, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        if self.path.startswith('/get_server_info'):\n"
+        f"            {handler}\n"
+        "            return\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n"
+        '" "${port}"\n'
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    with socket.socket() as probe, socket.socket() as probe2:
+        probe.bind(("127.0.0.1", 0))
+        probe2.bind(("127.0.0.1", 0))
+        gateway, control = probe.getsockname()[1], probe2.getsockname()[1]
+
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_PORT": str(gateway),
+            "TS_CONTROL_PORT": str(control),
+            "TS_READY_TIMEOUT": "60",
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SAMPLING_BACKEND": "triton",
+            "TS_BENCH_WARMUP_STEPS": "0",
+        },
+        timeout=300,
+    )
+    output = proc.stdout + proc.stderr
+
+    assert proc.returncode == 60, output
+    assert "rollout_sampling_backend_unverified" in output, output
+    assert "asked=triton" in output, output
+    # Not the refuted verdicts: nothing here says the engine ignored sampling or
+    # substituted a backend, and claiming either would be inventing a finding.
+    assert "rollout_sampling_ignored" not in output, output
+    assert "rollout_sampling_backend_mismatch" not in output, output
+    # It must not have proceeded to measure.
+    assert "TS_BENCH_STEP_START" not in output, output
+
+
+def test_exit_sixty_is_a_named_reason_on_the_host(tmp_path):
+    """The script's verdict has to survive the trip back into `failure_details`.
+
+    An exit code the host does not know maps to no reason, so the one failure
+    that says "this rollout is unverifiable" would arrive as a bare number --
+    which is how it would get read as a flake and retried.
+    """
+    assert mod._EXIT_REASONS[60] == "rollout_sampling_backend_unverified"
+
+    script = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text("utf-8")
+    for code, reason in mod._EXIT_REASONS.items():
+        assert f"exit {code}" in script, (
+            f"the host maps exit {code} to {reason!r} but the script never "
+            "exits with it; the two lists have drifted."
+        )
+
+
+def test_an_unknown_sampling_backend_is_a_recipe_error(tmp_path):
+    """Rejected on the host, where it reads as the recipe error it is. Left to
+    the container it is an argparse failure after the weights have loaded, which
+    surfaces as exit 50 several minutes into the trial."""
+    with pytest.raises(ValueError, match="sampling_backend"):
+        _rollout(tmp_path, sampling_backend="nucleus").setup()
+
+
+def test_the_sampling_backend_is_rejected_outside_rollout(tmp_path):
+    """Same contract as the other sampling keys: outside the mode nothing is
+    sampled, so accepting it would publish a setting that changed nothing."""
+    with pytest.raises(ValueError, match="sampling_backend"):
+        _make(tmp_path, sampling_backend="triton").setup()
 
 
 def test_an_ordinary_serving_cell_carries_no_rollout_env(tmp_path):
@@ -4145,6 +4591,29 @@ def test_a_mitigation_cannot_redefine_the_rollout_contract(tmp_path):
             wl._container_env()
 
 
+@pytest.mark.parametrize("name", [f"TS_{key.upper()}" for key in mod._ROLLOUT_ONLY_KEYS])
+def test_a_benchmark_cell_reserves_the_rollout_variables_too(tmp_path, name):
+    """The same keys on the cell that sets none of them.
+
+    Every one is absent on a benchmark cell, so only `_PROTOCOL_ENV_KEYS` can
+    reserve it there, and `TS_SAMPLING_BACKEND` was missing from it: a
+    mitigation or a `docker_args -e` spelling it reached a container that sends
+    no backend outside rollout, so the cell was named for a knob that changed
+    nothing. The script now refuses it as well, but only once the container is
+    up and without naming the mitigation that set it.
+
+    Unowned `TS_*` knobs still pass through -- see
+    `test_mitigation_env_wins_over_unowned_tokenspeed_vars`.
+    """
+    wl = _make(tmp_path, _aorta_trial_env={name: "triton"})
+    wl.setup()
+    wl._run_token, wl._port, wl._control_port = "tok", 8000, 8001
+    with pytest.raises(ValueError, match=name):
+        wl._container_env()
+    with pytest.raises(ValueError, match=name):
+        _make(tmp_path, docker_args=["-e", f"{name}=triton"]).setup()
+
+
 def test_a_collapsed_policy_fails_the_rollout_floor(tmp_path, monkeypatch):
     """The served-request audit stops being sufficient once EOS is respected.
 
@@ -4166,10 +4635,167 @@ def test_a_collapsed_policy_fails_the_rollout_floor(tmp_path, monkeypatch):
     reasons = [detail["reason"] for detail in result.failure_details]
     assert reasons == ["rollout_output_too_short"], result.failure_details
     detail = result.failure_details[0]
-    assert detail["mean_output_tokens"] == pytest.approx(33 / 32)
+    # Per completion: 32 requests at the default `rollout_samples: 4`.
+    assert detail["mean_output_tokens"] == pytest.approx(33 / (32 * 4))
     # Said explicitly, because the counters look healthy and the reader's first
     # guess will be the engine.
     assert "stopped generating rather than a serving failure" in detail["detail"]
+
+
+def test_the_floor_does_not_weaken_as_the_sample_count_grows(tmp_path, monkeypatch):
+    """The case a per-request floor let through, and it was the built-in one.
+
+    `total_output_tokens` sums `usage.completion_tokens` over all `n` choices,
+    so a policy answering with an immediate EOS produces about `n` tokens per
+    request. Divided by `completed` alone that reads as `n`, which clears the
+    default floor of 8 from `rollout_samples: 8` upward -- and `samples-8` is a
+    cell in the shipped rollout recipe. The collapse the guard exists for was
+    therefore invisible at exactly the configuration most likely to run.
+    """
+    wl = _rollout(tmp_path, rollout_samples=8, min_mean_output_tokens=8)
+    wl.setup()
+    # 32 requests, 8 completions each, one token apiece.
+    _stub_docker(
+        wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=32 * 8, samples=8)]
+    )
+    result = wl.run()
+
+    assert not result.passed, result.metrics
+    detail = result.failure_details[0]
+    assert detail["reason"] == "rollout_output_too_short"
+    assert detail["mean_output_tokens"] == pytest.approx(1.0)
+    assert "output_lens" in detail["basis"], detail["basis"]
+    # Per request this is 8.0, which is exactly the floor: the old reading
+    # cleared it.
+    assert 32 * 8 / 32 == 8.0
+
+
+def test_an_unreadable_export_is_not_also_reported_as_a_short_rollout(
+    tmp_path, monkeypatch
+):
+    """One broken export, one verdict -- pinned because it regressed once.
+
+    The boundary used to fall out of the floor's own `total_output_tokens > 0`
+    guard. Reading the per-completion lengths instead removed that coupling, so
+    an export with a broken token total came back as *both*
+    `result_json_unusable` and `rollout_output_too_short`. The audit owns "we
+    could not read it"; the floor owns "we read it and it is too short", and it
+    now stands down whenever the audit has already claimed the step.
+    """
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        # Readable, short lengths -- but a token total the audit rejects.
+        docs=[_rollout_doc(total_output_tokens=0, output_lens=[0] * 128)],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
+def test_a_first_choice_only_gateway_does_not_fail_a_healthy_rollout(
+    tmp_path, monkeypatch
+):
+    """The false failure the previous fix introduced, in the other direction.
+
+    Dividing `total_output_tokens` by `completed * rollout_samples` assumed the
+    gateway sums `usage.completion_tokens` across all `n` choices. This class's
+    own metric docs allow the other shape, first-choice-only, and there the
+    division is wrong by a factor of `n`: healthy 16-token completions at
+    `rollout_samples: 8` read as 2 and failed a floor of 8.
+
+    `output_lens` settles it without an assumption -- one entry per completion,
+    so its mean is the per-completion mean whatever the counters mean.
+    """
+    wl = _rollout(tmp_path, rollout_samples=8, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=32,
+                # First-choice-only accounting: one choice's worth per request.
+                total_output_tokens=32 * 16,
+                # But 8 genuine completions per request, 16 tokens each.
+                output_lens=[16] * (32 * 8),
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    # Sanity: the old rule would have failed this.
+    assert (32 * 16) / (32 * 8) == 2.0
+
+
+def test_the_two_floors_agree_on_the_sample_count(tmp_path):
+    """Host and container must divide by the same thing.
+
+    Two independent audits are only worth running while they enforce one
+    contract; the container's runs first and its verdict is the one a reader
+    sees, so a container still dividing per request would pass the step the
+    host was about to fail.
+    """
+    # 256 tokens over 32 requests at n=8: one token per completion, and the
+    # per-completion array says so without anyone having to divide.
+    collapsed = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": 32 * 8,
+        "output_lens": [1] * (32 * 8),
+    }
+    verdict = _run_script_audit(
+        tmp_path, collapsed, min_mean_output=8, rollout_samples=8
+    )
+    assert verdict.startswith("SHORTLEN"), verdict
+    assert "output_lens" in verdict, verdict
+
+    # The same token total spread over 32 completions is a genuine 8 apiece and
+    # passes, so the check above is the per-completion length and not a floor
+    # that fails everything.
+    healthy = dict(collapsed, output_lens=[8] * 32)
+    assert _run_script_audit(
+        tmp_path, healthy, min_mean_output=8, rollout_samples=1
+    ).startswith("OK")
+
+
+@pytest.mark.parametrize("total_output", [33.5, 40.0])
+def test_a_non_integer_token_total_is_unusable_on_both_sides(tmp_path, monkeypatch, total_output):
+    """`total_output_tokens` is a count, and the two audits disagreed about it.
+
+    The host's core-metric audit accepted any finite positive scalar while the
+    rollout floor guarded on `type(...) is int`, so `33.5` passed the audit
+    *and* skipped the floor -- the host being the lenient one twice over on the
+    one export shape both layers should reject. The container has always called
+    it `UNPARSEABLE`.
+
+    `40.0` is in the parametrisation on purpose: it is numerically fine and
+    still rejected, because the contract being matched is the container's
+    `type(...) is int` and not "is it a whole number".
+    """
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_rollout_doc(total_output_tokens=total_output)])
+    result = wl.run()
+
+    assert not result.passed
+    reasons = [detail["reason"] for detail in result.failure_details]
+    assert "result_json_unusable" in reasons, result.failure_details
+    # And not *also* reported as a short rollout: one broken export, one verdict.
+    assert "rollout_output_too_short" not in reasons, result.failure_details
+
+
+def test_the_container_agrees_a_non_integer_token_total_is_unparseable(tmp_path):
+    """The other half of the pair above, so the two cannot drift again."""
+    doc = {"completed": 32, "failed": 0, "total_output_tokens": 33.5}
+    verdict = _run_script_audit(tmp_path, doc, min_mean_output=8, rollout_samples=1)
+    assert verdict.startswith("UNPARSEABLE"), verdict
 
 
 def test_a_healthy_rollout_clears_the_floor(tmp_path, monkeypatch):
@@ -4198,7 +4824,7 @@ def test_the_floor_is_not_applied_outside_rollout(tmp_path, monkeypatch):
 
 
 def test_an_unusable_token_total_fails_rather_than_skipping_the_floor(tmp_path, monkeypatch):
-    """"We could not read it" must not become "it passed".
+    """`We could not read it` must not become `it passed`.
 
     The floor is computed from `total_output_tokens`, and an export omitting it
     would otherwise leave the rollout's one mode-specific guard silently
@@ -4338,6 +4964,852 @@ def test_the_two_audits_draw_the_unreadable_line_in_the_same_place(
     ], result.failure_details
 
 
+@pytest.mark.parametrize(
+    "unusable",
+    [[], None, "abc", {}, {"a": 1}, 5, [1.5], [-1], [True]],
+    ids=[
+        "empty",
+        "null",
+        "string",
+        "empty-object",
+        "object",
+        "number",
+        "fractional",
+        "negative",
+        "boolean",
+    ],
+)
+def test_the_two_audits_agree_that_a_present_output_lens_must_be_usable(
+    tmp_path, monkeypatch, unusable
+):
+    """One rule about a present array, asserted as an equivalence rather than twice.
+
+    The host's `_valid_output_lens` calls every one of these unusable, and under
+    `save_detailed` that makes the step `result_json_unusable`. The container
+    tested the *value* instead of the key, so `[]`, a string, an object and a
+    number fell through to the per-request fallback and the same export came
+    back `OK` or `SHORTLEN` from the layer that runs first -- one document, two
+    names, and the wrong one visible.
+
+    Enumerated here rather than restated in each layer's own tests, because that
+    restating is what let the two drift apart in the first place.
+    """
+    doc = {"completed": 32, "failed": 0, "total_output_tokens": 8192, "output_lens": unusable}
+    verdict = _run_script_audit(tmp_path, doc, min_mean_output=8)
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+    wl = _rollout(tmp_path, min_mean_output_tokens=8)
+    wl.setup()
+    # Assigned after the fixture rather than through it: `output_lens=None` is
+    # the fixture's "generate a healthy array" sentinel, so the null case has to
+    # be written onto the document to be the null case at all.
+    host_doc = _rollout_doc()
+    host_doc["output_lens"] = unusable
+    _stub_docker(wl, monkeypatch, docs=[host_doc])
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
+def test_a_present_null_output_lens_is_not_an_absent_one(tmp_path):
+    """The shape that separates testing the key from testing the value.
+
+    `doc.get` answers `None` for an absent key and for `"output_lens": null`
+    alike, so every value-based test -- including `is not None` -- reads a
+    present null as an absence and falls back per request on it. Only presence
+    of the key distinguishes them, which is why that is what the audit asks.
+    """
+    absent = _run_script_audit(
+        tmp_path, {"completed": 32, "failed": 0, "total_output_tokens": 8192}, min_mean_output=8
+    )
+    assert absent.startswith("OK"), absent
+
+    present_null = _run_script_audit(
+        tmp_path,
+        {"completed": 32, "failed": 0, "total_output_tokens": 8192, "output_lens": None},
+        min_mean_output=8,
+    )
+    assert present_null.startswith("UNPARSEABLE"), present_null
+
+
+def test_the_in_container_audit_still_falls_back_when_output_lens_is_absent(tmp_path):
+    """The narrowness control for the two tests above.
+
+    Refusing every export would satisfy them both. An absent array is a
+    configuration -- it is what `save_detailed: false` produces -- so it must
+    still reach the per-request fallback and say in the verdict that it did.
+    """
+    short = _run_script_audit(
+        tmp_path, {"completed": 32, "failed": 0, "total_output_tokens": 33}, min_mean_output=8
+    )
+    assert short.startswith("SHORTLEN"), short
+    assert "per_request" in short, short
+
+    healthy = _run_script_audit(
+        tmp_path, {"completed": 32, "failed": 0, "total_output_tokens": 8192}, min_mean_output=8
+    )
+    assert healthy.startswith("OK"), healthy
+
+
+@pytest.mark.parametrize("backend", [["triton"], {"triton": True}], ids=["list", "object"])
+def test_a_non_string_sampling_backend_is_a_recipe_error_not_a_crash(tmp_path, backend):
+    """An unhashable value reached a set membership test and left as `TypeError`.
+
+    The first condition already excluded non-strings, but only for itself: the
+    branches that build the explanation still read the raw value, and
+    `sampling_backend: [triton]` raised `unhashable type: 'list'` out of
+    `in _SAMPLING_BACKENDS` -- a crash where the recipe error this block exists
+    to raise should have been.
+    """
+    with pytest.raises(ValueError, match="sampling_backend"):
+        _rollout(tmp_path, sampling_backend=backend).setup()
+
+
+def test_a_named_backend_still_gets_its_own_explanation(tmp_path):
+    """Narrowness: normalising the value must not flatten the two named cases.
+
+    `greedy` and the CUDA-only backends each carry a reason a reader needs, and
+    a fix that routed every rejection through the bare message would pass the
+    test above while deleting them.
+    """
+    with pytest.raises(ValueError, match="greedy returns the argmax"):
+        _rollout(tmp_path, sampling_backend="greedy").setup()
+    with pytest.raises(ValueError, match="CUDA-only"):
+        _rollout(tmp_path, sampling_backend="flashinfer").setup()
+
+
+def test_a_step_that_dropped_requests_is_not_also_called_a_short_policy(
+    tmp_path, monkeypatch
+):
+    """The floor's detail ends "Every request was served" -- so it must not run
+    on a record that just reported the opposite.
+
+    A partially failed step produced `served_request_shortfall` naming
+    `completed=16 failed=16` and then `rollout_output_too_short` asserting every
+    request was served, in one result. The audit owns the counts; the floor owns
+    the lengths, and only once the counts are sound.
+    """
+    wl = _rollout(tmp_path, num_prompts=32, rollout_samples=4, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=16, failed=16, total_output_tokens=64, output_lens=[1] * 64
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "served_request_shortfall"
+    ], result.failure_details
+
+
+def test_the_floor_still_fires_when_the_counts_are_sound(tmp_path, monkeypatch):
+    """Narrowness for the test above: suppressing the floor outright would pass
+    it. The same short export with every request served is the case the floor
+    exists for, and there its closing sentence is true."""
+    wl = _rollout(tmp_path, num_prompts=32, rollout_samples=4, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=32, failed=0, total_output_tokens=128, output_lens=[1] * 128
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "rollout_output_too_short"
+    ], result.failure_details
+
+
+def _partial_shortfall_bench_doc() -> dict:
+    # A zero per failed request, which `_valid_output_lens` documents as what the
+    # bench records: 32 entries against `completed: 16`, so neither legitimate
+    # cardinality -- exactly because 16 requests failed.
+    doc = _bench_doc(completed=16, failed=16)
+    doc["output_lens"] = [128] * 16 + [0] * 16
+    return doc
+
+
+def _total_outage_bench_doc() -> dict:
+    # What a step that served nothing plausibly exports. The bench source is not
+    # available here, so these zeros are an assumption -- which is why the fix
+    # gates the audit on the counts rather than relaxing the rules it contains:
+    # whatever the bench writes for a total outage, the shortfall is the verdict.
+    doc = _bench_doc(completed=0, failed=32, throughput=0.0, ttft=0.0)
+    doc.update(
+        request_throughput=0.0,
+        total_token_throughput=0.0,
+        mean_ttft_ms=0.0,
+        mean_tpot_ms=0.0,
+        median_tpot_ms=0.0,
+        total_output_tokens=0,
+        output_lens=[0] * 32,
+    )
+    return doc
+
+
+def _corrupt_duration_shortfall_doc() -> dict:
+    doc = _bench_doc(completed=16, failed=16)
+    doc["duration"] = "abc"
+    return doc
+
+
+@pytest.mark.parametrize(
+    ("make_wl", "doc", "samples"),
+    [
+        pytest.param(
+            lambda p: _make(p, num_prompts=32),
+            _partial_shortfall_bench_doc(),
+            1,
+            id="benchmark-partial",
+        ),
+        pytest.param(
+            lambda p: _make(p, num_prompts=32, save_detailed=True),
+            _partial_shortfall_bench_doc(),
+            1,
+            id="benchmark-partial-save-detailed",
+        ),
+        pytest.param(
+            lambda p: _rollout(p, num_prompts=32, rollout_samples=4),
+            _rollout_doc(
+                completed=16,
+                failed=16,
+                total_output_tokens=2048,
+                output_lens=[32] * 64 + [0] * 64,
+            ),
+            4,
+            id="rollout-partial",
+        ),
+        # The rules beyond the length array: a step that served nothing has no
+        # throughput or TTFT to be positive, so the positivity audit contradicted
+        # the shortfall the same way.
+        pytest.param(
+            lambda p: _make(p, num_prompts=32), _total_outage_bench_doc(), 1, id="total-outage"
+        ),
+        # The deliberate cost. The duration really is corrupt, but the container
+        # reports SHORTFALL for this export and stops, and the step fails either
+        # way; one verdict per shortfall step is what both layers now give.
+        pytest.param(
+            lambda p: _make(p, num_prompts=32),
+            _corrupt_duration_shortfall_doc(),
+            1,
+            id="partial-with-corrupt-duration",
+        ),
+    ],
+)
+def test_a_shortfall_is_not_also_called_an_unusable_export(
+    tmp_path, monkeypatch, make_wl, doc, samples
+):
+    """A shortfall step keeps its own verdict, in both layers.
+
+    The measurement audit's rules are written for a step that served every
+    request. Run after a shortfall they called a correctly shaped export
+    `result_json_unusable` beside the `served_request_shortfall` that explained
+    it, while the container, which prints SHORTFALL before looking at anything
+    else, gave one verdict for the same export.
+    """
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=samples
+    )
+    assert verdict.startswith("SHORTFALL"), verdict
+
+    wl = make_wl(tmp_path)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "served_request_shortfall"
+    ], result.failure_details
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # Sound counts, and an array that is neither shape: still a broken export.
+        pytest.param({"output_lens": [128] * 16}, id="short-array"),
+        # Sound counts, and a step that served everything reporting no output.
+        pytest.param({"output_throughput": 0.0}, id="zero-throughput"),
+    ],
+)
+def test_sound_counts_still_get_the_measurement_audit(tmp_path, monkeypatch, overrides):
+    """Narrowness for the test above: gating on the shortfall must not retire the
+    audit. With every request served, both rules are the ones that apply."""
+    doc = _bench_doc()
+    doc.update(overrides)
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
+def test_a_clean_step_with_a_full_length_array_passes(tmp_path, monkeypatch):
+    """Narrowness: a present array is still read, and accepted, once the counts
+    are sound -- one entry per completed request, in both layers."""
+    doc = _bench_doc()
+    doc["output_lens"] = [128] * 32
+    assert _run_script_audit(tmp_path, doc, expected=32).startswith("OK")
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert result.passed, result.failure_details
+
+
+_OVERSIZED_INT = 10**1000
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["output_lens", "total_output_tokens", "output_throughput", "a_field_aorta_never_reads"],
+)
+def test_an_oversized_int_in_an_export_does_not_crash_the_trial(
+    tmp_path, monkeypatch, field
+):
+    """JSON bounds no integer, so `json.load` hands back one `float()` cannot take.
+
+    `math.isfinite` raises `OverflowError` rather than returning False, and that
+    propagated out of result building and aborted the whole trial -- an export
+    the workload is meant to classify as unusable instead took the process down.
+
+    Parametrised over four fields because the conversion is reached four ways,
+    and only the first is in `_valid_output_lens`: the core-metric audit converts
+    `total_output_tokens` and each required metric, and the scalar sweep converts
+    *every* key of the document -- so the last case crashed on a field this
+    workload does not read at all. A fix at one call site leaves the other three.
+    """
+    wl = _rollout(tmp_path, num_prompts=32, rollout_samples=4, min_mean_output_tokens=8)
+    wl.setup()
+    doc = _rollout_doc()
+    doc["output_lens" if field == "output_lens" else field] = (
+        [_OVERSIZED_INT] if field == "output_lens" else _OVERSIZED_INT
+    )
+    _stub_docker(wl, monkeypatch, docs=[doc])
+
+    result = wl.run()  # must not raise
+
+    if field == "a_field_aorta_never_reads":
+        # Nothing reads it, so excluding it from the scalars is the whole story.
+        assert result.passed, result.failure_details
+    else:
+        assert not result.passed
+        assert [d["reason"] for d in result.failure_details] == [
+            "result_json_unusable"
+        ], result.failure_details
+
+
+@pytest.mark.parametrize("field", ["output_lens", "total_output_tokens"])
+def test_the_container_audit_survives_an_oversized_int_too(tmp_path, field):
+    """The same conversion, twice, in the script's embedded audit.
+
+    `_whole` converts each entry; the per-request fallback divides
+    `total_output_tokens`, and its type and sign checks are integer comparisons
+    that a 1001-digit value passes. The second is reached only when there is no
+    array at all, so fixing `_whole` alone would have left it.
+
+    Unguarded the audit died with a traceback, its stdout empty, and the caller's
+    `case` fell through to `result_json_unusable` -- the right direction by
+    accident, under a name that described nothing and with a Python traceback in
+    the step log.
+    """
+    doc = {"completed": 4, "failed": 0, "total_output_tokens": 128}
+    if field == "output_lens":
+        doc["output_lens"] = [_OVERSIZED_INT] * 4
+    else:
+        doc["total_output_tokens"] = _OVERSIZED_INT
+
+    verdict = _run_script_audit(tmp_path, doc, expected=4, min_mean_output=8)
+
+    assert verdict.startswith("UNPARSEABLE"), verdict
+    assert "Traceback" not in verdict, verdict
+
+
+@pytest.mark.parametrize(
+    "unusable", [None, [], "abc", {"a": 1}, 5], ids=["null", "empty", "string", "object", "number"]
+)
+def test_a_present_output_lens_is_audited_even_without_save_detailed(
+    tmp_path, monkeypatch, unusable
+):
+    """The audit was keyed on the request, and the request is the wrong question.
+
+    `save_detailed: false` makes the bench strip the key, so it cannot produce
+    `[]` or a string here -- a present value that fails the rule is a broken
+    export whatever the cell asked for. Gating on the flag alone left the
+    permitted `save_detailed: false` + `rollout_samples: 1` + floor path reading
+    numbers out of a document the container had already refused, so the two
+    layers disagreed with the host, which publishes the metrics, as the lenient
+    one.
+
+    The numbers here clear the floor, so the only question under test is whether
+    the document is read at all.
+    """
+    wl = _rollout(
+        tmp_path,
+        num_prompts=32,
+        rollout_samples=1,
+        min_mean_output_tokens=8,
+        save_detailed=False,
+    )
+    wl.setup()
+    doc = _rollout_doc(completed=32, total_output_tokens=3200, samples=1)
+    doc["output_lens"] = unusable
+    _stub_docker(wl, monkeypatch, docs=[doc])
+
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+    # And the container says the same thing about the same document.
+    assert _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=1
+    ).startswith("UNPARSEABLE")
+
+
+def test_a_per_request_output_lens_cannot_carry_a_per_completion_floor(
+    tmp_path, monkeypatch
+):
+    """The collapse the floor exists for, clearing the floor exactly.
+
+    `output_lens` has two supported shapes and this class says so: one entry per
+    choice, or one per request. Only the first makes the array's mean a
+    per-completion mean. Read as per-completion regardless, a policy emitting one
+    token per choice at `rollout_samples: 8` reports 8 per request and clears the
+    default floor of 8 to the token -- and `samples-8` is a cell in the shipped
+    rollout recipe.
+
+    It is the same blind denominator `_validated_rollout` refuses to accept at
+    config time, arriving through the array instead of through the scalar.
+    """
+    wl = _rollout(tmp_path, num_prompts=32, rollout_samples=8, min_mean_output_tokens=8)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=256, output_lens=[8] * 32)
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "rollout_length_basis_unusable"
+    ], result.failure_details
+    detail = result.failure_details[0]
+    assert detail["output_lens_count"] == 32
+    assert detail["rollout_samples"] == 8
+    # The escape hatch is named, because the export is not the user's mistake.
+    assert "min_mean_output_tokens: 0" in detail["detail"]
+
+
+def test_the_container_refuses_the_same_basis(tmp_path):
+    """Both layers, or a hand-run script enforces the weaker contract while
+    printing the same verdict names -- the argument the neighbouring
+    `TS_SAVE_DETAILED` refusal already makes."""
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": 256,
+        "output_lens": [8] * 32,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=8
+    )
+    assert verdict.startswith("BADBASIS"), verdict
+    assert "completed=32" in verdict and "samples=8" in verdict, verdict
+
+
+@pytest.mark.parametrize(
+    "samples,lens,expected",
+    [
+        (8, [1] * 256, "rollout_output_too_short"),
+        (1, [1] * 32, "rollout_output_too_short"),
+        (8, [64] * 256, None),
+    ],
+    ids=["per-choice-short", "n1-short", "per-choice-healthy"],
+)
+def test_the_per_choice_shape_is_still_read_as_before(
+    tmp_path, monkeypatch, samples, lens, expected
+):
+    """Narrowness for the two tests above.
+
+    Refusing every array would satisfy them. The per-choice shape is what the
+    measured gateway returns and must still produce an ordinary verdict, short or
+    clean; and at `rollout_samples: 1` per request and per completion are the
+    same number, so no cardinality question arises there at all.
+    """
+    wl = _rollout(
+        tmp_path, num_prompts=32, rollout_samples=samples, min_mean_output_tokens=8
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=sum(lens), output_lens=lens)
+        ],
+    )
+    result = wl.run()
+
+    reasons = [d["reason"] for d in result.failure_details]
+    assert "rollout_length_basis_unusable" not in reasons, result.failure_details
+    if expected is None:
+        assert result.passed, result.failure_details
+    else:
+        assert reasons == [expected], result.failure_details
+
+
+@pytest.mark.parametrize(
+    "samples,lens",
+    [
+        (1, [100]),
+        (1, [100] * 31),
+        (1, [100] * 33),
+        (8, [100] * 31),
+        (8, [100] * 100),
+        (8, [100] * 33),
+    ],
+    ids=[
+        "n1-one-entry",
+        "n1-one-short",
+        "n1-one-long",
+        "n8-short-of-per-request",
+        "n8-between-the-two-shapes",
+        "n8-past-per-request",
+    ],
+)
+def test_an_array_of_neither_legitimate_cardinality_is_a_broken_export(
+    tmp_path, monkeypatch, samples, lens
+):
+    """Cardinality is part of whether the array can be read at all.
+
+    Two shapes are legitimate and this class names both: one entry per
+    completion (`completed * n`) and, at `n > 1`, one per request
+    (`completed`). Anything else describes a *subset* of the run -- `[100]`
+    against `completed: 32` published `generated_tokens_mean: 100.0` from one
+    completion standing in for thirty-two, and cleared a length floor on it.
+
+    The `n = 1` rows are the ones the old guard let through untested: its
+    per-request branch was gated on `samples > 1`, so at `n = 1` every
+    wrong-length array fell into the per-completion branch and had its mean
+    taken. There is no second legitimate cardinality at `n = 1` -- per request
+    and per completion are the same number -- so a length that is neither is a
+    broken export, and `result_json_unusable`/`UNPARSEABLE` rather than the
+    `rollout_length_basis_unusable` a real gateway choice earns.
+    """
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": sum(lens),
+        "output_lens": lens,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, min_mean_output=8, rollout_samples=samples
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+    assert "output_lens" in verdict, verdict
+
+    wl = _rollout(
+        tmp_path, num_prompts=32, rollout_samples=samples, min_mean_output_tokens=8
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=sum(lens), output_lens=lens)
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    reasons = [d["reason"] for d in result.failure_details]
+    assert reasons == ["result_json_unusable"], result.failure_details
+    # Not excused as a basis the floor merely cannot use: that verdict is for a
+    # readable export, and this one is not readable.
+    assert "rollout_length_basis_unusable" not in reasons, result.failure_details
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [None, [], "abc", {}, [100, 100, 100, 100], [10, 10, 10, -1]],
+    ids=["null", "empty", "string", "object", "over-cap", "negative"],
+)
+def test_the_container_still_audits_the_array_with_the_floor_switched_off(
+    tmp_path, unusable
+):
+    """`min_mean_output_tokens: 0` turned off the floor and the audit with it.
+
+    The whole `output_lens` section sat under `if min_mean_output > 0:`, so the
+    one configuration this workload tells people to reach for -- it is the
+    escape hatch named in both the `rollout_length_basis_unusable` detail and
+    the `save_detailed: false` refusal -- also switched off every check on
+    whether the array is readable. `null`, `[]`, `"abc"`, an object and an
+    over-cap array all printed `OK` here while the host went on calling the
+    same export `result_json_unusable`, so a direct script run enforced a
+    weaker contract than a recipe-driven one under a verdict name that reads
+    identical.
+
+    Whether an export can be read is not a question about the floor, which is
+    why the audit now runs whatever the floor is set to.
+    """
+    doc = {
+        "completed": 4,
+        "failed": 0,
+        "total_output_tokens": 40,
+        "output_lens": unusable,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=4, min_mean_output=0, output_len=50
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+    assert "output_lens" in verdict, verdict
+
+
+def test_the_floorless_audit_still_passes_the_exports_it_should(tmp_path):
+    """Narrowness for the test above: refusing everything would satisfy it too.
+
+    With the floor off, a healthy per-completion array still has to come back
+    `OK`, and so does an export with no array at all -- which is what
+    `save_detailed: false` produces and is a configuration rather than a
+    defect. And the *only* thing the floor owns is the comparison: an array
+    that would be SHORTLEN at `min_mean_output_tokens: 8` is `OK` at 0, because
+    that is what switching the floor off is supposed to mean.
+    """
+    healthy = {
+        "completed": 4,
+        "failed": 0,
+        "total_output_tokens": 40,
+        "output_lens": [10, 10, 10, 10],
+    }
+    assert _run_script_audit(
+        tmp_path, healthy, expected=4, min_mean_output=0, output_len=50
+    ).startswith("OK")
+
+    absent = {"completed": 4, "failed": 0, "total_output_tokens": 40}
+    assert _run_script_audit(
+        tmp_path, absent, expected=4, min_mean_output=0
+    ).startswith("OK")
+
+    collapsed = dict(healthy, total_output_tokens=4, output_lens=[1, 1, 1, 1])
+    assert _run_script_audit(
+        tmp_path, collapsed, expected=4, min_mean_output=8, output_len=50
+    ).startswith("SHORTLEN")
+    assert _run_script_audit(
+        tmp_path, collapsed, expected=4, min_mean_output=0, output_len=50
+    ).startswith("OK")
+
+
+def test_a_per_request_entry_may_hold_a_whole_requests_worth(tmp_path, monkeypatch):
+    """The cap is per *entry*, and an entry is not always one completion.
+
+    `output_len` is each completion's `max_tokens` on `random`, so it caps a
+    per-completion entry. A per-request entry under summed usage accounting
+    holds up to `n` of them. Applying the per-completion bound to the
+    per-request shape made the two rules contradict each other: `[800] * 32` at
+    `n=8` scored `rollout_length_basis_unusable`, and `[1600] * 32` -- the same
+    gateway with longer completions -- became `result_json_unusable`. The same
+    export was called broken once its completions got long enough, and the
+    verdict written for that shape stopped firing at exactly the point it was
+    most likely to be needed.
+
+    `1600` here is twice the per-completion cap and well inside `cap * n`, so
+    it is a possible export; the verdict it earns is the one about the basis.
+    """
+    wl = _rollout(
+        tmp_path,
+        num_prompts=32,
+        rollout_samples=8,
+        output_len=800,
+        min_mean_output_tokens=8,
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=32, total_output_tokens=32 * 1600, output_lens=[1600] * 32
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "rollout_length_basis_unusable"
+    ], result.failure_details
+
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": 32 * 1600,
+        "output_lens": [1600] * 32,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=8, output_len=800
+    )
+    assert verdict.startswith("BADBASIS"), verdict
+
+
+def test_the_scaled_bound_is_still_a_bound(tmp_path, monkeypatch):
+    """Narrowness for the test above: dropping the cap would satisfy it too.
+
+    A per-request entry is allowed `cap * n` and no more. `6401` at
+    `output_len: 800`, `n=8` is more generation than eight completions were
+    permitted between them, so it is an impossible export and goes back to
+    `result_json_unusable` -- the scaling moved the bound, it did not remove
+    it.
+    """
+    lens = [6401] + [1600] * 31
+    wl = _rollout(
+        tmp_path,
+        num_prompts=32,
+        rollout_samples=8,
+        output_len=800,
+        min_mean_output_tokens=8,
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=sum(lens), output_lens=lens)
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": sum(lens),
+        "output_lens": lens,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=8, output_len=800
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+
+def test_the_per_completion_shape_keeps_the_unscaled_bound(tmp_path, monkeypatch):
+    """The other half of the scaling rule, which the shape decides.
+
+    `completed * n` entries are completions, and a completion cannot exceed
+    `output_len`. Scaling that bound by `n` as well would have let an
+    impossible per-completion export through in the name of fixing the
+    per-request one.
+    """
+    lens = [801] + [800] * 255
+    doc = {
+        "completed": 32,
+        "failed": 0,
+        "total_output_tokens": sum(lens),
+        "output_lens": lens,
+    }
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=32, min_mean_output=8, rollout_samples=8, output_len=800
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+    wl = _rollout(
+        tmp_path,
+        num_prompts=32,
+        rollout_samples=8,
+        output_len=800,
+        min_mean_output_tokens=8,
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(completed=32, total_output_tokens=sum(lens), output_lens=lens)
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == [
+        "result_json_unusable"
+    ], result.failure_details
+
+
+def test_the_container_refuses_a_floor_no_completion_could_reach(tmp_path):
+    """Validate before the side effect, which here is a multi-minute weight load.
+
+    The host rejects `min_mean_output_tokens > output_len` on `random` as a
+    recipe error: `output_len` is each completion's `max_tokens`, so no run can
+    satisfy the floor. The container accepted it, loaded the model, benched, and
+    reported exit 56 -- a collapsed policy -- for what is an arithmetic mistake in
+    the configuration.
+    """
+    proc = _run_bench_script(tmp_path, min_mean=200, output_len=128)
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert "TS_MIN_MEAN_OUTPUT_TOKENS=200 exceeds TS_OUTPUT_LEN=128" in proc.stdout
+
+    # Narrowness: a floor inside the cap is not this mistake, and `sharegpt` is
+    # sent no `output_len` at all, so it has no recipe-set cap to exceed.
+    assert "exceeds TS_OUTPUT_LEN" not in _run_bench_script(
+        tmp_path, min_mean=100, output_len=128
+    ).stdout
+    assert "exceeds TS_OUTPUT_LEN" not in _run_bench_script(
+        tmp_path, min_mean=200, output_len=128, dataset="sharegpt"
+    ).stdout
+
+
+@pytest.mark.parametrize("output_len", ["abc", "0128"], ids=["text", "zero-padded"])
+def test_the_floor_bound_validates_its_own_operand(tmp_path, output_len):
+    """`-gt` is an integer test and this script does not run under `set -e`.
+
+    Nothing else validates `TS_OUTPUT_LEN`, so comparing against it directly
+    would print `[: integer expression expected` to stderr, evaluate *false*, and
+    carry on into model load -- the guard silently not firing on exactly the
+    malformed input a hand-run supplies, which is the case it was added for.
+
+    Zero-padded is included because the script already learned this once on
+    `TS_PORT`: all-digits passes a digit test and then reads as octal in
+    arithmetic, so `require_uint` rejects it rather than normalising it, and the
+    same reasoning applies to a value about to be compared with `-gt`.
+    """
+    proc = _run_bench_script(tmp_path, min_mean=8, output_len=output_len)
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert "TS_OUTPUT_LEN must be a positive integer" in proc.stdout, proc.stdout
+    assert "integer expression expected" not in proc.stderr, proc.stderr
+
+
+def test_an_unset_output_len_still_takes_the_documented_default(tmp_path):
+    """Narrowness for the validation above: `${TS_OUTPUT_LEN:-128}` substitutes
+    on empty as well as unset, so an empty value is the default rather than a
+    malformed one, and must not be rejected."""
+    proc = _run_bench_script(tmp_path, min_mean=8, output_len="")
+    assert "TS_OUTPUT_LEN must be" not in proc.stdout, proc.stdout
+
+
 def test_rollout_reports_generated_length_per_request(tmp_path, monkeypatch):
     """Per *request*, and named that way on purpose.
 
@@ -4374,7 +5846,15 @@ def test_the_length_distribution_is_pooled_across_steps(tmp_path, monkeypatch):
     unremarkable, while it is the thing that sizes the KV cache and decides how
     long the slowest completion holds a batch open.
     """
-    wl = _rollout(tmp_path, num_prompts=4, steps=2)
+    # `rollout_samples=1` so the fixture is self-consistent: four `output_lens`
+    # entries against four completed requests is one completion each, and the
+    # floor divides by completions. `output_len` raised above the 4000-token
+    # outlier because that outlier is the subject -- `output_len` is each
+    # completion's cap on `random`, so at the 128 default this export would be
+    # rejected as impossible rather than read as a long tail.
+    wl = _rollout(
+        tmp_path, num_prompts=4, steps=2, rollout_samples=1, output_len=4096
+    )
     wl.setup()
     _stub_docker(
         wl,
@@ -4400,16 +5880,105 @@ def test_the_length_distribution_is_pooled_across_steps(tmp_path, monkeypatch):
 def test_a_partial_length_distribution_is_not_published(tmp_path, monkeypatch):
     """Pooling over whichever steps happened to carry the array would describe a
     subset while reading as the trial's -- the same reason the scalar aggregate
-    publishes a metric only when every step supplied it."""
-    wl = _rollout(tmp_path, num_prompts=4, steps=2)
+    publishes a metric only when every step supplied it.
+
+    Under the rollout default this is also a *failure*, not just a suppression:
+    `save_detailed` asked for the array and one step did not deliver it. The
+    suppression-without-failure path is `save_detailed: false`, tested below.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, steps=2, rollout_samples=1)
     wl.setup()
     _stub_docker(
         wl,
         monkeypatch,
         docs=[
             _rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, 10]),
-            _rollout_doc(completed=4, total_output_tokens=40),
+            _rollout_doc(completed=4, total_output_tokens=40, output_lens=[]),
         ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
+    assert "output_lens" in result.failure_details[0]["detail"]
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+
+
+def test_no_lengths_plus_a_floor_plus_many_samples_is_refused(tmp_path):
+    """The fallback is weaker at `n > 1`; at `n > 1` it is blind.
+
+    Without `output_lens` both audits compare `total_output_tokens / completed`,
+    which is per request. With summed usage accounting and
+    `rollout_samples: 8`, one token per completion reads as 8 and clears the
+    default floor exactly -- so the cell advertises a per-completion guard that
+    cannot see a fully collapsed policy. Refused rather than downgraded.
+    """
+    with pytest.raises(ValueError, match="save_detailed"):
+        _rollout(
+            tmp_path, save_detailed=False, rollout_samples=8, min_mean_output_tokens=8
+        ).setup()
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        # At n == 1 per request and per completion are the same number.
+        {"save_detailed": False, "rollout_samples": 1, "min_mean_output_tokens": 8},
+        # With the floor off there is nothing to weaken.
+        {"save_detailed": False, "rollout_samples": 8, "min_mean_output_tokens": 0},
+    ],
+)
+def test_the_refusal_is_narrow(tmp_path, cfg):
+    """Only the combination that is actually blind is refused."""
+    _rollout(tmp_path, **cfg).setup()
+
+
+def test_the_container_refuses_the_blind_floor_too(tmp_path):
+    """Both layers, or a direct script run enforces the weaker contract.
+
+    The verdict names are the same either way, so a container that accepted
+    what the host refuses would print `OK` under the same vocabulary the host
+    uses to fail.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "8",
+            "TS_MIN_MEAN_OUTPUT_TOKENS": "8",
+            "TS_SAVE_DETAILED": "0",
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert "TS_SAVE_DETAILED" in output, output
+
+
+def test_without_save_detailed_a_missing_array_is_not_a_failure(tmp_path, monkeypatch):
+    """The other half of the contract, and the reason it is keyed on the request.
+
+    An explicit `save_detailed: false` is the caller saying they do not want the
+    per-completion array, so its absence is the configuration working. Only a
+    cell that *asked* for the lengths and did not get them is unusable.
+
+    Absence is spelled by omitting the key, which is what the bench without
+    `--save-detailed` actually writes. Spelled `output_lens=[]` this read as the
+    configuration working while exercising a present-but-unusable array, which
+    is a different case and is a failure under this same configuration.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1, save_detailed=False)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=40, output_lens=_OMIT)],
     )
     result = wl.run()
 
@@ -4452,24 +6021,37 @@ def _script_bench_argv(tmp_path: Path, env: dict) -> list[str]:
     # and never assembles a bench command -- so the stub answers 200 on the
     # control port for as long as the run needs it, then the bench step fails and
     # the script stops without anything having touched a GPU.
+    #
+    # `/get_server_info` gets the backend the stub was launched with, because a
+    # rollout run now refuses to continue past phase 2b when the engine will not
+    # say which sampling backend it is using (exit 60). An engine that honours
+    # `--sampling-backend` reports it back, so echoing the flag is what a working
+    # server does -- and it keeps this helper about the bench argv it is named
+    # for rather than about the read-back, which has its own tests.
     fake.write_text(
         "#!/usr/bin/env bash\n"
         f'printf "%s\\n" "$@" >> "{argv_log}"\n'
         'if [ "$1" = "version" ]; then echo fake; exit 0; fi\n'
         'if [ "$1" = "serve" ]; then\n'
         "  port=\"\"\n"
+        "  backend=\"\"\n"
         "  while [ $# -gt 0 ]; do\n"
         '    if [ "$1" = "--control-port" ]; then port="$2"; fi\n'
+        '    if [ "$1" = "--sampling-backend" ]; then backend="$2"; fi\n'
         "    shift\n"
         "  done\n"
         '  exec python3 -c "\n'
-        "import http.server, sys\n"
+        "import http.server, json, sys\n"
         "class H(http.server.BaseHTTPRequestHandler):\n"
         "    def do_GET(self):\n"
-        "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "        if self.path.startswith('/get_server_info'):\n"
+        "            body = json.dumps({'sampling_backend': sys.argv[2]}).encode()\n"
+        "        else:\n"
+        "            body = b'ok'\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(body)\n"
         "    def log_message(self, *a): pass\n"
         "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n"
-        '" "${port}"\n'
+        '" "${port}" "${backend}"\n'
         "fi\n"
         "exit 1\n",
         encoding="utf-8",
@@ -4571,6 +6153,138 @@ def test_the_script_rejects_ignore_eos_false_on_random_without_rollout(tmp_path)
     assert "cannot take effect with TS_DATASET=random" in output, output
 
 
+# A value the rollout path accepts for each rollout-only variable, and for two of
+# them the default as well: the host refuses a rollout-only key whatever it
+# holds, so `rollout_samples: 1` is refused outside the mode even though it is
+# what the mode would have used. Keyed by env name and looked up from the host's
+# `_ROLLOUT_ONLY_KEYS`, so a key added there without a value here fails at
+# collection rather than going untested.
+_ROLLOUT_ONLY_ENV_VALUES = {
+    "TS_ROLLOUT_SAMPLES": ("4", "1"),
+    "TS_SAMPLING_BACKEND": ("triton",),
+    "TS_TEMPERATURE": ("1.0",),
+    "TS_TOP_P": ("0.9",),
+    "TS_MIN_MEAN_OUTPUT_TOKENS": ("8", "0"),
+}
+
+
+def _rollout_only_env_names() -> list[str]:
+    return [f"TS_{key.upper()}" for key in mod._ROLLOUT_ONLY_KEYS]
+
+
+# The PATH check sits after the whole usage block and before the model loads,
+# and this environment has no TokenSpeed, so a configuration the script accepts
+# stops there -- see `_run_bench_script`.
+_REACHED_STARTUP = "'tokenspeed' not on PATH"
+
+
+def _run_script_before_startup(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run ts_bench_serve.sh as a hand-run would, with exactly `env` set.
+
+    Inherited `TS_*` variables are dropped, because a test about which
+    variables the script refuses must not depend on what the shell running the
+    suite happens to export.
+    """
+    inherited = {k: v for k, v in os.environ.items() if not k.startswith("TS_")}
+    return subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={**inherited, "TS_OUT_DIR": str(tmp_path / "out"), **env},
+        timeout=120,
+    )
+
+
+@pytest.mark.parametrize("rollout", [None, "0"], ids=["rollout-unset", "rollout-0"])
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [(name, value) for name in _rollout_only_env_names() for value in _ROLLOUT_ONLY_ENV_VALUES[name]],
+)
+def test_the_script_refuses_a_rollout_only_variable_outside_rollout(
+    tmp_path, rollout, name, value
+):
+    """The host's rollout-only contract, enforced where a direct run enters.
+
+    `_validated_rollout` refuses these keys without `rollout: true`, and the host
+    never exports them then, so only a hand-run could supply them -- which is
+    the run that used to get a weaker contract. Temperature, top_p and backend
+    were silently ignored; the floor and the sample count still reached
+    `audit_result_json`, so a benchmark could fail as SHORTLEN or BADBASIS
+    against a rollout it never ran.
+    """
+    env = {name: value}
+    if rollout is not None:
+        env["TS_ROLLOUT"] = rollout
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert f"usage {name} require TS_ROLLOUT=1" in output, output
+    assert _REACHED_STARTUP not in output, output
+    # The backend is the one variable with a legitimate benchmark-side route,
+    # so it is the one whose refusal names it -- and only it.
+    assert ("TS_SERVE_ARGS" in output) == (name == "TS_SAMPLING_BACKEND"), output
+
+
+def test_the_script_names_every_rollout_only_variable_it_refuses(tmp_path):
+    """One refusal naming all of them, as the host's names every present key,
+    rather than one per run for someone fixing them in turn."""
+    env = {name: _ROLLOUT_ONLY_ENV_VALUES[name][0] for name in _rollout_only_env_names()}
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    refusal = next(line for line in output.splitlines() if "require TS_ROLLOUT=1" in line)
+    for name in env:
+        assert name in refusal, refusal
+
+
+def test_the_script_and_the_host_agree_on_the_rollout_only_names():
+    """Two lists, held together here, in both directions.
+
+    A key the host adds without the script refusing it leaves a direct run on
+    the weaker contract again; a name the script refuses that the host does not
+    would reject a hand-run the recipe path accepts.
+    """
+    text = (mod._SCRIPTS_DIR / mod._BENCH_SCRIPT).read_text(encoding="utf-8")
+    declared = re.search(r"^ROLLOUT_ONLY_VARS=\(([^)]*)\)", text, re.MULTILINE)
+    assert declared, "ROLLOUT_ONLY_VARS not found in the script"
+    assert set(declared.group(1).split()) == set(_rollout_only_env_names())
+
+
+def test_an_empty_rollout_only_variable_is_not_a_setting(tmp_path):
+    """Narrowness: "set" means non-empty.
+
+    Every read of these in the script is `${X:-default}` or `-n`, so an empty
+    value is indistinguishable from an unset one in either mode -- it changes
+    nothing and claims nothing. Refusing it would also break `X=` as the way to
+    neutralise an inherited export.
+    """
+    env = dict.fromkeys(_rollout_only_env_names(), "")
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert "require TS_ROLLOUT=1" not in output, output
+    assert _REACHED_STARTUP in output, output
+
+
+def test_rollout_only_variables_are_still_accepted_under_rollout(tmp_path):
+    """Narrowness: the refusal is about the mode, not the names."""
+    env = {name: _ROLLOUT_ONLY_ENV_VALUES[name][0] for name in _rollout_only_env_names()}
+    env.update(TS_ROLLOUT="1", TS_IGNORE_EOS="0", TS_SAVE_DETAILED="1")
+    proc = _run_script_before_startup(tmp_path, env)
+    output = proc.stdout + proc.stderr
+    assert "require TS_ROLLOUT=1" not in output, output
+    assert _REACHED_STARTUP in output, output
+
+
+def test_mode_neutral_variables_are_still_accepted_outside_rollout(tmp_path):
+    """Narrowness: `save_detailed` and `seed` are not rollout-only on the host,
+    and a benchmark may set them, so the script must not treat everything
+    near the sampling knobs as rollout-only."""
+    proc = _run_script_before_startup(tmp_path, {"TS_SAVE_DETAILED": "1", "TS_SEED": "3"})
+    output = proc.stdout + proc.stderr
+    assert "require TS_ROLLOUT=1" not in output, output
+    assert _REACHED_STARTUP in output, output
+
+
 @pytest.mark.parametrize("spelling", ["1e0", "1E-5", ".5", "1.", ".", "", "0.5.0", "abc"])
 def test_the_script_accepts_only_a_plain_decimal_temperature(tmp_path, spelling):
     """The error message promises to refuse leading-dot forms, and has to.
@@ -4601,6 +6315,266 @@ def test_the_script_accepts_only_a_plain_decimal_temperature(tmp_path, spelling)
     assert "TS_TEMPERATURE" in output, output
 
 
+@pytest.mark.parametrize(
+    ("env", "label"),
+    [
+        ({"TS_TEMPERATURE": "0"}, "TS_TEMPERATURE"),
+        ({"TS_TEMPERATURE": "5"}, "TS_TEMPERATURE"),
+        ({"TS_TEMPERATURE": "1.0", "TS_TOP_P": "2"}, "TS_TOP_P"),
+        ({"TS_TEMPERATURE": "1.0", "TS_TOP_P": "0"}, "TS_TOP_P"),
+    ],
+)
+def test_the_script_enforces_the_documented_ranges(tmp_path, env, label):
+    """Spelling is not the range, and the container was only checking spelling.
+
+    `require_decimal` proves the value is a number; `TS_TEMPERATURE=5` and
+    `TS_TOP_P=2` are numbers. They reached the server and were refused there,
+    once per request and only after the model had loaded, so a usage error
+    arrived as every prompt failing. The host has always enforced `(0, 2]` and
+    `(0, 1]`; two validators are only worth having while they agree.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            **env,
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert label in output, output
+
+
+def test_serve_args_may_not_respell_the_sampling_backend_under_rollout(tmp_path):
+    """Losing this argument is silent, which is why it is reserved rather than
+    left to last-one-wins.
+
+    The host derives the backend from the same rollout block it derives
+    `temperature` and `n` from. A second spelling in `serve_args` would set the
+    engine's half while the request body kept asking to sample, and a greedy
+    engine answers a sampled request with 200 and the argmax -- so the run
+    would look entirely healthy.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ROLLOUT": "1",
+            "TS_IGNORE_EOS": "0",
+            "TS_TEMPERATURE": "1.0",
+            "TS_ROLLOUT_SAMPLES": "4",
+            "TS_SERVE_ARGS": json.dumps(["--sampling-backend", "greedy"]),
+        },
+        timeout=120,
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 64, output
+    assert "--sampling-backend" in output, output
+
+
+def test_serve_args_may_still_pin_a_sampling_backend_for_a_benchmark(tmp_path):
+    """The reservation is rollout-only, and deliberately so.
+
+    A throughput benchmark has a real reason to name a backend by hand, and
+    greedy is the right answer there -- reserving it everywhere would forbid a
+    legitimate configuration to guard a mode it is not in.
+    """
+    argv = _script_bench_argv(
+        tmp_path, {"TS_SERVE_ARGS": json.dumps(["--sampling-backend", "greedy"])}
+    )
+    assert argv, "the script should have reached the bench step"
+
+
+@pytest.mark.parametrize("bad", [-1, 10.5])
+def test_an_impossible_generated_length_suppresses_the_distribution(tmp_path, monkeypatch, bad):
+    """A negative or fractional length is not a measurement of anything.
+
+    `output_lens: [-1]` published a complete set of negative percentiles, which
+    is worse than a skewed distribution: nothing about the output looks wrong,
+    and a negative `generated_tokens_*` reading is one a `min_*` gate scores as
+    an improvement. Under the rollout default it also fails the trial, since
+    `save_detailed` asked for a usable array.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=40, output_lens=[10, 10, 10, bad])],
+    )
+    result = wl.run()
+
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
+
+
+def test_a_length_above_the_cap_is_an_impossible_export(tmp_path, monkeypatch):
+    """On `random`, `output_len` is each completion's `max_tokens`.
+
+    A longer entry describes generation the server was not permitted to do, so
+    the export is impossible rather than merely surprising -- and left
+    unchecked it cleared the floor and published percentiles that read like a
+    measurement. The smoke recipe establishes both halves of this: `input_len:
+    128` with `output_len: 256` expects `generated_tokens_max` at 256, which
+    pins the cap *and* shows the array counts generated tokens only.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1, output_len=128)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[
+            _rollout_doc(
+                completed=4, total_output_tokens=4129, output_lens=[10, 10, 10, 4099]
+            )
+        ],
+    )
+    result = wl.run()
+
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
+    assert not [key for key in result.metrics if key.startswith("generated_tokens_")]
+
+
+def test_a_length_exactly_on_the_cap_is_fine(tmp_path, monkeypatch):
+    """The cap truncating a rollout is a normal reading, not a fault.
+
+    On `random` nothing induces EOS, so every completion running to exactly
+    `output_len` is the expected shape -- the bound has to be `>` and not `>=`
+    or the common case becomes a failure.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1, output_len=128)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=512, output_lens=[128] * 4)],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert result.metrics["generated_tokens_max"] == 128
+
+
+def test_sharegpt_has_no_length_cap_to_check(tmp_path, monkeypatch):
+    """`sharegpt` is sent no `output_len`, so there is no bound to enforce.
+
+    Its lengths come from the conversations. Applying the recipe's `output_len`
+    there would reject correct exports against a number the run never saw --
+    the same mistake the TPOT audit already documents for this dataset.
+    """
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    wl = _rollout(
+        tmp_path,
+        num_prompts=4,
+        rollout_samples=1,
+        dataset="sharegpt",
+        dataset_path=str(dataset),
+    )
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=9000, output_lens=[9000] * 4)],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert result.metrics["generated_tokens_max"] == 9000
+
+
+def test_the_container_enforces_the_same_length_cap(tmp_path):
+    """Both layers, since the container's verdict is the one read first.
+
+    This test previously pinned the *wrong* behaviour: it asserted that an
+    over-cap array is discarded and the per-request fallback applies. That
+    made the container print SHORTLEN, or OK, for an export the host calls
+    `result_json_unusable` -- so the test was holding the two layers apart
+    rather than together. A present-but-invalid array is an impossible export,
+    and a second denominator is not a reading of it.
+    """
+    doc = {
+        "completed": 4,
+        "failed": 0,
+        "total_output_tokens": 4,
+        "output_lens": [100, 100, 100, 100],
+    }
+    # Cap above the entries: the array is usable and is what gets used.
+    assert _run_script_audit(
+        tmp_path, doc, expected=4, min_mean_output=8, output_len=128
+    ).startswith("OK")
+
+    # Cap below them: impossible export, so unusable on both layers -- and
+    # explicitly *not* the per-request fallback.
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=4, min_mean_output=8, output_len=50
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+    assert "output_lens" in verdict, verdict
+    assert "per_request" not in verdict, verdict
+
+
+@pytest.mark.parametrize("bad", [[10, 10, -1], [10, 10, 10.5], [10, 10, 4099]])
+def test_the_two_layers_agree_a_broken_array_is_unusable(tmp_path, monkeypatch, bad):
+    """One export, one verdict name, whichever layer reads it first.
+
+    Negative, fractional and over-cap all reach the same place now: the host
+    reports `result_json_unusable` and the container reports `UNPARSEABLE`,
+    rather than one of them substituting a different denominator and calling
+    the result a measurement.
+    """
+    doc = {"completed": 3, "failed": 0, "total_output_tokens": 30, "output_lens": bad}
+    verdict = _run_script_audit(
+        tmp_path, doc, expected=3, min_mean_output=8, output_len=128
+    )
+    assert verdict.startswith("UNPARSEABLE"), verdict
+
+    wl = _rollout(tmp_path, num_prompts=3, rollout_samples=1, output_len=128)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=3, total_output_tokens=30, output_lens=bad)],
+    )
+    result = wl.run()
+    assert not result.passed
+    assert [d["reason"] for d in result.failure_details] == ["result_json_unusable"]
+
+
+def test_an_integral_float_length_is_still_a_length(tmp_path, monkeypatch):
+    """Where this differs from the `total_output_tokens` rule, and why.
+
+    That field matches a container audit spelled `type(...) is int`. This one
+    has no container counterpart, so `10.0` is read as a count a JSON encoder
+    wrote rather than as a defect -- rejecting it would fail a correct run over
+    a serialisation detail.
+    """
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_rollout_doc(completed=4, total_output_tokens=40, output_lens=[10.0] * 4)],
+    )
+    result = wl.run()
+
+    assert result.passed, result.failure_details
+    assert result.metrics["generated_tokens_count"] == 4
+    assert result.metrics["generated_tokens_max"] == 10
+
+
 def test_the_pooled_length_count_is_an_integer(tmp_path, monkeypatch):
     """A population size, not a measurement.
 
@@ -4608,7 +6582,7 @@ def test_the_pooled_length_count_is_an_integer(tmp_path, monkeypatch):
     beside it, `rocprof_kernel_count`, `proton_kernel_count` -- and a lone
     `96.0` among them is a type surprise for anything reading the export.
     """
-    wl = _rollout(tmp_path, num_prompts=4)
+    wl = _rollout(tmp_path, num_prompts=4, rollout_samples=1)
     wl.setup()
     _stub_docker(
         wl,

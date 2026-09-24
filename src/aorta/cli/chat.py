@@ -166,7 +166,12 @@ def _quiet_mode() -> None:
 
     # Keep backend readiness, remote call counts, and agent routing/act
     # messages visible.
-    for useful in ("aorta.chat.session", "aorta.chat.inference", "aorta.chat.graph.nodes"):
+    for useful in (
+        "aorta.cli.chat",
+        "aorta.chat.session",
+        "aorta.chat.inference",
+        "aorta.chat.graph.nodes",
+    ):
         logging.getLogger(useful).setLevel(logging.INFO)
 
 
@@ -314,6 +319,9 @@ async def _ask_once(
     output_mode: str,
     quiet: bool,
     backend: Any = None,
+    *,
+    session_id: str | None = None,
+    turn: int = 1,
 ) -> tuple[list, bool]:
     """Invoke the agent for one query and render it; also report success.
 
@@ -327,7 +335,14 @@ async def _ask_once(
     suppress = _suppress_stderr_noise() if quiet else contextlib.nullcontext()
     try:
         with suppress:
-            reply, history, result = await invoke_agent(query, history)
+            decision = (
+                {"session_id": session_id, "turn": turn}
+                if session_id is not None
+                else {}
+            )
+            reply, history, result = await invoke_agent(
+                query, history, **decision
+            )
     except Exception as exc:
         msg = _failure_message(exc, backend)
         if output_mode == "json":
@@ -346,7 +361,12 @@ async def _ask_once(
 
 
 async def _interactive_loop(
-    invoke_agent: Any, output_mode: str, quiet: bool, backend: Any = None
+    invoke_agent: Any,
+    output_mode: str,
+    quiet: bool,
+    backend: Any = None,
+    *,
+    session_id: str | None = None,
 ) -> None:
     """Run a multi-turn REPL session."""
     banner = "AORTA Codebase Assistant  (type exit, quit, or /q to leave)"
@@ -372,6 +392,7 @@ async def _interactive_loop(
     # to protect.
     prompt_via_input = sys.stdout.isatty()
     history: list = []
+    turn = 0
 
     while True:
         try:
@@ -390,27 +411,61 @@ async def _interactive_loop(
         if not stripped:
             continue
 
-        history, _ = await _ask_once(invoke_agent, query, history, output_mode, quiet, backend)
+        turn += 1
+        history, _ = await _ask_once(
+            invoke_agent,
+            query,
+            history,
+            output_mode,
+            quiet,
+            backend,
+            session_id=session_id,
+            turn=turn,
+        )
 
 
 async def _run(query: str | None, output_mode: str, quiet: bool, no_wait: bool) -> bool:
     """Preflight the backend, then either answer once or start the REPL."""
     factory = _load("inference.providers.factory")
     session = _load("session")
+    decision_session = session.new_session_id()
     try:
         backend = factory.get_backend()
         if not no_wait:
             await backend.preflight()
     except (ImportError, ValueError) as exc:
         raise click.ClickException(f"LLM backend unavailable: {exc}") from exc
-    logger.info("LLM backend: %s", backend.describe())
+    # The tool protocol rides along with the provider. It decides whether an
+    # action-routed query can call a tool at all, and until it appeared here the
+    # first signal that it was wrong for the configured model was a query that
+    # answered nothing.
+    logger.info(
+        "LLM backend: %s (tool protocol: %s)",
+        backend.describe(),
+        _load("config").get_settings().llm_tool_mode,
+    )
 
     if query is None:
-        await _interactive_loop(session.invoke_agent, output_mode, quiet, backend)
+        await _interactive_loop(
+            session.invoke_agent,
+            output_mode,
+            quiet,
+            backend,
+            session_id=decision_session,
+        )
         # A REPL's exit status describes the session, not any one answer: the
         # user has already seen each failure and chosen to keep going.
         return True
-    _, ok = await _ask_once(session.invoke_agent, query, [], output_mode, quiet, backend)
+    _, ok = await _ask_once(
+        session.invoke_agent,
+        query,
+        [],
+        output_mode,
+        quiet,
+        backend,
+        session_id=decision_session,
+        turn=1,
+    )
     return ok
 
 
@@ -662,6 +717,9 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
     spec = importlib.util.find_spec("aorta.chat.ui.app")
     if spec is None or spec.origin is None:
         raise click.ClickException("could not locate aorta.chat.ui.app on disk")
+    app_root = _chainlit_app_root()
+    child_env["CHAINLIT_APP_ROOT"] = str(app_root)
+    _warn_if_origin_not_allowed(app_root, host, port)
     raise SystemExit(
         subprocess.call(
             [
@@ -679,6 +737,102 @@ def ui(ctx: click.Context, host: str, port: int) -> None:
             env=child_env,
         )
     )
+
+
+def origins_for(host: str, port: int) -> list[str]:
+    """The browser origins a UI bound to *host*:*port* is reached through.
+
+    A bind address and an origin are not the same thing. ``127.0.0.1`` is
+    typed as ``localhost`` as often as not, and both have to be listed or the
+    socket is refused for whichever one the operator used. ``0.0.0.0`` is not
+    an origin at all -- it means every interface, and the browser will send
+    whatever name it dialled -- so the loopback pair is the most that can be
+    said for it.
+    """
+    if host in ("0.0.0.0", "::", ""):
+        hosts = ["localhost", "127.0.0.1"]
+    elif host in ("localhost", "127.0.0.1"):
+        hosts = ["localhost", "127.0.0.1"]
+    else:
+        hosts = [host]
+    return [f"http://{name}:{port}" for name in hosts]
+
+
+def _configured_origins(app_root: Path) -> list[str] | None:
+    """``allow_origins`` from the config in force, or None if unreadable."""
+    settings = app_root / ".chainlit" / "config.toml"
+    try:
+        import tomllib
+
+        with settings.open("rb") as handle:
+            loaded = tomllib.load(handle)
+    except (OSError, ValueError, ImportError):
+        return None
+    origins = loaded.get("project", {}).get("allow_origins")
+    return [str(o) for o in origins] if isinstance(origins, list) else None
+
+
+def _warn_if_origin_not_allowed(app_root: Path, host: str, port: int) -> None:
+    """Say so now if the browser will be refused, rather than in the browser.
+
+    The origin policy lives in a file Chainlit reads and the bind address
+    arrives as an argument, so the two can disagree and nothing notices. What
+    the operator sees when they do is a page that loads and a websocket that
+    never opens, which reads as the UI being broken rather than as a setting
+    being one line short.
+
+    A warning and not an error. Binding ``0.0.0.0`` and reaching the box by
+    hostname is an ordinary deployment, and the origin the browser sends is
+    then a name this process cannot know -- refusing to start would break a
+    setup that works.
+    """
+    allowed = _configured_origins(app_root)
+    if allowed is None or "*" in allowed:
+        return
+    wanted = origins_for(host, port)
+    if any(origin in allowed for origin in wanted):
+        return
+    settings = app_root / ".chainlit" / "config.toml"
+    listed = ", ".join(allowed) or "(none)"
+    click.echo(
+        f"Warning: this UI will serve on {wanted[0]}, which is not in the "
+        f"origin policy, so the browser's connection will be refused.\n"
+        f"  allowed: {listed}\n"
+        f"  add it to allow_origins in {settings}",
+        err=True,
+    )
+
+
+def _chainlit_app_root() -> Path:
+    """A writable directory holding the Chainlit settings we intend to ship.
+
+    Chainlit reads ``.chainlit/config.toml`` under ``CHAINLIT_APP_ROOT``, or
+    under the working directory when that is unset -- and creates one with its
+    own defaults if there is none. Setting neither, as this did, meant the
+    settings that applied were whatever directory the operator happened to be
+    standing in: the repository's hardened file from a checkout, and a freshly
+    generated ``allow_origins = ["*"]`` from anywhere else. On a wheel there is
+    no repository file at all, so the permissive pair was what every install
+    got, on a UI whose tools run pasted code on GPU nodes.
+
+    Under the user's config directory rather than the package, because Chainlit
+    writes here -- ``.files`` for uploads, translations, the config itself --
+    and site-packages is the wrong place for that and often read-only.
+
+    The shipped file seeds it once. An operator editing the copy keeps their
+    edits; upgrading does not overwrite them, which is the tradeoff that goes
+    with making it theirs.
+    """
+    from aorta._user_paths import config_home
+
+    root = config_home() / "aorta" / "chat-ui"
+    settings = root / ".chainlit" / "config.toml"
+    if not settings.is_file():
+        shipped = Path(__file__).resolve().parents[1] / "chat" / "ui" / "chainlit_config.toml"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        if shipped.is_file():
+            settings.write_text(shipped.read_text(encoding="utf-8"), encoding="utf-8")
+    return root
 
 
 def _ui_env(options: _GroupOptions) -> dict[str, str]:
@@ -889,7 +1043,16 @@ def _guard(action: Any) -> Any:
         manifest.IndexMismatchError,
         manifest.ManifestError,
         ops.IndexFetchError,
-        FileNotFoundError,
+        # ``OSError`` rather than ``FileNotFoundError`` alone. The narrow one
+        # covered the missing index and left every other filesystem refusal
+        # unwrapped: a build into a read-only parent surfaced
+        # ``PermissionError: [Errno 13] ... '.aorta-index-cbr5wi0q'`` as a
+        # traceback naming a staging directory the user never chose, where the
+        # message they need -- which directory, and that it is not writable --
+        # was already in ``str(exc)``. These are reports about the path the
+        # command was given, which is the category this function exists to
+        # print rather than raise.
+        OSError,
         # The embedding and LLM provider factories report bad configuration as
         # ValueError, message-first; a traceback would bury it.
         ValueError,
@@ -925,19 +1088,37 @@ def index_group() -> None:
     help="Index only git-tracked files of a ROCm/aorta checkout (what CI publishes).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the build result as JSON.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Build over a downloaded index, replacing it with a locally built one.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
 def index_build(
-    path: str | None, output: str | None, public_only: bool, as_json: bool, verbose: bool
+    path: str | None,
+    output: str | None,
+    public_only: bool,
+    as_json: bool,
+    force: bool,
+    verbose: bool,
 ) -> None:
     """Build the index from source on this machine.
 
     The air-gapped and developer path. Needs the embedding weights, which are
     downloaded once (~65 MB) unless the cache is pre-seeded -- run 'aorta chat
     doctor' first if this node has no egress.
+
+    Refuses to build over an index that was downloaded rather than built
+    here, unless --public-only says the corpus is the published one. The test
+    is provenance, not size: an explicit --path over the whole checkout is
+    still refused, because nothing on disk proves it is the same tree the
+    release was built from. Pass --force to do it anyway.
     """
     _index_logging(verbose)
     ops = _load("rag.index_ops")
-    result = _guard(lambda: ops.build_index(_resolve_corpus(path, public_only), index_path=output))
+    result = _guard(
+        lambda: ops.build_index(_resolve_corpus(path, public_only), index_path=output, force=force)
+    )
 
     if as_json:
         click.echo(
@@ -968,6 +1149,21 @@ def index_build(
     click.echo(f"  digest      {manifest.corpus_digest}")
 
 
+def _echo_fetch_target(source: Any, output: str | None) -> None:
+    """Show the resolved asset and destination before anything is contacted.
+
+    On stderr, so ``--json`` still emits nothing but its object. Echoed rather
+    than logged because ``_index_logging`` configures the root logger through
+    ``basicConfig``, which is a no-op if something else configured it first --
+    and the defect being fixed here is a command that printed nothing at all,
+    so the one line that explains the wait should not depend on that.
+    """
+    ops = _load("rag.index_ops")
+    config = _load("config")
+    for line in ops.describe_target(source, output or config.settings.index_file):
+        click.echo(line, err=True)
+
+
 @index_group.command(name="fetch")
 @click.option(
     "--version",
@@ -982,12 +1178,18 @@ def index_build(
 )
 @click.option("--output", default=None, help="Where to install it. Defaults to the cache.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the result as JSON.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite an index built on this machine, and re-download an identical one.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
 def index_fetch(
     version: str | None,
     from_path: str | None,
     output: str | None,
     as_json: bool,
+    force: bool,
     verbose: bool,
 ) -> None:
     """Download the prebuilt index matching this aorta version.
@@ -995,6 +1197,10 @@ def index_fetch(
     An exact release version takes that release's asset; a development version
     takes the rolling asset built from main and reports how far off it is.
     Pass --version to override, or --from to side-load a staged file.
+
+    A refresh of an index that was itself downloaded proceeds and reports what
+    changed; one that would replace a locally-built index is refused, because
+    the network cannot give that back. Pass --force to overwrite it.
     """
     if version and from_path:
         raise click.UsageError("--version and --from are mutually exclusive.")
@@ -1002,9 +1208,17 @@ def index_fetch(
     ops = _load("rag.index_ops")
 
     if from_path:
-        result = _guard(lambda: ops.side_load(from_path, index_path=output))
+        result = _guard(lambda: ops.side_load(from_path, index_path=output, force=force))
     else:
-        result = _guard(lambda: ops.fetch_index(version=version, index_path=output))
+        # Resolved and echoed here, before the first request, then handed to
+        # `fetch_index` so it resolves once. Everything below runs after the
+        # download, which is why a fetch that stalled -- or that refused on the
+        # manifest -- used to print nothing at all: the tag, the URL and the
+        # destination were all known up front and shown only on success.
+        # `resolve_source` is pure, so this costs no network.
+        source = _guard(lambda: ops.resolve_source(version))
+        _echo_fetch_target(source, output)
+        result = _guard(lambda: ops.fetch_index(source=source, index_path=output, force=force))
 
     if as_json:
         click.echo(
@@ -1012,6 +1226,9 @@ def index_fetch(
                 {
                     "index": str(result.index_path),
                     "source": result.source,
+                    "up_to_date": result.up_to_date,
+                    "notes": result.notes,
+                    "changes": result.changes,
                     "warnings": result.warnings,
                     "manifest": result.manifest.describe(),
                 },
@@ -1019,11 +1236,130 @@ def index_fetch(
             )
         )
         return
-    click.echo(f"Installed {result.index_path}")
+    verb = "Already up to date" if result.up_to_date else "Installed"
+    click.echo(f"{verb} {result.index_path}")
     click.echo(f"  source    {result.source}")
     click.echo(f"  built as  {result.manifest.describe()}")
+    for change in result.changes:
+        click.echo(f"  replaced  {change}")
     for warning in result.warnings:
         click.echo(f"warning: {warning}", err=True)
+
+
+#: The fields worth putting side by side, and what to call them in the table.
+#: ``built_at`` is last and deliberately not the basis of the verdict: it is
+#: wall-clock from whoever built the index, so a locally-built one can carry a
+#: later timestamp while indexing *older* source. ``corpus_digest`` and
+#: ``aorta_sha`` are the honest answer to "which source".
+#:
+#: ``embedding_identity`` sits next to ``model`` because it is what makes the
+#: model name meaningful: for a remote provider it carries the endpoint too, so
+#: two rows reading the same ``model`` can still be two vector spaces that
+#: share a name. Without it the *incompatible* verdict could be printed over a
+#: table showing no visible difference at all.
+_STATUS_ROWS = (
+    ("model", "embedding_model"),
+    ("identity", "embedding_identity"),
+    ("dimensions", "dimensions"),
+    ("aorta", "aorta_version"),
+    ("aorta_sha", "aorta_sha"),
+    ("corpus", "corpus_digest"),
+    ("index_sha256", "index_sha256"),
+    ("chunks", "chunk_count"),
+    ("built_at", "built_at"),
+)
+
+
+def _status_cell(value: object) -> str:
+    """One table cell: always a single line, so no field can break the columns.
+
+    ``embedding_identity`` is newline-joined -- endpoint, then model -- so
+    printing it as recorded would put half of it on an unlabelled row and
+    misalign every row after it. Collapsing here rather than at the one field
+    that needs it today keeps the table's shape a property of the table.
+    """
+    return " / ".join(part for part in str(value or "").split("\n") if part) or "-"
+
+
+def _echo_status_table(local: dict, published: dict) -> None:
+    """Print both manifests as two columns, so a difference is visible.
+
+    A row whose two values differ only past the column width is repeated
+    underneath in full. Truncating for width is fine until it makes a row that
+    exists to show a difference show agreement instead -- and ``identity`` is
+    where that bites, because a remote one is ``remote / <endpoint> / <model>``
+    and two endpoints on the same provider share far more than 42 characters
+    while the ``model`` and ``dimensions`` rows above stay identical. Digests
+    can collide on a prefix too, just far less often.
+    """
+    click.echo(f"  {'':<13}{'local':<44}published")
+    hidden = []
+    for label, key in _STATUS_ROWS:
+        left = _status_cell(local.get(key))
+        right = _status_cell(published.get(key))
+        if left != right and left[:42] == right[:42]:
+            hidden.append((label, left, right))
+        click.echo(f"  {label:<13}{left[:42]:<44}{right[:42]}")
+    for label, left, right in hidden:
+        click.echo("")
+        click.echo(f"  {label} differs past the column width:")
+        click.echo(f"    local      {left}")
+        click.echo(f"    published  {right}")
+
+
+@index_group.command(name="status")
+@click.option(
+    "--version",
+    default=None,
+    help="Published version or tag to compare against. Overrides version matching.",
+)
+@click.option("--index", "index_path", default=None, help="Local index. Defaults to the cache.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the comparison as JSON.")
+@click.option("-v", "--verbose", is_flag=True, help="Debug-level logging.")
+def index_status(version: str | None, index_path: str | None, as_json: bool, verbose: bool) -> None:
+    """Compare the local index against the published one, without downloading it.
+
+    Reads the two manifests and nothing else, so it costs about a kilobyte.
+    This is the comparison nightly.yml already does in bash to decide whether
+    to republish.
+
+    Two verdicts exit non-zero, and both mean the same thing: no comparison was
+    made. 'no baseline' is a published manifest that could not be read, never
+    reported as 'up to date'; 'unreadable local index' is a file sitting at the
+    index path with no manifest this build can read, which is also what the
+    first query would refuse. An *absent* local index exits zero -- that is a
+    normal answer for someone who has not installed one yet.
+    """
+    _index_logging(verbose)
+    ops = _load("rag.index_ops")
+    comparison = _guard(lambda: ops.compare_index(version=version, index_path=index_path))
+
+    if as_json:
+        click.echo(json.dumps(ops.comparison_to_dict(comparison), indent=2))
+    else:
+        payload = ops.comparison_to_dict(comparison)
+        click.echo(f"verdict: {comparison.summary}")
+        click.echo("")
+        click.echo(f"  local      {payload['local']['index_path']} ({comparison.provenance})")
+        # Named explicitly: a dev install resolves to the rolling tag, so a
+        # verdict that does not say which asset it compared against is
+        # ambiguous.
+        click.echo(f"  published  {comparison.source.describe()}")
+        click.echo("")
+        _echo_status_table(payload["local"], payload["published"])
+        if comparison.differences:
+            click.echo("")
+            for difference in comparison.differences:
+                click.echo(f"  differs    {difference}")
+        if comparison.local_error:
+            click.echo("")
+            click.echo(f"warning: {comparison.local_error}", err=True)
+        if comparison.baseline_error:
+            click.echo("")
+            click.echo(f"warning: {comparison.baseline_error}", err=True)
+
+    if comparison.verdict in (ops.VERDICT_NO_BASELINE, ops.VERDICT_UNREADABLE_LOCAL_INDEX):
+        raise click.exceptions.Exit(1)
 
 
 @index_group.command(name="runs")

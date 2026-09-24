@@ -129,9 +129,7 @@ class TestSessionHistoryOnFailure:
     async def test_a_failed_turn_leaves_the_history_untouched(self, monkeypatch):
         from aorta.chat import session
 
-        monkeypatch.setattr(
-            session, "agent_graph", _Graph(RuntimeError("provider exploded"))
-        )
+        monkeypatch.setattr(session, "agent_graph", _Graph(RuntimeError("provider exploded")))
         history: list = []
         with pytest.raises(RuntimeError):
             await session.invoke_agent("why did fp32 fail?", history)

@@ -30,7 +30,15 @@
 #   53  a bench step failed or timed out
 #   54  a bench step exported no parseable result JSON
 #   55  a bench step served fewer requests than asked (the silent-pass guard)
-#   56  a rollout step generated fewer tokens per request than the floor
+#   56  a rollout step generated fewer tokens per completion than the floor
+#   57  a rollout was asked for but the engine decodes greedily, so the
+#       sampling parameters it accepted are being ignored
+#   58  the engine is sampling, but with a different backend than was asked
+#       for, so the cell's numbers would carry the wrong backend's name
+#   59  a rollout step's output_lens holds one entry per request rather than
+#       per completion, so the per-completion floor cannot be derived from it
+#   60  the engine would not say which sampling backend it is using, so 57 and
+#       58 cannot be ruled out and the label would rest on nothing
 #   64  usage / environment error (missing tokenspeed CLI, bad config)
 #
 # Two ports, for the reason `ts_serve_probe.sh` documents at length: `tokenspeed
@@ -65,14 +73,30 @@
 #   TS_ROLLOUT            1 for RL-rollout-shaped load: several sampled
 #                         completions per prompt at temperature > 0, stopping
 #                         on EOS. Sends the sampling parameters as
-#                         --extra-body and reserves that flag  (default 0)
+#                         --extra-body and reserves that flag. Without it, a
+#                         non-empty "(rollout only)" variable is exit 64
+#                                                           (default 0)
 #   TS_ROLLOUT_SAMPLES    completions per prompt, the `n` of the OpenAI
 #                         sampling API                    (rollout only)
+#   TS_SAMPLING_BACKEND   --sampling-backend for the server. Rollout only, and
+#                         defaulted to `triton` there rather than to the
+#                         engine's own default -- see the block where it is
+#                         appended                        (rollout only)
 #   TS_TEMPERATURE        sampling temperature            (rollout only)
 #   TS_TOP_P              nucleus sampling mass, omitted when unset
-#   TS_MIN_MEAN_OUTPUT_TOKENS  floor on total_output_tokens/completed per
-#                         step, 0 to disable. Guards the collapsed-policy case
-#                         described at the audit below     (default 0)
+#                                                         (rollout only)
+#   TS_MIN_MEAN_OUTPUT_TOKENS  (rollout only) floor on mean tokens per *completion* per step,
+#                         0 to disable. Read from the mean of the export's
+#                         output_lens, one entry per completion, so nothing is
+#                         assumed about whether the gateway's
+#                         usage.completion_tokens sums all n choices. With no
+#                         such key it falls back to
+#                         total_output_tokens/completed -- per *request*, the
+#                         weaker rule -- and the verdict names which basis was
+#                         used; a key that is present but unusable is refused
+#                         rather than fallen back on. Guards the
+#                         collapsed-policy case described at the audit below
+#                                                           (default 0)
 #   TS_SAVE_DETAILED      1 to keep the export's per-request arrays, which is
 #                         what carries `output_lens`       (default 0)
 #   TS_SEED               dataset/sampling seed           (default 0)
@@ -285,6 +309,19 @@ reject_owned_flags TS_SERVE_ARGS "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"
 # unguarded -- and the default is what most cells run.
 ROLLOUT="${TS_ROLLOUT:-0}"
 
+# `--sampling-backend` is reserved only under rollout, and the conditionality is
+# the same judgement as `--extra-body`'s below. A benchmark cell has a real
+# reason to pin a backend by hand, and greedy is the right answer there. A
+# rollout cell does not: the host derives the backend from the same rollout
+# block it derives `temperature` and `n` from, so a second spelling in
+# `serve_args` would set the engine's half while the body kept asking for
+# sampling -- and the result of losing that argument is silent, since a greedy
+# engine answers a sampled request with 200 and the argmax.
+if [ "${ROLLOUT}" = "1" ]; then
+  reject_owned_flags TS_SERVE_ARGS "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}" -- \
+    --sampling-backend
+fi
+
 # The bench flags this script owns unconditionally. `--extra-body` is appended
 # to the list below only under rollout, and that conditionality is deliberate --
 # see the comment where it happens.
@@ -361,6 +398,45 @@ REQUEST_RATE="${TS_REQUEST_RATE:-inf}"
 NUM_WARMUPS="${TS_NUM_WARMUPS:-1}"
 IGNORE_EOS="${TS_IGNORE_EOS:-1}"
 ROLLOUT_SAMPLES="${TS_ROLLOUT_SAMPLES:-1}"
+SAMPLING_BACKEND="${TS_SAMPLING_BACKEND:-triton}"
+# Checked before the server starts, for the reason the dataset checks above give:
+# an unknown backend name is an argparse failure inside the container after the
+# weights have loaded, which reports as exit 50 several minutes in.
+if [ "${ROLLOUT}" = "1" ]; then
+  case "${SAMPLING_BACKEND}" in
+    triton|triton_full) ;;
+    flashinfer|flashinfer_full)
+      # Offered by the engine, unusable here: these are CUDA-only and this
+      # script serves from ROCm images, where they are not registered at all.
+      # Accepting them moved the failure past `tokenspeed serve` startup, so a
+      # recipe error arrived as exit 50 after the weights had loaded.
+      echo "TS_BENCH_FAIL: usage TS_SAMPLING_BACKEND=${SAMPLING_BACKEND} is CUDA-only"
+      echo "  This script serves from a ROCm image, where the NVIDIA-only"
+      echo "  sampling backends are not registered. Use triton (the default) or"
+      echo "  triton_full."
+      exit 64
+      ;;
+    greedy)
+      # A backend the engine offers and this mode does not accept. Greedy
+      # returns the argmax and ignores temperature, top_p, top_k and seed, so
+      # this would run n copies of one decode and publish them as a sampled
+      # rollout -- the run TS_TEMPERATURE=0 is refused for, reached through the
+      # other knob. Refused here as well as on the host because the
+      # /get_server_info check below deliberately says nothing when greedy is
+      # what was asked for, so that check cannot be what catches this.
+      echo "TS_BENCH_FAIL: usage TS_SAMPLING_BACKEND=greedy cannot be combined with TS_ROLLOUT=1"
+      echo "  Greedy decoding ignores temperature, top_p, top_k and seed, so the"
+      echo "  ${ROLLOUT_SAMPLES} completions per prompt would be one decode repeated."
+      echo "  Use triton (the default), or drop TS_ROLLOUT for a benchmark cell."
+      exit 64
+      ;;
+    *)
+      echo "TS_BENCH_FAIL: usage TS_SAMPLING_BACKEND (${SAMPLING_BACKEND}) is not a backend the engine offers"
+      echo "  Accepted under rollout: triton, triton_full."
+      exit 64
+      ;;
+  esac
+fi
 MIN_MEAN_OUTPUT_TOKENS="${TS_MIN_MEAN_OUTPUT_TOKENS:-0}"
 SAVE_DETAILED="${TS_SAVE_DETAILED:-0}"
 SEED="${TS_SEED:-0}"
@@ -436,12 +512,70 @@ require_decimal() {  # require_decimal <label> <value>
       ;;
   esac
 }
+# The range as well as the spelling. `require_decimal` only proves the value is
+# a number, so `TS_TEMPERATURE=0` and `TS_TOP_P=2` reached the server, where the
+# gateway rejects them per request -- after the model has loaded, and reported
+# as every prompt failing rather than as the usage error it is. The host
+# enforces `(0, 2]` and `(0, 1]`; this is the same bound for someone running the
+# script directly, which is the case two independent validators exist for.
+# python3 because these are decimals and `[` is integers only; it is already a
+# hard dependency of the audit and the rollout body below.
+require_range() {  # require_range <label> <value> <max>
+  if ! python3 -c 'import sys
+value, hi = float(sys.argv[1]), float(sys.argv[2])
+sys.exit(0 if 0 < value <= hi else 1)' "${2}" "${3}"; then
+    echo "TS_BENCH_FAIL: usage ${1} must be in (0, ${3}], got '${2}'"
+    echo "  Outside that range the gateway refuses each request once the model"
+    echo "  is up, so the run reports as a serving failure rather than as this."
+    exit 64
+  fi
+}
 for pair in "TS_ROLLOUT=${ROLLOUT}" "TS_SAVE_DETAILED=${SAVE_DETAILED}"; do
   if [ "${pair#*=}" != "0" ] && [ "${pair#*=}" != "1" ]; then
     echo "TS_BENCH_FAIL: usage ${pair%%=*} must be 0 or 1, got '${pair#*=}'"
     exit 64
   fi
 done
+# Rollout-only variables are refused outside rollout rather than ignored, which
+# is the host's `_validated_rollout` contract and has to be this script's too:
+# the host never exports these without TS_ROLLOUT=1, so only a direct run gets
+# here, and it must not run on a weaker contract than a recipe. Ignoring them was
+# not harmless either way. Outside rollout no sampling body and no
+# `--sampling-backend` are sent, so a temperature, top_p or backend changed
+# nothing while the caller believed it had; and the floor and the sample count
+# were worse than ignored, because `audit_result_json` reads both, so a benchmark
+# was audited against a rollout it never ran and could fail as SHORTLEN or
+# BADBASIS.
+#
+# The same names as the host's `_ROLLOUT_ONLY_KEYS`, as `TS_<KEY>`; a test holds
+# the two lists together.
+#
+# "Set" means non-empty. Every read of these below is `${X:-default}` or `-n`,
+# so an empty value is indistinguishable from an unset one in both modes: it
+# changes nothing and claims nothing, and refusing it would also break `X=` as
+# the way to neutralise an inherited export. Any non-empty value is refused,
+# including a default such as TS_ROLLOUT_SAMPLES=1, as the host refuses the key
+# whatever it holds.
+ROLLOUT_ONLY_VARS=( TS_ROLLOUT_SAMPLES TS_SAMPLING_BACKEND TS_TEMPERATURE TS_TOP_P TS_MIN_MEAN_OUTPUT_TOKENS )
+if [ "${ROLLOUT}" != "1" ]; then
+  rollout_only_set=""
+  for name in "${ROLLOUT_ONLY_VARS[@]}"; do
+    if [ -n "${!name:-}" ]; then
+      rollout_only_set="${rollout_only_set:+${rollout_only_set}, }${name}"
+    fi
+  done
+  if [ -n "${rollout_only_set}" ]; then
+    echo "TS_BENCH_FAIL: usage ${rollout_only_set} require TS_ROLLOUT=1"
+    echo "  Outside rollout this script sends no sampling parameters, so these"
+    echo "  would either be ignored or change what the audit checks without"
+    echo "  changing what ran. Set TS_ROLLOUT=1, or unset them."
+    if [ -n "${TS_SAMPLING_BACKEND:-}" ]; then
+      echo "  To pin a backend for a benchmark, pass --sampling-backend in"
+      echo "  TS_SERVE_ARGS instead."
+    fi
+    exit 64
+  fi
+fi
 case "${MIN_MEAN_OUTPUT_TOKENS}" in
   ''|*[!0-9]*)
     echo "TS_BENCH_FAIL: usage TS_MIN_MEAN_OUTPUT_TOKENS must be a non-negative integer, got '${MIN_MEAN_OUTPUT_TOKENS}'"
@@ -450,6 +584,36 @@ case "${MIN_MEAN_OUTPUT_TOKENS}" in
 esac
 if [ "${ROLLOUT}" = "1" ]; then
   require_uint TS_ROLLOUT_SAMPLES "${ROLLOUT_SAMPLES}" 1 1024
+  # On `random` the recipe sends TS_OUTPUT_LEN as each completion's max_tokens,
+  # so a floor above it describes a length the server is not permitted to
+  # generate. No run can satisfy it, and left unchecked the mistake surfaces as
+  # exit 56 -- a collapsed policy -- after the weights have loaded, which is the
+  # wrong name for it and several minutes late. The host refuses the same
+  # combination at config time; refused here for the reason the SAVE_DETAILED
+  # check below gives, that a direct script run must not enforce a weaker
+  # contract than a recipe-driven one.
+  if [ "${DATASET}" = "random" ]; then
+    # Validated before the comparison, and this is load-bearing rather than
+    # defensive: `-gt` is an integer test, nothing else in this script validates
+    # TS_OUTPUT_LEN, and the script does not run under `set -e`. A non-numeric
+    # value would therefore print `[: integer expression expected` to stderr,
+    # evaluate *false*, and carry on into model load -- the guard silently not
+    # firing on exactly the malformed input a hand-run supplies, which is the
+    # case it exists for.
+    case "${OUTPUT_LEN}" in
+      ''|*[!0-9]*|0*)
+        echo "TS_BENCH_FAIL: usage TS_OUTPUT_LEN must be a positive integer without leading zeros, got '${OUTPUT_LEN}'"
+        exit 64
+        ;;
+    esac
+    if [ "${MIN_MEAN_OUTPUT_TOKENS}" -gt "${OUTPUT_LEN}" ]; then
+      echo "TS_BENCH_FAIL: usage TS_MIN_MEAN_OUTPUT_TOKENS=${MIN_MEAN_OUTPUT_TOKENS} exceeds TS_OUTPUT_LEN=${OUTPUT_LEN}"
+      echo "  TS_OUTPUT_LEN caps each completion's max_tokens on TS_DATASET=random,"
+      echo "  so no run could satisfy this floor and the trial would fail as"
+      echo "  though the policy had collapsed."
+      exit 64
+    fi
+  fi
   # Required rather than defaulted. A rollout at temperature 0 draws the same
   # greedy completion n times, so it costs n decodes and reports a length
   # distribution with no variance in it -- the shape the mode produces, with
@@ -463,8 +627,27 @@ if [ "${ROLLOUT}" = "1" ]; then
     exit 64
   fi
   require_decimal TS_TEMPERATURE "${TS_TEMPERATURE}"
+  require_range TS_TEMPERATURE "${TS_TEMPERATURE}" 2
   if [ -n "${TS_TOP_P:-}" ]; then
     require_decimal TS_TOP_P "${TS_TOP_P}"
+    require_range TS_TOP_P "${TS_TOP_P}" 1
+  fi
+  # The floor needs a per-completion reading and `output_lens` is the only one,
+  # so without TS_SAVE_DETAILED the audit falls back to
+  # total_output_tokens/completed -- per request. At n > 1 that is not merely
+  # weaker, it is blind: with summed usage accounting one token per completion
+  # reads as n and clears a floor of n exactly. The host refuses this
+  # combination; refused here too, or a direct script run enforces a weaker
+  # contract than a recipe-driven one while printing the same verdict names.
+  if [ "${SAVE_DETAILED}" != "1" ] && [ "${MIN_MEAN_OUTPUT_TOKENS}" != "0" ] \
+     && [ "${ROLLOUT_SAMPLES}" -gt 1 ]; then
+    echo "TS_BENCH_FAIL: usage TS_SAVE_DETAILED=0 cannot be combined with TS_MIN_MEAN_OUTPUT_TOKENS=${MIN_MEAN_OUTPUT_TOKENS} and TS_ROLLOUT_SAMPLES=${ROLLOUT_SAMPLES}"
+    echo "  The floor is per completion and output_lens is the only"
+    echo "  per-completion source; without it the check falls back to a"
+    echo "  per-request mean, which at this sample count a fully collapsed"
+    echo "  policy would still clear. Set TS_SAVE_DETAILED=1, or"
+    echo "  TS_MIN_MEAN_OUTPUT_TOKENS=0, or TS_ROLLOUT_SAMPLES=1."
+    exit 64
   fi
   # `--ignore-eos` pins every completion to TS_OUTPUT_LEN, which is the opposite
   # of what a rollout measures: real rollouts stop on EOS and their cost is the
@@ -736,6 +919,37 @@ fi
 if ! supplies_flag --drain-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
   serve_args+=( --drain-timeout "${DRAIN_TIMEOUT}" )
 fi
+# Rollout mode has to name the sampling backend, and the reason is that the
+# engine's own default is wrong here in a way that returns HTTP 200:
+#
+#   tokenspeed/runtime/sampling/registry.py
+#     def _get_default_backend_name() -> str:
+#         if current_platform().is_nvidia:
+#             return "flashinfer"
+#         return "greedy"
+#
+# `is_nvidia` is false on this hardware, so the default resolves to `greedy`,
+# and the greedy backend ignores `temperature`, `top_p`, `top_k` and `seed`
+# outright. The request is accepted, 200 comes back, and every completion is
+# the argmax -- so `n: 8` at temperature 1.2 returns eight identical choices
+# while the export, the metrics and the recipe all describe a sampled rollout.
+# That is this script's defining failure mode, a step that passes describing a
+# run that did not happen, and it is invisible to every audit below because
+# each of those reads counts and lengths rather than variety.
+#
+# Benchmark cells are deliberately left on the engine default: argmax decoding
+# is what a throughput benchmark wants, and changing it would move the numbers
+# under the blessed baselines. So this is appended only under rollout.
+#
+# `--sampling-backend` accepts greedy | triton | triton_full | flashinfer |
+# flashinfer_full. Under rollout this script accepts only `triton` and
+# `triton_full`: `greedy` is not sampling, and the `flashinfer*` pair is
+# CUDA-only and unregistered on the ROCm images served here, so allowing it
+# only moved the failure past weight load. Both refusals are above, next to the
+# value they check.
+if [ "${ROLLOUT}" = "1" ]; then
+  serve_args+=( --sampling-backend "${SAMPLING_BACKEND}" )
+fi
 
 # Phase 1: bring the server up. setsid so it leads its own process group and
 # `teardown` can signal the whole tree.
@@ -796,6 +1010,101 @@ if [ "${gen_health}" -ne 1 ]; then
   echo "TS_BENCH_FAIL: health_generate_unhealthy"
   tail -n 40 "${SERVER_LOG}" 2>/dev/null
   exit 52
+fi
+
+# Phase 2b: read the sampling backend back off the running engine. Asking for it
+# on the command line is not the same as getting it -- an engine that does not
+# know the flag, or that falls back, still serves -- and every downstream audit
+# here counts requests and tokens, none of which differ between sampled and
+# argmax decoding. So this is the one property of a rollout that cannot be
+# checked after the fact from what the run exported. Rollout only: a benchmark
+# cell wants greedy and asks for nothing.
+if [ "${ROLLOUT}" = "1" ]; then
+  info_code="$(http_code "${CONTROL}/get_server_info")"
+  server_info="$(curl -s --max-time 10 "${CONTROL}/get_server_info" 2>/dev/null || echo '')"
+  reported="$(printf '%s' "${server_info}" \
+    | tr ',{}' '\n\n\n' \
+    | sed -n 's/.*"sampling_backend"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1)"
+  if [ -z "${reported}" ]; then
+    # Fail, and the earlier "not fatal, the endpoint is a convenience" reading
+    # had it backwards. It is true that a build without `/get_server_info` is
+    # not evidence that sampling is broken. It is not evidence that sampling
+    # works either, and that is the whole question: this readback is the ONLY
+    # check that distinguishes the requested backend from a greedy fallback,
+    # because nothing downstream can. The audits count requests and tokens, and
+    # those are identical under sampled and argmax decoding.
+    #
+    # So warning here published a rollout labelled `SAMPLING_BACKEND` on no
+    # evidence that any sampling happened -- in precisely the case where the
+    # evidence was unavailable. An unverifiable claim is a stronger reason to
+    # stop than a refuted one, not a weaker one: a mismatch at least tells the
+    # reader what ran.
+    #
+    # Distinct from 57 and 58 on purpose, and the split routes the same way
+    # those two do. 57 says sampling was ignored, 58 says it happened under
+    # another name; 60 says nobody can tell which, and the operator's next move
+    # is to make the endpoint answer rather than to look at the numbers. A
+    # benchmark cell is unaffected -- it asks for nothing and never reaches
+    # here.
+    echo "TS_BENCH_FAIL: rollout_sampling_backend_unverified asked=${SAMPLING_BACKEND} http=${info_code}"
+    echo "  ${CONTROL}/get_server_info did not report a sampling_backend, so"
+    echo "  there is no evidence the engine honoured --sampling-backend. Nothing"
+    echo "  later in this run can substitute for it: request and token counts are"
+    echo "  identical whether the engine sampled or returned the argmax, so"
+    echo "  publishing would label the cell ${SAMPLING_BACKEND} on no evidence."
+    echo "--- first 400 bytes of the response ---"
+    printf '%.400s\n' "${server_info:-<empty>}"
+    tail -n 40 "${SERVER_LOG}" 2>/dev/null
+    exit 60
+  else
+    echo "TS_BENCH_INFO: sampling_backend=${reported} (asked for ${SAMPLING_BACKEND})"
+    # Assert what was asked for, not the absence of the one known-bad value.
+    # Testing only for `greedy` accepted every other disagreement silently: ask
+    # for `triton`, get `triton_full`, and the trial publishes that cell's
+    # numbers labelled with the backend from the host config rather than the one
+    # that ran. For a perf measurement an unnoticed backend substitution is the
+    # same defect as an unnoticed sampling-parameter substitution, and this
+    # check exists for the second, so it should cover the first.
+    #
+    # Exact match rather than a family of acceptable values, and the engine's
+    # own resolution is why. `_resolve_backend_name` returns
+    # `server_args.sampling_backend or _get_default_backend_name()` -- the CLI
+    # value verbatim when set -- and `create_sampling_backend` raises on a name
+    # it does not know instead of falling back to a neighbour. So there is no
+    # legitimate path from `triton` to `triton_full`, and treating them as one
+    # family would reintroduce exactly the looseness that let greedy through,
+    # over two backends with different implementations and different
+    # performance. If some later build does normalise or alias names, this
+    # fails loudly and gets relaxed deliberately, which is the safe direction.
+    # Two verdicts, not one, and the split is the same judgement as SHORTLEN
+    # against UNPARSEABLE: these route differently for whoever reads the
+    # failure. `rollout_sampling_ignored` says the sampling parameters did
+    # nothing and the rollout is not a rollout. A mismatch between two
+    # *sampling* backends says the opposite -- the numbers are real
+    # measurements, and what is wrong is the name they would be filed under.
+    # Reusing the greedy label for both would assert "sampling was ignored"
+    # about a run that sampled correctly, which is the mislabelled verdict this
+    # script exists to prevent, reached through the fix for the previous one.
+    if [ "${reported}" = "greedy" ] && [ "${SAMPLING_BACKEND}" != "greedy" ]; then
+      echo "TS_BENCH_FAIL: rollout_sampling_ignored asked=${SAMPLING_BACKEND} engine=${reported}"
+      echo "  The greedy backend discards temperature, top_p, top_k and seed and"
+      echo "  returns the argmax, so every one of the ${ROLLOUT_SAMPLES} completions"
+      echo "  per prompt would be the same string while the export described a"
+      echo "  sampled rollout. Failing here rather than publishing that."
+      tail -n 40 "${SERVER_LOG}" 2>/dev/null
+      exit 57
+    fi
+    if [ "${reported}" != "${SAMPLING_BACKEND}" ]; then
+      echo "TS_BENCH_FAIL: rollout_sampling_backend_mismatch asked=${SAMPLING_BACKEND} engine=${reported}"
+      echo "  The engine is sampling, so the measurement is real -- but not with"
+      echo "  the backend this cell will be labelled with. Sampling backends"
+      echo "  differ in implementation and in performance, so publishing one"
+      echo "  backend's numbers under another's name is a mislabelled result."
+      tail -n 40 "${SERVER_LOG}" 2>/dev/null
+      exit 58
+    fi
+  fi
 fi
 echo "TS_BENCH_OK: health_generate"
 
@@ -915,11 +1224,20 @@ run_bench_step() {
 # and require that it actually served what we asked for. Echoes one of
 # OK / SHORTFALL / UNPARSEABLE for the caller to classify.
 audit_result_json() {
-  python3 - "$1" "${NUM_PROMPTS}" "${MIN_MEAN_OUTPUT_TOKENS}" <<'PY'
+  # LEN_CAP is the largest a single completion could legitimately be, or an
+  # empty string when there is no such bound. `random` sends OUTPUT_LEN as each
+  # completion's max_tokens, so no entry can exceed it; `sharegpt` is sent no
+  # output_len at all and so has no cap. Mirrors the host's
+  # `_completion_length_cap`.
+  local len_cap=""
+  if [ "${DATASET}" = "random" ]; then len_cap="${OUTPUT_LEN}"; fi
+  python3 - "$1" "${NUM_PROMPTS}" "${MIN_MEAN_OUTPUT_TOKENS}" "${ROLLOUT_SAMPLES}" "${len_cap}" <<'PY'
 import json
 import sys
 
 path, expected, min_mean_output = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+samples = int(sys.argv[4])
+len_cap = int(sys.argv[5]) if sys.argv[5] else None
 try:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
@@ -963,8 +1281,9 @@ if failed != 0 or completed != expected:
 #
 # Mean rather than minimum, and from total_output_tokens rather than from a
 # per-request array, because those two fields are the ones every export version
-# carries. `output_lens` is used for the distribution the host reports, but it
-# is not depended on for the verdict.
+# carries. `output_lens` is preferred when present -- it is the only
+# per-completion source and needs no assumption about the gateway's usage
+# accounting -- but its absence is not fatal here; the host audits that.
 #
 # Non-positive is UNPARSEABLE here, not SHORTLEN, and the boundary matters
 # because the two verdicts route differently: SHORTLEN says a policy stopped
@@ -975,6 +1294,113 @@ if failed != 0 or completed != expected:
 # host is about to call unreadable, and a reader would have to reconcile two
 # names for one defect. Every request completing while zero tokens were
 # generated is not a short answer; an immediate EOS is still a token.
+# The array's validity and its shape are audited here, OUTSIDE the floor block
+# below, and only the mean comparison is left inside it. Everything in this
+# section used to sit under `if min_mean_output > 0:`, so setting the floor to 0
+# switched the whole audit off while the host went on refusing the same
+# exports -- `null`, `[]`, `"abc"` and over-cap arrays all printed OK here and
+# `result_json_unusable` there. `min_mean_output_tokens: 0` is precisely the
+# escape hatch the `rollout_length_basis_unusable` detail and the
+# `save_detailed: false` refusal both tell people to reach for, so that is the
+# configuration the hole was behind, and a direct script run enforced a weaker
+# contract than a recipe-driven one. Whether the export is readable is not a
+# question about the floor.
+#
+# Same rule as the host's `_valid_output_lens`, and it has to stay the same
+# rule: this audit runs first, so a container reading the array differently
+# would print a verdict the host then contradicts.
+lens = doc.get("output_lens")
+# Whether the entries are per completion or per request, decided by cardinality
+# rather than assumed. Read by the floor below to pick its basis.
+lens_per_request = False
+
+
+def _whole(v, cap):
+    # The host's rule verbatim (`_valid_output_lens`): a non-bool real
+    # number that is a non-negative whole value, so `10.0` counts and
+    # `10.5` does not. Spelling it as `isinstance(v, int)` here made the
+    # two layers disagree about integral floats -- the container would
+    # reject `[1.0] * 256`, fall back to per-request accounting and derive
+    # 8, clearing the default floor on a step the host reads as a mean of 1.
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if not (v == v and abs(v) != float("inf")):
+        return False
+    # JSON bounds no integer, so `json.load` yields arbitrary-precision
+    # ints and `float(v)` raises OverflowError rather than returning one.
+    # Unguarded that aborted the audit with a traceback: the caller reads
+    # this function's stdout, got nothing, and fell through its `case` to
+    # `result_json_unusable` -- the right direction, by accident, under the
+    # wrong name and with a Python traceback in the log. The host crashed
+    # the trial outright on the same export.
+    try:
+        if v < 0 or not float(v).is_integer():
+            return False
+    except OverflowError:
+        return False
+    # And no longer than an entry was permitted to be. `cap` is passed in
+    # rather than read from `len_cap` because the bound depends on what an
+    # entry *is*: on `random`, output_len is each completion's max_tokens, so
+    # a per-completion entry cannot exceed it, but a per-request entry under
+    # summed usage accounting holds up to `samples` of them. Applying the
+    # per-completion cap to the per-request shape called the same gateway a
+    # broken export as soon as its completions got long enough.
+    return cap is None or v <= cap
+
+
+# Present-but-invalid and absent are different things, and they were being
+# treated the same. The host's `_missing_core_metrics` calls a present
+# array that fails the rule `result_json_unusable`; this audit discarded it
+# and fell back per-request, so the same export got UNPARSEABLE on one
+# layer and SHORTLEN -- or OK -- on the other. An over-cap entry is an
+# impossible export, and falling back to a different denominator is not a
+# reading of it, it is a second opinion about a document neither layer can
+# trust.
+#
+# Keyed on presence of the key rather than on the value, which is the whole
+# rule and is why it is written once: `doc.get` answers `None` both for an
+# absent key and for `"output_lens": null`, so any test of the *value* --
+# including `is not None` -- reads a present null as an absence and falls
+# back on it. `[]`, a string and an object are the same mistake seen at
+# other types.
+#
+# The fallback survives for exactly one case: no array at all, which is
+# what `save_detailed: false` produces and is a configuration rather than a
+# defect.
+if "output_lens" in doc:
+    if not (isinstance(lens, list) and lens):
+        print(
+            f"UNPARSEABLE output_lens {type(lens).__name__} "
+            "(not a non-empty array of lengths)"
+        )
+        raise SystemExit(0)
+    # Exactly two cardinalities are legitimate: one entry per completion
+    # (`completed * samples`) and, at `samples > 1`, one per request
+    # (`completed`). Anything else describes a subset of the run rather than
+    # the run -- `[100]` against `completed: 32` averaged one completion
+    # standing in for thirty-two and cleared the floor on it -- so it is a
+    # broken export, not a gateway choice, and it is UNPARSEABLE rather than
+    # BADBASIS. At `samples == 1` the two shapes are the same number, so
+    # there is no second legitimate cardinality there at all; that is the
+    # case the old `and samples > 1` guard let through untested.
+    lens_per_request = samples > 1 and len(lens) == completed
+    if not lens_per_request and len(lens) != completed * samples:
+        print(
+            f"UNPARSEABLE output_lens n={len(lens)} completed={completed} "
+            f"samples={samples}: entries are neither one per completion nor "
+            "one per request"
+        )
+        raise SystemExit(0)
+    entry_cap = len_cap
+    if entry_cap is not None and lens_per_request:
+        entry_cap = entry_cap * samples
+    if not all(_whole(v, entry_cap) for v in lens):
+        print(
+            f"UNPARSEABLE output_lens {type(lens).__name__} "
+            "(entries are not whole lengths within cap)"
+        )
+        raise SystemExit(0)
+
 if min_mean_output > 0:
     total_output = doc.get("total_output_tokens")
     if (
@@ -984,12 +1410,61 @@ if min_mean_output > 0:
     ):
         print(f"UNPARSEABLE total_output_tokens={total_output!r}")
         raise SystemExit(0)
-    mean_output = total_output / completed
+    # The type and sign checks above pass on an arbitrary-precision int -- they
+    # are integer comparisons -- and the per-request fallback below then divides
+    # it, which is where OverflowError lands. Same defect as `_whole`'s, one
+    # conversion later, and it is reachable on the path that has no array at
+    # all, so fixing only `_whole` would have left it.
+    try:
+        float(total_output)
+    except OverflowError:
+        print(
+            "UNPARSEABLE total_output_tokens too large to measure "
+            f"({len(str(total_output))} digits)"
+        )
+        raise SystemExit(0)
+    # Per completion, and read off the per-completion array when the export
+    # has one rather than derived by dividing. Dividing by
+    # `completed * samples` assumed the gateway sums `usage.completion_tokens`
+    # across all `n` choices; the host's own metric documentation allows the
+    # other shape, first-choice-only, and on that shape the division is wrong
+    # by a factor of `n` in the direction that fails a healthy run.
+    # `output_lens` carries one entry per recorded completion, so its mean
+    # needs no assumption at all.
+    #
+    # Validity and cardinality were settled above, before the floor was
+    # consulted. What is left here is the one question that genuinely belongs
+    # to the floor: whether a per-completion mean can be derived at all.
+    if "output_lens" in doc:
+        if lens_per_request:
+            # One entry per *request* is a shape the host documents and
+            # supports, and it is the same quantity as
+            # total_output_tokens/completed -- so taking its mean as a
+            # per-completion reading is exactly the assumption the comment
+            # above refuses, reintroduced through the array. At samples=8 a
+            # policy emitting one token per choice reports 8 per request and
+            # clears a floor of 8 exactly. Refused rather than divided, and
+            # refused here as well as on the host, or a direct script run
+            # enforces a weaker contract than a recipe-driven one while
+            # printing the same verdict names.
+            print(
+                f"BADBASIS output_lens n={len(lens)} completed={completed} "
+                f"samples={samples}: entries are request totals, not completion "
+                "lengths, so a per-completion floor cannot be derived"
+            )
+            raise SystemExit(0)
+        mean_output = sum(lens) / len(lens)
+        basis = f"output_lens n={len(lens)}"
+    else:
+        # Granularity unknown, so it is not guessed: compared per request, the
+        # weaker guard, and the verdict says so.
+        mean_output = total_output / completed
+        basis = f"total_output_tokens/completed={total_output}/{completed} per_request"
     if mean_output < min_mean_output:
         print(
             f"SHORTLEN mean_output_tokens={mean_output:.3f} "
-            f"floor={min_mean_output} total_output_tokens={total_output} "
-            f"completed={completed}"
+            f"floor={min_mean_output} basis={basis} "
+            f"completed={completed} samples={samples}"
         )
         raise SystemExit(0)
 
@@ -1046,6 +1521,12 @@ for step in $(seq 1 "${WARMUP_STEPS}"); do
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       exit 56
       ;;
+    BADBASIS*)
+      # Fatal in a warmup too: the cardinality is a property of the gateway, so
+      # the measured steps would hit it as well, several minutes later.
+      echo "TS_BENCH_FAIL: warmup step ${step} rollout_length_basis_unusable ${audit#BADBASIS }"
+      exit 59
+      ;;
     *)
       echo "TS_BENCH_FAIL: warmup step ${step} result_json_unusable ${audit}"
       exit 54
@@ -1095,6 +1576,10 @@ for step in $(seq 1 "${BENCH_STEPS}"); do
       echo "TS_BENCH_FAIL: step ${step} rollout_output_too_short ${audit#SHORTLEN }"
       tail -n 40 "${SERVER_LOG}" 2>/dev/null
       overall=56
+      ;;
+    BADBASIS*)
+      echo "TS_BENCH_FAIL: step ${step} rollout_length_basis_unusable ${audit#BADBASIS }"
+      overall=59
       ;;
     *)
       echo "TS_BENCH_FAIL: step ${step} result_json_unusable ${audit}"

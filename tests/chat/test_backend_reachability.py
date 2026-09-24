@@ -117,9 +117,7 @@ class TestDoctorReportsAnUnreachableBackend:
         assert "AORTA_CHAT_VLLM_BASE_URL" in hint
         assert "aorta chat config init" in hint
 
-    def test_the_hint_is_not_prefixed_with_an_exception_class_name(
-        self, nothing_listening: str
-    ):
+    def test_the_hint_is_not_prefixed_with_an_exception_class_name(self, nothing_listening: str):
         """BackendUnreachableError's message is already operator-facing prose."""
         report = doctor.Report()
         doctor._check_backend(report)
@@ -172,19 +170,38 @@ class TestPreflightStaysPermissive:
         assert await backend.preflight(timeout=1, interval=1) is None
 
     @pytest.mark.asyncio
-    async def test_preflight_says_it_is_starting_anyway(
-        self, nothing_listening: str, caplog
-    ):
+    async def test_preflight_says_it_is_starting_anyway(self, nothing_listening: str, caplog):
         backend = LocalVLLMBackend()
         with caplog.at_level(logging.WARNING):
             await backend.preflight(timeout=1, interval=1)
         assert "starting anyway" in caplog.text
 
-    def test_preflights_default_budget_is_still_minutes(self):
-        """A quietly shortened warm-up window is the regression to watch for."""
+    def test_preflights_budget_is_a_minute_not_five(self):
+        """Shortened deliberately, which is why this says so rather than 300.
+
+        The original worry was a quietly shrunk warm-up window, and it was the
+        right worry: a large model on a cold page cache does take minutes. What
+        changed is the understanding of what the budget buys. ``preflight``
+        starts the session whichever way it ends, so the budget does not decide
+        whether a warming backend is tolerated -- it decides how long the user
+        stares at an empty chat before the welcome appears. A model that is
+        still loading is discovered by the first request at 60s exactly as it
+        would be at 300s.
+
+        The cost that made it worth changing was structural rather than the
+        number: the wait sat in ``on_chat_start``, so a down backend charged it
+        once per browser tab. The UI waits once per process now, and this is
+        the remaining courtesy delay.
+        """
         from aorta.chat.inference.providers import local_vllm
 
-        assert local_vllm.PREFLIGHT_TIMEOUT == 300
+        assert local_vllm.PREFLIGHT_TIMEOUT == 60
+
+    def test_the_budget_is_still_generous_enough_to_be_a_wait(self):
+        """Not a token one: a restarting proxy should still be caught by it."""
+        from aorta.chat.inference.providers import local_vllm
+
+        assert local_vllm.PREFLIGHT_TIMEOUT >= 30
 
     @pytest.mark.asyncio
     async def test_a_server_that_is_still_warming_up_is_waited_for(self, monkeypatch):
@@ -336,18 +353,14 @@ class TestAskExplainsRatherThanTracebacks:
         assert nothing_listening in message
         assert "Traceback" not in message
 
-    def test_the_message_is_short_enough_to_read(
-        self, unreachable_backend, connection_failure
-    ):
+    def test_the_message_is_short_enough_to_read(self, unreachable_backend, connection_failure):
         """It replaced 180-odd lines. A dozen is a message; a hundred is a trace."""
         from aorta.cli import chat as cli
 
         message = cli._failure_message(connection_failure, unreachable_backend)
         assert len(message.splitlines()) < 15
 
-    def test_the_message_says_what_to_do_next(
-        self, unreachable_backend, connection_failure
-    ):
+    def test_the_message_says_what_to_do_next(self, unreachable_backend, connection_failure):
         from aorta.cli import chat as cli
 
         message = cli._failure_message(connection_failure, unreachable_backend)

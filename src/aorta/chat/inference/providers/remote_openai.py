@@ -16,6 +16,7 @@ from langchain_openai import ChatOpenAI
 
 from aorta.chat.config import settings
 from aorta.chat.inference.callcount import LLMCallCounter
+from aorta.chat.inference.providers.base import REMOTE_NATIVE_REQUIREMENT
 from aorta.chat.remote_auth import build_auth, describe_auth
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,12 @@ class RemoteOpenAIBackend:
     """Chat backend for a hosted, metered OpenAI-compatible endpoint."""
 
     name = "openai"
+
+    native_requirement = REMOTE_NATIVE_REQUIREMENT
+
+    @property
+    def model_name(self) -> str:
+        return settings.remote_llm_model
 
     def get_chat_model(
         self,
@@ -94,8 +101,7 @@ class RemoteOpenAIBackend:
             extra_headers=settings.remote_llm_extra_headers,
         )
         return (
-            f"remote OpenAI-compatible -- {settings.remote_llm_model} "
-            f"at {endpoint} (auth: {auth})"
+            f"remote OpenAI-compatible -- {settings.remote_llm_model} at {endpoint} (auth: {auth})"
         )
 
 

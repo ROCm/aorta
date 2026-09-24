@@ -3,9 +3,24 @@
 # Two cells, eight prompts each, a 256-token allowance: small enough that the
 # run is dominated by model load rather than by generation, which is what makes
 # it a check on the plumbing instead of a measurement. What it establishes is
-# that sampled multi-completion requests reach the engine, that generation stops
-# on EOS rather than at `output_len`, and that the export carries the per-request
-# lengths the distribution is computed from.
+# that sampled multi-completion requests reach the engine, that the request body
+# carrying `ignore_eos: false` survives the bench CLI's own override, and that
+# the export carries the per-completion lengths the distribution is computed
+# from.
+#
+# What it does NOT establish is that generation stops on EOS, and the note on
+# `generated_tokens_max` below says why: `dataset: random` gives the model no
+# reason to emit one, so an EOS-respecting run and an EOS-ignoring run produce
+# the same observable lengths here. Showing that needs answerable prompts.
+#
+# It also does not establish that the four completions of the `n=4` cell differ
+# from one another, and they do not: TokenSpeed returns identical choices for
+# `n > 1` within a single request. That is an upstream defect, separate from the
+# greedy-sampling default this recipe's PR fixes and not resolved by that fix --
+# see the block at the top of `tokenspeed-serve-rollout.yaml`. It does not
+# weaken this recipe, whose subject is the request plumbing and the token
+# accounting rather than sampling diversity: `usage.completion_tokens` sums
+# across choices whether or not the choices differ.
 #
 #   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-rollout-smoke.yaml \
 #     --output-dir /tmp/ts-rollout-smoke
