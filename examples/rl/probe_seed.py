@@ -209,6 +209,32 @@ def seed_verdict(
     return HONOURED, "the seed replayed, two seeds diverged, and the engine samples"
 
 
+def seed_draw_order(repeats: int) -> list[int]:
+    """The order the two seeds are drawn in: ABBA, repeated.
+
+    All of `SEED_A`'s draws used to precede all of `SEED_B`'s, so the seed was
+    confounded with request order. An engine that ignores the key but whose
+    output moves with server state -- a cache warming, a batch changing shape
+    -- replays within each contiguous block and differs between them, which is
+    exactly `replays and diverges`: a false HONOURED, measured at 3/3 keys
+    against a fake engine whose output changed once every three requests.
+
+    Plain alternation (ABAB) closes that and opens its mirror image: an engine
+    whose output flips on every request hands each seed one parity, so each
+    replays and the two differ. ABBA closes both. Each seed lands on both
+    parities, and each seed's first draw precedes the other's last, so no single
+    change point can put one seed entirely before it and the other after.
+
+    What it cannot close is a drift with a longer period that happens to match
+    the pattern. The unseeded control is the guard there: an engine that moves
+    with server state shows it as diversity where no seed is set.
+    """
+    order: list[int] = []
+    for i in range(repeats):
+        order += [SEED_A, SEED_B] if i % 2 == 0 else [SEED_B, SEED_A]
+    return order
+
+
 def probe_seed_modes(
     model: str,
     temperature: float,
@@ -232,13 +258,11 @@ def probe_seed_modes(
     control_samples = bool(control and control.get("samples"))
     out: dict[str, Any] = {}
     for mode in ("top_level", "sampling_seed", "seed"):
-        draws = {
-            seed: [
+        draws: dict[int, list[dict[str, Any]]] = {SEED_A: [], SEED_B: []}
+        for seed in seed_draw_order(repeats):
+            draws[seed].append(
                 call(model, temperature=temperature, seed=seed, seed_mode=mode)
-                for _ in range(repeats)
-            ]
-            for seed in (SEED_A, SEED_B)
-        }
+            )
         errors = [r["error"] for rows in draws.values() for r in rows if r["error"]]
         by_seed = {
             seed: {r["content"] for r in rows} for seed, rows in draws.items()

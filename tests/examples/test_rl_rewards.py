@@ -16,6 +16,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -2108,6 +2109,91 @@ def test_the_warn_half_of_that_report_still_cites_its_finding(triage_reward):
     assert label.cited_detectors == {"waitcheck:wait_hazard"}
 
 
+def test_the_post_training_doc_states_the_live_category_count():
+    """The reviewer entry point quotes a taxonomy size the code can contradict.
+
+    It carried "this branch is behind main and still has eight" after the
+    branch had merged the eleven-name set; the count is the one claim in that
+    section a test can check, so it is checked against the set the graders
+    import rather than against a literal.
+    """
+    from aorta.agent.llm import AUTOPSY_CATEGORIES
+
+    text = (_REPO / "docs/tokenspeed-rl-post-training.md").read_text(encoding="utf-8")
+    claimed = re.findall(r"taxonomy from 8 categories to (\d+)", text)
+    assert claimed == [str(len(AUTOPSY_CATEGORIES))], claimed
+    assert "still\nhas eight" not in text and "still has eight" not in text
+
+
+def _fail_and_warn_report() -> dict:
+    """The real Waitcheck `warn` check beside the ConSan check promoted to `fail`.
+
+    No committed report ranks `fail`, so the failing half is synthetic: the
+    real ConSan check with its verdict raised and one finding of its own,
+    shaped like Waitcheck's but renamed so the two checks' evidence cannot be
+    confused in the assertion. The model refuses two checks from one sanitizer,
+    which is why the halves come from different ones.
+    """
+    import copy
+
+    doc = _mixed_verdict_report()
+    failed, warned = doc["checks"][0], doc["checks"][-1]
+    finding = copy.deepcopy(warned["findings"][0])
+    finding["sanitizer"] = failed["sanitizer"]
+    finding["code"] = "synthetic_failure"
+    failed.update(verdict="fail", state="ran", reason=None, returncode=None)
+    failed["findings"] = [finding]
+    doc["checks"] = [failed, warned]
+    doc["overall_verdict"] = "fail"
+    doc["execution_status"] = "complete"
+    return doc
+
+
+def test_a_fail_report_cites_only_the_checks_that_failed(triage_reward):
+    """The error-case rule, one rank down.
+
+    `codes` gathered findings from every check, so an overall `fail` that also
+    carried a check which merely warned cited the warning's hazard as evidence
+    for the failure -- right answer, wrong reason, in the ground truth.
+    """
+    label = triage_reward.label_sanitizer_report(_fail_and_warn_report())
+
+    assert label.verdict == "fail"
+    assert label.failure_detectors == ["consan:synthetic_failure"]
+    assert label.cited_detectors == {"consan:synthetic_failure"}
+
+
+def test_two_checks_at_the_overall_verdict_both_count(triage_reward):
+    """Narrowness: the rule filters by verdict, it does not pick one check."""
+    doc = _fail_and_warn_report()
+    doc["checks"][1]["verdict"] = "fail"
+
+    label = triage_reward.label_sanitizer_report(doc)
+
+    assert label.verdict == "fail"
+    assert sorted(label.failure_detectors) == [
+        "consan:synthetic_failure", "waitcheck:wait_hazard",
+    ]
+
+
+def test_the_committed_survey_attribution_is_unchanged_by_the_verdict_filter(
+    triage_reward,
+):
+    """No committed report mixes verdicts in a way the filter touches.
+
+    Pinned so the claim in `label_sanitizer_report`'s comment -- no existing
+    corpus row's ground truth moves -- is checked rather than remembered.
+    """
+    by_case = {
+        Path(src).parent.name: sorted(label.failure_detectors)
+        for src, label in triage_reward.load_sanitizer_reports(_SURVEY)
+    }
+    assert by_case["gemm_f32_waitcheck"] == ["waitcheck:wait_hazard"]
+    assert {case: codes for case, codes in by_case.items() if codes} == {
+        "gemm_f32_waitcheck": ["waitcheck:wait_hazard"],
+    }
+
+
 def test_a_rotted_report_is_rejected_rather_than_relabelled(triage_reward, tmp_path):
     """The corpus-rot signal for this source is aorta's own consistency check.
 
@@ -2333,13 +2419,16 @@ def test_a_refused_build_leaves_a_directory_that_is_not_a_corpus_alone(
     """The narrowness control: removing whatever `--out` names would pass above.
 
     `--out` is an operator-supplied path and a typo is the normal way it ends
-    up somewhere that matters. Keyed on the manifest, so this only ever
-    removes the three names it wrote.
+    up somewhere that matters. Keyed on the manifest, so a directory this
+    script never wrote a corpus into loses nothing -- not even a `*.jsonl`,
+    which is the shape `discard_corpus` removes where a manifest is present.
     """
     out = tmp_path / "not-a-corpus"
     out.mkdir()
     bystander = out / "notes.txt"
     bystander.write_text("mine", encoding="utf-8")
+    rows = out / "events.jsonl"
+    rows.write_text("{}\n", encoding="utf-8")
 
     code = _refuse(build_corpus, tmp_path, out)
     err = capsys.readouterr().err
@@ -2347,6 +2436,160 @@ def test_a_refused_build_leaves_a_directory_that_is_not_a_corpus_alone(
     assert code == 1, err
     assert "removed the previous corpus" not in err, err
     assert bystander.read_text(encoding="utf-8") == "mine"
+    assert rows.read_text(encoding="utf-8") == "{}\n"
+
+
+def _seed_previous_corpus(build_corpus, tmp_path):
+    """A published corpus plus the neighbours a real `--out` accumulates."""
+    out, manifest = _build(build_corpus, tmp_path, _SURVEY)
+    assert manifest["scenarios"] == 6
+    (out / "triage.v1.jsonl").write_text("older schema\n", encoding="utf-8")
+    (out / "manifest.v0.json").write_text("{}\n", encoding="utf-8")
+    (out / "README.md").write_text("provenance\n", encoding="utf-8")
+    (out / "scenario_labels.json").write_text('{"schema_version": 1}\n', encoding="utf-8")
+    return out
+
+
+_COMMITTED_INPUTS = ["README.md", "scenario_labels.json"]
+
+
+def test_a_refused_rebuild_removes_every_generated_name_not_just_three(
+    build_corpus, tmp_path, capsys
+):
+    """`discard_corpus` removed `CORPUS_FILES`; `publish` removes `_is_generated`.
+
+    So a refused rebuild left `triage.v1.jsonl` readable -- output from an
+    older schema that a successful build would have deleted, kept by the path
+    whose whole job is to leave nothing stale. The committed inputs beside it
+    are the narrowness half and must survive either way.
+    """
+    out = _seed_previous_corpus(build_corpus, tmp_path)
+    capsys.readouterr()
+
+    code = _refuse(build_corpus, tmp_path, out)
+    err = capsys.readouterr().err
+
+    assert code == 1, err
+    assert "removed the previous corpus" in err, err
+    assert sorted(p.name for p in out.iterdir()) == _COMMITTED_INPUTS
+
+
+def test_the_manifest_is_removed_last(build_corpus, tmp_path, monkeypatch):
+    """An interrupted discard must leave the marker that says to finish it.
+
+    The manifest is what `_holds_a_corpus` keys on. Removed first, a discard
+    that died part-way would leave rows behind in a directory no later failure
+    recognises as a corpus.
+    """
+    out = _seed_previous_corpus(build_corpus, tmp_path)
+    order: list[str] = []
+    real_unlink = Path.unlink
+
+    def recording_unlink(self, *args, **kwargs):
+        order.append(self.name)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", recording_unlink)
+    assert build_corpus.discard_corpus(out) is True
+    assert order[-1] == "manifest.json", order
+    assert set(order) == {
+        "triage.jsonl", "proposal.jsonl", "manifest.json",
+        "triage.v1.jsonl", "manifest.v0.json",
+    }
+
+
+def _duplicate_results(tmp_path):
+    tree = tmp_path / "dup"
+    shutil.copytree(_SURVEY, tree / "a")
+    shutil.copytree(_SURVEY, tree / "b")
+    return tree
+
+
+@pytest.mark.parametrize(
+    ("failure", "raised"),
+    [
+        ("baselines-missing", FileNotFoundError),
+        ("baselines-not-json", json.JSONDecodeError),
+        ("duplicate-scenario-ids", "DuplicateScenario"),
+    ],
+)
+def test_a_build_that_raises_still_discards_the_previous_corpus(
+    build_corpus, tmp_path, capsys, failure, raised
+):
+    """The two refusals discarded; the failures beside them did not.
+
+    A missing or unparseable --baselines, or two reports sharing a scenario
+    id, raised straight out of `main` and left the last corpus consumable --
+    the stale-corpus state the refusals prevent, reached by the commoner door.
+    The exception still propagates: the discard is added, not substituted.
+    """
+    out = _seed_previous_corpus(build_corpus, tmp_path)
+    capsys.readouterr()
+    results, baselines = _SURVEY, _VERDICT_BASELINES
+    if failure == "baselines-missing":
+        baselines = tmp_path / "nope.json"
+    elif failure == "baselines-not-json":
+        baselines = tmp_path / "baselines.json"
+        baselines.write_text("{not json", encoding="utf-8")
+    else:
+        results = _duplicate_results(tmp_path)
+    if isinstance(raised, str):
+        raised = getattr(build_corpus, raised)
+
+    with pytest.raises(raised):
+        build_corpus.main([
+            "--results", str(results), "--baselines", str(baselines),
+            "--out", str(out),
+        ])
+
+    assert "removed the previous corpus" in capsys.readouterr().err
+    assert sorted(p.name for p in out.iterdir()) == _COMMITTED_INPUTS
+
+
+@pytest.mark.parametrize("usage_error", ["run-meta-missing", "results-omitted"])
+def test_a_usage_error_leaves_the_previous_corpus_alone(
+    build_corpus, tmp_path, capsys, usage_error
+):
+    """Narrowness: exit 2 means the build never ran, so --out is not touched.
+
+    A command line with one wrong argument is no evidence its --out is the
+    directory the operator meant. Discarding here would turn a typo in
+    --run-meta into the loss of whatever --out named.
+    """
+    out = _seed_previous_corpus(build_corpus, tmp_path)
+    before = sorted(p.name for p in out.iterdir())
+    argv = ["--baselines", str(_VERDICT_BASELINES), "--out", str(out)]
+    if usage_error == "run-meta-missing":
+        argv += ["--results", str(_SURVEY), "--run-meta", str(tmp_path / "meta.jsno")]
+
+    with pytest.raises(SystemExit) as excinfo:
+        build_corpus.main(argv)
+
+    assert excinfo.value.code == 2
+    assert "removed the previous corpus" not in capsys.readouterr().err
+    assert sorted(p.name for p in out.iterdir()) == before
+
+
+def test_a_failed_publish_keeps_publishs_rollback(build_corpus, tmp_path, monkeypatch):
+    """Narrowness: the discard covers the build, not the swap.
+
+    `publish` rolls a failed write back to the previous directory, which is its
+    own tested contract, and a failure writing to --out is the least promising
+    moment to write to it again.
+    """
+    out = _seed_previous_corpus(build_corpus, tmp_path)
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+
+    def failing_publish(target, payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(build_corpus, "publish", failing_publish)
+    with pytest.raises(OSError, match="disk full"):
+        build_corpus.main([
+            "--results", str(_SURVEY), "--baselines", str(_VERDICT_BASELINES),
+            "--out", str(out),
+        ])
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
 
 
 def test_a_build_that_dies_mid_write_does_not_publish_half_of_it(
@@ -3249,6 +3492,75 @@ def _proposal_rows(raws):
         for scenario, group in raws.items()
         for index, raw in enumerate(group)
     ]
+
+
+@pytest.mark.parametrize(
+    ("case", "kind"),
+    [
+        ("explicit-stop", "explicit_stop"),
+        ("empty-list", "empty_mitigations"),
+        ("normalises-to-no-cells", "no_cells_after_normalising"),
+        ("unregistered-name", "hallucinated_mitigation"),
+        ("policy-rejected-name", "policy_rejected"),
+    ],
+)
+def test_each_tier4_refusal_has_its_own_failure_kind(
+    run_e2e, proposal_reward, monkeypatch, case, kind
+):
+    """Four of tier 4's five refusals were counted as registry hallucinations.
+
+    `failure_kind` matched `detail` for "no mitigation proposed" and called
+    everything else in the tier `hallucinated_mitigation`, so a model that
+    stopped, one that proposed only `none`, and one that named a registered
+    but unsafe mitigation were all reported as inventing names. Scored end to
+    end, so a stop site that forgets to set `tier4_reason` fails here.
+    """
+    m = proposal_reward
+    if case == "explicit-stop":
+        proposal = _proposal(m, stop=True)
+    elif case == "empty-list":
+        proposal = _proposal(m, mitigations=[])
+    elif case == "normalises-to-no-cells":
+        proposal = _proposal(m, mitigations=["none", "none"])
+    elif case == "unregistered-name":
+        proposal = _proposal(m, mitigations=["not_a_registered_mitigation"])
+    else:
+        unsafe = "sidecar/thing"
+        for module in (m, importlib.import_module("aorta.agent.policy")):
+            monkeypatch.setattr(module, "get_mitigation", lambda name, **kw: object())
+        proposal = _proposal(m, mitigations=[unsafe])
+
+    score = m.score_proposal(proposal)
+
+    assert score.stopped_at == "tier4_registry", (score.stopped_at, score.detail)
+    assert score.tier4_reason in m.TIER4_REASONS
+    assert run_e2e.failure_kind(score) == kind
+
+
+def test_an_unrecognised_tier4_reason_is_unknown_not_a_hallucination(
+    run_e2e, proposal_reward
+):
+    """The fallback was the defect: an unexpected refusal must show as new."""
+    score = proposal_reward.Score(tier=3, stopped_at="tier4_registry", detail="?")
+    assert run_e2e.failure_kind(score) == "unknown"
+    kinds = [run_e2e.failure_kind(proposal_reward.Score(
+        tier=3, stopped_at="tier4_registry", tier4_reason=reason,
+    )) for reason in proposal_reward.TIER4_REASONS]
+    assert len(set(kinds)) == len(kinds), kinds
+
+
+def test_the_other_tiers_keep_their_failure_kinds(run_e2e, proposal_reward):
+    """Narrowness: only tier 4 moved off the prose."""
+    m = proposal_reward
+    assert run_e2e.failure_kind(m.score_proposal(_proposal(m))) == "on_contract"
+    not_offered = m.score_proposal(_proposal(m, mitigations=["hip_launch_blocking"]))
+    assert run_e2e.failure_kind(not_offered) == "registered_but_not_offered"
+    assert run_e2e.failure_kind(m.score_proposal(
+        m.Proposal("p", "not json", ["tf32_off"])
+    )) == "malformed_json"
+    assert run_e2e.failure_kind(
+        m.score_proposal(_proposal(m, category="not_a_category"))
+    ) == "category_outside_set"
 
 
 def test_a_collapsed_group_is_reported_apart_from_a_degenerate_one(run_e2e):
@@ -7005,6 +7317,67 @@ def test_one_seed_replaying_is_not_the_key_replaying(monkeypatch):
 
     assert {row["verdict"] for row in modes.values()} == {probe_seed.IGNORED}
     assert not any(row["same_seed_reproduces"] for row in modes.values())
+
+
+def _order_following_engine(state):
+    """A fake ``call`` that ignores the seed; its output is a function of the
+    request's position alone -- server state, batch shape, a warming cache."""
+    counter = itertools.count()
+
+    def call(model, *, temperature, seed, seed_mode):
+        return {"error": "", "content": f'{{"state": {state(next(counter))}}}'}
+
+    return call
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        pytest.param(lambda n: n // 3, id="drifts-every-3-requests"),
+        pytest.param(lambda n: n % 2, id="flips-every-request"),
+        *[pytest.param(lambda n, k=k: int(n >= k), id=f"changes-once-after-{k}")
+          for k in range(1, 6)],
+    ],
+)
+def test_an_engine_whose_output_follows_request_order_is_never_honoured(
+    monkeypatch, state
+):
+    """The seed was confounded with request order.
+
+    Every `SEED_A` draw went out before every `SEED_B` draw, so an engine that
+    ignores the key but drifts every three requests replayed within each block
+    and differed between them: HONOURED on all three keys, measured. The
+    every-request case is what plain alternation would have got wrong, and the
+    single change points cover every position in the first mode's six draws.
+    The control is given as sampling, which is what such an engine shows.
+    """
+    probe_seed = _load("probe_seed")
+    monkeypatch.setattr(probe_seed, "call", _order_following_engine(state))
+
+    modes = probe_seed.probe_seed_modes("m", 1.0, 3, {"samples": True})
+
+    assert not [m for m, row in modes.items() if row["honoured"]], modes
+
+
+@pytest.mark.parametrize("repeats", [2, 3, 4, 5, 6])
+def test_the_draw_order_gives_no_request_position_to_one_seed_alone(repeats):
+    """The property the behavioural test above samples, stated for every size.
+
+    Each seed is drawn `repeats` times, lands on both parities, and starts
+    before the other finishes -- so neither a flip-every-request engine nor a
+    single change point can hand the two seeds disjoint outputs.
+    """
+    probe_seed = _load("probe_seed")
+    order = probe_seed.seed_draw_order(repeats)
+    positions = {
+        seed: [i for i, drawn in enumerate(order) if drawn == seed]
+        for seed in (probe_seed.SEED_A, probe_seed.SEED_B)
+    }
+    a, b = positions[probe_seed.SEED_A], positions[probe_seed.SEED_B]
+    assert len(order) == 2 * repeats
+    assert len(a) == len(b) == repeats
+    assert {i % 2 for i in a} == {i % 2 for i in b} == {0, 1}
+    assert min(a) < max(b) and min(b) < max(a)
 
 
 def test_an_outage_in_the_control_does_not_certify_sampling(monkeypatch):

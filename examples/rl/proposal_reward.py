@@ -304,6 +304,17 @@ def precision_credit(n_cells: int) -> float:
     return min(1.0, FREE_MITIGATIONS / n_cells)
 
 
+TIER4_EXPLICIT_STOP = "explicit_stop"
+TIER4_EMPTY = "empty_mitigations"
+TIER4_NO_CELLS = "no_cells_after_normalising"
+TIER4_UNREGISTERED = "unregistered_mitigation"
+TIER4_POLICY_REJECTED = "policy_rejected"
+TIER4_REASONS = (
+    TIER4_EXPLICIT_STOP, TIER4_EMPTY, TIER4_NO_CELLS, TIER4_UNREGISTERED,
+    TIER4_POLICY_REJECTED,
+)
+
+
 @dataclass
 class Score:
     tier: int = 0
@@ -320,6 +331,13 @@ class Score:
     # drops -- so `precision` is priced off the second.
     n_mitigations: int = 0
     n_cells: int = 0
+    # Which of tier 4's five refusals stopped the proposal, as a code rather
+    # than as `detail` prose. The tier covers five different outcomes -- an
+    # explicit stop, an empty list, a list that normalises to no cells, an
+    # unregistered name, and a registered name the policy refuses -- and a
+    # caller that told them apart by matching the prose counted four of them
+    # as hallucinated names. Empty when tier 4 did not stop the proposal.
+    tier4_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -332,6 +350,7 @@ class Score:
             "precision": round(self.precision, 4),
             "n_mitigations": self.n_mitigations,
             "n_cells": self.n_cells,
+            "tier4_reason": self.tier4_reason,
         }
 
     @property
@@ -539,6 +558,7 @@ def score_proposal(proposal: Proposal) -> Score:
     # consumer would accept the proposal and run cells for it.
     if raw_obj["stop"]:
         score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_EXPLICIT_STOP
         score.detail = (
             "stop is true, so the loop ends the search without running any "
             f"cell; the {len(raw_obj['next_mitigations'])} name(s) proposed "
@@ -557,6 +577,7 @@ def score_proposal(proposal: Proposal) -> Score:
     score.n_cells = len(cells)
     if not cells:
         score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_EMPTY if not names else TIER4_NO_CELLS
         score.detail = (
             "no mitigation proposed; the loop reads this as a stop"
             if not names
@@ -578,6 +599,7 @@ def score_proposal(proposal: Proposal) -> Score:
             unknown.append(name)
     if unknown:
         score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_UNREGISTERED
         score.detail = (
             f"unregistered mitigation(s) {sorted(unknown)}; "
             "silently dropped by the proposer"
@@ -617,6 +639,7 @@ def score_proposal(proposal: Proposal) -> Score:
         )
     except PolicyViolation as exc:
         score.stopped_at = "tier4_registry"
+        score.tier4_reason = TIER4_POLICY_REJECTED
         score.detail = f"AgentPolicy would reject the step: {exc}"
         return _finish(score)
     score.tier = 4

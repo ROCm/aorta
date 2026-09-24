@@ -548,14 +548,34 @@ def discard_corpus(out: Path) -> bool:
     Deleting is the destructive option and it is the consistent one. A
     successful build already replaces all three files unconditionally, so this
     directory's previous contents were forfeit the moment the command was run;
-    the failure path was the only one pretending otherwise. Scoped to the
-    files above for the same reason :func:`_holds_a_corpus` exists -- `--out`
-    given someone's home directory removes three names that are not there.
+    the failure path was the only one pretending otherwise. Gated on
+    :func:`_holds_a_corpus` for the reason that function exists -- `--out`
+    given someone's home directory holds no manifest, so nothing is removed.
+
+    What it removes is every name :func:`_is_generated` claims, the same set
+    :func:`publish` treats as forfeit, and not just :data:`CORPUS_FILES`. The
+    narrower set left a `triage.v1.jsonl` from an older schema readable after
+    a refused rebuild, which is a stale corpus under another name -- and it is
+    the file `publish` would have deleted had the build succeeded, so the
+    failure path kept what the success path destroys. Committed inputs such as
+    `README.md` and `scenario_labels.json` are outside that shape either way.
+
+    The manifest goes last. It is what marks this directory as a corpus, so an
+    interrupted discard leaves it in place and the next failed build finishes
+    the job, rather than leaving rows behind with nothing that says to remove
+    them.
     """
     if not _holds_a_corpus(out):
         return False
-    for name in CORPUS_FILES:
-        (out / name).unlink(missing_ok=True)
+    generated = sorted(
+        (entry for entry in out.iterdir() if _is_generated(entry.name)),
+        key=lambda entry: entry.name == "manifest.json",
+    )
+    for entry in generated:
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink(missing_ok=True)
     return True
 
 
@@ -747,14 +767,63 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    # One failure path for everything between the arguments and the swap.
+    #
+    # The two refusals below always discarded the previous corpus; the build
+    # failures around them did not. A missing or unparseable --baselines, or
+    # two reports sharing a scenario id, raised straight out of `main` and
+    # left the last corpus at --out consumable -- the stale-corpus state the
+    # refusals exist to prevent, reached through the more common door. So any
+    # exception here now discards too, then propagates unchanged: these are
+    # not all expected, and a traceback is the useful report for the ones that
+    # are not.
+    #
+    # Usage errors do not come through here, deliberately. `parser.error`
+    # above exits 2 before --out has been touched or read, and a command line
+    # with one wrong argument is no evidence that its --out is the directory
+    # the operator meant; removing a corpus on the strength of it would turn a
+    # typo in --run-meta into the loss of whatever --out happened to name. Exit
+    # 2 already says the build never ran. `publish` is outside too: its swap
+    # rolls a failed write back to the previous directory, which is its own
+    # tested contract, and a failure writing to --out is the least promising
+    # moment to write to it again.
+    try:
+        payload, manifest = _build(args, run_meta)
+    except RefusedBuildError as exc:
+        print(exc, file=sys.stderr)
+        _discard_and_say_so(args.out)
+        return 1
+    except Exception:
+        _discard_and_say_so(args.out)
+        raise
+    publish(args.out, payload)
+    print(json.dumps(manifest, indent=2))
+    return 0
+
+
+class RefusedBuildError(Exception):
+    """A build that ran and declined to publish; the message says why."""
+
+
+def _discard_and_say_so(out: Path) -> None:
+    if discard_corpus(out):
+        print(
+            f"  removed the previous corpus at {out}: this build did not "
+            "publish, so anything still there is stale and would train as if "
+            "it were this run's",
+            file=sys.stderr,
+        )
+
+
+def _build(
+    args: argparse.Namespace, run_meta: dict[str, Any]
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Everything between validated arguments and :func:`publish`."""
     baselines = json.loads(args.baselines.read_text(encoding="utf-8"))
 
     scenarios = collect(args.results)
     if not scenarios:
-        print(f"no sanitizer reports under {args.results}", file=sys.stderr)
-        if discard_corpus(args.out):
-            print(f"  removed the previous corpus at {args.out}", file=sys.stderr)
-        return 1
+        raise RefusedBuildError(f"no sanitizer reports under {args.results}")
 
     triage: list[dict[str, Any]] = []
     proposals: list[dict[str, Any]] = []
@@ -790,20 +859,11 @@ def main(argv: list[str] | None = None) -> int:
     # left", which are the same sentence only on a machine that has never run
     # this command before.
     if not triage:
-        print(
+        raise RefusedBuildError(
             f"all {len(scenarios)} discovered report(s) were rejected, so there "
             f"is nothing to publish; refusing to write an empty corpus to "
-            f"{args.out}. Check --baselines matches this results tree.",
-            file=sys.stderr,
+            f"{args.out}. Check --baselines matches this results tree."
         )
-        if discard_corpus(args.out):
-            print(
-                f"  removed the previous corpus at {args.out}: this build "
-                "refused to publish, so anything still there is stale and "
-                "would train as if it were this run's",
-                file=sys.stderr,
-            )
-        return 1
 
     families: dict[str, int] = {}
     verdicts: dict[str, int] = {}
@@ -834,16 +894,12 @@ def main(argv: list[str] | None = None) -> int:
         "ground_truth_disagreements": disagreements,
         "run_meta": run_meta,
     }
-    publish(
-        args.out,
-        {
-            "triage.jsonl": "".join(json.dumps(row) + "\n" for row in triage),
-            "proposal.jsonl": "".join(json.dumps(row) + "\n" for row in proposals),
-            "manifest.json": json.dumps(manifest, indent=2) + "\n",
-        },
-    )
-    print(json.dumps(manifest, indent=2))
-    return 0
+    payload = {
+        "triage.jsonl": "".join(json.dumps(row) + "\n" for row in triage),
+        "proposal.jsonl": "".join(json.dumps(row) + "\n" for row in proposals),
+        "manifest.json": json.dumps(manifest, indent=2) + "\n",
+    }
+    return payload, manifest
 
 
 if __name__ == "__main__":

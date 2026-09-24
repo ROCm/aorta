@@ -97,7 +97,15 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from proposal_reward import MAX_TIER, Proposal, delivered, score_proposal  # noqa: E402
+from proposal_reward import (  # noqa: E402
+    MAX_TIER,
+    TIER4_REASONS,
+    TIER4_UNREGISTERED,
+    Proposal,
+    Score,
+    delivered,
+    score_proposal,
+)
 from triage_reward import (  # noqa: E402
     ATTRIBUTION_WEIGHT,
     VERDICT_WEIGHT,
@@ -361,8 +369,26 @@ def _claimed(raw: str, key: str) -> Any:
     return obj.get(key) if isinstance(obj, dict) else None
 
 
-def failure_kind(stopped_at: str, detail: str, tier: int) -> str:
-    """The failure breakdown key for one scored proposal."""
+# Tier 4's breakdown keys, one per refusal. `hallucinated_mitigation` keeps
+# its name for the case it always meant -- a name the registry does not have --
+# so a results file recorded before the split still counts the same thing
+# under it; the other four used to be counted there too.
+_TIER4_KINDS = {reason: reason for reason in TIER4_REASONS}
+_TIER4_KINDS[TIER4_UNREGISTERED] = "hallucinated_mitigation"
+
+
+def failure_kind(score: Score) -> str:
+    """The failure breakdown key for one scored proposal.
+
+    Tier 4 is read from the scorer's `tier4_reason` rather than from `detail`.
+    Matching the prose recognised one of its five refusals and called the rest
+    `hallucinated_mitigation`, so an explicit `stop: true`, a list that
+    normalises to no cells and a registered name the policy refuses were all
+    reported as registry hallucinations. An unrecognised reason is `unknown`,
+    not the nearest guess: the breakdown is a measurement, and a new refusal
+    should show up as a key nobody expected rather than inflate an old one.
+    """
+    stopped_at, detail, tier = score.stopped_at, score.detail, score.tier
     if tier == MAX_TIER:
         return "on_contract"
     if stopped_at == "tier1_json":
@@ -372,9 +398,7 @@ def failure_kind(stopped_at: str, detail: str, tier: int) -> str:
     if stopped_at == "tier3_category":
         return "category_outside_set"
     if stopped_at == "tier4_registry":
-        if "no mitigation proposed" in detail:
-            return "empty_mitigations"
-        return "hallucinated_mitigation"
+        return _TIER4_KINDS.get(score.tier4_reason, "unknown")
     if stopped_at == "tier5_available":
         if "confidence" in detail:
             return "confidence_out_of_range"
@@ -493,9 +517,7 @@ def drive_proposals(
                     "stopped_at": score.stopped_at,
                     "detail": score.detail,
                     "consumer_outcome": score.consumer_outcome,
-                    "failure_kind": failure_kind(
-                        score.stopped_at, score.detail, score.tier
-                    ),
+                    "failure_kind": failure_kind(score),
                     # Recorded separately from the tier, because `unknown` is a
                     # member of the closed set: a proposal that declines to
                     # classify passes tier 3 and can reach 1.0. Whether it did

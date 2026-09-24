@@ -11,28 +11,37 @@ expertise.
 
 This document works out what of that belongs in this repository, what TokenSpeed
 can already do, what the training signal would be, and whether the cost claim
-survives contact with the measured numbers. It is a plan, not a report of work
-done: the only part built so far is the rollout-shaped serving support described
-under [What was built](#6-what-was-built).
+survives contact with the measured numbers. It started as a plan and is now
+partly a report. Built and measured: the rollout-shaped serving support
+([6](#6-what-was-built)), a loop that serves a model on TokenSpeed and scores
+`aorta agent`'s own proposals end to end, both graders, and the corpus builder
+([What is already done](#what-is-already-done)). Not built: training. No weight
+transport has yet been shown to move a tensor into a running engine, and there
+is no trained model.
 
 The short version:
 
 - **The RL loop does not belong in aorta.** AORTA is a benchmarking and triage
   harness. Its job here is to stand up, validate and measure the rollout engine.
   The trainer belongs in a separate effort built on verl or slime.
-- **TokenSpeed has the hard part designed, and neither transport works.** It
-  ships an RL online weight-sync control plane —
+- **TokenSpeed has the hard part designed, and no weight transport is yet
+  proven.** It ships an RL online weight-sync control plane —
   `/init_weight_transfer_engine`, `/start_weight_update`, `/update_weights`,
   `/finish_weight_update`, `/pause`, `/resume` — with NCCL and CUDA-IPC
   transports, and names verl / slime / AReaL / miles as the trainers it is for.
-  Measured on gfx950: the control plane works and is effectively free (1–5 ms
-  against a 322 s cold start), `ipc` raises `NotImplementedError`, and `nccl`
-  **returns success while transferring nothing**, loading uninitialised device
-  memory into the model
+  Measured on gfx950 against the image aorta pins: the control plane works and
+  is effectively free (1–5 ms against a 322 s cold start), `ipc` raises
+  `NotImplementedError`, and `nccl` **returns success while transferring
+  nothing**, loading uninitialised device memory into the model
   ([Phase 2b](#phase-2b--the-nccl-data-plane-does-not-transfer), filed upstream
   as [tokenspeed#1373](https://github.com/lightseekorg/tokenspeed/issues/1373)).
-  The engine choice is still defensible on the shape of the API; the loop is
-  blocked on an upstream fix.
+  Two things have moved since. Upstream deleted the `weight_transfer` package
+  that measurement exercised, and the disk path was traced to no scheduler
+  dispatch branch ([tokenspeed#1479](https://github.com/lightseekorg/tokenspeed/issues/1479));
+  [rl-post-training-decisions.md](rl-post-training-decisions.md) carries the
+  topology argument from there. What waits on a working transport is the
+  weight sync between training steps. The rollout-and-score loop does not, and
+  already runs. The engine choice is still defensible on the shape of the API.
 - **The domain is debugging, and the consumer is CIA with aorta inside it.**
   Both were open when this was first written; [A2](#a2) settled the domain and a
   CIA architecture diagram settled the consumer
@@ -219,8 +228,7 @@ the guidance the model is given cannot drift apart, and #484 fixed a real
 pre-existing routing bug on the way — the substring `barrier` used to route
 GPU-side evidence to a checkpoint-I/O category and now routes to `gpu_race`. The
 reward code reads the set by import (`proposal_reward.py`, `run_e2e.py`), so it
-picked the new members up with no edit. **This branch is behind main and still
-has eight**; rebase before quoting a category list from a live run.
+picked the new members up with no edit.
 
 **We found and fixed a genuine engine defect.** TokenSpeed picks its sampling
 backend like this:

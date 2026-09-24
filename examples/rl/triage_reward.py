@@ -359,15 +359,23 @@ def label_sanitizer_report(doc: dict[str, Any], source: str | None = None) -> La
     attribution reads the same way as a ``tier4:`` detector ID and cannot be
     confused with one.
 
-    **Codes are cited only by a ``fail`` or ``warn`` report.** A finding is
-    evidence that a sanitizer ran and saw something, so it cannot be the
-    justification for a verdict that says none ran. See the comment on
+    **Codes are cited only by a ``fail`` or ``warn`` report, and only from the
+    checks whose verdict is the overall one.** A finding is evidence that a
+    sanitizer ran and saw something, so it cannot be the justification for a
+    verdict that says none ran -- nor for a verdict its own check did not
+    reach. See the comment on
     ``failures`` below for the mixed-verdict case that makes this more than a
     restatement.
     """
     report = SanitizerReport.from_dict(doc)
+    verdict = report.overall_verdict.value
     codes: list[str] = []
     for check in report.checks:
+        # Only the checks that set the overall verdict. See `failures` below:
+        # a finding justifies the verdict of the check it came from, so a
+        # `warn` check's hazard is not evidence for an overall `fail`.
+        if check.verdict.value != verdict:
+            continue
         findings = list(check.findings)
         for kernel_result in check.kernel_results:
             findings.extend(kernel_result.findings)
@@ -376,7 +384,6 @@ def label_sanitizer_report(doc: dict[str, Any], source: str | None = None) -> La
             if code not in codes:
                 codes.append(code)
 
-    verdict = report.overall_verdict.value
     # A sanitizer that did not run is an infra error, exactly as a probe trial
     # that never validly ran is: no observation was made, so there is nothing
     # to attribute.
@@ -398,6 +405,16 @@ def label_sanitizer_report(doc: dict[str, Any], source: str | None = None) -> La
     # So finding codes can only ever justify `fail` or `warn`, and an
     # `error`/`not_checked` report cites nothing -- which is what the sentence
     # above it always claimed.
+    #
+    # The same argument one rank down: an overall `fail` can hold a check that
+    # only warned, and an overall `warn` a check that passed. Their findings
+    # justify their own verdicts, not the overall one, so `codes` is built
+    # from the checks whose verdict *is* the overall verdict and nothing else.
+    # Measured before landing: of the 52 distinct sanitizer reports reachable
+    # here, 9 mix check verdicts and none changes attribution under this rule,
+    # so no existing corpus row's ground truth moves. It is the rule the error
+    # case already follows, applied where no committed report has yet needed
+    # it.
     failures = codes if verdict in {"fail", "warn"} else []
     errors: list[str] = []
     return Label(
