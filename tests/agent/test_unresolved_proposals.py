@@ -25,6 +25,7 @@ code here, exactly as in the issue's reproduction.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -38,6 +39,8 @@ from aorta.agent.state import wake
 #: "rccl_p2p_disable" is not registered. It is the kind of name a model
 #: invents because it reads exactly like one that exists.
 UNREGISTERED = "rccl_p2p_disable"
+
+REPO = Path(__file__).resolve().parents[2]
 
 CANDIDATES = ["none", "tf32_off", "hsa_no_sdma"]
 
@@ -137,6 +140,12 @@ class TestTheFilterRecordsWhatItDrops:
         )
         assert step.next_mitigations == []
         assert step.unresolved_mitigations == ["tf32_off"]
+
+    def test_the_baseline_is_dropped_even_though_it_is_registered(self, proposer):
+        """The fourth cause the docs and the operator message now name."""
+        step = _propose(proposer(_reply(next_mitigations=["none"], stop=False)))
+        assert step.next_mitigations == []
+        assert step.unresolved_mitigations == ["none"]
 
     def test_a_clean_proposal_records_no_rejections(self, proposer):
         step = _propose(proposer(_reply(next_mitigations=["tf32_off"], stop=False)))
@@ -286,6 +295,26 @@ class TestStopAttribution:
         outcome, _message, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
         assert (outcome, reason) == ("agent_stop", "agent_requested")
 
+    def test_a_stop_with_no_reason_from_a_custom_proposer_is_its_own(self):
+        """FAILS BEFORE THE FIX: recorded as proposal_unresolved.
+
+        ``_step_from_content`` fills in ``agent_requested`` for a stop, but a
+        proposer written against the protocol can return ``stop=True`` with no
+        reason and dropped names. It asked to stop; the loop must say so.
+        """
+        step = self._step(stop=True, unresolved_mitigations=[UNREGISTERED])
+        outcome, _message, reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert (outcome, reason) == ("agent_stop", "agent_requested")
+
+    def test_the_operator_message_names_the_baseline_as_a_cause(self):
+        """The filter also drops ``none``: a registered, allowed, untried name
+        that is still never a candidate. The message must not tell the operator
+        it was unregistered or already tried."""
+        step = self._step(unresolved_mitigations=["none"])
+        outcome, message, _reason = _resolve_stop_outcome(step, BASELINE_FAILED)
+        assert outcome == "proposal_unresolved"
+        assert "`none` baseline" in message
+
     def test_a_passing_baseline_still_outranks_everything(self):
         """baseline_pass is a deterministic probe verdict, not an attribution call."""
         step = self._step(unresolved_mitigations=[UNREGISTERED])
@@ -302,6 +331,16 @@ class TestStopAttribution:
         step = self._step(hypothesis="No remaining registered mitigations to try.")
         outcome, _message, reason = _resolve_stop_outcome(step, [])
         assert (outcome, reason) == ("exhausted_candidates", "exhausted_candidates")
+
+    @pytest.mark.parametrize(
+        "doc", ["docs/agent/aorta-probe-agent.md", "docs/agent/agentic-testing-guide.md"]
+    )
+    def test_the_outcome_tables_name_the_baseline_as_a_cause(self, doc):
+        row = next(
+            line for line in (REPO / doc).read_text(encoding="utf-8").splitlines()
+            if line.startswith("| `proposal_unresolved`")
+        )
+        assert "`none` baseline" in row
 
     def test_the_cli_has_a_headline_for_the_new_outcome(self):
         """An unmapped outcome degrades to a bare "Finished with outcome:" line."""

@@ -314,7 +314,7 @@ PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail 
 | `converged` | Some `{mitigation}-none` passed | Ship that mitigation to customer / gate |
 | `exhausted_candidates` | No mitigations left in allowlist/registry | Manual matrix or new sidecar mitigations |
 | `agent_stop` | Proposer set `stop` (LLM or fake) | Read `agent_report.md` hypothesis |
-| `proposal_unresolved` | The proposer named mitigations and the candidate filter dropped all of them | Check `unresolved_mitigations` in `agent_log.jsonl` against `aorta mitigations list` and `--mitigation`; do *not* read the hypothesis as the reason |
+| `proposal_unresolved` | The proposer named mitigations, the candidate filter dropped all of them (unregistered, already tried, outside the allowlist, or the `none` baseline), and it did not ask to stop | Check `unresolved_mitigations` in `agent_log.jsonl` against `aorta mitigations list` and `--mitigation`; do *not* read the hypothesis as the reason |
 | `approval_required` | Mitigation needs ack (`--require-approval`) | Operator approves, re-run |
 | `walltime_exhausted` | `--max-walltime-sec` hit | Re-run same ticket to resume |
 | `policy_stop` | e.g. `--max-iterations` hit | Increase budget or narrow allowlist |
