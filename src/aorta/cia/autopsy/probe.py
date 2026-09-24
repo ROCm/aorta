@@ -3,15 +3,14 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import time
 from pathlib import Path
 
+from aorta.cia.cancellation import Stop, pause, stopped
 from aorta.cia.launch.cluster import ssh_user
-from aorta.cia.launch.planner import check_recipe_mode
-from aorta.cia.cancellation import Stop, pause
 from aorta.cia.launch.job import JobRecord
+from aorta.cia.launch.planner import check_recipe_mode
 
 # How long to wait for the production sweep (4 h)
 PROBE_TIMEOUT_SEC = 4 * 3600
@@ -40,8 +39,15 @@ def valid_host(node: str) -> bool:
 
 
 def _ssh(node: str, cmd: str, background: bool = False) -> subprocess.CompletedProcess | None:
-    full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15",
-                f"{ssh_user()}@{node}", cmd + (" &" if background else "")]
+    full_cmd = [
+        "ssh",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "ConnectTimeout=15",
+        f"{ssh_user()}@{node}",
+        cmd + (" &" if background else ""),
+    ]
     if background:
         subprocess.Popen(full_cmd)
         return None
@@ -91,6 +97,9 @@ def run_aorta_probe(
 
     Returns path to matrix.json in the bundle on success, None on timeout.
     """
+    if stopped(stop):
+        print("[probe] caller gave up; not launching a production sweep")
+        return None
     if not valid_host(job.node):
         print(f"[probe] {job.node!r} is not a hostname; not probing")
         return None
@@ -133,15 +142,26 @@ def run_aorta_probe(
     print(f"[probe] launching production sweep on {job.node}")
     print(f"[probe]   recipe:  {recipe}")
     print(f"[probe]   output:  {aorta_output}")
+    # Recipe resolution and mode inspection may touch a network filesystem.
+    # Re-check at the irreversible boundary so a stop received during that
+    # work cannot launch a new sweep afterwards.
+    if stopped(stop):
+        print("[probe] caller gave up; not launching a production sweep")
+        return None
     _ssh(head_node, cmd, background=False)
 
     # Wait for matrix.json to appear
     deadline = time.time() + PROBE_TIMEOUT_SEC
     while time.time() < deadline:
+        if stopped(stop):
+            print("[probe] caller gave up; stopping the wait for matrix.json")
+            return None
         check = _ssh(
             head_node,
             f"ssh -o ConnectTimeout=5 {shlex.quote(job.node)} "
-            + shlex.quote(f"test -f {shlex.quote(str(matrix_remote))} && echo EXISTS || echo WAITING"),
+            + shlex.quote(
+                f"test -f {shlex.quote(str(matrix_remote))} && echo EXISTS || echo WAITING"
+            ),
         )
         if check and "EXISTS" in (check.stdout + check.stderr):
             print(f"[probe] matrix.json ready on {job.node}")
@@ -155,6 +175,10 @@ def run_aorta_probe(
             return None
     else:
         print(f"[probe] timed out after {PROBE_TIMEOUT_SEC}s waiting for matrix.json")
+        return None
+
+    if stopped(stop):
+        print("[probe] caller gave up; not fetching production sweep output")
         return None
 
     # Copy matrix.json into the bundle, the same way everything else here
@@ -172,10 +196,13 @@ def run_aorta_probe(
     r = subprocess.run(
         [
             "scp",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=15",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "ConnectTimeout=15",
             # ProxyJump: local -> head node -> compute node.
-            "-J", f"{ssh_user()}@{head_node}",
+            "-J",
+            f"{ssh_user()}@{head_node}",
             f"{ssh_user()}@{job.node}:{shlex.quote(str(matrix_remote))}",
             str(dest),
         ],
@@ -191,6 +218,7 @@ def run_aorta_probe(
     manifest_path = bundle_root / "manifest.yaml"
     if manifest_path.is_file():
         import yaml
+
         manifest = yaml.safe_load(manifest_path.read_text()) or {}
         manifest.setdefault("paths", {})["aorta_matrix"] = "aorta/matrix.json"
         manifest_path.write_text(yaml.dump(manifest, default_flow_style=False))

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import ssl
 import sys
+import threading
+from collections.abc import Callable
 from typing import Any
 
 try:
@@ -15,7 +18,7 @@ except ImportError as exc:  # pragma: no cover - only without the extra
         "nothing behind, say so -- that is a packaging bug, not a missing step.)"
     ) from exc
 
-#: Where the CA bundle is named, for callers who want to look.
+#: Operator-chosen CA files. Read as client configuration, never written here.
 _CA_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 log = logging.getLogger(__name__)
@@ -36,32 +39,90 @@ nothing in it to say the reasoning step had been truncated on the way.
 _configured: bool = False
 
 
-def _use_certifi_bundle() -> None:
-    """Point TLS verification at certifi, for this process, when asked to.
+def _ssl_verify() -> str | bool:
+    """TLS verification for this LM client only.
 
-    LiteLLM fetches a remote price map and can fail on a corporate TLS
-    interception proxy whose CA the certifi bundle knows and the system store
-    does not. Certifi fixes that site and breaks the opposite one, where the
-    corporate CA is in the system store and not in certifi.
+    LiteLLM can fail on a corporate TLS interception proxy whose CA the certifi
+    bundle knows and the system store does not. Certifi fixes that site and
+    breaks the opposite one, where the corporate CA is in the system store and
+    not in certifi.
 
-    So three things. It runs from here rather than at import, because importing
-    a module should not change TLS verification for everything else in the
-    process -- including unrelated aorta code and the chat provider layer,
-    which never asked. It defers to SSL_CERT_FILE or REQUESTS_CA_BUNDLE if
-    either is already set, because that is somebody having decided. And
-    CIA_SSL_USE_CERTIFI=0 turns it off for the site it would otherwise break.
+    The old answer was to write SSL_CERT_FILE and REQUESTS_CA_BUNDLE for the
+    whole process. Those variables are how OpenSSL and requests pick a CA file
+    for every later import -- chat, unrelated aorta code, and anything the
+    user imported alongside -- so a Watch that needed certifi quietly changed
+    HTTPS for everyone else.
+
+    So the choice is client configuration: a CA path, or True for the system
+    store. OpenAI-compatible routes receive concrete clients whose TLS context
+    carries that choice; other LiteLLM providers receive ``ssl_verify``.
+    SSL_CERT_FILE / REQUESTS_CA_BUNDLE are still read, because that is somebody
+    having decided, and CIA_SSL_USE_CERTIFI=0 still turns certifi off for the
+    site it would otherwise break. Nothing here writes them.
     """
+    for var in _CA_ENV_VARS:
+        chosen = os.environ.get(var)
+        if chosen:
+            return chosen
     if os.environ.get("CIA_SSL_USE_CERTIFI", "1") == "0":
-        return
-    if any(os.environ.get(var) for var in _CA_ENV_VARS):
-        return
+        return True
     try:
         import certifi
     except ImportError:
-        log.debug("certifi is not installed; leaving TLS verification alone")
-        return
-    for var in _CA_ENV_VARS:
-        os.environ[var] = certifi.where()
+        log.debug("certifi is not installed; using system TLS trust")
+        return True
+    return certifi.where()
+
+
+def _ssl_context(verify: str | bool) -> ssl.SSLContext:
+    """Turn the selected trust source into an HTTP-client TLS context."""
+    if isinstance(verify, str):
+        return ssl.create_default_context(cafile=verify)
+    # No explicit CA file is deliberate: stdlib OpenSSL loads its configured
+    # default verify paths (including the OS trust directory). httpx's
+    # ``verify=True`` would instead create its own certifi-backed context.
+    return ssl.create_default_context()
+
+
+def _openai_clients(
+    *,
+    api_base: str | None,
+    api_key: str,
+    verify: str | bool,
+) -> tuple[Any, Callable[[], Any]]:
+    """A sync client and lazy async-client factory with per-LM TLS trust.
+
+    LiteLLM currently moves ``ssl_verify`` into ``extra_body`` on its
+    ``openai/*`` route instead of applying it to the transport. Supplying the
+    provider clients is its supported escape hatch: the CA context is attached
+    directly to each httpx pool and no TLS option enters the request JSON or
+    process-global state.
+    """
+    import httpx
+    from openai import AsyncOpenAI, OpenAI
+
+    context = _ssl_context(verify)
+    common: dict[str, Any] = {"api_key": api_key}
+    if api_base:
+        common["base_url"] = api_base
+    sync_client = OpenAI(
+        **common,
+        http_client=httpx.Client(
+            verify=context,
+            follow_redirects=True,
+        ),
+    )
+
+    def build_async_client() -> Any:
+        return AsyncOpenAI(
+            **common,
+            http_client=httpx.AsyncClient(
+                verify=context,
+                follow_redirects=True,
+            ),
+        )
+
+    return sync_client, build_async_client
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -138,8 +199,7 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] 
                 "package the extra should have installed. Reinstall with "
                 "`pip install 'amd-aorta[cia]'` and report it if it persists; "
                 "the agents are meant to read the same profile as the rest of "
-                "aorta chat."
-                % (sys.version_info[0], sys.version_info[1])
+                "aorta chat." % (sys.version_info[0], sys.version_info[1])
             )
             log.warning(
                 "Reading the chat settings from the environment only: %s. %s "
@@ -235,9 +295,7 @@ def redact(text: str) -> str:
 
     if not _redaction_enabled():
         return text
-    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(
-        text, scrub_paths=True, scrub_ip_addresses=True
-    )
+    scrubbed, _paths, _ipv4, _ipv6 = scrub_text(text, scrub_paths=True, scrub_ip_addresses=True)
     return scrubbed
 
 
@@ -273,6 +331,44 @@ class RedactingLM(dspy.LM):
     module reaches is not this module's business to track.
     """
 
+    def __init__(
+        self,
+        *args,
+        sync_client: Any = None,
+        async_client: Any = None,
+        async_client_factory: Callable[[], Any] | None = None,
+        **kwargs,
+    ):
+        self._sync_client = sync_client
+        self._async_client = async_client
+        self._async_client_factory = async_client_factory
+        self._async_client_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def _get_async_client(self) -> Any:
+        if self._async_client is None and self._async_client_factory is not None:
+            with self._async_client_lock:
+                if self._async_client is None and self._async_client_factory is not None:
+                    self._async_client = self._async_client_factory()
+        return self._async_client
+
+    def close(self) -> None:
+        """Close sync transport resources owned by this LM. Idempotent."""
+        client, self._sync_client = self._sync_client, None
+        with self._async_client_lock:
+            self._async_client_factory = None
+        if client is not None:
+            client.close()
+
+    async def aclose(self) -> None:
+        """Close both sync and already-created async transport resources."""
+        with self._async_client_lock:
+            client, self._async_client = self._async_client, None
+            self._async_client_factory = None
+        self.close()
+        if client is not None:
+            await client.close()
+
     @staticmethod
     def _clean(items: tuple, prompt: str | None, messages: Any) -> tuple:
         return (
@@ -283,10 +379,15 @@ class RedactingLM(dspy.LM):
 
     def forward(self, prompt=None, messages=None, **kwargs):
         _, prompt, messages = self._clean((), prompt, messages)
+        if self._sync_client is not None:
+            kwargs.setdefault("client", self._sync_client)
         return super().forward(prompt=prompt, messages=messages, **kwargs)
 
     async def aforward(self, prompt=None, messages=None, **kwargs):
         _, prompt, messages = self._clean((), prompt, messages)
+        async_client = self._get_async_client()
+        if async_client is not None:
+            kwargs.setdefault("client", async_client)
         return await super().aforward(prompt=prompt, messages=messages, **kwargs)
 
     def __call__(self, *items, prompt=None, messages=None, **kwargs):
@@ -334,17 +435,38 @@ def build_lm(
         )
     settings_base, settings_key, settings_model, provider = resolved or ("", "", "", "vllm")
 
-    _use_certifi_bundle()
+    resolved_base = (api_base or settings_base) or None
+    resolved_key = api_key or settings_key or "EMPTY"
+    qualified_model = _qualified_model(
+        model or settings_model or DEFAULT_MODEL,
+        provider,
+        bool(resolved_base),
+    )
+    verify = _ssl_verify()
+    transport: dict[str, Any]
+    if qualified_model.startswith("openai/"):
+        sync_client, async_client_factory = _openai_clients(
+            api_base=resolved_base,
+            api_key=resolved_key,
+            verify=verify,
+        )
+        transport = {
+            "sync_client": sync_client,
+            "async_client_factory": async_client_factory,
+        }
+    else:
+        # Non-OpenAI LiteLLM providers still consume this as provider
+        # configuration; the OpenAI-compatible route instead receives concrete
+        # clients above so the option cannot leak into its JSON request body.
+        transport = {"ssl_verify": verify}
+
     return RedactingLM(
-        model=_qualified_model(
-            model or settings_model or DEFAULT_MODEL,
-            provider,
-            bool(api_base or settings_base),
-        ),
-        api_base=(api_base or settings_base) or None,
-        api_key=api_key or settings_key or "EMPTY",
+        model=qualified_model,
+        api_base=resolved_base,
+        api_key=resolved_key,
         max_tokens=max_tokens,
         cache=False,
+        **transport,
     )
 
 

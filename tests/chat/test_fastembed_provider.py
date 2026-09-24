@@ -255,7 +255,10 @@ def _install_registry(monkeypatch, source_repo: str) -> None:
         def _list_supported_models():
             return [
                 types.SimpleNamespace(
-                    model=DEFAULT_MODEL, sources=types.SimpleNamespace(hf=source_repo)
+                    model=DEFAULT_MODEL,
+                    sources=types.SimpleNamespace(hf=source_repo),
+                    model_file="model_optimized.onnx",
+                    additional_files=[],
                 )
             ]
 
@@ -265,10 +268,17 @@ def _install_registry(monkeypatch, source_repo: str) -> None:
 
 
 def _seed_weights(directory: Path) -> Path:
-    """Put ONNX weights where a finished download leaves them; returns the snapshot."""
+    """Put a complete model snapshot where a finished download leaves it."""
     snapshot = directory / "snapshots" / "abc"
     snapshot.mkdir(parents=True, exist_ok=True)
     (snapshot / "model_optimized.onnx").write_bytes(b"\x00")
+    for name in (
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ):
+        (snapshot / name).write_text("{}", encoding="utf-8")
     return snapshot
 
 
@@ -299,23 +309,15 @@ class TestModelCacheProbe:
         source, directory = LAYOUTS[release]
         _install_registry(monkeypatch, source)
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        weights = tmp_path / "hub" / directory / "m.onnx"
-        weights.parent.mkdir(parents=True)
-        weights.write_bytes(b"\x00")
+        _seed_weights(tmp_path / "hub" / directory)
         assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
     @pytest.mark.parametrize("under_hub", [False, True], ids=["root", "hub"])
     @pytest.mark.parametrize("release", sorted(LAYOUTS))
-    def test_another_releases_spelling_does_not_count(
+    def test_another_releases_spelling_resolves_to_its_snapshot(
         self, monkeypatch, tmp_path: Path, release: str, under_hub: bool
     ):
-        """The one a widened probe would get wrong, so it is pinned per release.
-
-        Measured offline, fastembed 0.8.1 does not load a cache 0.8.0 seeded, nor
-        the reverse. Counting the other spelling would call a cache this install
-        cannot load warm, and ``_text_embedding`` would then swallow
-        ``PRE_SEED_PROCEDURE`` for the bare download error.
-        """
+        """AORTA resolves the snapshot before FastEmbed sees its parent spelling."""
         source, directory = LAYOUTS[release]
         (other,) = {name for _, name in LAYOUTS.values()} - {directory}
         _install_registry(monkeypatch, source)
@@ -323,9 +325,9 @@ class TestModelCacheProbe:
         base = tmp_path / "hub" if under_hub else tmp_path
 
         _seed_weights(base / other)
-        assert not fastembed_bge.model_is_cached(DEFAULT_MODEL)
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
-        # Same tree under this release's spelling: the registry stub is live.
+        # This release's own spelling remains loadable as well.
         _seed_weights(base / directory)
         assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
@@ -352,8 +354,13 @@ class TestModelCacheProbe:
         monkeypatch.setenv("HF_HOME", str(tmp_path))
         snapshot = tmp_path / directory / "snapshots" / "abc"
         snapshot.mkdir(parents=True)
-        for name in ("config.json", "tokenizer.json", "tokenizer_config.json"):
-            (snapshot / name).write_text("{}")
+        for name in (
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+        ):
+            (snapshot / name).write_text("{}", encoding="utf-8")
         assert not fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
         (snapshot / "model_optimized.onnx").write_bytes(b"\x00")
@@ -437,7 +444,7 @@ class TestDownloadFailureCarriesThePreSeedProcedure:
 
     def test_a_download_failure_names_hf_home_and_hf_hub_offline(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        monkeypatch.setattr(fastembed_bge, "model_is_cached", lambda model=None: False)
+        monkeypatch.setattr(fastembed_bge, "model_is_cached", lambda model=None, **_kwargs: False)
 
         import fastembed as fastembed_pkg
 
@@ -470,7 +477,7 @@ class TestDownloadFailureCarriesThePreSeedProcedure:
         wrong -- a corrupt file, an onnxruntime mismatch -- and telling the user
         to pre-seed a cache they already have would bury it.
         """
-        monkeypatch.setattr(fastembed_bge, "model_is_cached", lambda model=None: True)
+        monkeypatch.setattr(fastembed_bge, "model_is_cached", lambda model=None, **_kwargs: True)
 
         import fastembed as fastembed_pkg
 
