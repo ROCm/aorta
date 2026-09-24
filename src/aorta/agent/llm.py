@@ -718,8 +718,11 @@ def _answer_text(content: str) -> str:
     """The part of a reply that should be JSON: reasoning dropped, fence unwrapped.
 
     Anything that claims to know what the proposer would make of a reply
-    imports this rather than re-deriving it, so the claim cannot drift from
-    the proposer.
+    should import this rather than re-derive it, or the claim drifts from the
+    proposer. ``examples/rl/proposal_reward.py`` still calls
+    :func:`_strip_code_fence`, so its consumer outcome for a
+    reasoning-prefixed reply is ``silent_stop`` where the proposer accepts
+    it; moving it here changes reward scoring and is left to its own change.
 
     Raises:
         ValueError: The reply is reasoning with no answer after it.
