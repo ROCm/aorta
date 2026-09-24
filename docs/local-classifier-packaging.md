@@ -10,6 +10,10 @@ questions that get answered by accident if they are asked later: a dependency
 lands in whichever extra was convenient, and a verdict gets recorded without the
 identity of the thing that produced it.
 
+How to test the tier, from the checks that need nothing installed through the
+measurement that decides whether it is enabled, is in
+[local-classifier-testing.md](local-classifier-testing.md).
+
 The Phase 0 and Phase 1 offline tooling has since landed — the `[local-classifier]`
 extra, the `python -m aorta.local_classifier` maintainer tooling, and
 `src/aorta/local_classifier/` — and this record has been reconciled against
