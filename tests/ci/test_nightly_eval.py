@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -919,6 +920,934 @@ def test_the_rollout_doc_marks_its_variance_data_as_the_old_configuration():
     assert re.search(
         r"ten nightlies, at `warmup_steps: 2`", doc
     ), "the record-only window is not pinned to warmup_steps: 2"
+
+
+def _gated_names(spec: dict) -> set[str]:
+    """Every bound in one baseline entry that can red a cell, under one naming.
+
+    `step_time_ms` is not in `metrics`. `eval_lib.compare_to_baseline` reads it
+    as a *sibling* key (`baseline["step_time_ms"]["max"]`, eval_lib.py:218) and
+    compares it against the harness-synthesised `mean_step_time_ms`, so a
+    reader of `spec["metrics"]` alone sees an armed step-time ceiling as no
+    gate at all. That is precisely the bound this bless pruned by hand, which
+    makes it the one a future bless is most likely to restore by accident --
+    `refresh_baselines.py:231` writes it from `mean_step_time_ms` without being
+    asked. Folded in under the `step_time_ms.max` spelling the docs use, so the
+    tripwires below and the prose they check are talking about one name.
+    """
+    names = set(spec.get("metrics") or {})
+    names |= {f"step_time_ms.{bound}" for bound in (spec.get("step_time_ms") or {})}
+    return names
+
+
+def _gated_serving_metrics() -> dict[str, set[str]]:
+    """``cell -> gated metric names`` for tokenspeed_serve_smoke, from the real file."""
+    import yaml
+
+    baselines = yaml.safe_load(
+        (nightly_eval.REPO_ROOT / "config/ci/regression_baselines.yaml").read_text("utf-8")
+    )["baselines"]
+    return {
+        key.split("::", 1)[1]: _gated_names(spec)
+        for key, spec in baselines.items()
+        if key.startswith("tokenspeed_serve_smoke::")
+    }
+
+
+#: The two serving cells, spelled out. `assert gated` and a one-element set of
+#: frozensets are both satisfied by a single cell, so neither says what the docs
+#: say -- deleting the `no-scratch-reclaim` block left all three tripwires green
+#: while both documents went on claiming "gated on **both** cells".
+_SERVING_CELLS = frozenset({"baseline", "no-scratch-reclaim"})
+
+#: The two derivations step 6 of the rollout doc documents: `max × 1.25` on the
+#: window maximum for a `max` metric, `min × 0.85` on the window minimum for a
+#: `min` one. Stated here so the derivation check below has something to check
+#: against; the doc text for both is asserted alongside them so they cannot
+#: drift.
+#:
+#: Only `max` is armed today. `_FLOOR_MARGIN` is here because step 7 names
+#: `output_throughput` -- a `min` metric -- as ready for promotion, and a check
+#: that only knows ceilings would fail that promotion for having the wrong
+#: policy rather than the wrong number.
+_BLESS_MARGIN = 1.25
+_FLOOR_MARGIN = 0.85
+
+_BACKTICKED = re.compile(r"`([A-Za-z0-9_.]+)`")
+
+
+def _table_rows(doc: str, header: tuple[str, ...]) -> list[list[str]]:
+    """The body rows of the markdown table whose header cells are ``header``.
+
+    Anchored on the header rather than on a line number or a nearby heading, so
+    moving the table within the file is not a failure and renaming its columns
+    is -- a renamed column is the edit that would silently empty the row list
+    and turn every check built on it into a comparison against nothing. Callers
+    assert the result is non-empty for that reason.
+    """
+    rows: list[list[str]] = []
+    collecting = False
+    for line in doc.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            collecting = False
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if tuple(c.lower() for c in cells) == tuple(h.lower() for h in header):
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        if all(set(cell) <= set("-: ") for cell in cells):
+            continue          # the |---|---| separator
+        rows.append(cells)
+    return rows
+
+
+def _documented_gate_sets() -> dict[str, dict[str, set[str]]]:
+    """``doc -> {"gated": names, "record_only": names}``, read from the tables.
+
+    The previous spelling of this check asked whether each gated name appeared
+    *anywhere* in each file. Both documents already name every record-only
+    metric, so that condition is satisfied by any metric that could ever be
+    gated and the check could not fail: arming `median_ttft_ms` on both cells
+    and changing nothing in the docs passed, and so did moving `median_tpot_ms`
+    into the record-only list while it stayed gated. A substring test against a
+    document that lists both sets is a test of the vocabulary, not of the
+    claim.
+
+    So the names come out of the structures that carry the claim. In
+    `tokenspeed-serving.md` that is the three-column table under "Gated in the
+    nightly"; in `tokenspeed-gating-rollout.md` it is the `First bless` column
+    of the per-metric table, which states a verdict per metric and is the one
+    place either document distinguishes the two sets row by row.
+    """
+    serving = (nightly_eval.REPO_ROOT / "docs/tokenspeed-serving.md").read_text("utf-8")
+    serving_rows = _table_rows(serving, ("metric", "policy", "why this one"))
+    assert serving_rows, (
+        "docs/tokenspeed-serving.md has no `| metric | policy | why this one |` "
+        "table, so the gated set cannot be read out of it and this check would "
+        "compare against nothing."
+    )
+
+    rollout = (
+        nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md"
+    ).read_text("utf-8")
+    rollout_rows = _table_rows(rollout, ("Metric", "Policy", "First bless", "Why"))
+    assert rollout_rows, (
+        "docs/tokenspeed-gating-rollout.md has no per-metric "
+        "`| Metric | Policy | First bless | Why |` table."
+    )
+
+    def names(rows: list[list[str]], verdict: str | None) -> set[str]:
+        return {
+            name
+            for row in rows
+            if verdict is None or verdict in row[2]
+            for name in _BACKTICKED.findall(row[0])
+        }
+
+    return {
+        "docs/tokenspeed-serving.md": {
+            # That table is the gated set; the record-only names are prose
+            # beneath it, and the rollout doc states them row by row instead.
+            "gated": names(serving_rows, None),
+            "record_only": set(),
+        },
+        "docs/tokenspeed-gating-rollout.md": {
+            "gated": names(rollout_rows, "**Gate**"),
+            "record_only": names(rollout_rows, "**Record-only**"),
+        },
+    }
+
+
+def test_the_docs_name_exactly_the_serving_metrics_that_are_gated():
+    """Tie the prose to the config, because it already drifted once.
+
+    Arming the first gate made three separate documents wrong at a stroke --
+    they went on describing the serving cells as record-only and nothing as
+    gated -- and nothing in the tree noticed, because a claim about what is
+    gated lived only in prose. The same edit will be made again for step 7, so
+    the failure mode is recurring rather than historical.
+
+    Deliberately asserting the *set*, not that it is these two names. A reader
+    needs to know which metrics can red the nightly, so a doc that says "gated"
+    without naming them is its own inaccuracy; a doc that names a metric the
+    file does not gate is worse. Both directions fail here, and a future
+    promotion is then a docs edit the test demands rather than one it forbids.
+    """
+    gated = _gated_serving_metrics()
+    assert set(gated) == set(_SERVING_CELLS), (
+        f"expected both documented serving cells, got {sorted(gated)}. Both "
+        "documents say the gate is armed on both, so one cell in the file is a "
+        "claim neither of them makes."
+    )
+    assert len(set(map(frozenset, gated.values()))) == 1, (
+        f"the two serving cells gate different metric sets: {gated}. Both cells "
+        "measure the same thing under one mitigation difference, so a metric "
+        "worth gating on one is worth gating on the other."
+    )
+    names = next(iter(gated.values()))
+
+    for relative, documented in _documented_gate_sets().items():
+        assert documented["gated"] == names, (
+            f"{relative} says the nightly gates {sorted(documented['gated'])} "
+            f"and config/ci/regression_baselines.yaml gates {sorted(names)}. "
+            "Whichever is right, a reader of that document is being told the "
+            "wrong thing about which metrics can red the run."
+        )
+        wrongly_listed = sorted(documented["record_only"] & names)
+        assert not wrongly_listed, (
+            f"{relative} lists {wrongly_listed} as record-only while "
+            "config/ci/regression_baselines.yaml gates them."
+        )
+
+    # The specific claims that were false the moment the bless landed. Narrow on
+    # purpose: a reworded sentence is not what this catches, an unchanged one is.
+    stale = {
+        "docs/tokenspeed-serving.md": "no serving baseline has been blessed",
+        "docs/tokenspeed-gating-rollout.md": "nothing is gated, because no serving baseline",
+        "scripts/ci/dashboard_metadata.py": "record-only until a baseline is blessed",
+    }
+    for relative, claim in stale.items():
+        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        assert claim not in doc, (
+            f"{relative} still says {claim!r} while "
+            f"config/ci/regression_baselines.yaml gates {sorted(names)}."
+        )
+
+
+def _unquoted(doc: str) -> str:
+    """``doc`` with markdown blockquote markers stripped, line by line.
+
+    The current-state box is a blockquote, so its table's rows begin ``> |``
+    and `_table_rows` -- which requires a line to start with ``|`` -- reads
+    none of them. Stripping here rather than loosening `_table_rows` keeps
+    that function's other callers reading exactly the tables they read today.
+    """
+    return "\n".join(
+        line.lstrip()[1:].lstrip() if line.lstrip().startswith(">") else line
+        for line in doc.splitlines()
+    )
+
+
+def _bullets(section: str) -> list[str]:
+    """Top-level ``- `` items in ``section``, each with its indented continuation.
+
+    A bullet ends at the first non-blank line that is not indented, so prose
+    *after* the list is not absorbed into the last item. Splitting on ``\\n- ``
+    instead gave the final bullet everything to the end of the section, which
+    made a paragraph below the list look like part of it -- and a check that
+    reads which names a bullet carries would then read names that belong to the
+    commentary.
+    """
+    items: list[str] = []
+    current: list[str] | None = None
+    for line in section.splitlines():
+        if line.startswith("- "):
+            if current is not None:
+                items.append("\n".join(current))
+            current = [line]
+        elif current is not None:
+            if line.strip() and not line.startswith(" "):
+                items.append("\n".join(current))
+                current = None
+            else:
+                current.append(line)
+    if current is not None:
+        items.append("\n".join(current))
+    return items
+
+
+def _step_seven(doc: str) -> str:
+    """Step 7's text, from its numbered heading to the next `##` section.
+
+    Sliced rather than grepped for over the whole file because the claim being
+    checked is about *where* a statement is. The current-state box and step 7
+    are allowed to say different things about different metrics; what they may
+    not do is give contradictory instructions about the same ones, and that is
+    only visible if the two regions are read separately.
+    """
+    start = doc.index("**7. Promote the record-only metrics")
+    end = doc.index("\n## ", start)
+    return doc[start:end]
+
+
+def test_step_seven_groups_the_nine_the_way_the_current_state_box_does():
+    """The doc gave two answers about when step 7 may begin, and they disagreed.
+
+    The header said the nine record-only metrics are "what the next window is
+    for" while step 4, further down the same file, recorded that the completed
+    window already clears the excursion blocker on `median_ttft_ms` and
+    `output_throughput`. Following the header costs ten nights nobody needs; the
+    two halves were added by different commits and nothing read them together.
+
+    Fixing the header was not enough, and the first spelling of this test only
+    checked the header. Step 7 went on saying "after another ten nightlies"
+    and calling the `p99_*` metrics blocked on repeat data the window in fact
+    recorded -- so the instruction a step-7 author actually follows still sent
+    them back for nights nobody needs, and the tripwire passed because it was
+    looking at one sentence somewhere else in the file.
+
+    So this checks the partition rather than any sentence. The current-state
+    box states three groups of the nine; step 7's bullets must name the same
+    three, each whole and none merged. A reword passes. Splitting a group,
+    merging two, or dropping a metric does not -- and neither does the
+    original defect, because the old step 7 put `median_ttft_ms` and
+    `output_throughput` in a bullet with the `p99_*` reasoning about
+    excursions.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+
+    groups = _table_rows(
+        _unquoted(doc), ("record-only metric", "what step 7 is waiting for")
+    )
+    assert groups, (
+        "the rollout doc has no `| record-only metric | what step 7 is waiting "
+        "for |` box, so what step 7 must agree with cannot be read and this "
+        "check would compare against nothing."
+    )
+    expected = [frozenset(_BACKTICKED.findall(row[0])) for row in groups]
+    assert all(expected) and len(set(expected)) == len(expected), (
+        f"the current-state box's groups are not distinct and non-empty: {expected}"
+    )
+    nine = frozenset().union(*expected)
+    assert len(nine) == 9, (
+        f"the box names {len(nine)} record-only metrics, not nine: {sorted(nine)}. "
+        "Update this count with the rollout rather than around it."
+    )
+
+    bullets = _bullets(_step_seven(doc))
+    assert bullets, "step 7 has no bullet list to read its groups out of"
+    found = [g for g in (frozenset(_BACKTICKED.findall(b)) & nine for b in bullets) if g]
+    assert sorted(map(sorted, found)) == sorted(map(sorted, expected)), (
+        f"step 7 groups the nine as {sorted(map(sorted, found))} while the "
+        f"current-state box groups them as {sorted(map(sorted, expected))}. The "
+        "two have to give the same answer about the same metric: the box is "
+        "what a reader sees first and step 7 is what a promoter acts on."
+    )
+
+    # The two instructions that were false while the header check above passed.
+    # Kept as literals because they are the specific wrong things this document
+    # said, and a grep is the honest way to say "not that again".
+    for stale, why in (
+        (
+            "need another window before any of them can be promoted",
+            "step 4 of the same document contradicts it for median_ttft_ms and "
+            "output_throughput",
+        ),
+        (
+            "After another ten nightlies",
+            "the completed window already holds what two of the nine need, and "
+            "step 7 must not open by scheduling ten more",
+        ),
+        (
+            "blocked on having no repeat data",
+            "the nightly harvests every allowlisted metric, so the window "
+            "recorded the p99 series; what is missing is the analysis of it",
+        ),
+    ):
+        assert stale not in doc, f"the rollout doc still says {stale!r}: {why}."
+
+    assert "deferred to a separate PR" in doc, (
+        "nothing records that median_ttft_ms and output_throughput are held "
+        "back for attributability rather than for evidence, so a step-7 author "
+        "cannot tell which of the nine are actually waiting on a measurement."
+    )
+
+
+def test_the_rollout_doc_does_not_still_say_the_window_is_outstanding():
+    """Two rollout states in one document, four lines apart.
+
+    The current-state box says the window was taken and the gate is armed; the
+    paragraph immediately under it said "we do not yet have a window to derive
+    thresholds from", which is the state before this whole PR. A reader who
+    stops at the first paragraph after the box gets the wrong answer about
+    whether there is anything to do.
+
+    Narrow in both directions, like the step-7 check beside it: the present
+    tense must be gone, and the argument it carried must still be there --
+    it is the one step 7 has to satisfy for the nine, and it is the procedure
+    for the next workload's first bless, so a rewrite that deletes it rather
+    than re-tensing it loses something the document is for.
+    """
+    doc = (
+        nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md"
+    ).read_text("utf-8")
+    stale = "we do not yet have a window to derive thresholds from"
+    assert stale not in doc, (
+        f"the rollout doc still says {stale!r} while its own current-state box "
+        "records the completed 2026-09-08..09-17 window and two armed gates."
+    )
+    assert "A threshold derived from a single observation" in doc, (
+        "the single-observation argument is gone; it is what step 7 still has "
+        "to satisfy for the nine record-only metrics."
+    )
+
+
+def test_each_blessed_bound_is_its_windows_extremum_times_the_policys_margin():
+    """The numbers themselves, not just the prose around them.
+
+    The other tripwires here guard the *docs* against drifting from the
+    baseline file. The four floats in it are the part that decides whether the
+    nightly reds, and they were hand-written from a window table in a document
+    -- so a transposed digit passed every test in the tree and would have been
+    found by a nightly that stopped failing, or started.
+
+    The window extrema are committed in `tokenspeed-gating-rollout.md`, so the
+    derivation is checkable rather than merely stated: each bound must be its
+    cell's and metric's window extremum times the margin its policy documents.
+    That also makes the next hand-written bless show its working, which is the
+    habit worth having rather than this particular set of four numbers being
+    right.
+
+    **Both policies, though only `max` is armed today.** Step 6 documents two
+    derivations -- `max × 1.25` on the window maximum and `min × 0.85` on the
+    window minimum -- and step 7 names `output_throughput`, a `min` metric, as
+    one of the two whose evidence is already in hand. Asserting `policy ==
+    "max"` for every armed key would have failed that promotion *even when its
+    floor was derived exactly as the document says*, which makes this test an
+    obstacle to the rollout it exists to protect. The policy is read from the
+    baseline entry and picks the column and the multiplier; an unknown policy
+    is a failure rather than a skip, so a third one cannot arrive unchecked.
+
+    Both directions of coverage are asserted -- a gated key with no window row
+    is a bound nothing sized, and a window row with no gated key is a metric
+    the table measured and the bless silently dropped.
+    """
+    doc = (
+        nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md"
+    ).read_text("utf-8")
+    for margin, policy in ((_BLESS_MARGIN, "max"), (_FLOOR_MARGIN, "min")):
+        assert f"`{policy} × {margin}`" in doc, (
+            f"the rollout doc no longer states the {policy} margin as "
+            f"{policy} x {margin}, so the derivation checked below is not the "
+            "one it documents."
+        )
+
+    rows = _table_rows(
+        doc, ("cell", "metric", "min", "median", "max", "max/median", "full range")
+    )
+    assert rows, "the rollout doc has no per-cell window table to derive from"
+    #: policy -> {(cell, metric): the extremum that policy's bound anchors on}.
+    #: `min` anchors on the window minimum and `max` on the maximum: a floor is
+    #: sized by the worst throughput seen, a ceiling by the worst latency.
+    window = {
+        "min": {(row[0].strip("`"), row[1].strip("`")): float(row[2]) for row in rows},
+        "max": {(row[0].strip("`"), row[1].strip("`")): float(row[4]) for row in rows},
+    }
+    margins = {"max": _BLESS_MARGIN, "min": _FLOOR_MARGIN}
+
+    gated = _gated_serving_metrics()
+    measured = set(window["max"])
+    armed = {(cell, name) for cell, names in gated.items() for name in names}
+    assert armed == measured, (
+        f"gated keys {sorted(armed)} and window rows {sorted(measured)} do not "
+        "cover each other: a bound with no row was sized by nothing, and a row "
+        "with no bound is a measurement the bless dropped without saying so."
+    )
+
+    import yaml
+
+    baselines = yaml.safe_load(
+        (nightly_eval.REPO_ROOT / "config/ci/regression_baselines.yaml").read_text("utf-8")
+    )["baselines"]
+    for cell, metric in sorted(armed):
+        spec = baselines[f"tokenspeed_serve_smoke::{cell}"]["metrics"][metric]
+        policy = spec["policy"]
+        assert policy in margins, (
+            f"{cell}/{metric} is policy {policy!r}, which step 6 of the "
+            f"rollout doc gives no derivation for; it documents {sorted(margins)}. "
+            "Add the rule there and the margin here rather than exempting the key."
+        )
+        anchor = window[policy][(cell, metric)]
+        expected = round(anchor * margins[policy], 4)
+        assert spec["value"] == expected, (
+            f"{cell}/{metric} is policy {policy} and blessed at {spec['value']}, "
+            f"but its window {policy} {anchor} x {margins[policy]} is {expected}."
+        )
+
+
+def test_the_docs_say_which_serving_metrics_are_not_gated():
+    """"Gated" is only half the answer; the ungated set is the operational half.
+
+    `step_time_ms.max` is the one that has to be named. It is what `--perf-gate`
+    always writes, it is not a recorded metric at all, and it was pruned from
+    this bless by hand -- so a doc that omits it reads as though the pruning did
+    not happen, and the next hand-written bless puts it back.
+    """
+    gated = _gated_serving_metrics()
+    names = next(iter(gated.values()))
+    armed = sorted(n for n in names if n.split(".", 1)[0] == "step_time_ms")
+    assert not armed, (
+        f"{armed} is armed on a serving cell; the measured step-0 compile "
+        "excursion (2825 ms) clears any ceiling derived from a clean night. "
+        "See docs/tokenspeed-gating-rollout.md step 6."
+    )
+    for relative in ("docs/tokenspeed-serving.md", "docs/tokenspeed-gating-rollout.md"):
+        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        assert "step_time_ms.max" in doc, (
+            f"{relative} does not mention step_time_ms.max, so nothing records "
+            "that it was left out on purpose."
+        )
+        assert "record-only" in doc, (
+            f"{relative} no longer says which serving metrics stay record-only."
+        )
+
+
+#: What the completed 2026-09-08..09-17 window cleared for promotion: the
+#: step-0 excursion was the only blocker on these two, and it did not recur in
+#: twenty cell-runs. A fact about that window, so it stays true after step 7
+#: promotes them.
+_CLEARED_BY_THE_WINDOW = frozenset({"median_ttft_ms", "output_throughput"})
+
+#: The step-time bound under both of its names -- the key `--perf-gate` writes
+#: and the observation it is compared against. The excursion blocked it too,
+#: but no window clears it: the bound is synthesised at bless time from one
+#: night's mean, so there is no per-night series of it for a window to measure.
+_STEP_TIME_BOUND = frozenset({"step_time_ms.max", "mean_step_time_ms"})
+
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_BREAK = re.compile(r"\s*(?:;|:(?!//)|—)\s*")
+
+#: A clause saying the window cleared a metric: "clears the excursion blocker
+#: on", "window cleared it", "clears X for promotion". Affirmative forms only.
+#: English negates these as "does not clear", and the bare verb is kept out of
+#: the match, so a sentence explaining why a metric is *not* cleared is not
+#: read as claiming it is.
+_CLEARED_CLAIM = re.compile(
+    r"\bclear(?:s|ed)\b.*\b(?:blocker|for\s+promotion)\b|\bblocker\b.*\bclear(?:s|ed)\b"
+)
+
+#: A clause saying a metric can be promoted, by the same rule: "can be
+#: promoted", "lets X be promoted", "evidence for promoting", and "pruned
+#: until X" -- which says when the pruning ends. Not "cannot be promoted" and
+#: not "promoting it needs".
+_PROMOTABLE_CLAIM = re.compile(
+    r"\b(?:can|could|should|may|will)\s+be\s+promoted\b"
+    r"|\blets?\b.*\bbe\s+promoted\b"
+    r"|\bfor\s+promotion\b"
+    r"|\bevidence\s+for\s+promoting\b"
+    r"|\bprune\w*\b.*\buntil\b"
+)
+
+
+def _prose_blocks(doc: str) -> list[list[list[str]]]:
+    """``doc`` as blocks of sentences of clauses, so a claim can be read in place.
+
+    A block is a paragraph, a bullet or one table row -- the unit a pronoun can
+    reach back across. Blockquote markers and emphasis are dropped so the
+    current-state box and `**bold**` leads read like any other prose; backticks
+    are kept, because they carry the metric names.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+
+    def close() -> None:
+        if current:
+            blocks.append(" ".join(current))
+            current.clear()
+
+    for line in _unquoted(doc).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("|", "- ")):
+            close()
+        if stripped.startswith("|"):
+            blocks.append(stripped)
+        elif stripped:
+            current.append(stripped)
+    close()
+    return [
+        [_CLAUSE_BREAK.split(s) for s in _SENTENCE_BREAK.split(block.replace("*", ""))]
+        for block in blocks
+    ]
+
+
+def _claims(doc: str, pattern: re.Pattern, universe: frozenset) -> list[tuple[str, frozenset]]:
+    """``(clause, metrics it is about)`` for every clause ``pattern`` matches.
+
+    A clause is about the ``universe`` names it spells out, or -- when it says
+    "it", "them" or "their" -- about the names in the nearest earlier clause of
+    the same block that spelled any out. That fallback is the whole reason
+    this reads blocks rather than grepping lines: "The window cleared its
+    excursion blocker too" names nothing, and was false because of the
+    sentence before it.
+    """
+    found: list[tuple[str, frozenset]] = []
+    for block in _prose_blocks(doc):
+        about: frozenset = frozenset()
+        for sentence in block:
+            for clause in sentence:
+                named = frozenset(_BACKTICKED.findall(clause)) & universe
+                if named:
+                    about = named
+                if pattern.search(clause):
+                    found.append((clause, about))
+    return found
+
+
+def test_the_rollout_doc_says_the_window_cleared_exactly_two_metrics():
+    """The window cleared `median_ttft_ms` and `output_throughput`, and nothing else.
+
+    The rollout doc said otherwise in nine places. Three made the step-time
+    bound cleared or promotable -- "clears the *excursion* blocker on
+    `median_ttft_ms`, `output_throughput` and `step_time_ms.max`", "The window
+    cleared its excursion blocker too" with the name one sentence earlier, and
+    "prune it by hand until `warmup_steps` is proven to cover the excursion" --
+    and six more said "the three" where the set is two. Each sat near text
+    explaining why `step_time_ms.max` is the exception, so a reader got both
+    answers a paragraph apart: it is not a recorded metric, and a clean window
+    has no series of it to clear.
+
+    Read as claims, not as vocabulary. Every clause asserting that the window
+    cleared a metric, or that a metric can be promoted, is resolved to the
+    metrics it is about; the cleared set must be exactly the two, and neither
+    kind of claim may be about the step-time bound. Sentences that say why it
+    is *not* cleared use the negated verb and are not claims. A bare count is
+    checked separately, because "the three can be promoted" names nothing to
+    resolve.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+
+    rows = _table_rows(doc, ("Metric", "Policy", "First bless", "Why"))
+    dropped = {n for row in rows if "(was: gate)" in row[2] for n in _BACKTICKED.findall(row[0])}
+    assert dropped == _CLEARED_BY_THE_WINDOW | _STEP_TIME_BOUND, (
+        f"the per-metric table marks {sorted(dropped)} as dropped from the "
+        "original gate set; this check assumes the excursion blocked "
+        "median_ttft_ms, output_throughput and the step-time bound. Update the "
+        "constants with the table rather than around it."
+    )
+    universe = frozenset(dropped)
+
+    cleared = frozenset().union(*(about for _, about in _claims(doc, _CLEARED_CLAIM, universe)))
+    assert cleared == _CLEARED_BY_THE_WINDOW, (
+        f"the rollout doc says the window cleared {sorted(cleared)}; it cleared "
+        f"{sorted(_CLEARED_BY_THE_WINDOW)}. step_time_ms.max is not a recorded "
+        "metric, so there is no per-night series of it for a window to clear."
+    )
+
+    for pattern in (_CLEARED_CLAIM, _PROMOTABLE_CLAIM):
+        for clause, about in _claims(doc, pattern, universe):
+            assert not about & _STEP_TIME_BOUND, (
+                f"the rollout doc says the step-time bound is cleared or "
+                f"promotable from the window: {clause!r}. It is synthesised at "
+                "bless time from one night's mean, and step 4 and step 7 both "
+                "say no window measures it."
+            )
+
+    promotion = re.compile(
+        f"{_CLEARED_CLAIM.pattern}|{_PROMOTABLE_CLAIM.pattern}|\\bstay\\s+record-only\\b"
+    )
+    for clause, _ in _claims(doc, promotion, universe):
+        assert not re.search(r"\b(?:the|all)\s+three\b", clause), (
+            f"the rollout doc counts the metrics the window decides as three: "
+            f"{clause!r}. It decides two; name them."
+        )
+
+
+#: How the rollout doc said some of the nine were waiting on nights not yet
+#: run: a count of groups that are waiting, or a count of metrics for which
+#: "the next window" is the right answer or "another window" the wrong one.
+#: Parameterised over the count so a reworded "two groups are waiting" is
+#: caught as well as the original "only one group is waiting". A count that is
+#: itself the object of "of the" is not the subject -- "none of the three
+#: groups is waiting" says zero -- so it is excluded by look-behind.
+_NUMBER = r"(?:one|two|three|four|five|six|seven|eight|nine|some)"
+_WAITING_ON_NEW_NIGHTS = re.compile(
+    rf"(?<!of the )\b(?:only\s+)?{_NUMBER}\s+"
+    rf"(?:of\s+(?:them|the\s+nine|the\s+(?:{_NUMBER}\s+)?groups)\s+|groups?\s+)"
+    r"(?:is|are)\s+waiting\b"
+    rf"|\bright\s+answer\s+for\s+(?:only\s+)?{_NUMBER}\b"
+    rf"|\bwrong\s+answer\s+for\s+{_NUMBER}\s+of\b",
+    re.I,
+)
+
+
+def test_the_rollout_doc_does_not_say_any_group_waits_for_new_nights():
+    """None of the three groups waits on nights that have not happened yet.
+
+    The current-state box and step 7 agree on that group by group: two
+    metrics have their evidence, three need the *analysis* of the recorded
+    window and a second one only if that analysis says so, four are held on
+    redundancy. Three summary sentences disagreed with them -- "'the next
+    window' is the right answer for only three of them", "the wrong answer for
+    six of the nine", and step 7's own opening, "only one group is waiting on
+    nights that have not happened yet" -- each implying the `p99_*` group
+    should wait before reading what it already has.
+
+    The partition check above cannot see this: the groups were right and the
+    sentences summarising them were wrong. So this reads every sentence for a
+    count of groups or metrics described as waiting. It is a pattern over how
+    this document quantifies waiting, not a parse of meaning, and says so.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+    for block in _prose_blocks(doc):
+        for clauses in block:
+            sentence = " ".join(clauses)
+            assert not _WAITING_ON_NEW_NIGHTS.search(sentence), (
+                f"the rollout doc says part of the nine is waiting on new "
+                f"nights: {sentence!r}. The current-state box and step 7 give "
+                "every group a way forward from the recorded window."
+            )
+
+
+#: Opposing a failure to a chart: "not a chart", "rather than a chart", "not
+#: charted", "instead of a chart entry".
+_NOT_CHARTED = re.compile(
+    r"\b(?:not|rather\s+than|instead\s+of)\s+(?:a\s+)?chart(?:s|ed|\s+entry|\s+entries)?\b",
+    re.I,
+)
+
+
+def test_the_docs_say_a_breach_fails_the_nightly_and_stays_charted():
+    """A gate breach is a verdict, and the observation behind it stays on the chart.
+
+    Three places said a run over a serving ceiling is "a nightly failure, not a
+    chart" (or "rather than a chart", or "not a chart entry"). The failure half
+    is right. The other half is not -- see the next test for the path -- and it
+    sends an operator looking for the breached value somewhere other than the
+    metric history it is drawn in.
+
+    Two halves, per text: no sentence about a failure opposes it to charting,
+    and some sentence about a failure says the observation is still charted,
+    so deleting the clause is not a way to pass. The dashboard text is read
+    from `DASHBOARD_METADATA` rather than from source, because the source
+    splits it across string literals and a grep would read the seams.
+    """
+    dashboard_metadata = _load("dashboard_metadata")
+    texts = {
+        relative: (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        for relative in ("docs/tokenspeed-gating-rollout.md", "docs/tokenspeed-serving.md")
+    }
+    texts["scripts/ci/dashboard_metadata.py (tokenspeed_serve_smoke success criteria)"] = (
+        dashboard_metadata.DASHBOARD_METADATA["workloads"]["tokenspeed_serve_smoke"]["repro"][
+            "success_criteria"
+        ]
+    )
+    for where, text in texts.items():
+        failures = [
+            " ".join(clauses)
+            for block in _prose_blocks(text)
+            for clauses in block
+            if re.search(r"\bfail", " ".join(clauses))
+        ]
+        conflated = [s for s in failures if _NOT_CHARTED.search(s)]
+        assert not conflated, (
+            f"{where} opposes a gate failure to charting: {conflated[0]!r}. "
+            "nightly_eval.py records the failing cell with its metrics and "
+            "gen_dashboard.py charts every entry, so the breach is both."
+        )
+        assert any(re.search(r"\bcharted\b", s) for s in failures), (
+            f"{where} no longer says that a breached observation stays charted; "
+            "an operator reading it cannot tell where to find the value that "
+            "failed the run."
+        )
+
+
+def test_a_serving_gate_breach_fails_the_nightly_and_stays_charted(tmp_path, monkeypatch):
+    """What the docs now say a breach does, checked on the path that does it.
+
+    A night over the `median_tpot_ms` ceiling is driven through the real
+    `nightly_eval.main()` against the committed baselines, and its results
+    file through the real dashboard renderer beside a clean night's. The run
+    must exit non-zero, the results file must still carry the breached value,
+    and that cell's `median_tpot_ms` history must be the chart of both nights.
+    A harness that drops a failing cell's metrics, or a history that skips
+    failed nights, fails this -- and would make the prose wrong again in the
+    other direction.
+
+    The results file reaches the dashboard through two workflow steps that
+    are YAML rather than Python -- the artifact upload and the publisher --
+    and both have to run on a failed eval for any of this to hold, so they are
+    asserted too.
+    """
+    import sys
+
+    import yaml
+
+    gen_dashboard = _load("gen_dashboard")
+    workflows = nightly_eval.REPO_ROOT / ".github/workflows"
+    publish = yaml.safe_load((workflows / "nightly-eval.yml").read_text("utf-8"))["jobs"]["publish"]
+    assert "always()" in publish["if"], (
+        "nightly-eval.yml's publish job no longer runs after a failed eval, so a "
+        "breaching night never reaches the history the docs say it is charted in."
+    )
+    uploads = [
+        step
+        for step in yaml.safe_load((workflows / "eval-reusable.yml").read_text("utf-8"))["jobs"][
+            "eval"
+        ]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+        and "gpu-nightly-results.json" in step["with"]["path"]
+    ]
+    assert [step.get("if") for step in uploads] == ["always()"], (
+        "eval-reusable.yml does not upload gpu-nightly-results.json after a failed "
+        "eval, so the publisher has nothing to record."
+    )
+
+    baselines = yaml.safe_load(nightly_eval.BASELINES.read_text("utf-8"))["baselines"]
+    ceiling = baselines["tokenspeed_serve_smoke::baseline"]["metrics"]["median_tpot_ms"]["value"]
+    healthy, breach = 1.8906, round(ceiling * 1.5, 4)
+    entry = {e["name"]: e for e in _real_matrix()["entries"]}["tokenspeed_serve_smoke"]
+
+    real_evaluate = nightly_eval.evaluate
+    monkeypatch.setattr(
+        nightly_eval, "evaluate",
+        lambda _matrix, blessed, work: real_evaluate({"entries": [entry]}, blessed, work),
+    )
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(nightly_eval, "docker_daemon", lambda: (True, "stubbed"))
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {"amd_aorta_version": "x"})
+
+    def night(label: str, tpot: float) -> tuple[int, dict]:
+        def fake_run_entry(e, out_dir):
+            mpath = out_dir / e["name"] / "matrix.json"
+            _write_matrix(mpath, [
+                {"name": cell, "error": None, "passed_count": 1, "failed_count": 0,
+                 "error_count": 0, "mean_step_time_ms": 1130.0,
+                 "metrics_summary": {"median_tpot_ms": {"mean": value},
+                                     "p99_itl_ms": {"mean": 34.75}}}
+                for cell, value in (("baseline", tpot), ("no-scratch-reclaim", healthy))
+            ])
+            return 0, mpath, False
+
+        out = tmp_path / f"{label}.json"
+        monkeypatch.setattr(nightly_eval, "run_entry", fake_run_entry)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["nightly_eval.py", "--out", str(out), "--work-dir", str(tmp_path / label)],
+        )
+        rc = nightly_eval.main()
+        doc = json.loads(out.read_text("utf-8"))
+        doc["generated_at"] = f"2026-09-{label}T11:30:00+00:00"
+        return rc, doc
+
+    clean_rc, clean = night("18", healthy)
+    breach_rc, breached = night("19", breach)
+
+    assert clean_rc == 0 and clean["summary"]["fail"] == 0, clean["summary"]
+    assert breach_rc == 1, "a night over the median_tpot_ms ceiling did not fail the nightly"
+    assert breached["summary"]["fail"] == 1, breached["summary"]
+    cell = {e["cell"]: e for e in breached["entries"]}["baseline"]
+    assert cell["verdict"] == "fail"
+    assert any("median_tpot_ms" in reason for reason in cell["reasons"]), cell["reasons"]
+    assert cell["metrics"]["summary"]["median_tpot_ms"] == breach, (
+        "the failing cell reached the results file without the value that failed it"
+    )
+
+    html = gen_dashboard.build_dashboard_html([clean, breached])
+    chart = gen_dashboard._svg_sparkline([healthy, breach])
+    assert chart.startswith("<svg") and chart in html, (
+        "the dashboard does not chart the breaching night in the cell's "
+        "median_tpot_ms history; the docs say it does."
+    )
+
+
+def _heading_anchors(doc: str) -> set[str]:
+    """The ``#fragment`` GitHub gives each heading of ``doc``.
+
+    GitHub's rule: lowercase, drop every character that is not a letter, a
+    digit, a space, ``-`` or ``_``, turn spaces into ``-``, and suffix a
+    repeated slug ``-1``, ``-2``. Lines inside fenced code are skipped, because
+    the rollout doc's shell blocks are full of ``# comment`` lines that are not
+    headings and would otherwise mint anchors that do not exist.
+    """
+    anchors: set[str] = set()
+    seen: dict[str, int] = {}
+    fenced = False
+    for line in doc.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        match = None if fenced else re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if not match:
+            continue
+        slug = "".join(
+            c for c in match.group(1).lower()
+            if c in " -_" or unicodedata.category(c)[0] in "LMN"
+        ).replace(" ", "-")
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        anchors.add(slug if count == 0 else f"{slug}-{count}")
+    return anchors
+
+
+def test_the_gating_docs_link_only_to_anchors_they_define():
+    """Every in-page ``](#...)`` link lands on a heading of the same file.
+
+    Renaming "What blocks this today" to "What blocked this, and what remains"
+    left the current-state notes linking to ``#what-blocks-this-today``, which
+    no longer exists; GitHub renders that as a link that scrolls nowhere. The
+    two gating docs cross-reference their own sections heavily -- the rollout
+    doc has 25 such links -- and every heading here gets reworded as the
+    rollout moves, so the anchors are checked rather than trusted.
+    """
+    for relative in ("docs/tokenspeed-gating-rollout.md", "docs/tokenspeed-serving.md"):
+        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        anchors = _heading_anchors(doc)
+        links = re.findall(r"\]\(#([^)\s]+)\)", doc)
+        assert links, f"{relative} has no in-page links, so this checks nothing"
+        dead = sorted({link for link in links if link not in anchors})
+        assert not dead, (
+            f"{relative} links to {dead}, which no heading in it defines. Point "
+            "the link at the heading's current anchor, or keep the old one as an "
+            "alias."
+        )
+
+
+def test_the_heading_anchors_follow_githubs_rule():
+    """The slugger above agrees with GitHub on the cases these docs contain.
+
+    Without this, a slugger that returned every link's own fragment would pass
+    the dead-link test for any doc at all.
+    """
+    doc = "\n".join([
+        "## What blocked this, and what remains",
+        "#### One MI350X cell at `warmup_steps: 2` (2026-09-03) — a data point",
+        "```bash",
+        "# not a heading",
+        "```",
+        "## Repeated",
+        "## Repeated",
+    ])
+    assert _heading_anchors(doc) == {
+        "what-blocked-this-and-what-remains",
+        "one-mi350x-cell-at-warmup_steps-2-2026-09-03--a-data-point",
+        "repeated",
+        "repeated-1",
+    }
+
+
+def test_the_rollout_doc_does_not_say_the_window_is_still_to_come():
+    """The ten-night window at ``warmup_steps: 2`` has been taken; say so.
+
+    Two places still spoke of it as future after the PR recorded it and blessed
+    from it: the ``warmup_steps`` paragraph ("the ten-night record-only window
+    has to be taken afresh ... before anything is blessed") and the warmup-1
+    caveat ("there is no measurement at `warmup_steps: 2` yet"). Each sat a
+    screen away from the step-4 text reporting that window's numbers. The
+    patterns are the future-tense forms this doc used; the paired assertion
+    that the taken window is still named keeps a deletion from passing. Read
+    with whitespace collapsed rather than through `_prose_blocks`, which
+    splits clauses on ``:`` and so would cut `warmup_steps: 2` in half.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+    prose = " ".join(_unquoted(doc).split())
+    stale = re.compile(
+        r"\bwindow\s+(?:still\s+)?(?:has|have|needs?)\s+to\s+be\s+taken\b"
+        r"|\bno\s+measurement\s+at\s+`warmup_steps:\s*2`\s+yet\b"
+        r"|\bten-night\s+window\s+is\s+what\s+produces\s+it\b",
+        re.I,
+    )
+    found = stale.search(prose)
+    assert not found, (
+        f"the rollout doc still speaks of the warmup_steps: 2 window as future: "
+        f"{found.group(0)!r}. It is 2026-09-08..09-17, and the gates are blessed "
+        "from it."
+    )
+    assert re.search(r"window at `warmup_steps: 2`,?\s+2026-09-08\.\.09-17", prose), (
+        "the warmup-1 caveat no longer says where the warmup_steps: 2 measurement is"
+    )
 
 
 def test_pending_entries_are_valid_and_loadable():

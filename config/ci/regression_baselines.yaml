@@ -1,7 +1,14 @@
 # Expected-outcome baselines for the nightly evaluation.
 # Blessed from nightly run 2026-08-10 (16/16 record, 0 skip) on MI350.
-# Correctness-only (checksum equal policies); perf gating not enabled.
-# Regenerate via scripts/ci/refresh_baselines.py after stack bumps.
+# Correctness (checksum equal policies) everywhere, plus the first performance
+# ceilings: two metrics on tokenspeed_serve_smoke, from the ten-night window
+# 2026-09-08..09-17 (docs/tokenspeed-gating-rollout.md steps 3-6). Every other
+# entry stays record-only for performance.
+# Regenerate via scripts/ci/refresh_baselines.py after stack bumps -- but note
+# that tokenspeed_serve_smoke is hand-written: it declares needs_docker_daemon
+# and refresh-baselines.yml mounts no socket, so a refresh scoped to it is
+# refused rather than run. A refresh of any OTHER entry carries these two
+# ceilings over untouched, in both --perf-gate and correctness-only modes.
 baselines:
   gpu_smoke::baseline-local:
     passed: true
@@ -30,6 +37,32 @@ baselines:
   race::smoke:
     passed: true
   race_8gpu::smoke:
+    passed: true
+  # Each ceiling is the window MAXIMUM x 1.25, not the mean and not one night's
+  # observation: the variation this workload shows is the occasional bad night
+  # rather than jitter about a centre, and a mean is the statistic that hides
+  # one. Worst night of the window sits at 80.0% of every ceiling below.
+  # Deliberately only these two keys per cell: the other nine auto-gateable
+  # metrics and the synthesised step_time_ms.max stay record-only, the last
+  # because the measured step-0 compile excursion (2825 ms) clears any ceiling
+  # derived from a clean night. See the per-metric table in the rollout doc.
+  tokenspeed_serve_smoke::baseline:
+    metrics:
+      median_tpot_ms:
+        policy: max
+        value: 2.3922
+      p99_itl_ms:
+        policy: max
+        value: 44.287
+    passed: true
+  tokenspeed_serve_smoke::no-scratch-reclaim:
+    metrics:
+      median_tpot_ms:
+        policy: max
+        value: 2.3995
+      p99_itl_ms:
+        policy: max
+        value: 44.7886
     passed: true
   training_ddp::baseline-local:
     passed: true
