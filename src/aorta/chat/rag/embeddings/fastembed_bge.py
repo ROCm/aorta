@@ -10,8 +10,10 @@ so the retrieval quality is BGE's rather than MiniLM's and the hazard is gone by
 construction rather than by warning.
 
 One thing the swap does *not* preserve is bit-identical vectors. fastembed
-sources this model from ``qdrant/bge-small-en-v1.5-onnx-q``, which is quantised
-(67 MB against the 130 MB fp32 weights). Same architecture, same 384 dimensions,
+sources this model from a re-host of its own --
+``Qdrant/bge-small-en-v1.5-onnx-Q`` from fastembed 0.8.1,
+``qdrant/bge-small-en-v1.5-onnx-q`` before it -- which is quantised (67 MB
+against the 130 MB fp32 weights). Same architecture, same 384 dimensions,
 near-identical rankings -- but not the same numbers, which is precisely why
 :func:`FastembedBgeProvider.collection_name` encodes the provider *and* the
 model. A dimension check alone would let a torch-built index load here and
@@ -66,7 +68,8 @@ PRE_SEED_PROCEDURE = (
     "reachable, so they cannot be downloaded.\n"
     "\n"
     "To pre-seed the cache from a machine that does have egress:\n"
-    "  1. On the connected machine, with the same aorta version installed:\n"
+    "  1. On the connected machine, with the same aorta *and* fastembed versions\n"
+    "     installed (a cache seeded by another fastembed may not load here):\n"
     "       export HF_HOME=/tmp/aorta-model-cache\n"
     "       aorta chat doctor            # downloads nothing\n"
     "       python -c 'from fastembed import TextEmbedding; "
@@ -127,6 +130,17 @@ def model_is_cached(model: str | None = None) -> bool:
     id, so both names are accepted -- a cache seeded through either counts. The
     ``hub`` subdirectory is checked too, so a cache seeded by plain
     ``huggingface_hub`` into ``$HF_HOME/hub`` is recognised.
+
+    The source repo is matched exactly as the *installed* fastembed spells it,
+    case included, and never case-folded. fastembed 0.8.1 respelled this
+    model's source ``qdrant/...-onnx-q`` -> ``Qdrant/...-onnx-Q`` and changed
+    nothing else about the tree, yet measured offline neither release loads a
+    cache the other seeded: ``huggingface_hub`` resolves the directory by exact
+    name. Accepting both spellings would call a cache this install cannot load
+    warm, and :func:`_text_embedding` would then re-raise the bare download
+    error instead of :data:`PRE_SEED_PROCEDURE`. An exact check asks the
+    filesystem the question ``huggingface_hub`` asks, so it gets the same answer
+    whatever the filesystem's case rules.
     """
     model = model or settings.embedding_model
     root = model_cache_dir()
@@ -143,8 +157,10 @@ def _source_repo(model: str) -> str:
     """The HuggingFace repo fastembed actually downloads ``model`` from.
 
     fastembed re-hosts ONNX conversions under its own org, so
-    ``BAAI/bge-small-en-v1.5`` is fetched from ``qdrant/bge-small-en-v1.5-onnx-q``
-    and that is the name the cache directory carries.
+    ``BAAI/bge-small-en-v1.5`` is fetched from ``Qdrant/bge-small-en-v1.5-onnx-Q``
+    (``qdrant/bge-small-en-v1.5-onnx-q`` before fastembed 0.8.1) and that is
+    the name the cache directory carries. Read from the installed registry
+    rather than written down here, because the spelling moves between releases.
 
     Falls back to the model id whenever the registry cannot be read at all --
     fastembed absent, a partial install, or the *private*
