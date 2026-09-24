@@ -46,6 +46,7 @@ def run(groups: list[dict], **config) -> dict:
         "top_p": 0.95,
         "max_new_tokens": 320,
         "max_episode_steps": 8,
+        "gen_batch": 4,
         "seed": 20260923,
         "scenarios": [g["scenario_id"] for g in groups],
     }
@@ -155,11 +156,19 @@ def test_different_episode_counts_are_refused():
 
 @pytest.mark.parametrize("field, value", [
     ("temperature", 1.0), ("top_p", 0.8), ("max_new_tokens", 512),
-    ("max_episode_steps", 4), ("seed", 1),
+    ("max_episode_steps", 4), ("seed", 1), ("gen_batch", 8),
 ])
 def test_two_columns_sampled_differently_are_refused(field, value):
     with pytest.raises(ValueError, match=f"differ in '{field}'"):
         eval_episodes.compare(run([group("a")]), run([group("a")], **{field: value}))
+
+
+def test_a_column_that_predates_gen_batch_does_not_pair_with_one_that_has_it():
+    old = run([group("a")])
+    del old["config"]["gen_batch"]
+    with pytest.raises(ValueError, match="differ in 'gen_batch'"):
+        eval_episodes.compare(old, run([group("a")]))
+    assert eval_episodes.compare(old, old)
 
 
 def test_two_columns_from_different_checkpoints_are_the_whole_point():
@@ -197,7 +206,7 @@ class _Args:
         self.__dict__.update({
             "model": "Qwen/Qwen3-8B", "param_dtype": "float32", "episodes_per_scenario": 64,
             "max_episode_steps": 8, "temperature": 0.7, "top_p": 0.95,
-            "max_new_tokens": 320, "seed": 20260923, "scenarios": "",
+            "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923, "scenarios": "",
         })
         self.__dict__.update(kw)
 
@@ -206,7 +215,8 @@ def column_file(tmp_path: Path, **config) -> Path:
     base = {
         "init_from": "/ckpt/last", "model": "Qwen/Qwen3-8B", "param_dtype": "float32",
         "episodes_per_scenario": 64, "max_episode_steps": 8, "temperature": 0.7,
-        "top_p": 0.95, "max_new_tokens": 320, "seed": 20260923, "scenarios": ["a"],
+        "top_p": 0.95, "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923,
+        "scenarios": ["a"],
     }
     base.update(config)
     path = tmp_path / "before.json"
@@ -222,7 +232,7 @@ def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
 @pytest.mark.parametrize("field, value", [
     ("model", "Qwen/Qwen3-4B"), ("param_dtype", "bfloat16"), ("episodes_per_scenario", 32),
     ("max_episode_steps", 4), ("temperature", 1.0), ("top_p", 0.8),
-    ("max_new_tokens", 512), ("seed", 1), ("init_from", "/ckpt/earlier"),
+    ("max_new_tokens", 512), ("gen_batch", 8), ("seed", 1), ("init_from", "/ckpt/earlier"),
 ])
 def test_a_column_written_under_different_settings_is_refused(tmp_path, field, value):
     with pytest.raises(ValueError, match=field):

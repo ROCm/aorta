@@ -117,8 +117,10 @@ SLACK = 4.0
 DTYPES = {"F32": np.float32, "F64": np.float64, "BF16": np.uint16, "F16": np.float16}
 
 #: Half an ulp relative to magnitude, per storage dtype: the most one rounding
-#: of an in-place update can move an element beyond the update itself.
-HALF_ULP = {"F32": 2.0**-24, "F64": 2.0**-53, "BF16": 2.0**-9, "F16": 2.0**-11}
+#: of an in-place update can move an element beyond the update itself. It is
+#: 2^-p for a p-bit significand (implicit bit included): F32 24, F64 53, BF16 8,
+#: F16 11.
+HALF_ULP = {"F32": 2.0**-24, "F64": 2.0**-53, "BF16": 2.0**-8, "F16": 2.0**-11}
 
 
 def adam_step_ceiling(steps: int, beta1: float = 0.9, beta2: float = 0.999) -> float:
@@ -170,14 +172,20 @@ def read_header(path: Path) -> tuple[dict[str, Any], int]:
 
 
 def read_tensor(path: Path, info: dict[str, Any], base: int) -> Any:
-    """One tensor as float32, whatever it is stored as."""
+    """One tensor as float32, or float64 when it is stored as F64.
+
+    Every narrower dtype widens to float32 exactly. F64 does not narrow: a
+    real update below float32's resolution would read as "unmoved", and damage
+    below it would be invisible.
+    """
     begin, end = info["data_offsets"]
     dtype = DTYPES[info["dtype"]]
     flat = np.fromfile(path, dtype=dtype, count=(end - begin) // np.dtype(dtype).itemsize,
                        offset=base + begin)
     if info["dtype"] == "BF16":
         flat = (flat.astype(np.uint32) << 16).view(np.float32)
-    return flat.astype(np.float32).reshape(info["shape"])
+    widest = np.float64 if info["dtype"] == "F64" else np.float32
+    return flat.astype(widest).reshape(info["shape"])
 
 
 def tensor_map(root: Path) -> dict[str, Path]:

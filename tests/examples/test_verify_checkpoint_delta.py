@@ -258,6 +258,32 @@ def test_bfloat16_on_disk_is_widened_not_reinterpreted(tmp_path):
     assert vcd.read_tensor(path, meta["w"], offset).tolist() == values.tolist()
 
 
+def test_an_f64_tree_is_compared_in_f64(tmp_path):
+    """A move below float32's resolution is still a move in an F64 tree."""
+    def f64_tree(root, value):
+        root.mkdir()
+        tensors = {FROZEN: np.full((2,), 0.5), K_PROJ: np.full((2,), value)}
+        header, buf, offset = {}, bytearray(), 0
+        for name, array in tensors.items():
+            raw = np.ascontiguousarray(array, dtype=np.float64).tobytes()
+            header[name] = {"dtype": "F64", "shape": [2], "data_offsets": [offset, offset + len(raw)]}
+            buf += raw
+            offset += len(raw)
+        blob = json.dumps(header).encode()
+        (root / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob + bytes(buf))
+        return root
+
+    pre = f64_tree(tmp_path / "pre", 1.0)
+    post = f64_tree(tmp_path / "post", 1.0 + 1e-12)
+    assert np.float32(1.0 + 1e-12) == np.float32(1.0), "the move is below f32 resolution"
+    assert run(pre, post) == 0
+
+
+def test_the_half_ulp_table_is_two_to_minus_the_significand_bits():
+    for dtype, bits in (("F32", 24), ("F64", 53), ("BF16", 8), ("F16", 11)):
+        assert vcd.HALF_ULP[dtype] == 2.0**-bits, dtype
+
+
 def test_a_bf16_tree_gets_the_bf16_rounding_allowance():
     """Each in-place update rounds to the storage dtype, so a bf16 tree can move
     an element by far more than lr per step through rounding alone."""

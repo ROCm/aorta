@@ -79,6 +79,12 @@ def test_a_replay_that_walks_a_different_path_is_flagged(scenario):
     assert result["mismatched_steps"] == 2
 
 
+def test_an_empty_wire_is_a_refusal_not_a_reproduction(scenario):
+    """Zero episodes replayed is zero mismatches; that is not evidence."""
+    with pytest.raises(ValueError, match="nothing to replay"):
+        rescore.replay([], [scenario], AgentPolicy())
+
+
 def test_a_scenario_the_corpus_does_not_have_is_a_refusal(scenario):
     rows = recorded(scenario, [reply([CHARLIE])])
     for row in rows:

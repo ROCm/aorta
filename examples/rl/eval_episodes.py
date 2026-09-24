@@ -144,11 +144,16 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             f"the two columns used different episode counts on {mismatched}; "
             "a paired comparison needs the same n on both sides"
         )
-    for field in ("temperature", "top_p", "max_new_tokens", "max_episode_steps", "seed"):
-        if before["config"][field] != after["config"][field]:
+    # `gen_batch` is sampling too: it decides which draws of the stream go to
+    # which prompt, and the padding each prompt is generated under. Read with
+    # `.get` so a column that predates the field compares as None rather than
+    # raising -- and a column that has it never pairs with one that does not.
+    for field in ("temperature", "top_p", "max_new_tokens", "max_episode_steps", "seed",
+                  "gen_batch"):
+        if before["config"].get(field) != after["config"].get(field):
             raise ValueError(
-                f"the two columns differ in {field!r}: {before['config'][field]!r} vs "
-                f"{after['config'][field]!r}. A paired comparison has to hold sampling "
+                f"the two columns differ in {field!r}: {before['config'].get(field)!r} vs "
+                f"{after['config'].get(field)!r}. A paired comparison has to hold sampling "
                 "fixed, or the difference it reports is not the weights."
             )
 
@@ -223,7 +228,7 @@ def print_comparison(result: dict[str, Any]) -> None:
 #: different list is refused by ``compare``.
 _REUSE_FIELDS = (
     "init_from", "model", "param_dtype", "episodes_per_scenario", "max_episode_steps",
-    "temperature", "top_p", "max_new_tokens", "seed",
+    "temperature", "top_p", "max_new_tokens", "gen_batch", "seed",
 )
 
 
@@ -247,6 +252,7 @@ def _config(args: argparse.Namespace, source: str) -> dict[str, Any]:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "max_new_tokens": args.max_new_tokens,
+        "gen_batch": args.gen_batch,
         "seed": args.seed,
     }
 

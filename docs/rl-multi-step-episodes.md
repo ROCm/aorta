@@ -128,10 +128,14 @@ did.
   KL to the frozen base at β = 1e-3, 8 episodes per scenario per iteration,
   all seven scenarios, fp32 weights.
 - The trainer used was the exploratory version this one is derived from. It
-  had the same objective, optimiser, sampling and checks, plus modes this
-  version drops. This version also refuses to write a checkpoint from an
-  iteration whose checks failed; the checks passed on all 17 iterations, so
-  that difference was never exercised.
+  had the same optimiser, sampling and checks, plus modes this version drops.
+  There are two differences:
+  - This version refuses to write a checkpoint from an iteration whose checks
+    failed. The checks passed on all 17 iterations, so that difference was
+    never exercised.
+  - The exploratory version skipped zero-advantage samples entirely, which
+    left groups with a flat reward without the KL term. This version applies
+    KL to them.
 - The 17 iterations were accumulated across three chained runs, so the Adam
   moments restarted twice.
 - Every iteration passed the trainer's checks. The pair passes

@@ -294,8 +294,12 @@ def replay(
 
     Refuses rather than skips on a scenario it cannot find: a replay that
     silently dropped the scenarios it did not know would report agreement on a
-    subset as agreement.
+    subset as agreement. And refuses an empty wire, for the same reason: zero
+    episodes replayed is zero mismatches, and "nothing disagreed" is not
+    "reproducible".
     """
+    if not rows:
+        raise ValueError("the wire holds no rows: there is nothing to replay")
     by_id = {s.scenario_id: s for s in scenarios}
     missing = sorted({r["scenario_id"] for r in rows} - set(by_id))
     if missing:

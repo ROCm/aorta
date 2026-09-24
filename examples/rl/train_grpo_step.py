@@ -178,12 +178,15 @@ class FiniteLogits:
 
     ⚠ **Runs LAST**, because ``generate`` appends custom processors after the
     built-in ones, so ``-inf`` entries are the *expected* output of top-p
-    filtering and must not be treated as damage. Only NaN is, plus a row with
-    no finite entry at all -- which ``multinomial`` rejects just as hard, and
-    which top-p cannot produce on its own.
+    filtering and must not be treated as damage. NaN and ``+inf`` are: softmax
+    over a row holding ``+inf`` is ``inf / inf`` = NaN, so a ``+inf`` beside
+    finite logits crashes ``multinomial`` exactly as a NaN does. So is a row
+    with no finite entry at all, which top-p cannot produce on its own.
 
-    The repair is the least inventive one available. A NaN becomes ``-inf``, a
-    token that will not be drawn. A row with nothing finite left is ended at
+    The repair is the least inventive one available. A NaN or ``+inf`` becomes
+    ``-inf``, a token that will not be drawn. ``+inf`` is not read as "certain":
+    a logit that overflowed is damage, and promoting it to probability 1 would
+    make the guard choose the token. A row with nothing finite left is ended at
     EOS rather than sampled from a flattened distribution, because flattening
     makes the guard choose the token and the policy is supposed to.
 
@@ -200,7 +203,7 @@ class FiniteLogits:
         self.dead_rows = 0
 
     def __call__(self, input_ids: Any, scores: Any) -> Any:
-        nan = torch.isnan(scores)
+        nan = torch.isnan(scores) | (scores == float("inf"))
         if bool(nan.any()):
             self.nan_steps += 1
             self.nan_rows += int(nan.any(dim=-1).sum())
@@ -304,11 +307,14 @@ def sample_loss(
     ``-(A / total) * sum(log pi(completion))`` plus, with a reference,
     ``(kl_beta / total) * sum(k3)``. ``total`` is the number of samples, so an
     episode of depth *d* contributes *d* terms under one advantage and the loss
-    scale does not jump when episodes get longer. A zero advantage or an empty
-    completion contributes nothing and is skipped rather than back-propagated
-    as a zero.
+    scale does not jump when episodes get longer. An empty completion
+    contributes nothing. A zero advantage -- every sample of a group whose
+    rewards are all equal -- contributes nothing *only when there is no KL
+    term*: the KL penalty does not depend on the advantage, and skipping it
+    would leave exactly the flat groups with no anchor to the reference.
     """
-    if sample.advantage == 0.0:
+    with_kl = reference is not None and kl_beta > 0.0
+    if sample.advantage == 0.0 and not with_kl:
         return None
     prompt_ids = tok(chat_prompt(tok, sample.prompt), return_tensors="pt")["input_ids"]
     comp_ids = tok(sample.completion, return_tensors="pt", add_special_tokens=False)["input_ids"]
@@ -322,7 +328,7 @@ def sample_loss(
     loss = -(sample.advantage / total) * comp_lp.sum()
     stats = {"nll": float(-comp_lp.sum().item()), "kl_sum": 0.0, "kl_tokens": 0.0,
              "pg_abs": float(abs((sample.advantage / total) * comp_lp.sum().item()))}
-    if reference is not None and kl_beta > 0.0:
+    if with_kl:
         ref_device = reference_device or device
         with torch.no_grad():
             ref_logits = reference(input_ids=ids.to(ref_device)).logits[:, :-1, :].float()

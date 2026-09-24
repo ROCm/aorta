@@ -104,6 +104,16 @@ def test_a_nan_becomes_a_token_that_is_never_drawn():
     assert (guard.nan_steps, guard.nan_rows, guard.dead_rows) == (1, 1, 0)
 
 
+def test_positive_infinity_is_damage_too():
+    """softmax over a row holding +inf is inf/inf = NaN, so +inf beside finite
+    logits crashes multinomial exactly as a NaN does."""
+    guard = trainer.FiniteLogits(eos_token_id=0)
+    out = guard(None, torch.tensor([[float("inf"), 0.0, 1.0]]))
+    assert out[0].tolist() == [float("-inf"), 0.0, 1.0]
+    assert bool(torch.isfinite(torch.softmax(out, dim=-1)).all())
+    assert guard.nan_steps == 1
+
+
 def test_top_p_minus_infinity_is_expected_and_left_alone():
     """Narrowness: the guard runs after top-p, whose -inf entries are output."""
     guard = trainer.FiniteLogits(eos_token_id=0)
@@ -132,6 +142,18 @@ def test_a_zero_advantage_or_empty_completion_contributes_nothing():
     model, tok = TinyLM(), CharTokenizer()
     assert trainer.sample_loss(model, tok, sample(0.0), 4, device="cpu") is None
     assert trainer.sample_loss(model, tok, sample(1.0, ""), 4, device="cpu") is None
+
+
+def test_a_zero_advantage_still_carries_the_kl_term():
+    """KL does not depend on the advantage: a flat group must still be anchored
+    to the reference, and its loss is the KL term alone."""
+    tok = CharTokenizer()
+    result = trainer.sample_loss(TinyLM(3), tok, sample(0.0), 2, device="cpu",
+                                 reference=TinyLM(4), kl_beta=0.5)
+    assert result is not None
+    loss, stats = result
+    assert stats["kl_sum"] > 0 and stats["pg_abs"] == 0.0
+    assert float(loss) == pytest.approx(0.5 / 2 * stats["kl_sum"], rel=1e-5)
 
 
 def test_the_gradient_raises_the_completion_likelihood_for_a_positive_advantage():
