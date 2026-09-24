@@ -10,8 +10,10 @@ so the retrieval quality is BGE's rather than MiniLM's and the hazard is gone by
 construction rather than by warning.
 
 One thing the swap does *not* preserve is bit-identical vectors. fastembed
-sources this model from ``qdrant/bge-small-en-v1.5-onnx-q``, which is quantised
-(67 MB against the 130 MB fp32 weights). Same architecture, same 384 dimensions,
+sources this model from a re-host of its own --
+``Qdrant/bge-small-en-v1.5-onnx-Q`` from fastembed 0.8.1,
+``qdrant/bge-small-en-v1.5-onnx-q`` before it -- which is quantised (67 MB
+against the 130 MB fp32 weights). Same architecture, same 384 dimensions,
 near-identical rankings -- but not the same numbers, which is precisely why
 :func:`FastembedBgeProvider.collection_name` encodes the provider *and* the
 model. A dimension check alone would let a torch-built index load here and
@@ -66,7 +68,8 @@ PRE_SEED_PROCEDURE = (
     "reachable, so they cannot be downloaded.\n"
     "\n"
     "To pre-seed the cache from a machine that does have egress:\n"
-    "  1. On the connected machine, with the same aorta version installed:\n"
+    "  1. On the connected machine, with the same aorta *and* fastembed versions\n"
+    "     installed (aorta can also reuse a complete legacy snapshot directly):\n"
     "       export HF_HOME=/tmp/aorta-model-cache\n"
     "       aorta chat doctor            # downloads nothing\n"
     "       python -c 'from fastembed import TextEmbedding; "
@@ -211,12 +214,14 @@ def model_is_cached(
     ``hub`` subdirectory is checked too, so a cache seeded by plain
     ``huggingface_hub`` into ``$HF_HOME/hub`` is recognised.
 
-    Compare repository slugs case-insensitively. FastEmbed 0.8.1 changed the
-    registered source from ``qdrant/...-onnx-q`` to ``Qdrant/...-onnx-Q``.
-    HuggingFace preserves that spelling in the cache directory, but upgrading
-    must not make the existing lowercase cache invisible on a case-sensitive
-    filesystem. The answer is the loadable snapshot path used by
-    :func:`_text_embedding`, not a looser second interpretation of the cache.
+    FastEmbed 0.8.1 changed the registered source from
+    ``qdrant/...-onnx-q`` to ``Qdrant/...-onnx-Q``. Repository slugs are
+    matched case-insensitively because :func:`_text_embedding` passes the
+    resolved snapshot directly as ``specific_model_path``; unlike
+    ``snapshot_download``, loading that path does not depend on which release
+    named its parent directory. The answer is therefore the same complete,
+    loadable snapshot that construction uses, not a looser second
+    interpretation of the cache.
     """
     model = model or settings.embedding_model
     return _cached_model_path(model, cache_dir) is not None
@@ -226,8 +231,10 @@ def _source_repo(model: str) -> str:
     """The HuggingFace repo fastembed actually downloads ``model`` from.
 
     fastembed re-hosts ONNX conversions under its own org, so
-    ``BAAI/bge-small-en-v1.5`` is fetched from its Qdrant-hosted ONNX repository
-    and that is the name the cache directory carries.
+    ``BAAI/bge-small-en-v1.5`` is fetched from ``Qdrant/bge-small-en-v1.5-onnx-Q``
+    (``qdrant/bge-small-en-v1.5-onnx-q`` before fastembed 0.8.1) and that is
+    the name the cache directory carries. Read from the installed registry
+    rather than written down here, because the spelling moves between releases.
 
     Falls back to the model id whenever the registry cannot be read at all --
     fastembed absent, a partial install, or the *private*

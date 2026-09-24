@@ -14,15 +14,12 @@ arrive with it:
    the same model family, so an index it built would pass ``SqliteVecStore``'s
    dimension check and then answer from vectors that were never comparable.
 
-The one offline-cache integration test loads a tiny local ONNX fixture through
-real FastEmbed 0.8.1. Everything else stubs model construction or asks only for
-names, and no test reaches the network.
+Nothing here loads a model or touches the network: ``fastembed.TextEmbedding``
+is constructed lazily and every test either stubs it or asks only for names.
 """
 
 from __future__ import annotations
 
-import base64
-import json
 import sys
 import types
 from pathlib import Path
@@ -40,51 +37,6 @@ from aorta.chat.rag.embeddings.fastembed_bge import (
     FastembedBgeProvider,
     ModelUnavailableError,
 )
-
-_TINY_ONNX = (
-    "CAg60QIKJwoJaW5wdXRfaWRzEglpZHNfZmxvYXQiBENhc3QqCQoCdG8YAaABAgomCglp"
-    "ZHNfZmxvYXQKBGF4ZXMSCGV4cGFuZGVkIglVbnNxdWVlemUKLAoIZXhwYW5kZWQKB3Jl"
-    "cGVhdHMSEWxhc3RfaGlkZGVuX3N0YXRlIgRUaWxlEhxhb3J0YS1mYXN0ZW1iZWQtb2Zm"
-    "bGluZS10ZXN0Kg0IARAHOgECQgRheGVzKhMIAxAHOgQBAYADQgdyZXBlYXRzWigKCWlu"
-    "cHV0X2lkcxIbChkIBxIVCgcSBWJhdGNoCgoSCHNlcXVlbmNlWi0KDmF0dGVudGlvbl9t"
-    "YXNrEhsKGQgHEhUKBxIFYmF0Y2gKChIIc2VxdWVuY2ViNQoRbGFzdF9oaWRkZW5fc3Rh"
-    "dGUSIAoeCAESGgoHEgViYXRjaAoKEghzZXF1ZW5jZQoDCIADQgQKABAN"
-)
-
-
-def _write_offline_snapshot(cache_root: Path, repository: str) -> Path:
-    """A tiny but real FastEmbed snapshot under a HuggingFace cache repo."""
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import Whitespace
-
-    snapshot = cache_root / repository / "snapshots" / "legacy-revision"
-    snapshot.mkdir(parents=True)
-    (cache_root / repository / "refs").mkdir()
-    (cache_root / repository / "refs" / "main").write_text(
-        "legacy-revision\n",
-        encoding="utf-8",
-    )
-    (snapshot / "model_optimized.onnx").write_bytes(base64.b64decode(_TINY_ONNX))
-    tokenizer = Tokenizer(
-        WordLevel(
-            {"[PAD]": 0, "[UNK]": 1, "hello": 2},
-            unk_token="[UNK]",
-        )
-    )
-    tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.save(str(snapshot / "tokenizer.json"))
-    (snapshot / "tokenizer_config.json").write_text(
-        json.dumps(
-            {
-                "model_max_length": 32,
-                "pad_token": "[PAD]",
-                "unk_token": "[UNK]",
-            }
-        ),
-        encoding="utf-8",
-    )
-    return snapshot
 
 
 class _FakeModel:
@@ -280,68 +232,157 @@ class TestSourceRepoLookupIsFailSoft:
         assert fastembed_bge._source_repo(DEFAULT_MODEL) == "qdrant/bge-small-en-v1.5-onnx-q"
 
 
+#: Per fastembed release: the source repo its registry names for
+#: ``DEFAULT_MODEL``, and the directory a download of it leaves in the cache.
+#: Both columns were measured by downloading through each release, not derived
+#: from the probe. 0.8.1 respelled the source and the tree under it is
+#: otherwise identical, yet offline neither release loads the other's cache.
+LAYOUTS = {
+    "0.8.0": ("qdrant/bge-small-en-v1.5-onnx-q", "models--qdrant--bge-small-en-v1.5-onnx-q"),
+    "0.8.1": ("Qdrant/bge-small-en-v1.5-onnx-Q", "models--Qdrant--bge-small-en-v1.5-onnx-Q"),
+}
+
+
+def _install_registry(monkeypatch, source_repo: str) -> None:
+    """A fake ``fastembed`` whose registry sources ``DEFAULT_MODEL`` from ``source_repo``.
+
+    So each release's layout is exercised whichever fastembed is installed, or
+    none.
+    """
+
+    class TextEmbedding:
+        @staticmethod
+        def _list_supported_models():
+            return [
+                types.SimpleNamespace(
+                    model=DEFAULT_MODEL,
+                    sources=types.SimpleNamespace(hf=source_repo),
+                    model_file="model_optimized.onnx",
+                    additional_files=[],
+                )
+            ]
+
+    module = types.ModuleType("fastembed")
+    module.TextEmbedding = TextEmbedding
+    monkeypatch.setitem(sys.modules, "fastembed", module)
+
+
+def _seed_weights(directory: Path) -> Path:
+    """Put a complete model snapshot where a finished download leaves it."""
+    snapshot = directory / "snapshots" / "abc"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    (snapshot / "model_optimized.onnx").write_bytes(b"\x00")
+    for name in (
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ):
+        (snapshot / name).write_text("{}", encoding="utf-8")
+    return snapshot
+
+
 class TestModelCacheProbe:
     def test_an_empty_cache_reports_absent(self, monkeypatch, tmp_path: Path):
         monkeypatch.setenv("HF_HOME", str(tmp_path))
         assert not fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
-    def test_weights_under_the_source_repo_name_count(self, monkeypatch, tmp_path: Path):
+    @pytest.mark.parametrize("release", sorted(LAYOUTS))
+    def test_weights_under_the_source_repo_name_count(
+        self, monkeypatch, tmp_path: Path, release: str
+    ):
         """fastembed downloads from its own re-host, not from the model id.
 
-        ``BAAI/bge-small-en-v1.5`` arrives from
-        ``qdrant/bge-small-en-v1.5-onnx-q``, so that is the directory name the
-        cache actually carries.
+        ``BAAI/bge-small-en-v1.5`` arrives from ``Qdrant/bge-small-en-v1.5-onnx-Q``
+        (``qdrant/bge-small-en-v1.5-onnx-q`` before 0.8.1), so that is the
+        directory name the cache actually carries.
         """
+        source, directory = LAYOUTS[release]
+        _install_registry(monkeypatch, source)
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        _write_offline_snapshot(
-            tmp_path,
-            "models--qdrant--bge-small-en-v1.5-onnx-q",
-        )
+        _seed_weights(tmp_path / directory)
         assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
-    def test_fastembed_081_source_repo_casing_counts(self, monkeypatch, tmp_path: Path):
-        """0.8.1 capitalised the source repo without renaming existing caches."""
-        monkeypatch.setenv("HF_HOME", str(tmp_path))
-        _write_offline_snapshot(
-            tmp_path,
-            "models--Qdrant--bge-small-en-v1.5-onnx-Q",
-        )
-        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
-
-    def test_a_hub_seeded_cache_is_recognised_too(self, monkeypatch, tmp_path: Path):
+    @pytest.mark.parametrize("release", sorted(LAYOUTS))
+    def test_a_hub_seeded_cache_is_recognised_too(self, monkeypatch, tmp_path: Path, release: str):
         """Plain huggingface_hub writes under $HF_HOME/hub, not beside it."""
+        source, directory = LAYOUTS[release]
+        _install_registry(monkeypatch, source)
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        _write_offline_snapshot(
-            tmp_path / "hub",
-            "models--qdrant--bge-small-en-v1.5-onnx-q",
-        )
+        _seed_weights(tmp_path / "hub" / directory)
         assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
-    def test_fastembed_081_loads_a_legacy_lowercase_cache_offline(
-        self, monkeypatch, tmp_path: Path
+    @pytest.mark.parametrize("under_hub", [False, True], ids=["root", "hub"])
+    @pytest.mark.parametrize("release", sorted(LAYOUTS))
+    def test_another_releases_spelling_resolves_to_its_snapshot(
+        self, monkeypatch, tmp_path: Path, release: str, under_hub: bool
     ):
-        """Detection and construction must resolve the same legacy snapshot."""
-        pytest.importorskip("fastembed", reason="the integration needs the chat-cli extra")
-        from fastembed.common import model_management
-
+        """AORTA resolves the snapshot before FastEmbed sees its parent spelling."""
+        source, directory = LAYOUTS[release]
+        (other,) = {name for _, name in LAYOUTS.values()} - {directory}
+        _install_registry(monkeypatch, source)
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-        assert fastembed_bge._source_repo(DEFAULT_MODEL) == "Qdrant/bge-small-en-v1.5-onnx-Q"
-        snapshot = _write_offline_snapshot(
-            tmp_path,
-            "models--qdrant--bge-small-en-v1.5-onnx-q",
-        )
+        base = tmp_path / "hub" if under_hub else tmp_path
 
-        def network_is_a_failure(*_args, **_kwargs):
-            raise AssertionError("offline legacy loading reached snapshot_download")
+        _seed_weights(base / other)
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
-        monkeypatch.setattr(model_management, "snapshot_download", network_is_a_failure)
+        # This release's own spelling remains loadable as well.
+        _seed_weights(base / directory)
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
-        vector = FastembedBgeEmbeddings().embed_query("hello")
+    @pytest.mark.parametrize("release", sorted(LAYOUTS))
+    def test_another_models_weights_do_not_count(self, monkeypatch, tmp_path: Path, release: str):
+        """A warm cache for a sibling model says nothing about this one."""
+        source, directory = LAYOUTS[release]
+        _install_registry(monkeypatch, source)
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
 
-        assert fastembed_bge._cached_model_path(DEFAULT_MODEL) == snapshot
-        assert len(vector) == 384
-        assert sum(value * value for value in vector) == pytest.approx(1.0)
+        _seed_weights(tmp_path / directory.replace("bge-small", "bge-base"))
+        assert not fastembed_bge.model_is_cached(DEFAULT_MODEL)
+
+        _seed_weights(tmp_path / directory)
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
+
+    @pytest.mark.parametrize("release", sorted(LAYOUTS))
+    def test_a_snapshot_without_onnx_weights_does_not_count(
+        self, monkeypatch, tmp_path: Path, release: str
+    ):
+        """An interrupted download can finish the small files and not the 67 MB weights."""
+        source, directory = LAYOUTS[release]
+        _install_registry(monkeypatch, source)
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        snapshot = tmp_path / directory / "snapshots" / "abc"
+        snapshot.mkdir(parents=True)
+        for name in (
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+        ):
+            (snapshot / name).write_text("{}", encoding="utf-8")
+        assert not fastembed_bge.model_is_cached(DEFAULT_MODEL)
+
+        (snapshot / "model_optimized.onnx").write_bytes(b"\x00")
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
+
+    def test_the_probe_follows_the_installed_fastembed(self, monkeypatch, tmp_path: Path):
+        """Seeded where ``huggingface_hub`` puts the installed registry's source, not the probe.
+
+        The stubbed tests above pin each release's spelling; this pins that the
+        probe tracks whichever fastembed is installed, since the spelling moves
+        between releases and a test hardcoding one breaks on the other.
+        """
+        fastembed = pytest.importorskip("fastembed")
+        file_download = pytest.importorskip("huggingface_hub.file_download")
+        (source,) = [
+            description.sources.hf
+            for description in fastembed.TextEmbedding._list_supported_models()
+            if description.model == DEFAULT_MODEL
+        ]
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        _seed_weights(tmp_path / file_download.repo_folder_name(repo_id=source, repo_type="model"))
+        assert fastembed_bge.model_is_cached(DEFAULT_MODEL)
 
     def test_a_directory_without_weights_does_not_count(self, monkeypatch, tmp_path: Path):
         """A half-finished download must not read as a warm cache."""
@@ -403,11 +444,7 @@ class TestDownloadFailureCarriesThePreSeedProcedure:
 
     def test_a_download_failure_names_hf_home_and_hf_hub_offline(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HF_HOME", str(tmp_path))
-        monkeypatch.setattr(
-            fastembed_bge,
-            "model_is_cached",
-            lambda model=None, **_kwargs: False,
-        )
+        monkeypatch.setattr(fastembed_bge, "model_is_cached", lambda model=None, **_kwargs: False)
 
         import fastembed as fastembed_pkg
 
@@ -440,11 +477,7 @@ class TestDownloadFailureCarriesThePreSeedProcedure:
         wrong -- a corrupt file, an onnxruntime mismatch -- and telling the user
         to pre-seed a cache they already have would bury it.
         """
-        monkeypatch.setattr(
-            fastembed_bge,
-            "model_is_cached",
-            lambda model=None, **_kwargs: True,
-        )
+        monkeypatch.setattr(fastembed_bge, "model_is_cached", lambda model=None, **_kwargs: True)
 
         import fastembed as fastembed_pkg
 

@@ -659,19 +659,20 @@ class TestStructure:
 
 class TestEmbeddingModelCache:
     def _seed(self, tmp_path: Path) -> None:
-        weights = (
-            tmp_path
-            / "hf"
-            / "hub"
-            / "models--qdrant--bge-small-en-v1.5-onnx-q"
-            / "snapshots"
-            / "abc"
-            / "model_optimized.onnx"
-        )
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        directory = fastembed_bge._model_dir_slug(fastembed_bge._source_repo(MODEL))
+        snapshot = tmp_path / "hf" / "hub" / directory / "snapshots" / "abc"
+        weights = snapshot / "model_optimized.onnx"
         weights.parent.mkdir(parents=True)
         weights.write_bytes(b"\x00")
-        (weights.parent / "tokenizer.json").write_text("{}", encoding="utf-8")
-        (weights.parent / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+        for name in (
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+        ):
+            (snapshot / name).write_text("{}", encoding="utf-8")
 
     def test_a_warm_cache_is_ok(self, tmp_path: Path):
         self._seed(tmp_path)
@@ -1319,9 +1320,9 @@ class TestStoreProbeAgreesWithTheReadPath:
         failure = _read_path_answers(index)
         defect = _probe(index)
         if failure:
-            assert (
-                defect
-            ), f"retrieval refuses a {how} store with {failure!r}, and the probe called it healthy"
+            assert defect, (
+                f"retrieval refuses a {how} store with {failure!r}, and the probe called it healthy"
+            )
         else:
             # Not skipped: a new damage state that leaves queries working is a
             # claim about the read path, and it should have to be made out loud
@@ -2184,9 +2185,9 @@ class TestTheProviderRegistryIsNotDuplicated:
             model, native_note = doctor._model_and_native_note(provider)
             assert model, f"{provider} reports no model name"
             assert native_note, f"{provider} reports no native requirement"
-            assert (
-                "tools" in native_note
-            ), f"{provider}'s native requirement does not say what native needs"
+            assert "tools" in native_note, (
+                f"{provider}'s native requirement does not say what native needs"
+            )
 
     def test_doctor_no_longer_keeps_its_own_provider_set(self):
         """Pinned by name, because the fix is the deletion.
@@ -3090,9 +3091,9 @@ class TestEveryCommandTheReportNamesCanRun:
                 if is_offered and path[:1] == ["index"]:
                     offered.add(tuple(path))
         assert offered, "no index commands offered anywhere; the extractor has broken"
-        assert offered <= set(
-            _OUTCOME_ORACLES
-        ), f"no outcome oracle for {offered - set(_OUTCOME_ORACLES)}"
+        assert offered <= set(_OUTCOME_ORACLES), (
+            f"no outcome oracle for {offered - set(_OUTCOME_ORACLES)}"
+        )
 
     def test_the_sweep_would_catch_a_missing_required_option(self):
         """Without this the sweep could pass by never finding a failure to catch.

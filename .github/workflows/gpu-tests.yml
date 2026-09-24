@@ -115,6 +115,23 @@ jobs:
             # backend pin that silently records nothing passes every CPU check.
             'src/aorta/instrumentation/proton/*'
             'scripts/audit_env_knobs.py'
+            # The mitigation registry and the test that audits it against the
+            # installed runtime, for the same reason `env_knobs.py` is listed:
+            # whether a mitigation's variable is read by anything is only
+            # answerable where ROCm is installed, so a registry change that
+            # skips this lane skips the only check of it. Same shape as the
+            # `environment.py` note above -- a test file listed without the
+            # module it guards leaves the module unguarded.
+            'src/aorta/registry/mitigations.py'
+            'tests/registry/test_mitigation_variable_presence.py'
+            # The audit locates its libraries through this resolver, which is
+            # the only thing that knows both the classic `/opt/rocm` layout and
+            # the TheRock site-packages one `Dockerfile.ci-gpu` actually has.
+            # A PR that changes only the resolver changes which directories get
+            # scanned -- scanning the wrong ones reports the registry as unread
+            # -- so without this entry it would skip the sole GPU-backed check
+            # of the audit it just repointed.
+            'src/aorta/instrumentation/rocm_paths.py'
             'tests/hw_queue_eval/*'
             'tests/instrumentation/test_environment.py'
             'tests/instrumentation/test_env_knob_audit.py'
@@ -290,6 +307,15 @@ jobs:
             # written with no apostrophe because this is a single-quoted bash -lc
             # payload that any apostrophe would close early.
             export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$(python -c "import os; from aorta.instrumentation.rocm_paths import resolve_rocm_roots as r; x = r(); print(os.pathsep.join(dict.fromkeys([str(x.core_lib_dir), str(x.lib_dir)])))")"
+            # THIS lane promises a ROCm stack, so a test that cannot find one
+            # must go red rather than skip. Read by
+            # tests/registry/test_mitigation_variable_presence.py, whose whole
+            # job is answerable only where ROCm is installed: without this, a
+            # resolver that stopped finding the wheel layout (a base-image bump
+            # is enough) would turn the audit into a green skip and the gate
+            # would report success having checked nothing. Same failure shape as
+            # a required check that was never added to the ruleset.
+            export AORTA_REQUIRE_ROCM=1
             pytest -m "gpu or rocm" -n 4 --timeout=300 --junitxml=gpu-results.xml
           '
 
