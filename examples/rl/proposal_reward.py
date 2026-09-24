@@ -1039,7 +1039,8 @@ def load_corpus(
     ``sidecar_files`` is the registry view the rows were produced against, and
     a row may carry its own under ``proposal.sidecar_files`` -- a row wins,
     because the row records what that loop actually ran with and the argument
-    is only the caller's best guess for rows that recorded nothing. Scored
+    is only the caller's best guess for rows that recorded nothing. An empty
+    list is a record, not nothing: that loop ran with no sidecars. Scored
     without either, every ``--mitigations-file`` name in the corpus reads as
     hallucinated; see :class:`Proposal`.
     """
@@ -1072,8 +1073,15 @@ def load_corpus(
                 raw=spec["raw"],
                 candidates=candidates,
                 tried=tried,
+                # `is None`, not truthiness. An empty list is a record -- the
+                # loop ran with no sidecars -- and falling back on it scored the
+                # row against definitions that loop never had, so a name only
+                # the caller's sidecar defines passed as registered. Absent or
+                # null is a row that recorded nothing, which is what the
+                # argument is for.
                 sidecar_files=(
-                    tuple(Path(p) for p in recorded) if recorded else sidecar_files
+                    sidecar_files if recorded is None
+                    else tuple(Path(p) for p in recorded)
                 ),
             ),
             row.get("workload_family", "unknown"),

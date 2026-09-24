@@ -73,6 +73,57 @@ def log(msg: str) -> None:
     print(f"[check] {msg}", flush=True)
 
 
+def check_engine_geometry(
+    status: int, body: Any, world_size: int, rank_offset: int
+) -> tuple[str, str] | None:
+    """``(verdict, why)`` if the group cannot form as asked, else ``None``.
+
+    `/get_world_size` was fetched and logged, and nothing checked it. This
+    harness has exactly one peer, so the group holds `world_size` ranks: the
+    peer's one and the engine's workers at `rank_offset + i`. If the engine
+    has any other number of workers, or its block does not leave exactly one
+    rank free, ranks collide or go missing and `/init_weight_transfer_engine`
+    blocks in rendezvous until the 1800-second request timeout -- half an hour
+    to learn what one GET had already said.
+
+    `rank_offset` may be 0 or 1, not only 1: the block of `world_size - 1`
+    workers must leave one rank free at either end, and the post-training
+    document records a deliberate `rank_offset: 0` run with the roles
+    reversed. Which end the peer is at cannot be checked here, because the plan
+    does not carry the peer's rank.
+
+    A non-200 or an unreadable body is refused too, rather than skipped:
+    unchecked, it is the same half-hour wait. A 404 is what an engine that does
+    not serve this vLLM-dialect control plane answers, `main` among them. The
+    body is read as `{"world_size": N}`, vLLM's shape for this route, or a bare
+    integer; the pinned image's handler is in no source this repository can
+    see, so anything else is refused rather than guessed at.
+    """
+    if status != 200:
+        return (
+            "ENGINE_WORLD_SIZE_UNAVAILABLE",
+            f"/get_world_size answered {status}, so the group geometry cannot "
+            "be checked; an engine that does not serve the vLLM-dialect "
+            "control plane answers 404 here.",
+        )
+    workers = body.get("world_size") if isinstance(body, dict) else body
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        return (
+            "ENGINE_WORLD_SIZE_UNAVAILABLE",
+            f"/get_world_size returned {body!r}, not a worker count.",
+        )
+    if workers != world_size - 1 or rank_offset not in (0, 1):
+        return (
+            "ENGINE_GEOMETRY_MISMATCH",
+            f"the engine has {workers} worker(s) at ranks from {rank_offset}, "
+            f"but --world-size {world_size} with one peer needs "
+            f"{world_size - 1} at --rank-offset 0 or 1; the group would not "
+            "form and /init_weight_transfer_engine would block until its "
+            "timeout.",
+        )
+    return None
+
+
 def call(
     base: str, method: str, path: str, body: dict[str, Any] | None = None, timeout: int = TIMEOUT_S
 ) -> tuple[int, Any, float]:
@@ -708,6 +759,12 @@ def main() -> int:
     status, world, _ = call(args.control_url, "GET", "/get_world_size", timeout=30)
     report["engine_get_world_size"] = {"status": status, "body": world}
     log(f"engine reports world size: {world}")
+    refusal = check_engine_geometry(status, world, args.world_size, args.rank_offset)
+    if refusal is not None:
+        report["verdict"], report["why"] = refusal
+        log(refusal[1])
+        flush()
+        return 2
 
     baseline = generate_phase(
         args.engine_url, args.model, args.prompt, args.max_tokens, args.replicates

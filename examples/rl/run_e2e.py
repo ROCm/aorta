@@ -160,6 +160,29 @@ class Recorded:
     usage: dict[str, Any] = field(default_factory=dict)
 
 
+def split_failure(error: str, record: Recorded, captured: bool) -> tuple[str, str]:
+    """``(transport_error, consumer_error)`` for one call, from where it failed.
+
+    Every exception around a call used to be filed as `transport_error`, and
+    `delivered()` excludes any row carrying one. But the recorder appends a
+    record with `error` set and re-raises when the *provider* fails, and a
+    clean record only once a completion has come back -- so an exception with
+    a clean record behind it was raised afterwards, by the consumer reading
+    that completion. An oversized integer in `confidence` is one:
+    `AgentStep.from_dict` raises `OverflowError`, `score_proposal` scores the
+    reply as the malformed output it is, and the row was then dropped from
+    every statistic as an outage -- real bad model output removed from the
+    totals it belongs in.
+
+    So a captured, clean record makes the exception a `consumer_error` and the
+    row delivered; anything else is still a transport failure, including an
+    exception with no record at all, since then nothing arrived to read.
+    """
+    if captured and not record.error:
+        return "", error
+    return error or record.error, ""
+
+
 def sample_seed(base: int, scenario: str, index: int) -> int:
     """A per-sample seed that is distinct but reproducible.
 
@@ -492,7 +515,9 @@ def drive_proposals(
             except Exception as exc:  # noqa: BLE001 - a transport failure is a result
                 error = f"{type(exc).__name__}: {exc}"
 
-            record = recorder.calls[before] if len(recorder.calls) > before else Recorded()
+            captured = len(recorder.calls) > before
+            record = recorder.calls[before] if captured else Recorded()
+            transport_error, consumer_error = split_failure(error, record, captured)
             proposal = Proposal(
                 name=f"{scenario}:sample{index}",
                 raw=record.content,
@@ -511,7 +536,8 @@ def drive_proposals(
                     "raw_chars": len(record.content),
                     "latency_sec": round(record.latency_sec, 2),
                     "usage": record.usage,
-                    "transport_error": error or record.error,
+                    "transport_error": transport_error,
+                    "consumer_error": consumer_error,
                     "tier": score.tier,
                     "reward": round(score.reward, 4),
                     "stopped_at": score.stopped_at,
@@ -646,7 +672,9 @@ def drive_triage(
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
 
-        record = recorder.calls[before] if len(recorder.calls) > before else Recorded()
+        captured = len(recorder.calls) > before
+        record = recorder.calls[before] if captured else Recorded()
+        transport_error, consumer_error = split_failure(error, record, captured)
         answer, parse_error = parse_triage(record.content)
         score = score_answer(answer, label)
         out.append(
@@ -657,7 +685,8 @@ def drive_triage(
                 "reasoning_split_off": bool(record.reasoning),
                 "raw_chars": len(record.content),
                 "latency_sec": round(record.latency_sec, 2),
-                "transport_error": error or record.error,
+                "transport_error": transport_error,
+                "consumer_error": consumer_error,
                 "parse_error": parse_error,
                 "answer": {"verdict": answer.verdict, "detectors": answer.detectors},
                 "label": {
@@ -974,6 +1003,9 @@ def aggregate(
             # transport error: counting it over `proposals` is the tautology
             # zero, which is exactly the number that would hide an outage.
             "transport_errors": sum(1 for p in requested if p["transport_error"]),
+            # Delivered rows whose reading raised. Counted, not excluded: they
+            # are model output, and their scores are in the statistics above.
+            "consumer_errors": sum(1 for p in requested if p.get("consumer_error")),
         },
         "triage": {
             "n": len(triage),
@@ -1002,6 +1034,9 @@ def aggregate(
             "parse_failures": sum(1 for t in triage if t["parse_error"]),
             "transport_errors": sum(
                 1 for t in triage_requested if t["transport_error"]
+            ),
+            "consumer_errors": sum(
+                1 for t in triage_requested if t.get("consumer_error")
             ),
             "per_scenario": {
                 t["scenario_id"]: {

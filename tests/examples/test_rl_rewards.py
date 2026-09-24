@@ -1626,15 +1626,39 @@ def test_a_proposal_row_whose_loop_state_is_not_a_list_of_names_is_refused(
     assert "build_corpus.py" in message, message
 
 
+def test_a_row_that_records_no_sidecars_is_not_given_the_callers(
+    proposal_reward, tmp_path
+):
+    """`[]` fell back to the caller's sidecars because an empty list is falsy.
+
+    That contradicts the rule `load_corpus` documents -- a row wins, because it
+    records what its loop ran with -- and it changes results: a name only the
+    caller's sidecar defines was scored as registered, on contract at tier 5,
+    for a loop that never had it. Now the row's empty record stands, and that
+    name is the hallucination it was in the loop.
+    """
+    fallback = _sidecar(tmp_path)
+    corpus = _proposal_corpus(
+        tmp_path, raw=_SIDECAR_PROPOSAL, sidecar_files=[],
+        candidates=["rl_sidecar_flag", "none"], tried=[],
+    )
+    (proposal, _), = proposal_reward.load_corpus(corpus, (fallback,))
+
+    assert proposal.sidecar_files == ()
+    score = proposal_reward.score_proposal(proposal)
+    assert score.tier4_reason == proposal_reward.TIER4_UNREGISTERED, score.detail
+
+
 def test_a_well_formed_proposal_row_still_loads(proposal_reward, tmp_path):
     """Narrowness: the refusal is about shape, not about being empty or absent.
 
     An empty `tried` is the ordinary first step, and `sidecar_files` is
-    optional -- absent, null or empty all mean the row recorded none, so the
-    caller's argument fills it, exactly as before.
+    optional -- absent or null means the row recorded nothing, so the caller's
+    argument fills it. An empty list is not in this set: it records that the
+    loop ran with no sidecars, which is the next test.
     """
     fallback = _sidecar(tmp_path)
-    for sidecar in (KeyError, None, []):
+    for sidecar in (KeyError, None):
         corpus = _proposal_corpus(tmp_path, tried=[], sidecar_files=sidecar)
         (proposal, _), = proposal_reward.load_corpus(corpus, (fallback,))
         assert proposal.candidates == _LOOP_STATE["candidates"]
@@ -2107,6 +2131,32 @@ def test_the_warn_half_of_that_report_still_cites_its_finding(triage_reward):
     assert label.verdict == "warn"
     assert label.failure_detectors == ["waitcheck:wait_hazard"]
     assert label.cited_detectors == {"waitcheck:wait_hazard"}
+
+
+def test_the_docs_state_the_exit_code_the_greedy_guard_actually_returns():
+    """Both documents said the sampling check *warns*; it fails closed.
+
+    `backends` returns 57 when the engine reports `greedy`, and `up` hands that
+    to `teardown_failed`, which removes the container. An operator reading
+    "warns" expects a usable server after the message. The code is read out of
+    the script's greedy branch rather than written here, so the documents and
+    the script cannot drift apart again without this failing.
+    """
+    script = (_EXAMPLES / "serve_for_rollouts.sh").read_text(encoding="utf-8")
+    branch = re.search(
+        r'if \[ "\$\{reported\}" = "greedy" \].*?return (\d+)', script, re.S
+    )
+    assert branch, "the greedy branch of backends() moved; update this test"
+    code = branch.group(1)
+    routing = (_REPO / "docs/tokenspeed-rl-e2e-sanitizer-routing.md").read_text(
+        encoding="utf-8"
+    )
+    post = (_REPO / "docs/tokenspeed-rl-post-training.md").read_text(encoding="utf-8")
+
+    assert f"`greedy` when\nsomething else was asked for exits **{code}**" in routing
+    assert f"`up`\nexits {code} and removes the container" in post
+    assert "warning if the\nengine reports `greedy`" not in routing
+    assert "warns if the engine still reports greedy" not in post
 
 
 def test_the_post_training_doc_states_the_live_category_count():
@@ -2592,6 +2642,76 @@ def test_a_failed_publish_keeps_publishs_rollback(build_corpus, tmp_path, monkey
     assert {p.name: p.read_bytes() for p in out.iterdir()} == before
 
 
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        pytest.param('{"dataset": "someone else\'s"}\n', id="other-object"),
+        pytest.param('{"schema": "acme.dataset/1"}\n', id="other-schema"),
+        pytest.param('["a", "list"]\n', id="not-an-object"),
+        pytest.param("manifest: yaml\n", id="not-json"),
+    ],
+)
+@pytest.mark.parametrize("build", ["refused", "successful"])
+def test_a_directory_with_a_foreign_manifest_is_refused_not_cleaned(
+    build_corpus, tmp_path, capsys, manifest, build
+):
+    """`manifest.json` existing was taken as proof this script owned `--out`.
+
+    It is one of the commonest names a data directory has. Pointed at one, a
+    refused build deleted every `*.jsonl` and `manifest*.json` in it, and a
+    successful build replaced them -- the second on the success path, where
+    `discard_corpus`'s check never ran. Both are now a usage error before the
+    build, and `discard_corpus` and `publish` refuse for any other caller.
+    """
+    out = tmp_path / "data"
+    out.mkdir()
+    (out / "manifest.json").write_text(manifest, encoding="utf-8")
+    (out / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    results = _SURVEY
+    if build == "refused":
+        results = tmp_path / "empty"
+        results.mkdir()
+
+    with pytest.raises(SystemExit) as excinfo:
+        build_corpus.main([
+            "--results", str(results), "--baselines", str(_VERDICT_BASELINES),
+            "--out", str(out),
+        ])
+    assert excinfo.value.code == 2
+    assert "not an aorta.rl_corpus/* corpus manifest" in capsys.readouterr().err
+
+    assert build_corpus.discard_corpus(out) is False
+    with pytest.raises(build_corpus.ForeignManifestError):
+        build_corpus.publish(out, {"triage.jsonl": "fresh\n"})
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+
+
+@pytest.mark.parametrize("schema", ["aorta.rl_corpus/0.1", "aorta.rl_corpus/0.2"])
+def test_a_corpus_manifest_is_still_recognised_as_ours(build_corpus, tmp_path, schema):
+    """Narrowness: this script's own directories stay replaceable and discardable,
+    including one from a later schema version of the same corpus."""
+    out = tmp_path / "corpus"
+    out.mkdir()
+    (out / "manifest.json").write_text(json.dumps({"schema": schema}), encoding="utf-8")
+    (out / "triage.jsonl").write_text("{}\n", encoding="utf-8")
+
+    assert build_corpus.publish_target(out) == out
+    assert build_corpus.discard_corpus(out) is True
+    assert list(out.iterdir()) == []
+
+
+def _previous(build_corpus, name):
+    """A stand-in for one file of a previous corpus.
+
+    The manifest carries the corpus schema, because that is what makes a
+    directory this script's to replace; the rows can be anything.
+    """
+    if name == "manifest.json":
+        return json.dumps({"schema": build_corpus.CORPUS_SCHEMA, "previous": True}) + "\n"
+    return f"previous {name}\n"
+
+
 def test_a_build_that_dies_mid_write_does_not_publish_half_of_it(
     build_corpus, tmp_path
 ):
@@ -2609,7 +2729,7 @@ def test_a_build_that_dies_mid_write_does_not_publish_half_of_it(
     out = tmp_path / "corpus"
     out.mkdir()
     for name in build_corpus.CORPUS_FILES:
-        (out / name).write_text(f"previous {name}\n", encoding="utf-8")
+        (out / name).write_text(_previous(build_corpus, name), encoding="utf-8")
 
     with pytest.raises(TypeError):
         build_corpus.publish(
@@ -2618,7 +2738,7 @@ def test_a_build_that_dies_mid_write_does_not_publish_half_of_it(
         )
 
     for name in build_corpus.CORPUS_FILES:
-        assert (out / name).read_text(encoding="utf-8") == f"previous {name}\n"
+        assert (out / name).read_text(encoding="utf-8") == _previous(build_corpus, name)
     assert not list(tmp_path.glob(".corpus.*")), "a scratch directory was left behind"
 
 
@@ -2695,7 +2815,7 @@ def test_a_failed_publish_leaves_the_files_it_did_not_write_alone(
     out.mkdir()
     (out / "README.md").write_text("provenance\n", encoding="utf-8")
     for name in build_corpus.CORPUS_FILES:
-        (out / name).write_text(f"previous {name}\n", encoding="utf-8")
+        (out / name).write_text(_previous(build_corpus, name), encoding="utf-8")
 
     with pytest.raises(TypeError):
         build_corpus.publish(
@@ -2705,7 +2825,7 @@ def test_a_failed_publish_leaves_the_files_it_did_not_write_alone(
 
     assert (out / "README.md").read_text(encoding="utf-8") == "provenance\n"
     for name in build_corpus.CORPUS_FILES:
-        assert (out / name).read_text(encoding="utf-8") == f"previous {name}\n"
+        assert (out / name).read_text(encoding="utf-8") == _previous(build_corpus, name)
     assert not list(tmp_path.glob(".corpus.*")), "a scratch directory was left behind"
 
 
@@ -2778,7 +2898,7 @@ def test_a_link_to_a_directory_is_followed_rather_than_replaced(
     real = tmp_path / "real"
     real.mkdir()
     for name in build_corpus.CORPUS_FILES:
-        (real / name).write_text(f"previous {name}\n", encoding="utf-8")
+        (real / name).write_text(_previous(build_corpus, name), encoding="utf-8")
     (real / "README.md").write_text("provenance\n", encoding="utf-8")
     (tmp_path / "corpus").symlink_to("real")
 
@@ -3492,6 +3612,114 @@ def _proposal_rows(raws):
         for scenario, group in raws.items()
         for index, raw in enumerate(group)
     ]
+
+
+_OVERSIZED_CONFIDENCE = (
+    '{"category": "unknown", "hypothesis": "h", "next_mitigations": ["tf32_off"], '
+    '"confidence": 1' + "0" * 400 + ', "stop": false}'
+)
+
+
+class _FakeRecorder:
+    """The surface `drive_proposals` and `drive_triage` read off the recorder."""
+
+    def __init__(self):
+        self.calls = []
+        self.seed = None
+
+
+def _drive_one_proposal(run_e2e, monkeypatch, outcome):
+    """Run `drive_proposals` on one sample whose proposer fails as ``outcome``.
+
+    ``delivered-then-raises`` records the clean completion and then fails in
+    the consumer, the way `AgentStep.from_dict` does on an oversized integer;
+    ``transport`` records the provider error the recorder writes before it
+    re-raises; ``nothing-recorded`` raises before any record exists.
+    """
+    from aorta.agent.llm import AgentStep
+
+    recorder = _FakeRecorder()
+
+    class Proposer:
+        def propose(self, **kwargs):
+            if outcome == "delivered-then-raises":
+                recorder.calls.append(run_e2e.Recorded(content=_OVERSIZED_CONFIDENCE))
+                AgentStep.from_dict(json.loads(_OVERSIZED_CONFIDENCE))
+            elif outcome == "transport":
+                recorder.calls.append(run_e2e.Recorded(error="APIConnectionError: reset"))
+                raise ConnectionError("reset")
+            raise ConnectionError("refused before a request was recorded")
+
+    monkeypatch.setattr(run_e2e, "agent_proposer", lambda model: Proposer())
+    row = {"scenario_id": "s", "workload_family": "f",
+           "label": {"verdict": "warn", "failure_detectors": [], "error_detectors": []},
+           "checks": []}
+    [out] = run_e2e.drive_proposals(
+        [row], model="m", samples=1, recorder=recorder, verbose=False
+    )
+    return out
+
+
+def test_a_consumer_failure_after_delivery_is_model_output_not_an_outage(
+    run_e2e, proposal_reward, monkeypatch
+):
+    """An exception from reading a completion was filed as a transport failure.
+
+    `from_dict` raises `OverflowError` on an oversized `confidence`, after the
+    completion has arrived; `score_proposal` scores that reply as malformed
+    output, and then `delivered()` dropped the row from every statistic because
+    `transport_error` was set -- real bad model output removed as an outage.
+    """
+    row = _drive_one_proposal(run_e2e, monkeypatch, "delivered-then-raises")
+
+    assert row["transport_error"] == ""
+    assert row["consumer_error"].startswith("OverflowError"), row["consumer_error"]
+    assert row["raw"] == _OVERSIZED_CONFIDENCE
+    assert proposal_reward.delivered(row) is True
+
+
+@pytest.mark.parametrize("outcome", ["transport", "nothing-recorded"])
+def test_a_provider_failure_is_still_a_transport_error(
+    run_e2e, proposal_reward, monkeypatch, outcome
+):
+    """Narrowness: an outage is still excluded, with or without a record."""
+    row = _drive_one_proposal(run_e2e, monkeypatch, outcome)
+
+    assert row["transport_error"], row
+    assert row["consumer_error"] == ""
+    assert proposal_reward.delivered(row) is False
+
+
+@pytest.mark.parametrize("delivered_first", [True, False])
+def test_the_triage_drive_splits_failures_the_same_way(
+    run_e2e, triage_reward, monkeypatch, delivered_first
+):
+    """The sibling site: `drive_triage` filed every exception as transport too.
+
+    A fake `litellm` stands in for the real one, which the CPU lane does not
+    install; `drive_triage` imports it inside the function.
+    """
+    import types
+
+    recorder = _FakeRecorder()
+
+    def completion(**kwargs):
+        if delivered_first:
+            recorder.calls.append(run_e2e.Recorded(content='{"verdict": "pass"}'))
+            raise ValueError("raised while reading the reply")
+        recorder.calls.append(run_e2e.Recorded(error="APIConnectionError: reset"))
+        raise ConnectionError("reset")
+
+    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(completion=completion))
+    row = {"scenario_id": "s", "workload_family": "f", "checks": []}
+    labels = {"triage:s": triage_reward.Label(verdict="pass")}
+
+    [out] = run_e2e.drive_triage([row], labels, model="m", recorder=recorder, verbose=False)
+
+    if delivered_first:
+        assert (out["transport_error"], out["consumer_error"][:10]) == ("", "ValueError")
+    else:
+        assert out["transport_error"] and out["consumer_error"] == ""
 
 
 @pytest.mark.parametrize(
@@ -6709,7 +6937,8 @@ def test_the_models_subcommand_still_passes_on_a_healthy_gateway(tmp_path):
 
 
 def _drive_roundtrip(
-    mod, tmp_path, monkeypatch, *, perturb_update=200, marker=True, peer_grace="0.05"
+    mod, tmp_path, monkeypatch, *, perturb_update=200, marker=True, peer_grace="0.05",
+    world=(200, {"world_size": 1}), extra_args=(),
 ):
     """Run ``main`` end to end against a stub control plane.
 
@@ -6746,6 +6975,9 @@ def _drive_roundtrip(
 
     def fake_call(base, method, path, body=None, timeout=mod.TIMEOUT_S):
         posted.append(path)
+        if path == "/get_world_size":
+            # One worker: `--world-size 2` below is that worker plus the peer.
+            return world[0], world[1], 0.01
         if path == "/v1/completions":
             drawn = sum(1 for p in posted if p == "/v1/completions") - 1
             return 200, {"choices": [{"text": texts[min(drawn, len(texts) - 1)]}]}, 0.01
@@ -6770,10 +7002,76 @@ def _drive_roundtrip(
             "--world-size", "2",
             "--peer-grace", peer_grace,
             "--out", str(out),
+            *extra_args,
         ],
     )
     code = mod.main()
     return code, json.loads(out.read_text()), posted
+
+
+@pytest.mark.parametrize(
+    ("world", "extra_args", "verdict"),
+    [
+        pytest.param((200, {"world_size": 2}), (), "ENGINE_GEOMETRY_MISMATCH",
+                     id="two-workers-for-world-2"),
+        pytest.param((200, {"world_size": 1}), ("--rank-offset", "2"),
+                     "ENGINE_GEOMETRY_MISMATCH", id="block-leaves-no-free-end"),
+        pytest.param((404, {"detail": "Not Found"}), (), "ENGINE_WORLD_SIZE_UNAVAILABLE",
+                     id="route-absent"),
+        # The status check's own case: the body alone would pass.
+        pytest.param((503, {"world_size": 1}), (), "ENGINE_WORLD_SIZE_UNAVAILABLE",
+                     id="error-status-with-a-plausible-body"),
+        pytest.param((200, {"ok": True}), (), "ENGINE_WORLD_SIZE_UNAVAILABLE",
+                     id="body-without-a-count"),
+        pytest.param((200, True), (), "ENGINE_WORLD_SIZE_UNAVAILABLE", id="bool-body"),
+    ],
+)
+def test_a_group_that_cannot_form_is_refused_before_the_rendezvous(
+    nccl_roundtrip_check, tmp_path, monkeypatch, world, extra_args, verdict
+):
+    """`/get_world_size` was fetched, logged, and never checked.
+
+    One peer means the engine must bring exactly `world_size - 1` workers and
+    leave one rank free. Anything else and `/init_weight_transfer_engine`
+    blocks in rendezvous until the 1800-second request timeout. Refused right
+    after the GET: no baseline draws and no rendezvous are spent on it.
+    """
+    code, report, posted = _drive_roundtrip(
+        nccl_roundtrip_check, tmp_path, monkeypatch, world=world,
+        extra_args=extra_args,
+    )
+
+    assert code == 2
+    assert report["verdict"] == verdict, report
+    assert report["why"]
+    assert "/init_weight_transfer_engine" not in posted
+    assert "/v1/completions" not in posted
+
+
+@pytest.mark.parametrize(
+    ("world", "rank_offset"),
+    [
+        pytest.param((200, {"world_size": 1}), "1", id="vllm-shape-offset-1"),
+        pytest.param((200, {"world_size": 1}), "0", id="roles-reversed-offset-0"),
+        pytest.param((200, 1), "1", id="bare-integer"),
+    ],
+)
+def test_a_group_that_can_form_still_runs(
+    nccl_roundtrip_check, tmp_path, monkeypatch, world, rank_offset
+):
+    """Narrowness: the one-peer layouts this harness has actually used run on.
+
+    `rank_offset: 0` is the reversed-roles run the post-training document
+    records, so requiring exactly 1 would refuse a layout that was measured.
+    """
+    code, report, posted = _drive_roundtrip(
+        nccl_roundtrip_check, tmp_path, monkeypatch, world=world,
+        extra_args=("--rank-offset", rank_offset),
+    )
+
+    assert "/init_weight_transfer_engine" in posted
+    assert report["verdict"] == "PROVEN", report
+    assert code == 0
 
 
 def test_a_rejected_perturb_update_does_not_post_a_second_collective(

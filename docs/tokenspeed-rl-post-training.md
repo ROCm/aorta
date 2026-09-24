@@ -250,8 +250,10 @@ server. The decisive measurement was `n=8` in a **single** request at
 temperature 1.2 returning eight identical choices — same batch, same cache
 state. The fix is one flag, `--sampling-backend triton`, now the default in
 `examples/rl/serve_for_rollouts.sh`, which additionally reads the value back
-from `/get_server_info` and warns if the engine still reports greedy; distinct
-completions go from 1/8 to 8/8 at every temperature above zero.
+from `/get_server_info` and refuses the engine if it still reports greedy: `up`
+exits 57 and removes the container, so no server is left running for anything
+to sample from. Distinct completions go from 1/8 to 8/8 at every temperature
+above zero.
 
 **The generalisable part, and the reason this is worth attention even for
 someone who never touches RL: the default is conditional on the platform being

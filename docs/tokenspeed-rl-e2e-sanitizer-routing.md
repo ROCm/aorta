@@ -683,10 +683,14 @@ Being NVIDIA-conditional, it would never appear on an NVIDIA CI lane.
 #### The fix, and what it bought
 
 `examples/rl/serve_for_rollouts.sh` now passes `--sampling-backend triton` and
-reads the value back from `/get_server_info` after bring-up, warning if the
-engine reports `greedy` when something else was asked for — the same
-"read it back rather than assume it" the script already applies to the served
-model name. `--sampling-backend` accepts `greedy | triton | triton_full |
+reads the value back from `/get_server_info` after bring-up — the same "read it
+back rather than assume it" the script already applies to the served model
+name. It fails closed rather than warning. An engine reporting `greedy` when
+something else was asked for exits **57**, as does a `/get_server_info` that
+cannot be read or carries no `sampling_backend`; any other mismatch between the
+requested and reported backend exits **60**. On the `up` path either code
+removes the container before exiting, so a mismatch never leaves a server
+running for a caller to use. `--sampling-backend` accepts `greedy | triton | triton_full |
 flashinfer | flashinfer_full`; `flashinfer` is CUDA-only, so `triton` is the
 portable choice on ROCm.
 

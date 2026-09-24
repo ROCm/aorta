@@ -63,6 +63,8 @@ from compare_verdict_baselines import _compare_case  # noqa: E402
 from triage_reward import label_sanitizer_report  # noqa: E402
 
 CORPUS_SCHEMA = "aorta.rl_corpus/0.1"
+#: Every schema version of this corpus, for recognising a directory as ours.
+_CORPUS_SCHEMA_FAMILY = CORPUS_SCHEMA.rsplit("/", 1)[0] + "/"
 
 # Which workload family a case directory belongs to. Recorded on every example
 # even though there are only three families today: the detector and finding
@@ -522,15 +524,49 @@ def _is_generated(name: str) -> bool:
     )
 
 
+class ForeignManifestError(Exception):
+    """``--out`` holds a ``manifest.json`` this script did not write."""
+
+
+def _manifest_owner(out: Path) -> str:
+    """``"none"``, ``"ours"`` or ``"foreign"``, for the manifest in ``out``.
+
+    Ours means a JSON object whose `schema` is this script's corpus schema --
+    the one field every manifest it has written carries, since the first
+    commit of the builder, and that nothing else has reason to. The file merely
+    existing was the old test, and `manifest.json` is one of the commonest
+    names a data directory has: pointed at one, a refused build deleted every
+    `*.jsonl` and `manifest*.json` in it, and a successful build replaced them.
+    An unreadable or non-JSON manifest is foreign too. This script's manifest
+    is published by a rename, so it is never seen half-written, and the
+    direction to err in is the one that deletes nothing.
+
+    The prefix rather than the exact string, so a later schema version still
+    recognises its predecessor's directory as its own.
+    """
+    path = out / "manifest.json"
+    if not path.is_file():
+        return "none"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "foreign"
+    schema = doc.get("schema") if isinstance(doc, dict) else None
+    if isinstance(schema, str) and schema.startswith(_CORPUS_SCHEMA_FAMILY):
+        return "ours"
+    return "foreign"
+
+
+
 def _holds_a_corpus(out: Path) -> bool:
     """Whether ``out`` already holds a corpus this script produced.
 
-    The manifest is the key rather than the directory existing, so `--out`
-    pointed at a directory that is not a corpus is never mistaken for one --
-    and so nothing this script did not write is ever removed by
-    :func:`discard_corpus`.
+    Keyed on the manifest's schema rather than on the directory or the file
+    existing, so `--out` pointed at a directory that is not a corpus is never
+    mistaken for one -- and so nothing this script did not write is ever
+    removed by :func:`discard_corpus`. See :func:`_manifest_owner`.
     """
-    return (out / "manifest.json").is_file()
+    return _manifest_owner(out) == "ours"
 
 
 def discard_corpus(out: Path) -> bool:
@@ -595,14 +631,29 @@ def publish_target(out: Path) -> Path:
     So a link to a directory is followed, which puts the swap where the reads
     already were, and anything else that exists is refused: a file, a link to
     one, a dangling link.
+
+    A directory holding a `manifest.json` this script did not write is refused
+    as well. The swap drops every name :func:`_is_generated` claims, which is
+    every `*.jsonl` and `manifest*.json`, so a successful build into someone
+    else's data directory destroyed exactly the files that made it one --
+    silently, and on the success path, where :func:`discard_corpus`'s own
+    ownership check never runs. Refusing here covers both paths, and as a usage
+    error before anything is built.
     """
     if out.is_symlink() and out.is_dir():
-        return out.resolve()
-    if os.path.lexists(out) and not out.is_dir():
+        out = out.resolve()
+    elif os.path.lexists(out) and not out.is_dir():
         raise NotADirectoryError(
             f"--out {out} exists and is not a directory. A build replaces "
             "--out wholesale, so it would be moved aside to make room for the "
             "corpus; pass a directory, or a path that does not exist yet."
+        )
+    if _manifest_owner(out) == "foreign":
+        raise ForeignManifestError(
+            f"--out {out} holds a manifest.json that is not an "
+            f"{_CORPUS_SCHEMA_FAMILY}* corpus manifest. A build replaces every "
+            "*.jsonl and manifest*.json in --out, so it would destroy that "
+            "directory's own files; pass an empty or corpus directory."
         )
     return out
 
@@ -760,7 +811,7 @@ def main(argv: list[str] | None = None) -> int:
     # error before the build rather than a traceback after it.
     try:
         publish_target(args.out)
-    except NotADirectoryError as exc:
+    except (NotADirectoryError, ForeignManifestError) as exc:
         parser.error(str(exc))
     try:
         run_meta = load_run_meta(args.run_meta)
