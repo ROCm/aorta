@@ -8,6 +8,7 @@ device. Skipped where torch is absent; CI's CPU lane installs a CPU wheel.
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -171,6 +172,58 @@ def test_the_gradient_raises_the_completion_likelihood_for_a_positive_advantage(
         assert (after - before) * advantage > 0, advantage
 
 
+def test_the_sampled_ids_run_through_the_first_stop_token_and_no_further():
+    assert trainer.sampled_ids([5, 6, 0, 0, 0], {0}) == [5, 6, 0], "padding is not output"
+    assert trainer.sampled_ids([5, 6, 7], {0}) == [5, 6, 7], "hit the length cap"
+    assert trainer.sampled_ids([5, 9, 6, 0], {0, 9}) == [5, 9], "either stop token ends it"
+
+
+def test_the_stop_set_includes_every_configured_eos():
+    class Config:
+        eos_token_id = [11, 12]
+
+    class Model:
+        generation_config = Config()
+
+    assert trainer._stop_ids(Model(), CharTokenizer()) == {0, 11, 12}
+
+
+def test_a_completion_is_its_text_and_carries_its_ids():
+    reply = trainer.Completion('{"x": 1}', [3, 4])
+    assert reply == '{"x": 1}' and isinstance(reply, str)
+    assert reply.token_ids == (3, 4)
+    assert json.loads(json.dumps({"raw": reply}))["raw"] == '{"x": 1}'
+
+
+def test_the_loss_is_taken_over_the_sampled_ids_not_a_re_tokenisation():
+    """Decode-then-encode need not return the sampled IDs; the gradient has to
+    be over what was drawn."""
+    model, tok = TinyLM(seed=5), CharTokenizer()
+    text = '{"x": 1}'
+    retokenised = trainer.sample_loss(model, tok, sample(1.0, text), 1, device="cpu")[1]
+    drawn = [7, 8, 9]
+    sampled = Sample(scenario_id="s", prompt="p", completion=trainer.Completion(text, drawn),
+                     advantage=1.0)
+    _, stats = trainer.sample_loss(model, tok, sampled, 1, device="cpu")
+    prompt_ids = tok(trainer.chat_prompt(tok, "p"))["input_ids"]
+    ids = torch.cat([prompt_ids, torch.tensor([drawn])], dim=1)
+    logp = torch.log_softmax(model(ids).logits[:, :-1, :], dim=-1)
+    want = -logp.gather(2, ids[:, 1:].unsqueeze(-1)).squeeze(-1)[:, prompt_ids.shape[1] - 1:].sum()
+    assert stats["nll"] == pytest.approx(float(want), rel=1e-5)
+    assert stats["nll"] != pytest.approx(retokenised["nll"])
+
+
+def test_the_environment_hands_the_completion_object_through_to_the_sample(tmp_path):
+    scenario = make_scenario(build_archive(tmp_path, resolver=MENU[1]))
+    _group, samples, wire = episode_env.rollout_scenario(
+        scenario, 2, AgentPolicy(max_iterations=8),
+        lambda users: [trainer.Completion(reply([MENU[1]]), [1, 2])] * len(users),
+        advantage_fn=trainer.advantages,
+    )
+    assert samples and all(s.completion.token_ids == (1, 2) for s in samples)
+    assert json.dumps(wire)
+
+
 def test_the_loss_scales_with_one_over_the_sample_count():
     model, tok = TinyLM(), CharTokenizer()
     one, _ = trainer.sample_loss(model, tok, sample(1.0), 1, device="cpu")
@@ -306,6 +359,27 @@ def test_a_configuration_that_cannot_produce_a_checked_update_is_refused(
     assert code == trainer.EXIT_REFUSED
     assert fragment in capsys.readouterr().err
     assert not (tmp_path / "run").exists(), "refused before touching disk"
+
+
+@pytest.mark.parametrize("artifact", trainer.RUN_ARTIFACTS)
+def test_an_out_dir_holding_another_runs_artifact_is_refused(tmp_path, artifact):
+    (tmp_path / artifact).mkdir()
+    assert artifact in trainer.check_output_dir(tmp_path)
+
+
+def test_an_empty_or_unrelated_out_dir_is_accepted(tmp_path):
+    assert trainer.check_output_dir(tmp_path / "new") is None
+    (tmp_path / "notes.txt").write_text("x")
+    assert trainer.check_output_dir(tmp_path) is None
+
+
+def test_a_fresh_run_into_a_used_out_is_refused_before_it_touches_anything(tmp_path, capsys):
+    out = tmp_path / "run"
+    out.mkdir()
+    (out / "wire.jsonl").write_text('{"iteration": 1}\n')
+    assert trainer.main(["--out", str(out)]) == trainer.EXIT_REFUSED
+    assert "already holds ['wire.jsonl']" in capsys.readouterr().err
+    assert (out / "wire.jsonl").read_text() == '{"iteration": 1}\n'
 
 
 def test_the_shipped_defaults_are_a_valid_configuration():

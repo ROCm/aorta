@@ -94,7 +94,8 @@ Chaining
 ========
 ``--init-from`` starts from a checkpoint instead of the base model and does not
 rewrite ``checkpoint-pre``; ``--iteration-offset`` numbers the iterations so a
-chained run's ``wire.jsonl`` concatenates into one series. ⚠ The Adam moments
+chained run's ``wire.jsonl`` concatenates into one series. Each link writes to
+its own ``--out``: a directory already holding a run's artifacts is refused. ⚠ The Adam moments
 are **not** carried across a chain -- they are two more copies of the model and
 are not written to disk -- so each link restarts with a first step of exactly
 ``lr`` per element. That is a real discontinuity and belongs beside any chained
@@ -217,15 +218,62 @@ class FiniteLogits:
         return scores
 
 
-def generate(model: Any, tok: Any, prompts: list[str], args: Any) -> list[str]:
+class Completion(str):
+    """A decoded reply that still carries the token IDs that were sampled.
+
+    The policy gradient has to be taken over the action that was drawn, and
+    the action is the token sequence, not its text: decode followed by encode
+    is not guaranteed to give the same IDs back (a non-canonical segmentation
+    re-encodes canonically, and a skipped special token disappears), so
+    re-tokenising the text can apply the gradient to a sequence the policy did
+    not sample. A ``str`` subclass rather than a new field, because the
+    environment passes the reply through unchanged -- the same object reaches
+    ``Sample.completion`` -- so the IDs travel with the text without the
+    torch-free environment learning about tokens. ``sample_loss`` uses them
+    when present and re-tokenises only a plain ``str``.
+    """
+
+    token_ids: tuple[int, ...]
+
+    def __new__(cls, text: str, token_ids: Any) -> Completion:
+        obj = super().__new__(cls, text)
+        obj.token_ids = tuple(int(t) for t in token_ids)
+        return obj
+
+
+def sampled_ids(generated: list[int], stop_ids: set[int]) -> list[int]:
+    """The IDs a sequence actually sampled: through its first stop token.
+
+    ``generate`` pads a finished sequence out to the batch's longest, so
+    everything after the first stop token is padding, not policy output. The
+    stop token itself is kept: ending the reply is a decision the policy made
+    and it is part of the action. A sequence with no stop token hit the length
+    cap and every token in it was sampled.
+    """
+    for index, token in enumerate(generated):
+        if token in stop_ids:
+            return generated[: index + 1]
+    return list(generated)
+
+
+def _stop_ids(model: Any, tok: Any) -> set[int]:
+    configured = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    stops = set(configured) if isinstance(configured, (list, tuple)) else {configured}
+    stops.add(tok.eos_token_id)
+    return {int(t) for t in stops if t is not None}
+
+
+def generate(model: Any, tok: Any, prompts: list[str], args: Any) -> list[Completion]:
     """Sample one completion per prompt, in left-padded batches of ``gen_batch``.
 
     Batching across *different* prompts is what makes episodes affordable, and
     left padding is what makes slicing the generated half at the padded prompt
-    width correct for a ragged batch.
+    width correct for a ragged batch. Each reply is a :class:`Completion`, so
+    the loss is taken over the sampled IDs rather than a re-tokenisation.
     """
     guard = FiniteLogits(tok.eos_token_id)
-    out_texts: list[str] = []
+    stops = _stop_ids(model, tok)
+    out_texts: list[Completion] = []
     for start in range(0, len(prompts), args.gen_batch):
         chunk = prompts[start : start + args.gen_batch]
         enc = tok(chunk, return_tensors="pt", padding=True).to(args.device)
@@ -241,7 +289,8 @@ def generate(model: Any, tok: Any, prompts: list[str], args: Any) -> list[str]:
             )
         width = enc["input_ids"].shape[1]
         for seq in out:
-            out_texts.append(tok.decode(seq[width:], skip_special_tokens=True))
+            ids = sampled_ids(seq[width:].tolist(), stops)
+            out_texts.append(Completion(tok.decode(ids, skip_special_tokens=True), ids))
     if guard.nan_steps or guard.dead_rows:
         # Printed, never swallowed: a repaired row is partly the guard's text
         # rather than the policy's, so the count travels with any number
@@ -307,7 +356,9 @@ def sample_loss(
     ``-(A / total) * sum(log pi(completion))`` plus, with a reference,
     ``(kl_beta / total) * sum(k3)``. ``total`` is the number of samples, so an
     episode of depth *d* contributes *d* terms under one advantage and the loss
-    scale does not jump when episodes get longer. An empty completion
+    scale does not jump when episodes get longer. The completion is scored as
+    the IDs that were sampled when it is a :class:`Completion`, and re-tokenised
+    only when it is plain text. An empty completion
     contributes nothing. A zero advantage -- every sample of a group whose
     rewards are all equal -- contributes nothing *only when there is no KL
     term*: the KL penalty does not depend on the advantage, and skipping it
@@ -317,7 +368,12 @@ def sample_loss(
     if sample.advantage == 0.0 and not with_kl:
         return None
     prompt_ids = tok(chat_prompt(tok, sample.prompt), return_tensors="pt")["input_ids"]
-    comp_ids = tok(sample.completion, return_tensors="pt", add_special_tokens=False)["input_ids"]
+    sampled = getattr(sample.completion, "token_ids", None)
+    if sampled is not None:
+        comp_ids = torch.tensor([list(sampled)], dtype=prompt_ids.dtype)
+    else:
+        comp_ids = tok(sample.completion, return_tensors="pt",
+                       add_special_tokens=False)["input_ids"]
     if comp_ids.shape[1] == 0:
         return None
     ids = torch.cat([prompt_ids, comp_ids], dim=1).to(device)
@@ -392,6 +448,34 @@ def update_checks(
             "advisory": True,
         },
     }
+
+
+#: What a run writes into ``--out``. Any of them already there means the
+#: directory belongs to another run.
+RUN_ARTIFACTS = ("wire.jsonl", "train-log.json", "checkpoint-pre", "checkpoint-last",
+                 "checkpoint-best", "episodes")
+
+
+def check_output_dir(out: Path) -> str | None:
+    """A refusal message if ``--out`` already holds another run's artifacts.
+
+    ``wire.jsonl`` is appended to row by row and ``train-log.json`` rewritten,
+    so reusing a directory would merge two runs' rows under duplicate
+    (iteration, scenario, episode) keys -- which every reader of the wire then
+    groups together -- while the log and the checkpoints describe only the
+    second run. A chained link therefore gets its **own** ``--out``;
+    ``--iteration-offset`` is what makes the wires of successive links
+    concatenate into one series, so there is no legitimate append into an
+    existing directory to allow. An empty directory, or one holding other
+    files, is fine.
+    """
+    present = sorted(name for name in RUN_ARTIFACTS if (out / name).exists())
+    if present:
+        return (
+            f"{out} already holds {present} from another run; give this run its own "
+            "--out (a chained link too -- --iteration-offset lines the wires up)"
+        )
+    return None
 
 
 def validate_args(args: argparse.Namespace) -> str | None:
@@ -472,7 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear training loop
     args = build_parser().parse_args(argv)
-    refusal = validate_args(args)
+    refusal = validate_args(args) or check_output_dir(args.out)
     if refusal:
         print(f"[refused] {refusal}", file=sys.stderr)
         return EXIT_REFUSED
@@ -582,7 +666,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
     }
     best = {"reward_mean": float("-inf"), "iteration": None}
     status = 0
-    wire = (args.out / "wire.jsonl").open("a", encoding="utf-8")
+    # "x": exclusive create. check_output_dir has already refused a directory
+    # holding a wire, and this makes a race with another run fail rather than
+    # interleave.
+    wire = (args.out / "wire.jsonl").open("x", encoding="utf-8")
 
     def write_log() -> None:
         log["elapsed_sec"] = round(time.time() - started, 1)

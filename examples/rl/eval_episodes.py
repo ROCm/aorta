@@ -157,6 +157,22 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
                 "fixed, or the difference it reports is not the weights."
             )
 
+    # The ground truth has to be the same too, or "the difference is the
+    # weights" is false. A column records a digest per scenario; two that
+    # carry different digests were scored against different answer keys.
+    # Two columns that both predate the field cannot be checked, and the
+    # result says so rather than claiming a pairing it did not verify.
+    corpus_a, corpus_b = before["config"].get("corpus"), after["config"].get("corpus")
+    if (corpus_a is not None or corpus_b is not None) and corpus_a != corpus_b:
+        differing = sorted(
+            sid for sid in set(corpus_a or {}) | set(corpus_b or {})
+            if (corpus_a or {}).get(sid) != (corpus_b or {}).get(sid)
+        )
+        raise ValueError(
+            f"the two columns were scored against different archives for {differing}: "
+            "a paired comparison needs the same ground truth on both sides"
+        )
+
     rows = []
     pooled = [0, 0, 0, 0]
     for scenario in sorted(a):
@@ -177,6 +193,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     return {
         "before": before["config"]["init_from"],
         "after": after["config"]["init_from"],
+        "corpus_verified": corpus_a is not None,
         "scenarios": rows,
         "pooled_step1_before": (pooled[0] / pooled[1]) if pooled[1] else None,
         "pooled_step1_after": (pooled[2] / pooled[3]) if pooled[3] else None,
@@ -218,6 +235,9 @@ def print_comparison(result: dict[str, Any]) -> None:
     print("  ⚠ Not a held-out set: the policy trained on all of these scenarios. What is\n"
           "    controlled is that the weights are fixed and the two columns are paired on\n"
           "    seed, scenario, episode count and sampling parameters.")
+    if not result.get("corpus_verified"):
+        print("  ⚠ Neither column records which archives it was scored against, so the\n"
+              "    two are not verified to share a ground truth.")
     if abs(result["pooled_step1_z"]) < 2.0:
         print("  ⚠ |z| < 2 on the pooled rate: this run does not distinguish the two\n"
               "    checkpoints. Report it as that, not as a tie and not as a win.")
@@ -257,7 +277,9 @@ def _config(args: argparse.Namespace, source: str) -> dict[str, Any]:
     }
 
 
-def reusable_column(path: Path, source: str, args: argparse.Namespace) -> dict[str, Any]:
+def reusable_column(
+    path: Path, source: str, args: argparse.Namespace, digests: dict[str, str]
+) -> dict[str, Any]:
     """Load a column already on disk, or refuse it. Never silently recomputes.
 
     A two-column run at n=64 is hundreds of episodes on a GPU, and a run can be
@@ -272,6 +294,13 @@ def reusable_column(path: Path, source: str, args: argparse.Namespace) -> dict[s
     Reuse is sound only because of :func:`scenario_seed`: every scenario's
     sampling stream is derived from its own name, so it does not matter which
     process a scenario ran in or how many ran ahead of it.
+
+    ``digests`` is :func:`episode_env.corpus_digests` of the corpus this run
+    would score against. The settings can all match while the ground truth
+    does not -- another ``--corpus-root``, or an archive re-run in place -- so
+    a column is reused only if it records the same digest for every scenario it
+    covers, and a column that records none is refused: there is no way to tell
+    which answer key it was scored against.
     """
     column = json.loads(path.read_text())
     want = _config(args, source)
@@ -284,6 +313,21 @@ def reusable_column(path: Path, source: str, args: argparse.Namespace) -> dict[s
         raise ValueError(
             f"{path} was produced under different settings and cannot be reused -- "
             + "; ".join(differing) + ". Point --out somewhere else."
+        )
+    recorded = column["config"].get("corpus")
+    if recorded is None:
+        raise ValueError(
+            f"{path} records no corpus digest, so which archives it was scored against "
+            "cannot be checked. Point --out somewhere else."
+        )
+    stale = sorted(
+        sid for sid in column["config"].get("scenarios", [])
+        if recorded.get(sid) is None or recorded.get(sid) != digests.get(sid)
+    )
+    if stale:
+        raise ValueError(
+            f"{path} was scored against different archives for {stale} than the corpus "
+            "this run would use. Point --out somewhere else."
         )
     if args.scenarios:
         wanted = sorted(s.strip() for s in args.scenarios.split(",") if s.strip())
@@ -327,6 +371,7 @@ def _column_payload(
     """
     config = _config(args, column_source(checkpoint, args))
     config["scenarios"] = [s.scenario_id for s in scenarios]
+    config["corpus"] = {s.scenario_id: s.digest for s in scenarios}
     return {"config": config, "groups": groups, "wire": wire}
 
 
@@ -414,7 +459,12 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
     source = column_source(checkpoint, args)
     done = None
     if path.exists():
-        done = reusable_column(path, source, args)
+        import episode_env
+
+        only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+        done = reusable_column(
+            path, source, args, episode_env.corpus_digests(args.corpus_root, only=only)
+        )
         covered = {g["scenario_id"] for g in done["groups"]}
         if not set(done["config"]["scenarios"]) - covered:
             print(f"[reuse] {label} column from {path} ({source})", flush=True)

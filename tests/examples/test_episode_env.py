@@ -504,6 +504,30 @@ def test_an_archive_without_a_baseline_cell_is_refused(tmp_path):
         make_scenario(archive)
 
 
+def test_the_archive_digest_is_its_content_not_its_location(tmp_path):
+    archive = build_archive(tmp_path, resolver=DELTA)
+    digest = env.archive_digest(archive)
+    assert make_scenario(archive).digest == digest
+    import shutil
+
+    moved = shutil.copytree(archive, tmp_path / "elsewhere" / "ARCHIVE")
+    assert env.archive_digest(moved) == digest, "the mount point is not the answer key"
+    trial = moved / f"{ALPHA}-none" / "trial_0" / "result.json"
+    trial.write_text(trial.read_text().replace('"fail"', '"pass"', 1))
+    assert env.archive_digest(moved) != digest, "an edited verdict is a different answer key"
+
+
+def test_an_archive_with_nothing_to_digest_is_refused(tmp_path):
+    (tmp_path / "EMPTY").mkdir()
+    with pytest.raises(ValueError, match="no trial"):
+        env.archive_digest(tmp_path / "EMPTY")
+
+
+def test_corpus_digests_refuses_an_unknown_id(tmp_path):
+    with pytest.raises(SystemExit, match="not in the corpus"):
+        env.corpus_digests(tmp_path, only=["typo"])
+
+
 def test_no_corpus_root_is_a_refusal_naming_the_fix(monkeypatch):
     monkeypatch.delenv(env.CORPUS_ROOT_ENV, raising=False)
     with pytest.raises(SystemExit, match="--corpus-root"):

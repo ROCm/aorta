@@ -142,6 +142,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -338,6 +339,9 @@ class Scenario:
     offered: tuple[str, ...]
     #: ``loop._read_cell_summaries`` over the whole archive, in its own order.
     summaries: tuple[dict[str, Any], ...]
+    #: :func:`archive_digest` of the archive, so a result can say which ground
+    #: truth it was scored against. Empty only for a hand-built scenario.
+    digest: str = ""
 
     @property
     def resolvers(self) -> frozenset[str]:
@@ -351,6 +355,29 @@ class Scenario:
         """The archive's own summaries, filtered to the cells on an axis."""
         wanted = set(cell_names)
         return [dict(row) for row in self.summaries if row.get("cell_name") in wanted]
+
+
+def archive_digest(root: str | Path) -> str:
+    """SHA-256 over every ``trial_*/result.json`` in an archive, path and bytes.
+
+    The identity of a ground truth. Two archives with the same directory name
+    -- a different ``--corpus-root``, or the same path after a re-run or an
+    edit -- are different answer keys, and a scenario id alone cannot tell them
+    apart. The files hashed are exactly the ones the grid, the summaries and
+    the labels are built from, keyed by their path relative to the archive so
+    the digest does not depend on where the corpus is mounted.
+    """
+    root = Path(root)
+    digest = hashlib.sha256()
+    files = sorted(
+        path for path in root.rglob("result.json") if path.parent.name.startswith("trial_")
+    )
+    if not files:
+        raise ValueError(f"{root}: no trial_*/result.json to take a digest of")
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(path.read_bytes() + b"\0")
+    return digest.hexdigest()
 
 
 def load_scenario(
@@ -415,6 +442,7 @@ def load_scenario(
         label=label,
         offered=menu,
         summaries=tuple(_read_cell_summaries(root)),
+        digest=archive_digest(root),
     )
 
 
@@ -430,17 +458,33 @@ def load_corpus(
     silent drop: a typo would otherwise look like a result on a smaller corpus.
     """
     base = resolve_corpus_root(root)
+    return [
+        load_scenario(sid, base / archive, family)
+        for sid, archive, family in _selected(entries, only)
+    ]
+
+
+def _selected(
+    entries: Sequence[tuple[str, str, str]], only: Sequence[str]
+) -> list[tuple[str, str, str]]:
     known = [sid for sid, _, _ in entries]
     unknown = [sid for sid in only if sid not in known]
     if unknown:
         raise SystemExit(
             f"scenario id(s) {unknown} are not in the corpus; available: {sorted(known)}"
         )
-    return [
-        load_scenario(sid, base / archive, family)
-        for sid, archive, family in entries
-        if not only or sid in only
-    ]
+    return [entry for entry in entries if not only or entry[0] in only]
+
+
+def corpus_digests(
+    root: str | Path | None = None,
+    entries: Sequence[tuple[str, str, str]] = CORPUS,
+    *,
+    only: Sequence[str] = (),
+) -> dict[str, str]:
+    """:func:`archive_digest` per scenario id, without loading the scenarios."""
+    base = resolve_corpus_root(root)
+    return {sid: archive_digest(base / archive) for sid, archive, _ in _selected(entries, only)}
 
 
 @dataclass

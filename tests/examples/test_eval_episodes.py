@@ -171,6 +171,27 @@ def test_a_column_that_predates_gen_batch_does_not_pair_with_one_that_has_it():
     assert eval_episodes.compare(old, old)
 
 
+def test_columns_scored_against_different_archives_are_refused():
+    with pytest.raises(ValueError, match=r"different archives for \['a'\]"):
+        eval_episodes.compare(run([group("a")], corpus={"a": "x"}),
+                              run([group("a")], corpus={"a": "y"}))
+
+
+def test_a_column_with_a_corpus_never_pairs_with_one_without():
+    with pytest.raises(ValueError, match="different archives"):
+        eval_episodes.compare(run([group("a")]), run([group("a")], corpus={"a": "x"}))
+
+
+def test_matching_corpora_are_verified_and_missing_ones_are_flagged(capsys):
+    same = eval_episodes.compare(run([group("a")], corpus={"a": "x"}),
+                                 run([group("a")], corpus={"a": "x"}))
+    assert same["corpus_verified"] is True
+    legacy = eval_episodes.compare(run([group("a")]), run([group("a")]))
+    assert legacy["corpus_verified"] is False
+    eval_episodes.print_comparison(legacy)
+    assert "not verified to share a ground truth" in capsys.readouterr().out
+
+
 def test_two_columns_from_different_checkpoints_are_the_whole_point():
     """Narrowness: ``init_from`` sits in the same dict and MUST differ."""
     result = eval_episodes.compare(run([group("a")], init_from="base"),
@@ -207,8 +228,13 @@ class _Args:
             "model": "Qwen/Qwen3-8B", "param_dtype": "float32", "episodes_per_scenario": 64,
             "max_episode_steps": 8, "temperature": 0.7, "top_p": 0.95,
             "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923, "scenarios": "",
+            "corpus_root": None,
         })
         self.__dict__.update(kw)
+
+
+#: What the corpus on disk digests to, in these tests.
+DIGESTS = {"a": "digest-a", "b": "digest-b"}
 
 
 def column_file(tmp_path: Path, **config) -> Path:
@@ -216,7 +242,7 @@ def column_file(tmp_path: Path, **config) -> Path:
         "init_from": "/ckpt/last", "model": "Qwen/Qwen3-8B", "param_dtype": "float32",
         "episodes_per_scenario": 64, "max_episode_steps": 8, "temperature": 0.7,
         "top_p": 0.95, "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923,
-        "scenarios": ["a"],
+        "scenarios": ["a"], "corpus": dict(DIGESTS),
     }
     base.update(config)
     path = tmp_path / "before.json"
@@ -225,7 +251,8 @@ def column_file(tmp_path: Path, **config) -> Path:
 
 
 def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
-    reused = eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args())
+    reused = eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
+                                           DIGESTS)
     assert reused["config"]["init_from"] == "/ckpt/last"
 
 
@@ -237,21 +264,56 @@ def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
 def test_a_column_written_under_different_settings_is_refused(tmp_path, field, value):
     with pytest.raises(ValueError, match=field):
         eval_episodes.reusable_column(column_file(tmp_path, **{field: value}), "/ckpt/last",
-                                      _Args())
+                                      _Args(), DIGESTS)
 
 
 def test_the_base_model_column_matches_by_model_name(tmp_path):
     args = _Args()
     assert eval_episodes.column_source(None, args) == "Qwen/Qwen3-8B"
     assert eval_episodes.reusable_column(column_file(tmp_path, init_from="Qwen/Qwen3-8B"),
-                                         "Qwen/Qwen3-8B", args)
+                                         "Qwen/Qwen3-8B", args, DIGESTS)
 
 
 def test_a_narrowed_scenario_set_is_checked_against_the_flag(tmp_path):
     path = column_file(tmp_path, scenarios=["a", "b"])
     with pytest.raises(ValueError, match="--scenarios asked for"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"))
-    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"))
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS)
+    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS)
+
+
+def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
+    """The other half of the reuse check: a column has to carry what it is
+    checked against, or every future reuse of it is a refusal."""
+    from types import SimpleNamespace
+
+    scenarios = [SimpleNamespace(scenario_id="a", digest="digest-a"),
+                 SimpleNamespace(scenario_id="b", digest="digest-b")]
+    payload = eval_episodes._column_payload(_Args(), scenarios, [], [], Path("/ckpt/last"))
+    assert payload["config"]["corpus"] == DIGESTS
+    assert payload["config"]["scenarios"] == ["a", "b"]
+
+
+def test_a_column_that_records_no_corpus_is_refused(tmp_path):
+    """No way to tell which answer key it was scored against."""
+    path = column_file(tmp_path)
+    doc = json.loads(path.read_text())
+    del doc["config"]["corpus"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="records no corpus digest"):
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS)
+
+
+def test_a_column_scored_against_other_archives_is_refused(tmp_path):
+    """Every setting matches; the ground truth does not."""
+    with pytest.raises(ValueError, match=r"different archives for \['a'\]"):
+        eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
+                                      {"a": "another-digest", "b": "digest-b"})
+
+
+def test_only_the_scenarios_the_column_covers_are_checked(tmp_path):
+    """Narrowness: a changed archive the column never scored is not its business."""
+    assert eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
+                                         {"a": "digest-a", "b": "changed"})
 
 
 class ReachedError(Exception):
@@ -259,6 +321,9 @@ class ReachedError(Exception):
 
 
 def _stub_evaluate(monkeypatch):
+    import episode_env
+
+    monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
     calls = []
 
     def fake(checkpoint, args, done=None, on_progress=None):
