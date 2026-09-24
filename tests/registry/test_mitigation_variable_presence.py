@@ -26,6 +26,11 @@ Covered:
   Per ``(mitigation, variable)``, not per mitigation: a mitigation is an env-var
   bundle, so an entry excused for one variable is still audited for the rest.
 
+  A name counts as read only when it is a whole C string. A name found only as
+  the tail of a longer string, which is exactly how a linker's tail-merged
+  literal looks, proves neither a read nor an absence. Each verdict fails
+  closed on it: see :class:`NameEvidence`.
+
   Only where the whole stack is present to be scanned -- ROCm's libraries and a
   ROCm torch. On a lane that promises one and has not got one
   (``AORTA_REQUIRE_ROCM``) that is a failure, because a check that quietly
@@ -212,27 +217,121 @@ def _load_audit_script():
     return module
 
 
-def names_in_binary(lib: Path) -> frozenset[str]:
-    """Environment-variable-shaped strings that occupy a whole C string in ``lib``.
+class NameEvidence(NamedTuple):
+    """What a byte scan can say about a name: a whole C string, the tail of one, or nothing.
 
-    NUL required on both sides, for the reason ``audit_env_knobs.extract_names``
-    gives: ``strings`` splits on any non-printable byte and can manufacture a
-    standalone-looking name out of the middle of help text. That function is not
-    reused directly because its regex is built from the GEMM prefixes it audits,
-    and mitigation variables share no prefix.
+    ``whole`` holds the names that occupy an entire C string -- NUL on both
+    sides -- and is the only thing either verdict counts as a read. ``tails``
+    holds every C string that *ends* in an environment-variable-shaped name
+    without being one, such as ``"set GPU_MAX_HW_QUEUES"``.
+    :meth:`hosts_of` reads both, because a name can also be the tail of a
+    longer name (``DEBUG_HIP_LAUNCH_BLOCKING`` ends in ``HIP_LAUNCH_BLOCKING``).
+
+    **A tail is evidence for neither verdict, and each verdict fails closed on
+    it.** Linkers can tail-merge string literals in ``SHF_MERGE|SHF_STRINGS``
+    sections, so a binary that reads ``HIP_LAUNCH_BLOCKING``
+    and ``DEBUG_HIP_LAUNCH_BLOCKING`` can store only the longer one and hand
+    ``getenv`` a pointer six bytes in. The same layout comes from a binary that
+    reads only the longer name, and from a pointer into prose. A byte scan
+    cannot tell those apart, so the two verdicts read the uncertainty in the
+    direction that keeps each one loud:
+
+    * :func:`find_unread_mitigations` counts ``whole`` only. A tail cannot make
+      a variable look read, so this cannot pass a variable nobody reads. A
+      tail-merged read shows up as an offender, which is a visible false
+      alarm, and :func:`tail_hosts_of` puts the host strings in its message.
+    * :func:`find_possibly_read_known_absent` flags an exempted variable found
+      as a tail. The rot check used to read a tail as absence, so an
+      exemption stayed excused while the library could be reading the
+      variable: absence of evidence read as favourable evidence (aorta#506).
+
+    Help text (``"set NAME to enable the thing"``) is still nothing: the name
+    is not followed by a NUL there, so it is neither whole nor a tail.
+
+    Alternatives considered and rejected:
+
+    * **Drop the leading-NUL requirement.** ``DEBUG_HIP_LAUNCH_BLOCKING`` would
+      then answer for ``HIP_LAUNCH_BLOCKING`` in the presence verdict, and a
+      variable nobody reads would pass silently. That fixes a false alarm by
+      creating a false pass.
+    * **Keep it two-valued.** This is the defect above, sitting in the
+      verdict that is least able to notice it.
+    * **Resolve the tail by finding what references it.** This is the only
+      thing that actually decides the question. It needs relocation parsing,
+      because table-driven flags such as CLR's are pointers in a relocated
+      table, plus a RIP-relative displacement scan for direct ``lea``s. That
+      is a disassembler-shaped instrument, and it would then decide both
+      verdicts, so it would need validating against real objects itself. It
+      is left to a person with ``readelf -r`` and ``objdump -d`` when the
+      tail verdict fires.
+
+    **What this costs, measured.** On ROCm 7.0.2.2 (``/opt/rocm`` on the
+    meta64 nodes) every ROCm-owned registry variable occurs exactly once as a
+    whole string and none occurs as a tail. Neither exempted name occurs
+    anywhere, even as a substring, so the tail verdict fires on nothing there
+    and the presence verdict is unchanged. Torch's objects were not in that
+    tree and were not measured.
+
+    **Left open on purpose.** If an exempted variable ever does show up as a
+    tail, both verdicts stay red however the entry is edited. The exemption
+    cannot be proven, and removing it leaves a variable with no whole-string
+    read. That is the honest answer a byte scan can give. What evidence
+    should then excuse the entry is a decision to take with the case in
+    hand, not in advance. A recorded "reviewed host" would go stale silently
+    the day a later build tail-merged a real read into the same string.
+    """
+
+    whole: frozenset[str]
+    tails: frozenset[str]
+
+    def hosts_of(self, name: str) -> frozenset[str]:
+        """The longer C strings ``name`` ends: where a tail-merged read of it would sit."""
+        return frozenset(
+            string
+            for string in self.whole | self.tails
+            if string != name and string.endswith(name)
+        )
+
+
+def scan_binary(lib: Path) -> NameEvidence:
+    """Every environment-variable-shaped name in ``lib``, whole or as a tail.
+
+    NUL required on both sides for ``whole``, for the reason
+    ``audit_env_knobs.extract_names`` gives: ``strings`` splits on any
+    non-printable byte and can manufacture a standalone-looking name out of
+    the middle of help text. That function is not reused directly because its
+    regex is built from the GEMM prefixes it audits, and mitigation variables
+    share no prefix. A name followed by a NUL but not preceded by one is kept
+    too, as the whole C string it ends, rather than thrown away -- see
+    :class:`NameEvidence` for why throwing it away was a verdict.
+
+    One pass either way: the regex is greedy, so the match covering a C
+    string's last name ends at that string's NUL whether or not it starts at
+    the string's first byte.
     """
     with lib.open("rb") as handle:
         if handle.read(4) != b"\x7fELF":
             raise ValueError(f"{lib} is not an ELF shared object")
-    found: set[str] = set()
+    whole: set[str] = set()
+    tails: set[str] = set()
     with lib.open("rb") as handle, mmap.mmap(
         handle.fileno(), 0, access=mmap.ACCESS_READ
     ) as data:
         for match in _ENV_NAME_RE.finditer(data):
             start, end = match.span()
-            if (start == 0 or data[start - 1] == 0) and end < len(data) and data[end] == 0:
-                found.add(match.group().decode("ascii"))
-    return frozenset(found)
+            if end >= len(data) or data[end] != 0:
+                continue
+            if start == 0 or data[start - 1] == 0:
+                whole.add(match.group().decode("ascii"))
+            else:
+                begin = data.rfind(b"\x00", 0, start) + 1
+                tails.add(data[begin:end].decode("latin-1"))
+    return NameEvidence(frozenset(whole), frozenset(tails))
+
+
+def names_in_binary(lib: Path) -> frozenset[str]:
+    """The names that occupy a whole C string in ``lib``: :attr:`NameEvidence.whole`."""
+    return scan_binary(lib).whole
 
 
 def mitigation_variables() -> dict[str, set[str]]:
@@ -275,6 +374,44 @@ def find_fixed_known_absent(
         for mitigation, variable in KNOWN_ABSENT
         if variable in present
     )
+
+
+def find_possibly_read_known_absent(
+    evidence: NameEvidence,
+) -> dict[tuple[str, str], list[str]]:
+    """Listed pairs whose variable ends a longer C string, with those strings.
+
+    The rot check's other half. :func:`find_fixed_known_absent` asks whether
+    the variable is now a whole string. This asks whether the scan can still
+    prove it is *not* read, and a tail means it cannot: the linker may have
+    merged a real read into the longer string. See :class:`NameEvidence`.
+
+    A variable that is also whole is left to :func:`find_fixed_known_absent`.
+    That verdict is already "remove the entry", so repeating it here as "go
+    and check" would only weaken the instruction.
+    """
+    return {
+        (mitigation, variable): sorted(hosts)
+        for mitigation, variable in sorted(KNOWN_ABSENT)
+        if variable not in evidence.whole and (hosts := evidence.hosts_of(variable))
+    }
+
+
+def tail_hosts_of(
+    variables: set[str] | dict[str, set[str]], evidence: NameEvidence
+) -> dict[str, list[str]]:
+    """The longer strings each of ``variables`` ends, for the unread verdict's message.
+
+    Without it the message says "appears in no scanned binary" about a name
+    that does appear, as the tail of something the linker may have merged a
+    read into. That is the one case where the person reading the red lane
+    needs to check relocations rather than the registry.
+    """
+    return {
+        variable: sorted(hosts)
+        for variable in sorted(variables)
+        if (hosts := evidence.hosts_of(variable))
+    }
 
 
 #: Set on a lane that promises a ROCm install. When it is set, a stack this
@@ -336,8 +473,8 @@ _PROC_SELF_MAPS = Path("/proc/self/maps")
 
 def mapped_libraries(
     sonames: tuple[str, ...] | None = None, maps_text: str | None = None
-) -> dict[str, Path]:
-    """``{soname: the exact file this process mapped for it}``.
+) -> dict[str, tuple[Path, ...]]:
+    """``{soname: every distinct file this process mapped for it}``.
 
     Ground truth rather than a model. Everything else here *predicts* which
     copy the loader would choose; a mapping is the loader having already
@@ -362,8 +499,16 @@ def mapped_libraries(
     place by being a library this audit would open anyway; it is a precedence
     fact, not a widening of the scan.
 
-    First mapping wins, because a soname is loaded once: later rows are further
-    segments of the same file.
+    **Every file, not the first.** A base soname is not loaded only once.
+    ``libamdhip64.so.6`` and ``libamdhip64.so.7`` carry distinct
+    ``DT_SONAME`` values, so the loader can map both into one process, and both
+    are keyed ``libamdhip64.so`` here. Keeping the first dropped the second
+    without saying so. ``/proc/self/maps`` is ordered by address, so "first"
+    was not a winner of anything, and a name only the dropped major carries
+    left the union and could be reported unread. Every file the process
+    mapped is ground truth, so every one is kept. Only a *repeated* path is
+    collapsed: later rows for the same path are further segments of one
+    file, not another library.
 
     Versioned names match the way the loader names them: ``libamdhip64.so.7``
     is a mapping of ``libamdhip64.so``. Same rule as
@@ -384,7 +529,7 @@ def mapped_libraries(
             maps_text = _PROC_SELF_MAPS.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return {}
-    found: dict[str, Path] = {}
+    found: dict[str, dict[Path, None]] = {}
     for line in maps_text.splitlines():
         # "addr perms offset dev inode  pathname"; the pathname is optional and
         # is the sixth field. Bounded split so a path containing spaces stays
@@ -397,12 +542,10 @@ def mapped_libraries(
             continue
         name = Path(path_str).name
         for soname in names:
-            if soname in found:
-                continue
             if name == soname or name.startswith(f"{soname}."):
-                found[soname] = Path(path_str)
+                found.setdefault(soname, {})[Path(path_str)] = None
                 break
-    return found
+    return {soname: tuple(paths) for soname, paths in found.items()}
 
 
 def mapped_library_dirs(
@@ -418,7 +561,9 @@ def mapped_library_dirs(
     """
     return list(
         dict.fromkeys(
-            lib.parent for lib in mapped_libraries(sonames, maps_text).values()
+            lib.parent
+            for libs in mapped_libraries(sonames, maps_text).values()
+            for lib in libs
         )
     )
 
@@ -632,6 +777,35 @@ def test_scan_ignores_a_name_embedded_in_prose(tmp_path):
     found = names_in_binary(lib)
     assert "HIP_LAUNCH_BLOCKING" in found
     assert "DISABLE_TF32" not in found
+    # And not a tail either. The name is followed by prose, not by a NUL, so
+    # no pointer into this string can make it a C string on its own.
+    assert scan_binary(lib).hosts_of("DISABLE_TF32") == frozenset()
+
+
+def test_a_tail_of_a_longer_string_is_not_a_read(tmp_path):
+    """A tail cannot make a variable look read.
+
+    Both layouts from the review. ``DEBUG_HIP_LAUNCH_BLOCKING`` is what a
+    linker's tail merge of two literals leaves behind, and
+    ``"set GPU_MAX_HW_QUEUES"`` is a pointer into prose. Either may be a read
+    and either may not be, so the presence verdict still reports both unread.
+    Counting them is the false pass that dropping the leading-NUL requirement
+    would buy. What changes is that the scan keeps the host strings, so the
+    red lane can say where to look instead of saying the name is nowhere.
+    """
+    lib = _fake_so(
+        tmp_path / "libfake.so", ["DEBUG_HIP_LAUNCH_BLOCKING", "set GPU_MAX_HW_QUEUES"]
+    )
+    evidence = scan_binary(lib)
+
+    assert "DEBUG_HIP_LAUNCH_BLOCKING" in evidence.whole
+    assert not {"HIP_LAUNCH_BLOCKING", "GPU_MAX_HW_QUEUES"} & evidence.whole
+    offenders = find_unread_mitigations(evidence.whole)
+    assert {"HIP_LAUNCH_BLOCKING", "GPU_MAX_HW_QUEUES"} <= set(offenders)
+    assert tail_hosts_of(offenders, evidence) == {
+        "GPU_MAX_HW_QUEUES": ["set GPU_MAX_HW_QUEUES"],
+        "HIP_LAUNCH_BLOCKING": ["DEBUG_HIP_LAUNCH_BLOCKING"],
+    }
 
 
 def test_scan_rejects_a_non_elf_file(tmp_path):
@@ -1610,11 +1784,77 @@ def test_a_mapped_path_that_no_longer_exists_falls_back_to_the_search_path(tmp_p
     on_disk = _fake_so(rocm / "libamdhip64.so", ["HIP_LAUNCH_BLOCKING"])
 
     scan = libraries_to_scan(
-        [rocm, torch_lib], {"libamdhip64.so": tmp_path / "gone" / "libamdhip64.so.7"}
+        [rocm, torch_lib], {"libamdhip64.so": (tmp_path / "gone" / "libamdhip64.so.7",)}
     )
 
     assert scan.libraries == [on_disk.resolve()], scan.libraries
     assert "libamdhip64.so" not in scan.unresolved
+
+
+def test_every_mapped_major_of_a_soname_is_scanned(tmp_path):
+    """Two majors mapped at once are two loaded libraries, and both are read.
+
+    ``.so.6`` and ``.so.7`` carry distinct ``DT_SONAME`` values, so both can
+    be in the process, and both are keyed ``libamdhip64.so``. Keeping the
+    first mapping dropped ``.so.7``. The first by address is not a winner of
+    anything, and ``GPU_MAX_HW_QUEUES``, which only ``.so.7`` carries, left
+    the union.
+
+    Narrowness in the same tree. A ``.so.8`` beside ``.so.6`` that nothing
+    mapped is still not read. It is also what ``resolve_library`` would
+    answer, so a rule that also consulted the search path here would show
+    up. A ``(deleted)`` row adds nothing, and a file's further segments are
+    one file, not two.
+    """
+    rocm, other, torch_lib = tmp_path / "rocm", tmp_path / "other", tmp_path / "torch"
+    for directory in (rocm, other, torch_lib):
+        directory.mkdir()
+    six = _fake_so(rocm / "libamdhip64.so.6", ["HIP_LAUNCH_BLOCKING"])
+    seven = _fake_so(other / "libamdhip64.so.7", ["GPU_MAX_HW_QUEUES"])
+    _fake_so(rocm / "libamdhip64.so.8", ["PYTORCH_CUDA_ALLOC_CONF"])
+    maps_text = "\n".join(
+        [
+            _maps_line(str(six)),
+            _maps_line(str(six)),
+            _maps_line(str(seven)),
+            _maps_line(f"{rocm / 'libamdhip64.so.5'} (deleted)"),
+        ]
+    )
+
+    mapped = mapped_libraries(maps_text=maps_text)
+    assert mapped == {"libamdhip64.so": (six, seven)}, mapped
+    assert mapped_library_dirs(maps_text=maps_text) == [rocm, other]
+
+    scan = libraries_to_scan([rocm, torch_lib], mapped)
+    assert scan.libraries == [six.resolve(), seven.resolve()], scan.libraries
+    names = union_of_names(scan.libraries)
+    assert {"HIP_LAUNCH_BLOCKING", "GPU_MAX_HW_QUEUES"} <= names
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in names, (
+        "the unmapped major beside the mapped ones was read"
+    )
+
+
+def test_a_vanished_second_major_is_answered_by_the_search_path(tmp_path):
+    """The ``is_file()`` fallback applies per mapped file, not per soname.
+
+    One major is still on disk and the other has gone since the snapshot. The
+    surviving one is read, and the gone one is answered by the search path,
+    as a lone vanished mapping always was. Falling back only when *every*
+    copy has gone would drop the vanished major's names silently, which is
+    the defect above arriving one step later.
+    """
+    rocm, torch_lib = tmp_path / "rocm", tmp_path / "torch"
+    rocm.mkdir()
+    torch_lib.mkdir()
+    six = _fake_so(rocm / "libamdhip64.so.6", ["HIP_LAUNCH_BLOCKING"])
+    on_path = _fake_so(rocm / "libamdhip64.so", ["GPU_MAX_HW_QUEUES"])
+
+    scan = libraries_to_scan(
+        [rocm, torch_lib],
+        {"libamdhip64.so": (six, tmp_path / "gone" / "libamdhip64.so.7")},
+    )
+
+    assert scan.libraries == [six.resolve(), on_path.resolve()], scan.libraries
 
 
 def test_the_mappings_are_read_after_torch_is_imported(monkeypatch, tmp_path):
@@ -1690,13 +1930,20 @@ def test_the_audited_union_is_read_from_the_mapped_copies(monkeypatch, tmp_path)
 
     The snapshot is also asserted to be taken after the plan, because the plan
     is what imports torch and populates the thing being snapshotted.
+
+    And the tails have to arrive with the whole names:
+    :func:`test_known_absent_entries_are_not_the_tail_of_a_longer_string`
+    reads them from this function and nowhere else, so an evidence object
+    that dropped them would pass that test by having nothing to look at.
     """
     dirs = _stack(tmp_path)
     rocm = dirs[0]
     # Two majors in one directory: resolve_library answers .so.7, the process
     # is running .so.6, and only the mapping can tell them apart.
     (rocm / "libamdhip64.so").unlink()
-    loaded = _fake_so(rocm / "libamdhip64.so.6", ["HIP_LAUNCH_BLOCKING"])
+    loaded = _fake_so(
+        rocm / "libamdhip64.so.6", ["HIP_LAUNCH_BLOCKING", "set GPU_MAX_HW_QUEUES"]
+    )
     _fake_so(rocm / "libamdhip64.so.7", ["PYTORCH_CUDA_ALLOC_CONF"])
     order: list[str] = []
     module = sys.modules[__name__]
@@ -1707,18 +1954,21 @@ def test_the_audited_union_is_read_from_the_mapped_copies(monkeypatch, tmp_path)
 
     def record_maps(sonames=None, maps_text=None):
         order.append("maps")
-        return {"libamdhip64.so": loaded}
+        return {"libamdhip64.so": (loaded,)}
 
     monkeypatch.setattr(module, "require_readable_stack", record_plan)
     monkeypatch.setattr(module, "mapped_libraries", record_maps)
 
-    names = loaded_stack_names()
+    evidence = loaded_stack_evidence()
 
     assert order == ["plan", "maps"]
-    assert "HIP_LAUNCH_BLOCKING" in names
-    assert "PYTORCH_CUDA_ALLOC_CONF" not in names, (
+    assert "HIP_LAUNCH_BLOCKING" in evidence.whole
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in evidence.whole, (
         "the fixture read the unloaded major, so the mapping never reached "
         "libraries_to_scan"
+    )
+    assert evidence.hosts_of("GPU_MAX_HW_QUEUES") == {"set GPU_MAX_HW_QUEUES"}, (
+        "the loaded stack's tails did not reach the evidence the rot check reads"
     )
 
 
@@ -1775,6 +2025,44 @@ def test_an_unmapped_or_vanished_torch_object_is_still_read_from_the_wheel(tmp_p
     assert scan.unscanned_torch is None
 
 
+def test_every_mapped_copy_of_a_torch_object_is_scanned(tmp_path):
+    """Torch's side of the several-majors rule, including the partial fallback.
+
+    Two mapped copies of ``libtorch_hip`` are both read and the wheel's copy
+    is not. With one of the two gone, the wheel's copy is read as well, since
+    it is torch's search path.
+    """
+    dirs = _stack(tmp_path)
+    wheel = (dirs[-1] / "libtorch_hip.so").resolve()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    first = _fake_so(tmp_path / "a" / "libtorch_hip.so.2", ["PYTORCH_CUDA_ALLOC_CONF"])
+    second = _fake_so(
+        tmp_path / "b" / "libtorch_hip.so.3", ["PYTORCH_NO_CUDA_MEMORY_CACHING"]
+    )
+    sonames = torch_sonames(dirs[-1])
+
+    both = libraries_to_scan(
+        dirs,
+        mapped_libraries(
+            sonames, maps_text="\n".join([_maps_line(str(first)), _maps_line(str(second))])
+        ),
+    )
+    assert {first.resolve(), second.resolve()} <= set(both.libraries), both.libraries
+    assert wheel not in both.libraries
+    assert "PYTORCH_NO_CUDA_MEMORY_CACHING" in union_of_names(both.libraries)
+
+    second.unlink()
+    one_gone = libraries_to_scan(
+        dirs,
+        {"libtorch_hip.so": (first, second)},
+    )
+    assert first.resolve() in one_gone.libraries
+    assert wheel in one_gone.libraries, (
+        "a vanished mapped copy was not answered by the wheel's own object"
+    )
+
+
 def test_the_fixture_asks_where_torchs_objects_were_mapped(monkeypatch, tmp_path):
     """The snapshot is taken for torch's sonames, not only for ROCm's.
 
@@ -1794,7 +2082,7 @@ def test_the_fixture_asks_where_torchs_objects_were_mapped(monkeypatch, tmp_path
     monkeypatch.setattr(module, "require_readable_stack", lambda: dirs)
     monkeypatch.setattr(module, "mapped_libraries", record_maps)
 
-    loaded_stack_names()
+    loaded_stack_evidence()
 
     assert asked and "libtorch_hip.so" in asked[0], asked
     assert set(sonames_to_scan()) <= set(asked[0]), asked
@@ -2035,7 +2323,27 @@ def torch_sonames(torch_lib: Path) -> tuple[str, ...]:
     return tuple(sorted({_soname_of(lib.name) for lib in torch_shared_objects(torch_lib)}))
 
 
-def libraries_to_scan(dirs: list[Path], mapped: dict[str, Path] | None = None) -> ScanSet:
+def _mapped_copies(
+    loaded: dict[str, tuple[Path, ...]], soname: str
+) -> tuple[list[Path], bool]:
+    """``(soname's mapped files still on disk, resolved; whether the fallback answers too)``.
+
+    The fallback is the search path on the ROCm side and the wheel's own
+    object on torch's. It answers when nothing was mapped, as it always did,
+    and also when *any* mapped copy has vanished, not only when all of them
+    have. The single-mapping rule was "a vanished mapping is answered by the
+    search path". Applying it per soname would drop a vanished second major's
+    names without a word, which is the defect :func:`mapped_libraries` was
+    changed to stop, arriving one step later.
+    """
+    copies = loaded.get(soname, ())
+    live = [copy.resolve() for copy in copies if copy.is_file()]
+    return live, not copies or len(live) < len(copies)
+
+
+def libraries_to_scan(
+    dirs: list[Path], mapped: dict[str, tuple[Path, ...]] | None = None
+) -> ScanSet:
     """The shared objects to read names out of, resolved from ``dirs``.
 
     Declared sonames in the ROCm directories, and everything in torch's.
@@ -2072,11 +2380,16 @@ def libraries_to_scan(dirs: list[Path], mapped: dict[str, Path] | None = None) -
     stays excused on a binary nothing ran. That is the defect the loader order
     was added to fix, surviving one directory further in.
 
+    Every file mapped for a soname is scanned, not one of them. Two majors
+    mapped at once are two loaded libraries, and the union has to carry both;
+    see :func:`mapped_libraries`.
+
     The mapped path is re-checked with ``is_file()`` rather than trusted. The
     snapshot is a moment in the past and a mapping can outlive its file -- an
     unlink after ``dlopen`` is a live mapping of nothing on disk -- so a stale
     entry falls through to the search path below instead of turning into an
     unresolved soname and failing the lane over a file that was there.
+    :func:`_mapped_copies` applies that per file.
 
     ``mapped`` defaults to *no* mapped libraries rather than to a live read of
     this process, which is the opposite default from ``loader_dirs`` one layer
@@ -2114,10 +2427,11 @@ def libraries_to_scan(dirs: list[Path], mapped: dict[str, Path] | None = None) -
     scanned: list[Path] = []
     resolved: set[str] = set()
     for soname in sonames_to_scan():
-        exact = loaded.get(soname)
-        if exact is not None and exact.is_file():
+        live, fall_back = _mapped_copies(loaded, soname)
+        scanned.extend(live)
+        if live:
             resolved.add(soname)
-            scanned.append(exact.resolve())
+        if not fall_back:
             continue
         for directory in rocm_dirs:
             lib = audit.resolve_library(directory, soname)
@@ -2133,8 +2447,10 @@ def libraries_to_scan(dirs: list[Path], mapped: dict[str, Path] | None = None) -
     # same rule covers a ROCm library a ROCm wheel bundles in torch/lib -- the
     # mapped copy was already scanned above, and the bundled one is not.
     for obj in sorted(torch_objects):
-        exact = loaded.get(_soname_of(obj.name))
-        scanned.append(exact.resolve() if exact is not None and exact.is_file() else obj)
+        live, fall_back = _mapped_copies(loaded, _soname_of(obj.name))
+        scanned.extend(live)
+        if fall_back:
+            scanned.append(obj)
     return ScanSet(
         list(dict.fromkeys(scanned)),
         tuple(soname for soname in sonames_to_scan() if soname not in resolved),
@@ -2216,8 +2532,8 @@ def require_scanned_libraries(scan: ScanSet, dirs: list[Path]) -> list[Path]:
     return scan.libraries
 
 
-def union_of_names(scanned: list[Path]) -> frozenset[str]:
-    """Every audited name in ``scanned``, or the fail-or-skip an unreadable one earns.
+def union_of_evidence(scanned: list[Path]) -> NameEvidence:
+    """Every name in ``scanned``, whole and tail, or the fail-or-skip an unreadable one earns.
 
     The read used to be wrapped in ``except (ValueError, OSError): continue``
     -- "not an ELF, or unreadable; neither is this test's business". It is
@@ -2239,13 +2555,17 @@ def union_of_names(scanned: list[Path]) -> frozenset[str]:
     the file, which is what makes an image that ships a genuinely non-ELF
     ``.so`` a one-line fix instead of a mystery.
     """
-    found: set[str] = set()
+    whole: set[str] = set()
+    tails: set[str] = set()
     unreadable: list[str] = []
     for lib in scanned:
         try:
-            found |= names_in_binary(lib)
+            evidence = scan_binary(lib)
         except (ValueError, OSError) as exc:
             unreadable.append(f"{lib} ({exc})")
+            continue
+        whole |= evidence.whole
+        tails |= evidence.tails
     if unreadable:
         _unreadable_stack(
             f"{len(unreadable)} of {len(scanned)} scanned objects could not be "
@@ -2253,11 +2573,16 @@ def union_of_names(scanned: list[Path]) -> frozenset[str]:
             "under which an unread variable looks unread and a KNOWN_ABSENT "
             "entry whose claimed consumer is one of them stays excused"
         )
-    return frozenset(found)
+    return NameEvidence(frozenset(whole), frozenset(tails))
 
 
-def loaded_stack_names() -> frozenset[str]:
-    """The union the two GPU-lane tests read: every audited name in the loaded stack.
+def union_of_names(scanned: list[Path]) -> frozenset[str]:
+    """The whole-string half of :func:`union_of_evidence`, which is what counts as a read."""
+    return union_of_evidence(scanned).whole
+
+
+def loaded_stack_evidence() -> NameEvidence:
+    """The union the GPU-lane tests read: every audited name in the loaded stack.
 
     A function rather than a fixture body, for the same reason
     :func:`require_readable_stack` is one: the ordering it encodes is the whole
@@ -2275,22 +2600,36 @@ def loaded_stack_names() -> frozenset[str]:
     scan = libraries_to_scan(
         dirs, mapped_libraries(sonames_to_scan() + torch_sonames(dirs[-1]))
     )
-    return union_of_names(require_scanned_libraries(scan, dirs))
+    return union_of_evidence(require_scanned_libraries(scan, dirs))
 
 
 @pytest.fixture(scope="module")
-def present_names() -> frozenset[str]:
-    return loaded_stack_names()
+def stack_evidence() -> NameEvidence:
+    return loaded_stack_evidence()
+
+
+@pytest.fixture(scope="module")
+def present_names(stack_evidence) -> frozenset[str]:
+    return stack_evidence.whole
 
 
 @pytest.mark.rocm
-def test_every_mitigation_variable_is_read_by_something(present_names):
+def test_every_mitigation_variable_is_read_by_something(present_names, stack_evidence):
     offenders = find_unread_mitigations(present_names)
+    tails = tail_hosts_of(offenders, stack_evidence)
     assert not offenders, (
-        "these mitigations set an environment variable that appears in no "
-        f"scanned binary, so nothing reads it: {offenders}. A probe cell for "
-        "one of them is a second baseline under a different name. Either fix "
-        "the entry or add it to KNOWN_ABSENT with the evidence. See aorta#511."
+        "these mitigations set an environment variable that is a whole string "
+        f"in no scanned binary, so nothing provably reads it: {offenders}. A "
+        "probe cell for one of them is a second baseline under a different "
+        "name. Either fix the entry or add it to KNOWN_ABSENT with the "
+        "evidence. See aorta#511."
+        + (
+            f" Of those, {tails} occur only as the tail of a longer string, "
+            "which a byte scan cannot tell from a tail-merged read: check the "
+            "object's relocations before exempting (see NameEvidence)."
+            if tails
+            else ""
+        )
     )
 
 
@@ -2305,6 +2644,26 @@ def test_known_absent_entries_are_still_absent(present_names):
     assert not fixed, (
         f"{fixed} are listed in KNOWN_ABSENT but their variables are now "
         "present in a scanned binary. Remove them from the list."
+    )
+
+
+@pytest.mark.rocm
+def test_known_absent_entries_are_not_the_tail_of_a_longer_string(stack_evidence):
+    """An exemption has to be provable, and a tail-merged read cannot be ruled out.
+
+    Separate from the test above because the instruction differs: that one
+    has seen the variable and says remove the entry, while this one cannot
+    tell and says go and look. See :class:`NameEvidence`.
+    """
+    possibly = find_possibly_read_known_absent(stack_evidence)
+    assert not possibly, (
+        f"{possibly}: these KNOWN_ABSENT variables are not whole strings in any "
+        "scanned binary, but each is the tail of the longer strings shown, and "
+        "a linker that tail-merges string literals stores a real read exactly "
+        "that way. The exemption cannot be proven from bytes. Check whether "
+        "anything references the tail's address (readelf -r for a relocated "
+        "table, objdump -d for a direct lea) and retire or re-justify the "
+        "entry on that evidence."
     )
 
 
@@ -2421,3 +2780,49 @@ def test_a_sibling_variable_becoming_readable_does_not_clear_the_entry(monkeypat
     )
     assert find_fixed_known_absent({"READABLE_SIBLING"}) == []
     assert find_fixed_known_absent({"DISABLE_TF32"}) == [("tf32_off", "DISABLE_TF32")]
+
+
+def test_an_exempted_variable_at_the_tail_of_a_longer_string_is_flagged(
+    monkeypatch, tmp_path
+):
+    """The rot check's silent direction, closed for the layout it could not see.
+
+    The library ends two longer strings with the exempted name. That is what
+    it would look like if it now read the variable and the linker had
+    tail-merged the literal. :func:`find_fixed_known_absent` sees no whole
+    string and keeps the entry excused, which was the rot check's whole
+    answer before. The tail verdict names the entry and both host strings.
+    """
+    synthetic = _synthetic_exemption(monkeypatch)
+    name = synthetic[1]
+    lib = _fake_so(tmp_path / "libfake.so", [f"LIBRARY_{name}", f"set {name}"])
+    evidence = scan_binary(lib)
+
+    assert find_fixed_known_absent(evidence.whole) == []
+    assert find_possibly_read_known_absent(evidence) == {
+        synthetic: [f"LIBRARY_{name}", f"set {name}"]
+    }
+
+
+def test_a_name_that_is_not_a_tail_does_not_flag_its_exemption(monkeypatch, tmp_path):
+    """Narrowness. Only a C string that *ends* in the name leaves it undecided.
+
+    If the tail verdict fired on any occurrence, every exemption whose name
+    turns up in prose or inside a longer identifier would go red. A verdict
+    that is loud on the wrong input gets deleted, not fixed. So: help text,
+    the name as a prefix, the name in the middle, and nothing at all are all
+    still a proven absence. A name that is also a whole string is left to
+    :func:`find_fixed_known_absent`, whose instruction is the stronger one.
+    """
+    synthetic = _synthetic_exemption(monkeypatch)
+    name = synthetic[1]
+    lib = _fake_so(tmp_path / "libfake.so", [f"{name}_V2", f"X{name}Y"], noise=name)
+    assert find_possibly_read_known_absent(scan_binary(lib)) == {}
+    assert find_possibly_read_known_absent(NameEvidence(frozenset(), frozenset())) == {}
+
+    whole = scan_binary(_fake_so(tmp_path / "libwhole.so", [name, f"LIBRARY_{name}"]))
+    assert find_fixed_known_absent(whole.whole) == [synthetic]
+    assert find_possibly_read_known_absent(whole) == {}
+    assert NameEvidence(frozenset({name}), frozenset()).hosts_of(name) == frozenset(), (
+        "a name is not the tail of itself"
+    )
