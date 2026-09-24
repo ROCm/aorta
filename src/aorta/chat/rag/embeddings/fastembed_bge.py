@@ -143,8 +143,10 @@ def _cached_model_path(model: str, cache_dir: Path | None = None) -> Path | None
         return None
     required_files = [
         Path(model_file),
+        Path("config.json"),
         Path("tokenizer.json"),
         Path("tokenizer_config.json"),
+        Path("special_tokens_map.json"),
         *(Path(name) for name in (getattr(description, "additional_files", ()) or ())),
     ]
     if any(path.is_absolute() or ".." in path.parts for path in required_files):
