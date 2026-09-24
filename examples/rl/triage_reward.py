@@ -499,6 +499,29 @@ def load_corpus(
                 f"{path}:{line_number}: verdict {verdict!r} is outside this "
                 f"scorer's vocabulary {sorted(SANITIZER_VERDICTS)}"
             )
+        # The refusal `_detector_list` already makes on the `result.json` path.
+        # `list()` read `"consan:1"` as eight one-character IDs and made them
+        # the attribution ground truth. Ahead of the check below, which reads
+        # the same two fields and would otherwise quote those characters back
+        # as the row's citation.
+        try:
+            failure_detectors = _detector_list(stored, "failure_detectors")
+            error_detectors = _detector_list(stored, "error_detectors")
+        except TypeError as exc:
+            raise ValueError(
+                f"{path}:{line_number}: {exc}. A corpus row is ground truth, "
+                "so it is refused rather than repaired; rebuild it with "
+                "build_corpus.py."
+            ) from exc
+        stale = stored.get("stale")
+        if stale is None:
+            stale = False
+        elif not isinstance(stale, bool):
+            raise ValueError(
+                f"{path}:{line_number}: stale is a JSON "
+                f"{type(stale).__name__}, not a boolean, and `bool()` reads "
+                f"{stale!r} as true; rebuild it with build_corpus.py."
+            )
         # The same invariant `label_sanitizer_report` now holds, checked on the
         # way back in. Rows are what the scorer actually trains against, and a
         # corpus built before that fix carries finding codes under
@@ -519,10 +542,7 @@ def load_corpus(
         # `cited_detectors` is their union, so checking one half leaves a row
         # that reaches the scorer with the same miscitation through the other.
         if verdict in {"error", "not_checked"}:
-            cited = [
-                *(stored.get("failure_detectors") or []),
-                *(stored.get("error_detectors") or []),
-            ]
+            cited = [*failure_detectors, *error_detectors]
             if cited:
                 raise ValueError(
                     f"{path}:{line_number}: a {verdict!r} report cites "
@@ -535,10 +555,10 @@ def load_corpus(
             row["example_id"],
             Label(
                 verdict=verdict,
-                failure_detectors=list(stored.get("failure_detectors") or []),
-                error_detectors=list(stored.get("error_detectors") or []),
+                failure_detectors=failure_detectors,
+                error_detectors=error_detectors,
                 stored_verdict=stored.get("stored_verdict"),
-                stale=bool(stored.get("stale")),
+                stale=stale,
                 source=row["example_id"],
             ),
             row.get("workload_family", "unknown"),

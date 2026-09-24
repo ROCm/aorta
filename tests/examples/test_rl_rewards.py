@@ -1383,6 +1383,102 @@ def test_the_scorer_cli_takes_the_sidecars_the_run_was_given(
     assert _tier(supplied) == proposal_reward.MAX_TIER
 
 
+_LOOP_STATE = {
+    "candidates": ["hsa_no_sdma", "hip_launch_blocking", "amd_log_level_4", "none"],
+    "tried": ["hsa_no_sdma"],
+}
+
+
+def _proposal_corpus(tmp_path, **spec_overrides):
+    """A one-row proposal corpus; an override of `KeyError` deletes the key."""
+    spec = {
+        "name": "p",
+        "raw": _completion("illegal_mem", mitigations=("hip_launch_blocking",)),
+        **_LOOP_STATE,
+    }
+    for key, value in spec_overrides.items():
+        if value is KeyError:
+            spec.pop(key, None)
+        else:
+            spec[key] = value
+    corpus = tmp_path / "proposal.jsonl"
+    corpus.write_text(json.dumps({
+        "kind": "proposal", "workload_family": "f", "proposal": spec,
+    }) + "\n", encoding="utf-8")
+    return corpus
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("candidates", "hip_launch_blocking"),
+        ("candidates", {"hip_launch_blocking": True}),
+        ("candidates", ["hip_launch_blocking", 7]),
+        ("candidates", None),
+        ("candidates", KeyError),
+        ("tried", "hsa_no_sdma"),
+        ("tried", ["hsa_no_sdma", 7]),
+        ("tried", None),
+        ("tried", KeyError),
+        ("sidecar_files", "extra.json"),
+        ("sidecar_files", ["extra.json", 7]),
+    ],
+)
+def test_a_proposal_row_whose_loop_state_is_not_a_list_of_names_is_refused(
+    proposal_reward, tmp_path, field, value
+):
+    """`list()` read a string as one name per character.
+
+    `"candidates": "hip_launch_blocking"` offered nineteen one-character
+    names, so a valid proposal scored `tier5_available` rather than the row
+    being refused. `tried` fails the other way, and so does leaving it out: an
+    absent or null `tried` read as `[]` says nothing was tried, re-offers the
+    mitigation the row says already ran, and a proposal naming it scored 1.0
+    where the row as written scores 0.8. That is why absence is refused for
+    these two, unlike the detector lists in `triage_reward` -- `build_corpus.py`
+    has written both on every row since its first one.
+
+    Refused rather than skipped, as `triage_reward.load_corpus` refuses: the
+    `.jsonl` is generated, and a dropped row shrinks the scored set silently.
+    """
+    corpus = _proposal_corpus(tmp_path, **{field: value})
+
+    with pytest.raises(ValueError) as excinfo:
+        proposal_reward.load_corpus(corpus)
+
+    message = str(excinfo.value)
+    assert "proposal.jsonl:1" in message, message
+    assert f"proposal.{field}" in message, message
+    assert "build_corpus.py" in message, message
+
+
+def test_a_well_formed_proposal_row_still_loads(proposal_reward, tmp_path):
+    """Narrowness: the refusal is about shape, not about being empty or absent.
+
+    An empty `tried` is the ordinary first step, and `sidecar_files` is
+    optional -- absent, null or empty all mean the row recorded none, so the
+    caller's argument fills it, exactly as before.
+    """
+    fallback = _sidecar(tmp_path)
+    for sidecar in (KeyError, None, []):
+        corpus = _proposal_corpus(tmp_path, tried=[], sidecar_files=sidecar)
+        (proposal, _), = proposal_reward.load_corpus(corpus, (fallback,))
+        assert proposal.candidates == _LOOP_STATE["candidates"]
+        assert proposal.tried == []
+        assert proposal.sidecar_files == (fallback,)
+        assert proposal_reward.score_proposal(proposal).tier == (
+            proposal_reward.MAX_TIER
+        )
+
+    # And the row as written scores what its loop state says: the tried
+    # mitigation is not offered, which is the fact an absent `tried` erased.
+    corpus = _proposal_corpus(
+        tmp_path, raw=_completion("illegal_mem", mitigations=("hsa_no_sdma",))
+    )
+    (proposal, _), = proposal_reward.load_corpus(corpus)
+    assert proposal_reward.score_proposal(proposal).stopped_at == "tier5_available"
+
+
 def test_prose_around_the_object_earns_nothing(proposal_reward):
     proposal = proposal_reward.Proposal(
         "prose", 'Here you go: {"category": "rccl_hang"}', ["tf32_off"]
@@ -2196,6 +2292,91 @@ def test_a_failed_publish_leaves_the_files_it_did_not_write_alone(
     assert not list(tmp_path.glob(".corpus.*")), "a scratch directory was left behind"
 
 
+def _not_a_directory(tmp_path, shape):
+    """An `--out` that exists and is not a directory, and how to read it back."""
+    target = tmp_path / "notes.txt"
+    target.write_text("mine\n", encoding="utf-8")
+    if shape == "file":
+        return target
+    link = tmp_path / "corpus"
+    link.symlink_to(target.name if shape == "link-to-file" else "nowhere")
+    return link
+
+
+def _entries(directory):
+    return sorted(
+        (p.name, os.readlink(p) if p.is_symlink() else p.is_dir())
+        for p in directory.iterdir()
+    )
+
+
+@pytest.mark.parametrize("shape", ["file", "link-to-file", "dangling-link"])
+def test_an_out_that_is_not_a_directory_is_refused_not_moved_aside(
+    build_corpus, tmp_path, capsys, shape
+):
+    """`--out notes.txt` hid the file rather than rejecting it.
+
+    The swap renames whatever `--out` names, so the file became
+    `.notes.txt.previous-<pid>` with a corpus directory in its place, and the
+    cleanup's `rmtree(..., ignore_errors=True)` cannot remove a file -- so it
+    stayed there, hidden. A link to a file went the same way. Refused at the
+    command line, before the build, and again at the swap for any other caller.
+    """
+    out = _not_a_directory(tmp_path, shape)
+    before = _entries(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        build_corpus.main([
+            "--results", str(_SURVEY),
+            "--baselines", str(
+                Path(__file__).resolve().parents[2]
+                / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+            ),
+            "--out", str(out),
+        ])
+    assert excinfo.value.code == 2
+    assert "is not a directory" in capsys.readouterr().err
+
+    with pytest.raises(NotADirectoryError):
+        build_corpus.publish(out, {"triage.jsonl": "fresh\n"})
+
+    assert _entries(tmp_path) == before, "--out was moved, replaced or hidden"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "mine\n"
+
+
+def test_a_link_to_a_directory_is_followed_rather_than_replaced(
+    build_corpus, tmp_path
+):
+    """The other thing `ignore_errors` swallowed, and the worse one.
+
+    The carry-across reads *through* a link while the swap renamed the link
+    itself, and `rmtree` refuses a link, so the link was hidden like the file
+    above -- and the directory it pointed at kept the previous corpus, readable
+    by anything following the link, beside a build that reported success.
+
+    Followed rather than refused, which is the narrowness half: a link is how
+    a corpus directory gets put on a bigger disk, and it is where the reads
+    already went. So the build lands in the target and the link survives.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    for name in build_corpus.CORPUS_FILES:
+        (real / name).write_text(f"previous {name}\n", encoding="utf-8")
+    (real / "README.md").write_text("provenance\n", encoding="utf-8")
+    (tmp_path / "corpus").symlink_to("real")
+
+    _, manifest = _build(build_corpus, tmp_path, _SURVEY)
+
+    assert manifest["scenarios"] == 6
+    assert os.readlink(tmp_path / "corpus") == "real"
+    assert json.loads((real / "manifest.json").read_text())["scenarios"] == 6
+    assert (real / "triage.jsonl").read_text(encoding="utf-8").startswith("{")
+    assert (real / "README.md").read_text(encoding="utf-8") == "provenance\n"
+    assert _entries(tmp_path) == [("corpus", "real"), ("real", True)], (
+        "a scratch directory or a hidden copy was left behind"
+    )
+
+
 def test_every_example_carries_a_workload_family(build_corpus, tmp_path):
     """Stratification is free now and expensive to retrofit, so it is enforced."""
     out, manifest = _build(build_corpus, tmp_path, _SURVEY)
@@ -2461,6 +2642,51 @@ def test_rescoring_reads_the_raw_completion_not_the_stored_reward(rescore_e2e):
     for row in rows:
         assert row["reward_before"] == 1.0
         assert row["reward_after"] < 1.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("candidates", "hip_launch_blocking"), ("tried", "hsa_no_sdma"),
+     ("candidates", ["hip_launch_blocking", 7]), ("tried", None)],
+)
+def test_a_results_file_whose_loop_state_is_not_a_list_is_refused(
+    rescore_e2e, tmp_path, capsys, field, value
+):
+    """Every completion is re-scored against `meta`, so a string there re-grades the file.
+
+    `list()` read `"hip_launch_blocking"` as nineteen one-character names, so
+    every recorded completion naming a real mitigation fell to
+    `tier5_available`, and a `tried` of characters re-offered the mitigation
+    the run had already tried. Nothing in the output said so.
+
+    Refused for the whole invocation rather than skipped, and the second half
+    is why: a well-formed file that passes `--check-determinism` beside a
+    malformed one would otherwise report success over a file it never read.
+    """
+    doc = _recorded({"s": [_completion()] * 2})
+    doc["meta"][field] = value
+    for measure in (rescore_e2e.rescore_recorded, rescore_e2e.analyse):
+        with pytest.raises(ValueError, match=rf"meta\.{field}"):
+            measure(doc)
+
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps(_recorded(
+        {"s": [_completion(hypothesis=f"h{i}") for i in range(3)]}
+    )), encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(doc), encoding="utf-8")
+
+    # The control: on its own the good file passes the determinism check.
+    assert rescore_e2e.main([str(good), "--json", "--check-determinism"]) == 0
+    capsys.readouterr()
+
+    assert rescore_e2e.main(
+        [str(good), str(bad), "--json", "--check-determinism"]
+    ) == 2
+    captured = capsys.readouterr()
+    assert f"refusing {bad}" in captured.err, captured.err
+    assert f"meta.{field}" in captured.err, captured.err
+    assert captured.out == "", "a refused invocation printed results anyway"
 
 
 def test_identical_completions_cannot_produce_within_group_spread(rescore_e2e):
@@ -2779,6 +3005,89 @@ def test_the_rows_that_corpus_check_is_not_about_still_load(triage_reward, tmp_p
     assert labels["triage:a"].cited_detectors == set()
     assert labels["triage:b"].cited_detectors == {"consan:race"}
     assert labels["triage:c"].cited_detectors == {"waitcheck:wait_hazard"}
+
+
+def _triage_corpus(tmp_path, **label):
+    corpus = tmp_path / "triage.jsonl"
+    corpus.write_text(json.dumps({
+        "kind": "triage", "example_id": "triage:x", "workload_family": "f",
+        "label": {"verdict": "fail", "failure_detectors": [],
+                  "error_detectors": [], **label},
+    }) + "\n", encoding="utf-8")
+    return corpus
+
+
+@pytest.mark.parametrize("verdict", ["fail", "error"])
+@pytest.mark.parametrize("field", ["failure_detectors", "error_detectors"])
+@pytest.mark.parametrize(
+    "value", ["consan:1", {"consan:1": True}, ["consan:1", 7]],
+    ids=["bare-string", "object", "non-string-entry"],
+)
+def test_a_corpus_row_whose_detector_list_is_not_a_list_of_ids_is_refused(
+    triage_reward, tmp_path, verdict, field, value
+):
+    """`list()` made `"consan:1"` eight one-character detector IDs.
+
+    On a `fail` row those became the ground truth attribution F1 is scored
+    against, so a model citing the real detector scored against characters.
+    `_detector_list` already refuses this shape on the `result.json` path; the
+    corpus loader coerced it on the way back in.
+
+    The `error` rows pin the ordering: the "error cites nothing" check reads
+    the same two fields, and run ahead of validation it refused with the
+    characters quoted back as the row's citation. The refusal has to name
+    the shape, not a miscitation that is not in the file.
+    """
+    corpus = _triage_corpus(tmp_path, verdict=verdict, **{field: value})
+
+    with pytest.raises(ValueError) as excinfo:
+        triage_reward.load_corpus(corpus)
+
+    message = str(excinfo.value)
+    assert "triage.jsonl:1" in message, message
+    assert field in message, message
+    assert "build_corpus.py" in message, message
+    assert "cites" not in message, message
+
+
+def test_absent_or_null_detector_lists_still_load_as_empty(triage_reward, tmp_path):
+    """Narrowness: absent is a real state for a detector list, unlike a string.
+
+    A clean run fired no failure detectors, and `_detector_list` reads a
+    missing key and a JSON null as that. Refusing them would reject rows that
+    say exactly what the archive meant.
+    """
+    corpus = tmp_path / "triage.jsonl"
+    corpus.write_text("\n".join(json.dumps(row) for row in [
+        {"kind": "triage", "example_id": "triage:a", "workload_family": "f",
+         "label": {"verdict": "pass"}},
+        {"kind": "triage", "example_id": "triage:b", "workload_family": "f",
+         "label": {"verdict": "error", "failure_detectors": None,
+                   "error_detectors": None}},
+    ]) + "\n", encoding="utf-8")
+
+    labels = {eid: label for eid, label, _ in triage_reward.load_corpus(corpus)}
+
+    assert {eid: lb.cited_detectors for eid, lb in labels.items()} == {
+        "triage:a": set(), "triage:b": set(),
+    }
+
+
+def test_a_corpus_row_whose_stale_flag_is_not_a_boolean_is_refused(
+    triage_reward, tmp_path
+):
+    """`bool("false")` is true, so the row printed as STALE when it said it was not."""
+    with pytest.raises(ValueError, match=r"triage\.jsonl:1: stale is a JSON str"):
+        triage_reward.load_corpus(_triage_corpus(tmp_path, stale="false"))
+
+    # Narrowness: both booleans, and absence, which is what `Label` defaults.
+    for stale, expected in ((True, True), (False, False), (None, False)):
+        (_, label, _), = triage_reward.load_corpus(
+            _triage_corpus(tmp_path, stale=stale)
+        )
+        assert label.stale is expected
+    (_, label, _), = triage_reward.load_corpus(_triage_corpus(tmp_path))
+    assert label.stale is False
 
 
 def test_shotgun_counts_the_names_offered_not_the_length_written(run_e2e):
@@ -5630,6 +5939,45 @@ def test_a_group_of_one_is_allowed_and_says_why_it_looks_collapsed(
     ]) == 0
     assert out.exists()
     assert "--samples 1" in capsys.readouterr().err
+
+
+def test_the_rollout_driver_refuses_a_corrupt_label_before_sampling(
+    run_e2e, monkeypatch, tmp_path
+):
+    """`loop_state` still copies the label's detector lists with `list()`.
+
+    That is safe only because every row it sees has been through
+    `triage_reward.load_corpus` first -- `main` drives only the rows the
+    scorer's label map contains -- so a string list there is refused before
+    it can become one-character detector IDs in the prompt the model is
+    shown. Pinned here because that is a property of `main`'s ordering, and a
+    reorder would break it with nothing else going red.
+    """
+    corpus = tmp_path / "triage.jsonl"
+    corpus.write_text(json.dumps({
+        "kind": "triage", "example_id": "triage:s", "scenario_id": "s",
+        "workload_family": "f",
+        "label": {"verdict": "fail", "failure_detectors": "consan:1",
+                  "error_detectors": []},
+    }) + "\n", encoding="utf-8")
+
+    def _no_rollout(*_args, **_kwargs):
+        raise AssertionError("sampled rollouts for a corpus that should be refused")
+
+    monkeypatch.setattr(run_e2e, "drive_proposals", _no_rollout)
+    monkeypatch.setattr(run_e2e, "drive_triage", _no_rollout)
+    monkeypatch.setattr(run_e2e, "RecordingLiteLLM", _no_rollout)
+    monkeypatch.setenv("OPENAI_API_BASE", "unset")
+    monkeypatch.setenv("OPENAI_API_KEY", "unset")
+
+    with pytest.raises(ValueError, match=r"triage\.jsonl:1: failure_detectors"):
+        run_e2e.main([
+            "--corpus", str(corpus),
+            "--base-url", "http://127.0.0.1:1/v1",
+            "--model", "openai/whatever",
+            "--out", str(tmp_path / "out.json"),
+        ])
+    assert not (tmp_path / "out.json").exists()
 
 
 def test_the_models_subcommand_fails_on_an_http_error(tmp_path):

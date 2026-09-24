@@ -67,6 +67,7 @@ from proposal_reward import (  # noqa: E402
     Score,
     delivered,
     score_proposal,
+    string_list,
 )
 
 # The category the contract-perfect reference commits to.
@@ -137,6 +138,23 @@ def reference_policies(offered: list[str]) -> dict[str, str]:
     }
 
 
+def loop_lists(meta: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """The recorded `candidates` and `tried`, or a ``ValueError`` naming the shape.
+
+    Every completion is re-scored against these, so a string here -- read one
+    character per name -- re-grades the whole file: every real mitigation
+    falls outside the offered set, and a `tried` of characters re-offers the
+    mitigation the run had already tried.
+    """
+    try:
+        return (
+            string_list(meta, "candidates", required=True),
+            string_list(meta, "tried", required=True),
+        )
+    except ValueError as exc:
+        raise ValueError(f"meta.{exc}") from exc
+
+
 def rescore_recorded(doc: dict[str, Any]) -> list[dict[str, Any]]:
     """Re-score every *delivered* proposal from its raw completion text.
 
@@ -152,9 +170,7 @@ def rescore_recorded(doc: dict[str, Any]) -> list[dict[str, Any]]:
     here long after the GPU is gone, so the exclusion matters more here than it
     does upstream. `transport_errors` below reports how many were skipped.
     """
-    meta = doc["meta"]
-    candidates = list(meta["candidates"])
-    tried = list(meta["tried"])
+    candidates, tried = loop_lists(doc["meta"])
 
     out: list[dict[str, Any]] = []
     for row in doc["proposals"]:
@@ -196,8 +212,7 @@ def group_by_scenario(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, An
 
 def analyse(doc: dict[str, Any]) -> dict[str, Any]:
     meta = doc["meta"]
-    candidates = list(meta["candidates"])
-    tried = list(meta["tried"])
+    candidates, tried = loop_lists(meta)
     offered = [c for c in candidates if c not in tried and c != "none"]
 
     rows = rescore_recorded(doc)
@@ -405,6 +420,15 @@ def main(argv: list[str] | None = None) -> int:
         if not doc.get("proposals"):
             print(f"no proposals in {path}", file=sys.stderr)
             continue
+        # Refused, not skipped: a file dropped here is a file
+        # `--check-determinism` never sees, so skipping it could turn a run
+        # that fails the check into one that passes. The recorded file is the
+        # only record of a spent GPU run, so the fix is to the file.
+        try:
+            loop_lists(doc["meta"])
+        except ValueError as exc:
+            print(f"refusing {path}: {exc}", file=sys.stderr)
+            return 2
         result = analyse(doc)
         result["source"] = str(path)
         results.append(result)

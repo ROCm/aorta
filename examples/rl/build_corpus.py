@@ -559,6 +559,34 @@ def discard_corpus(out: Path) -> bool:
     return True
 
 
+def publish_target(out: Path) -> Path:
+    """The directory :func:`publish` swaps for ``out``, or a refusal.
+
+    The swap renames whatever ``out`` names, so anything but a directory was
+    moved aside rather than replaced. A regular file became
+    `.<name>.previous-<pid>` with a corpus directory where it had been, and
+    since `rmtree` cannot remove a file, the cleanup's ``ignore_errors``
+    swallowed the failure and left it there, hidden. A symlink to a directory
+    was worse, because the carry-across reads *through* the link while the
+    swap renames the link itself: the link was hidden the same way, and the
+    directory it pointed at kept the previous corpus, readable by anything that
+    follows the link -- a stale corpus beside a build that reported success.
+
+    So a link to a directory is followed, which puts the swap where the reads
+    already were, and anything else that exists is refused: a file, a link to
+    one, a dangling link.
+    """
+    if out.is_symlink() and out.is_dir():
+        return out.resolve()
+    if os.path.lexists(out) and not out.is_dir():
+        raise NotADirectoryError(
+            f"--out {out} exists and is not a directory. A build replaces "
+            "--out wholesale, so it would be moved aside to make room for the "
+            "corpus; pass a directory, or a path that does not exist yet."
+        )
+    return out
+
+
 def publish(out: Path, payload: dict[str, str]) -> None:
     """Write the corpus beside ``out``, then swap it in.
 
@@ -595,7 +623,11 @@ def publish(out: Path, payload: dict[str, str]) -> None:
     Copied rather than moved, so a failure before the swap leaves `out`
     untouched rather than half-emptied; the copies cost a provenance record,
     not a corpus.
+
+    ``out`` goes through :func:`publish_target` first, so by the swap it is a
+    real directory or absent, and so is `previous`.
     """
+    out = publish_target(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     staging = out.with_name(f".{out.name}.staging-{os.getpid()}")
     previous = out.with_name(f".{out.name}.previous-{os.getpid()}")
@@ -622,6 +654,10 @@ def publish(out: Path, payload: dict[str, str]) -> None:
                 previous.rename(out)
             raise
     finally:
+        # Absorbs a scratch path that is already gone -- `staging` after a
+        # successful swap -- and a failed cleanup of the old directory once the
+        # new one is in place, where raising would report a failed build over a
+        # published corpus. Nothing else reaches it now that `out` is checked.
         for scratch in (staging, previous):
             shutil.rmtree(scratch, ignore_errors=True)
 
@@ -637,6 +673,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-meta", type=Path, default=None,
                         help="JSON of provenance shared by every example")
     args = parser.parse_args(argv)
+    # `publish` checks again at the swap. Here so a wrong `--out` is a usage
+    # error before the build rather than a traceback after it.
+    try:
+        publish_target(args.out)
+    except NotADirectoryError as exc:
+        parser.error(str(exc))
 
     baselines = json.loads(args.baselines.read_text(encoding="utf-8"))
     run_meta = (

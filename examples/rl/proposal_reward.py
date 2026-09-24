@@ -961,6 +961,43 @@ def baselines() -> list[dict[str, Any]]:
     return rows
 
 
+def string_list(doc: dict[str, Any], key: str, *, required: bool) -> list[str] | None:
+    """``doc[key]`` as a list of strings, or a refusal naming the shape.
+
+    The stored-field counterpart of ``triage_reward._detector_list``.
+    ``list(doc.get(key) or [])`` accepted anything iterable, so a string became
+    one entry per character: `"hip_launch_blocking"` as `candidates` offered
+    nineteen one-character names, and a valid proposal scored `tier5_available`
+    against them rather than the row being refused.
+
+    ``required`` is per field, because absence means different things. The
+    loop state's `candidates` and `tried` have been written on every row since
+    `build_corpus.py` first wrote one, so a missing or null value is a
+    corrupted row -- and reading `tried` as `[]` is not neutral: it says
+    nothing was tried, re-offers the mitigation the row says already ran, and
+    scores a proposal naming it as available. Optional fields return ``None``
+    when absent or null so the caller can supply its own default.
+    """
+    value = doc.get(key)
+    if value is None:
+        if required:
+            raise ValueError(
+                f"{key} is {'null' if key in doc else 'missing'}, and reading "
+                "it as an empty list would change which mitigations count as "
+                "offered"
+            )
+        return None
+    if not isinstance(value, list):
+        raise ValueError(
+            f"{key} is a JSON {type(value).__name__}, not a list; a bare "
+            "string would be read one character per entry"
+        )
+    bad = [repr(item) for item in value if not isinstance(item, str)]
+    if bad:
+        raise ValueError(f"{key} holds non-string entries: {bad}")
+    return list(value)
+
+
 def load_corpus(
     path: Path, sidecar_files: tuple[Path, ...] = ()
 ) -> list[tuple[Proposal, str]]:
@@ -978,7 +1015,9 @@ def load_corpus(
     hallucinated; see :class:`Proposal`.
     """
     out: list[tuple[Proposal, str]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         line = line.strip()
         if not line:
             continue
@@ -986,16 +1025,26 @@ def load_corpus(
         if row.get("kind") != "proposal":
             continue
         spec = row["proposal"]
+        # Refused rather than skipped, as `triage_reward.load_corpus` refuses a
+        # bad row: the `.jsonl` is generated, so the fix is a rebuild, and a
+        # dropped row would shrink the scored set with nothing to say so.
+        try:
+            candidates = string_list(spec, "candidates", required=True)
+            tried = string_list(spec, "tried", required=True)
+            recorded = string_list(spec, "sidecar_files", required=False)
+        except ValueError as exc:
+            raise ValueError(
+                f"{path}:{line_number}: proposal.{exc}; rebuild it with "
+                "build_corpus.py."
+            ) from exc
         out.append((
             Proposal(
                 name=spec["name"],
                 raw=spec["raw"],
-                candidates=list(spec.get("candidates") or []),
-                tried=list(spec.get("tried") or []),
+                candidates=candidates,
+                tried=tried,
                 sidecar_files=(
-                    tuple(Path(p) for p in spec["sidecar_files"])
-                    if spec.get("sidecar_files")
-                    else sidecar_files
+                    tuple(Path(p) for p in recorded) if recorded else sidecar_files
                 ),
             ),
             row.get("workload_family", "unknown"),
