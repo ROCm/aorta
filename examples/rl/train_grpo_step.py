@@ -65,7 +65,8 @@ Every iteration, before a checkpoint is written:
     unchanged did not receive the update.
 ``frozen_control_unchanged``
     ``model.embed_tokens`` is frozen as a negative control -- the largest single
-    tensor -- and must be bit-identical afterwards. Without a frozen set,
+    tensor -- and must be bit-identical, byte for byte, to the copy taken at
+    load: an order-insensitive fingerprint would pass a permuted tensor. Without a frozen set,
     "only what the optimiser touched changed" has nothing to contrast against,
     so the run refuses to start without one.
 ``gradient_is_finite_and_nonzero``
@@ -415,11 +416,29 @@ def fingerprint(t: Any) -> tuple[float, float, float]:
     return float(f.sum().item()), float(f.pow(2).sum().item()), float(f.abs().sum().item())
 
 
+def bit_identical(a: Any, b: Any) -> bool:
+    """Whether two tensors hold exactly the same bits.
+
+    The frozen control's claim is "bit-identical", and neither a fingerprint
+    nor ``torch.equal`` makes it: three aggregate moments are unchanged by a
+    permutation, and ``torch.equal`` treats ``-0.0`` as ``0.0`` and NaN as
+    unequal to itself. Comparing the raw bytes makes it exactly. A tensor that
+    is not contiguous is copied first, which only the check pays for.
+    """
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    return bool(
+        torch.equal(
+            a.detach().contiguous().view(torch.uint8),
+            b.detach().contiguous().view(torch.uint8),
+        )
+    )
+
+
 def update_checks(
     fp_pre: dict[str, tuple[float, float, float]],
     fp_post: dict[str, tuple[float, float, float]],
-    frozen_pre: dict[str, tuple[float, float, float]],
-    frozen_post: dict[str, tuple[float, float, float]],
+    frozen_identical: dict[str, bool],
     grad_norm: float,
     cosine: float,
 ) -> dict[str, dict[str, Any]]:
@@ -440,7 +459,7 @@ def update_checks(
     non_finite = sorted(
         n for n, moments in fp_post.items() if not all(math.isfinite(m) for m in moments)
     )
-    frozen_moved = sorted(n for n in frozen_pre if frozen_pre[n] != frozen_post.get(n))
+    frozen_moved = sorted(n for n, same in frozen_identical.items() if not same)
     finite = grad_norm == grad_norm and grad_norm not in (float("inf"), float("-inf"))
     return {
         "every_trained_tensor_moved": {
@@ -455,9 +474,9 @@ def update_checks(
             "passed": bool(fp_post) and not non_finite,
         },
         "frozen_control_unchanged": {
-            "tensors": sorted(frozen_pre),
+            "tensors": sorted(frozen_identical),
             "moved": frozen_moved,
-            "passed": bool(frozen_pre) and not frozen_moved,
+            "passed": bool(frozen_identical) and not frozen_moved,
         },
         "gradient_is_finite_and_nonzero": {
             "grad_norm": grad_norm,
@@ -637,6 +656,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
         print("[refused] no frozen tensor, so 'only what the optimiser touched' has no "
               "control", file=sys.stderr)
         return EXIT_REFUSED
+    # One exact copy of the frozen control, taken before any step, on the same
+    # device: the control is the largest single tensor, and comparing it where
+    # it lives costs one extra copy of it rather than a transfer per iteration.
+    frozen_reference = {n: p.detach().clone() for n, p in frozen.items()}
 
     # Eight tensors spanning depth, kept exactly so the realised delta can be
     # compared with the gradient that produced it.
@@ -801,7 +824,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
 
             # ---- Adam, and the audit ---------------------------------------
             fp_pre = {n: fingerprint(t) for n, t in trained.items()}
-            frozen_pre = {n: fingerprint(t) for n, t in frozen.items()}
             audit_pre = {n: trained[n].detach().clone() for n in audit_names}
             audit_grad = {
                 n: (trained[n].grad.detach().clone() if trained[n].grad is not None
@@ -816,7 +838,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
                             p.grad.mul_(coef)
                 opt.step()
             fp_post = {n: fingerprint(t) for n, t in trained.items()}
-            frozen_post = {n: fingerprint(t) for n, t in frozen.items()}
+            # Against the copy taken at load, byte for byte: the control must
+            # never move, so every iteration is checked against the start.
+            frozen_identical = {
+                n: bit_identical(t, frozen_reference[n]) for n, t in frozen.items()
+            }
             dot = nrm_d = nrm_g = 0.0
             for n in audit_names:
                 d = (trained[n].detach() - audit_pre[n]).double()
@@ -825,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
                 nrm_d += float(d.pow(2).sum().item())
                 nrm_g += float(g.pow(2).sum().item())
             cosine = dot / ((nrm_d**0.5 * nrm_g**0.5) + 1e-30)
-            row["checks"] = update_checks(fp_pre, fp_post, frozen_pre, frozen_post,
+            row["checks"] = update_checks(fp_pre, fp_post, frozen_identical,
                                           grad_norm, cosine)
             for key, check in row["checks"].items():
                 mark = "PASS" if check["passed"] else ("warn" if check.get("advisory") else "FAIL")

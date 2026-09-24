@@ -267,10 +267,9 @@ def fp(*values):
     return {f"t{i}": (v, v, v) for i, v in enumerate(values)}
 
 
-def checks(pre, post, frozen_pre=None, frozen_post=None, grad_norm=1.0, cosine=0.5):
-    frozen_pre = {"emb": (1.0, 1.0, 1.0)} if frozen_pre is None else frozen_pre
-    frozen_post = dict(frozen_pre) if frozen_post is None else frozen_post
-    return trainer.update_checks(pre, post, frozen_pre, frozen_post, grad_norm, cosine)
+def checks(pre, post, frozen=None, grad_norm=1.0, cosine=0.5):
+    frozen = {"emb": True} if frozen is None else frozen
+    return trainer.update_checks(pre, post, frozen, grad_norm, cosine)
 
 
 def gating_passed(result):
@@ -305,12 +304,12 @@ def test_an_unmoved_trained_tensor_fails():
 
 
 def test_a_moved_frozen_control_fails():
-    result = checks(fp(1.0), fp(1.1), frozen_post={"emb": (1.0, 1.0, 1.5)})
+    result = checks(fp(1.0), fp(1.1), frozen={"emb": False})
     assert not result["frozen_control_unchanged"]["passed"]
 
 
 def test_no_frozen_control_is_a_failure_not_a_vacuous_pass():
-    assert not checks(fp(1.0), fp(1.1), frozen_pre={}, frozen_post={})[
+    assert not checks(fp(1.0), fp(1.1), frozen={})[
         "frozen_control_unchanged"]["passed"]
 
 
@@ -325,6 +324,31 @@ def test_a_negative_cosine_is_advisory_and_does_not_gate():
     assert result["step_descends_the_gradient"]["advisory"] is True
     assert gating_passed(result)
     assert "step_descends_the_gradient" not in trainer.GATING_CHECKS
+
+
+def test_the_frozen_check_sees_a_permutation_the_fingerprint_does_not():
+    """The review's counterexample: [1, 2, 3] -> [3, 2, 1] keeps every moment."""
+    a = torch.tensor([1.0, 2.0, 3.0])
+    b = torch.tensor([3.0, 2.0, 1.0])
+    assert trainer.fingerprint(a) == trainer.fingerprint(b)
+    assert not trainer.bit_identical(a, b)
+
+
+def test_the_frozen_check_is_about_bits_not_values():
+    assert not trainer.bit_identical(torch.tensor([0.0]), torch.tensor([-0.0]))
+    nan = torch.tensor([float("nan")])
+    assert trainer.bit_identical(nan, nan.clone()), "the same NaN bits have not moved"
+    assert not trainer.bit_identical(torch.zeros(2), torch.zeros(2, dtype=torch.float64))
+    # Same element size and the same bytes: only the dtype check separates them.
+    assert not trainer.bit_identical(torch.zeros(2), torch.zeros(2, dtype=torch.int32))
+    assert not trainer.bit_identical(torch.zeros(2), torch.zeros(1, 2))
+
+
+def test_an_untouched_tensor_is_bit_identical_to_its_copy():
+    """Narrowness: a clone of an unchanged tensor, contiguous or not, passes."""
+    t = torch.randn(4, 3)
+    assert trainer.bit_identical(t, t.clone())
+    assert trainer.bit_identical(t.t(), t.clone().t())
 
 
 def test_the_fingerprint_sees_a_change_that_preserves_the_sum():
