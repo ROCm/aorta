@@ -235,6 +235,8 @@ class _Args:
 
 #: What the corpus on disk digests to, in these tests.
 DIGESTS = {"a": "digest-a", "b": "digest-b"}
+#: The BLAS backend this process reports, in these tests.
+BACKEND = {"torch": "2.x", "preferred_blas_library": "backend-a", "env": {}}
 
 
 def column_file(tmp_path: Path, **config) -> Path:
@@ -242,7 +244,7 @@ def column_file(tmp_path: Path, **config) -> Path:
         "init_from": "/ckpt/last", "model": "Qwen/Qwen3-8B", "param_dtype": "float32",
         "episodes_per_scenario": 64, "max_episode_steps": 8, "temperature": 0.7,
         "top_p": 0.95, "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923,
-        "scenarios": ["a"], "corpus": dict(DIGESTS),
+        "scenarios": ["a"], "corpus": dict(DIGESTS), "blas_backend": dict(BACKEND),
     }
     base.update(config)
     path = tmp_path / "before.json"
@@ -252,7 +254,7 @@ def column_file(tmp_path: Path, **config) -> Path:
 
 def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
     reused = eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                           DIGESTS)
+                                           DIGESTS, BACKEND)
     assert reused["config"]["init_from"] == "/ckpt/last"
 
 
@@ -264,21 +266,21 @@ def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
 def test_a_column_written_under_different_settings_is_refused(tmp_path, field, value):
     with pytest.raises(ValueError, match=field):
         eval_episodes.reusable_column(column_file(tmp_path, **{field: value}), "/ckpt/last",
-                                      _Args(), DIGESTS)
+                                      _Args(), DIGESTS, BACKEND)
 
 
 def test_the_base_model_column_matches_by_model_name(tmp_path):
     args = _Args()
     assert eval_episodes.column_source(None, args) == "Qwen/Qwen3-8B"
     assert eval_episodes.reusable_column(column_file(tmp_path, init_from="Qwen/Qwen3-8B"),
-                                         "Qwen/Qwen3-8B", args, DIGESTS)
+                                         "Qwen/Qwen3-8B", args, DIGESTS, BACKEND)
 
 
 def test_a_narrowed_scenario_set_is_checked_against_the_flag(tmp_path):
     path = column_file(tmp_path, scenarios=["a", "b"])
     with pytest.raises(ValueError, match="--scenarios asked for"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS)
-    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS, BACKEND)
+    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS, BACKEND)
 
 
 def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
@@ -288,9 +290,45 @@ def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
 
     scenarios = [SimpleNamespace(scenario_id="a", digest="digest-a"),
                  SimpleNamespace(scenario_id="b", digest="digest-b")]
-    payload = eval_episodes._column_payload(_Args(), scenarios, [], [], Path("/ckpt/last"))
+    payload = eval_episodes._column_payload(_Args(), scenarios, [], [], Path("/ckpt/last"),
+                                            BACKEND)
+    assert payload["config"]["blas_backend"] == BACKEND
     assert payload["config"]["corpus"] == DIGESTS
     assert payload["config"]["scenarios"] == ["a", "b"]
+
+
+def test_a_column_computed_with_another_blas_backend_is_refused(tmp_path):
+    other = dict(BACKEND, preferred_blas_library="backend-b")
+    with pytest.raises(ValueError, match="BLAS backend"):
+        eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
+                                      other)
+
+
+def test_a_column_that_records_no_blas_backend_is_refused(tmp_path):
+    path = column_file(tmp_path)
+    doc = json.loads(path.read_text())
+    del doc["config"]["blas_backend"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="records no BLAS backend"):
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND)
+
+
+def test_a_blas_environment_variable_is_part_of_the_backend(monkeypatch):
+    monkeypatch.setenv("SOME_BLAS_SETTING", "1")
+    assert eval_episodes.blas_backend()["env"].get("SOME_BLAS_SETTING") == "1"
+    monkeypatch.setenv("UNRELATED_SETTING", "1")
+    assert "UNRELATED_SETTING" not in eval_episodes.blas_backend()["env"]
+
+
+def test_columns_computed_with_different_backends_are_refused():
+    with pytest.raises(ValueError, match="different BLAS backends"):
+        eval_episodes.compare(run([group("a")], blas_backend={"x": 1}),
+                              run([group("a")], blas_backend={"x": 2}))
+    with pytest.raises(ValueError, match="different BLAS backends"):
+        eval_episodes.compare(run([group("a")]), run([group("a")], blas_backend={"x": 1}))
+    same = eval_episodes.compare(run([group("a")], blas_backend={"x": 1}),
+                                 run([group("a")], blas_backend={"x": 1}))
+    assert same["backend_verified"] is True
 
 
 def test_a_column_that_records_no_corpus_is_refused(tmp_path):
@@ -300,20 +338,20 @@ def test_a_column_that_records_no_corpus_is_refused(tmp_path):
     del doc["config"]["corpus"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no corpus digest"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND)
 
 
 def test_a_column_scored_against_other_archives_is_refused(tmp_path):
     """Every setting matches; the ground truth does not."""
     with pytest.raises(ValueError, match=r"different archives for \['a'\]"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                      {"a": "another-digest", "b": "digest-b"})
+                                      {"a": "another-digest", "b": "digest-b"}, BACKEND)
 
 
 def test_only_the_scenarios_the_column_covers_are_checked(tmp_path):
     """Narrowness: a changed archive the column never scored is not its business."""
     assert eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                         {"a": "digest-a", "b": "changed"})
+                                         {"a": "digest-a", "b": "changed"}, BACKEND)
 
 
 class ReachedError(Exception):
@@ -324,6 +362,7 @@ def _stub_evaluate(monkeypatch):
     import episode_env
 
     monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
+    monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
     calls = []
 
     def fake(checkpoint, args, done=None, on_progress=None):

@@ -45,6 +45,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 import zlib
 from pathlib import Path
@@ -77,6 +78,36 @@ class _GenArgs:
 
     def __init__(self, **kw: Any) -> None:
         self.__dict__.update(kw)
+
+
+def blas_backend() -> dict[str, Any]:
+    """Which GEMM backend this process would compute with, as far as it can tell.
+
+    A column's numbers come from matrix multiplies, and the BLAS library torch
+    dispatches them to is a property of the process, not of the weights: two
+    columns computed through different libraries are not measuring only the
+    weights. Recorded are the torch version, what
+    ``torch.backends.cuda.preferred_blas_library()`` reports, and every
+    environment variable with ``BLAS`` in its name, since those are how a
+    library is selected or configured from outside. Where torch or the query is
+    unavailable the entry says so rather than being left out, so its absence
+    can never read as a match.
+    """
+    try:
+        import torch
+    except ImportError:
+        return {"torch": None, "preferred_blas_library": "torch not importable",
+                "env": _blas_env()}
+    try:
+        preferred = str(torch.backends.cuda.preferred_blas_library())
+    except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+        preferred = f"unavailable ({type(exc).__name__})"
+    return {"torch": str(torch.__version__), "preferred_blas_library": preferred,
+            "env": _blas_env()}
+
+
+def _blas_env() -> dict[str, str]:
+    return {k: v for k, v in sorted(os.environ.items()) if "BLAS" in k.upper()}
 
 
 def two_proportion_z(hits_a: int, n_a: int, hits_b: int, n_b: int) -> float:
@@ -173,6 +204,16 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             "a paired comparison needs the same ground truth on both sides"
         )
 
+    # And the same GEMM backend, for the same reason. Two legacy columns that
+    # predate the field cannot be checked, and the result says so.
+    backend_a = before["config"].get("blas_backend")
+    backend_b = after["config"].get("blas_backend")
+    if (backend_a is not None or backend_b is not None) and backend_a != backend_b:
+        raise ValueError(
+            f"the two columns were computed with different BLAS backends ({backend_a!r} vs "
+            f"{backend_b!r}): a paired comparison needs the same backend on both sides"
+        )
+
     rows = []
     pooled = [0, 0, 0, 0]
     for scenario in sorted(a):
@@ -194,6 +235,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         "before": before["config"]["init_from"],
         "after": after["config"]["init_from"],
         "corpus_verified": corpus_a is not None,
+        "backend_verified": backend_a is not None,
         "scenarios": rows,
         "pooled_step1_before": (pooled[0] / pooled[1]) if pooled[1] else None,
         "pooled_step1_after": (pooled[2] / pooled[3]) if pooled[3] else None,
@@ -235,6 +277,9 @@ def print_comparison(result: dict[str, Any]) -> None:
     print("  ⚠ Not a held-out set: the policy trained on all of these scenarios. What is\n"
           "    controlled is that the weights are fixed and the two columns are paired on\n"
           "    seed, scenario, episode count and sampling parameters.")
+    if not result.get("backend_verified"):
+        print("  ⚠ Neither column records its BLAS backend, so the two are not verified\n"
+              "    to have computed with the same one.")
     if not result.get("corpus_verified"):
         print("  ⚠ Neither column records which archives it was scored against, so the\n"
               "    two are not verified to share a ground truth.")
@@ -278,7 +323,11 @@ def _config(args: argparse.Namespace, source: str) -> dict[str, Any]:
 
 
 def reusable_column(
-    path: Path, source: str, args: argparse.Namespace, digests: dict[str, str]
+    path: Path,
+    source: str,
+    args: argparse.Namespace,
+    digests: dict[str, str],
+    backend: dict[str, Any],
 ) -> dict[str, Any]:
     """Load a column already on disk, or refuse it. Never silently recomputes.
 
@@ -301,6 +350,10 @@ def reusable_column(
     a column is reused only if it records the same digest for every scenario it
     covers, and a column that records none is refused: there is no way to tell
     which answer key it was scored against.
+
+    ``backend`` is :func:`blas_backend` of this process, checked the same way:
+    a column computed through another BLAS backend, or one that records none,
+    is refused.
     """
     column = json.loads(path.read_text())
     want = _config(args, source)
@@ -313,6 +366,17 @@ def reusable_column(
         raise ValueError(
             f"{path} was produced under different settings and cannot be reused -- "
             + "; ".join(differing) + ". Point --out somewhere else."
+        )
+    recorded_backend = column["config"].get("blas_backend")
+    if recorded_backend is None:
+        raise ValueError(
+            f"{path} records no BLAS backend, so whether it was computed the way this "
+            "run would compute cannot be checked. Point --out somewhere else."
+        )
+    if recorded_backend != backend:
+        raise ValueError(
+            f"{path} was computed with BLAS backend {recorded_backend!r}, and this run "
+            f"would use {backend!r}. Point --out somewhere else."
         )
     recorded = column["config"].get("corpus")
     if recorded is None:
@@ -362,6 +426,7 @@ def _column_payload(
     groups: list[dict[str, Any]],
     wire: list[dict[str, Any]],
     checkpoint: Path | None,
+    backend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The on-disk shape of one column.
 
@@ -372,6 +437,7 @@ def _column_payload(
     config = _config(args, column_source(checkpoint, args))
     config["scenarios"] = [s.scenario_id for s in scenarios]
     config["corpus"] = {s.scenario_id: s.digest for s in scenarios}
+    config["blas_backend"] = blas_backend() if backend is None else backend
     return {"config": config, "groups": groups, "wire": wire}
 
 
@@ -463,7 +529,8 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
 
         only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
         done = reusable_column(
-            path, source, args, episode_env.corpus_digests(args.corpus_root, only=only)
+            path, source, args, episode_env.corpus_digests(args.corpus_root, only=only),
+            blas_backend(),
         )
         covered = {g["scenario_id"] for g in done["groups"]}
         if not set(done["config"]["scenarios"]) - covered:
