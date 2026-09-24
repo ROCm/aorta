@@ -70,7 +70,7 @@ def describe_tools(tools: dict[str, object] | None = None) -> dict[str, str]:
     """Each tool's one-line description, by name, in a stable order.
 
     Split out of :func:`catalogue` when the selector gained a second consumer:
-    the LLM path wants one block of text to put in a prompt, and the Laya path
+    the LLM path wants one block of text to put in a prompt, and the local-classifier path
     wants one question per tool. Deriving the second from the first would mean
     parsing the block back apart, and writing it twice would mean two answers to
     "what does this tool say it does" -- which is the drift that makes a

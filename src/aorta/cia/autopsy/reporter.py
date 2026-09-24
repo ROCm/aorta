@@ -18,7 +18,7 @@ def build_report(
     tooling_gaps: list[dict[str, Any]],
     confidence_source: dict[str, Any] | None = None,
     escalation: dict[str, Any] | None = None,
-    laya: dict[str, Any] | None = None,
+    local_classifier: dict[str, Any] | None = None,
     rationale_caveat: str = "",
 ) -> dict[str, Any]:
     """Assemble the Autopsy report.
@@ -32,7 +32,7 @@ def build_report(
     did.
 
     Recording provenance inline rather than beside the run is rule 2 of
-    Decision 22 in ``docs/laya-packaging.md``: a report is copied into a ticket
+    Decision 22 in ``docs/local-classifier-packaging.md``: a report is copied into a ticket
     and read on its own, and until now it could not answer "which thing said
     this?" for a field two different sources have always been able to write.
 
@@ -62,6 +62,6 @@ def build_report(
         report["confidence_source"] = confidence_source
     if escalation:
         report["escalation"] = escalation
-    if laya:
-        report["laya"] = laya
+    if local_classifier:
+        report["local_classifier"] = local_classifier
     return report

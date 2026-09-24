@@ -13,7 +13,7 @@ from aorta.cia.autopsy.adapters.base import resolve_in_bundle
 from aorta.cia.llm import ensure_configured
 
 if TYPE_CHECKING:  # pragma: no cover - the annotation must not cost an import
-    from aorta.laya.predictor import LayaPredictor, Noul
+    from aorta.local_classifier.predictor import DecisionPredictor, Noul
 
 # Extensions considered log files by default
 DEFAULT_LOG_EXTENSIONS = {".log", ".txt", ".out", ".err"}
@@ -22,18 +22,18 @@ DEFAULT_MAX_FILES = 8
 # Directories that never hold training logs but do hold thousands of .txt files.
 SKIP_DIR_PARTS = {".git", ".venv", "site-packages", "node_modules", "__pycache__"}
 
-#: What the Laya tier resolves when the config names no checkpoint.
-DEFAULT_LAYA_BACKEND = "laya-typed-decisions"
+#: What the local-classifier tier resolves when the config names no checkpoint.
+DEFAULT_CLASSIFIER_BACKEND = "laya-typed-decisions"
 
 #: How sure the classifier has to be that a listed file is a log before Watch
 #: watches it.
 #:
 #: A placeholder and not a fitted number. The temperature refit that makes a
-#: Laya probability mean what it says is per (question type, option count) and
+#: local-classifier probability mean what it says is per (question type, option count) and
 #: has not been run against anything in this repository, so 0.5 is here as the
 #: indifference point of a probability rather than as a measurement. That is
-#: also why ``laya.enabled`` ships false: the tier is wired, not justified.
-DEFAULT_LAYA_MIN_PROBABILITY = 0.5
+#: also why ``local_classifier.enabled`` ships false: the tier is wired, not justified.
+DEFAULT_CLASSIFIER_MIN_PROBABILITY = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -152,15 +152,15 @@ class LogDiscovery(dspy.Signature):
 #: The tier's question, with ``{label}`` naming one entry of the listing.
 #:
 #: **One definition, here, and the corpus builder imports it.** The alternative
-#: had already happened: ``aorta.laya.corpus.log_finder`` had independently
+#: had already happened: ``aorta.local_classifier.corpus.log_finder`` had independently
 #: written its own phrasing, so a temperature fitted on that corpus would have
 #: been fitted against a question this tier never asks. That does not fail, it
 #: answers slightly worse, for a reason nobody would go looking for -- the same
 #: defect Track B found in the proposer and Phase 5 found in chat. The question
 #: belongs to the module that owns the decision, which is this one; the seam in
-#: :mod:`aorta.laya.predictor` deliberately holds none of them, because it
+#: :mod:`aorta.local_classifier.predictor` deliberately holds none of them, because it
 #: serves three tracks and a string registry is what it would become.
-#: ``tests/cia/test_laya_questions.py`` fails if this text appears anywhere else.
+#: ``tests/cia/test_local_classifier_questions.py`` fails if this text appears anywhere else.
 #:
 #: A template rather than a fixed string, and that is what makes the shape one
 #: forward pass rather than N. Questions about one state share its encoding, so
@@ -173,7 +173,7 @@ class LogDiscovery(dspy.Signature):
 #: Worded from the same four things ``LogDiscovery`` above asks for -- loss,
 #: steps, throughput, faults -- because the two tiers have to be answering the
 #: same question for a comparison between them to mean anything.
-LAYA_USEFUL_QUESTION_TEMPLATE = (
+CLASSIFIER_USEFUL_QUESTION_TEMPLATE = (
     "In the file listing above, is {label} a training log worth watching "
     "for loss values, step counts, throughput, GPU errors or stack traces?"
 )
@@ -182,8 +182,8 @@ LAYA_USEFUL_QUESTION_TEMPLATE = (
 #: checkpoints and placeholders, which is what the extension scan's exclude list
 #: and its hundred-byte floor already encode; a noul with a gloss on one side
 #: only asks the model to guess what the other side of the question is.
-LAYA_USEFUL_WHEN_TRUE = "Watch would read useful training output out of this file"
-LAYA_USEFUL_WHEN_FALSE = (
+CLASSIFIER_USEFUL_WHEN_TRUE = "Watch would read useful training output out of this file"
+CLASSIFIER_USEFUL_WHEN_FALSE = (
     "a checkpoint, a binary, an empty placeholder, or an unrelated file"
 )
 
@@ -195,12 +195,12 @@ def useful_question(label: str) -> Noul:
     question is asked -- here at inference, and in the corpus builder that
     labels it.
     """
-    from aorta.laya.predictor import Noul
+    from aorta.local_classifier.predictor import Noul
 
     return Noul(
-        question=LAYA_USEFUL_QUESTION_TEMPLATE.format(label=label),
-        when_true=LAYA_USEFUL_WHEN_TRUE,
-        when_false=LAYA_USEFUL_WHEN_FALSE,
+        question=CLASSIFIER_USEFUL_QUESTION_TEMPLATE.format(label=label),
+        when_true=CLASSIFIER_USEFUL_WHEN_TRUE,
+        when_false=CLASSIFIER_USEFUL_WHEN_FALSE,
     )
 
 
@@ -236,14 +236,14 @@ class LogFinder(dspy.Module):
       extensions — file extensions to include (fallback if paths absent)
       exclude    — patterns to never watch
       max_files  — cap on number of files returned
-      laya       — enabled / backend / min_probability for the tier 3 classifier
+      local_classifier — enabled / backend / min_probability for the tier 3 classifier
     """
 
     def __init__(
         self,
         config: dict[str, Any] | None = None,
         *,
-        predictor: LayaPredictor | None = None,
+        predictor: DecisionPredictor | None = None,
     ):
         ensure_configured()
         cfg = config or {}
@@ -253,20 +253,22 @@ class LogFinder(dspy.Module):
         self.max_files: int = int(cfg.get("max_files", DEFAULT_MAX_FILES))
         self._discovery = dspy.Predict(LogDiscovery)
 
-        laya_cfg = cfg.get("laya", {}) or {}
-        self.laya_enabled: bool = bool(laya_cfg.get("enabled", False))
-        self.laya_backend: str = str(laya_cfg.get("backend", DEFAULT_LAYA_BACKEND))
-        self.laya_min_probability: float = float(
-            laya_cfg.get("min_probability", DEFAULT_LAYA_MIN_PROBABILITY)
+        local_classifier_cfg = cfg.get("local_classifier", {}) or {}
+        self.local_classifier_enabled: bool = bool(local_classifier_cfg.get("enabled", False))
+        self.local_classifier_backend: str = str(
+            local_classifier_cfg.get("backend", DEFAULT_CLASSIFIER_BACKEND)
+        )
+        self.local_classifier_min_probability: float = float(
+            local_classifier_cfg.get("min_probability", DEFAULT_CLASSIFIER_MIN_PROBABILITY)
         )
         # *predictor* is the injection point, the same one ``LayaAgentPredictor``
         # offers through ``load=``: a test drives the tier with
-        # ``FakeLayaPredictor`` and no checkpoint goes anywhere near CI.
+        # ``FakeDecisionPredictor`` and no checkpoint goes anywhere near CI.
         self._predictor = predictor
         # One LogFinder serves the whole poll loop, so a checkpoint that is not
         # staged on this node must be discovered once rather than on every
         # ambiguous directory for the life of the process.
-        self._laya_unavailable = False
+        self._local_classifier_unavailable = False
 
     def find(
         self,
@@ -282,7 +284,7 @@ class LogFinder(dspy.Module):
           0. Scheduler-native query (scontrol / kubectl) — most reliable, no guessing
           1. Explicit config path hints
           2. Extension-based scan
-          3. Laya, or the LLM, over the dir listing
+          3. The local classifier, or the LLM, over the dir listing
 
         **Nothing in this method runs for a job that declared a log.** The only
         caller is the poll loop, which prefers ``job.log_path`` outright, and
@@ -344,8 +346,8 @@ class LogFinder(dspy.Module):
         if not candidates:
             return by_ext[: self.max_files]
 
-        if self.laya_enabled:
-            ranked = self._rank_with_laya(listing, candidates)
+        if self.local_classifier_enabled:
+            ranked = self._rank_with_local_classifier(listing, candidates)
             if ranked:
                 return ranked[: self.max_files]
         else:
@@ -358,7 +360,7 @@ class LogFinder(dspy.Module):
     def _candidates(self, listing: str, job_dir: Path) -> list[tuple[str, Path]]:
         """The files tier 3 is allowed to return, as ``(label, resolved path)``.
 
-        This is the security fix, and it is deliberately not behind the Laya
+        This is the security fix, and it is deliberately not behind the local-classifier
         flag. The hazard is not that an LLM ranks badly, it is that it answers
         in free text: shown a listing and asked which files are logs, it can
         name a path that was never in the listing, and ``is_file()`` plus the
@@ -374,7 +376,7 @@ class LogFinder(dspy.Module):
 
         Parsed back out of the rendered listing rather than re-walking the
         directory, and for the same reason the corpus builder in
-        ``aorta.laya.corpus.log_finder`` parses it the same way: a second walk
+        ``aorta.local_classifier.corpus.log_finder`` parses it the same way: a second walk
         can return a path the listing does not contain, which is the one
         property this is here to remove.
 
@@ -433,7 +435,7 @@ class LogFinder(dspy.Module):
             return []
         return result
 
-    def _rank_with_laya(
+    def _rank_with_local_classifier(
         self, listing: str, candidates: list[tuple[str, Path]]
     ) -> list[Path]:
         """Score every listed file in one forward pass and rank by p(worth watching).
@@ -461,11 +463,11 @@ class LogFinder(dspy.Module):
         hardware. The ``_dir_listing`` cap of sixty lines bounds it; nothing
         here claims the bound is comfortable.
         """
-        predictor = self._laya()
+        predictor = self._local_classifier()
         if predictor is None:
             return []
         try:
-            from aorta.laya.predictor import NoulAnswer, ask_one
+            from aorta.local_classifier.predictor import NoulAnswer, ask_one
 
             answers = ask_one(
                 predictor, listing, [useful_question(label) for label, _ in candidates]
@@ -477,16 +479,16 @@ class LogFinder(dspy.Module):
                         f"{type(predictor).__name__} answered a noul with "
                         f"{type(answer).__name__}"
                     )
-                if answer.at(self.laya_min_probability):
+                if answer.at(self.local_classifier_min_probability):
                     scored.append((answer.probability, path))
         except Exception as exc:
             # Said out loud, once, rather than degraded silently. An operator
             # who turned this on and got the extension scan anyway has no other
             # way to find out; a warning is the difference between "the weights
             # are not staged on this node" and "discovery is worse than it was".
-            self._laya_unavailable = True
+            self._local_classifier_unavailable = True
             print(
-                f"[watch] the Laya log-finder tier failed and will not be "
+                f"[watch] the local-classifier log-finder tier failed and will not be "
                 f"retried this run; falling back to the extension scan: "
                 f"{type(exc).__name__}: {exc}"
             )
@@ -495,29 +497,29 @@ class LogFinder(dspy.Module):
         # listing gave them rather than an order that changes between polls.
         return [path for _probability, path in sorted(scored, key=lambda pair: -pair[0])]
 
-    def _laya(self) -> LayaPredictor | None:
+    def _local_classifier(self) -> DecisionPredictor | None:
         """The predictor, built once, or None when this tier cannot run.
 
         Imported inside the method, not at module scope. ``aorta.cia.watch`` is
         on the import path of every Watch poll and of ``aorta.cli`` through the
         chat tools, and the loader behind this name brings torch; Decision 22
-        in ``docs/laya-packaging.md`` is the whole argument, and
+        in ``docs/local-classifier-packaging.md`` is the whole argument, and
         ``tests/cli/test_chat_boundaries.py`` is what enforces it.
 
         A failed load is remembered rather than retried. The alternative is a
         node with no staged weights paying a load attempt per ambiguous job for
         as long as Watch runs.
         """
-        if self._laya_unavailable:
+        if self._local_classifier_unavailable:
             return None
         if self._predictor is None:
             try:
-                from aorta.laya.predictor import make_predictor
+                from aorta.local_classifier.predictor import make_predictor
 
-                if self.laya_backend == "fake":
-                    # Refused rather than resolved, matching the watch.laya
+                if self.local_classifier_backend == "fake":
+                    # Refused rather than resolved, matching the watch.local_classifier
                     # section of watch_config.yaml. ``make_predictor`` would
-                    # hand back ``FakeLayaPredictor`` quite happily, and it
+                    # hand back ``FakeDecisionPredictor`` quite happily, and it
                     # answers from a hash of the question and the listing --
                     # stable, arbitrary, and indistinguishable from a model
                     # with an opinion. Here that is a hash choosing which files
@@ -527,12 +529,12 @@ class LogFinder(dspy.Module):
                         "the fake predictor ranks by hash; pass predictor= to "
                         "drive this tier in a test"
                     )
-                self._predictor = make_predictor(self.laya_backend)
+                self._predictor = make_predictor(self.local_classifier_backend)
             except Exception as exc:
-                self._laya_unavailable = True
+                self._local_classifier_unavailable = True
                 print(
-                    f"[watch] could not build the Laya log-finder predictor "
-                    f"{self.laya_backend!r}; falling back to the extension "
+                    f"[watch] could not build the local-classifier log-finder predictor "
+                    f"{self.local_classifier_backend!r}; falling back to the extension "
                     f"scan: {type(exc).__name__}: {exc}"
                 )
                 return None

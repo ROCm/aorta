@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, Any
 
 import dspy
 
-from aorta.agent.llm import AUTOPSY_CATEGORIES, LAYA_CATEGORY_QUESTION
+from aorta.agent.llm import AUTOPSY_CATEGORIES, CLASSIFIER_CATEGORY_QUESTION
 from aorta.cia.autopsy.adapters.base import resolve_in_bundle as _resolve_in_bundle
 from aorta.cia.llm import build_lm
 
 if TYPE_CHECKING:  # Annotations only: ``from __future__ import annotations``
     # means this costs nothing at run time, which is what the import-boundary
     # probe in tests/cli/test_chat_boundaries.py measures.
-    from aorta.laya.predictor import Choice, LayaPredictor
+    from aorta.local_classifier.predictor import Choice, DecisionPredictor
 
 
 # ---------------------------------------------------------------------------
@@ -152,16 +152,16 @@ def coerce_category(category: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The Laya tier — the category and its confidence, from a calibrated encoder
+# The local-classifier tier — the category and its confidence, from a calibrated encoder
 # ---------------------------------------------------------------------------
 
 #: The checkpoint the tier resolves when nothing names one. Spelled the same as
 #: ``aorta.cia.watch.watcher`` and ``aorta.cia.watch.log_finder`` spell it, so
 #: the three CIA surfaces read the same way.
-DEFAULT_LAYA_BACKEND = "laya-typed-decisions"
+DEFAULT_CLASSIFIER_BACKEND = "laya-typed-decisions"
 
 #: The three environment variables that configure this tier, mirroring the
-#: ``watch.laya`` and ``log_finder.laya`` blocks of ``watch_config.yaml``:
+#: ``watch.local_classifier`` and ``log_finder.local_classifier`` blocks of ``watch_config.yaml``:
 #: ``enabled`` / ``backend`` / one threshold named for what it gates.
 #:
 #: An environment variable rather than a config key because Autopsy has no
@@ -169,28 +169,31 @@ DEFAULT_LAYA_BACKEND = "laya-typed-decisions"
 #: ``trigger_autopsy``, neither of which carries settings, and inventing a
 #: fourth configuration surface to hold one flag would be a worse trade than
 #: the asymmetry.
-LAYA_ENABLED_ENV = "CIA_AUTOPSY_LAYA_ENABLED"
-LAYA_BACKEND_ENV = "CIA_AUTOPSY_LAYA_BACKEND"
-LAYA_ESCALATION_THRESHOLD_ENV = "CIA_AUTOPSY_LAYA_ESCALATION_THRESHOLD"
+LOCAL_CLASSIFIER_ENABLED_ENV = "CIA_AUTOPSY_LOCAL_CLASSIFIER_ENABLED"
+LOCAL_CLASSIFIER_BACKEND_ENV = "CIA_AUTOPSY_LOCAL_CLASSIFIER_BACKEND"
+LOCAL_CLASSIFIER_ESCALATION_THRESHOLD_ENV = "CIA_AUTOPSY_LOCAL_CLASSIFIER_ESCALATION_THRESHOLD"
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
 
 
-def laya_config_from_env() -> dict[str, Any]:
+def local_classifier_config_from_env() -> dict[str, Any]:
     """The tier's configuration, off unless an operator turned it on.
 
     ``escalation_threshold`` is absent rather than defaulted, and that absence
-    is load-bearing. ``aorta.cia.autopsy.escalation`` will not compare a Laya
+    is load-bearing. ``aorta.cia.autopsy.escalation`` will not compare a local-classifier
     probability against a cutoff nobody derived for it, so leaving this unset --
     which is every installation today -- is what keeps the escalation on the
     figure 0.85 was actually chosen against. A default here would be a number
     invented to fill a slot, which is the defect this whole phase is about.
     """
     config: dict[str, Any] = {
-        "enabled": os.environ.get(LAYA_ENABLED_ENV, "").strip().lower() in _TRUE,
-        "backend": os.environ.get(LAYA_BACKEND_ENV, "").strip() or DEFAULT_LAYA_BACKEND,
+        "enabled": os.environ.get(LOCAL_CLASSIFIER_ENABLED_ENV, "").strip().lower() in _TRUE,
+        "backend": (
+            os.environ.get(LOCAL_CLASSIFIER_BACKEND_ENV, "").strip()
+            or DEFAULT_CLASSIFIER_BACKEND
+        ),
     }
-    raw = os.environ.get(LAYA_ESCALATION_THRESHOLD_ENV, "").strip()
+    raw = os.environ.get(LOCAL_CLASSIFIER_ESCALATION_THRESHOLD_ENV, "").strip()
     if raw:
         try:
             config["escalation_threshold"] = float(raw)
@@ -201,7 +204,7 @@ def laya_config_from_env() -> dict[str, Any]:
             # that mistake -- but they have to be told, or they will read the
             # report as though their cutoff had applied.
             print(
-                f"[autopsy] {LAYA_ESCALATION_THRESHOLD_ENV}={raw!r} is not a number; "
+                f"[autopsy] {LOCAL_CLASSIFIER_ESCALATION_THRESHOLD_ENV}={raw!r} is not a number; "
                 "the escalation stays on the rule-based confidence"
             )
     return config
@@ -210,7 +213,7 @@ def laya_config_from_env() -> dict[str, Any]:
 def category_question() -> Choice:
     """The one question this tier asks, over the whole shared vocabulary.
 
-    The wording is :data:`aorta.agent.llm.LAYA_CATEGORY_QUESTION`, imported
+    The wording is :data:`aorta.agent.llm.CLASSIFIER_CATEGORY_QUESTION`, imported
     rather than written again. Track B found that the corpus builder and the
     inference path had independently phrased the same question, which does not
     fail loudly -- a temperature is fitted per question, so a question reworded
@@ -233,19 +236,19 @@ def category_question() -> Choice:
     extra step. Glosses belong in whichever corpus first labels this decision,
     and then in both call sites at once.
     """
-    from aorta.laya.predictor import Choice
+    from aorta.local_classifier.predictor import Choice
 
     return Choice(
-        question=LAYA_CATEGORY_QUESTION,
+        question=CLASSIFIER_CATEGORY_QUESTION,
         options=tuple(sorted(AUTOPSY_CATEGORIES)),
     )
 
 
 @dataclass(frozen=True)
-class LayaCategory:
+class LocalClassifierCategory:
     """What the tier answered about one bundle, and under what conditions.
 
-    Carried on the returned ``dspy.Prediction`` as ``laya`` rather than written
+    Carried on the returned ``dspy.Prediction`` as ``local_classifier`` rather than written
     from here, following the shape ``aorta.cia.watch.watcher`` established: this
     module has no idea where a report is going, and the orchestrator that does
     is the one that should decide what lands in it.
@@ -302,7 +305,7 @@ class LayaCategory:
             "model_id": self.model_id,
             "category": self.category,
             "probability": round(self.probability, 4),
-            "question": LAYA_CATEGORY_QUESTION,
+            "question": CLASSIFIER_CATEGORY_QUESTION,
             "options": self.options,
             "bucket": self.bucket,
             "clamped": self.clamped,
@@ -311,12 +314,12 @@ class LayaCategory:
         }
 
 
-class _LayaCategoryTier:
+class _LocalClassifierCategoryTier:
     """One forward pass, one typed answer, and no prose.
 
     The tier answers the two fields of ``TriageDecision`` that are a
     classification -- ``category`` and ``confidence`` -- and touches none of the
-    three that are writing. That split is forced rather than chosen: Laya emits
+    three that are writing. That split is forced rather than chosen: the classifier emits
     no tokens, so it cannot produce the ``rationale`` a reader acts on, and
     ``next_probe`` is a recommendation the rationale has to argue for.
 
@@ -330,30 +333,30 @@ class _LayaCategoryTier:
     def __init__(
         self,
         config: Mapping[str, Any] | None = None,
-        predictor: LayaPredictor | None = None,
+        predictor: DecisionPredictor | None = None,
     ) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", False))
-        self.backend = str(cfg.get("backend", DEFAULT_LAYA_BACKEND) or "")
-        # No default, and see ``laya_config_from_env``: ``None`` is what keeps
+        self.backend = str(cfg.get("backend", DEFAULT_CLASSIFIER_BACKEND) or "")
+        # No default, and see ``local_classifier_config_from_env``: ``None`` is what keeps
         # the escalation on a number whose cutoff was derived against it.
         raw_threshold = cfg.get("escalation_threshold")
         self.escalation_threshold = (
             None if raw_threshold is None else float(raw_threshold)
         )
         # The injection point, the same one ``LayaAgentPredictor`` offers through
-        # ``load=``: a test drives the tier with ``FakeLayaPredictor`` and no
+        # ``load=``: a test drives the tier with ``FakeDecisionPredictor`` and no
         # checkpoint goes anywhere near CI.
         self._predictor = predictor
 
-    def observe(self, evidence_json: str) -> LayaCategory | None:
+    def observe(self, evidence_json: str) -> LocalClassifierCategory | None:
         """Classify one bundle's evidence, or None when the tier cannot run.
 
         None is the whole of the failure handling, and the caller reads it as
         "ask the LLM the way you always did". Autopsy runs once per failure, so
         unlike Watch's poll loop there is nothing to be gained by remembering
         the failure -- but there is something to lose by raising, because the
-        alternative to a Laya category is a perfectly good LLM one.
+        alternative to a local-classifier category is a perfectly good LLM one.
         """
         if not self.enabled:
             return None
@@ -362,7 +365,7 @@ class _LayaCategoryTier:
             return None
         question = category_question()
         try:
-            from aorta.laya.predictor import ChoiceAnswer, ask_one, bucket_for
+            from aorta.local_classifier.predictor import ChoiceAnswer, ask_one, bucket_for
 
             (answer,) = ask_one(predictor, evidence_json, [question])
             if not isinstance(answer, ChoiceAnswer):
@@ -400,12 +403,12 @@ class _LayaCategoryTier:
             # they read afterwards names the LLM as its source, which is true
             # but does not explain why.
             print(
-                f"[autopsy] the Laya category tier failed; the router classifies "
+                f"[autopsy] the local-classifier category tier failed; the router classifies "
                 f"as before: {type(exc).__name__}: {exc}"
             )
             return None
 
-        return LayaCategory(
+        return LocalClassifierCategory(
             model_id=predictor.model_id(),
             # ``coerce_category`` runs over this downstream and will pass it
             # through. An option-marker head scores the labels it was offered
@@ -415,7 +418,7 @@ class _LayaCategoryTier:
             # ``probability``, not the library's own ``confidence`` field. That
             # one is normalised Shannon entropy over the distribution, which
             # measures how peaked an answer is rather than how likely the top
-            # option is to be right; ``docs/laya-packaging.md`` has the argument.
+            # option is to be right; ``docs/local-classifier-packaging.md`` has the argument.
             probability=answer.probability,
             options=len(answer.probabilities),
             escalation_threshold=self.escalation_threshold,
@@ -424,11 +427,11 @@ class _LayaCategoryTier:
             caveat=caveat,
         )
 
-    def _resolve(self) -> LayaPredictor | None:
+    def _resolve(self) -> DecisionPredictor | None:
         """The predictor, or None when this tier cannot run.
 
         ``fake`` is refused rather than resolved, the same refusal Watch's tier
-        makes and for the same reason: ``FakeLayaPredictor`` answers from a
+        makes and for the same reason: ``FakeDecisionPredictor`` answers from a
         blake2b hash of the question and the state, so it is stable, arbitrary,
         and indistinguishable from a model with an opinion. A hashed category
         would reach ``report.json``, and from there the corpus builders that
@@ -439,18 +442,18 @@ class _LayaCategoryTier:
             return self._predictor
         if not self.backend or self.backend == "fake":
             print(
-                f"[autopsy] {LAYA_ENABLED_ENV} is set but no real checkpoint is named "
-                f"(backend={self.backend!r}); the Laya category tier is off. A hashed "
+                f"[autopsy] {LOCAL_CLASSIFIER_ENABLED_ENV} is set but no real checkpoint is named "
+                f"(backend={self.backend!r}); the local-classifier category tier is off. A hashed "
                 "fake verdict is not a measurement and must not be recorded as one."
             )
             return None
         try:
-            from aorta.laya.predictor import make_predictor
+            from aorta.local_classifier.predictor import make_predictor
 
             self._predictor = make_predictor(self.backend)
         except Exception as exc:  # noqa: BLE001 - see observe()
             print(
-                f"[autopsy] could not build the Laya predictor {self.backend!r}; "
+                f"[autopsy] could not build the local-classifier predictor {self.backend!r}; "
                 f"the category tier is off: {type(exc).__name__}: {exc}"
             )
             return None
@@ -585,8 +588,8 @@ class TriageRouter(dspy.Module):
         self,
         bundle_root: Path | str,
         *,
-        laya: Mapping[str, Any] | None = None,
-        predictor: LayaPredictor | None = None,
+        local_classifier: Mapping[str, Any] | None = None,
+        predictor: DecisionPredictor | None = None,
     ):
         # Built here, per bundle, because one of the tools is bound to a root
         # and a module shared across jobs would carry the first job's root into
@@ -602,8 +605,9 @@ class TriageRouter(dspy.Module):
         # Bound to this module rather than configured globally: whichever agent
         # reached DSPy first would otherwise decide what Autopsy reasons with.
         self._lm = build_lm(max_tokens=self.MAX_TOKENS)
-        self.laya_tier = _LayaCategoryTier(
-            laya_config_from_env() if laya is None else laya, predictor
+        self.local_classifier_tier = _LocalClassifierCategoryTier(
+            local_classifier_config_from_env() if local_classifier is None else local_classifier,
+            predictor,
         )
         # The LLM-classifies module is built whether or not the tier is on, and
         # not only because a construction-time ``set_lm`` is what binds the
@@ -621,7 +625,7 @@ class TriageRouter(dspy.Module):
     def forward(self, evidence: list[dict[str, Any]], job_context: str) -> dspy.Prediction:
         """Classify the bundle and explain it, in one or two pieces.
 
-        The Laya tier is asked first, before an LLM call is spent, so that the
+        The local-classifier tier is asked first, before an LLM call is spent, so that the
         prompt can be chosen by what actually answered rather than by what was
         configured. When it answers, the model is handed a signature with no
         ``category`` and no ``confidence`` field at all, which is the only way
@@ -630,7 +634,7 @@ class TriageRouter(dspy.Module):
         than the rule it lost.
         """
         evidence_json = json.dumps(evidence)
-        observation = self.laya_tier.observe(evidence_json)
+        observation = self.local_classifier_tier.observe(evidence_json)
         if observation is None:
             prediction = self.react(
                 evidence_json=evidence_json,
@@ -651,5 +655,5 @@ class TriageRouter(dspy.Module):
         # written for.
         prediction.category = coerce_category(observation.category)
         prediction.confidence = observation.probability
-        prediction.laya = observation
+        prediction.local_classifier = observation
         return prediction

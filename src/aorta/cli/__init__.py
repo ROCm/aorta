@@ -32,10 +32,6 @@ _COMMANDS: dict[str, LazyCommand] = {
         "aorta.cli.environments:environments",
         "Inspect the merged environments registry (built-ins + plugins).",
     ),
-    "laya": LazyCommand(
-        "aorta.cli.laya:laya",
-        "Build the Laya decision corpora and measure a model against them offline.",
-    ),
     "mitigations": LazyCommand(
         "aorta.cli.mitigations:mitigations",
         "Inspect the merged mitigations registry (built-ins + plugins).",

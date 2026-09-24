@@ -2,8 +2,8 @@
 
 ``FakeLLMProposer`` round-robins registered mitigations (offline tests).
 ``LiteLLMProposer`` calls LiteLLM when ``amd-aorta[agent]`` is installed.
-``LayaProposer`` answers the same decision from a local calibrated encoder when
-``amd-aorta[laya]`` is.
+``LocalClassifierProposer`` answers the same decision from a local calibrated encoder when
+``amd-aorta[local-classifier]`` is.
 
 **Every model import in this module is deferred, and the rule is tested.**
 ``tests/cli/test_chat_boundaries.py`` imports this module in a clean interpreter
@@ -12,8 +12,8 @@ langchain stack, pydantic, chainlit -- reaches ``sys.modules``. The reason is
 ``--llm-backend=fake``: it is the default, it is what the test suite and
 ``--dry-run`` depend on, and it has to keep working on a base install of
 ``pip install amd-aorta``, which is ``pyyaml`` plus ``click``. So the chat seam
-lives inside ``ChatProviderProposer._chat_model`` and the Laya seam inside
-``LayaProposer.propose``, and neither costs anything to anyone who does not
+lives inside ``ChatProviderProposer._chat_model`` and the decision-predictor seam inside
+``LocalClassifierProposer.propose``, and neither costs anything to anyone who does not
 select it.
 """
 
@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 if TYPE_CHECKING:  # Annotations only: `from __future__ import annotations` means
     # this costs nothing at run time, which is what the import-boundary probe
     # above measures.
-    from aorta.laya.predictor import LayaPredictor
+    from aorta.local_classifier.predictor import DecisionPredictor
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
 StopReason = Literal[
@@ -399,7 +399,7 @@ CHAT_PROVIDER_BACKENDS: frozenset[str] = frozenset({"litellm", "openai", "vllm"}
 #: checked against this one in ``tests/agent/test_llm_providers.py``, which is
 #: the only thing standing between adding a backend here and it being
 #: unreachable from the command line.
-AGENT_LLM_BACKENDS: frozenset[str] = frozenset({"fake", "laya"}) | CHAT_PROVIDER_BACKENDS
+AGENT_LLM_BACKENDS: frozenset[str] = frozenset({"fake", "local"}) | CHAT_PROVIDER_BACKENDS
 
 _CHAT_EXTRA_HINT = (
     "--llm-backend={backend} is configured through the shared chat provider "
@@ -476,36 +476,36 @@ class ChatProviderProposer:
         return _step_from_content(getattr(response, "content", None), remaining)
 
 
-#: The three questions a Laya proposer asks, spelled as text rather than as
-#: :class:`aorta.laya.predictor.Choice` / ``Noul`` instances so that naming them
+#: The three questions a local-classifier proposer asks, spelled as text rather than as
+#: :class:`aorta.local_classifier.predictor.Choice` / ``Noul`` instances so that naming them
 #: costs no import.
 #:
-#: Public because ``aorta/laya/corpus/proposer.py`` labels a corpus against these
+#: Public because ``aorta/local_classifier/corpus/proposer.py`` labels a corpus against these
 #: same three questions, and the two have to be the same strings. If they drift,
 #: the encoder is fine-tuned on one question and asked another -- which does not
 #: fail, it just answers slightly worse for a reason nobody would look for. That
 #: module already imports :data:`PROBE_CATEGORIES` from here; the questions
-#: belong in the same place, and ``tests/agent/test_laya_proposer.py`` fails if
+#: belong in the same place, and ``tests/agent/test_local_classifier_proposer.py`` fails if
 #: the two copies stop matching.
-LAYA_MITIGATION_QUESTION = (
+CLASSIFIER_MITIGATION_QUESTION = (
     "Which of these candidate mitigations will make this failure stop reproducing?"
 )
-LAYA_CATEGORY_QUESTION = "Which category of failure is this?"
-LAYA_STOP_QUESTION = (
+CLASSIFIER_CATEGORY_QUESTION = "Which category of failure is this?"
+CLASSIFIER_STOP_QUESTION = (
     "Should the mitigation search stop here, rather than trying another "
     "registered mitigation?"
 )
-LAYA_STOP_WHEN_TRUE = "no untried mitigation can plausibly clear this failure"
-LAYA_STOP_WHEN_FALSE = "at least one untried mitigation is still worth running"
+CLASSIFIER_STOP_WHEN_TRUE = "no untried mitigation can plausibly clear this failure"
+CLASSIFIER_STOP_WHEN_FALSE = "at least one untried mitigation is still worth running"
 
-#: What ``--llm-backend=laya`` loads when ``--llm-model`` names nothing.
+#: What ``--llm-backend=local`` loads when ``--llm-model`` names nothing.
 #:
 #: The fine-tuned checkpoint rather than the base one, because the model card's
 #: own numbers put base ``laya`` below a majority-class baseline on its typed
 #: decisions and call it "a fast base to specialise, not a zero-shot decision
 #: engine". Defaulting to the weaker of the two would make the first thing anyone
 #: tries the worst version of it.
-DEFAULT_LAYA_CHECKPOINT = "laya-typed-decisions"
+DEFAULT_CLASSIFIER_CHECKPOINT = "laya-typed-decisions"
 
 #: How much of the stop noul's probability mass it takes to end the search.
 #:
@@ -518,7 +518,7 @@ DEFAULT_LAYA_CHECKPOINT = "laya-typed-decisions"
 #: Nothing here applies the per-(question type, option count) temperature fit
 #: that Phase 1 exists to produce, so it is a policy choice about which error to
 #: prefer, made in the absence of a fit rather than derived from one. Re-derive
-#: it when there is one -- and read ``docs/laya-packaging.md`` on why a
+#: it when there is one -- and read ``docs/local-classifier-packaging.md`` on why a
 #: probability is a function of the checkpoint *and* the fit applied to it.
 #:
 #: Whether the stop noul's own bucket was trustworthy is not a thing this
@@ -527,20 +527,20 @@ DEFAULT_LAYA_CHECKPOINT = "laya-typed-decisions"
 #: published checkpoint and is not a property of nouls. The step asks
 #: ``Calibration.caveat`` per question instead, so a checkpoint that clamped the
 #: noul bucket says so on the very step that thresholded against it.
-DEFAULT_LAYA_STOP_THRESHOLD = 0.75
+DEFAULT_CLASSIFIER_STOP_THRESHOLD = 0.75
 
 
-class LayaProposer:
-    """Proposer on a local calibrated encoder (requires ``pip install 'amd-aorta[laya]'``).
+class LocalClassifierProposer:
+    """Proposer on a local calibrated encoder (needs the ``[local-classifier]`` extra).
 
     The same decision as :class:`FakeLLMProposer` and :class:`ChatProviderProposer`,
     reached without generating a token. ``AgentStep`` happens to be almost exactly
-    the shape Laya answers in: ``next_mitigations`` is a choice over the
+    the shape the local classifier answers in: ``next_mitigations`` is a choice over the
     candidates that are actually left, ``category`` a choice over
     :data:`PROBE_CATEGORIES`, ``stop`` a noul, and ``confidence`` the probability
     the chosen answer carries rather than a float a prompt asked a model to
-    invent. All three are one forward pass, because Laya batches M questions over
-    one state -- see :class:`aorta.laya.predictor.LayaPredictor`.
+    invent. All three are one forward pass, because the predictor batches M questions over
+    one state -- see :class:`aorta.local_classifier.predictor.DecisionPredictor`.
 
     **``confidence`` is not yet a calibrated probability, and the step says so
     out loud.** Two separate things are wrong with it, and the disclosure is in
@@ -551,7 +551,7 @@ class LayaProposer:
     21-way answer is a strong preference at 0.24 and pure noise at 0.048, and
     both look like "low confidence" to a threshold picked for a producer with a
     different answer shape. N and the library's bucket for it
-    (``aorta.laya.predictor.bucket_for``) are pure and offline, so they are on
+    (``aorta.local_classifier.predictor.bucket_for``) are pure and offline, so they are on
     every step whether or not a checkpoint ever loaded.
 
     The second is the *checkpoint*: whether that bucket's shipped temperature was
@@ -570,8 +570,8 @@ class LayaProposer:
     precisely the defect this integration exists to remove, and shipping one here
     under a new name would be worse than the self-reported float it replaces.
 
-    ``hypothesis`` stays templated, following :class:`FakeLLMProposer`'s. Laya
-    never emits text, so there is nothing to ask it for, and a sentence built
+    ``hypothesis`` stays templated, following :class:`FakeLLMProposer`'s. The
+    classifier never emits text, so there is nothing to ask it for, and a sentence built
     from the answers is more honest than one built from nothing. It is also the
     only field the caveat above can ride on without a call-site change.
 
@@ -587,18 +587,18 @@ class LayaProposer:
         *,
         checkpoint: str | None = None,
         device: str | None = None,
-        stop_threshold: float = DEFAULT_LAYA_STOP_THRESHOLD,
-        predictor: LayaPredictor | None = None,
+        stop_threshold: float = DEFAULT_CLASSIFIER_STOP_THRESHOLD,
+        predictor: DecisionPredictor | None = None,
     ) -> None:
-        self._checkpoint = checkpoint or DEFAULT_LAYA_CHECKPOINT
+        self._checkpoint = checkpoint or DEFAULT_CLASSIFIER_CHECKPOINT
         self._device = device
         self._stop_threshold = stop_threshold
-        # Injected by tests against ``FakeLayaPredictor``, which needs no weights
+        # Injected by tests against ``FakeDecisionPredictor``, which needs no weights
         # and no extra. Nothing on the CLI path reaches this argument, so a run
         # cannot end up reporting a hash function's output as a verdict.
         self._predictor = predictor
 
-    def _laya_predictor(self) -> LayaPredictor:
+    def _local_classifier_predictor(self) -> DecisionPredictor:
         """Resolve the predictor once, importing the seam here and not above.
 
         Deferred for the reason this module's docstring gives, and cached for a
@@ -606,10 +606,10 @@ class LayaProposer:
         ``--max-iterations``, and a checkpoint rebuilt per call would cost
         seconds per iteration -- the card measures a 7.4 s median reload on CPU.
         The weights load on the first question and stay loaded, which is
-        :class:`aorta.laya.predictor.LayaAgentPredictor`'s own behaviour.
+        :class:`aorta.local_classifier.predictor.LayaAgentPredictor`'s own behaviour.
         """
         if self._predictor is None:
-            from aorta.laya.predictor import make_predictor
+            from aorta.local_classifier.predictor import make_predictor
 
             # ``checkpoint=`` rather than ``backend=`` so that ``--llm-model``
             # can name either a published checkpoint or a local fine-tune
@@ -634,7 +634,7 @@ class LayaProposer:
         if not remaining:
             return _exhausted_step()
 
-        from aorta.laya.predictor import (
+        from aorta.local_classifier.predictor import (
             Choice,
             ChoiceAnswer,
             Noul,
@@ -644,23 +644,23 @@ class LayaProposer:
         )
 
         mitigation_q = Choice(
-            question=LAYA_MITIGATION_QUESTION, options=tuple(remaining)
+            question=CLASSIFIER_MITIGATION_QUESTION, options=tuple(remaining)
         )
         # The derived probe set, not AUTOPSY_CATEGORIES. Offering a category the
         # agent has no way to reach teaches it to guess one, and the guess
         # validates -- see the comment above PROBE_CATEGORIES.
         category_q = Choice(
-            question=LAYA_CATEGORY_QUESTION, options=tuple(sorted(PROBE_CATEGORIES))
+            question=CLASSIFIER_CATEGORY_QUESTION, options=tuple(sorted(PROBE_CATEGORIES))
         )
         stop_q = Noul(
-            question=LAYA_STOP_QUESTION,
-            when_true=LAYA_STOP_WHEN_TRUE,
-            when_false=LAYA_STOP_WHEN_FALSE,
+            question=CLASSIFIER_STOP_QUESTION,
+            when_true=CLASSIFIER_STOP_WHEN_TRUE,
+            when_false=CLASSIFIER_STOP_WHEN_FALSE,
         )
 
-        predictor = self._laya_predictor()
+        predictor = self._local_classifier_predictor()
         # The user half of the prompt the LLM backends send, verbatim, because
-        # that is what `aorta/laya/corpus/proposer.py` recorded as the state when
+        # that is what `aorta/local_classifier/corpus/proposer.py` recorded as the state when
         # it built the training corpus. Serialising it a second way here would be
         # train/serve skew introduced by a helper nobody would suspect -- and it
         # would also stop a Phase 1 comparison between the two backends being a
@@ -725,7 +725,7 @@ class LayaProposer:
         return AgentStep(
             category=category.option,
             # `FakeLLMProposer`'s sentence, plus what answered it. Decision 22
-            # asks that every report a Laya verdict reaches records which
+            # asks that every report a local-classifier verdict reaches records which
             # checkpoint produced it *inline*, because a report gets copied,
             # archived and attached to a ticket away from anything beside it --
             # and `hypothesis` is the only field on an AgentStep that both
@@ -785,7 +785,7 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
     breaking an install that used to work. ``vllm`` and ``openai`` are new, have
     no such history, and say plainly which extra they need.
 
-    ``laya`` is the odd one out: it is not a provider at all but a local
+    ``local`` is the odd one out: it is not a provider at all but a local
     encoder, so it reads no chat settings and ``model`` names a *checkpoint*
     rather than a model on someone's endpoint.
 
@@ -795,8 +795,8 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
     """
     if backend == "fake":
         return FakeLLMProposer()
-    if backend == "laya":
-        return LayaProposer(checkpoint=model)
+    if backend == "local":
+        return LocalClassifierProposer(checkpoint=model)
     if backend == "litellm" and not _chat_layer_available():
         return LiteLLMProposer(model=model or "gpt-4o-mini")
     if backend in CHAT_PROVIDER_BACKENDS:
@@ -810,22 +810,22 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
 __all__ = [
     "AGENT_LLM_BACKENDS",
     "AUTOPSY_CATEGORIES",
-    "DEFAULT_LAYA_CHECKPOINT",
-    "DEFAULT_LAYA_STOP_THRESHOLD",
+    "CLASSIFIER_CATEGORY_QUESTION",
+    "CLASSIFIER_MITIGATION_QUESTION",
+    "CLASSIFIER_STOP_QUESTION",
+    "CLASSIFIER_STOP_WHEN_FALSE",
+    "CLASSIFIER_STOP_WHEN_TRUE",
+    "DEFAULT_CLASSIFIER_CHECKPOINT",
+    "DEFAULT_CLASSIFIER_STOP_THRESHOLD",
     "EVIDENCE_ONLY_CATEGORIES",
-    "LAYA_CATEGORY_QUESTION",
-    "LAYA_MITIGATION_QUESTION",
-    "LAYA_STOP_QUESTION",
-    "LAYA_STOP_WHEN_FALSE",
-    "LAYA_STOP_WHEN_TRUE",
     "PROBE_CATEGORIES",
     "CHAT_PROVIDER_BACKENDS",
     "AgentStep",
     "ChatProviderProposer",
     "FakeLLMProposer",
     "LLMProposer",
-    "LayaProposer",
     "LiteLLMProposer",
+    "LocalClassifierProposer",
     "StopReason",
     "make_proposer",
 ]

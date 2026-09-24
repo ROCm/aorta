@@ -80,7 +80,7 @@ CLEAN_DELTA_CHARS = 4000
 #: Where the archive goes: beside ``events.jsonl``, inside the job directory,
 #: and outside ``bundle/`` on purpose. A bundle is what Autopsy reads about a
 #: failure, and nothing here is about a failure.
-CLEAN_DELTA_FILE = "laya_clean_deltas.jsonl"
+CLEAN_DELTA_FILE = "local_classifier_clean_deltas.jsonl"
 
 
 def archive_clean_delta(
@@ -92,7 +92,7 @@ def archive_clean_delta(
     signal: str,
     confidence: float,
     source: str = "",
-    laya: dict[str, Any] | None = None,
+    local_classifier: dict[str, Any] | None = None,
     limit_bytes: int,
 ) -> bool:
     """Keep one delta that did *not* alert. Returns whether anything was written.
@@ -106,7 +106,7 @@ def archive_clean_delta(
     length, and the clean-gate this feeds cannot be measured from the artifacts
     the system currently produces. This is the other half of the corpus, and it
     costs no model to collect -- which matters, because the measurement that
-    gates ``watch.laya.enabled`` is blocked on data rather than on weights.
+    gates ``watch.local_classifier.enabled`` is blocked on data rather than on weights.
 
     Every non-alerting delta is kept, healthy or not, with the verdict that was
     reached beside it. Watch can decide a delta is unhealthy and stay quiet
@@ -174,8 +174,8 @@ def archive_clean_delta(
         "truncated": len(delta) > CLEAN_DELTA_CHARS,
         "delta": kept,
     }
-    if laya is not None:
-        record["laya"] = laya
+    if local_classifier is not None:
+        record["local_classifier"] = local_classifier
 
     try:
         with path.open("a", encoding="utf-8") as handle:

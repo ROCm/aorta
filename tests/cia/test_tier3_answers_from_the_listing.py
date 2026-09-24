@@ -8,15 +8,15 @@ never saw passes all three. The answer space is now derived from the listing
 itself, so there is nothing to invent from.
 
 That property belongs to the tier, not to whichever engine ranks it, which is
-why it is asserted here against both the DSPy tier and the Laya tier. The Laya
-tier ships disabled; if the containment had landed inside its flag, the shipped
+why it is asserted here against both the DSPy tier and the local-classifier
+tier. The classifier tier ships disabled; if the containment had landed inside its flag, the shipped
 default would still have been the hazardous one.
 
 Two things this file deliberately does not do. It never requires weights: the
-Laya tier is driven through ``FakeLayaPredictor``, whose answers are a hash of
+local-classifier tier is driven through ``FakeDecisionPredictor``, whose answers are a hash of
 the question and are stable, arbitrary, and not predictions. And it asserts no
 accuracy, because nothing in this repository has measured this decision -- which
-is also why ``laya.enabled`` is false in the shipped config.
+is also why ``local_classifier.enabled`` is false in the shipped config.
 """
 
 from __future__ import annotations
@@ -32,16 +32,16 @@ import yaml
 pytest.importorskip("dspy", reason="the log finder needs the [cia] extra")
 
 from aorta.cia.watch.log_finder import (
-    DEFAULT_LAYA_BACKEND,
-    DEFAULT_LAYA_MIN_PROBABILITY,
+    DEFAULT_CLASSIFIER_BACKEND,
+    DEFAULT_CLASSIFIER_MIN_PROBABILITY,
     LogFinder,
     _dir_listing,
     useful_question,
 )
-from aorta.laya.predictor import (
+from aorta.local_classifier.predictor import (
     ChoiceAnswer,
-    FakeLayaPredictor,
-    LayaUnavailableError,
+    ClassifierUnavailableError,
+    FakeDecisionPredictor,
     NoulAnswer,
 )
 
@@ -89,12 +89,12 @@ def _refusing(monkeypatch, finder: LogFinder) -> None:
     """Fail loudly if the DSPy tier is consulted at all."""
 
     def _no(**_kwargs):
-        raise AssertionError("the LLM tier ran while the Laya tier was enabled")
+        raise AssertionError("the LLM tier ran while the local-classifier tier was enabled")
 
     monkeypatch.setattr(finder, "_discovery", _no)
 
 
-def _pinned(**probabilities: float) -> FakeLayaPredictor:
+def _pinned(**probabilities: float) -> FakeDecisionPredictor:
     """A predictor with a fixed answer for each named file.
 
     Keyed through ``useful_question`` rather than through a question string
@@ -102,7 +102,7 @@ def _pinned(**probabilities: float) -> FakeLayaPredictor:
     rather than silently falling back to the fake's hashed answers -- which
     would still be numbers, and would still rank.
     """
-    return FakeLayaPredictor(
+    return FakeDecisionPredictor(
         pinned={
             useful_question(label.replace("_", ".")).question: NoulAnswer(probability=value)
             for label, value in probabilities.items()
@@ -110,8 +110,8 @@ def _pinned(**probabilities: float) -> FakeLayaPredictor:
     )
 
 
-def _laya(enabled: bool = True, **extra) -> dict:
-    return {"extensions": [".log"], "laya": {"enabled": enabled, **extra}}
+def _local_classifier(enabled: bool = True, **extra) -> dict:
+    return {"extensions": [".log"], "local_classifier": {"enabled": enabled, **extra}}
 
 
 class TestTheAnswerSpaceIsTheListing:
@@ -149,10 +149,10 @@ class TestTheAnswerSpaceIsTheListing:
 
         assert [p.name for p in finder.find(job)] == ["part3.log"]
 
-    def test_the_laya_tier_is_only_ever_offered_the_listing(self, job, monkeypatch):
+    def test_the_local_classifier_tier_is_only_ever_offered_the_listing(self, job, monkeypatch):
         """It cannot name the hidden file because it is never asked about it."""
         predictor = _Recording()
-        finder = LogFinder(config=_laya(), predictor=predictor)
+        finder = LogFinder(config=_local_classifier(), predictor=predictor)
         _refusing(monkeypatch, finder)
 
         finder.find(job)
@@ -163,8 +163,8 @@ class TestTheAnswerSpaceIsTheListing:
         assert not any("notes.dat" in question for question in asked)
 
 
-class _Recording(FakeLayaPredictor):
-    """``FakeLayaPredictor`` that remembers what it was asked.
+class _Recording(FakeDecisionPredictor):
+    """``FakeDecisionPredictor`` that remembers what it was asked.
 
     Subclassed rather than written from scratch for the reason the predictor
     tests subclass it: the answers stay the reference implementation's, so a
@@ -194,7 +194,7 @@ class TestTheShapeOfTheCall:
         a sixty-entry directory sixty passes inside the poll loop.
         """
         predictor = _Recording()
-        finder = LogFinder(config=_laya(), predictor=predictor)
+        finder = LogFinder(config=_local_classifier(), predictor=predictor)
         _refusing(monkeypatch, finder)
 
         finder.find(job)
@@ -205,7 +205,7 @@ class TestTheShapeOfTheCall:
     def test_every_entry_gets_its_own_question(self, job, monkeypatch):
         """Two files sharing a question text would share one answer."""
         predictor = _Recording()
-        finder = LogFinder(config=_laya(), predictor=predictor)
+        finder = LogFinder(config=_local_classifier(), predictor=predictor)
         _refusing(monkeypatch, finder)
 
         finder.find(job)
@@ -216,7 +216,7 @@ class TestTheShapeOfTheCall:
 class TestRanking:
     def test_files_come_back_most_probable_first(self, job, monkeypatch):
         finder = LogFinder(
-            config=_laya(),
+            config=_local_classifier(),
             predictor=_pinned(part0_log=0.6, part1_log=0.9, part2_log=0.7,
                               part3_log=0.1, part4_log=0.2, part5_log=0.3),
         )
@@ -228,7 +228,7 @@ class TestRanking:
 
     def test_max_files_still_caps_the_answer(self, job, monkeypatch):
         finder = LogFinder(
-            config={**_laya(), "max_files": 2},
+            config={**_local_classifier(), "max_files": 2},
             predictor=_pinned(part0_log=0.6, part1_log=0.9, part2_log=0.7,
                               part3_log=0.8, part4_log=0.99, part5_log=0.55),
         )
@@ -238,7 +238,7 @@ class TestRanking:
 
     def test_a_file_below_the_threshold_is_not_watched(self, job, monkeypatch):
         finder = LogFinder(
-            config=_laya(min_probability=0.8),
+            config=_local_classifier(min_probability=0.8),
             predictor=_pinned(part0_log=0.6, part1_log=0.9, part2_log=0.7,
                               part3_log=0.1, part4_log=0.2, part5_log=0.85),
         )
@@ -249,7 +249,7 @@ class TestRanking:
     def test_at_the_threshold_counts_as_reaching_it(self, job, monkeypatch):
         """``NoulAnswer.at`` uses ``>=``, matching ``should_alert``."""
         finder = LogFinder(
-            config=_laya(min_probability=0.7),
+            config=_local_classifier(min_probability=0.7),
             predictor=_pinned(part0_log=0.7, part1_log=0.1, part2_log=0.1,
                               part3_log=0.1, part4_log=0.1, part5_log=0.1),
         )
@@ -265,7 +265,7 @@ class TestTheFallbacksSurvive:
         self, job, monkeypatch
     ):
         finder = LogFinder(
-            config=_laya(),
+            config=_local_classifier(),
             predictor=_pinned(part0_log=0.1, part1_log=0.1, part2_log=0.1,
                               part3_log=0.1, part4_log=0.1, part5_log=0.1),
         )
@@ -277,18 +277,18 @@ class TestTheFallbacksSurvive:
         self, job, monkeypatch, capsys
     ):
         """Silence here would read as "discovery got worse", not "stage the weights"."""
-        finder = LogFinder(config=_laya(), predictor=_Unavailable())
+        finder = LogFinder(config=_local_classifier(), predictor=_Unavailable())
         _refusing(monkeypatch, finder)
 
         found = finder.find(job)
 
         assert found == finder._scan_by_extension(job)[:8]
-        assert "LayaUnavailableError" in capsys.readouterr().out
+        assert "ClassifierUnavailableError" in capsys.readouterr().out
 
     def test_it_is_not_retried_for_every_later_job(self, job, monkeypatch):
         """One finder serves the whole poll loop; a missing checkpoint stays missing."""
         predictor = _Unavailable()
-        finder = LogFinder(config=_laya(), predictor=predictor)
+        finder = LogFinder(config=_local_classifier(), predictor=predictor)
         _refusing(monkeypatch, finder)
 
         finder.find(job)
@@ -300,7 +300,7 @@ class TestTheFallbacksSurvive:
         self, job, monkeypatch, capsys
     ):
         """A choice where a noul was asked has no p(yes) to threshold."""
-        finder = LogFinder(config=_laya(), predictor=_AnsweringChoices())
+        finder = LogFinder(config=_local_classifier(), predictor=_AnsweringChoices())
         _refusing(monkeypatch, finder)
 
         assert finder.find(job) == finder._scan_by_extension(job)[:8]
@@ -310,7 +310,7 @@ class TestTheFallbacksSurvive:
         self, job, monkeypatch, capsys
     ):
         """Discovery failing costs the extension scan's answer, never the poll loop."""
-        finder = LogFinder(config=_laya(backend="not-a-checkpoint"))
+        finder = LogFinder(config=_local_classifier(backend="not-a-checkpoint"))
         _refusing(monkeypatch, finder)
 
         assert finder.find(job) == finder._scan_by_extension(job)[:8]
@@ -319,11 +319,11 @@ class TestTheFallbacksSurvive:
     def test_the_fake_backend_is_refused_by_name(self, job, monkeypatch, capsys):
         """A hash choosing which files Watch tails, and which roots its tools get.
 
-        Refused rather than resolved, as ``watch.laya`` refuses it. A test that
+        Refused rather than resolved, as ``watch.local_classifier`` refuses it. A test that
         wants the fake passes it through ``predictor=``, which is what every
         test above does.
         """
-        finder = LogFinder(config=_laya(backend="fake"))
+        finder = LogFinder(config=_local_classifier(backend="fake"))
         _refusing(monkeypatch, finder)
 
         assert finder.find(job) == finder._scan_by_extension(job)[:8]
@@ -332,14 +332,14 @@ class TestTheFallbacksSurvive:
     def test_an_unreadable_listing_spends_nothing(self, tmp_path, monkeypatch):
         """No listing means no candidates, so neither engine is consulted."""
         predictor = _Recording()
-        finder = LogFinder(config=_laya(), predictor=predictor)
+        finder = LogFinder(config=_local_classifier(), predictor=predictor)
         _refusing(monkeypatch, finder)
 
         assert finder.find(tmp_path / "gone") == []
         assert predictor.calls == []
 
 
-class _Unavailable(FakeLayaPredictor):
+class _Unavailable(FakeDecisionPredictor):
     """A staged-weights failure, counted so a retry shows up as one."""
 
     def __init__(self) -> None:
@@ -348,10 +348,10 @@ class _Unavailable(FakeLayaPredictor):
 
     def ask(self, states, questions):
         self.attempts += 1
-        raise LayaUnavailableError("no checkpoint on this node")
+        raise ClassifierUnavailableError("no checkpoint on this node")
 
 
-class _AnsweringChoices(FakeLayaPredictor):
+class _AnsweringChoices(FakeDecisionPredictor):
     def ask(self, states, questions):
         return [[ChoiceAnswer(probabilities=(("yes", 1.0),)) for _ in questions] for _ in states]
 
@@ -359,7 +359,7 @@ class _AnsweringChoices(FakeLayaPredictor):
 class TestItShipsOff:
     @pytest.fixture(scope="class")
     def config(self) -> dict:
-        return yaml.safe_load(CONFIG.read_text(encoding="utf-8"))["log_finder"]["laya"]
+        return yaml.safe_load(CONFIG.read_text(encoding="utf-8"))["log_finder"]["local_classifier"]
 
     def test_the_flag_is_false_in_the_shipped_config(self, config):
         """Phase 1 has not measured this tier against the extension scan."""
@@ -373,7 +373,7 @@ class TestItShipsOff:
         assert [p.name for p in finder.find(job)] == ["part3.log"]
         assert predictor.calls == []
 
-    def test_every_key_under_laya_has_a_reader(self, config):
+    def test_every_key_under_local_classifier_has_a_reader(self, config):
         """The rule ``tests/cia/test_watch_config.py`` applies to the top level."""
         source = SOURCE.read_text(encoding="utf-8")
         unread = [key for key in config if f'"{key}"' not in source]
@@ -382,12 +382,12 @@ class TestItShipsOff:
 
     def test_the_defaults_in_code_match_the_file(self, config):
         """A fallback that disagrees with the file is a third behaviour."""
-        assert DEFAULT_LAYA_BACKEND == config["backend"]
-        assert DEFAULT_LAYA_MIN_PROBABILITY == config["min_probability"]
+        assert DEFAULT_CLASSIFIER_BACKEND == config["backend"]
+        assert DEFAULT_CLASSIFIER_MIN_PROBABILITY == config["min_probability"]
 
 
 def test_reaching_the_log_finder_does_not_import_the_predictor():
-    """The loader behind ``aorta.laya.predictor`` brings torch (Decision 22).
+    """The loader behind ``aorta.local_classifier.predictor`` brings torch (Decision 22).
 
     A subprocess rather than a ``sys.modules`` check, because by the time this
     file runs the module is imported at the top of it. ``aorta.cia.watch`` is on
@@ -396,7 +396,7 @@ def test_reaching_the_log_finder_does_not_import_the_predictor():
     """
     probe = (
         "import aorta.cia.watch.log_finder, sys; "
-        "print(','.join(m for m in sys.modules if m.startswith('aorta.laya')))"
+        "print(','.join(m for m in sys.modules if m.startswith('aorta.local_classifier')))"
     )
     result = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120

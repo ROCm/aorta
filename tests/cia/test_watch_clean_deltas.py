@@ -6,7 +6,7 @@ the ``watchdog_ok`` excerpts the events file caps at 500 characters -- against
 bundles of up to 4000. A ``watch_healthy`` corpus built from those two has a
 positive class four thousand characters long and a negative class five hundred,
 and a classifier can score well on it without reading a word, by measuring
-length. ``aorta.laya.corpus.watch`` warns about exactly this on every build.
+length. ``aorta.local_classifier.corpus.watch`` warns about exactly this on every build.
 
 That is why the clean-gate cannot be measured today, and it is a data problem
 rather than a model problem: no weights are needed to fix it. Shadow mode is
@@ -35,7 +35,7 @@ from aorta.cia.watch.bundle_writer import (
 )
 from aorta.cia.watch.cursors import load_cursors
 from aorta.cia.watch.poll import poll_jobs
-from aorta.cia.watch.watcher import LayaObservation
+from aorta.cia.watch.watcher import LocalClassifierObservation
 
 _CONFIG = "src/aorta/cia/watch/watch_config.yaml"
 
@@ -65,7 +65,7 @@ class TestItIsOffUnlessAskedFor:
 
     def test_the_shipped_config_asks_for_nothing(self, repo_root):
         config = yaml.safe_load((repo_root / _CONFIG).read_text(encoding="utf-8"))
-        assert config["watch"]["laya"]["shadow_archive_bytes"] == 0
+        assert config["watch"]["local_classifier"]["shadow_archive_bytes"] == 0
 
     def test_a_negative_budget_is_off_rather_than_unbounded(self, tmp_path):
         assert _archive(tmp_path, limit_bytes=-1) is False
@@ -177,8 +177,8 @@ class TestWhatOneRecordSays:
         assert record["healthy"] is False
         assert record["signal"] == "WATCH_HANG"
 
-    def test_a_laya_observation_rides_along_when_there_is_one(self, tmp_path):
-        observation = LayaObservation(
+    def test_a_local_classifier_observation_rides_along_when_there_is_one(self, tmp_path):
+        observation = LocalClassifierObservation(
             model_id="laya-typed-decisions",
             clean_probability=0.71,
             clean_threshold=0.9,
@@ -187,9 +187,9 @@ class TestWhatOneRecordSays:
             signal="WATCH_HANG",
             signal_probability=0.5,
         )
-        _archive(tmp_path, laya=observation.as_event_fields())
+        _archive(tmp_path, local_classifier=observation.as_event_fields())
 
-        assert _records(tmp_path)[0]["laya"]["model_id"] == "laya-typed-decisions"
+        assert _records(tmp_path)[0]["local_classifier"]["model_id"] == "laya-typed-decisions"
 
     def test_it_appends_rather_than_replacing(self, tmp_path):
         _archive(tmp_path, delta="first\n")
@@ -232,7 +232,7 @@ def _write_job(root: Path, job_id: str, content: str) -> Path:
     return job_dir
 
 
-_OBSERVATION = LayaObservation(
+_OBSERVATION = LocalClassifierObservation(
     model_id="laya-typed-decisions@cpu",
     clean_probability=0.8123456,
     clean_threshold=0.9,
@@ -260,7 +260,7 @@ def watching(monkeypatch):
 
         Pred.healthy = healthy
         if observation is not None:
-            Pred.laya = observation
+            Pred.local_classifier = observation
 
         class FakeWatcher:
             def forward(self, **kwargs):
@@ -283,7 +283,7 @@ def watching(monkeypatch):
 class TestThePollLoopArchivesOnlyWhatItWasAskedTo:
     def test_nothing_is_written_with_the_knob_at_zero(self, tmp_path, watching):
         job_dir = _write_job(tmp_path, "cia-aaa", "step 41 loss 0.31\n")
-        watching(tmp_path, healthy=True, config={"watch": {"laya": {"shadow_archive_bytes": 0}}})
+        watching(tmp_path, healthy=True, config={"watch": {"local_classifier": {"shadow_archive_bytes": 0}}})
 
         assert not (job_dir / CLEAN_DELTA_FILE).exists()
 
@@ -292,7 +292,7 @@ class TestThePollLoopArchivesOnlyWhatItWasAskedTo:
         watching(
             tmp_path,
             healthy=True,
-            config={"watch": {"laya": {"shadow_archive_bytes": 32_000}}},
+            config={"watch": {"local_classifier": {"shadow_archive_bytes": 32_000}}},
         )
         records = _records(job_dir)
 
@@ -306,7 +306,7 @@ class TestThePollLoopArchivesOnlyWhatItWasAskedTo:
         watching(
             tmp_path,
             healthy=False,
-            config={"watch": {"laya": {"shadow_archive_bytes": 32_000}}},
+            config={"watch": {"local_classifier": {"shadow_archive_bytes": 32_000}}},
         )
 
         assert (job_dir / "bundle" / "logs" / "watch.stderr.log").is_file()
@@ -322,7 +322,7 @@ class TestThePollLoopArchivesOnlyWhatItWasAskedTo:
         watching(
             tmp_path,
             healthy=True,
-            config={"watch": {"laya": {"shadow_archive_bytes": 50}}},
+            config={"watch": {"local_classifier": {"shadow_archive_bytes": 50}}},
         )
 
         assert already_full.read_text(encoding="utf-8") == "x" * 100, "the cap did not hold"
@@ -368,7 +368,7 @@ class TestTheShadowEvent:
         shadow = json.loads((job_dir / "events.jsonl").read_text().splitlines()[1])
         assert shadow["watch_signal"] == "WATCH_CLEAN"
         assert shadow["watch_healthy"] is True
-        assert shadow["signal"] == "WATCH_HANG", "Laya's own answer holds the usual field"
+        assert shadow["signal"] == "WATCH_HANG", "the classifier's own answer holds the usual field"
 
     def test_it_quotes_no_log_text(self, tmp_path, watching):
         """A tier that only scored the delta has nothing to quote out of it."""

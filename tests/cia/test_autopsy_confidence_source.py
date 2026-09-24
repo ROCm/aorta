@@ -6,7 +6,7 @@ a bare watchdog NaN, and the router's prompt asks a model in English for the
 same ``~0.62``. Both ends of that comparison were written together, which is why
 a bare number in an ``if`` was good enough.
 
-Phase 4 puts a calibrated encoder behind the same field, and a Laya probability
+Phase 4 puts a calibrated encoder behind the same field, and a local-classifier probability
 is a different distribution with the same name and the same range. Nothing in
 this repository has measured it: there are no weights on this machine, Phase 1
 has not run, and no temperature fit exists. So the tests here are not about
@@ -14,7 +14,7 @@ whether the encoder is right. They are about the one thing that can be checked
 without a measurement -- that a cutoff derived against one source is never
 quietly applied to another, and that a report says which source it had.
 
-Nothing here loads weights. ``FakeLayaPredictor`` answers from a hash, which is
+Nothing here loads weights. ``FakeDecisionPredictor`` answers from a hash, which is
 what a wiring test wants and what production must refuse; the tier refuses it by
 name, and that refusal is tested too.
 """
@@ -25,22 +25,22 @@ import json
 
 import pytest
 
-from aorta.agent.llm import AUTOPSY_CATEGORIES, LAYA_CATEGORY_QUESTION
+from aorta.agent.llm import AUTOPSY_CATEGORIES, CLASSIFIER_CATEGORY_QUESTION
 from aorta.cia.autopsy import escalation, router
 from aorta.cia.autopsy.escalation import (
     ADAPTER_RULES,
     ESCALATION_THRESHOLD,
-    LAYA,
     LLM_SELF_REPORT,
+    LOCAL_CLASSIFIER,
     SWEEP_PROBE,
     Confidence,
     UncalibratedThresholdError,
 )
-from aorta.laya.predictor import ChoiceAnswer, FakeLayaPredictor, NoulAnswer
+from aorta.local_classifier.predictor import ChoiceAnswer, FakeDecisionPredictor, NoulAnswer
 
 
-def _laya(value: float, detail: str = "laya-typed-decisions") -> Confidence:
-    return Confidence(value, LAYA, detail)
+def _local_classifier(value: float, detail: str = "laya-typed-decisions") -> Confidence:
+    return Confidence(value, LOCAL_CLASSIFIER, detail)
 
 
 def _adapters(value: float) -> Confidence:
@@ -52,7 +52,7 @@ def _decide(reported: Confidence, rule_based: Confidence, **kwargs):
 
 
 class TestTheCutoffStillMeansWhatItMeant:
-    """The pre-Laya behaviour, pinned before anything is allowed to change it."""
+    """The pre-classifier behaviour, pinned before anything is allowed to change it."""
 
     def test_the_cutoff_is_unchanged(self):
         assert ESCALATION_THRESHOLD == 0.85
@@ -60,7 +60,7 @@ class TestTheCutoffStillMeansWhatItMeant:
     def test_it_is_registered_for_the_two_sources_it_was_chosen_against(self):
         """Both are the same authored scale; a third source is not on it."""
         assert escalation.THRESHOLD_SOURCES == {ADAPTER_RULES, LLM_SELF_REPORT}
-        assert LAYA not in escalation.THRESHOLD_SOURCES
+        assert LOCAL_CLASSIFIER not in escalation.THRESHOLD_SOURCES
 
     @pytest.mark.parametrize("source", [ADAPTER_RULES, LLM_SELF_REPORT])
     @pytest.mark.parametrize(
@@ -80,7 +80,7 @@ class TestTheCutoffStillMeansWhatItMeant:
         assert "nothing to escalate" in decision.reason
 
 
-class TestALayaProbabilityDoesNotInheritTheCutoff:
+class TestALocalClassifierProbabilityDoesNotInheritTheCutoff:
     """The single edit that could make this system worse, refused structurally.
 
     A calibrated probability and an LLM's self-report are both floats in [0, 1]
@@ -90,17 +90,17 @@ class TestALayaProbabilityDoesNotInheritTheCutoff:
     attribute either to a threshold.
     """
 
-    def test_a_confident_laya_answer_cannot_suppress_a_sweep(self):
+    def test_a_confident_local_classifier_answer_cannot_suppress_a_sweep(self):
         """0.99 clears 0.85 on the old scale. It is not on the old scale."""
-        decision = _decide(_laya(0.99), _adapters(0.62))
+        decision = _decide(_local_classifier(0.99), _adapters(0.62))
 
         assert decision.escalate is True
         assert decision.gated_on.source == ADAPTER_RULES
         assert decision.gated_on.value == 0.62
 
-    def test_an_unconfident_laya_answer_cannot_cause_one_either(self):
+    def test_an_unconfident_local_classifier_answer_cannot_cause_one_either(self):
         """The error is symmetric, so refusing the cutoff has to be too."""
-        decision = _decide(_laya(0.10), _adapters(0.95))
+        decision = _decide(_local_classifier(0.10), _adapters(0.95))
 
         assert decision.escalate is False
         assert decision.gated_on.source == ADAPTER_RULES
@@ -113,14 +113,14 @@ class TestALayaProbabilityDoesNotInheritTheCutoff:
         what makes the tier safe to ship before the measurement exists.
         """
         for value in (0.0, 0.5, 1.0):
-            with_laya = _decide(_laya(value), _adapters(0.62))
+            with_local_classifier = _decide(_local_classifier(value), _adapters(0.62))
             without = _decide(_adapters(0.62), _adapters(0.62))
-            assert with_laya.escalate == without.escalate
+            assert with_local_classifier.escalate == without.escalate
 
     def test_the_report_can_tell_that_the_two_numbers_differ(self):
         """A reader told only the outcome cannot audit this; one told only the
         reported confidence would audit it wrongly."""
-        fields = _decide(_laya(0.99), _adapters(0.62)).as_report_fields()
+        fields = _decide(_local_classifier(0.99), _adapters(0.62)).as_report_fields()
 
         assert fields["gated_on"] == {"source": ADAPTER_RULES, "value": 0.62}
         assert fields["threshold"] == ESCALATION_THRESHOLD
@@ -131,16 +131,16 @@ class TestADerivedCutoffIsAccepted:
     """Phase 1's output has somewhere to land, rather than arriving as a patch."""
 
     @pytest.mark.parametrize("value,escalates", [(0.40, True), (0.55, False), (0.90, False)])
-    def test_an_operator_supplied_threshold_gates_the_laya_number(self, value, escalates):
-        decision = _decide(_laya(value), _adapters(0.95), laya_threshold=0.55)
+    def test_an_operator_supplied_threshold_gates_the_local_classifier_number(self, value, escalates):
+        decision = _decide(_local_classifier(value), _adapters(0.95), local_classifier_threshold=0.55)
 
         assert decision.escalate is escalates
-        assert decision.gated_on.source == LAYA
+        assert decision.gated_on.source == LOCAL_CLASSIFIER
         assert decision.threshold == 0.55
 
     def test_the_checkpoint_that_produced_it_is_named_in_the_reason(self):
         """Rule 2 of Decision 22: a threshold is derived against *a* checkpoint."""
-        decision = _decide(_laya(0.4, "fine-tune-2026-09"), _adapters(0.95), laya_threshold=0.55)
+        decision = _decide(_local_classifier(0.4, "fine-tune-2026-09"), _adapters(0.95), local_classifier_threshold=0.55)
 
         assert "fine-tune-2026-09" in decision.reason
 
@@ -154,7 +154,7 @@ class TestAnUnknownSourceIsNotGuessedAt:
     def test_a_fallback_that_is_not_on_the_cutoff_s_scale_raises_too(self):
         """The fallback is only safe because of what it is, not because it is second."""
         with pytest.raises(UncalibratedThresholdError, match="nothing left to gate on"):
-            _decide(_laya(0.9), Confidence(0.62, "some_future_head"))
+            _decide(_local_classifier(0.9), Confidence(0.62, "some_future_head"))
 
 
 class TestNothingClaimsAMeasurement:
@@ -172,20 +172,20 @@ class TestNothingClaimsAMeasurement:
 # ── the tier ───────────────────────────────────────────────────────────────
 
 
-def _pinned(category: str, probability: float = 0.77) -> FakeLayaPredictor:
+def _pinned(category: str, probability: float = 0.77) -> FakeDecisionPredictor:
     """The fake with the category answer pinned, which is the whole of a wiring test."""
     others = sorted(AUTOPSY_CATEGORIES - {category})
     spread = (1.0 - probability) / len(others)
-    return FakeLayaPredictor(
+    return FakeDecisionPredictor(
         pinned={
-            LAYA_CATEGORY_QUESTION: ChoiceAnswer(
+            CLASSIFIER_CATEGORY_QUESTION: ChoiceAnswer(
                 probabilities=((category, probability),) + tuple((o, spread) for o in others)
             )
         }
     )
 
 
-class _Clamped(FakeLayaPredictor):
+class _Clamped(FakeDecisionPredictor):
     """A checkpoint that clamped ``choice:11+``, which is the shipped default's state.
 
     The numbers are the library's published ones for that bucket rather than
@@ -197,7 +197,7 @@ class _Clamped(FakeLayaPredictor):
         super().__init__(pinned=_pinned(category, probability)._pinned)
 
     def calibration(self):
-        from aorta.laya.predictor import Calibration, ClampedBucket
+        from aorta.local_classifier.predictor import Calibration, ClampedBucket
 
         return Calibration(
             model_id=self.model_id(),
@@ -206,14 +206,14 @@ class _Clamped(FakeLayaPredictor):
         )
 
 
-class _Calibrated(FakeLayaPredictor):
+class _Calibrated(FakeDecisionPredictor):
     """A checkpoint whose fit for this bucket survived, so there is nothing to say."""
 
     def __init__(self, category: str, probability: float = 0.91) -> None:
         super().__init__(pinned=_pinned(category, probability)._pinned)
 
     def calibration(self):
-        from aorta.laya.predictor import Calibration
+        from aorta.local_classifier.predictor import Calibration
 
         return Calibration(
             model_id=self.model_id(), applied=(("choice:11+", 1.7), ("noul:2", 1.4))
@@ -261,46 +261,46 @@ _EVIDENCE = [
 ]
 
 
-def _route(fake_react, predictor=None, **laya):
-    built = router.TriageRouter("/tmp", laya=laya, predictor=predictor)
+def _route(fake_react, predictor=None, **local_classifier):
+    built = router.TriageRouter("/tmp", local_classifier=local_classifier, predictor=predictor)
     return built(evidence=_EVIDENCE, job_context="job_id=cia-aaa")
 
 
 class TestTheTierIsOffUntilSomethingHasBeenMeasured:
     def test_a_router_with_no_configuration_asks_nothing(self, fake_react):
-        class Loud(FakeLayaPredictor):
+        class Loud(FakeDecisionPredictor):
             def ask(self, states, questions):
                 raise AssertionError("the tier ran with no configuration")
 
         prediction = _route(fake_react, Loud())
 
         assert prediction.category == "illegal_mem"
-        assert getattr(prediction, "laya", None) is None
+        assert getattr(prediction, "local_classifier", None) is None
 
     def test_the_environment_ships_it_off(self, monkeypatch):
         """Default off: the measurement that would justify enabling it has not happened."""
         for name in (
-            router.LAYA_ENABLED_ENV,
-            router.LAYA_BACKEND_ENV,
-            router.LAYA_ESCALATION_THRESHOLD_ENV,
+            router.LOCAL_CLASSIFIER_ENABLED_ENV,
+            router.LOCAL_CLASSIFIER_BACKEND_ENV,
+            router.LOCAL_CLASSIFIER_ESCALATION_THRESHOLD_ENV,
         ):
             monkeypatch.delenv(name, raising=False)
 
-        assert router.laya_config_from_env()["enabled"] is False
+        assert router.local_classifier_config_from_env()["enabled"] is False
 
     def test_no_escalation_threshold_is_defaulted(self, monkeypatch):
         """The absence is the design. A number here would be one invented to fill a slot."""
-        monkeypatch.delenv(router.LAYA_ESCALATION_THRESHOLD_ENV, raising=False)
+        monkeypatch.delenv(router.LOCAL_CLASSIFIER_ESCALATION_THRESHOLD_ENV, raising=False)
 
-        assert "escalation_threshold" not in router.laya_config_from_env()
-        assert router._LayaCategoryTier({}).escalation_threshold is None
+        assert "escalation_threshold" not in router.local_classifier_config_from_env()
+        assert router._LocalClassifierCategoryTier({}).escalation_threshold is None
 
     def test_an_unparseable_threshold_is_refused_out_loud(self, monkeypatch, capsys):
         """Silently ignoring it would let an operator read the report as though
         their cutoff had applied."""
-        monkeypatch.setenv(router.LAYA_ESCALATION_THRESHOLD_ENV, "point five")
+        monkeypatch.setenv(router.LOCAL_CLASSIFIER_ESCALATION_THRESHOLD_ENV, "point five")
 
-        assert "escalation_threshold" not in router.laya_config_from_env()
+        assert "escalation_threshold" not in router.local_classifier_config_from_env()
         assert "is not a number" in capsys.readouterr().out
 
 
@@ -312,7 +312,7 @@ class TestTheEncoderAnswersTheClassification:
         assert prediction.confidence == pytest.approx(0.88)
 
     def test_the_rationale_and_next_probe_stay_on_the_model(self, fake_react):
-        """Laya emits no tokens, so there is nothing to ask it for."""
+        """The classifier emits no tokens, so there is nothing to ask it for."""
         prediction = _route(fake_react, _pinned("gpu_race"), enabled=True)
 
         assert prediction.rationale.startswith("SAN_CONSAN_RACE")
@@ -368,12 +368,12 @@ class TestTheEncoderAnswersTheClassification:
 
     def test_the_observation_travels_for_the_report_to_record(self, fake_react):
         prediction = _route(fake_react, _pinned("gpu_race", 0.88), enabled=True)
-        fields = prediction.laya.as_report_fields()
+        fields = prediction.local_classifier.as_report_fields()
 
         assert fields["model_id"] == "fake"
         assert fields["category"] == "gpu_race"
         assert fields["probability"] == pytest.approx(0.88)
-        assert fields["question"] == LAYA_CATEGORY_QUESTION
+        assert fields["question"] == CLASSIFIER_CATEGORY_QUESTION
         assert fields["options"] == len(AUTOPSY_CATEGORIES)
         assert fields["escalation_threshold"] is None
 
@@ -397,27 +397,27 @@ class TestTheWorstBucketSaysSo:
         The plan said nine. It is eleven, and either number is one side of a
         boundary that decides whether anything is disclosed at all.
         """
-        from aorta.laya.predictor import bucket_for
+        from aorta.local_classifier.predictor import bucket_for
 
         assert bucket_for(router.category_question()) == "choice:11+"
 
     def test_the_bucket_is_named_even_though_no_checkpoint_loaded(self, fake_react):
         """``bucket_for`` is pure, which is why half the disclosure survives a
         predictor that never reached any weights."""
-        observation = _route(fake_react, _pinned("gpu_race"), enabled=True).laya
+        observation = _route(fake_react, _pinned("gpu_race"), enabled=True).local_classifier
 
         assert observation.bucket == "choice:11+"
 
     def test_an_unreadable_calibration_is_unknown_and_not_clean(self, fake_react):
-        """``FakeLayaPredictor`` has no temperature table, so there is nothing
+        """``FakeDecisionPredictor`` has no temperature table, so there is nothing
         to report -- and nothing is a third state, not a pass."""
-        observation = _route(fake_react, _pinned("gpu_race"), enabled=True).laya
+        observation = _route(fake_react, _pinned("gpu_race"), enabled=True).local_classifier
 
         assert observation.clamped is None
         assert "CALIBRATION UNKNOWN" in observation.caveat
 
     def test_a_clamped_bucket_names_both_temperatures(self, fake_react):
-        observation = _route(fake_react, _Clamped("gpu_race"), enabled=True).laya
+        observation = _route(fake_react, _Clamped("gpu_race"), enabled=True).local_classifier
 
         assert observation.clamped is True
         assert "NOT CALIBRATED" in observation.caveat
@@ -426,7 +426,7 @@ class TestTheWorstBucketSaysSo:
     def test_a_clean_bucket_says_nothing(self, fake_react):
         """``caveat()`` returns "" where there is nothing to say, so a fitted
         checkpoint does not paste a reassurance into every report."""
-        observation = _route(fake_react, _Calibrated("gpu_race"), enabled=True).laya
+        observation = _route(fake_react, _Calibrated("gpu_race"), enabled=True).local_classifier
 
         assert observation.clamped is False
         assert observation.caveat == ""
@@ -440,7 +440,7 @@ class TestTheWorstBucketSaysSo:
 
         code = [
             line
-            for line in inspect.getsource(router._LayaCategoryTier).splitlines()
+            for line in inspect.getsource(router._LocalClassifierCategoryTier).splitlines()
             if not line.strip().startswith("#")
         ]
         source = "\n".join(code)
@@ -455,7 +455,7 @@ class TestTheWorstBucketSaysSo:
         """
         import inspect
 
-        source = inspect.getsource(router._LayaCategoryTier.observe)
+        source = inspect.getsource(router._LocalClassifierCategoryTier.observe)
 
         assert source.index("ask_one(") < source.index("predictor.calibration()")
 
@@ -467,19 +467,19 @@ class TestTheWorstBucketSaysSo:
         into report.json with its calibration unexamined.
         """
 
-        class Mute(FakeLayaPredictor):
+        class Mute(FakeDecisionPredictor):
             def calibration(self):
                 raise RuntimeError("the temperature table could not be read")
 
         prediction = _route(fake_react, Mute(), enabled=True)
 
         assert prediction.category == "illegal_mem"
-        assert getattr(prediction, "laya", None) is None
+        assert getattr(prediction, "local_classifier", None) is None
         assert "the router classifies as before" in capsys.readouterr().out
 
 
 class TestWhatTheModelAndTheEncoderAreShown:
-    class _Recording(FakeLayaPredictor):
+    class _Recording(FakeDecisionPredictor):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self.asked: list[tuple[tuple[str, ...], int]] = []
@@ -515,13 +515,13 @@ class TestTheQuestionHasOneDefinition:
     """
 
     def test_the_wording_is_the_shared_constant(self):
-        assert router.category_question().question == LAYA_CATEGORY_QUESTION
+        assert router.category_question().question == CLASSIFIER_CATEGORY_QUESTION
 
     def test_this_module_does_not_spell_the_question_a_second_time(self):
         import inspect
 
         source = inspect.getsource(router)
-        assert source.count(f'"{LAYA_CATEGORY_QUESTION}"') == 0
+        assert source.count(f'"{CLASSIFIER_CATEGORY_QUESTION}"') == 0
 
     def test_the_answer_space_is_the_whole_shared_vocabulary(self):
         """Autopsy reaches every category; the probe agent reaches a subset."""
@@ -542,7 +542,7 @@ class TestTheTierRefusesToGuess:
         builders that read report.json as ground truth."""
         prediction = _route(fake_react, None, enabled=True, backend="fake")
 
-        assert getattr(prediction, "laya", None) is None
+        assert getattr(prediction, "local_classifier", None) is None
         assert prediction.category == "illegal_mem"
         assert "not a measurement" in capsys.readouterr().out
 
@@ -566,7 +566,7 @@ class TestTheTierRefusesToGuess:
     def test_a_predictor_answering_the_wrong_shape_is_not_read_as_a_category(
         self, fake_react, capsys
     ):
-        class Wrong(FakeLayaPredictor):
+        class Wrong(FakeDecisionPredictor):
             def ask(self, states, questions):
                 return [[NoulAnswer(probability=1.0) for _ in questions] for _ in states]
 
@@ -589,7 +589,7 @@ class TestTheTierRefusesToGuess:
         set drifting away from AUTOPSY_CATEGORIES.
         """
 
-        class OffVocabulary(FakeLayaPredictor):
+        class OffVocabulary(FakeDecisionPredictor):
             def ask(self, states, questions):
                 return [[ChoiceAnswer(probabilities=(("probably_a_race", 1.0),))] for _ in states]
 
@@ -600,7 +600,7 @@ class TestTheTierRefusesToGuess:
 
 
 class _StubRouter:
-    """A router that answers from a Laya tier, without dspy or a model."""
+    """A router that answers from a local-classifier tier, without dspy or a model."""
 
     prediction = None
 
@@ -644,7 +644,7 @@ class TestTheReportSaysWhereItsConfidenceCameFrom:
         report = _report(evidenced_bundle, monkeypatch, _prediction())
 
         assert report["confidence_source"] == {"source": LLM_SELF_REPORT, "value": 0.62}
-        assert "laya" not in report
+        assert "local_classifier" not in report
 
     def test_a_degraded_verdict_is_recorded_as_the_adapters(self, evidenced_bundle, monkeypatch):
         """Autopsy has always had two sources here. Only one of them was visible."""
@@ -659,9 +659,9 @@ class TestTheReportSaysWhereItsConfidenceCameFrom:
 
         assert report["confidence_source"]["source"] == ADAPTER_RULES
 
-    def test_a_laya_verdict_names_the_checkpoint_inline(self, evidenced_bundle, monkeypatch):
+    def test_a_local_classifier_verdict_names_the_checkpoint_inline(self, evidenced_bundle, monkeypatch):
         """Rule 2 of Decision 22: a report is copied into a ticket and read alone."""
-        observation = router.LayaCategory(
+        observation = router.LocalClassifierCategory(
             model_id="laya-typed-decisions@cpu",
             category="numeric_silent",
             probability=0.71,
@@ -669,21 +669,21 @@ class TestTheReportSaysWhereItsConfidenceCameFrom:
             escalation_threshold=None,
         )
         report = _report(
-            evidenced_bundle, monkeypatch, _prediction(confidence=0.71, laya=observation)
+            evidenced_bundle, monkeypatch, _prediction(confidence=0.71, local_classifier=observation)
         )
 
         assert report["confidence_source"] == {
-            "source": LAYA,
+            "source": LOCAL_CLASSIFIER,
             "value": 0.71,
             "detail": "laya-typed-decisions@cpu",
         }
-        assert report["laya"]["model_id"] == "laya-typed-decisions@cpu"
-        assert report["laya"]["question"] == LAYA_CATEGORY_QUESTION
+        assert report["local_classifier"]["model_id"] == "laya-typed-decisions@cpu"
+        assert report["local_classifier"]["question"] == CLASSIFIER_CATEGORY_QUESTION
 
     def test_the_escalation_block_says_what_it_gated_on(self, evidenced_bundle, monkeypatch):
         """The reported confidence and the gating one are allowed to differ, and
         a report that does not say so cannot be audited."""
-        observation = router.LayaCategory(
+        observation = router.LocalClassifierCategory(
             model_id="laya-typed-decisions",
             category="numeric_silent",
             probability=0.99,
@@ -691,7 +691,7 @@ class TestTheReportSaysWhereItsConfidenceCameFrom:
             escalation_threshold=None,
         )
         report = _report(
-            evidenced_bundle, monkeypatch, _prediction(confidence=0.99, laya=observation)
+            evidenced_bundle, monkeypatch, _prediction(confidence=0.99, local_classifier=observation)
         )
 
         assert report["confidence"] == 0.99
@@ -707,7 +707,7 @@ class TestTheReportSaysWhereItsConfidenceCameFrom:
         assert "nothing to escalate" in report["escalation"]["reason"]
 
 
-def _observed(**fields) -> router.LayaCategory:
+def _observed(**fields) -> router.LocalClassifierCategory:
     base = {
         "model_id": "laya-typed-decisions",
         "category": "numeric_silent",
@@ -722,7 +722,7 @@ def _observed(**fields) -> router.LayaCategory:
         ),
     }
     base.update(fields)
-    return router.LayaCategory(**base)
+    return router.LocalClassifierCategory(**base)
 
 
 class TestTheCaveatReachesTheArtifactAndNotOnlyTheTerminal:
@@ -735,15 +735,15 @@ class TestTheCaveatReachesTheArtifactAndNotOnlyTheTerminal:
     disclosure that is not in it is a disclosure nobody gets.
     """
 
-    def _laya_report(self, bundle, monkeypatch, observation):
+    def _local_classifier_report(self, bundle, monkeypatch, observation):
         return _report(
             bundle,
             monkeypatch,
-            _prediction(confidence=observation.probability, laya=observation),
+            _prediction(confidence=observation.probability, local_classifier=observation),
         )
 
     def test_the_rationale_a_person_reads_carries_it(self, evidenced_bundle, monkeypatch):
-        report = self._laya_report(evidenced_bundle, monkeypatch, _observed())
+        report = self._local_classifier_report(evidenced_bundle, monkeypatch, _observed())
 
         assert "NOT CALIBRATED" in report["rationale"]
         assert "choice:11+" in report["rationale"]
@@ -753,10 +753,10 @@ class TestTheCaveatReachesTheArtifactAndNotOnlyTheTerminal:
     ):
         """A consumer grepping prose for "NOT CALIBRATED" is one rewording away
         from disagreeing with the thing that wrote it."""
-        report = self._laya_report(evidenced_bundle, monkeypatch, _observed())
+        report = self._local_classifier_report(evidenced_bundle, monkeypatch, _observed())
 
-        assert report["laya"]["bucket"] == "choice:11+"
-        assert report["laya"]["clamped"] is True
+        assert report["local_classifier"]["bucket"] == "choice:11+"
+        assert report["local_classifier"]["clamped"] is True
         assert report["confidence_source"]["caveat"].startswith("; NOT CALIBRATED")
 
     def test_unknown_survives_the_round_trip_as_null_rather_than_false(
@@ -765,9 +765,9 @@ class TestTheCaveatReachesTheArtifactAndNotOnlyTheTerminal:
         """``None`` means nobody asked the checkpoint, and a reader collapsing
         it to "not clamped" reads the worst case as the best one."""
         observation = _observed(clamped=None, caveat="; CALIBRATION UNKNOWN: no weights")
-        report = self._laya_report(evidenced_bundle, monkeypatch, observation)
+        report = self._local_classifier_report(evidenced_bundle, monkeypatch, observation)
 
-        assert json.loads(json.dumps(report))["laya"]["clamped"] is None
+        assert json.loads(json.dumps(report))["local_classifier"]["clamped"] is None
         assert "CALIBRATION UNKNOWN" in report["rationale"]
 
     def test_a_calibrated_bucket_leaves_the_rationale_alone(
@@ -775,10 +775,10 @@ class TestTheCaveatReachesTheArtifactAndNotOnlyTheTerminal:
     ):
         """The disclosure has to mean something when it is absent."""
         observation = _observed(clamped=False, caveat="")
-        report = self._laya_report(evidenced_bundle, monkeypatch, observation)
+        report = self._local_classifier_report(evidenced_bundle, monkeypatch, observation)
 
         assert "CALIBRAT" not in report["rationale"].upper()
-        assert report["laya"]["clamped"] is False
+        assert report["local_classifier"]["clamped"] is False
         assert "caveat" not in report["confidence_source"]
 
     def test_an_llm_confidence_has_nothing_to_disclose(self, evidenced_bundle, monkeypatch):
@@ -790,20 +790,20 @@ class TestTheCaveatReachesTheArtifactAndNotOnlyTheTerminal:
     def test_the_escalation_reason_discloses_only_the_number_it_gated_on(
         self, evidenced_bundle, monkeypatch
     ):
-        """The caveat is about the Laya probability, and by default the sweep is
+        """The caveat is about the local-classifier probability, and by default the sweep is
         not decided on it.
 
         With no derived cutoff, ``decide`` gates on the adapters' figure -- which
         is not from a clamped bucket, so stamping "NOT CALIBRATED" on that line
-        would attribute the Laya number's problem to a decision that avoided it.
-        The reason says instead why the Laya number was set aside, and the
+        would attribute the classifier number's problem to a decision that avoided it.
+        The reason says instead why the classifier number was set aside, and the
         caveat stays where that number actually appears.
         """
-        report = self._laya_report(evidenced_bundle, monkeypatch, _observed())
+        report = self._local_classifier_report(evidenced_bundle, monkeypatch, _observed())
         reason = report["escalation"]["reason"]
 
         assert "NOT CALIBRATED" not in reason
-        assert "no cutoff has been derived for laya" in reason
+        assert "no cutoff has been derived for local_classifier" in reason
         assert report["escalation"]["gated_on"]["source"] == ADAPTER_RULES
         assert "NOT CALIBRATED" in report["confidence_source"]["caveat"]
         assert "NOT CALIBRATED" in report["rationale"]
@@ -842,19 +842,19 @@ class TestDisclosingDoesNotChangeWhatRuns:
     """
 
     def test_a_caveat_does_not_move_the_escalation(self):
-        loud = Confidence(0.4, LAYA, "ckpt", caveat="; NOT CALIBRATED: choice:11+")
-        quiet = Confidence(0.4, LAYA, "ckpt")
+        loud = Confidence(0.4, LOCAL_CLASSIFIER, "ckpt", caveat="; NOT CALIBRATED: choice:11+")
+        quiet = Confidence(0.4, LOCAL_CLASSIFIER, "ckpt")
 
         assert (
-            _decide(loud, _adapters(0.95), laya_threshold=0.55).escalate
-            is _decide(quiet, _adapters(0.95), laya_threshold=0.55).escalate
+            _decide(loud, _adapters(0.95), local_classifier_threshold=0.55).escalate
+            is _decide(quiet, _adapters(0.95), local_classifier_threshold=0.55).escalate
         )
 
     def test_it_is_still_recorded_on_the_decision_that_ignored_it(self):
         decision = _decide(
-            Confidence(0.4, LAYA, "ckpt", caveat="; NOT CALIBRATED: choice:11+"),
+            Confidence(0.4, LOCAL_CLASSIFIER, "ckpt", caveat="; NOT CALIBRATED: choice:11+"),
             _adapters(0.95),
-            laya_threshold=0.55,
+            local_classifier_threshold=0.55,
         )
 
         assert "NOT CALIBRATED" in decision.reason
@@ -882,6 +882,6 @@ def test_importing_autopsy_pulls_in_no_model_machinery():
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
     assert json.loads(out.stdout) == [], (
-        f"importing Autopsy pulled in {out.stdout.strip()}; the Laya imports must "
+        f"importing Autopsy pulled in {out.stdout.strip()}; the classifier imports must "
         "stay inside the tier that loads a checkpoint."
     )

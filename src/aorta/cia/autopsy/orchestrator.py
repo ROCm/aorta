@@ -135,8 +135,8 @@ def run_autopsy(
     # reported confidence comes from somewhere that cutoff does not describe.
     rule_based = escalation.Confidence(classification.confidence, escalation.ADAPTER_RULES)
     reported = rule_based
-    laya_threshold: float | None = None
-    laya_fields: dict[str, Any] | None = None
+    local_classifier_threshold: float | None = None
+    local_classifier_fields: dict[str, Any] | None = None
 
     # LLM router — re-classifies based on all adapter evidence
     if use_llm and all_evidence:
@@ -162,18 +162,18 @@ def run_autopsy(
             # its absence is how Autopsy says the model self-reported -- the
             # distinction the escalation cutoff has always depended on and has
             # never until now been able to see.
-            observation = getattr(pred, "laya", None)
+            observation = getattr(pred, "local_classifier", None)
             if observation is None:
                 reported = escalation.Confidence(confidence, escalation.LLM_SELF_REPORT)
             else:
                 reported = escalation.Confidence(
                     confidence,
-                    escalation.LAYA,
+                    escalation.LOCAL_CLASSIFIER,
                     observation.model_id,
                     caveat=observation.caveat,
                 )
-                laya_threshold = observation.escalation_threshold
-                laya_fields = observation.as_report_fields()
+                local_classifier_threshold = observation.escalation_threshold
+                local_classifier_fields = observation.as_report_fields()
         except Exception as e:
             # A verdict reached without the router is a weaker claim than one
             # reached with it, and the difference is invisible in the category
@@ -215,7 +215,10 @@ def run_autopsy(
     # which cutoff, is `escalation.decide`'s to answer -- the two were an
     # unwritten pairing until a third source of the number arrived.
     decision = escalation.decide(
-        next_probe, reported, rule_based=rule_based, laya_threshold=laya_threshold
+        next_probe,
+        reported,
+        rule_based=rule_based,
+        local_classifier_threshold=local_classifier_threshold,
     )
     if decision.escalate and job is not None:
         print(f"[autopsy] {decision.reason} — escalating to Aorta production sweep")
@@ -255,7 +258,7 @@ def run_autopsy(
         tooling_gaps=all_gaps,
         confidence_source=reported.as_report_fields(),
         escalation=decision.as_report_fields(),
-        laya=laya_fields,
+        local_classifier=local_classifier_fields,
         # The rationale is the one field of this report a person actually
         # reads, so it is where a "this number is not calibrated" has to end
         # up. Passed separately rather than concatenated here because

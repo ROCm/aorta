@@ -50,7 +50,7 @@ remote model:
 | `--llm-backend` | Remote call? | Needs | How decisions are made |
 |-----------------|--------------|-------|-------------------------|
 | `fake` *(default)* | **No** | nothing — base install | Deterministic `FakeLLMProposer`: heuristics on detector IDs + round-robin through registered mitigations |
-| `laya` | **No** | `amd-aorta[laya]` + staged weights | `LayaProposer` runs a local calibrated encoder. Three typed questions, one forward pass, no tokens generated |
+| `local` | **No** | `amd-aorta[local-classifier]` + staged weights | `LocalClassifierProposer` runs a local calibrated encoder. Three typed questions, one forward pass, no tokens generated |
 | `litellm` | **Yes** | `amd-aorta[chat-cli]`, or `amd-aorta[agent]` alone | Shared chat provider layer, falling back to a direct LiteLLM call when the chat extra is absent |
 | `openai` | **Yes** | `amd-aorta[chat-cli]` | Shared chat provider layer |
 | `vllm` | **Yes** | `amd-aorta[chat-cli]` | Shared chat provider layer, against a model you host |
@@ -89,7 +89,7 @@ sequenceDiagram
     participant Loop as agent loop
     participant Probe as run_recipe / probe
     participant Classifier as 5-tier classifier
-    participant Proposer as fake / laya / LLM backend
+    participant Proposer as fake / local / LLM backend
 
     CLI->>Loop: argv + ticket + policy
     Loop->>Probe: run none-none cell
@@ -133,7 +133,7 @@ pip install 'amd-aorta[agent]'
 export OPENAI_API_KEY=...   # or another provider LiteLLM supports
 
 # Local calibrated encoder, no network at propose time
-pip install 'amd-aorta[laya]'
+pip install 'amd-aorta[local-classifier]'
 ```
 
 Then:
@@ -141,12 +141,12 @@ Then:
 ```bash
 aorta agent mitigate --llm-backend litellm --llm-model gpt-4o-mini ...
 aorta agent mitigate --llm-backend vllm ...
-aorta agent mitigate --llm-backend laya ...
+aorta agent mitigate --llm-backend local ...
 ```
 
 For `openai` and `vllm`, `--llm-model` is optional: the chat profile already
-names a model. For `laya` it names a **checkpoint**, not a model on an
-endpoint — see [Example 3b](#example-3b--local-encoder-backend-laya).
+names a model. For `local` it names a **checkpoint**, not a model on an
+endpoint — see [Example 3b](#example-3b--local-encoder-backend-local).
 
 ---
 
@@ -167,10 +167,10 @@ So “agentic” here means **autonomous search over a mitigation space**, not
 “must call Claude/GPT.” A model is an **optional upgrade** for smarter
 mitigation ordering and richer hypotheses — not a requirement.
 
-`laya` sits between the two. It is a learned model, so it orders mitigations by
+`local` sits between the two. It is a learned model, so it orders mitigations by
 something better than registry order, but it never generates text and never
 leaves the machine, so it keeps the offline property `fake` has. What it cannot
-do is write a hypothesis: `LayaProposer` templates that string the same way
+do is write a hypothesis: `LocalClassifierProposer` templates that string the same way
 `FakeLLMProposer` does, because a model that emits no tokens has nothing to say.
 If the prose in `agent_report.md` is what you are after, you want one of the
 three LLM backends.
@@ -198,8 +198,8 @@ Useful flags:
 | `--max-iterations N` | Cap mitigation proposals (default 8) |
 | `--mitigation NAME` | Restrict search (repeatable) |
 | `--mitigations-file sidecar.json` | Extra registered mitigations |
-| `--llm-backend NAME` | Proposer backend: `fake` (default), `laya`, `litellm`, `openai`, `vllm` |
-| `--llm-model NAME` | Model for the selected backend; a **checkpoint name or local fine-tune directory** for `laya`. Defaults to whatever the chat profile configures (`gpt-4o-mini` on the standalone `litellm` path, `laya-typed-decisions` for `laya`) |
+| `--llm-backend NAME` | Proposer backend: `fake` (default), `local`, `litellm`, `openai`, `vllm` |
+| `--llm-model NAME` | Model for the selected backend; a **checkpoint name or local fine-tune directory** for `local`. Defaults to whatever the chat profile configures (`gpt-4o-mini` on the standalone `litellm` path, `laya-typed-decisions` for `local`) |
 | `--dry-run` | Plan cells without executing |
 | `--bundle` | Run `aorta bundle` after loop (needs recipe redaction) |
 | `-v` / `-vv` | Progress logging |
@@ -341,18 +341,18 @@ configured provider instead.
 
 ---
 
-### Example 3b — Local encoder backend (`laya`)
+### Example 3b — Local encoder backend (`local`)
 
 Same loop, same artifacts, no network call at the propose step:
 
 ```bash
-pip install 'amd-aorta[laya]'
+pip install 'amd-aorta[local-classifier]'
 
 PYTHONPATH=src aorta agent mitigate \
   --output /tmp/agent_out \
-  --ticket smoke-laya \
+  --ticket smoke-local \
   --symptom "RCCL hang after checkpoint" \
-  --llm-backend laya \
+  --llm-backend local \
   --mitigation none \
   --mitigation nccl_launch_order_implicit \
   --mitigation tf32_off \
@@ -364,7 +364,7 @@ PYTHONPATH=src aorta agent mitigate \
 
 1. Baseline cell runs and fails; the classifier populates detectors, exactly as
    in Example 3.
-2. `LayaProposer` builds **three typed questions over one state**: a choice over
+2. `LocalClassifierProposer` builds **three typed questions over one state**: a choice over
    the mitigations that are actually left, a choice over `PROBE_CATEGORIES`, and
    a yes/no on whether to stop searching.
 3. All three are answered in **one forward pass** — the encoder batches
@@ -379,19 +379,21 @@ Two properties worth knowing before you read the output:
   the answer space, so the filtering the LLM backends do after the fact is
   structural here.
 - **The stop threshold is a policy choice, not a measurement.**
-  `DEFAULT_LAYA_STOP_THRESHOLD` sits above the 0.5 midpoint because the two
+  `DEFAULT_CLASSIFIER_STOP_THRESHOLD` sits above the 0.5 midpoint because the two
   mistakes cost differently: a false stop ends an investigation and reports a
   category nobody went on to test, while a false continue costs one more probe
   cell, and `AgentPolicy` already bounds how many of those there can be. Nothing
   on this path applies the per-question-type temperature fit that would make the
   probabilities calibrated, so treat the threshold as an error preference made in
   the absence of a fit — not as a figure derived from one. See
-  [`docs/laya-packaging.md`](../laya-packaging.md) on why a probability is a
+  [`docs/local-classifier-packaging.md`](../local-classifier-packaging.md) on why a probability is a
   function of the checkpoint *and* the fit applied to it.
 
 `--llm-model` selects the checkpoint; it defaults to the fine-tuned
 `laya-typed-decisions` rather than the base checkpoint, whose published numbers
-sit below a majority-class baseline on typed decisions.
+sit below a majority-class baseline on typed decisions. (The encoder behind
+this backend is currently the Laya model, which is why the checkpoint names
+and the error messages below mention it.)
 
 ---
 
@@ -439,7 +441,7 @@ aorta agent mitigate (CLI)
             ├── run_recipe()      same engine as aorta probe
             │       └── SubprocessWorkload + 5-tier classifier
             ├── _read_cell_summaries()  from trial_*/result.json
-            ├── proposer.propose()       fake | laya | litellm/openai/vllm
+            ├── proposer.propose()       fake | local | litellm/openai/vllm
             ├── AgentPolicy.validate_step()
             └── write_agent_report()
 ```
@@ -486,7 +488,7 @@ chain (`capture` fields), recommended next action.
 | Pick… | When |
 |-------|------|
 | **`fake`** *(default)* | CI, unit tests, offline dev, reproducible demos. No extra, no keys, no weights, no network. The only backend a base install can run |
-| **`laya`** | You want symptom-aware ordering without a network call or an API key: an air-gapped node, a customer site, or a loop you do not want metered. Needs the `[laya]` extra and staged weights |
+| **`local`** | You want symptom-aware ordering without a network call or an API key: an air-gapped node, a customer site, or a loop you do not want metered. Needs the `[local-classifier]` extra and staged weights |
 | **`litellm`** | You already configure a provider through LiteLLM, or you are on an `[agent]`-only install where the chat extra is absent |
 | **`openai`** | The chat profile already points at OpenAI and you want one place to configure it |
 | **`vllm`** | You host the model yourself and want the prose without the third party |
@@ -497,7 +499,7 @@ five are subject to the same registry check on whatever they propose.
 Two axes decide it in practice. **Does a remote call cost you anything** — money,
 an egress rule, or a customer's data leaving their machine — rules out the three
 LLM backends. **Do you need prose in `agent_report.md`** rules out `fake` and
-`laya`, both of which template the hypothesis rather than writing one.
+`local`, both of which template the hypothesis rather than writing one.
 
 ---
 
@@ -506,7 +508,7 @@ LLM backends. **Do you need prose in `agent_report.md`** rules out `fake` and
 | | `aorta probe` | `aorta agent mitigate` |
 |---|---------------|---------------|
 | Matrix | You write full YAML axes | Grows axis iteration by iteration |
-| Who picks next mitigation | You | Proposer (`fake`, `laya`, or an LLM backend) |
+| Who picks next mitigation | You | Proposer (`fake`, `local`, or an LLM backend) |
 | Verdict | Classifier | Classifier (unchanged) |
 | argv | Opaque, fixed | Opaque, fixed |
 | Resume | Per ticket dir | Same + `agent_log.jsonl` |
@@ -545,22 +547,22 @@ Install it, then configure the endpoint once in `~/.config/aorta/chat.toml` or
 resolves. `litellm` does not hit this, because it falls back to a direct call
 when the chat extra is absent.
 
-**`LayaUnavailable: Laya is required for a real typed-decision predictor`** —
-`--llm-backend=laya` needs `pip install 'amd-aorta[laya]'`. It is a separate
+**`ClassifierUnavailableError: Laya is required for a real typed-decision predictor`** —
+`--llm-backend=local` needs `pip install 'amd-aorta[local-classifier]'`. It is a separate
 extra because it resolves torch, which nothing reachable from `[chat-cli]` is
 allowed to do.
 
-**`LayaUnavailable: could not load the Laya checkpoint …`** — the extra is
+**`ClassifierUnavailableError: could not load the Laya checkpoint …`** — the extra is
 installed but the weights are not. They download on first use, so this is the
 ordinary no-egress failure as often as it is a bad checkpoint name. Stage the
 checkpoint from a machine with egress, or pass `--llm-model` pointing at a local
-fine-tune directory. Note that a `laya` run loads weights on the **first
+fine-tune directory. Note that a `local` run loads weights on the **first
 proposer call**, not at startup, so this surfaces after the baseline cell has
 already run rather than immediately.
 
-**A `laya` run stops earlier or later than you expected** — the stop threshold
+**A `local` run stops earlier or later than you expected** — the stop threshold
 is a policy choice about which error to prefer, not a calibrated cutoff; see
-[Example 3b](#example-3b--local-encoder-backend-laya). Raise `--max-iterations`
+[Example 3b](#example-3b--local-encoder-backend-local). Raise `--max-iterations`
 if you want the search to keep going regardless.
 
 **All mitigations fail** — expected for hard repros; outcome

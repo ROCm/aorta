@@ -19,7 +19,7 @@ from aorta.cia.launch.job import JobRecord, record_watch_files
 from aorta.cia.launch.registry import scan_active_jobs
 from aorta.cia.watch.cursors import load_cursors, read_new_bytes, save_cursors
 from aorta.cia.watch.log_finder import LogFinder
-from aorta.cia.watch.watcher import LayaObservation, LogWatcher
+from aorta.cia.watch.watcher import LocalClassifierObservation, LogWatcher
 
 
 def _utc_now() -> str:
@@ -101,8 +101,8 @@ def _emit_skipped(events_path: Path, job, content: str, error: str) -> None:
         )
 
 
-def _shadow_event(job: JobRecord, observation: LayaObservation, used: dict) -> dict:
-    """One ``watchdog_shadow`` line: what Laya said, beside what Watch used.
+def _shadow_event(job: JobRecord, observation: LocalClassifierObservation, used: dict) -> dict:
+    """One ``watchdog_shadow`` line: what the local classifier said, beside what Watch used.
 
     A distinct ``event_type`` so nothing that reads this file for verdicts can
     mistake it for one. ``watchdog_alert`` and ``watchdog_ok`` are what the
@@ -122,7 +122,7 @@ def _shadow_event(job: JobRecord, observation: LayaObservation, used: dict) -> d
         "phase": "watchdog",
         "event_type": "watchdog_shadow",
         "job_id": job.job_id,
-        # Laya's own answers occupy the fields a scorer already knows how to
+        # The classifier's own answers occupy the fields a scorer already knows how to
         # read: the slug it chose, and p(healthy) as the confidence in it.
         "signal": observation.signal,
         "confidence": round(observation.clean_probability, 4),
@@ -131,7 +131,7 @@ def _shadow_event(job: JobRecord, observation: LayaObservation, used: dict) -> d
         # text into the events file for no reader.
         "excerpt": "",
         "assessment": (
-            f"Shadow only. Laya put p(healthy) at "
+            f"Shadow only. The local classifier put p(healthy) at "
             f"{observation.clean_probability:.2f} against a clean threshold of "
             f"{observation.clean_threshold:.2f}. No control flow depended on it."
         ),
@@ -495,11 +495,12 @@ def poll_jobs(
 
     interval = float(watch_cfg.get("poll_interval_sec", 30))
     confidence_threshold = float(watch_cfg.get("confidence_threshold", 0.70))
-    # Read here and not inside LogWatcher, unlike the rest of ``watch.laya``,
+    # Read here and not inside LogWatcher, unlike the rest of ``watch.local_classifier``,
     # because the archive is about a job directory and the watcher has never
-    # been told where one is. Keeping it that way is what lets the Laya tier be
+    # been told where one is. Keeping it that way is what lets the local-classifier tier be
     # a pure function of the delta.
-    archive_bytes = int((watch_cfg.get("laya") or {}).get("shadow_archive_bytes", 0) or 0)
+    tier_cfg = watch_cfg.get("local_classifier") or {}
+    archive_bytes = int(tier_cfg.get("shadow_archive_bytes", 0) or 0)
     expectations = "\n".join(
         f"- {e}" for e in watch_cfg.get("expectations", [
             "Training loss should be decreasing or stable — not NaN or diverging",
@@ -509,7 +510,7 @@ def poll_jobs(
     )
 
     finder = LogFinder(config=finder_cfg)
-    # The whole ``watch`` block, not just ``watch.laya``: the watcher picks the
+    # The whole ``watch`` block, not just ``watch.local_classifier``: the watcher picks the
     # keys it owns, which is the shape ``LogFinder`` already has, and a second
     # place that knows the nesting is a second place to get it wrong.
     watcher = LogWatcher(watch_cfg)
@@ -773,11 +774,11 @@ def _poll_rounds(*, pool, capacity, queued, jobs_root, finder, watcher, interval
             confidence = float(getattr(pred, "confidence", 0.0))
             evidence = getattr(pred, "evidence", "")
             assessment = getattr(pred, "assessment", "")
-            # Present only when the Laya tier ran, which is off by default.
+            # Present only when the local-classifier tier ran, which is off by default.
             # Read with getattr for the same reason every other field here is:
             # this loop does not know which tier answered and must not start
             # caring.
-            observation = getattr(pred, "laya", None)
+            observation = getattr(pred, "local_classifier", None)
 
             print(f"[watch] {job.job_id}: {signal} confidence={confidence:.2f} — {assessment[:120]}")
 
@@ -901,7 +902,9 @@ def _poll_rounds(*, pool, capacity, queued, jobs_root, finder, watcher, interval
                     signal=signal,
                     confidence=confidence,
                     source=job.watch_files[0] if job.watch_files else "",
-                    laya=observation.as_event_fields() if observation is not None else None,
+                    local_classifier=(
+                        observation.as_event_fields() if observation is not None else None
+                    ),
                     limit_bytes=archive_bytes,
                 )
             save_cursors(job_dir, cursors)

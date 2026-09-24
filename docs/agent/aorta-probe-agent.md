@@ -87,7 +87,7 @@ flowchart TD
    optional approval gate before running mitigations flagged as needing ack.
 4. **Optional model dependency** — every backend that reaches a model lives
    behind an extra (`[chat-cli]` for `openai` / `vllm` / `litellm`, `[agent]`
-   for the standalone `litellm` path, `[laya]` for the local encoder); a
+   for the standalone `litellm` path, `[local-classifier]` for the local encoder); a
    deterministic fake proposer supports offline tests with zero API calls.
 
 ---
@@ -142,7 +142,7 @@ src/aorta/agent/
   __init__.py
   loop.py      # orchestration -> run_recipe
   llm.py       # AgentStep + the LLMProposer implementations:
-               #   FakeLLMProposer, LayaProposer, ChatProviderProposer, LiteLLMProposer
+               #   FakeLLMProposer, LocalClassifierProposer, ChatProviderProposer, LiteLLMProposer
   policy.py    # budget, registry filter, approval
   state.py     # agent_log.jsonl, wake()
   report.py    # agent_report.md writer
@@ -164,7 +164,7 @@ aorta agent mitigate \
 ```
 
 Default backend is `fake` (deterministic, offline-safe, no extra required).
-`--llm-backend` also takes `laya`, `litellm`, `openai` and `vllm`; see
+`--llm-backend` also takes `local`, `litellm`, `openai` and `vllm`; see
 [agentic-testing-guide.md](agentic-testing-guide.md#are-we-using-an-actual-llm)
 for what each needs installed.
 

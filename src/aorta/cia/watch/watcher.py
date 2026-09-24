@@ -14,7 +14,7 @@ from aorta.cia.autopsy.adapters.stderr_watch import scan_stderr_text
 from aorta.cia.llm import ensure_configured
 
 if TYPE_CHECKING:  # pragma: no cover - an annotation must not cost an import
-    from aorta.laya.predictor import Choice, LayaPredictor, Noul
+    from aorta.local_classifier.predictor import Choice, DecisionPredictor, Noul
 
 _SANITIZER_RESULT = re.compile(
     r"^\[sanitizer\] (?P<name>[A-Za-z0-9_-]+): "
@@ -208,17 +208,17 @@ class WatchAssessment(dspy.Signature):
 
 
 # ---------------------------------------------------------------------------
-# The Laya tier: the clean-gate, between the sanitizer regex and ReAct
+# The local-classifier tier: the clean-gate, between the sanitizer regex and ReAct
 # ---------------------------------------------------------------------------
 
 #: The checkpoint the tier resolves when the config names none.
-DEFAULT_LAYA_BACKEND = "laya-typed-decisions"
+DEFAULT_CLASSIFIER_BACKEND = "laya-typed-decisions"
 
-#: How sure Laya has to be that a delta is healthy before Watch declines to
+#: How sure the local classifier has to be that a delta is healthy before Watch declines to
 #: spend an LLM call on it.
 #:
 #: Deliberately high, and deliberately not a fitted number. Nothing in this
-#: repository has yet scored a Laya checkpoint against a ROCm log, and the
+#: repository has yet scored a classifier checkpoint against a ROCm log, and the
 #: per-(question type, option count) temperature refit that makes one of its
 #: probabilities mean what it says has not been run either -- so 0.90 is a
 #: policy rather than a measurement: decline far more often than fire until
@@ -233,15 +233,15 @@ DEFAULT_CLEAN_THRESHOLD = 0.90
 # against nothing while still looking like a probability. Nothing raises. The
 # gate simply thresholds a number that no longer means what its name says.
 #
-# So there is one definition, here, and ``aorta.laya.corpus.watch`` imports it
+# So there is one definition, here, and ``aorta.local_classifier.corpus.watch`` imports it
 # to label against. This module is the canonical side for the same reason
 # ``aorta/agent/llm.py`` is for the proposer's questions and Autopsy's category:
 # the question is about *Watch's decision*, not about the encoder.
-# ``aorta.laya.predictor`` serves every track, and if each track's phrasings
+# ``aorta.local_classifier.predictor`` serves every track, and if each track's phrasings
 # lived there the seam would become a string registry.
 #
 # Bare strings rather than assembled ``Noul`` / ``Choice`` objects, matching
-# ``LAYA_CATEGORY_QUESTION`` and its neighbours, because the seam's types are
+# ``CLASSIFIER_CATEGORY_QUESTION`` and its neighbours, because the seam's types are
 # what a caller assembles and the text is what has to be identical. The
 # assembly is :func:`healthy_question` and :func:`signal_question` below, which
 # is what a caller wanting the whole question should import -- re-assembling
@@ -263,7 +263,7 @@ WATCH_SIGNALS: tuple[str, ...] = (
 )
 
 #: The gate's question. p(yes) is what ``clean_threshold`` is compared against.
-LAYA_HEALTHY_QUESTION = (
+CLASSIFIER_HEALTHY_QUESTION = (
     "Is this new training log output healthy -- no expectation clearly "
     "violated, and nothing here that needs a closer look?"
 )
@@ -271,22 +271,22 @@ LAYA_HEALTHY_QUESTION = (
 #: The two sides of it. A bare noul gets the library's own generic pair, which
 #: says nothing about training: "healthy" has to be told from "quiet", and the
 #: false side has to name the three things Watch is actually looking for.
-LAYA_HEALTHY_WHEN_TRUE = (
+CLASSIFIER_HEALTHY_WHEN_TRUE = (
     "training is progressing normally, or this is ordinary startup noise"
 )
-LAYA_HEALTHY_WHEN_FALSE = (
+CLASSIFIER_HEALTHY_WHEN_FALSE = (
     "an expectation is clearly violated: a bad number, a stall, an error"
 )
 
 #: The slug question. Never a verdict -- see :func:`signal_question`.
-LAYA_SIGNAL_QUESTION = (
+CLASSIFIER_SIGNAL_QUESTION = (
     "Which signal best describes what went wrong in this training log output?"
 )
 
 #: One gloss per slug, in the order offered. Part of the question too: the
 #: library sends ``criteria`` as the answer space of a choice, so a slug missing
 #: from here is a slug the model is not offered.
-LAYA_SIGNAL_CRITERIA: tuple[tuple[str, str], ...] = (
+CLASSIFIER_SIGNAL_CRITERIA: tuple[tuple[str, str], ...] = (
     ("WATCH_NUMERIC_NAN", "a NaN, a non-finite value, or a diverging loss"),
     ("WATCH_HANG", "training is stalled: no step progress"),
     ("WATCH_LOSS_STALL", "loss has plateaued and is not decreasing as expected"),
@@ -300,20 +300,20 @@ def healthy_question() -> Noul:
     """The gate's question, assembled. One definition, two callers.
 
     The runtime tier below and the corpus builder in
-    ``aorta.laya.corpus.watch`` both call this, so the thing a temperature is
+    ``aorta.local_classifier.corpus.watch`` both call this, so the thing a temperature is
     fitted against and the thing a threshold is applied to cannot drift apart.
 
     Imported inside the function rather than at module scope. The seam itself
     is pure dataclasses, but the module that holds it is also where the loader
-    lives, and Decision 22 in ``docs/laya-packaging.md`` asks for one rule
+    lives, and Decision 22 in ``docs/local-classifier-packaging.md`` asks for one rule
     rather than a per-symbol judgement about which imports are cheap today.
     """
-    from aorta.laya.predictor import Noul
+    from aorta.local_classifier.predictor import Noul
 
     return Noul(
-        question=LAYA_HEALTHY_QUESTION,
-        when_true=LAYA_HEALTHY_WHEN_TRUE,
-        when_false=LAYA_HEALTHY_WHEN_FALSE,
+        question=CLASSIFIER_HEALTHY_QUESTION,
+        when_true=CLASSIFIER_HEALTHY_WHEN_TRUE,
+        when_false=CLASSIFIER_HEALTHY_WHEN_FALSE,
     )
 
 
@@ -329,20 +329,20 @@ def signal_question() -> Choice:
     Nothing reads this answer as a verdict. The gate fires on the noul, and a
     slug is only ever written to a ``watchdog_shadow`` event.
     """
-    from aorta.laya.predictor import Choice
+    from aorta.local_classifier.predictor import Choice
 
     return Choice(
-        question=LAYA_SIGNAL_QUESTION,
+        question=CLASSIFIER_SIGNAL_QUESTION,
         options=WATCH_SIGNALS,
-        criteria=LAYA_SIGNAL_CRITERIA,
+        criteria=CLASSIFIER_SIGNAL_CRITERIA,
     )
 
 
 @dataclass(frozen=True)
-class LayaObservation:
-    """What the Laya tier saw about one delta, and whether it acted on it.
+class LocalClassifierObservation:
+    """What the local-classifier tier saw about one delta, and whether it acted on it.
 
-    Carried on the returned ``dspy.Prediction`` as ``laya`` rather than written
+    Carried on the returned ``dspy.Prediction`` as ``local_classifier`` rather than written
     from here, because this module has no idea where a job's events file is and
     acquiring one would give the assessment a side effect. ``poll.py`` already
     owns every write to ``events.jsonl``; this is the payload it writes.
@@ -371,7 +371,7 @@ class LayaObservation:
     signal_caveat: str = ""
 
     def as_event_fields(self) -> dict[str, Any]:
-        """The Laya half of a ``watchdog_shadow`` event.
+        """The local-classifier half of a ``watchdog_shadow`` event.
 
         ``model_id`` travels inline rather than beside the run, which is rule 2
         of Decision 22: a report read on its own -- copied into a ticket, or
@@ -399,13 +399,13 @@ class LayaObservation:
         }
 
 
-class _LayaTier:
+class _LocalClassifierTier:
     """One forward pass, two typed answers, and no prose.
 
     The tier only ever short-circuits toward *clean*, and that asymmetry is
     forced rather than chosen. ``write_bundle`` persists ``evidence`` -- the log
     lines Autopsy reads -- and the events file carries ``assessment``, the
-    paragraph an operator reads. Laya generates no text, so it cannot produce
+    paragraph an operator reads. The classifier generates no text, so it cannot produce
     either, and an unhealthy verdict from it would alert with an empty bundle.
     A clean verdict needs neither: ``sanitizer_assessment`` already establishes
     that the clean branch says ``evidence="none"`` and a single fixed sentence.
@@ -417,15 +417,15 @@ class _LayaTier:
     def __init__(
         self,
         config: Mapping[str, Any] | None = None,
-        predictor: LayaPredictor | None = None,
+        predictor: DecisionPredictor | None = None,
     ) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", False))
         self.shadow = bool(cfg.get("shadow", False))
         self.clean_threshold = float(cfg.get("clean_threshold", DEFAULT_CLEAN_THRESHOLD))
-        self.backend = str(cfg.get("backend", DEFAULT_LAYA_BACKEND) or "")
+        self.backend = str(cfg.get("backend", DEFAULT_CLASSIFIER_BACKEND) or "")
         # The injection point, the same one ``LayaAgentPredictor`` offers
-        # through ``load=``: a test drives the tier with ``FakeLayaPredictor``
+        # through ``load=``: a test drives the tier with ``FakeDecisionPredictor``
         # and no checkpoint goes anywhere near CI.
         self._predictor = predictor
         # One LogWatcher serves the whole poll loop, so a checkpoint that is
@@ -435,7 +435,7 @@ class _LayaTier:
 
     @property
     def wanted(self) -> bool:
-        """Whether anything should ask Laya at all.
+        """Whether anything should ask the local classifier at all.
 
         Shadow and the gate are separate flags because they are separate
         decisions: shadow is what produces the comparison, and the gate is what
@@ -444,12 +444,12 @@ class _LayaTier:
         """
         return self.enabled or self.shadow
 
-    def observe(self, new_content: str) -> LayaObservation | None:
+    def observe(self, new_content: str) -> LocalClassifierObservation | None:
         """Score one delta, or None when the tier cannot run.
 
         The state is the delta and nothing else -- not the job context, not the
         expectations -- because the state is half of a calibrated question. The
-        corpus in ``aorta.laya.corpus.watch`` is built from
+        corpus in ``aorta.local_classifier.corpus.watch`` is built from
         ``bundle/logs/watch.stderr.log``, which is the delta alone, so anything
         else here would fit a temperature against one input distribution and
         apply it to another. The cost is real and is recorded rather than
@@ -462,7 +462,7 @@ class _LayaTier:
         if predictor is None:
             return None
         try:
-            from aorta.laya.predictor import ChoiceAnswer, NoulAnswer, ask_one
+            from aorta.local_classifier.predictor import ChoiceAnswer, NoulAnswer, ask_one
 
             healthy, slug = healthy_question(), signal_question()
             clean, signal = ask_one(predictor, new_content, [healthy, slug])
@@ -492,7 +492,7 @@ class _LayaTier:
             # attempt per delta for the life of the watcher.
             self._unavailable = True
             print(
-                f"[watch] the Laya tier failed and will not be retried this run; "
+                f"[watch] the local-classifier tier failed and will not be retried this run; "
                 f"assessment continues without it: {type(exc).__name__}: {exc}"
             )
             return None
@@ -504,11 +504,11 @@ class _LayaTier:
         # printing and would be caught on the next round; a single non-finite
         # loss line would not be. ``scan_stderr_text`` is the deterministic
         # scanner Watch already trusts for exactly that signature, so a delta it
-        # flags is never gated however sure Laya is. Nothing else about the
+        # flags is never gated however sure the classifier is. Nothing else about the
         # tier changes -- in particular this does not alert on its own, because
         # alerting is ReAct's to do with evidence attached.
         vetoed = scan_stderr_text(new_content).alert
-        return LayaObservation(
+        return LocalClassifierObservation(
             model_id=predictor.model_id(),
             clean_probability=clean.probability,
             clean_threshold=self.clean_threshold,
@@ -524,12 +524,12 @@ class _LayaTier:
             signal_caveat=signal_caveat,
         )
 
-    def _resolve(self) -> LayaPredictor | None:
+    def _resolve(self) -> DecisionPredictor | None:
         """The predictor, built once, or None when this tier cannot run.
 
         ``fake`` is refused rather than resolved, which is the one place this
         differs from every other backend selector in the tree.
-        ``FakeLayaPredictor`` answers from a blake2b hash of the question and
+        ``FakeDecisionPredictor`` answers from a blake2b hash of the question and
         the state: stable, arbitrary, and indistinguishable from a model with an
         opinion. Behind the gate it would skip an LLM call on a coin flip;
         behind shadow it would write hash noise into the events file as a
@@ -544,26 +544,26 @@ class _LayaTier:
         if not self.backend or self.backend == "fake":
             self._unavailable = True
             print(
-                "[watch] watch.laya is on but names no real checkpoint "
-                f"(backend={self.backend!r}); the Laya tier is off. A hashed "
+                "[watch] watch.local_classifier is on but names no real checkpoint "
+                f"(backend={self.backend!r}); the local-classifier tier is off. A hashed "
                 "fake verdict is not a measurement and must not be recorded as one."
             )
             return None
         try:
-            from aorta.laya.predictor import make_predictor
+            from aorta.local_classifier.predictor import make_predictor
 
             self._predictor = make_predictor(self.backend)
         except Exception as exc:  # noqa: BLE001 - see observe()
             self._unavailable = True
             print(
-                f"[watch] could not build the Laya predictor {self.backend!r}; "
-                f"the Laya tier is off: {type(exc).__name__}: {exc}"
+                f"[watch] could not build the local-classifier predictor {self.backend!r}; "
+                f"the local-classifier tier is off: {type(exc).__name__}: {exc}"
             )
             return None
         return self._predictor
 
 
-def gated_prediction(observation: LayaObservation) -> dspy.Prediction:
+def gated_prediction(observation: LocalClassifierObservation) -> dspy.Prediction:
     """The verdict a gated delta gets, in the shape every caller already reads.
 
     The same five fields ``sanitizer_assessment``'s clean branch returns, for
@@ -595,12 +595,12 @@ def gated_prediction(observation: LayaObservation) -> dspy.Prediction:
         confidence=observation.clean_probability,
         evidence="none",
         assessment=(
-            f"Laya ({observation.model_id}) scored this delta "
+            f"The local classifier ({observation.model_id}) scored this delta "
             f"p(healthy)={observation.clean_probability:.2f} against a clean "
             f"threshold of {observation.clean_threshold:.2f}, so no LLM assessment "
             f"was made. This describes the gate, not the log{observation.clean_caveat}."
         ),
-        laya=observation,
+        local_classifier=observation,
     )
 
 
@@ -609,13 +609,15 @@ class LogWatcher(dspy.Module):
         self,
         config: Mapping[str, Any] | None = None,
         *,
-        predictor: LayaPredictor | None = None,
+        predictor: DecisionPredictor | None = None,
     ):
         # Machine-readable sanitizer summaries need no model. Build ReAct only
         # when an unstructured log actually reaches it, so a headless hardware
         # gate can verify sanitizer -> Watch -> Autopsy with no provider.
         self.react = None
-        self.laya_tier = _LayaTier((config or {}).get("laya", {}) or {}, predictor)
+        self.local_classifier_tier = _LocalClassifierTier(
+            (config or {}).get("local_classifier", {}) or {}, predictor
+        )
 
     def forward(
         self,
@@ -626,7 +628,7 @@ class LogWatcher(dspy.Module):
     ) -> dspy.Prediction:
         """Assess *new_content*, reading only under *allowed_roots*.
 
-        Three tiers, cheapest first: the sanitizer regex, then Laya, then ReAct.
+        Three tiers, cheapest first: the sanitizer regex, then the local classifier, then ReAct.
         Every one of them returns the same ``dspy.Prediction`` shape, which is
         why ``poll.py`` needs no branch for which of them answered.
 
@@ -637,7 +639,7 @@ class LogWatcher(dspy.Module):
         """
         machine_verdict = sanitizer_assessment(new_content)
         if machine_verdict is not None:
-            # No Laya, deliberately, and not only to save a pass. Laya sits
+            # No local classifier, deliberately, and not only to save a pass. It sits
             # *after* this tier, so it will never be asked about a delta the
             # regex answers -- and a shadow comparison gathered on traffic the
             # gate cannot see would measure it on the wrong population.
@@ -649,7 +651,7 @@ class LogWatcher(dspy.Module):
         # that cannot say whether it is on without a constructor having run
         # would fail, and this way the missing answer is "off", which is the
         # safe direction.
-        tier = getattr(self, "laya_tier", None)
+        tier = getattr(self, "local_classifier_tier", None)
         observation = tier.observe(new_content) if tier is not None else None
         if observation is not None and observation.gated:
             return gated_prediction(observation)
@@ -673,5 +675,5 @@ class LogWatcher(dspy.Module):
             # reads ``healthy``, ``signal`` and ``confidence`` off the same
             # object, which is what "no control-flow change" has to mean if it
             # is to be checkable rather than asserted.
-            prediction.laya = observation
+            prediction.local_classifier = observation
         return prediction

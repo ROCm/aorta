@@ -1,6 +1,6 @@
 """Watch's third tier decides whether to spend an LLM call, not what to say.
 
-Laya generates no text. ``write_bundle`` persists ``evidence`` -- the log lines
+The classifier generates no text. ``write_bundle`` persists ``evidence`` -- the log lines
 Autopsy reads -- and the events file carries ``assessment``, the paragraph an
 operator reads, so a tier that cannot write either cannot produce an alert. It
 can produce the other verdict: a clean one quotes nothing, and
@@ -14,7 +14,7 @@ is only worth gathering if running it changed nothing -- which is a property
 about control flow, so it is asserted against control flow rather than
 described in a comment.
 
-Nothing here loads weights. ``FakeLayaPredictor`` answers from a hash, which is
+Nothing here loads weights. ``FakeDecisionPredictor`` answers from a hash, which is
 exactly what a threshold test wants and exactly what production must refuse; the
 tier refuses it by name, and that refusal is tested too.
 """
@@ -26,21 +26,21 @@ import yaml
 
 from aorta.cia.watch.poll import should_alert
 from aorta.cia.watch.watcher import (
+    CLASSIFIER_HEALTHY_QUESTION,
+    CLASSIFIER_HEALTHY_WHEN_FALSE,
+    CLASSIFIER_HEALTHY_WHEN_TRUE,
+    CLASSIFIER_SIGNAL_QUESTION,
     DEFAULT_CLEAN_THRESHOLD,
-    LAYA_HEALTHY_QUESTION,
-    LAYA_HEALTHY_WHEN_FALSE,
-    LAYA_HEALTHY_WHEN_TRUE,
-    LAYA_SIGNAL_QUESTION,
     WATCH_SIGNALS,
-    LayaObservation,
+    LocalClassifierObservation,
     LogWatcher,
     gated_prediction,
     healthy_question,
     signal_question,
 )
-from aorta.laya.predictor import (
+from aorta.local_classifier.predictor import (
     ChoiceAnswer,
-    FakeLayaPredictor,
+    FakeDecisionPredictor,
     NoulAnswer,
 )
 
@@ -52,7 +52,7 @@ _CONFIG = "src/aorta/cia/watch/watch_config.yaml"
 _ORDINARY = "=== train.log ===\nstep 41 loss 0.31 tok/s 8123\nstep 42 loss 0.30 tok/s 8140\n"
 
 
-class _Pinned(FakeLayaPredictor):
+class _Pinned(FakeDecisionPredictor):
     """The fake with p(healthy) pinned, which is the whole of a threshold test."""
 
     def __init__(self, clean: float, signal: str = "WATCH_HANG") -> None:
@@ -88,14 +88,14 @@ class _FakeReAct:
         )
 
 
-def _watcher(predictor=None, **laya) -> tuple[LogWatcher, _FakeReAct]:
+def _watcher(predictor=None, **local_classifier) -> tuple[LogWatcher, _FakeReAct]:
     """A watcher whose ReAct tier is a counter rather than a model.
 
     ``react`` is assigned rather than left None because building the real one
     calls ``ensure_configured()``, and a test that needs a provider to prove a
     provider was not needed would be proving the opposite of the point.
     """
-    watcher = LogWatcher({"laya": laya}, predictor=predictor)
+    watcher = LogWatcher({"local_classifier": local_classifier}, predictor=predictor)
     react = _FakeReAct()
     watcher.react = react
     return watcher, react
@@ -138,7 +138,7 @@ class TestTheGateOnlyEverSaysClean:
     def test_an_unconfident_or_unhealthy_delta_always_reaches_react(self, clean):
         """The tier has no second branch, and that is structural, not a gap.
 
-        A low p(healthy) is Laya saying the log looks wrong, and acting on that
+        A low p(healthy) is the classifier saying the log looks wrong, and acting on that
         would mean alerting with no evidence to bundle and no assessment to
         read. So the only thing a low score buys is the assessment that would
         have happened anyway.
@@ -194,9 +194,9 @@ class TestShadowModeChangesNothing:
     def test_the_observation_travels_beside_the_verdict(self):
         """How ``poll.py`` gets something to write without this module knowing a path."""
         watcher, _ = _watcher(_Pinned(0.999, signal="WATCH_OOM"), shadow=True)
-        observation = _assess(watcher).laya
+        observation = _assess(watcher).local_classifier
 
-        assert isinstance(observation, LayaObservation)
+        assert isinstance(observation, LocalClassifierObservation)
         assert observation.gated is False
         assert observation.clean_probability == pytest.approx(0.999)
         assert observation.signal == "WATCH_OOM"
@@ -210,10 +210,10 @@ class TestShadowModeChangesNothing:
     def test_a_gated_delta_still_records_what_was_observed(self):
         """Otherwise the gate's own traffic would be invisible to the comparison."""
         watcher, _ = _watcher(_Pinned(0.99), enabled=True)
-        assert _assess(watcher).laya.gated is True
+        assert _assess(watcher).local_classifier.gated is True
 
     def test_the_sanitizer_tier_still_wins_and_is_not_shadowed(self):
-        """Laya sits after the regex, so it must not be measured on the regex's traffic.
+        """The classifier sits after the regex, so it must not be measured on the regex's traffic.
 
         A shadow comparison gathered on deltas the gate will never see would
         describe a population the gate does not serve.
@@ -223,7 +223,7 @@ class TestShadowModeChangesNothing:
 
         assert react.calls == []
         assert pred.signal == "WATCH_CLEAN"
-        assert getattr(pred, "laya", None) is None
+        assert getattr(pred, "local_classifier", None) is None
 
 
 class TestTheNanVeto:
@@ -250,14 +250,14 @@ class TestTheNanVeto:
         pred = _assess(watcher, f"=== train.log ===\nstep 11 loss 0.4\n{line}\n")
 
         assert len(react.calls) == 1, "a confident clean skipped a printed NaN"
-        assert pred.laya.vetoed is True
-        assert pred.laya.gated is False
+        assert pred.local_classifier.vetoed is True
+        assert pred.local_classifier.gated is False
 
     def test_the_veto_is_recorded_rather_than_silent(self):
         """Counting these is how the shadow period finds out whether it matters."""
         watcher, _ = _watcher(_Pinned(0.99), shadow=True)
         pred = _assess(watcher, "=== train.log ===\nloss = nan\n")
-        assert pred.laya.vetoed is True
+        assert pred.local_classifier.vetoed is True
 
     def test_a_log_reporting_no_nan_is_not_vetoed(self):
         """The scanner's own negation rule, inherited rather than re-implemented.
@@ -270,14 +270,14 @@ class TestTheNanVeto:
         pred = _assess(watcher, "=== train.log ===\nno nan detected this epoch\n")
 
         assert react.calls == []
-        assert pred.laya.vetoed is False
+        assert pred.local_classifier.vetoed is False
 
 
 class TestTheTierRefusesToGuess:
     def test_the_fake_backend_is_refused_by_name(self, capsys):
         """Everywhere else in the tree ``fake`` is the safe default. Not here.
 
-        ``FakeLayaPredictor`` answers from a blake2b hash of the question and
+        ``FakeDecisionPredictor`` answers from a blake2b hash of the question and
         the log: stable, arbitrary, and indistinguishable from a model with an
         opinion. Behind the gate that is a coin flip deciding whether a log is
         read; behind shadow it is hash noise written to the events file for
@@ -287,7 +287,7 @@ class TestTheTierRefusesToGuess:
         pred = _assess(watcher)
 
         assert len(react.calls) == 1
-        assert getattr(pred, "laya", None) is None
+        assert getattr(pred, "local_classifier", None) is None
         assert "not a measurement" in capsys.readouterr().out
 
     def test_a_config_naming_no_checkpoint_is_refused_too(self, capsys):
@@ -321,7 +321,7 @@ class TestTheTierRefusesToGuess:
         assert capsys.readouterr().out.count("will not be retried this run") == 1
 
     def test_a_predictor_that_raises_mid_answer_is_survivable(self, capsys):
-        class Exploding(FakeLayaPredictor):
+        class Exploding(FakeDecisionPredictor):
             def ask(self, states, questions):
                 raise RuntimeError("the checkpoint was unloaded under us")
 
@@ -335,7 +335,7 @@ class TestTheTierRefusesToGuess:
     def test_a_predictor_answering_the_wrong_shape_is_not_read_as_a_number(self):
         """A choice where a noul was asked must not be coerced into a threshold."""
 
-        class Wrong(FakeLayaPredictor):
+        class Wrong(FakeDecisionPredictor):
             def ask(self, states, questions):
                 return [
                     [ChoiceAnswer(probabilities=(("true", 1.0),)) for _ in questions]
@@ -351,7 +351,7 @@ class TestItIsOffUntilSomethingHasBeenMeasured:
     def test_a_watcher_with_no_config_asks_nothing(self):
         """The default install must not reach for weights it was never given."""
 
-        class Loud(FakeLayaPredictor):
+        class Loud(FakeDecisionPredictor):
             def ask(self, states, questions):
                 raise AssertionError("the tier ran with no configuration")
 
@@ -361,16 +361,16 @@ class TestItIsOffUntilSomethingHasBeenMeasured:
 
     def test_the_shipped_config_ships_the_gate_off(self, repo_root):
         config = yaml.safe_load((repo_root / _CONFIG).read_text(encoding="utf-8"))
-        laya = config["watch"]["laya"]
+        tier = config["watch"]["local_classifier"]
 
-        assert laya["enabled"] is False
-        assert laya["shadow"] is False
-        assert laya["shadow_archive_bytes"] == 0
+        assert tier["enabled"] is False
+        assert tier["shadow"] is False
+        assert tier["shadow_archive_bytes"] == 0
 
     def test_the_shipped_threshold_is_the_documented_one(self, repo_root):
         """A default nobody can find is a default nobody can trust."""
         config = yaml.safe_load((repo_root / _CONFIG).read_text(encoding="utf-8"))
-        assert config["watch"]["laya"]["clean_threshold"] == DEFAULT_CLEAN_THRESHOLD
+        assert config["watch"]["local_classifier"]["clean_threshold"] == DEFAULT_CLEAN_THRESHOLD
 
     def test_the_two_thresholds_are_two_keys(self, repo_root):
         """They gate opposite directions, so one number serving both inverts one.
@@ -381,9 +381,9 @@ class TestItIsOffUntilSomethingHasBeenMeasured:
         """
         config = yaml.safe_load((repo_root / _CONFIG).read_text(encoding="utf-8"))
 
-        assert "clean_threshold" in config["watch"]["laya"]
+        assert "clean_threshold" in config["watch"]["local_classifier"]
         assert config["watch"]["confidence_threshold"] == 0.70
-        assert config["watch"]["laya"]["clean_threshold"] != 0.70
+        assert config["watch"]["local_classifier"]["clean_threshold"] != 0.70
 
     def test_the_config_says_what_would_justify_turning_it_on(self, repo_root):
         """The flag is the easy half. The criteria are what stop it drifting on."""
@@ -434,7 +434,7 @@ class TestTheCorpusLabelsTheQuestionThisTierAsks:
         ``watchdog_ok`` event with an excerpt over the builder's forty-character
         floor gives the healthy one.
         """
-        from aorta.laya.corpus.watch import build_watch_corpus
+        from aorta.local_classifier.corpus.watch import build_watch_corpus
 
         job_dir = tmp_path / "cia-aaa"
         (job_dir / "bundle" / "logs").mkdir(parents=True)
@@ -491,7 +491,7 @@ class TestTheCorpusLabelsTheQuestionThisTierAsks:
 
         Scoped to ``src/aorta/cia/`` because that is this track's package. The
         same property across the tree -- in particular that
-        ``aorta.laya.corpus.watch`` imports these rather than restating them --
+        ``aorta.local_classifier.corpus.watch`` imports these rather than restating them --
         belongs to the CIA-wide question-uniqueness check being added alongside
         the log finder's questions, and asserting it from here would be a second
         copy of that test rather than a second guard.
@@ -501,10 +501,10 @@ class TestTheCorpusLabelsTheQuestionThisTierAsks:
 
         cia = Path(__file__).resolve().parents[2] / "src" / "aorta" / "cia"
         wanted = {
-            LAYA_HEALTHY_QUESTION,
-            LAYA_HEALTHY_WHEN_TRUE,
-            LAYA_HEALTHY_WHEN_FALSE,
-            LAYA_SIGNAL_QUESTION,
+            CLASSIFIER_HEALTHY_QUESTION,
+            CLASSIFIER_HEALTHY_WHEN_TRUE,
+            CLASSIFIER_HEALTHY_WHEN_FALSE,
+            CLASSIFIER_SIGNAL_QUESTION,
         }
         spellings: dict[str, list[str]] = {text: [] for text in wanted}
         for path in sorted(cia.rglob("*.py")):
@@ -520,7 +520,7 @@ class TestTheCorpusLabelsTheQuestionThisTierAsks:
 
 
 class TestWhatTheModelIsShown:
-    class _Recording(FakeLayaPredictor):
+    class _Recording(FakeDecisionPredictor):
         def __init__(self):
             super().__init__()
             self.asked: list[tuple[tuple[str, ...], int]] = []
@@ -532,7 +532,7 @@ class TestWhatTheModelIsShown:
     def test_the_state_is_the_delta_and_nothing_else(self):
         """Because the corpus's state is the delta and nothing else.
 
-        ``aorta.laya.corpus.watch`` builds from ``bundle/logs/watch.stderr.log``,
+        ``aorta.local_classifier.corpus.watch`` builds from ``bundle/logs/watch.stderr.log``,
         which is the delta alone. Feeding the runtime tier a richer state would
         fit a temperature against one input distribution and apply it to
         another. The cost is real: ``elapsed_sec`` is exactly what tells
@@ -577,7 +577,7 @@ class TestTheCalibrationCaveatTravelsWithTheNumber:
     checkpoint every time rather than argued from the option count once.
     """
 
-    def test_both_questions_sit_outside_the_bucket_laya_clamps(self):
+    def test_both_questions_sit_outside_the_clamped_bucket(self):
         """Pinned, because the argument for the current wording partly rests on it.
 
         Widening the slug question past ten options would move it into
@@ -585,21 +585,21 @@ class TestTheCalibrationCaveatTravelsWithTheNumber:
         slug, which looks like a vocabulary change rather than a calibration
         change.
         """
-        from aorta.laya.predictor import bucket_for
+        from aorta.local_classifier.predictor import bucket_for
 
         assert bucket_for(healthy_question()) == "noul:2"
         assert bucket_for(signal_question()) == "choice:6-10"
 
     def test_an_unknown_calibration_is_disclosed_rather_than_read_as_clean(self):
-        """``FakeLayaPredictor`` reports unknown on purpose, and unknown is not fine."""
+        """``FakeDecisionPredictor`` reports unknown on purpose, and unknown is not fine."""
         watcher, _ = _watcher(_Pinned(0.99), shadow=True)
-        observation = _assess(watcher).laya
+        observation = _assess(watcher).local_classifier
 
         assert "CALIBRATION UNKNOWN" in observation.clean_caveat
         assert "CALIBRATION UNKNOWN" in observation.signal_caveat
 
     def test_a_clamped_bucket_names_the_temperature_that_was_refused(self):
-        from aorta.laya.predictor import Calibration, ClampedBucket
+        from aorta.local_classifier.predictor import Calibration, ClampedBucket
 
         class Clamped(_Pinned):
             def calibration(self):
@@ -612,7 +612,7 @@ class TestTheCalibrationCaveatTravelsWithTheNumber:
                 )
 
         watcher, _ = _watcher(Clamped(0.99), shadow=True)
-        observation = _assess(watcher).laya
+        observation = _assess(watcher).local_classifier
 
         assert "NOT CALIBRATED" in observation.clean_caveat
         assert "noul:2" in observation.clean_caveat
@@ -625,14 +625,14 @@ class TestTheCalibrationCaveatTravelsWithTheNumber:
         path carries no noise and the decision costs a field that is usually
         empty.
         """
-        from aorta.laya.predictor import Calibration
+        from aorta.local_classifier.predictor import Calibration
 
         class Calibrated(_Pinned):
             def calibration(self):
                 return Calibration(model_id="a-fine-tune", applied=(("noul:2", 1.1),))
 
         watcher, _ = _watcher(Calibrated(0.99), shadow=True)
-        observation = _assess(watcher).laya
+        observation = _assess(watcher).local_classifier
 
         assert observation.clean_caveat == ""
         assert observation.signal_caveat == ""
@@ -645,8 +645,8 @@ class TestTheCalibrationCaveatTravelsWithTheNumber:
         assert "CALIBRATION UNKNOWN" in assessment
 
     def test_a_gated_assessment_carries_only_the_question_it_acted_on(self):
-        """The gate fired on the noul; the ``WATCH_CLEAN`` slug is not Laya's answer."""
-        from aorta.laya.predictor import Calibration, ClampedBucket
+        """The gate fired on the noul; the ``WATCH_CLEAN`` slug is not the classifier's answer."""
+        from aorta.local_classifier.predictor import Calibration, ClampedBucket
 
         class SlugClamped(_Pinned):
             def calibration(self):
@@ -662,7 +662,7 @@ class TestTheCalibrationCaveatTravelsWithTheNumber:
         pred = _assess(watcher)
 
         assert "NOT CALIBRATED" not in pred.assessment
-        assert "NOT CALIBRATED" in pred.laya.signal_caveat
+        assert "NOT CALIBRATED" in pred.local_classifier.signal_caveat
 
     def test_a_predictor_that_cannot_say_costs_the_tier(self):
         """Not a verdict with the disclosure quietly missing, which is the failure itself."""
@@ -675,10 +675,10 @@ class TestTheCalibrationCaveatTravelsWithTheNumber:
         pred = _assess(watcher)
 
         assert len(react.calls) == 1, "a verdict was gated with no calibration known"
-        assert getattr(pred, "laya", None) is None
+        assert getattr(pred, "local_classifier", None) is None
 
     def test_the_caveats_reach_the_event_payload(self):
-        observation = LayaObservation(
+        observation = LocalClassifierObservation(
             model_id="m",
             clean_probability=0.9,
             clean_threshold=0.9,
@@ -700,7 +700,7 @@ class TestTheObservationCarriesItsProvenance:
     def test_the_event_fields_name_the_checkpoint(self):
         """Rule 2 of Decision 22: a verdict that cannot say which weights produced
         it is a verdict nobody can compare against the next one."""
-        observation = LayaObservation(
+        observation = LocalClassifierObservation(
             model_id="laya-typed-decisions@cpu",
             clean_probability=0.9312345,
             clean_threshold=0.9,
@@ -716,7 +716,7 @@ class TestTheObservationCarriesItsProvenance:
         assert fields["gated"] is True
 
     def test_a_gated_prediction_carries_the_observation_for_the_events_file(self):
-        observation = LayaObservation(
+        observation = LocalClassifierObservation(
             model_id="m",
             clean_probability=0.95,
             clean_threshold=0.9,
@@ -725,7 +725,7 @@ class TestTheObservationCarriesItsProvenance:
             signal="WATCH_HANG",
             signal_probability=0.4,
         )
-        assert gated_prediction(observation).laya is observation
+        assert gated_prediction(observation).local_classifier is observation
 
 
 def test_importing_watch_pulls_in_no_model_machinery():
@@ -734,7 +734,7 @@ def test_importing_watch_pulls_in_no_model_machinery():
     ``aorta.cia.watch.poll`` is imported by every Watch run and reaches the
     predictor seam through this tier. A module-scope ``import laya`` anywhere on
     that path would put torch behind ``aorta watchdog poll`` on nodes that never
-    turn the tier on, which is what Decision 22 in ``docs/laya-packaging.md``
+    turn the tier on, which is what Decision 22 in ``docs/local-classifier-packaging.md``
     asks it not to do.
 
     Measured in a subprocess, because ``sys.modules`` is already dirty by the
@@ -754,6 +754,6 @@ def test_importing_watch_pulls_in_no_model_machinery():
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
     assert json.loads(out.stdout) == [], (
-        f"importing Watch pulled in {out.stdout.strip()}; the Laya imports must "
+        f"importing Watch pulled in {out.stdout.strip()}; the classifier imports must "
         "stay inside the tier that loads a checkpoint."
     )

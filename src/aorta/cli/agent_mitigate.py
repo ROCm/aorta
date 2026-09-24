@@ -178,12 +178,12 @@ class _MitigateCommand(click.Command):
     # import time, and `aorta --help` must not pay for that module's imports.
     # tests/agent/test_llm_providers.py fails if this list and
     # AGENT_LLM_BACKENDS drift apart.
-    type=click.Choice(["fake", "laya", "litellm", "openai", "vllm"]),
+    type=click.Choice(["fake", "litellm", "local", "openai", "vllm"]),
     default="fake",
     show_default=True,
     help=(
-        "Proposer backend: fake (offline, no network). laya runs a local "
-        "calibrated encoder and needs amd-aorta[laya] plus staged weights. "
+        "Proposer backend: fake (offline, no network). local runs a local "
+        "calibrated encoder and needs amd-aorta[local-classifier] plus staged weights. "
         "litellm, openai and vllm are configured by the shared chat provider "
         "settings and need amd-aorta[chat-cli]; litellm also still works on "
         "amd-aorta[agent] alone."
@@ -195,7 +195,7 @@ class _MitigateCommand(click.Command):
     help=(
         "Override the model name for the selected backend. Defaults to whatever "
         "the chat provider settings configure (gpt-4o-mini on the standalone "
-        "litellm path). For --llm-backend=laya this is a checkpoint name or a "
+        "litellm path). For --llm-backend=local this is a checkpoint name or a "
         "local fine-tune directory, not a model on an endpoint."
     ),
 )

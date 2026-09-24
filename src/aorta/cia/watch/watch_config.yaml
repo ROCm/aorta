@@ -11,14 +11,15 @@ watch:
   # were settings that changed nothing.
   poll_interval_sec: 60
 
-  # The Laya tier: a local, typed, calibrated classifier sitting between the
-  # sanitizer regex and the ReAct assessment. It decides whether to spend an
-  # LLM call, never what the answer is -- Laya generates no text, so it can
+  # The local-classifier tier: a local, typed, calibrated classifier sitting
+  # between the sanitizer regex and the ReAct assessment. It decides whether to spend an
+  # LLM call, never what the answer is -- the classifier generates no text, so it can
   # produce neither the `evidence` a bundle persists nor the `assessment` an
   # operator reads, and it therefore only ever short-circuits toward clean.
-  # Track A of docs/plans/laya-system1-integration.md; the weights live where
-  # docs/laya-packaging.md (Decision 22) says they may.
-  laya:
+  # Track A of the integration plan (docs/plans/laya-system1-integration.md,
+  # written when the current model was adopted); the weights live where
+  # docs/local-classifier-packaging.md (Decision 22) says they may.
+  local_classifier:
     # The gate. False, and it stays false until the Phase 1 measurement exists.
     #
     # What has to be true before anyone sets this to true:
@@ -30,8 +31,8 @@ watch:
     #      gate reads the healthy noul, which is the `noul:2` bucket, so the
     #      specific check is that the chosen checkpoint does not clamp it --
     #      `predictor.calibration().is_clamped("noul:2")` must be False, and
-    #      not None, which means nobody asked. A clamped bucket means laya
-    #      refused the shipped temperature and substituted a bound, so the
+    #      not None, which means nobody asked. A clamped bucket means the
+    #      model runtime refused the shipped temperature and substituted a bound, so the
     #      probability is not calibrated and thresholding it is guesswork.
     #      Every verdict already discloses this inline; the gate is where it
     #      has to be acted on rather than disclosed.
@@ -42,21 +43,21 @@ watch:
     #      only on healthy traffic has not been scored.
     enabled: false
 
-    # Shadow mode: ask Laya on every delta the regex does not answer, write the
+    # Shadow mode: ask the classifier on every delta the regex does not answer, write the
     # answer to the events file as `watchdog_shadow`, and change nothing else.
     # This is what produces the comparison that condition 3 above needs. It
     # costs one local forward pass per delta and no LLM call either way.
     shadow: false
 
-    # How sure Laya must be that a delta is healthy before the gate skips the
+    # How sure the classifier must be that a delta is healthy before the gate skips the
     # LLM call. Separate from `confidence_threshold` above and deliberately so:
     # that one escalates when the assessment is unhealthy AND at least that
     # sure, this one stays quiet when the delta is healthy AND at least this
     # sure. They gate opposite directions, and one number serving both would be
     # an inversion bug that reads as correct.
     #
-    # 0.90 is a policy, not a fitted number -- nothing here has scored a Laya
-    # checkpoint against a ROCm log yet.
+    # 0.90 is a policy, not a fitted number -- nothing here has scored a
+    # classifier checkpoint against a ROCm log yet.
     #
     # Bounded failure, stated more carefully than the plan does. A false clean
     # is usually described as delaying an alert by one poll interval
@@ -65,15 +66,15 @@ watch:
     # read again. A condition that keeps printing -- a hang, a stall, repeated
     # OOM retries -- is seen on the next round and the one-interval figure
     # holds. A single line printed once is lost. That is why a delta the
-    # deterministic NaN scanner flags is never gated however sure Laya is, and
+    # deterministic NaN scanner flags is never gated however sure the classifier is, and
     # why raising this is the safe direction and lowering it is not.
     clean_threshold: 0.90
 
-    # A checkpoint name from aorta.laya.predictor.CHECKPOINTS, or a local
+    # A checkpoint name from aorta.local_classifier.predictor.CHECKPOINTS, or a local
     # directory holding a fine-tune.
     #
     # "fake" is refused here rather than resolved, unlike everywhere else a
-    # backend is named in this tree. FakeLayaPredictor answers from a hash of
+    # backend is named in this tree. FakeDecisionPredictor answers from a hash of
     # the question and the log: stable, arbitrary, and indistinguishable from a
     # model with an opinion. Behind the gate that is a coin flip deciding
     # whether a log is read; behind shadow it is hash noise written into the
@@ -92,8 +93,8 @@ watch:
     #
     # What gets written, and its bounds, are in `archive_clean_delta` in
     # bundle_writer.py: one JSONL record per non-alerting delta under
-    # <job_dir>/laya_clean_deltas.jsonl, each delta truncated to the same 4000
-    # characters write_bundle uses so the two classes are length-comparable,
+    # <job_dir>/local_classifier_clean_deltas.jsonl, each delta truncated to the
+    # same 4000 characters write_bundle uses so the two classes are length-comparable,
     # each scrubbed by the same redaction Watch applies to anything it sends to
     # a provider, and the file capped at this many bytes per job.
     #
@@ -135,12 +136,12 @@ log_finder:
   # Cap on number of files to monitor simultaneously.
   max_files: 8
 
-  # Tier 3: score the directory listing with Laya instead of spending a
+  # Tier 3: score the directory listing with the local classifier instead of spending a
   # dspy.Predict call on it. Tiers 0 through 2 -- the scheduler query, the
   # explicit globs above, the extension scan -- are unaffected either way, and
   # the extension scan remains the final fallback.
   #
-  # Off, and it stays off until Phase 1 of the Laya plan measures this decision
+  # Off, and it stays off until Phase 1 of the integration plan measures this decision
   # against the extension scan. Nothing in this repository has scored it, and a
   # tier enabled on the strength of its design is a tier nobody can defend when
   # Watch reads the wrong file.
@@ -150,14 +151,14 @@ log_finder:
   # which engine ranks them, so the hallucinated-path hazard is closed with
   # this flag off. What the flag buys is one local forward pass instead of a
   # remote LLM round-trip, and whatever ranking difference comes with it.
-  laya:
+  local_classifier:
     enabled: false
 
-    # A checkpoint name from aorta.laya.predictor.CHECKPOINTS, or a local
+    # A checkpoint name from aorta.local_classifier.predictor.CHECKPOINTS, or a local
     # directory holding a fine-tune.
     #
-    # "fake" is refused here rather than resolved, as it is for watch.laya
-    # above and for the same reason: FakeLayaPredictor answers from a hash of
+    # "fake" is refused here rather than resolved, as it is for watch.local_classifier
+    # above and for the same reason: FakeDecisionPredictor answers from a hash of
     # the question and the listing, so it is stable, arbitrary, and
     # indistinguishable from a model with an opinion. Here that is a hash
     # choosing which files Watch tails, and Watch grants the parent of each one
@@ -166,7 +167,7 @@ log_finder:
 
     # How sure the classifier must be that a listed file is a log. A
     # placeholder at the indifference point of a probability, not a fitted
-    # number -- the per-question-type temperature refit that makes a Laya
+    # number -- the per-question-type temperature refit that makes a classifier
     # probability mean what it says has not been run here.
     #
     # Bounded failure: too high and every file is rejected, which falls back to

@@ -8,6 +8,17 @@ status: planned — no integration code written; Phase 0 and Phase 1 gate everyt
 
 # Laya (System-1) calibrated decisions for AORTA
 
+> **Naming note, added after this plan was written.** The integration has since
+> been made vendor-neutral, because the model is an implementation detail behind a
+> swappable seam. This plan keeps its original narrative about adopting Laya, but
+> the code it describes now lives under these names: the package is
+> `aorta.local_classifier` (and `aorta.chat.local_classifier`), the seam is
+> `DecisionPredictor`, Track B's proposer is `LocalClassifierProposer` selected with
+> `--llm-backend local`, the extra is `[local-classifier]`, the config blocks are
+> `watch.local_classifier` and `log_finder.local_classifier`, and the Phase 0/1
+> tooling runs as `python -m aorta.local_classifier corpus|eval`. Decision 22 is
+> recorded in [`docs/local-classifier-packaging.md`](../local-classifier-packaging.md).
+
 > Replace the LLM calls that exist only to *classify* with a typed, calibrated
 > encoder. Keep every call that writes prose on the LLM.
 
@@ -74,20 +85,20 @@ it gates **two** subprocess probes, not one. The second is
 `aorta agent mitigate --llm-backend=fake` is the default and must stay fully
 offline on a base install.
 
-So Track B's `LayaProposer` lands in the one CIA-adjacent module that *is*
+So Track B's `LocalClassifierProposer` lands in the one CIA-adjacent module that *is*
 import-gated. A module-scope `import laya` there would turn the offline default
 backend into one that pays for torch, and on a base install it would stop
 working entirely. Every loader in every track is imported inside the function
 that needs it.
 
 **Resolution.** Decision 22 (Phase 2, and
-[`docs/laya-packaging.md`](../laya-packaging.md)) is written before any
+[`docs/local-classifier-packaging.md`](../local-classifier-packaging.md)) is written before any
 integration code, and it covers all three of these separately: which extra may
 declare the dependency, which import graphs must stay clean of it, and which
 runtime carries the weights. The Phase 0/1 tooling has since added a third probe
 of the same shape, `test_importing_the_seam_pulls_in_no_model_machinery` in
-[`tests/cia/test_laya_predictor.py`](../../tests/cia/test_laya_predictor.py),
-covering `import aorta.laya`.
+[`tests/cia/test_local_classifier_predictor.py`](../../tests/cia/test_local_classifier_predictor.py),
+covering `import aorta.local_classifier`.
 
 ### F2 — The base checkpoints are below the majority-class baseline, so Phase 1 is a real gate
 
@@ -165,10 +176,10 @@ on top. Adding that to `[cia]` would grow the extra it was written to shrink and
 would break the 3.14 leg of its own matrix the first time torch has no wheel for
 a new CPython.
 
-**Resolution.** Decision 22 puts the dependency in a separate opt-in `[laya]`
-extra rather than in `[cia]`, so `pip install 'amd-aorta[cia]'` keeps its Python
+**Resolution.** Decision 22 puts the dependency in a separate opt-in
+`[local-classifier]` extra rather than in `[cia]`, so `pip install 'amd-aorta[cia]'` keeps its Python
 range and its size. That extra has since landed, and is also kept out of `all`.
-See [`docs/laya-packaging.md`](../laya-packaging.md).
+See [`docs/local-classifier-packaging.md`](../local-classifier-packaging.md).
 
 ---
 
@@ -269,7 +280,7 @@ The highest decision number in the tree is 21b, so this is 22. It is written
 first because F1 and F6 are both packaging questions, and a packaging question
 answered after the code is written is answered by whatever the code already did.
 
-The record lives at [`docs/laya-packaging.md`](../laya-packaging.md) and settles
+The record lives at [`docs/local-classifier-packaging.md`](../local-classifier-packaging.md) and settles
 three things: which extra may declare a torch dependency and which import graphs
 must stay clean of it; that the chat path exports to ONNX onto the onnxruntime
 `fastembed` already installs; and that checkpoints are pinned by digest with the
@@ -286,7 +297,7 @@ independently and in any order.
 flowchart TD
     gate["Phase 1 gate passes"] --> d22["Phase 2: Decision 22"]
     d22 --> trackA["Track A: Watch clean-gate"]
-    d22 --> trackB["Track B: LayaProposer"]
+    d22 --> trackB["Track B: LocalClassifierProposer"]
     d22 --> trackC["Track C: LogFinder tier 3"]
     trackA --> autopsy["Phase 4: Autopsy confidence"]
     trackA --> chat["Phase 5: chat router + selector"]
@@ -305,7 +316,8 @@ change at all.
 - Add a third tier to `LogWatcher.forward`, ordered regex, Laya, ReAct.
 - New config in
   [`src/aorta/cia/watch/watch_config.yaml`](../../src/aorta/cia/watch/watch_config.yaml):
-  `watch.laya.enabled` defaulting to false, and `watch.laya.clean_threshold` as a
+  `watch.local_classifier.enabled` defaulting to false, and
+  `watch.local_classifier.clean_threshold` as a
   **separate** knob from the existing `confidence_threshold: 0.70`. They gate
   opposite directions — one decides when to alert, the other when to stay quiet —
   and sharing one number would be an inversion bug that reads as correct.
@@ -322,7 +334,7 @@ change at all.
   and `test_sanitizer_states.py`: pure threshold logic against a fake predictor,
   with no weights in CI.
 
-### Track B — `LayaProposer` behind the existing Protocol
+### Track B — `LocalClassifierProposer` behind the existing Protocol
 
 The lowest-risk track, because the seam is already there:
 [`src/aorta/agent/llm.py`](../../src/aorta/agent/llm.py) declares `LLMProposer`

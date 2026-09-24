@@ -154,7 +154,10 @@ agent = [
     "litellm>=1.0.0",
 ]
 
-# Laya: the local, non-autoregressive decision model behind `aorta laya`.
+# local-classifier: the local, non-autoregressive decision model behind the
+# default-off classifier tiers in Watch, Autopsy, the probe agent and the chat
+# router. The current implementation is the Laya model, via the `laya` library,
+# which is what this extra installs.
 #
 # Its own extra rather than a line in `cia`, for one reason: it resolves torch.
 # `[cia]` is not torch-gated in CI (cpu-tests.yml installs it with no assertion),
@@ -162,9 +165,9 @@ agent = [
 # every headless Watch and Autopsy install that has no use for a local
 # classifier. `[chat-cli]` is a harder case: nightly.yml and release.yml fail the
 # build if a chat-cli install resolves torch at all, so nothing reachable from
-# that extra may depend on this one. `aorta/laya/predictor.py` imports laya
-# inside the method that loads a checkpoint, and `tests/cli/test_chat_boundaries.py`
-# asserts the import graph stays clean.
+# that extra may depend on this one. `aorta/local_classifier/predictor.py` imports
+# laya inside the method that loads a checkpoint, and
+# `tests/cli/test_chat_boundaries.py` asserts the import graph stays clean.
 #
 # The checkpoint is NOT pinned here. Weights arrive from the Hugging Face hub at
 # first use and are addressed by repository and subfolder, and pinning them by
@@ -182,17 +185,19 @@ agent = [
 # Reading a calibrated probability is the entire reason for this dependency, so a
 # release that hands back an uncalibrated one is below the floor.
 #
-# It is also the only release `aorta/laya/predictor.py` has been verified against.
+# It is also the only release `aorta/local_classifier/predictor.py` has been
+# verified against.
 # 0.3.3, 0.3.4 and 0.3.5 shipped on three consecutive days, moving both the Python
 # and the transformers floor inside that window, so "the API I read in the wheel"
 # and "the API an install resolves" are worth keeping the same thing.
-# `tests/cia/test_laya_predictor.py` fails if this floor and that verification drift.
+# `tests/cia/test_local_classifier_predictor.py` fails if this floor and that
+# verification drift.
 #
 # Deliberately not in `all`, on the same grounds as the chat-* extras: `all` is
 # what the dev and CI stacks install, and adding ~2.7 GB of torch wheels to every
 # lint job to support one offline measurement is not a trade worth making. Ask for
 # it explicitly.
-laya = [
+local-classifier = [
     "laya>=0.3.5",
 ]
 

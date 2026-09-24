@@ -635,14 +635,14 @@ def _parse_route(route_text: str) -> str | None:
     return named[0] if len(named) == 1 else None
 
 
-def _laya_tier() -> Any | None:
-    """The Laya predictor, or ``None`` when this install has no tier.
+def _local_classifier_tier() -> Any | None:
+    """The local-classifier predictor, or ``None`` when this install has no tier.
 
     Three ways to have none, and all three are ordinary rather than exceptional:
     the flag is off (the default), the chat extra is present but no artifact has
     been staged, or the artifact is there and unreadable. Each returns ``None``
     and the caller runs the LLM path it ran before, which is why this logs at
-    warning and does not raise -- Laya is a tier, not a dependency.
+    warning and does not raise -- the classifier is a tier, not a dependency.
 
     Imported here rather than at module scope for the reason every model import
     in this tree is: ``onnxruntime`` is in ``_HEAVY_PREFIXES`` and the artifact
@@ -651,10 +651,10 @@ def _laya_tier() -> Any | None:
     """
     from aorta.chat.config import settings
 
-    if not settings.laya_enabled:
+    if not settings.local_classifier_enabled:
         return None
     try:
-        from aorta.chat.laya import chat_predictor
+        from aorta.chat.local_classifier import chat_predictor
 
         return chat_predictor()
     except Exception as exc:
@@ -662,16 +662,16 @@ def _laya_tier() -> Any | None:
         # onnxruntime", "a manifest from a different build", and a node whose
         # job is to classify an English sentence must not be the thing that
         # takes a conversation down because a staged file was half-copied.
-        logger.warning("Laya tier unavailable (%s); falling back to the LLM.", exc)
+        logger.warning("local-classifier tier unavailable (%s); falling back to the LLM.", exc)
         return None
 
 
-def _laya_model_id(predictor: Any) -> str:
+def _local_classifier_model_id(predictor: Any) -> str:
     """What answered, for a log line or a rationale -- and never a raise.
 
-    :meth:`LayaPredictor.model_id`'s own docstring says it exists so that a run
+    :meth:`DecisionPredictor.model_id`'s own docstring says it exists so that a run
     which failed to load still says which weights it was reaching for, and
-    :class:`~aorta.chat.laya.onnx_predictor.OnnxLayaPredictor` catches its own
+    :class:`~aorta.chat.local_classifier.onnx_predictor.OnnxDecisionPredictor` catches its own
     unavailability to honour that. The Protocol already has three
     implementations and will get more, though, and this was called outside the
     ``try`` in both tiers: a predictor whose ``ask`` succeeded and whose
@@ -689,12 +689,12 @@ def _laya_model_id(predictor: Any) -> str:
     try:
         return str(predictor.model_id())
     except Exception as exc:
-        logger.warning("Laya predictor could not name itself (%s).", exc)
+        logger.warning("local-classifier predictor could not name itself (%s).", exc)
         return f"<unidentified predictor: {type(exc).__name__}>"
 
 
-async def _laya_route(text: str) -> str | None:
-    """The route Laya gives for *text*, or ``None`` to fall back to the LLM.
+async def _local_classifier_route(text: str) -> str | None:
+    """The route the local classifier gives for *text*, or ``None`` to fall back to the LLM.
 
     Off the event loop. This coroutine is awaited from a Chainlit request
     handler and a forward pass is CPU work -- the model card's own CPU figure is
@@ -703,19 +703,19 @@ async def _laya_route(text: str) -> str | None:
     loop for, with another session's tokens waiting behind it. Same reasoning as
     ``retrieve_node``'s two ``to_thread`` calls.
     """
-    predictor = _laya_tier()
+    predictor = _local_classifier_tier()
     if predictor is None:
         return None
 
     from aorta.chat.config import settings
-    from aorta.chat.laya.questions import ROUTER_QUESTION
-    from aorta.laya.predictor import ask_noul
+    from aorta.chat.local_classifier.questions import ROUTER_QUESTION
+    from aorta.local_classifier.predictor import ask_noul
 
-    threshold = settings.laya_router_threshold
+    threshold = settings.local_classifier_router_threshold
     try:
         answer = await asyncio.to_thread(ask_noul, predictor, text, ROUTER_QUESTION)
     except Exception as exc:
-        logger.warning("Laya router failed (%s); falling back to the LLM.", exc)
+        logger.warning("local-classifier router failed (%s); falling back to the LLM.", exc)
         return None
 
     # `.at()` rather than a bare comparison, so the threshold is named where it
@@ -725,7 +725,7 @@ async def _laya_route(text: str) -> str | None:
     logger.info(
         "Router classified as: %s [%s: p(action)=%.2f at threshold %.2f]",
         route,
-        _laya_model_id(predictor),
+        _local_classifier_model_id(predictor),
         answer.probability,
         threshold,
     )
@@ -735,22 +735,23 @@ async def _laya_route(text: str) -> str | None:
 async def router_node(state: AgentState) -> dict[str, Any]:
     """Classify intent: pure Q&A vs action-requiring.
 
-    Two tiers. Laya answers one noul when the flag is on and an artifact is
+    Two tiers. The local classifier answers one noul when the flag is on and an artifact is
     staged; otherwise the LLM answers the prompt it always did. The LLM path is
-    kept rather than replaced because Laya is off by default and because the
+    kept rather than replaced because the classifier is off by default and because the
     measurement that would justify enabling it has not been run.
 
-    The two fallback constants below the prompt have no analogue on the Laya
+    The two fallback constants below the prompt have no analogue on the local-classifier
     path, and that is the point of it: a noul returns a probability, so there is
     no reply to fail to parse and no empty reply to classify. ``If in doubt,
-    classify as action`` becomes :data:`~aorta.chat.laya.questions.DEFAULT_ROUTER_THRESHOLD`,
+    classify as action`` becomes
+    :data:`~aorta.chat.local_classifier.questions.DEFAULT_ROUTER_THRESHOLD`,
     which is a number that can be re-derived against a corpus rather than a
     sentence that cannot. They stay where they are for the LLM path, which still
     has both populations to handle.
     """
     last_msg = state["messages"][-1]
 
-    route = await _laya_route(str(last_msg.content))
+    route = await _local_classifier_route(str(last_msg.content))
     if route is not None:
         return {"route": route}
 
@@ -983,7 +984,7 @@ def _first_json_object(text: str) -> dict | None:
 async def _llm_selection(text: str) -> tuple[list[str], str]:
     """The tools the LLM ranks for *text*, and its one-sentence reason.
 
-    Lifted out of :func:`selector_node` unchanged when Laya became a second way
+    Lifted out of :func:`selector_node` unchanged when the local classifier became a second way
     to produce the same pair. Every failure returns an empty ranking rather than
     propagating, which is what makes the node advisory: see the caller.
     """
@@ -1015,14 +1016,14 @@ async def _llm_selection(text: str) -> tuple[list[str], str]:
     return [], ""
 
 
-async def _laya_selection(text: str) -> tuple[list[str], str] | None:
-    """The same pair from Laya, or ``None`` to fall back to the LLM.
+async def _local_classifier_selection(text: str) -> tuple[list[str], str] | None:
+    """The same pair from the local classifier, or ``None`` to fall back to the LLM.
 
     **N independent nouls, not one choice over N tools.** The reason is the
     ``head_max_len`` budget split -- every option of one question shares one
     token budget -- plus Laya 0.3.5's clamped ``choice:11+`` bucket, which a
     single choice over the registry falls into on a full install though not on
-    a bare one. :mod:`aorta.chat.laya.questions` has the measured counts and
+    a bare one. :mod:`aorta.chat.local_classifier.questions` has the measured counts and
     the reason that split matters.
 
     **It costs one forward pass, not N.** The Protocol's asymmetry is that M
@@ -1031,14 +1032,14 @@ async def _laya_selection(text: str) -> tuple[list[str], str] | None:
     pass, and ``ask_one`` is the call that says so. Rewriting this as one state
     per tool would be N passes for the same answer.
     """
-    predictor = _laya_tier()
+    predictor = _local_classifier_tier()
     if predictor is None:
         return None
 
     from aorta.chat.config import settings
-    from aorta.chat.laya.questions import tool_question
+    from aorta.chat.local_classifier.questions import tool_question
     from aorta.chat.tools.capabilities import MAX_CANDIDATES, describe_tools
-    from aorta.laya.predictor import NoulAnswer, ask_one
+    from aorta.local_classifier.predictor import NoulAnswer, ask_one
 
     # The same descriptions the LLM prompt is rendered from, so that a
     # comparison between the two paths is a comparison of models rather than of
@@ -1049,7 +1050,7 @@ async def _laya_selection(text: str) -> tuple[list[str], str] | None:
     names = list(described)
     questions = [tool_question(name, described[name]) for name in names]
 
-    threshold = settings.laya_selector_threshold
+    threshold = settings.local_classifier_selector_threshold
     # Both contract checks live inside this guard, and that placement is the
     # fix rather than an accident of layout. They exist to catch a predictor
     # that broke the Protocol, so the ways they can fail are exactly the ways a
@@ -1079,7 +1080,7 @@ async def _laya_selection(text: str) -> tuple[list[str], str] | None:
                 f"{sorted({type(answer).__name__ for answer in answers})}"
             )
     except Exception as exc:
-        logger.warning("Laya selector failed (%s); falling back to the LLM.", exc)
+        logger.warning("local-classifier selector failed (%s); falling back to the LLM.", exc)
         return None
 
     ranked = sorted(
@@ -1089,13 +1090,13 @@ async def _laya_selection(text: str) -> tuple[list[str], str] | None:
         key=lambda pair: -pair[1],
     )
     kept = [(name, p) for name, p in ranked if p >= threshold][:MAX_CANDIDATES]
-    # Templated, because Laya never emits a token and a sentence built from the
+    # Templated, because the classifier never emits a token and a sentence built from the
     # answers is more honest than one built from nothing -- the same call
-    # ``LayaProposer`` makes for ``hypothesis``. It also happens to be the only
+    # ``LocalClassifierProposer`` makes for ``hypothesis``. It also happens to be the only
     # rationale this node can produce that carries none of the user's own text,
     # which is worth something given that ``decision_log.py`` digests this field
     # in summary mode precisely because the LLM's version quotes the question.
-    model_id = _laya_model_id(predictor)
+    model_id = _local_classifier_model_id(predictor)
     if kept:
         scored = ", ".join(f"p({name})={probability:.2f}" for name, probability in kept)
         why = f"[{model_id}: {scored} at threshold {threshold:.2f}]"
@@ -1111,13 +1112,13 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
     whether that would answer this question, so a problem described in words
     nobody anticipated still reaches the right instrument.
 
-    Two tiers, as in ``router_node``: Laya answers one noul per tool when the
+    Two tiers, as in ``router_node``: the local classifier answers one noul per tool when the
     flag is on and an artifact is staged, and the LLM answers the prompt it
-    always did otherwise -- including when Laya is present but fails, since a
+    always did otherwise -- including when the classifier is present but fails, since a
     tier that cannot answer must not cost the turn its ranking.
 
     Advisory: on any failure the act node still sees every tool. That property
-    is structural rather than defensive, and it survives the Laya tier
+    is structural rather than defensive, and it survives the local-classifier tier
     unchanged, because both tiers converge on the same empty list and
     ``_recommendation`` renders an empty list as no system message at all --
     leaving the model exactly where it was before this node ran. A shortlist
@@ -1130,7 +1131,7 @@ async def selector_node(state: AgentState) -> dict[str, Any]:
 
     text = _selector_view(_recent_human_turns(state["messages"]))
 
-    selection = await _laya_selection(text)
+    selection = await _local_classifier_selection(text)
     if selection is None:
         selection = await _llm_selection(text)
     proposed, why = selection

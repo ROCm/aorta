@@ -9,7 +9,7 @@ prompt asks a model in English for ``~0.62``, ``~0.55``, ``>= 0.9`` and ``0.0``.
 The cutoff works because both ends of the comparison were authored together, by
 the same person, on the same afternoon.
 
-Phase 4 puts a calibrated encoder behind the same field, and a Laya probability
+Phase 4 puts a calibrated encoder behind the same field, and a local-classifier probability
 is a different distribution wearing the same name and the same range: trained
 against a strictly proper scoring rule, then temperature-fitted per (question
 type, option count). Carrying 0.85 across that change is the single edit in
@@ -20,7 +20,7 @@ stop happening or sweeps that should not -- neither of which anybody notices
 against a four-hour job that was always flaky.
 
 There is no honest way to re-derive the cutoff in this change. Phase 1 has not
-run, no Laya checkpoint has been scored against an Autopsy bundle, and no
+run, no classifier checkpoint has been scored against an Autopsy bundle, and no
 temperature fit exists to make one of its probabilities mean what it says. So
 this module does not guess a replacement and does not quietly keep the old one.
 It makes the pairing the code has always relied on explicit -- a confidence
@@ -46,7 +46,7 @@ LLM_SELF_REPORT = "llm_self_report"
 #: A calibrated head's probability for the category it chose. The one source
 #: here that is a probability in the sense the word usually carries, and the one
 #: source :data:`ESCALATION_THRESHOLD` was *not* chosen against.
-LAYA = "laya"
+LOCAL_CLASSIFIER = "local_classifier"
 
 #: The only ``next_probe`` that can escalate. The router may also answer
 #: ``'none'``, and then nothing below is consulted.
@@ -89,8 +89,8 @@ class Confidence:
     convention.
 
     *detail* names the specific producer where there is one to name: the
-    checkpoint identity for :data:`LAYA`, which is rule 2 of Decision 22 in
-    ``docs/laya-packaging.md`` -- a report gets copied into a ticket and read on
+    checkpoint identity for :data:`LOCAL_CLASSIFIER`, which is rule 2 of Decision 22 in
+    ``docs/local-classifier-packaging.md`` -- a report gets copied into a ticket and read on
     its own, and a verdict that cannot say which weights produced it cannot be
     compared against the next one.
 
@@ -142,7 +142,7 @@ class Escalation:
 
     *gated_on* is separate from the confidence the report carries because they
     are allowed to differ, and the case where they differ is the point of this
-    module: Laya may supply the verdict's confidence while the cutoff is still
+    module: the local classifier may supply the verdict's confidence while the cutoff is still
     applied to the adapters' figure, because that is the figure the cutoff was
     chosen against. A reader who is told only the outcome cannot audit that, and
     a reader who is told only the reported confidence would audit it wrongly.
@@ -167,28 +167,29 @@ def decide(
     reported: Confidence,
     *,
     rule_based: Confidence,
-    laya_threshold: float | None = None,
+    local_classifier_threshold: float | None = None,
 ) -> Escalation:
     """Whether to run the production sweep, and on whose number.
 
     *reported* is the confidence the report will carry. *rule_based* is the
     adapters' own figure, which exists for every bundle whether or not any model
     ran and is therefore always available as the thing the cutoff was fitted to.
-    *laya_threshold* is a cutoff an operator has derived for a Laya probability;
+    *local_classifier_threshold* is a cutoff an operator has derived for a
+    local-classifier probability;
     ``None`` means nobody has, which is the state of the world in this change.
 
     The three branches, and why they are in this order:
 
     1. A source :data:`ESCALATION_THRESHOLD` was chosen against is compared
        against it. This is what Autopsy has always done and it is unchanged.
-    2. A Laya probability with a derived threshold is compared against *that*
+    2. A local-classifier probability with a derived threshold is compared against *that*
        threshold. This is the branch Phase 1 is supposed to unlock, and it is
        here now so that the measurement has somewhere to land rather than
        arriving as a second patch to this function.
-    3. A Laya probability with no derived threshold does not get compared at
+    3. A local-classifier probability with no derived threshold does not get compared at
        all. The escalation still happens, on the adapters' figure, which is a
        real number about this bundle on the scale the cutoff was fitted to --
-       so the control flow is the one Autopsy had before Laya was switched on,
+       so the control flow is the one Autopsy had before the tier was switched on,
        and turning the tier on changes what the report *says* without changing
        what the pipeline *does*. That asymmetry is deliberate: the category is
        the thing Phase 4 set out to improve, and the sweep is the thing a wrong
@@ -205,17 +206,17 @@ def decide(
     if reported.source in THRESHOLD_SOURCES:
         return _below(reported, ESCALATION_THRESHOLD, "the cutoff was chosen against this source")
 
-    if reported.source != LAYA:
+    if reported.source != LOCAL_CLASSIFIER:
         raise UncalibratedThresholdError(
             f"no escalation threshold is registered for confidence source {reported.source!r}. "
             f"Register one in THRESHOLD_SOURCES if it shares a scale with "
             f"{sorted(THRESHOLD_SOURCES)}, or pass a threshold derived against it."
         )
 
-    if laya_threshold is not None:
+    if local_classifier_threshold is not None:
         return _below(
             reported,
-            laya_threshold,
+            local_classifier_threshold,
             "an operator supplied a cutoff derived against this checkpoint",
         )
 
@@ -244,8 +245,8 @@ def _below(confidence: Confidence, threshold: float, why: str) -> Escalation:
 __all__ = [
     "ADAPTER_RULES",
     "ESCALATION_THRESHOLD",
-    "LAYA",
     "LLM_SELF_REPORT",
+    "LOCAL_CLASSIFIER",
     "SWEEP_PROBE",
     "THRESHOLD_SOURCES",
     "Confidence",
