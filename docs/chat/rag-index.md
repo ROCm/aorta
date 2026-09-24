@@ -332,16 +332,22 @@ build` both fail — the first for want of the asset, the second for want of the
 model.
 
 The download is ~65 MB, not the 130 MB of the fp32 weights: `fastembed` serves
-this model from a quantised ONNX re-host (`qdrant/bge-small-en-v1.5-onnx-q`),
-which is also why its vectors are not interchangeable with a torch-built
-index's.
+this model from a quantised ONNX re-host (`Qdrant/bge-small-en-v1.5-onnx-Q`;
+`qdrant/bge-small-en-v1.5-onnx-q` before `fastembed` 0.8.1), which is also why
+its vectors are not interchangeable with a torch-built index's.
 
-Pre-seed the model cache on a connected machine, copy it across, and point at it:
+Pre-seed the model cache on a connected machine running the same `fastembed`
+version as this one, copy it across, and point at it:
 
 ```bash
 export HF_HOME=/shared/hf-cache
 export HF_HUB_OFFLINE=1
 ```
+
+The `fastembed` version has to match because the cache directory is named after
+the re-host exactly as that version spells it: a cache seeded by 0.8.0 does not
+load under 0.8.1, nor the reverse, and `aorta chat doctor` reports such a cache
+as not cached.
 
 `HF_HOME` is checked first and wins when set. Without it the cache is
 `model_cache_path`, which defaults under `$XDG_CACHE_HOME` — set that instead

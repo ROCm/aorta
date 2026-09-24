@@ -183,7 +183,11 @@ controls stay hidden unless it runs.
   perf gating. Baselines honor the expected `passed` outcome (an expected-failure
   baseline is supported).
 - **Performance** is **trend-only by default**: step-time/throughput/latency are
-  captured + charted but not gated.
+  captured + charted but not gated. "By default" is now load-bearing rather than
+  descriptive — one entry has live bounds. `tokenspeed_serve_smoke` gates
+  `median_tpot_ms` and `p99_itl_ms` on both its cells and nothing else; see
+  [tokenspeed-gating-rollout.md](tokenspeed-gating-rollout.md). Every other
+  entry is still correctness-only.
   To turn on perf gating (Phase 5), regenerate baselines with
   `refresh_baselines.py --perf-gate` (adds `step_time_ms.max` plus per-metric
   `policy`/`value` bounds -- min for throughput, max for latency/step-time, equal
