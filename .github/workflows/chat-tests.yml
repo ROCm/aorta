@@ -175,11 +175,18 @@ jobs:
             extras: chat-cli
           - python-version: "3.12"
             extras: chat-cli
-          # One leg carries the full stack -- Chainlit and LiteLLM -- at the top
-          # of Chainlit's supported range, which is where a `Requires-Python`
-          # bump on its side will show up first.
+          # One leg carries the full stack -- Chainlit, LiteLLM and the cluster
+          # agents -- at the top of Chainlit's supported range, which is where a
+          # `Requires-Python` bump on its side will show up first. The
+          # cancellation contract crosses BaseTool into run_triage, so testing
+          # either extra alone cannot exercise it.
+          #
+          # cia is here because the chat tools import through aorta.cia, so
+          # without it the staging and prompt tests fail on a missing dspy
+          # rather than on anything they are about. Skipping them instead would
+          # mean the staging-collision fix has no lane that runs it.
           - python-version: "3.13"
-            extras: chat-all
+            extras: chat-all,cia
             litellm: "yes"
           - python-version: "3.14"
             extras: chat-cli
@@ -218,6 +225,7 @@ jobs:
           import sys
 
           extras = os.environ["EXTRAS"]
+          selected = set(extras.split(","))
           required = [
               "langchain_core",
               "langchain_openai",
@@ -226,8 +234,10 @@ jobs:
               "sqlite_vec",
               "fastembed",
           ]
-          if extras in ("chat-ui", "chat-all"):
+          if selected & {"chat-ui", "chat-all"}:
               required.append("chainlit")
+          if "cia" in selected:
+              required.append("dspy")
           if os.environ.get("WITH_LITELLM") == "yes":
               required += ["litellm", "langchain_litellm"]
           missing = [name for name in required if importlib.util.find_spec(name) is None]
@@ -287,21 +297,77 @@ jobs:
   # this is ever made required) must require THIS job, not the per-version legs:
   # a matrix skipped by a job-level `if` never emits their contexts, so a
   # required check pinned to one would hang the PR forever
+  # The floor is a claim that the declared minimum can run this code, and
+  # nothing was checking it. Every leg above resolves the newest LangGraph, so
+  # an import added here that only exists in a later release passes CI and
+  # fails for anyone who installs the minimum the metadata permits -- which is
+  # exactly what happened with langgraph.config.get_stream_writer against the
+  # old >=0.2.0 floor.
+  minimum-langgraph:
+    name: pytest (chat, langgraph floor)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.chat == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Resolved as one set, not installed and then downgraded. Pinning
+      # LangGraph afterwards leaves the langchain-* packages at versions picked
+      # for a newer one, and the resulting ImportErrors are artefacts of the
+      # half-migrated environment rather than anything a user would hit.
+      - name: Install the chat extra with LangGraph pinned to the declared floor
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          floor=$(python - <<'PY'
+          import re, pathlib
+          text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          print(re.search(r'"langgraph>=([0-9.]+)', text).group(1))
+          PY
+          )
+          echo "declared floor: ${floor}"
+          python -m pip install -e '.[chat-cli,tests]' "langgraph==${floor}"
+          python - <<'PY'
+          import importlib.metadata as md
+          for pkg in ("langgraph", "langchain-core", "langchain-openai"):
+              print(f"  {pkg}: {md.version(pkg)}")
+          PY
+
+      - name: The imports the floor exists for
+        run: |
+          python - <<'PY'
+          # The two the floor was raised for. An ImportError here means the
+          # declared minimum cannot run the code that declares it.
+          from langgraph.config import get_stream_writer
+          from aorta.chat.graph import nodes
+          from aorta.chat import session
+          print("get_stream_writer and the graph import on the floor")
+          PY
+
+      - name: The custom stream mode works on the floor
+        run: |
+          python -m pytest tests/chat/test_langgraph_floor.py tests/chat/test_streamed_steps.py -q
+
   # (actions/runner#952). This job has no matrix and `if: always()`, so its
   # single context reports on every PR.
   required:
     name: Chat tests
     runs-on: ubuntu-latest
-    needs: [changes, tests]
+    needs: [changes, tests, minimum-langgraph]
     if: always()
     steps:
       - name: Collapse the chat matrix result into one check
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
+          FLOOR_RESULT: ${{ needs.minimum-langgraph.result }}
         run: |
           set -euo pipefail
-          echo "changes=${CHANGES_RESULT} tests=${TESTS_RESULT}"
+          echo "changes=${CHANGES_RESULT} tests=${TESTS_RESULT} floor=${FLOOR_RESULT}"
 
           # A broken relevance gate is not a pass.
           if [ "$CHANGES_RESULT" != "success" ]; then
@@ -313,4 +379,12 @@ jobs:
             success)  echo "Chat matrix passed." ;;
             skipped)  echo "Chat matrix skipped (no chat-relevant change)." ;;
             *)        echo "Chat matrix did not pass (${TESTS_RESULT})."; exit 1 ;;
+          esac
+
+          # Counted separately: the matrix resolves the newest LangGraph, so a
+          # green matrix says nothing about the minimum the metadata permits.
+          case "$FLOOR_RESULT" in
+            success)  echo "The declared LangGraph floor runs the code." ;;
+            skipped)  echo "Floor check skipped (no chat-relevant change)." ;;
+            *)        echo "The declared LangGraph floor did not pass (${FLOOR_RESULT})."; exit 1 ;;
           esac

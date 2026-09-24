@@ -659,13 +659,12 @@ class TestStructure:
 
 class TestEmbeddingModelCache:
     def _seed(self, tmp_path: Path) -> None:
-        weights = (
-            tmp_path
-            / "hf"
-            / "hub"
-            / "models--qdrant--bge-small-en-v1.5-onnx-q"
-            / "model_optimized.onnx"
-        )
+        from aorta.chat.rag.embeddings import fastembed_bge
+
+        # The installed fastembed's spelling of the source repo, which moves
+        # between releases; each spelling is pinned in test_fastembed_provider.
+        directory = fastembed_bge._model_dir_slug(fastembed_bge._source_repo(MODEL))
+        weights = tmp_path / "hf" / "hub" / directory / "model_optimized.onnx"
         weights.parent.mkdir(parents=True)
         weights.write_bytes(b"\x00")
 
