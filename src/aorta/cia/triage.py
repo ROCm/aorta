@@ -27,6 +27,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -35,18 +36,23 @@ from pathlib import Path
 
 import yaml
 
-
 from aorta.cia.autopsy.orchestrator import run_autopsy
 from aorta.cia.cancellation import Stop, pause, stopped
+
 # Through the seam, not around it: launch() exists so a scheduler-less backend
 # is a branch in one place rather than an edit at every call site, and the only
 # production submitter calling submit_sbatch directly is how that stops being
 # true. An unused abstraction rots.
 from aorta.cia.launch import cancel, launch
-from aorta.cia.watch.poll import poll_jobs
 from aorta.cia.launch.job import (
-    JobRecord, _utc_now, new_job_id, read_job_json, update_job_status, write_job_json,
+    JobRecord,
+    _utc_now,
+    new_job_id,
+    read_job_json,
+    update_job_status,
+    write_job_json,
 )
+from aorta.cia.watch.poll import poll_jobs
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +96,9 @@ def sacct_state(slurm_id: str) -> str:
     try:
         r = subprocess.run(
             ["sacct", "-j", slurm_id, "--format=State", "--noheader", "--parsable2", "-X"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         line = (r.stdout or "").strip().splitlines()
         if line:
@@ -110,7 +118,9 @@ def sacct_nodelist(slurm_id: str) -> str:
     try:
         r = subprocess.run(
             ["sacct", "-j", slurm_id, "--format=NodeList", "--noheader", "--parsable2", "-X"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         for line in (r.stdout or "").strip().splitlines():
             node = line.strip()
@@ -140,7 +150,7 @@ def wait_for_job(slurm_id: str, timeout: int, interval: int = 5, *, stop: Stop =
     return f"TIMEOUT_WAITING({state})"
 
 
-_KERNEL_RE = re.compile(r'__global__\s+[\w\s:<>,*&]*?\b(\w+)\s*\(', re.MULTILINE)
+_KERNEL_RE = re.compile(r"__global__\s+[\w\s:<>,*&]*?\b(\w+)\s*\(", re.MULTILINE)
 
 
 def detect_kernel_name(source: str) -> str:
@@ -236,8 +246,9 @@ def reconcile_stale_jobs(jobs_root: Path) -> int:
             continue
         state = sacct_state(record.scheduler_job_id)
         if state in TERMINAL_STATES:
-            update_job_status(jobs_root, record.job_id,
-                              "completed" if state == "COMPLETED" else "failed")
+            update_job_status(
+                jobs_root, record.job_id, "completed" if state == "COMPLETED" else "failed"
+            )
             fixed += 1
     if fixed:
         log.info(f"reconciled {fixed} stale job record(s) to terminal")
@@ -275,9 +286,9 @@ def summarize_sanitizer(report: dict) -> dict:
         "total_findings": 0,
     }
 
-    kernels = ((report.get("worklist") or {}).get("kernels") or [])
+    kernels = (report.get("worklist") or {}).get("kernels") or []
     if kernels:
-        summary["kernel"] = ((kernels[0].get("identity") or {}).get("name"))
+        summary["kernel"] = (kernels[0].get("identity") or {}).get("name")
 
     for check in checks:
         findings = check.get("findings") or []
@@ -300,13 +311,19 @@ def summarize_sanitizer(report: dict) -> dict:
             first = findings[0]
             if first.get("message"):
                 entry["message"] = str(first["message"])
-            entry["context"] = [
-                str(meta[k]) for k in ("context_1", "context_2") if meta.get(k)
-            ]
+            entry["context"] = [str(meta[k]) for k in ("context_1", "context_2") if meta.get(k)]
             entry["example"] = {
                 k: meta[k]
-                for k in ("first_owner", "second_owner", "first_lds", "second_lds",
-                          "first_kind", "second_kind", "first_inst", "second_inst")
+                for k in (
+                    "first_owner",
+                    "second_owner",
+                    "first_lds",
+                    "second_lds",
+                    "first_kind",
+                    "second_kind",
+                    "first_inst",
+                    "second_inst",
+                )
                 if k in meta
             }
             entry["example_message"] = findings[0].get("message", "")[:400]
@@ -331,29 +348,44 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--recipe", help="Path to an existing aorta sanitizer recipe YAML")
     ap.add_argument("--source", help="Path to a .hip file to compile and triage")
-    ap.add_argument("--command", help=(
-        "Raw command to launch instead of a sanitizer sweep, for workloads that "
-        "are not expressible as a recipe. '{bundle}' is replaced with the job's "
-        "bundle directory, for a command that wants it as an argument; every job "
-        "also gets AORTA_BUNDLE in its environment, which costs the program "
-        "nothing."
-    ))
-    ap.add_argument("--kernel-name", default="",
-                    help="Kernel to analyse (auto-detected from --source when omitted)")
+    ap.add_argument(
+        "--command",
+        help=(
+            "Raw command to launch instead of a sanitizer sweep, for workloads that "
+            "are not expressible as a recipe. '{bundle}' is replaced with the job's "
+            "bundle directory, for a command that wants it as an argument; every job "
+            "also gets AORTA_BUNDLE in its environment, which costs the program "
+            "nothing."
+        ),
+    )
+    ap.add_argument(
+        "--kernel-name",
+        default="",
+        help="Kernel to analyse (auto-detected from --source when omitted)",
+    )
     ap.add_argument("--arch", default=os.environ.get("CIA_GPU_ARCH", "gfx950"))
     ap.add_argument("--jobs-root", default=os.environ.get("CIA_JOBS_ROOT", ""))
     ap.add_argument("--node", default=os.environ.get("CIA_DEMO_NODE", ""))
     ap.add_argument("--aorta-root", default=os.environ.get("AORTA_PATH", _default_aorta_root()))
     ap.add_argument("--job-timeout", type=int, default=900)
-    ap.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
-                    help="Extra variable to export in the batch job. The sanitizers "
-                         "need ROCJITSU_BUILD and LD_PRELOAD, which used to reach the "
-                         "job by being set in a subprocess this driver no longer runs in.")
+    ap.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra variable to export in the batch job. The sanitizers "
+        "need ROCJITSU_BUILD and LD_PRELOAD, which used to reach the "
+        "job by being set in a subprocess this driver no longer runs in.",
+    )
     ap.add_argument("--watch-rounds", type=int, default=20)
-    ap.add_argument("--watch-grace", type=int, default=180,
-                    help="Seconds to let Watch alert after the job ends")
+    ap.add_argument(
+        "--watch-grace", type=int, default=180, help="Seconds to let Watch alert after the job ends"
+    )
     ap.add_argument("--label", default="", help="Human label for this run (racy / fixed)")
     args = ap.parse_args(argv)
+    # Even callers that never supplied an external token need an internal one:
+    # job timeout must stop the Watch thread before this function returns.
+    work_stop = stop if stop is not None else threading.Event()
 
     if not args.recipe and not args.source and not args.command:
         return {"ok": False, "error": "pass either --recipe or --source"}
@@ -411,7 +443,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
                 "ok": False,
                 "stage": "source",
                 "error": "could not find a __global__ kernel in the source; "
-                         "pass --kernel-name explicitly",
+                "pass --kernel-name explicitly",
             }
 
         # Keep the source with the job so the bundle is self-describing.
@@ -432,8 +464,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
             f"-o {shlex.quote(str(binary))} {shlex.quote(str(staged))} && "
             f"{shlex.quote(venv_bin('aorta'))} sweep run "
             f"--recipe {shlex.quote(str(recipe))} "
-            f"--output {shlex.quote(aorta_output)}"
-            + echo_findings
+            f"--output {shlex.quote(aorta_output)}" + echo_findings
         )
         # ConSan samples workgroups with a large default stride, so a small repro
         # grid can be skipped entirely: every site gets patched but nothing is
@@ -458,8 +489,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         command = (
             f"{shlex.quote(venv_bin('aorta'))} sweep run "
             f"--recipe {shlex.quote(str(recipe))} "
-            f"--output {shlex.quote(aorta_output)}"
-            + echo_findings
+            f"--output {shlex.quote(aorta_output)}" + echo_findings
         )
 
     record = JobRecord(
@@ -483,6 +513,18 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     )
     reconcile_stale_jobs(jobs_root)
     log.info("── Launch ──")
+
+    # Source preparation and stale-job reconciliation can both take long
+    # enough for the caller to cancel. Do not turn a cancellation that arrived
+    # during either step into a new scheduler submission.
+    if stopped(work_stop):
+        return {
+            "ok": False,
+            "stage": "launch",
+            "error": "abandoned by caller before launch",
+            "job_id": job_id,
+            "job_dir": str(job_dir),
+        }
 
     slurm_id, err = launch(
         command=command,
@@ -513,6 +555,28 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     write_job_json(record, jobs_root)
     log.info(f"submitted slurm job {slurm_id}")
 
+    # Cancellation can race with the scheduler call itself. The allocation now
+    # exists, so release it before Watch (or any later triage stage) can start.
+    if stopped(work_stop):
+        cancelled, why = cancel(slurm_id)
+        if cancelled:
+            log.info(f"cancelled slurm {slurm_id}; the allocation is released")
+            update_job_status(jobs_root, job_id, "cancelled")
+        else:
+            log.warning(
+                f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
+                "node until its time limit"
+            )
+        return {
+            "ok": False,
+            "stage": "launch",
+            "error": "abandoned by caller during launch",
+            "job_id": job_id,
+            "slurm_job_id": slurm_id,
+            "cancelled": cancelled,
+            "job_dir": str(job_dir),
+        }
+
     bundle = job_dir / "bundle"
     report_path = bundle / "report.json"
 
@@ -531,14 +595,14 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         kwargs={
             "jobs_root": jobs_root,
             "max_rounds": args.watch_rounds,
-            "stop": stop,
+            "stop": work_stop,
             "only": job_id,
         },
         daemon=True,
     )
     watcher.start()
 
-    state = wait_for_job(slurm_id, timeout=args.job_timeout, stop=stop)
+    state = wait_for_job(slurm_id, timeout=args.job_timeout, stop=work_stop)
 
     # Giving up on the answer has to give back the node. The allocation outlives
     # this process otherwise -- until its own time limit, four hours by default
@@ -551,6 +615,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     # ones that time out precisely because they are slow -- the ones that held a
     # node longest.
     if state.startswith("ABANDONED") or state.startswith("TIMEOUT_WAITING"):
+        work_stop.set()
         cancelled, why = cancel(slurm_id)
         if cancelled:
             log.info(f"cancelled slurm {slurm_id}; the allocation is released")
@@ -559,10 +624,24 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
                 f"slurm {slurm_id} could not be cancelled ({why}); it may hold a "
                 "node until its time limit"
             )
-        # Terminal, so scan_active_jobs stops handing this to Watch. Leaving it
-        # 'running' would have every later round poll a log that stopped growing
-        # when the job died, until the staleness window finally retired it.
+        # Terminal scheduler status removes this from Watch's active log path.
+        # Durable unsettled Autopsy state is recovered separately; leaving the
+        # job 'running' would also make every later round poll a dead log.
         update_job_status(jobs_root, job_id, "cancelled")
+        # Watch owns its own bounded Autopsy pool. Give it a bounded chance to
+        # observe the same stop event and persist queued/running work before the
+        # triage reports cancellation complete.
+        # External cancellation (chat/API or CLI SIGINT) promises that Watch
+        # has observed the stop before the caller gets its answer. A legacy
+        # library caller with no token still gets the internal event above,
+        # but does not pay this grace period synchronously.
+        if stop is not None:
+            watcher.join(timeout=5)
+        if stop is not None and watcher.is_alive():
+            log.warning(
+                "Watch is still unwinding after cancellation; its stop flag is "
+                "set and it will start no new Autopsy work"
+            )
         return {
             "ok": False,
             "stage": "wait",
@@ -586,11 +665,14 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
     while time.time() < deadline:
         if report_path.is_file() or not watcher.is_alive():
             break
-        if pause(stop, 5):
+        if pause(work_stop, 5):
             log.info("caller gave up; not waiting out the rest of the grace window")
             break
 
-    watcher.join(timeout=30)
+    # Normal completion can wait for report finalization. Cancellation cannot:
+    # Watch has its own bounded shutdown/abandonment path and the caller should
+    # not pay this historical thirty-second join on top of it.
+    watcher.join(timeout=5 if stopped(work_stop) else 30)
     watch_events = read_watch_events(job_dir)
     watch_tail = [
         f"{e.get('signal')} @ {e.get('confidence')}: {e.get('assessment', '')[:160]}"
@@ -612,6 +694,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
             log.info("── Bundle (direct) ──")
             try:
                 from aorta.cia.watch.bundle_writer import write_bundle
+
                 evidence = ""
                 if Path(log_path).is_file():
                     evidence = "\n".join(
@@ -626,7 +709,7 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         # The bundle above is worth assembling either way -- a caller that gave
         # up is told where to find it. The verdict is not: it is an unbounded
         # model call whose answer has nowhere left to go.
-        if stopped(stop):
+        if stopped(work_stop):
             log.info("caller gave up; skipping the autopsy rather than paying for a verdict")
             return {
                 "ok": False,
@@ -635,10 +718,16 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
                 "job_dir": str(job_dir),
             }
         try:
-            report = run_autopsy(bundle, kb_version="kb-static-poc")
+            report = run_autopsy(
+                bundle,
+                kb_version="kb-static-poc",
+                stop=work_stop,
+            )
             report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-            log.info(f"autopsy category={report.get('category')} "
-                f"confidence={report.get('confidence')}")
+            log.info(
+                f"autopsy category={report.get('category')} "
+                f"confidence={report.get('confidence')}"
+            )
         except Exception as exc:
             log.info(f"autopsy failed: {exc}")
     else:
@@ -670,7 +759,8 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         diagnostics = []
         if Path(log_path).is_file():
             diagnostics = [
-                ln for ln in Path(log_path).read_text(errors="replace").splitlines()
+                ln
+                for ln in Path(log_path).read_text(errors="replace").splitlines()
                 if "error:" in ln or "warning:" in ln
             ][:20]
         result["ok"] = False
@@ -684,8 +774,15 @@ def run_triage(argv: list[str] | None = None, *, stop: Stop = None) -> dict:
         result["report_path"] = str(report_path)
         result["autopsy"] = {
             k: report.get(k)
-            for k in ("category", "confidence", "rationale", "evidence",
-                      "next_probes", "tooling_gaps", "signals")
+            for k in (
+                "category",
+                "confidence",
+                "rationale",
+                "evidence",
+                "next_probes",
+                "tooling_gaps",
+                "signals",
+            )
             if k in report
         }
     else:
@@ -709,7 +806,20 @@ def main() -> int:
     server's own logging setup stands.
     """
     logging.basicConfig(level=logging.INFO, format="[triage] %(message)s", stream=sys.stderr)
-    result = run_triage()
+    stop = threading.Event()
+    previous_sigint = signal.getsignal(signal.SIGINT)
+
+    def request_stop(signum, frame):
+        if stop.is_set():
+            # A second Ctrl-C is the explicit hard-stop escape hatch.
+            signal.default_int_handler(signum, frame)
+        stop.set()
+
+    signal.signal(signal.SIGINT, request_stop)
+    try:
+        result = run_triage(stop=stop)
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
     print(json.dumps(result, indent=2))
     return 0 if result.get("ok") else 1
 

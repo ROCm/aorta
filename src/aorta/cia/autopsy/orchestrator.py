@@ -7,29 +7,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from aorta.cia.autopsy.adapters.aorta_matrix import AortaMatrixAdapter, load_matrix, MatrixClassification, classify_matrix
-from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext, load_manifest
-from aorta.cia.autopsy.adapters.sanitizer_report import (
-    SanitizerClassification,
-    SanitizerReportAdapter,
-    classify_sanitizer,
+from aorta.cia.autopsy.adapters.aorta_matrix import (
+    AortaMatrixAdapter,
+    MatrixClassification,
+    classify_matrix,
+    load_matrix,
 )
+from aorta.cia.autopsy.adapters.base import AdapterArtifact, BundleContext, load_manifest
 from aorta.cia.autopsy.adapters.rocgdb import (
     RocgdbAdapter,
     RocgdbClassification,
     classify_rocgdb,
     parse_rocgdb_session,
 )
+from aorta.cia.autopsy.adapters.sanitizer_report import (
+    SanitizerClassification,
+    SanitizerReportAdapter,
+    classify_sanitizer,
+)
 from aorta.cia.autopsy.adapters.stderr_watch import StderrWatchAdapter
 from aorta.cia.autopsy.reporter import build_report
-
+from aorta.cia.cancellation import Stop, stopped
 
 log = logging.getLogger(__name__)
 
 
-def _reviewed_rationale(
-    classification: MatrixClassification, router_rationale: str
-) -> str:
+def _reviewed_rationale(classification: MatrixClassification, router_rationale: str) -> str:
     """Keep a debugger-proven cause/fix when the LLM reviews the evidence.
 
     ROCgDB's adapter deterministically turns ``mean_sq=0``, ``inv_rms=inf`` and
@@ -57,7 +60,7 @@ def run_autopsy(
     *,
     kb_version: str | None = None,
     use_llm: bool = True,
-    job: "Any | None" = None,
+    job: Any | None = None,
     head_node: str = "",
     stop: Stop = None,
 ) -> dict[str, Any]:
@@ -127,10 +130,17 @@ def run_autopsy(
         all_next.extend(art.next_probes)
         all_gaps.extend(art.tooling_gaps)
 
+    # Adapter collection is local and bounded. The router is a provider call,
+    # so do not begin one after the caller has already cancelled; the
+    # deterministic evidence still produces a useful terminal report.
+    if stopped(stop):
+        use_llm = False
+
     # LLM router — re-classifies based on all adapter evidence
     if use_llm and all_evidence:
         try:
             from aorta.cia.autopsy.router import TriageRouter
+
             # The root goes to the constructor, not into the call the model
             # can influence: the evidence tool is bound to it there.
             router = TriageRouter(bundle_root)
@@ -145,7 +155,6 @@ def run_autopsy(
                 getattr(pred, "rationale", classification.rationale),
             )
             next_probe = getattr(pred, "next_probe", "none")
-            next_probe_reason = getattr(pred, "next_probe_reason", "")
         except Exception as e:
             # A verdict reached without the router is a weaker claim than one
             # reached with it, and the difference is invisible in the category
@@ -160,7 +169,7 @@ def run_autopsy(
             all_gaps.append(
                 {
                     "description": f"Autopsy router unavailable ({e}); "
-                                   "verdict derived from adapters alone.",
+                    "verdict derived from adapters alone.",
                     "missing_signal": "LLM_ROUTER_REVIEW",
                     "suggested_tool": "none",
                 }
@@ -171,7 +180,6 @@ def run_autopsy(
             confidence = classification.confidence
             rationale = classification.rationale
             next_probe = all_next[0]["tool"] if all_next else "none"
-            next_probe_reason = ""
     else:
         category = classification.category
         if category == "unknown" and matrix_adapter.tooling_gaps:
@@ -179,19 +187,28 @@ def run_autopsy(
         confidence = classification.confidence
         rationale = classification.rationale
         next_probe = all_next[0]["tool"] if all_next else "none"
-        next_probe_reason = ""
 
     # Escalate: run production Aorta probe if confidence is low and probe recommended
-    if next_probe == "aorta sweep run" and confidence < 0.85 and job is not None:
+    if (
+        next_probe == "aorta sweep run"
+        and confidence < 0.85
+        and job is not None
+        and not stopped(stop)
+    ):
         print(f"[autopsy] confidence={confidence:.2f} — escalating to Aorta production sweep")
         from aorta.cia.autopsy.probe import run_aorta_probe
+
         matrix_path = run_aorta_probe(bundle_root, job, head_node=head_node, stop=stop)
         if matrix_path:
             # Re-run with the new production matrix (use_llm stays True, no infinite loop
             # because production matrix will raise confidence above 0.85)
             return run_autopsy(
-                bundle_root, kb_version=kb_version, use_llm=use_llm,
-                job=None, head_node=head_node,
+                bundle_root,
+                kb_version=kb_version,
+                use_llm=use_llm,
+                job=None,
+                head_node=head_node,
+                stop=stop,
             )
 
     if not all_evidence and category == "tooling_gap":
@@ -288,9 +305,7 @@ def merge_watchdog_matrix(
         return MatrixClassification(
             category=matrix_cls.category,
             confidence=min(0.95, matrix_cls.confidence + 0.05),
-            rationale=(
-                f"{matrix_cls.rationale} Watchdog log corroborates NaN/non-finite loss."
-            ),
+            rationale=(f"{matrix_cls.rationale} Watchdog log corroborates NaN/non-finite loss."),
             signals=list(dict.fromkeys([*matrix_cls.signals, "WATCH_NUMERIC_NAN"])),
         )
 

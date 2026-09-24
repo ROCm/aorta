@@ -69,7 +69,7 @@ PRE_SEED_PROCEDURE = (
     "\n"
     "To pre-seed the cache from a machine that does have egress:\n"
     "  1. On the connected machine, with the same aorta *and* fastembed versions\n"
-    "     installed (a cache seeded by another fastembed may not load here):\n"
+    "     installed (aorta can also reuse a complete legacy snapshot directly):\n"
     "       export HF_HOME=/tmp/aorta-model-cache\n"
     "       aorta chat doctor            # downloads nothing\n"
     "       python -c 'from fastembed import TextEmbedding; "
@@ -121,7 +121,90 @@ def _model_dir_slug(model: str) -> str:
     return "models--" + model.replace("/", "--")
 
 
-def model_is_cached(model: str | None = None) -> bool:
+def _model_description(model: str) -> Any | None:
+    """FastEmbed's registry entry for *model*, or None when it cannot be read."""
+    try:
+        from fastembed import TextEmbedding
+
+        for description in TextEmbedding._list_supported_models():
+            if description.model.casefold() == model.casefold():
+                return description
+    except Exception:
+        logger.debug(
+            "could not read fastembed's model registry for %s",
+            model,
+            exc_info=True,
+        )
+    return None
+
+
+def _cached_model_path(model: str, cache_dir: Path | None = None) -> Path | None:
+    """A complete snapshot FastEmbed can load directly, including legacy casing."""
+    description = _model_description(model)
+    model_file = getattr(description, "model_file", None)
+    if not isinstance(model_file, str):
+        return None
+    required_files = [
+        Path(model_file),
+        Path("config.json"),
+        Path("tokenizer.json"),
+        Path("tokenizer_config.json"),
+        Path("special_tokens_map.json"),
+        *(Path(name) for name in (getattr(description, "additional_files", ()) or ())),
+    ]
+    if any(path.is_absolute() or ".." in path.parts for path in required_files):
+        return None
+
+    source_repo = getattr(getattr(description, "sources", None), "hf", None) or model
+    candidates = {
+        _model_dir_slug(model).casefold(),
+        _model_dir_slug(source_repo).casefold(),
+    }
+    root = Path(cache_dir) if cache_dir is not None else model_cache_dir()
+
+    def loadable(snapshot: Path) -> bool:
+        try:
+            return snapshot.is_dir() and all(
+                (snapshot / relative_path).is_file() for relative_path in required_files
+            )
+        except OSError:
+            return False
+
+    for base in (root, root / "hub"):
+        try:
+            repositories = list(base.iterdir())
+        except OSError:
+            continue
+        for repository in repositories:
+            if repository.name.casefold() not in candidates:
+                continue
+            if loadable(repository):
+                return repository
+
+            snapshots = repository / "snapshots"
+            try:
+                revision = (repository / "refs" / "main").read_text(encoding="utf-8").strip()
+            except OSError:
+                revision = ""
+            if revision and Path(revision).name == revision:
+                preferred = snapshots / revision
+                if loadable(preferred):
+                    return preferred
+            try:
+                available = sorted(snapshots.iterdir(), key=lambda path: path.name)
+            except OSError:
+                continue
+            for snapshot in available:
+                if loadable(snapshot):
+                    return snapshot
+    return None
+
+
+def model_is_cached(
+    model: str | None = None,
+    *,
+    cache_dir: Path | None = None,
+) -> bool:
     """Whether the ONNX weights are already on disk.
 
     Deliberately a filesystem check rather than a ``TextEmbedding(...)``
@@ -131,26 +214,17 @@ def model_is_cached(model: str | None = None) -> bool:
     ``hub`` subdirectory is checked too, so a cache seeded by plain
     ``huggingface_hub`` into ``$HF_HOME/hub`` is recognised.
 
-    The source repo is matched exactly as the *installed* fastembed spells it,
-    case included, and never case-folded. fastembed 0.8.1 respelled this
-    model's source ``qdrant/...-onnx-q`` -> ``Qdrant/...-onnx-Q`` and changed
-    nothing else about the tree, yet measured offline neither release loads a
-    cache the other seeded: ``huggingface_hub`` resolves the directory by exact
-    name. Accepting both spellings would call a cache this install cannot load
-    warm, and :func:`_text_embedding` would then re-raise the bare download
-    error instead of :data:`PRE_SEED_PROCEDURE`. An exact check asks the
-    filesystem the question ``huggingface_hub`` asks, so it gets the same answer
-    whatever the filesystem's case rules.
+    FastEmbed 0.8.1 changed the registered source from
+    ``qdrant/...-onnx-q`` to ``Qdrant/...-onnx-Q``. Repository slugs are
+    matched case-insensitively because :func:`_text_embedding` passes the
+    resolved snapshot directly as ``specific_model_path``; unlike
+    ``snapshot_download``, loading that path does not depend on which release
+    named its parent directory. The answer is therefore the same complete,
+    loadable snapshot that construction uses, not a looser second
+    interpretation of the cache.
     """
     model = model or settings.embedding_model
-    root = model_cache_dir()
-    candidates = {_model_dir_slug(model), _model_dir_slug(_source_repo(model))}
-    for base in (root, root / "hub"):
-        for candidate in candidates:
-            directory = base / candidate
-            if directory.is_dir() and any(directory.rglob("*.onnx")):
-                return True
-    return False
+    return _cached_model_path(model, cache_dir) is not None
 
 
 def _source_repo(model: str) -> str:
@@ -171,14 +245,11 @@ def _source_repo(model: str) -> str:
     failure being explained with an unrelated one and the operator would lose
     :data:`PRE_SEED_PROCEDURE` entirely.
     """
-    try:
-        from fastembed import TextEmbedding
-    except Exception:  # absent, or an install too broken to import
+    description = _model_description(model)
+    if description is None:
         return model
     try:
-        for description in TextEmbedding._list_supported_models():
-            if description.model == model:
-                return getattr(description.sources, "hf", None) or model
+        return getattr(description.sources, "hf", None) or model
     except Exception:
         logger.debug(
             "could not read fastembed's model registry; treating %s as its own "
@@ -200,10 +271,20 @@ def _text_embedding(model: str, cache_dir: Path | None) -> TextEmbedding:
     """
     from fastembed import TextEmbedding
 
+    resolved_cache = cache_dir or model_cache_dir()
+    specific_model_path = _cached_model_path(model, resolved_cache)
     try:
-        return TextEmbedding(model_name=model, cache_dir=str(cache_dir) if cache_dir else None)
+        return TextEmbedding(
+            model_name=model,
+            cache_dir=str(cache_dir) if cache_dir else None,
+            **(
+                {"specific_model_path": str(specific_model_path)}
+                if specific_model_path is not None
+                else {}
+            ),
+        )
     except Exception as exc:
-        if model_is_cached(model):
+        if model_is_cached(model, cache_dir=resolved_cache):
             raise
         raise ModelUnavailableError(
             PRE_SEED_PROCEDURE.format(model=model, cache=model_cache_dir())
