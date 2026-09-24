@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1739,6 +1740,113 @@ def test_a_serving_gate_breach_fails_the_nightly_and_stays_charted(tmp_path, mon
     assert chart.startswith("<svg") and chart in html, (
         "the dashboard does not chart the breaching night in the cell's "
         "median_tpot_ms history; the docs say it does."
+    )
+
+
+def _heading_anchors(doc: str) -> set[str]:
+    """The ``#fragment`` GitHub gives each heading of ``doc``.
+
+    GitHub's rule: lowercase, drop every character that is not a letter, a
+    digit, a space, ``-`` or ``_``, turn spaces into ``-``, and suffix a
+    repeated slug ``-1``, ``-2``. Lines inside fenced code are skipped, because
+    the rollout doc's shell blocks are full of ``# comment`` lines that are not
+    headings and would otherwise mint anchors that do not exist.
+    """
+    anchors: set[str] = set()
+    seen: dict[str, int] = {}
+    fenced = False
+    for line in doc.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        match = None if fenced else re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if not match:
+            continue
+        slug = "".join(
+            c for c in match.group(1).lower()
+            if c in " -_" or unicodedata.category(c)[0] in "LMN"
+        ).replace(" ", "-")
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        anchors.add(slug if count == 0 else f"{slug}-{count}")
+    return anchors
+
+
+def test_the_gating_docs_link_only_to_anchors_they_define():
+    """Every in-page ``](#...)`` link lands on a heading of the same file.
+
+    Renaming "What blocks this today" to "What blocked this, and what remains"
+    left the current-state notes linking to ``#what-blocks-this-today``, which
+    no longer exists; GitHub renders that as a link that scrolls nowhere. The
+    two gating docs cross-reference their own sections heavily -- the rollout
+    doc has 25 such links -- and every heading here gets reworded as the
+    rollout moves, so the anchors are checked rather than trusted.
+    """
+    for relative in ("docs/tokenspeed-gating-rollout.md", "docs/tokenspeed-serving.md"):
+        doc = (nightly_eval.REPO_ROOT / relative).read_text("utf-8")
+        anchors = _heading_anchors(doc)
+        links = re.findall(r"\]\(#([^)\s]+)\)", doc)
+        assert links, f"{relative} has no in-page links, so this checks nothing"
+        dead = sorted({link for link in links if link not in anchors})
+        assert not dead, (
+            f"{relative} links to {dead}, which no heading in it defines. Point "
+            "the link at the heading's current anchor, or keep the old one as an "
+            "alias."
+        )
+
+
+def test_the_heading_anchors_follow_githubs_rule():
+    """The slugger above agrees with GitHub on the cases these docs contain.
+
+    Without this, a slugger that returned every link's own fragment would pass
+    the dead-link test for any doc at all.
+    """
+    doc = "\n".join([
+        "## What blocked this, and what remains",
+        "#### One MI350X cell at `warmup_steps: 2` (2026-09-03) — a data point",
+        "```bash",
+        "# not a heading",
+        "```",
+        "## Repeated",
+        "## Repeated",
+    ])
+    assert _heading_anchors(doc) == {
+        "what-blocked-this-and-what-remains",
+        "one-mi350x-cell-at-warmup_steps-2-2026-09-03--a-data-point",
+        "repeated",
+        "repeated-1",
+    }
+
+
+def test_the_rollout_doc_does_not_say_the_window_is_still_to_come():
+    """The ten-night window at ``warmup_steps: 2`` has been taken; say so.
+
+    Two places still spoke of it as future after the PR recorded it and blessed
+    from it: the ``warmup_steps`` paragraph ("the ten-night record-only window
+    has to be taken afresh ... before anything is blessed") and the warmup-1
+    caveat ("there is no measurement at `warmup_steps: 2` yet"). Each sat a
+    screen away from the step-4 text reporting that window's numbers. The
+    patterns are the future-tense forms this doc used; the paired assertion
+    that the taken window is still named keeps a deletion from passing. Read
+    with whitespace collapsed rather than through `_prose_blocks`, which
+    splits clauses on ``:`` and so would cut `warmup_steps: 2` in half.
+    """
+    doc = (nightly_eval.REPO_ROOT / "docs/tokenspeed-gating-rollout.md").read_text("utf-8")
+    prose = " ".join(_unquoted(doc).split())
+    stale = re.compile(
+        r"\bwindow\s+(?:still\s+)?(?:has|have|needs?)\s+to\s+be\s+taken\b"
+        r"|\bno\s+measurement\s+at\s+`warmup_steps:\s*2`\s+yet\b"
+        r"|\bten-night\s+window\s+is\s+what\s+produces\s+it\b",
+        re.I,
+    )
+    found = stale.search(prose)
+    assert not found, (
+        f"the rollout doc still speaks of the warmup_steps: 2 window as future: "
+        f"{found.group(0)!r}. It is 2026-09-08..09-17, and the gates are blessed "
+        "from it."
+    )
+    assert re.search(r"window at `warmup_steps: 2`,?\s+2026-09-08\.\.09-17", prose), (
+        "the warmup-1 caveat no longer says where the warmup_steps: 2 measurement is"
     )
 
 

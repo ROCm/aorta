@@ -79,8 +79,8 @@ Two consequences that decide the shape of this rollout:
   matrix once it can actually *pass* on the runner. Adding one that cannot is not
   a soft landing; it is a nightly that is red every night. That constraint is
   what shaped this entry: it declares `needs_docker_daemon: true` so that a
-  runner without the socket **skips** it rather than failing — see [What blocks
-  this today](#what-blocks-this-today).
+  runner without the socket **skips** it rather than failing — see [What blocked
+  this, and what remains](#what-blocked-this-and-what-remains).
 - **Blessing is all-or-nothing per refresh, unless it is scoped.**
   `refresh_baselines.py` rebuilds the whole baseline file and `--perf-gate` armed
   every entry in it. Running it to bless serving would, in the same PR, derive
@@ -180,13 +180,13 @@ measurement of the exact cell the staged nightly entry runs, taken from the
 > this section measures. So read everything below as **the rationale for that
 > change, not as the baseline to bless against**: the table is the evidence that
 > a step-0 excursion reaches the metrics at `warmup_steps: 1`, and it is retained
-> for that purpose. It is *not* a prediction of what the record-only window will
-> show, because the window is taken at a different setting — one whose whole
-> purpose is to remove the excursion these thirteen cell-runs contain. Nothing
-> here is deleted or restated at the new setting; there is no measurement at
-> `warmup_steps: 2` yet, and inventing one would be worse than having none. The
-> ten-night window is what produces it. See step 3 of
-> [the rollout sequence](#the-rollout-sequence).
+> for that purpose. It was *not* a prediction of what the record-only window
+> would show, because the window was taken at a different setting — one whose
+> whole purpose is to remove the excursion these thirteen cell-runs contain.
+> Nothing here is deleted or restated at the new setting. The measurement this
+> was waiting for is the ten-night window at `warmup_steps: 2`,
+> 2026-09-08..09-17, and it lives in step 4 of
+> [the rollout sequence](#the-rollout-sequence) rather than here.
 
 **Twelve of the thirteen are very clean.** Tighter than the cross-sweep numbers
 above, because these are the same recipe on the same node:
@@ -457,13 +457,15 @@ is positional: raising `warmup_steps` from 1 to 2 discards it by construction.
 **That has now been done** — the recipe sets `warmup_steps: 2` — which is what
 lets `median_ttft_ms` and `output_throughput` be promoted later.
 (`step_time_ms.max`, the third metric the excursion blocked, stays pruned for a
-reason `warmup_steps` does not touch; see step 4.) The cost is that
-it changes the measurement: every number in this document was taken at
-`warmup_steps: 1`, so none of them is a baseline any more, and the ten-night
-record-only window has to be taken afresh at the new setting before anything is
-blessed. That is a deliberate trade. Carrying the excursion into the window
-instead would have meant either blessing a bimodal cell or spending ten nights
-establishing a distribution we already intended to change.
+reason `warmup_steps` does not touch; see step 4.) The cost was that
+it changed the measurement: every number taken before the change was at
+`warmup_steps: 1`, so none of them could be a baseline, and the ten-night
+record-only window had to be taken afresh at the new setting before anything was
+blessed. It was: the 2026-09-08..09-17 window is at `warmup_steps: 2`, and the
+two gates are blessed from it ([step 4](#the-rollout-sequence)). That was a
+deliberate trade. Carrying the excursion into the window instead would have
+meant either blessing a bimodal cell or spending ten nights establishing a
+distribution we already intended to change.
 
 For the concurrency-64 stall no such fix exists — it has no position to discard —
 which is why that cell stays out of the nightly entirely rather than being gated
