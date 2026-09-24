@@ -649,17 +649,96 @@ def _strip_code_fence(content: str) -> str:
     return "\n".join(body).strip()
 
 
+#: Qwen3's reasoning delimiters; DeepSeek-R1 uses the same pair.
+_REASONING_OPEN = "<think>"
+_REASONING_CLOSE = "</think>"
+
+
+def _strip_reasoning(content: str) -> str:
+    """Drop the reasoning block a thinking model writes before its answer.
+
+    A Qwen3-family model served without a server-side reasoning parser replies
+    ``<think>...</think>`` and then the JSON. Qwen3.8's chat template opens the
+    block in the *prompt*, so its replies carry only the closing tag. Left in,
+    every such reply fails to parse and the loop stops after its first step --
+    measured on every Qwen3 model tried, on vLLM and TokenSpeed alike, with no
+    scenario converging.
+
+    Requiring the server flag (``--reasoning-parser qwen3``) instead was
+    rejected: neither engine enables it by default, so every default deployment
+    would stay broken, and nothing on this side would say why. It remains the
+    recommended setup (``docs/chat/providers.md``); this covers its absence.
+    With the flag on, the block arrives in ``reasoning_content``, which neither
+    proposer reads, so a generation cut off mid-reasoning reaches
+    :func:`_step_from_content` as empty content and stops there. Asking the
+    server not to think (``chat_template_kwargs``) also yields parseable
+    replies, but the proposals get markedly worse, and the parameter is not
+    portable across providers.
+
+    Narrow on purpose, because each widening reads an answer out of text that
+    is not one:
+
+    * Only a *terminated* block. Qwen3 drafts the object mid-thought, so an
+      unterminated ``<think>`` -- a generation that ended before its answer --
+      often contains JSON; searching it for the first ``{`` would promote a
+      discarded draft to a decision. That raises instead.
+    * Only a *leading* block, or the headless form. A reply that begins as an
+      answer (``{`` or a fence) is left alone, so a ``</think>`` quoted in a
+      hypothesis is data. Removing ``<think>...</think>`` wherever it occurs
+      would edit string values.
+    * Split at the *first* closing tag, so an answer that quotes one survives.
+      Reasoning that spelled the tag out as text would leave prose in front of
+      the answer, which fails to parse -- the safe direction.
+
+    A headless reply cut off before its closing tag is indistinguishable from
+    prose and fails to parse exactly as prose does. A terminated block with
+    nothing after it raises with a message saying so, rather than surfacing as
+    a JSON error at column 1 that reads like malformed output.
+
+    Raises:
+        ValueError: The reply is reasoning with no answer after it.
+    """
+    text = content.strip()
+    if text.startswith(_REASONING_OPEN):
+        end = text.find(_REASONING_CLOSE, len(_REASONING_OPEN))
+        if end == -1:
+            raise ValueError("reasoning block never closed; the generation ended before an answer")
+        answer = text[end + len(_REASONING_CLOSE) :]
+    elif _REASONING_CLOSE in text and not text.startswith(("{", "```")):
+        answer = text.split(_REASONING_CLOSE, 1)[1]
+    else:
+        return text
+    answer = answer.strip()
+    if not answer:
+        raise ValueError("reply was reasoning with no answer after it")
+    return answer
+
+
+def _answer_text(content: str) -> str:
+    """The part of a reply that should be JSON: reasoning dropped, fence unwrapped.
+
+    Anything that claims to know what the proposer would make of a reply
+    imports this rather than re-deriving it, so the claim cannot drift from
+    the proposer.
+
+    Raises:
+        ValueError: The reply is reasoning with no answer after it.
+    """
+    return _strip_code_fence(_strip_reasoning(content))
+
+
 def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
     """Parse a model reply into an :class:`AgentStep`, failing safe.
 
-    Providers return malformed or partial JSON, a non-object, or nothing at all
-    even when asked for strict JSON. Every one of those becomes a stop rather
-    than an exception, so the loop still writes a report.
+    Providers return malformed or partial JSON, a non-object, reasoning with no
+    answer, or nothing at all even when asked for strict JSON. Every one of
+    those becomes a stop rather than an exception, so the loop still writes a
+    report.
     """
     if not content or not content.strip():
         return _safe_stop("Empty LLM response")
     try:
-        raw = json.loads(_strip_code_fence(content))
+        raw = json.loads(_answer_text(content))
         if not isinstance(raw, dict):
             raise TypeError(f"expected a JSON object, got {type(raw).__name__}")
         step = AgentStep.from_dict(raw)
@@ -757,7 +836,8 @@ class ChatProviderProposer:
 
     Unlike :class:`LiteLLMProposer` there is no ``response_format`` to lean on
     -- the layer returns a LangChain chat model, not a raw completion call -- so
-    the reply is fence-tolerant and every parse failure still fails safe.
+    the reply is fence- and reasoning-tolerant and every parse failure still
+    fails safe.
     """
 
     def __init__(self, provider: str, *, model: str | None = None) -> None:
