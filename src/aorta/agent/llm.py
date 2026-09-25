@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
+from aorta.agent.prompt_profiles import DEFAULT_PROMPT_PROFILE, PromptProfile, get_prompt_profile
+
 log = logging.getLogger(__name__)
 
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
@@ -655,6 +657,19 @@ def _build_prompt(
     return system, user
 
 
+def _profile_prompt(
+    profile: PromptProfile,
+    symptom: str | None,
+    cell_summaries: list[dict[str, Any]],
+    remaining: list[str],
+    tried: list[str],
+) -> tuple[str, str]:
+    """The system and user messages ``profile`` sends for this loop state."""
+    if profile.build is None:
+        return _build_prompt(symptom, cell_summaries, remaining, tried)
+    return profile.build(cell_summaries, remaining)
+
+
 def _strip_code_fence(content: str) -> str:
     """Unwrap a ```json fenced block.
 
@@ -816,8 +831,11 @@ class LiteLLMProposer:
     :func:`make_proposer` prefers the shared layer and falls back to this.
     """
 
-    def __init__(self, *, model: str = "gpt-4o-mini") -> None:
+    def __init__(
+        self, *, model: str = "gpt-4o-mini", prompt_profile: str = DEFAULT_PROMPT_PROFILE
+    ) -> None:
         self._model = model
+        self._profile = get_prompt_profile(prompt_profile)
 
     def propose(
         self,
@@ -843,14 +861,20 @@ class LiteLLMProposer:
                 "distribution is stale — reinstall from this repo with -e '.[agent]'."
             ) from exc
 
-        system, user = _build_prompt(symptom, cell_summaries, remaining, tried)
+        system, user = _profile_prompt(self._profile, symptom, cell_summaries, remaining, tried)
+        request: dict[str, Any] = {}
+        if self._profile.json_mode:
+            request["response_format"] = {"type": "json_object"}
+        extra_body = self._profile.extra_body()
+        if extra_body:
+            request["extra_body"] = extra_body
         response = litellm.completion(
             model=self._model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            response_format={"type": "json_object"},
+            **request,
         )
         return _step_from_content(response.choices[0].message.content, remaining)
 
@@ -885,9 +909,16 @@ class ChatProviderProposer:
     fails safe.
     """
 
-    def __init__(self, provider: str, *, model: str | None = None) -> None:
+    def __init__(
+        self,
+        provider: str,
+        *,
+        model: str | None = None,
+        prompt_profile: str = DEFAULT_PROMPT_PROFILE,
+    ) -> None:
         self._provider = provider
         self._model = model
+        self._profile = get_prompt_profile(prompt_profile)
 
     def _chat_model(self) -> Any:
         """Resolve the configured chat model, or explain which extra is missing.
@@ -929,10 +960,16 @@ class ChatProviderProposer:
         if not remaining:
             return _exhausted_step()
 
-        system, user = _build_prompt(symptom, cell_summaries, remaining, tried)
+        system, user = _profile_prompt(self._profile, symptom, cell_summaries, remaining, tried)
         # Role tuples rather than langchain message classes: one fewer import on
         # a path that only needs to say who said what.
-        response = self._chat_model().invoke([("system", system), ("human", user)])
+        messages = [("system", system), ("human", user)]
+        extra_body = self._profile.extra_body()
+        chat_model = self._chat_model()
+        if extra_body:
+            response = chat_model.invoke(messages, extra_body=extra_body)
+        else:
+            response = chat_model.invoke(messages)
         return _step_from_content(getattr(response, "content", None), remaining)
 
 
@@ -951,7 +988,12 @@ def _chat_layer_available() -> bool:
         return False
 
 
-def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
+def make_proposer(
+    backend: str,
+    *,
+    model: str | None = None,
+    prompt_profile: str = DEFAULT_PROMPT_PROFILE,
+) -> LLMProposer:
     """Build the proposer for ``--llm-backend``.
 
     Phase 5b (locked Decision 7a) put ``vllm`` / ``openai`` / ``litellm`` onto
@@ -968,13 +1010,24 @@ def make_proposer(backend: str, *, model: str | None = None) -> LLMProposer:
     ``fake`` stays the default and stays fully offline -- it imports nothing and
     reaches nothing, which is what makes the test suite and ``--dry-run``
     hermetic.
+
+    ``prompt_profile`` (see :mod:`aorta.agent.prompt_profiles`) is checked
+    before the backend, so a misspelt profile fails whichever backend was
+    asked for. ``fake`` sends no prompt, so it refuses any profile but
+    ``default`` rather than accept one and ignore it.
     """
+    get_prompt_profile(prompt_profile)
     if backend == "fake":
+        if prompt_profile != DEFAULT_PROMPT_PROFILE:
+            raise ValueError(
+                f"prompt profile {prompt_profile!r} needs a real model: "
+                "--llm-backend=fake builds no prompt, so it would be ignored"
+            )
         return FakeLLMProposer()
     if backend == "litellm" and not _chat_layer_available():
-        return LiteLLMProposer(model=model or "gpt-4o-mini")
+        return LiteLLMProposer(model=model or "gpt-4o-mini", prompt_profile=prompt_profile)
     if backend in CHAT_PROVIDER_BACKENDS:
-        return ChatProviderProposer(backend, model=model)
+        return ChatProviderProposer(backend, model=model, prompt_profile=prompt_profile)
     raise ValueError(
         f"unknown agent LLM backend: {backend!r} "
         f"(expected one of {', '.join(sorted({'fake', *CHAT_PROVIDER_BACKENDS}))})"
