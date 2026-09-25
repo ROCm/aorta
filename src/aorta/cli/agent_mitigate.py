@@ -37,6 +37,9 @@ _OUTCOME_HEADLINES: dict[str, str] = {
     "converged": "Mitigation found — repro passes with a non-baseline cell.",
     "exhausted_candidates": "Search stopped — no more mitigations to try.",
     "agent_stop": "Search stopped by the agent.",
+    "proposal_unresolved": (
+        "Stopped — the proposer named no mitigation that could be resolved."
+    ),
     "approval_required": "Paused — operator approval required.",
     "walltime_exhausted": "Stopped — wall-time budget exhausted.",
     "policy_stop": "Stopped — policy limit hit.",
