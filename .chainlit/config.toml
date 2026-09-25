@@ -43,8 +43,8 @@ mask_user_env = true
 # against each other at startup and says what to add rather than failing in
 # the browser as a socket that will not open.
 allow_origins = [
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
 ]
 
 [features]
