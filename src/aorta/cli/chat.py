@@ -680,7 +680,7 @@ def ask(
 
 @chat.command(name="ui")
 @click.option("--host", default="127.0.0.1", show_default=True, help="Bind address.")
-@click.option("--port", default=8000, show_default=True, type=int, help="Bind port.")
+@click.option("--port", default=8080, show_default=True, type=int, help="Bind port.")
 @click.pass_context
 def ui(ctx: click.Context, host: str, port: int) -> None:
     """Serve the Chainlit web UI (needs the chat-ui extra).
