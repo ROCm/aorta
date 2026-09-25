@@ -395,6 +395,16 @@ def test_episode_rollouts_templates_each_prompt_and_delegates_to_the_env(tmp_pat
     (["--clip", "-1"], "--clip"),
     (["--clip", "nan"], "--clip"),
     (["--kl-beta", "nan"], "--kl-beta"),
+    (["--lr", "inf"], "--lr"),
+    (["--lr", "nan"], "--lr"),
+    (["--adam-eps", "nan"], "--adam-eps"),
+    (["--adam-eps", "0"], "--adam-eps"),
+    (["--min-parse-frac", "nan"], "--min-parse-frac"),
+    (["--min-parse-frac", "1.5"], "--min-parse-frac"),
+    (["--min-parse-frac", "-0.1"], "--min-parse-frac"),
+    (["--budget-sec", "nan"], "--budget-sec"),
+    (["--budget-sec", "inf"], "--budget-sec"),
+    (["--temperature", "inf"], "--temperature"),
 ])
 def test_a_configuration_that_cannot_produce_a_checked_update_is_refused(
     tmp_path, capsys, flags, fragment
@@ -426,10 +436,130 @@ def test_a_fresh_run_into_a_used_out_is_refused_before_it_touches_anything(tmp_p
     assert (out / "wire.jsonl").read_text() == '{"iteration": 1}\n'
 
 
+class _StopAfterSentinel(Exception):
+    pass
+
+
+def test_the_exclusive_sentinel_is_taken_before_anything_else(tmp_path, monkeypatch):
+    """The wire exists before the first model load, i.e. before checkpoint-pre."""
+    out = tmp_path / "run"
+    seen = {}
+
+    def stop(*_a, **_k):
+        seen["wire"] = (out / "wire.jsonl").exists()
+        seen["listing"] = sorted(p.name for p in out.iterdir())
+        raise _StopAfterSentinel
+
+    monkeypatch.setattr(trainer, "_train", stop)
+    with pytest.raises(_StopAfterSentinel):
+        trainer.main(["--out", str(out)])
+    assert seen == {"wire": True, "listing": ["wire.jsonl"]}
+
+
+def test_a_run_that_loses_the_race_writes_nothing(tmp_path, monkeypatch, capsys):
+    """Both runs passed the preflight; the second finds the wire taken."""
+    out = tmp_path / "run"
+    out.mkdir()
+    (out / "wire.jsonl").write_text('{"iteration": 1}\n')
+    monkeypatch.setattr(trainer, "check_output_dir", lambda _out: None)
+    monkeypatch.setattr(trainer, "_train", lambda *a: pytest.fail("trained after losing the race"))
+    assert trainer.main(["--out", str(out)]) == trainer.EXIT_REFUSED
+    assert "another run took it" in capsys.readouterr().err
+    assert sorted(p.name for p in out.iterdir()) == ["wire.jsonl"]
+    assert (out / "wire.jsonl").read_text() == '{"iteration": 1}\n'
+
+
+def test_a_refusal_after_the_sentinel_leaves_out_reusable(tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    monkeypatch.setattr(trainer, "_train", lambda *a: trainer.EXIT_REFUSED)
+    assert trainer.main(["--out", str(out)]) == trainer.EXIT_REFUSED
+    assert trainer.check_output_dir(out) is None
+
+
+def test_a_run_that_wrote_rows_keeps_its_wire_whatever_it_returns(tmp_path, monkeypatch):
+    """Narrowness: only an empty wire from a refused run is removed."""
+    out = tmp_path / "run"
+
+    def wrote(_args, wire):
+        wire.write('{"iteration": 1}\n')
+        return trainer.EXIT_REFUSED
+
+    monkeypatch.setattr(trainer, "_train", wrote)
+    trainer.main(["--out", str(out)])
+    assert (out / "wire.jsonl").read_text() == '{"iteration": 1}\n'
+
+
+class _FakeSaver:
+    """Writes ``marker`` into a tree, optionally failing halfway."""
+
+    def __init__(self, marker, fail=False):
+        self.marker, self.fail = marker, fail
+
+    def save_pretrained(self, path, **_):
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "model.safetensors").write_text(self.marker)
+        if self.fail:
+            (path / "model-00002-of-00002.safetensors").write_text("half-written")
+            raise OSError("disk full")
+        (path / "config.json").write_text(self.marker)
+
+
+def test_a_checkpoint_is_published_complete_and_replaces_the_old_one(tmp_path):
+    dest = tmp_path / "checkpoint-last"
+    trainer.publish_checkpoint(_FakeSaver("one"), _FakeSaver("one"), dest)
+    trainer.publish_checkpoint(_FakeSaver("two"), _FakeSaver("two"), dest)
+    assert (dest / "model.safetensors").read_text() == "two"
+    assert (dest / "config.json").read_text() == "two"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["checkpoint-last"]
+
+
+def test_a_save_that_dies_midway_leaves_the_previous_checkpoint_intact(tmp_path):
+    dest = tmp_path / "checkpoint-last"
+    trainer.publish_checkpoint(_FakeSaver("one"), _FakeSaver("one"), dest)
+    with pytest.raises(OSError):
+        trainer.publish_checkpoint(_FakeSaver("two", fail=True), _FakeSaver("two"), dest)
+    assert (dest / "model.safetensors").read_text() == "one"
+    assert (dest / "config.json").read_text() == "one"
+    # The next save clears the leftover partial tree rather than mixing into it.
+    trainer.publish_checkpoint(_FakeSaver("three"), _FakeSaver("three"), dest)
+    assert (dest / "config.json").read_text() == "three"
+    assert not (dest / "model-00002-of-00002.safetensors").exists(), "stale shard carried over"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["checkpoint-last"]
+
+
+def test_a_crash_between_the_renames_leaves_a_complete_previous_tree(tmp_path, monkeypatch):
+    dest = tmp_path / "checkpoint-last"
+    trainer.publish_checkpoint(_FakeSaver("one"), _FakeSaver("one"), dest)
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self.name.endswith(".partial"):
+            raise OSError("preempted")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    with pytest.raises(OSError):
+        trainer.publish_checkpoint(_FakeSaver("two"), _FakeSaver("two"), dest)
+    previous = tmp_path / "checkpoint-last.previous"
+    assert not dest.exists()
+    assert (previous / "config.json").read_text() == "one"
+    assert "checkpoint-last.previous" in trainer.check_output_dir(tmp_path)
+
+
 def test_a_positive_clip_is_a_valid_configuration():
     """Narrowness: the refusal is for negative and non-finite clips only."""
     args = trainer.build_parser().parse_args(["--out", "x", "--clip", "1.0"])
     assert trainer.validate_args(args) is None
+
+
+@pytest.mark.parametrize("flags", [
+    ["--min-parse-frac", "0"], ["--min-parse-frac", "1"], ["--lr", "1e-3"],
+    ["--budget-sec", "60"],
+])
+def test_the_edges_of_each_range_are_accepted(flags):
+    """Narrowness: 0 and 1 are both meaningful parse-fraction floors."""
+    assert trainer.validate_args(trainer.build_parser().parse_args(["--out", "x", *flags])) is None
 
 
 def test_the_shipped_defaults_are_a_valid_configuration():

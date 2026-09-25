@@ -74,7 +74,9 @@ Every iteration, before a checkpoint is written:
 
 A failed check **stops the run before that iteration's checkpoint is written**,
 so ``checkpoint-last`` is always the last iteration that passed, and the exit
-status is non-zero.
+status is non-zero. Each checkpoint is written beside its name and swapped in
+by rename (:func:`publish_checkpoint`), so a crash mid-save never leaves a
+partial tree under that name.
 
 Advisory, recorded but not gating: ``step_descends_the_gradient``, the cosine
 between the realised delta and ``-grad`` on an audit subset of eight tensors.
@@ -119,6 +121,7 @@ import argparse
 import json
 import logging
 import math
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -493,7 +496,35 @@ def update_checks(
 #: What a run writes into ``--out``. Any of them already there means the
 #: directory belongs to another run.
 RUN_ARTIFACTS = ("wire.jsonl", "train-log.json", "checkpoint-pre", "checkpoint-last",
-                 "checkpoint-best", "episodes")
+                 "checkpoint-best", "episodes",
+                 "checkpoint-last.partial", "checkpoint-last.previous",
+                 "checkpoint-best.partial", "checkpoint-best.previous")
+
+
+def publish_checkpoint(model: Any, tok: Any, dest: Path) -> None:
+    """Write a checkpoint so ``dest`` is only ever a complete tree.
+
+    ``save_pretrained`` into ``dest`` itself overwrites it file by file, so a
+    preemption or a full disk mid-save leaves a partial tree under the name
+    that promises the last verified iteration. The new tree is written to
+    ``<dest>.partial`` and swapped in by rename; the old one is kept as
+    ``<dest>.previous`` until the swap completes. A crash leaves either the
+    old ``dest``, or no ``dest`` and a complete ``<dest>.previous`` -- never a
+    partial tree named ``dest``.
+    """
+    partial = dest.with_name(dest.name + ".partial")
+    previous = dest.with_name(dest.name + ".previous")
+    if partial.exists():
+        shutil.rmtree(partial)
+    model.save_pretrained(partial, safe_serialization=True)
+    tok.save_pretrained(partial)
+    if dest.exists():
+        if previous.exists():
+            shutil.rmtree(previous)
+        dest.rename(previous)
+    partial.rename(dest)
+    if previous.exists():
+        shutil.rmtree(previous)
 
 
 def check_output_dir(out: Path) -> str | None:
@@ -524,8 +555,16 @@ def validate_args(args: argparse.Namespace) -> str | None:
         return "--iterations must be >= 1"
     if args.group < 2:
         return "--group must be >= 2: a group of one has no advantage to learn from"
-    if not args.lr > 0:
-        return "--lr must be > 0"
+    if not (math.isfinite(args.lr) and args.lr > 0):
+        return "--lr must be finite and > 0"
+    if not (math.isfinite(args.adam_eps) and args.adam_eps > 0):
+        return "--adam-eps must be finite and > 0"
+    if not (math.isfinite(args.min_parse_frac) and 0.0 <= args.min_parse_frac <= 1.0):
+        # NaN would make `parse_fraction < min_parse_frac` always false and
+        # silently disable the collapse stop.
+        return "--min-parse-frac must be finite and in [0, 1]"
+    if not (math.isfinite(args.budget_sec) and args.budget_sec > 0):
+        return "--budget-sec must be finite and > 0"
     if not (math.isfinite(args.kl_beta) and args.kl_beta >= 0):
         return "--kl-beta must be finite and >= 0; a negative coefficient pays the policy to drift"
     if not (math.isfinite(args.clip) and args.clip >= 0):
@@ -535,8 +574,8 @@ def validate_args(args: argparse.Namespace) -> str | None:
         return "--clip must be finite and >= 0 (0 disables clipping)"
     if not 0.0 < args.top_p <= 1.0:
         return "--top-p must be in (0, 1]"
-    if not args.temperature > 0:
-        return "--temperature must be > 0; sampling at 0 has no spread to normalise"
+    if not (math.isfinite(args.temperature) and args.temperature > 0):
+        return "--temperature must be finite and > 0; sampling at 0 has no spread to normalise"
     return None
 
 
@@ -599,13 +638,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear training loop
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     refusal = validate_args(args) or check_output_dir(args.out)
     if refusal:
         print(f"[refused] {refusal}", file=sys.stderr)
         return EXIT_REFUSED
 
+    # "x": exclusive create, before anything else is written. check_output_dir
+    # is only a preflight; two runs can both pass it, and whichever loses this
+    # create stops here instead of writing a checkpoint-pre over the other's.
+    args.out.mkdir(parents=True, exist_ok=True)
+    try:
+        wire = (args.out / "wire.jsonl").open("x", encoding="utf-8")
+    except FileExistsError:
+        print(f"[refused] {args.out} already holds ['wire.jsonl']: another run took it "
+              "after the preflight", file=sys.stderr)
+        return EXIT_REFUSED
+    code = EXIT_FAILED
+    try:
+        code = _train(args, wire)
+        return code
+    finally:
+        empty = wire.tell() == 0
+        wire.close()
+        if code == EXIT_REFUSED and empty:
+            # Ours by the exclusive create, and nothing was written: a refused
+            # run should not leave --out refusing the next attempt.
+            (args.out / "wire.jsonl").unlink()
+
+
+def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one linear training loop
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from aorta.agent.policy import AgentPolicy
@@ -616,7 +679,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
     logging.getLogger("aorta.agent.llm").setLevel(logging.ERROR)
 
     started = time.time()
-    args.out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     policy = AgentPolicy(max_iterations=args.max_episode_steps)
     only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
@@ -718,10 +780,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
     }
     best = {"reward_mean": float("-inf"), "iteration": None}
     status = 0
-    # "x": exclusive create. check_output_dir has already refused a directory
-    # holding a wire, and this makes a race with another run fail rather than
-    # interleave.
-    wire = (args.out / "wire.jsonl").open("x", encoding="utf-8")
 
     def write_log() -> None:
         log["elapsed_sec"] = round(time.time() - started, 1)
@@ -873,13 +931,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
 
             # Disk policy: pre, last and best only -- a checkpoint per
             # iteration costs a model's size each and adds no information.
-            last_dir = args.out / "checkpoint-last"
-            model.save_pretrained(last_dir, safe_serialization=True)
-            tok.save_pretrained(last_dir)
+            publish_checkpoint(model, tok, args.out / "checkpoint-last")
             if row["reward_mean"] > best["reward_mean"]:
                 best.update(reward_mean=row["reward_mean"], iteration=it)
-                model.save_pretrained(args.out / "checkpoint-best", safe_serialization=True)
-                tok.save_pretrained(args.out / "checkpoint-best")
+                publish_checkpoint(model, tok, args.out / "checkpoint-best")
             log["best"] = dict(best)
             log["last_verified_iteration"] = it
             log["iterations"].append(row)
@@ -908,7 +963,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
             if not passed:
                 status = EXIT_FAILED
     finally:
-        wire.close()
         write_log()
 
     print(f"\niterations completed: {len(log['iterations'])}")
