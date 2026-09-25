@@ -7,19 +7,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from aorta.agent.prompt_profiles import DEFAULT_PROMPT_PROFILE, PromptProfile, get_prompt_profile
 
+log = logging.getLogger(__name__)
+
 # Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
+# ``proposal_unresolved`` is the one the proposer never sets itself: it means
+# the loop stopped because every name the model asked for was dropped by the
+# candidate filter below, so there was nothing left to run. It exists so that
+# stop is separable from a model that genuinely concluded the search.
 StopReason = Literal[
     "baseline_pass",
     "exhausted_candidates",
     "agent_requested",
+    "proposal_unresolved",
 ]
 
 #: Reachable only from instrument evidence: a sanitizer that watched two waves
@@ -159,6 +167,14 @@ class AgentStep:
     confidence: float
     stop: bool
     stop_reason: StopReason | None = None
+    #: Names the model proposed that the candidate filter dropped -- not in the
+    #: registry, already tried, outside the operator's allowlist, or the
+    #: ``none`` baseline, which the filter never offers. Set by the
+    #: proposer, never by the model (see from_dict). Without this the loop
+    #: cannot say which name failed to resolve, so an affected run can be
+    #: detected but not repaired; with it, ``next_mitigations`` plus this list
+    #: reconstruct what the model actually asked for.
+    unresolved_mitigations: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentStep:
@@ -169,6 +185,13 @@ class AgentStep:
         stop = stop_raw if isinstance(stop_raw, bool) else False
         reason_raw = raw.get("stop_reason")
         stop_reason: StopReason | None = None
+        # The model-claimable reasons only. "proposal_unresolved" is
+        # deliberately absent: it is a statement about what the agent did with
+        # the model's names, so a model that claimed it would be reporting on
+        # machinery it cannot see -- the same reason a claimed "baseline_pass"
+        # is downgraded in loop._resolve_stop_outcome unless the probe
+        # verdicts agree. unresolved_mitigations is likewise never read from
+        # raw: the proposer computes it.
         if stop and isinstance(reason_raw, str) and reason_raw in (
             "baseline_pass",
             "exhausted_candidates",
@@ -664,17 +687,99 @@ def _strip_code_fence(content: str) -> str:
     return "\n".join(body).strip()
 
 
+#: Qwen3's reasoning delimiters; DeepSeek-R1 uses the same pair.
+_REASONING_OPEN = "<think>"
+_REASONING_CLOSE = "</think>"
+
+
+def _strip_reasoning(content: str) -> str:
+    """Drop the reasoning block a thinking model writes before its answer.
+
+    A Qwen3-family model served without a server-side reasoning parser replies
+    ``<think>...</think>`` and then the JSON. Qwen3.8's chat template opens the
+    block in the *prompt*, so its replies carry only the closing tag. Left in,
+    every such reply fails to parse and the loop stops after its first step --
+    measured on every Qwen3 model tried, on vLLM and TokenSpeed alike, with no
+    scenario converging.
+
+    Requiring the server flag (``--reasoning-parser qwen3``) instead was
+    rejected: neither engine enables it by default, so every default deployment
+    would stay broken, and nothing on this side would say why. It remains the
+    recommended setup (``docs/chat/providers.md``); this covers its absence.
+    With the flag on, the block arrives in ``reasoning_content``, which neither
+    proposer reads, so a generation cut off mid-reasoning reaches
+    :func:`_step_from_content` as empty content and stops there. Asking the
+    server not to think (``chat_template_kwargs``) also yields parseable
+    replies, but the proposals get markedly worse, and the parameter is not
+    portable across providers.
+
+    Narrow on purpose, because each widening reads an answer out of text that
+    is not one:
+
+    * Only a *terminated* block. Qwen3 drafts the object mid-thought, so an
+      unterminated ``<think>`` -- a generation that ended before its answer --
+      often contains JSON; searching it for the first ``{`` would promote a
+      discarded draft to a decision. That raises instead.
+    * Only a *leading* block, or the headless form. A reply that begins as an
+      answer (``{`` or a fence) is left alone, so a ``</think>`` quoted in a
+      hypothesis is data. Removing ``<think>...</think>`` wherever it occurs
+      would edit string values.
+    * Split at the *first* closing tag, so an answer that quotes one survives.
+      Reasoning that spelled the tag out as text would leave prose in front of
+      the answer, which fails to parse -- the safe direction.
+
+    A headless reply cut off before its closing tag is indistinguishable from
+    prose and fails to parse exactly as prose does. A terminated block with
+    nothing after it raises with a message saying so, rather than surfacing as
+    a JSON error at column 1 that reads like malformed output.
+
+    Raises:
+        ValueError: The reply is reasoning with no answer after it.
+    """
+    text = content.strip()
+    if text.startswith(_REASONING_OPEN):
+        end = text.find(_REASONING_CLOSE, len(_REASONING_OPEN))
+        if end == -1:
+            raise ValueError("reasoning block never closed; the generation ended before an answer")
+        answer = text[end + len(_REASONING_CLOSE) :]
+    elif _REASONING_CLOSE in text and not text.startswith(("{", "```")):
+        answer = text.split(_REASONING_CLOSE, 1)[1]
+    else:
+        return text
+    answer = answer.strip()
+    if not answer:
+        raise ValueError("reply was reasoning with no answer after it")
+    return answer
+
+
+def _answer_text(content: str) -> str:
+    """The part of a reply that should be JSON: reasoning dropped, fence unwrapped.
+
+    Anything that claims to know what the proposer would make of a reply
+    should import this rather than re-derive it, or the claim drifts from the
+    proposer. ``examples/rl/proposal_reward.py`` still calls
+    :func:`_strip_code_fence`, so its consumer outcome for a
+    reasoning-prefixed reply is ``silent_stop`` where the proposer accepts
+    it; moving it here changes reward scoring and is left to its own change.
+
+    Raises:
+        ValueError: The reply is reasoning with no answer after it.
+    """
+    return _strip_code_fence(_strip_reasoning(content))
+
+
 def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
     """Parse a model reply into an :class:`AgentStep`, failing safe.
 
-    Providers return malformed or partial JSON, a non-object, or nothing at all
-    even when asked for strict JSON. Every one of those becomes a stop rather
-    than an exception, so the loop still writes a report.
+    Providers return malformed or partial JSON, a non-object, reasoning with no
+    answer, or nothing at all even when asked for strict JSON. Every one of
+    those becomes a stop rather than an exception, so the loop still writes a
+    report.
     """
     if not content or not content.strip():
         return _safe_stop("Empty LLM response")
     try:
-        raw = json.loads(_strip_code_fence(content))
+        raw = json.loads(_answer_text(content))
         if not isinstance(raw, dict):
             raise TypeError(f"expected a JSON object, got {type(raw).__name__}")
         step = AgentStep.from_dict(raw)
@@ -684,7 +789,25 @@ def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
     # Never let the model widen its own allowlist: PolicyValidation re-checks,
     # but a name outside `remaining` is a mitigation already tried or never
     # registered, and running it is not the agent's call.
+    #
+    # Keep what was dropped. This filter runs BEFORE
+    # AgentPolicy.validate_step, so it empties the very list validation would
+    # have rejected, and the loop then reads the empty list as a decision to
+    # stop (aorta#449). Recording the names is what separates "the model
+    # concluded" from "the agent could not resolve what the model asked for",
+    # and it is the only record of the dropped half when some names survive
+    # and the loop carries on. Not de-duplicated: this is the audit trail of
+    # what the model actually emitted, so it stays faithful to the reply.
     filtered = [m for m in step.next_mitigations if m in remaining]
+    unresolved = [m for m in step.next_mitigations if m not in remaining]
+    if unresolved:
+        log.warning(
+            "proposer named %d mitigation(s) that do not resolve against the "
+            "remaining candidates and were dropped: %s (remaining: %s)",
+            len(unresolved),
+            sorted(set(unresolved)),
+            sorted(remaining),
+        )
     stop_reason = step.stop_reason
     if step.stop and stop_reason is None:
         stop_reason = "agent_requested"
@@ -695,6 +818,7 @@ def _step_from_content(content: str | None, remaining: list[str]) -> AgentStep:
         confidence=step.confidence,
         stop=step.stop,
         stop_reason=stop_reason,
+        unresolved_mitigations=unresolved,
     )
 
 
@@ -781,7 +905,8 @@ class ChatProviderProposer:
 
     Unlike :class:`LiteLLMProposer` there is no ``response_format`` to lean on
     -- the layer returns a LangChain chat model, not a raw completion call -- so
-    the reply is fence-tolerant and every parse failure still fails safe.
+    the reply is fence- and reasoning-tolerant and every parse failure still
+    fails safe.
     """
 
     def __init__(

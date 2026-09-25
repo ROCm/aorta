@@ -299,6 +299,31 @@ class TestRlEpisodeRequest:
             {"role": "user", "content": TRAINED_USER},
         ]
 
+    @pytest.mark.parametrize("profile", sorted(PROMPT_PROFILES))
+    @pytest.mark.parametrize("path", ["chat", "litellm"])
+    def test_a_reasoning_block_is_stripped_under_every_profile(self, monkeypatch, profile, path):
+        """The profile changes the request; the reply is read the same way.
+
+        A server without a reasoning parser still returns ``<think>`` before
+        the JSON, and a profile must not opt a proposer out of the shared
+        parser that drops it.
+        """
+        reply = "<think>\nThe baseline NaNs; try the allocator.\n</think>\n\n" + TRAINED_REPLY
+        if path == "chat":
+            model = RecordingChatModel(reply)
+            monkeypatch.setattr(ChatProviderProposer, "_chat_model", lambda self: model)
+            proposer = ChatProviderProposer("vllm", prompt_profile=profile)
+        else:
+            message = SimpleNamespace(content=reply)
+            response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
+            monkeypatch.setitem(
+                sys.modules, "litellm", SimpleNamespace(completion=lambda **kw: response)
+            )
+            proposer = LiteLLMProposer(model="m", prompt_profile=profile)
+        step = _propose(proposer)
+        assert step.next_mitigations == ["pytorch_no_cuda_memory_caching"]
+        assert step.stop is False
+
     def test_extra_body_is_a_fresh_dict(self):
         profile = get_prompt_profile("rl-episode")
         first = profile.extra_body()

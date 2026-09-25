@@ -54,6 +54,46 @@ vllm_model = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
 Preflight polls the server's `/health` and warns rather than failing, so a
 server that is still loading does not abort the session.
 
+`aorta agent mitigate --llm-backend vllm` reads this same profile, so one
+served model backs both the chatbot and the probe agent.
+
+#### Serving a Qwen3-family model
+
+Start the engine with its Qwen3 reasoning parser, so the thinking goes to
+`reasoning_content` and `content` carries only the answer. On TokenSpeed, also
+pick a sampling backend that honours temperature: on AMD GPUs its default,
+`greedy`, ignores temperature, `top_p` and seed without an error.
+
+```bash
+vllm serve Qwen/Qwen3-8B --reasoning-parser qwen3
+
+tokenspeed serve Qwen/Qwen3-8B --reasoning-parser qwen3 --sampling-backend triton
+# add --grammar-backend xgrammar if requests use JSON mode
+```
+
+- **Without the parser**, a Qwen3 reply opens with a `<think>…</think>` block
+  (Qwen3.8's chat template opens it in the prompt, so only `</think>` appears).
+  The probe agent drops a terminated block before reading the JSON, so replies
+  parse either way. A reply cut off before its answer is recorded as an
+  unparseable response and ends the search; Qwen3-8B thinks for about
+  1,000–1,250 tokens a step and Qwen3.8-27B for about 4,000–4,700, so a
+  server-side output cap below that ends it early.
+- **Leave thinking on.** Disabling it (`enable_thinking: false` in
+  `chat_template_kwargs`, or a no-think template) makes every reply parse, but on
+  the agent's prompt Qwen3-8B's first proposal named a mitigation that fixes the
+  failure 19–21% of the time, against 40–43% with thinking on; many replies gave
+  up at `unknown` and proposed nothing.
+- **JSON mode** (`response_format={"type": "json_object"}`, which
+  `--llm-backend litellm` sends on an `[agent]`-only install) needs the parser.
+  Without it the grammar applies from the first token while the template has
+  thinking on, and 12–14% of Qwen3-8B's first replies listed 15 or more
+  mitigation names ([#510](https://github.com/ROCm/aorta/issues/510)). With the
+  parser the model thinks before the grammar applies, and none did (0 of 448
+  first replies from a Qwen3-8B fine-tune that showed the tail without it). On
+  TokenSpeed, JSON mode combined with `enable_thinking: false` *and* the parser
+  parsed only 3–4% of replies (vLLM was unaffected); aorta's clients never send
+  that combination.
+
 ### An OpenAI-compatible endpoint
 
 ```toml
