@@ -343,6 +343,11 @@ failure:
 | Qwen3-8B, base | 18 of 48 | 17 of 48 |
 | Qwen3-8B, RL-trained (17 iterations) | 17 of 48 | **40 of 48** (5 of 6 scenarios) |
 
+The RL-trained checkpoint was trained on all seven of these scenarios, so this
+table shows that the product path reproduces what the checkpoint learned under
+its training prompt. It is not evidence that the checkpoint generalises to
+failures it was not trained on.
+
 **Do not use it with a general model.** It does not help the base model above,
 and in 6 of the base model's 48 runs the search ended early because it answered
 with a category the loop does not accept. In an earlier sampled measurement,
@@ -352,7 +357,9 @@ off, against 61% under `default` with thinking allowed.
 **Serving.** Serve the checkpoint with its Qwen3 reasoning parser, so the same
 engine also answers `default` correctly. On TokenSpeed, also choose a sampling
 backend that honours temperature (on AMD GPUs the default, `greedy`, ignores
-it), and `xgrammar` for the JSON-mode requests `--llm-backend litellm` sends:
+it). `rl-episode` never sends JSON mode on either backend. Only `default` on
+`--llm-backend litellm` does, so `xgrammar` matters only if the same engine
+also serves that combination:
 
 ```bash
 vllm serve /path/to/checkpoint --served-model-name aorta-probe \
