@@ -48,6 +48,7 @@ external LLM is involved.
 |---------|-----------|-------------------------|
 | Default (`--llm-backend fake`) | **No** | Deterministic `FakeLLMProposer`: heuristics on detector IDs + round-robin through registered mitigations |
 | `--llm-backend litellm` | **Yes** | LiteLLM calls your configured model; requires `pip install 'amd-aorta[agent]'` and provider API keys |
+| `--llm-backend vllm` / `openai` | **Yes** | The model `aorta chat` is configured with (`~/.config/aorta/chat.toml` or `AORTA_CHAT_*`); requires `pip install 'amd-aorta[chat-cli]'` |
 
 The CLI default is **`fake`** so tests, CI, and local smoke runs work with
 **zero API calls** and fully reproducible behavior.
@@ -105,6 +106,20 @@ Then:
 ```bash
 aorta agent mitigate --llm-backend litellm --llm-model gpt-4o-mini ...
 ```
+
+To use a model you serve yourself on vLLM or TokenSpeed, point the chat
+settings at it and select the `vllm` backend:
+
+```bash
+pip install 'amd-aorta[chat-cli]'
+export AORTA_CHAT_LLM_PROVIDER=vllm
+export AORTA_CHAT_VLLM_BASE_URL=http://localhost:8000/v1
+export AORTA_CHAT_VLLM_MODEL=Qwen/Qwen3-8B
+aorta agent mitigate --llm-backend vllm ...
+```
+
+For a Qwen3-family model, start the engine with the flags in
+[serving a Qwen3-family model](../chat/providers.md#serving-a-qwen3-family-model).
 
 ---
 

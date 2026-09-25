@@ -16,6 +16,7 @@ from __future__ import annotations
 import builtins
 import importlib.util
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,8 @@ from aorta.agent.llm import (
     ChatProviderProposer,
     FakeLLMProposer,
     LiteLLMProposer,
+    _answer_text,
+    _strip_code_fence,
     make_proposer,
 )
 
@@ -224,6 +227,141 @@ class TestChatProviderProposer:
         """``bool("false")`` is True, so only a real JSON boolean may stop it."""
         chat_model(json.dumps({"stop": "false", "next_mitigations": ["tf32_off"]}))
         assert _propose(ChatProviderProposer("openai")).stop is False
+
+
+# ── reasoning output (Qwen3-family models) ────────────────────────────────
+
+_STEP = {
+    "category": "oom_fragment",
+    "hypothesis": "allocator reuse",
+    "next_mitigations": ["tf32_off"],
+    "confidence": 0.6,
+    "stop": False,
+}
+_BARE = json.dumps(_STEP)
+
+
+class TestReasoningOutput:
+    """A Qwen3 reply opens with a ``<think>`` block unless the server strips it.
+
+    The positive cases are the shapes served engines were measured emitting.
+    The rest pin how narrow the strip is, because each widening reads an answer
+    out of text that is not one -- and a reply with no answer has to stay a
+    parse failure, not become an empty proposal.
+    """
+
+    @staticmethod
+    def _step(chat_model, reply):
+        chat_model(reply)
+        return _propose(ChatProviderProposer("vllm"))
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param(f"<think>\nThe baseline NaNs.\n</think>\n\n{_BARE}", id="qwen3"),
+            pytest.param(f"The baseline NaNs.\n</think>\n\n{_BARE}", id="headless-qwen3.8"),
+            pytest.param(f"<think>\n\n</think>\n\n{_BARE}", id="empty-block"),
+            pytest.param(f"<think>\nok\n</think>\n```json\n{_BARE}\n```", id="then-a-fence"),
+        ],
+    )
+    def test_a_reasoning_prefixed_reply_parses_to_the_bare_replys_step(self, chat_model, reply):
+        bare = self._step(chat_model, _BARE)
+        assert bare.next_mitigations == ["tf32_off"] and bare.stop is False
+        assert self._step(chat_model, reply) == bare
+
+    def test_the_answer_after_the_block_wins_over_a_draft_inside_it(self, chat_model):
+        """Qwen3 drafts the object mid-thought; only the one after the block is the answer."""
+        draft = json.dumps({**_STEP, "next_mitigations": ["hsa_xnack"]})
+        reply = f"<think>\nFirst idea: {draft}\nNo -- reconsider.\n</think>\n{_BARE}"
+        assert self._step(chat_model, reply).next_mitigations == ["tf32_off"]
+
+    @pytest.mark.parametrize(
+        ("reply", "why"),
+        [
+            pytest.param(
+                f"<think>\nMaybe {_BARE} -- but first check the", "never closed", id="unterminated"
+            ),
+            pytest.param(
+                "<think>\nStill weighing it.\n</think>\n", "no answer", id="reasoning-only"
+            ),
+            pytest.param("<think>\nok\n</think>\nI would try tf32_off.", None, id="prose-after"),
+            pytest.param(f"Weighing {_BARE} -- but the", None, id="headless-cut-off"),
+        ],
+    )
+    def test_reasoning_without_an_answer_is_a_parse_failure(self, chat_model, reply, why):
+        """Absence of an answer must not read as an answer, least of all a drafted one."""
+        step = self._step(chat_model, reply)
+        assert step.stop is True
+        assert step.next_mitigations == []
+        assert step.confidence == 0.0
+        assert step.hypothesis.startswith("LLM returned unparseable response"), step.hypothesis
+        if why is not None:
+            assert why in step.hypothesis
+
+    @pytest.mark.parametrize("fenced", [False, True], ids=["bare", "fenced"])
+    def test_tags_inside_a_string_value_are_data(self, chat_model, fenced):
+        quoted = {**_STEP, "hypothesis": "stderr shows <think>x</think> and then </think>"}
+        body = json.dumps(quoted)
+        step = self._step(chat_model, f"```json\n{body}\n```" if fenced else body)
+        assert step.hypothesis == quoted["hypothesis"]
+        assert step.next_mitigations == ["tf32_off"]
+
+    def test_an_answer_quoting_a_closing_tag_survives_the_strip(self, chat_model):
+        quoted = {**_STEP, "hypothesis": "saw </think> in stderr"}
+        step = self._step(chat_model, f"<think>\nok\n</think>\n{json.dumps(quoted)}")
+        assert step.hypothesis == "saw </think> in stderr"
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            _BARE,
+            f"```json\n{_BARE}\n```",
+            f"```\n{_BARE}\n```",
+            "not json at all",
+            "[1, 2, 3]",
+            '{"broken": ',
+            "I would open a <think> block here",
+        ],
+    )
+    def test_a_reply_without_a_closing_tag_is_read_exactly_as_before(self, reply):
+        assert _answer_text(reply) == _strip_code_fence(reply)
+
+    def test_reasoning_in_its_own_channel_is_never_read_as_the_answer(self, monkeypatch):
+        """With ``--reasoning-parser`` a truncated generation leaves content empty."""
+        message = SimpleNamespace(
+            content="", additional_kwargs={"reasoning_content": _BARE}, reasoning_content=_BARE
+        )
+        model = SimpleNamespace(invoke=lambda messages: message)
+        monkeypatch.setattr(ChatProviderProposer, "_chat_model", lambda self: model)
+        step = _propose(ChatProviderProposer("vllm"))
+        assert step.stop is True
+        assert step.next_mitigations == []
+        assert "Empty" in step.hypothesis
+
+    def test_the_direct_litellm_path_parses_the_same_way(self, monkeypatch):
+        """Both proposers share the parse, so ``--llm-backend litellm`` alone is covered too."""
+        replies = iter(
+            [
+                (f"<think>\nok\n</think>\n{_BARE}", None),
+                (None, _BARE),
+                ("<think>\nStill weighing it.", None),
+            ]
+        )
+
+        def completion(**kwargs):
+            content, reasoning = next(replies)
+            message = SimpleNamespace(content=content, reasoning_content=reasoning)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+        proposer = LiteLLMProposer()
+        assert _propose(proposer).next_mitigations == ["tf32_off"]
+        in_reasoning_channel = _propose(proposer)
+        assert in_reasoning_channel.next_mitigations == []
+        assert "Empty" in in_reasoning_channel.hypothesis
+        unterminated = _propose(proposer)
+        assert unterminated.next_mitigations == []
+        assert "never closed" in unterminated.hypothesis
 
 
 class TestMissingExtra:
