@@ -853,6 +853,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.episodes_per_scenario < 1:
         print("--episodes-per-scenario must be >= 1", file=sys.stderr)
         return EXIT_REFUSED
+    for flag, value in (("--max-episode-steps", args.max_episode_steps),
+                        ("--max-new-tokens", args.max_new_tokens),
+                        ("--gen-batch", args.gen_batch)):
+        if value < 1:
+            print(f"{flag} must be >= 1", file=sys.stderr)
+            return EXIT_REFUSED
 
     existing = [p for p in (args.out / "before.json", args.out / "after.json") if p.exists()]
     if existing and not args.reuse:

@@ -405,6 +405,14 @@ def test_episode_rollouts_templates_each_prompt_and_delegates_to_the_env(tmp_pat
     (["--budget-sec", "nan"], "--budget-sec"),
     (["--budget-sec", "inf"], "--budget-sec"),
     (["--temperature", "inf"], "--temperature"),
+    (["--gen-batch", "0"], "--gen-batch"),
+    (["--gen-batch", "-2"], "--gen-batch"),
+    (["--max-episode-steps", "0"], "--max-episode-steps"),
+    (["--max-new-tokens", "0"], "--max-new-tokens"),
+    (["--log-episodes", "-1"], "--log-episodes"),
+    (["--iteration-offset", "-1"], "--iteration-offset"),
+    (["--iterations", "-3"], "--iterations"),
+    (["--group", "0"], "--group"),
 ])
 def test_a_configuration_that_cannot_produce_a_checked_update_is_refused(
     tmp_path, capsys, flags, fragment
@@ -556,6 +564,8 @@ def test_a_positive_clip_is_a_valid_configuration():
 @pytest.mark.parametrize("flags", [
     ["--min-parse-frac", "0"], ["--min-parse-frac", "1"], ["--lr", "1e-3"],
     ["--budget-sec", "60"],
+    ["--gen-batch", "1"], ["--max-episode-steps", "1"], ["--max-new-tokens", "1"],
+    ["--log-episodes", "0"], ["--iteration-offset", "0"],
 ])
 def test_the_edges_of_each_range_are_accepted(flags):
     """Narrowness: 0 and 1 are both meaningful parse-fraction floors."""

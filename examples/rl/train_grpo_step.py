@@ -576,6 +576,16 @@ def validate_args(args: argparse.Namespace) -> str | None:
         return "--iterations must be >= 1"
     if args.group < 2:
         return "--group must be >= 2: a group of one has no advantage to learn from"
+    # Each of these reaches the model only after it has loaded: `--gen-batch 0`
+    # is `range(..., step=0)`, and `--max-episode-steps 0` or
+    # `--max-new-tokens 0` produce episodes with nothing to learn from.
+    for flag, value, floor in (("--max-episode-steps", args.max_episode_steps, 1),
+                               ("--max-new-tokens", args.max_new_tokens, 1),
+                               ("--gen-batch", args.gen_batch, 1),
+                               ("--log-episodes", args.log_episodes, 0),
+                               ("--iteration-offset", args.iteration_offset, 0)):
+        if value < floor:
+            return f"{flag} must be >= {floor}"
     if not (math.isfinite(args.lr) and args.lr > 0):
         return "--lr must be finite and > 0"
     if not (math.isfinite(args.adam_eps) and args.adam_eps > 0):

@@ -450,6 +450,16 @@ def test_a_zero_episode_count_is_refused(tmp_path, monkeypatch):
     assert calls == []
 
 
+@pytest.mark.parametrize("flag", ["--max-episode-steps", "--max-new-tokens", "--gen-batch"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_non_positive_sampling_size_is_refused_before_any_work(tmp_path, monkeypatch, capsys,
+                                                                  flag, value):
+    calls = _stub_evaluate(monkeypatch)
+    assert eval_episodes.main(["--after", str(tmp_path / "c"), "--out", str(tmp_path / "o"),
+                               flag, value]) == eval_episodes.EXIT_REFUSED
+    assert calls == [] and f"{flag} must be >= 1" in capsys.readouterr().err
+
+
 def test_the_sampling_defaults_are_the_trainers():
     """A comparison at different sampling settings than training measures two
     things at once; the constants here are only defaults if they match."""
