@@ -249,6 +249,54 @@ def test_a_pair_that_cannot_be_vouched_for_exits_incomplete(tmp_path, capsys, sh
     assert verdict_line.startswith("INCOMPLETE") and reason in verdict_line
 
 
+def test_a_sign_bit_write_to_the_frozen_control_is_a_move(tmp_path, capsys):
+    """``abs(-0.0 - 0.0)`` is zero, so a numeric delta calls this unmoved; the
+    control's claim is bit-identity, so the bytes decide."""
+    before = base()
+    before[FROZEN][1, 2] = 0.0
+    after = {name: array + (0.0 if name == FROZEN else 1e-5) for name, array in before.items()}
+    after[FROZEN][1, 2] = -0.0
+    pre = write_checkpoint(tmp_path / "pre", before)
+    post = write_checkpoint(tmp_path / "post", after)
+    assert run(pre, post) == vcd.EXIT_INCOMPLETE
+    out = capsys.readouterr().out
+    assert "the frozen control moved" in out.split("VERDICT: ")[1]
+    assert "BIT-IDENTICAL" not in out
+
+
+def test_an_untouched_frozen_control_is_bit_identical_whatever_it_holds(tmp_path, capsys):
+    """Narrowness: the same bytes pass, including a -0.0 present on both sides
+    and a control spanning several read chunks."""
+    before = base()
+    before[FROZEN] = np.linspace(-1.0, 1.0, 64 * 64, dtype=np.float32).reshape(64, 64)
+    before[FROZEN][0, 0] = -0.0
+    # A copy, not ``+ 0.0``: -0.0 + 0.0 is +0.0, the very write under test.
+    after = {name: array.copy() if name == FROZEN else array + 1e-5
+             for name, array in before.items()}
+    pre = write_checkpoint(tmp_path / "pre", before)
+    post = write_checkpoint(tmp_path / "post", after, shards=2)
+    result = vcd.compare(pre, post, bound=vcd.optimiser_bound(1e-6, 17), steps=17, chunk=100)
+    assert result["frozen_identical"] is True
+    assert vcd.verdict(result)[0] == 0
+    assert run(pre, post) == 0
+    assert "BIT-IDENTICAL" in capsys.readouterr().out
+
+
+def test_the_byte_comparison_sees_a_difference_in_any_chunk(tmp_path):
+    """A differing byte in the last, partial chunk is still a difference."""
+    before = base()
+    before[FROZEN] = np.zeros((8, 8), dtype=np.float32)
+    after = {name: array + (0.0 if name == FROZEN else 1e-5) for name, array in before.items()}
+    after[FROZEN][7, 7] = -0.0
+    pre = write_checkpoint(tmp_path / "pre", before)
+    post = write_checkpoint(tmp_path / "post", after)
+    bound = vcd.optimiser_bound(1e-6, 17)
+    for chunk in (7, 64, 1 << 20):
+        result = vcd.compare(pre, post, bound=bound, steps=17, chunk=chunk)
+        assert result["frozen_delta"] == 0.0
+        assert result["frozen_identical"] is False, chunk
+
+
 def test_an_unmoved_trained_tensor_is_incomplete(tmp_path, capsys):
     before = base()
     after = {name: array.copy() for name, array in before.items()}

@@ -193,6 +193,32 @@ def read_tensor(path: Path, info: dict[str, Any], base: int) -> Any:
     return flat.astype(widest).reshape(info["shape"])
 
 
+def raw_identical(path_a: Path, info_a: dict[str, Any], base_a: int,
+                  path_b: Path, info_b: dict[str, Any], base_b: int,
+                  chunk: int = 1 << 24) -> bool:
+    """Whether two stored tensors hold exactly the same bytes.
+
+    The frozen control's claim is bit-identity, which a numeric delta cannot
+    make: ``abs(-0.0 - 0.0)`` is zero. Read in chunks so the check costs
+    ``chunk`` bytes of memory, not a second copy of the largest tensor.
+    """
+    begin_a, end_a = info_a["data_offsets"]
+    begin_b, end_b = info_b["data_offsets"]
+    if info_a["dtype"] != info_b["dtype"] or end_a - begin_a != end_b - begin_b:
+        return False
+    remaining = end_a - begin_a
+    with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
+        fa.seek(base_a + begin_a)
+        fb.seek(base_b + begin_b)
+        while remaining:
+            size = min(chunk, remaining)
+            block_a, block_b = fa.read(size), fb.read(size)
+            if len(block_a) != size or block_a != block_b:
+                return False
+            remaining -= size
+    return True
+
+
 def tensor_map(root: Path) -> dict[str, Path]:
     """Every tensor name in a checkpoint directory, mapped to the file holding it.
 
@@ -233,6 +259,7 @@ def compare(
     steps: int,
     frozen: str = FROZEN,
     report: int = 8,
+    chunk: int = 1 << 24,
 ) -> dict[str, Any]:
     """Every tensor of PRE against POST. Pure apart from reading the two trees."""
     names_pre, names_post = tensor_map(pre), tensor_map(post)
@@ -249,6 +276,7 @@ def compare(
         "unmoved": [],
         "deltas": [],
         "frozen_delta": None,
+        "frozen_identical": None,
         "dtypes": set(),
     }
     for name in sorted(set(names_pre) & set(names_post)):
@@ -262,6 +290,9 @@ def compare(
             )
             continue
         result["dtypes"].add(info_a["dtype"])
+        if name == frozen:
+            result["frozen_identical"] = raw_identical(
+                names_pre[name], info_a, base_a, names_post[name], info_b, base_b, chunk)
         a = read_tensor(names_pre[name], info_a, base_a)
         b = read_tensor(names_post[name], info_b, base_b)
         if not (np.isfinite(a).all() and np.isfinite(b).all()):
@@ -314,9 +345,9 @@ def verdict(result: dict[str, Any], frozen: str = FROZEN) -> tuple[int, str]:
             "INCOMPLETE -- the two trees do not hold the same tensors, so they are "
             "not a before/after pair"
         )
-    if result["frozen_delta"] is None:
+    if result.get("frozen_identical") is None:
         return EXIT_INCOMPLETE, f"INCOMPLETE -- the frozen control {frozen} is not in the tree"
-    if result["frozen_delta"] != 0.0:
+    if not result["frozen_identical"]:
         return EXIT_INCOMPLETE, "INCOMPLETE -- the frozen control moved, so the control is broken"
     if result["unmoved"]:
         return EXIT_INCOMPLETE, (
@@ -377,11 +408,14 @@ def main(argv: list[str] | None = None) -> int:
     for label in ("only_in_pre", "only_in_post", "mismatched", "non_finite"):
         if result[label]:
             print(f"{label:<25} {result[label][:5]}")
-    frozen = result["frozen_delta"]
-    print(f"frozen {args.frozen}: " + (
-        "ABSENT" if frozen is None
-        else f"max abs delta {frozen:.3e} ({'BIT-IDENTICAL' if frozen == 0.0 else 'MOVED'})"
-    ))
+    identical, frozen = result["frozen_identical"], result["frozen_delta"]
+    if identical is None:
+        state = "ABSENT"
+    else:
+        state = "BIT-IDENTICAL" if identical else "MOVED"
+        if frozen is not None:
+            state = f"max abs delta {frozen:.3e} ({state})"
+    print(f"frozen {args.frozen}: {state}")
     deltas = result["deltas"]
     if deltas:
         print(f"delta min / median / max  {deltas[0]:.4e} / {deltas[len(deltas) // 2]:.4e} "
