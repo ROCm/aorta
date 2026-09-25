@@ -23,17 +23,28 @@ _CA_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "claude-haiku-4-5"
+CIA_MODEL = "Qwen/Qwen3.8-27B"
+DEFAULT_MODEL = CIA_MODEL
+
+
+def _cia_lm_kwargs() -> dict[str, Any]:
+    """The model and request controls shared by Launch, Watch, and Autopsy."""
+    return {
+        "model": CIA_MODEL,
+        "extra_body": {
+            "chat_template_kwargs": {
+                "enable_thinking": False,
+            }
+        },
+    }
+
 
 DEFAULT_MAX_TOKENS = 4096
-"""Enough for a reasoning model to think and still answer.
+"""Enough for tool trajectories and the final structured answer.
 
-A reasoning model bills its hidden reasoning against the same budget as the
-reply, and spends it freely. At the 1024 this used to be, Autopsy's reasoning
-consumed the whole budget and the response was cut off before a single output
-field was emitted. The router received empty text, failed to parse it, and
-scored every bundle ``tooling_gap`` at confidence 0.0 -- a wrong verdict, with
-nothing in it to say the reasoning step had been truncated on the way.
+At the 1024 this used to be, Autopsy could consume the whole budget before a
+single output field was emitted. CIA now disables Qwen's thinking trace, but
+the ReAct tool calls and final response still share this output budget.
 """
 
 _configured: bool = False
@@ -171,8 +182,10 @@ def chat_provider(*, configured_only: bool = True) -> tuple[str, str, str, str] 
     selected by ``llm_provider`` and configured in ``~/.config/aorta/chat.toml``
     or ``AORTA_CHAT_*`` (docs/chat/providers.md, docs/chat/configuration.md).
     The agents read those same settings, so that configuring chat configures
-    them: a user who has run ``aorta chat config init --profile openai`` should
-    not then have a Watch and an Autopsy quietly talking somewhere else.
+    their endpoint and credentials: a user who has run
+    ``aorta chat config init --profile openai`` should not then have a Watch
+    and an Autopsy quietly talking somewhere else. CIA pins its own model and
+    no-thinking request controls through :func:`_cia_lm_kwargs`.
 
     Only the settings are read, not the provider layer, so this keeps the
     agents runnable without the chat extras. What it does need is pydantic and
@@ -404,6 +417,8 @@ def build_lm(
     api_base: str | None = None,
     api_key: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    *,
+    extra_body: dict[str, Any] | None = None,
 ) -> dspy.LM:
     """Build an LM for one module to bind to its own program.
 
@@ -460,13 +475,33 @@ def build_lm(
         # clients above so the option cannot leak into its JSON request body.
         transport = {"ssl_verify": verify}
 
+    request_options: dict[str, Any] = {}
+    if extra_body is not None:
+        request_options["extra_body"] = extra_body
+
     return RedactingLM(
         model=qualified_model,
         api_base=resolved_base,
         api_key=resolved_key,
         max_tokens=max_tokens,
         cache=False,
+        **request_options,
         **transport,
+    )
+
+
+def build_cia_lm(
+    *,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> dspy.LM:
+    """Build the fixed, non-thinking LM used by every CIA stage."""
+    return build_lm(
+        api_base=api_base,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        **_cia_lm_kwargs(),
     )
 
 
@@ -542,17 +577,27 @@ def configure_dspy(
     api_base: str | None = None,
     api_key: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    *,
+    extra_body: dict[str, Any] | None = None,
 ) -> None:
     """Set the process-wide default LM.
 
     Defaults come from the environment so callers need no hard-coded secrets:
       LITELLM_API_BASE  — proxy URL  (default: http://localhost:4000)
       LITELLM_API_KEY   — master key (default: "dummy")
-      LITELLM_MODEL     — model name (default: claude-haiku-4-5)
+      LITELLM_MODEL     — legacy model name (CIA defaults to Qwen/Qwen3.8-27B)
     """
     global _configured
 
-    dspy.configure(lm=build_lm(model, api_base, api_key, max_tokens))
+    dspy.configure(
+        lm=build_lm(
+            model,
+            api_base,
+            api_key,
+            max_tokens,
+            extra_body=extra_body,
+        )
+    )
     _configured = True
 
 
@@ -565,14 +610,20 @@ def ensure_configured(**kwargs) -> None:
     budget, Watch had already configured the default from its own poll loop,
     and Autopsy reasoned at Watch's settings with neither of them able to tell.
 
-    So the arguments are no longer accepted quietly. A module whose settings
-    matter should build its own LM with :func:`build_lm` and bind it to its own
-    program, which no other module can then take away.
+    With no arguments this installs CIA's Qwen3.8 non-thinking defaults, shared
+    by Launch and Watch. Explicit arguments are no longer accepted quietly
+    once configured. A module whose settings matter should build its own LM
+    with :func:`build_lm` and bind it to its own program, which no other module
+    can then take away.
     """
     global _configured
 
+    caller_supplied = bool(kwargs)
+    if not caller_supplied:
+        kwargs = _cia_lm_kwargs()
+
     if _configured:
-        if kwargs:
+        if caller_supplied:
             log.warning(
                 "DSPy already has a default LM, so %s had no effect here. Build "
                 "an LM with build_lm() and bind it to your own module instead.",
