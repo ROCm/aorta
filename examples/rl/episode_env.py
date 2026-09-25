@@ -159,7 +159,7 @@ from aorta.agent.loop import (
     _resolve_stop_outcome,
 )
 from aorta.agent.policy import AgentPolicy, PolicyViolation
-from aorta.agent.state import append_log_event, read_trial_results
+from aorta.agent.state import append_log_event
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -384,6 +384,45 @@ def archive_digest(root: str | Path) -> str:
     return digest.hexdigest()
 
 
+def strict_trial_results(cell: Path, scenario_id: str = "") -> list[dict[str, Any]]:
+    """Every ``trial_*/result.json`` of a cell, or a ``ValueError`` naming each bad one.
+
+    ``aorta.agent.state.read_trial_results`` skips a trial whose file is
+    missing or does not parse, which is right for a live loop reading a cell
+    still being written and wrong for an archive standing in for a re-run: a
+    four-trial cell with one unreadable trial would pass as three that agree,
+    and the dropped one may be the one that disagreed.
+    """
+    problems: list[str] = []
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    for trial in sorted(p for p in cell.glob("trial_*") if p.is_dir()):
+        path = trial / "result.json"
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            problems.append(f"{trial.name}/result.json: missing")
+            continue
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            problems.append(f"{trial.name}/result.json: {type(exc).__name__}: {exc}")
+            continue
+        if not isinstance(doc, dict):
+            problems.append(f"{trial.name}/result.json: not a JSON object")
+            continue
+        try:
+            index = int(trial.name.removeprefix("trial_"))
+        except ValueError:
+            problems.append(f"{trial.name}: not a trial_<N> directory")
+            continue
+        indexed.append((index, doc))
+    if problems:
+        raise ValueError(
+            f"{scenario_id or cell.name}: cell {cell} has trial(s) that cannot be read "
+            f"({'; '.join(problems[:4])}); an archive with an unreadable trial cannot "
+            f"say its trials agree"
+        )
+    return [doc for _, doc in sorted(indexed, key=lambda pair: pair[0])]
+
+
 def load_scenario(
     scenario_id: str,
     root: str | Path,
@@ -404,6 +443,9 @@ def load_scenario(
       proposer is ever called, so the scenario would harvest zero decisions.
     """
     root = Path(root)
+    # Read strictly, and first: the grid reader below skips a trial it cannot
+    # read, and a trial that cannot be read may be the one that disagrees.
+    trials = {cell: strict_trial_results(cell, scenario_id) for cell in find_probe_cells(root)}
     grid = grid_from_matrix(root, scenario_id)
     menu = tuple(offered) if offered is not None else tuple(registered_mitigations())
     missing = sorted(set(menu) - set(grid.measured_mitigations))
@@ -415,16 +457,15 @@ def load_scenario(
             f"archive that measured the whole menu, or shrink the menu -- but "
             f"do not let the environment invent a verdict."
         )
-    baseline = next((c for c in find_probe_cells(root) if c.name == BASELINE_CELL), None)
+    baseline = next((c for c in trials if c.name == BASELINE_CELL), None)
     if baseline is None:
         raise ValueError(f"{scenario_id}: {root} has no {BASELINE_CELL} cell")
     # Per trial, through the same resolver the grid uses, so "the trials agree"
     # is a statement about the verdicts the scorer sees and not about whatever
     # string each trial happened to store.
     split = sorted(
-        cell.name
-        for cell in find_probe_cells(root)
-        if len({label_run(doc).verdict for doc in read_trial_results(cell)}) > 1
+        cell.name for cell, docs in trials.items()
+        if len({label_run(doc).verdict for doc in docs}) > 1
     )
     if split:
         raise ValueError(
@@ -437,7 +478,7 @@ def load_scenario(
             f"{scenario_id}: the {BASELINE_CELL} cell in {root} did not fail, "
             f"so there is nothing to search for"
         )
-    label = label_trials(read_trial_results(baseline), source=str(baseline))
+    label = label_trials(trials[baseline], source=str(baseline))
     return Scenario(
         scenario_id=scenario_id,
         family=family,

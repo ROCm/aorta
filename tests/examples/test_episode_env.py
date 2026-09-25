@@ -496,6 +496,51 @@ def test_an_archive_whose_trials_disagree_is_refused(tmp_path):
         make_scenario(archive)
 
 
+@pytest.mark.parametrize("damage, named", [
+    ("{not json", "JSONDecodeError"),
+    ("[1, 2]", "not a JSON object"),
+    (None, "missing"),
+    (b"\xff\xfe", "UnicodeDecodeError"),
+])
+def test_an_unreadable_trial_is_refused_and_named(tmp_path, damage, named):
+    """The disagreeing trial may be the one that cannot be read, so a cell with
+    one is not three trials that agree."""
+    archive = build_archive(tmp_path, resolver=None)
+    write_cell(archive, f"{ALPHA}-none", ["fail", "fail", "fail", "pass"], ["tier1:exit_nonzero"])
+    bad = archive / f"{ALPHA}-none" / "trial_3" / "result.json"
+    if damage is None:
+        bad.unlink()
+    elif isinstance(damage, bytes):
+        bad.write_bytes(damage)
+    else:
+        bad.write_text(damage)
+    with pytest.raises(ValueError, match=rf"cannot be read.*trial_3/result.json: {named}"):
+        make_scenario(archive)
+
+
+def test_an_unreadable_baseline_trial_is_refused(tmp_path):
+    archive = build_archive(tmp_path, resolver=None)
+    write_cell(archive, "none-none", ["fail", "fail"], ["tier1:exit_nonzero"])
+    (archive / "none-none" / "trial_1" / "result.json").write_text("")
+    with pytest.raises(ValueError, match="none-none.*cannot be read"):
+        make_scenario(archive)
+
+
+def test_strict_trial_results_orders_by_index_like_the_shared_reader(tmp_path):
+    """Narrowness: on a clean cell it returns what the loop's reader returns."""
+    archive = build_archive(tmp_path, resolver=None)
+    verdicts = ["fail"] * 12
+    write_cell(archive, f"{ALPHA}-none", verdicts, ["tier1:exit_nonzero"])
+    cell = archive / f"{ALPHA}-none"
+    for index in range(len(verdicts)):
+        # Tell the trials apart, so trial_10 sorting before trial_2 would show.
+        path = cell / f"trial_{index}" / "result.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), "trial": index}))
+    docs = env.strict_trial_results(cell)
+    assert [d["trial"] for d in docs] == list(range(len(verdicts)))
+    assert docs == read_trial_results(cell)
+
+
 def test_agreeing_repeated_trials_are_accepted(tmp_path):
     """Narrowness: several trials are fine as long as they agree."""
     archive = build_archive(tmp_path, resolver=None)
