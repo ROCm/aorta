@@ -276,8 +276,15 @@ def _stop_ids(model: Any, tok: Any) -> set[int]:
     return {int(t) for t in stops if t is not None}
 
 
-def generate(model: Any, tok: Any, prompts: list[str], args: Any) -> list[Completion]:
+def generate(model: Any, tok: Any, prompts: list[str], args: Any,
+             seeds: list[int] | None = None) -> list[Completion]:
     """Sample one completion per prompt, in left-padded batches of ``gen_batch``.
+
+    With ``seeds``, each prompt is instead generated on its own after
+    ``torch.manual_seed(seeds[j])``, so its reply is a function of its prompt
+    and its seed alone. A batch shares one random stream across its rows, and
+    rows finish at different lengths, so batched sampling cannot give two runs
+    the same draw for the same prompt; evaluation pays the throughput for that.
 
     Batching across *different* prompts is what makes episodes affordable, and
     left padding is what makes slicing the generated half at the padded prompt
@@ -287,8 +294,13 @@ def generate(model: Any, tok: Any, prompts: list[str], args: Any) -> list[Comple
     guard = FiniteLogits(tok.eos_token_id)
     stops = _stop_ids(model, tok)
     out_texts: list[Completion] = []
-    for start in range(0, len(prompts), args.gen_batch):
-        chunk = prompts[start : start + args.gen_batch]
+    if seeds is not None and len(seeds) != len(prompts):
+        raise ValueError(f"{len(seeds)} seed(s) for {len(prompts)} prompt(s)")
+    step = 1 if seeds is not None else args.gen_batch
+    for start in range(0, len(prompts), step):
+        chunk = prompts[start : start + step]
+        if seeds is not None:
+            torch.manual_seed(seeds[start])
         enc = tok(chunk, return_tensors="pt", padding=True).to(args.device)
         with torch.no_grad(), torch.autocast(args.device.split(":")[0], dtype=torch.bfloat16):
             out = model.generate(
@@ -322,8 +334,13 @@ def episode_rollouts(
     policy: Any,
     *,
     log_root: Path | None = None,
+    episode_seed: Any = None,
 ) -> tuple[list[dict[str, Any]], list[Sample], list[dict[str, Any]]]:
     """Multi-step episodes. Everything except generation lives in the env.
+
+    ``episode_seed(scenario_id, episode, step) -> int``, when given, seeds every
+    reply on its own (see :func:`generate`); training leaves it ``None`` and
+    keeps batched sampling.
 
     ``episode_env.rollout_scenario`` imports no ``torch``, so the environment,
     the scoring, the flattening and the group statistics are tested on a CPU;
@@ -335,14 +352,22 @@ def episode_rollouts(
     samples: list[Sample] = []
     wire: list[dict[str, Any]] = []
     for scenario in scenarios:
+        if episode_seed is None:
+            def gen(users, _keys=None):
+                return generate(model, tok, [chat_prompt(tok, u) for u in users], args)
+        else:
+            def gen(users, keys, _sid=scenario.scenario_id):
+                seeds = [episode_seed(_sid, index, step) for index, step in keys]
+                return generate(model, tok, [chat_prompt(tok, u) for u in users], args, seeds)
         group, scenario_samples, scenario_wire = episode_env.rollout_scenario(
             scenario,
             args.group,
             policy,
-            lambda users: generate(model, tok, [chat_prompt(tok, u) for u in users], args),
+            gen,
             advantage_fn=advantages,
             log_root=log_root,
             log_first=args.log_episodes,
+            keyed=episode_seed is not None,
         )
         groups.append(group)
         samples.extend(scenario_samples)

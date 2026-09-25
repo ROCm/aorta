@@ -349,7 +349,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     # `.get` so a column that predates the field compares as None rather than
     # raising -- and a column that has it never pairs with one that does not.
     for field in ("temperature", "top_p", "max_new_tokens", "max_episode_steps", "seed",
-                  "gen_batch"):
+                  "gen_batch", "seeding"):
         if before["config"].get(field) != after["config"].get(field):
             raise ValueError(
                 f"the two columns differ in {field!r}: {before['config'].get(field)!r} vs "
@@ -403,9 +403,14 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
 
     rows = []
     pooled = [0, 0, 0, 0]
-    # Paired only where both columns kept per-episode outcomes; a column that
-    # predates `step1_hits` leaves the paired statistic unavailable, not zero.
-    paired = all("step1_hits" in a[s] and "step1_hits" in b[s] for s in a)
+    # Paired only where both columns were seeded per episode -- otherwise
+    # episode i is not the same draw in both, and McNemar's pairing is false --
+    # and kept per-episode outcomes. Anything else leaves the paired statistic
+    # unavailable, not zero.
+    paired = (
+        before["config"].get("seeding") == after["config"].get("seeding") == SEEDING
+        and all("step1_hits" in a[s] and "step1_hits" in b[s] for s in a)
+    )
     discordant = [0, 0]
     for scenario in sorted(a):
         ha, na = step1_counts(a[scenario])
@@ -473,9 +478,10 @@ def print_comparison(result: dict[str, Any]) -> None:
     print()
     print(f"  pooled step-1 resolver rate  {_fmt(result['pooled_step1_before'], '.3f')} -> "
           f"{_fmt(result['pooled_step1_after'], '.3f')}  z = {result['pooled_step1_z']:+.2f}")
-    if result.get("pooled_step1_paired_z") is None:
-        print("  paired (McNemar) z            unavailable: a column has no per-episode outcomes")
-    else:
+    # Reported only for columns seeded per episode; otherwise the unpaired z
+    # above is the statistic, and printing a paired one would claim a pairing
+    # the sampling did not have.
+    if result.get("pooled_step1_paired_z") is not None:
         print(f"  paired (McNemar) z            {result['pooled_step1_paired_z']:+.2f}  "
               f"({result['pooled_step1_gained']} gained, {result['pooled_step1_lost']} lost "
               "of the paired episodes)")
@@ -506,7 +512,7 @@ def print_comparison(result: dict[str, Any]) -> None:
 #: different list is refused by ``compare``.
 _REUSE_FIELDS = (
     "init_from", "model", "param_dtype", "episodes_per_scenario", "max_episode_steps",
-    "temperature", "top_p", "max_new_tokens", "gen_batch", "seed",
+    "temperature", "top_p", "max_new_tokens", "gen_batch", "seed", "seeding",
 )
 
 
@@ -532,6 +538,7 @@ def _config(args: argparse.Namespace, source: str) -> dict[str, Any]:
         "max_new_tokens": args.max_new_tokens,
         "gen_batch": args.gen_batch,
         "seed": args.seed,
+        "seeding": SEEDING,
     }
 
 
@@ -688,6 +695,28 @@ def write_atomically(path: Path, text: str) -> None:
     os.replace(temporary, path)
 
 
+#: How a column's sampling is seeded. Recorded in every column and part of
+#: the reuse identity, so a column seeded one way never pairs with, or is
+#: reused as, one seeded another way. Columns that predate the field were
+#: seeded once per scenario and sampled in batches.
+SEEDING = "per-episode-step"
+
+
+def episode_seed(base: int, scenario_id: str, episode: int, step: int) -> int:
+    """The seed for one reply: a function of (seed, scenario, episode, step) only.
+
+    Seeding once per scenario, as columns before this did, gives each
+    scenario one random stream that a batch of episodes shares; once two
+    checkpoints' replies differ in length, later draws come from different
+    points of that stream and episode *i* stops being the same draw in both
+    columns. A seed per reply, with each reply generated on its own, makes
+    episode *i*, step *k* the same draw whatever the other episodes did.
+    ``zlib.crc32`` for the reason given in :func:`scenario_seed`.
+    """
+    key = f"{scenario_id}/{episode}/{step}".encode()
+    return (base + zlib.crc32(key)) % (2**31 - 1)
+
+
 def scenario_seed(base: int, scenario_id: str) -> int:
     """A sampling stream per *(seed, scenario)* rather than per column.
 
@@ -798,12 +827,14 @@ def evaluate(
         device=args.device,
         log_episodes=0,
     )
-    # One scenario per `episode_rollouts` call, so the seed is set per
-    # scenario and the column is persisted after each one. The batching that
-    # makes episodes affordable is within a scenario's group and is untouched.
+    # One scenario per `episode_rollouts` call, so the column is persisted after
+    # each one. Every reply is seeded on its own (see `episode_seed`), which
+    # costs the batching a training run keeps.
     for scenario in todo:
-        torch.manual_seed(scenario_seed(args.seed, scenario.scenario_id))
-        groups, _, wire = train_grpo_step.episode_rollouts(model, tok, [scenario], gen, policy)
+        groups, _, wire = train_grpo_step.episode_rollouts(
+            model, tok, [scenario], gen, policy,
+            episode_seed=lambda sid, index, step: episode_seed(args.seed, sid, index, step),
+        )
         carried.extend(groups)
         carried_wire.extend(wire)
         if on_progress is not None:

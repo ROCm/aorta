@@ -602,3 +602,106 @@ def test_the_trainer_ranks_best_before_the_optimiser_step():
     body = source[source.index("def _train("):]
     assert body.index("update_best(") < body.index("opt.step()")
     assert 'publish_checkpoint(model, tok, args.out / "checkpoint-best")' not in body
+
+
+# ---------------------------------------------------------------------------
+# per-episode seeding for evaluation
+# ---------------------------------------------------------------------------
+
+class _Batch(dict):
+    def to(self, _device):
+        return self
+
+
+class _PadTokenizer:
+    eos_token_id = pad_token_id = 0
+
+    def __call__(self, texts, return_tensors="pt", padding=True):
+        width = max(len(t) for t in texts)
+        rows = [[0] * (width - len(t)) + [1 + ord(c) % 60 for c in t] for t in texts]
+        return _Batch(input_ids=torch.tensor(rows, dtype=torch.long))
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "".join(chr(40 + i) for i in ids if i)
+
+
+class _SeedRecorder:
+    """model.generate that records the batch size and the seed it ran under."""
+
+    def __init__(self):
+        self.calls = []
+        self.generation_config = type("GenerationConfig", (), {"eos_token_id": 0})()
+
+    def generate(self, input_ids, **_kw):
+        self.calls.append((input_ids.shape[0], torch.initial_seed()))
+        tail = torch.tensor([[7, 0]] * input_ids.shape[0])
+        return torch.cat([input_ids, tail], dim=1)
+
+
+class _GenArgs:
+    gen_batch, temperature, top_p, max_new_tokens, device = 4, 0.7, 0.95, 8, "cpu"
+
+
+def test_seeded_generation_runs_each_prompt_alone_under_its_own_seed():
+    model = _SeedRecorder()
+    out = trainer.generate(model, _PadTokenizer(), ["ab", "abcd", "a"], _GenArgs(),
+                           seeds=[11, 22, 33])
+    assert model.calls == [(1, 11), (1, 22), (1, 33)]
+    assert len(out) == 3
+
+
+def test_unseeded_generation_keeps_its_batches():
+    """Narrowness: training's batched sampling is unchanged."""
+    model = _SeedRecorder()
+    trainer.generate(model, _PadTokenizer(), ["ab", "abcd", "a", "b", "c"], _GenArgs())
+    assert [size for size, _ in model.calls] == [4, 1]
+
+
+def test_a_seed_count_that_does_not_match_the_prompts_is_an_error():
+    with pytest.raises(ValueError, match="2 seed"):
+        trainer.generate(_SeedRecorder(), _PadTokenizer(), ["a", "b", "c"], _GenArgs(),
+                         seeds=[1, 2])
+
+
+def test_each_episode_is_seeded_by_its_own_index_and_step(tmp_path, monkeypatch):
+    scenario = make_scenario(build_archive(tmp_path, resolver=MENU[2]))
+    calls: list[tuple[list[str], list[int]]] = []
+
+    def fake_generate(model, tok, prompts, args, seeds=None):
+        calls.append((prompts, seeds))
+        return [reply([MENU[2 if s % 2 else 0]]) for s in seeds]
+
+    monkeypatch.setattr(trainer, "generate", fake_generate)
+
+    class Args:
+        group = 3
+        log_episodes = 0
+
+    trainer.episode_rollouts(None, CharTokenizer(), [scenario], Args(), AgentPolicy(),
+                             episode_seed=lambda sid, index, step: 1000 * step + index)
+    assert calls[0][1] == [1000, 1001, 1002], "step 1, episodes 0-2"
+    assert all(s // 1000 == 2 for s in calls[1][1]), "every later call is step 2"
+    assert all(len(p) == len(s) for p, s in calls)
+
+
+def test_an_episode_is_the_same_draw_whatever_the_other_episodes_do(tmp_path, monkeypatch):
+    """The property the paired statistic needs: episode i's replies depend on
+    (scenario, i, step) only, not on how many episodes share its group."""
+    scenario = make_scenario(build_archive(tmp_path, resolver=MENU[2]))
+
+    def by_seed(model, tok, prompts, args, seeds=None):
+        return [reply([MENU[s % len(MENU)]]) for s in seeds]
+
+    monkeypatch.setattr(trainer, "generate", by_seed)
+    seed = lambda sid, index, step: (7 * index + 3 * step) % 97  # noqa: E731
+
+    def episodes(n):
+        class Args:
+            group = n
+            log_episodes = 0
+        _, _, wire = trainer.episode_rollouts(None, CharTokenizer(), [scenario], Args(),
+                                              AgentPolicy(), episode_seed=seed)
+        return {(r["episode"], r["step"]): r["raw"] for r in wire}
+
+    small, large = episodes(2), episodes(5)
+    assert {k: v for k, v in large.items() if k[0] < 2} == small

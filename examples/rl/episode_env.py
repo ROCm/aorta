@@ -949,6 +949,7 @@ def rollout_scenario(
     advantage_fn: Callable[[list[float]], tuple[list[float], float, float]],
     log_root: Path | None = None,
     log_first: int = 0,
+    keyed: bool = False,
 ) -> tuple[dict[str, Any], list[Sample], list[dict[str, Any]]]:
     """Advance ``count`` episodes in lockstep, score them, and flatten.
 
@@ -961,6 +962,11 @@ def rollout_scenario(
     episode of depth *d* costs *d* batched calls rather than *d* sequential ones.
     A generator that returns the wrong number of completions is an error, not a
     silent ``zip`` truncation that would leave episodes waiting forever.
+
+    ``keyed=True`` calls ``generate(prompts, keys)`` instead, where ``keys[j]``
+    is ``(episode index, step)`` for prompt ``j``: what a generator needs to
+    seed each reply on its own, so that a reply does not depend on which other
+    episodes happened to share its batch.
     """
     episodes = open_episodes(scenario, count, policy, log_root=log_root, log_first=log_first)
     depth = 0
@@ -969,7 +975,11 @@ def rollout_scenario(
         if not live:
             break
         depth += 1
-        texts = generate([prompt for _, prompt in live])
+        prompts = [prompt for _, prompt in live]
+        if keyed:
+            texts = generate(prompts, [(episode.index, depth) for episode, _ in live])
+        else:
+            texts = generate(prompts)
         if len(texts) != len(live):
             raise ValueError(
                 f"generate returned {len(texts)} completion(s) for {len(live)} prompt(s)"

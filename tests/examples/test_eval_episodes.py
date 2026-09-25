@@ -255,7 +255,7 @@ def column_file(tmp_path: Path, **config) -> Path:
         "init_from": "/ckpt/last", "model": "Qwen/Qwen3-8B", "param_dtype": "float32",
         "episodes_per_scenario": 64, "max_episode_steps": 8, "temperature": 0.7,
         "top_p": 0.95, "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923,
-        "scenarios": ["a"], "corpus": dict(DIGESTS), "blas_backend": dict(BACKEND), "scorer": dict(SCORER),
+        "seeding": eval_episodes.SEEDING, "scenarios": ["a"], "corpus": dict(DIGESTS), "blas_backend": dict(BACKEND), "scorer": dict(SCORER),
         "checkpoint": dict(WEIGHTS), "runtime": dict(RUNTIME),
     }
     base.update(config)
@@ -678,6 +678,11 @@ def test_a_written_column_records_its_checkpoint_identity():
 # the paired statistic, beside the unpaired one
 # ---------------------------------------------------------------------------
 
+def seeded(groups, **config):
+    """A column that declares per-episode seeding, the only kind that pairs."""
+    return run(groups, seeding=eval_episodes.SEEDING, **config)
+
+
 def paired_group(scenario_id, hits):
     g = group(scenario_id, n=len(hits), step1_hits=sum(hits))
     g["step1_hits"] = list(hits)
@@ -695,10 +700,10 @@ def test_mcnemar_uses_only_the_discordant_pairs():
 def test_the_paired_z_is_reported_beside_the_unpaired_one():
     """Same marginals, different pairing: the unpaired z cannot tell these apart."""
     before = [1] * 4 + [0] * 4
-    shifted = eval_episodes.compare(run([paired_group("a", before)]),
-                                    run([paired_group("a", [1] * 6 + [0] * 2)]))
-    crossed = eval_episodes.compare(run([paired_group("a", before)]),
-                                    run([paired_group("a", [0] * 2 + [1] * 6)]))
+    shifted = eval_episodes.compare(seeded([paired_group("a", before)]),
+                                    seeded([paired_group("a", [1] * 6 + [0] * 2)]))
+    crossed = eval_episodes.compare(seeded([paired_group("a", before)]),
+                                    seeded([paired_group("a", [0] * 2 + [1] * 6)]))
     assert shifted["pooled_step1_z"] == crossed["pooled_step1_z"]
     assert (shifted["pooled_step1_gained"], shifted["pooled_step1_lost"]) == (2, 0)
     assert (crossed["pooled_step1_gained"], crossed["pooled_step1_lost"]) == (4, 2)
@@ -708,8 +713,8 @@ def test_the_paired_z_is_reported_beside_the_unpaired_one():
 
 def test_pairs_are_summed_within_scenarios_never_across_them():
     result = eval_episodes.compare(
-        run([paired_group("a", [0, 0]), paired_group("b", [1, 1])]),
-        run([paired_group("a", [1, 1]), paired_group("b", [1, 0])]))
+        seeded([paired_group("a", [0, 0]), paired_group("b", [1, 1])]),
+        seeded([paired_group("a", [1, 1]), paired_group("b", [1, 0])]))
     rows = {r["scenario_id"]: r for r in result["scenarios"]}
     assert (rows["a"]["step1_gained"], rows["a"]["step1_lost"]) == (2, 0)
     assert (rows["b"]["step1_gained"], rows["b"]["step1_lost"]) == (0, 1)
@@ -718,18 +723,19 @@ def test_pairs_are_summed_within_scenarios_never_across_them():
 
 def test_an_unresolvable_scenario_adds_no_pairs():
     result = eval_episodes.compare(
-        run([paired_group("a", [0, 1]), {**group("u", n=2, step1_hits=None), "step1_hits": [0, 1]}]),
-        run([paired_group("a", [1, 1]), {**group("u", n=2, step1_hits=None), "step1_hits": [1, 0]}]))
+        seeded([paired_group("a", [0, 1]), {**group("u", n=2, step1_hits=None), "step1_hits": [0, 1]}]),
+        seeded([paired_group("a", [1, 1]), {**group("u", n=2, step1_hits=None), "step1_hits": [1, 0]}]))
     assert (result["pooled_step1_gained"], result["pooled_step1_lost"]) == (1, 0)
 
 
 def test_a_column_without_per_episode_outcomes_has_no_paired_z(capsys):
     """A legacy column reports the paired statistic as unavailable, not as zero."""
-    result = eval_episodes.compare(run([group("a")]), run([paired_group("a", [1] * 8)]))
+    result = eval_episodes.compare(seeded([group("a")]), seeded([paired_group("a", [1] * 8)]))
     assert result["pooled_step1_paired_z"] is None
     assert result["scenarios"][0]["step1_paired_z"] is None
     eval_episodes.print_comparison(result)
-    assert "paired (McNemar) z            unavailable" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "McNemar" not in out and "z = " in out
 
 
 # ---------------------------------------------------------------------------
@@ -840,3 +846,58 @@ def test_a_written_column_records_its_package_versions():
         _Args(), [SimpleNamespace(scenario_id="a", digest="digest-a")], [], [],
         Path("/ckpt/last"), BACKEND, SCORER, WEIGHTS, RUNTIME)
     assert payload["config"]["runtime"] == RUNTIME
+
+
+# ---------------------------------------------------------------------------
+# per-episode seeding, and the paired statistic it licenses
+# ---------------------------------------------------------------------------
+
+def test_columns_with_per_episode_outcomes_but_scenario_seeding_report_only_the_unpaired_z(
+    capsys,
+):
+    """The recorded columns' case: outcomes exist, but episode i was not the
+    same draw in both columns, so no paired statistic is reported."""
+    result = eval_episodes.compare(run([paired_group("a", [0, 0, 1, 1])]),
+                                   run([paired_group("a", [1, 1, 1, 1])]))
+    assert result["pooled_step1_paired_z"] is None
+    assert result["scenarios"][0]["step1_paired_z"] is None
+    assert result["pooled_step1_z"] != 0.0
+    eval_episodes.print_comparison(result)
+    assert "McNemar" not in capsys.readouterr().out
+
+
+def test_both_columns_seeded_per_episode_report_the_paired_z_too(capsys):
+    """Narrowness: the paired statistic is still reported where it is valid."""
+    result = eval_episodes.compare(seeded([paired_group("a", [0, 0, 1, 1])]),
+                                   seeded([paired_group("a", [1, 1, 1, 1])]))
+    assert result["pooled_step1_paired_z"] == pytest.approx(2 / 2**0.5)
+    eval_episodes.print_comparison(result)
+    assert "paired (McNemar) z" in capsys.readouterr().out
+
+
+def test_columns_seeded_differently_are_not_compared():
+    with pytest.raises(ValueError, match="differ in 'seeding'"):
+        eval_episodes.compare(run([group("a")]), seeded([group("a")]))
+
+
+def test_a_column_seeded_per_scenario_is_not_reused_by_a_per_episode_run(tmp_path):
+    """The recorded columns predate per-episode seeding and are not reusable."""
+    path = column_file(tmp_path)
+    doc = json.loads(path.read_text())
+    del doc["config"]["seeding"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="seeding"):
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER,
+                                      WEIGHTS, RUNTIME)
+
+
+def test_the_episode_seed_depends_on_every_coordinate_and_nothing_else():
+    seed = eval_episodes.episode_seed
+    base = seed(20260923, "xnack_page_fault", 3, 1)
+    assert base == seed(20260923, "xnack_page_fault", 3, 1)
+    assert len({base, seed(20260924, "xnack_page_fault", 3, 1),
+                seed(20260923, "queue_stale_read", 3, 1),
+                seed(20260923, "xnack_page_fault", 4, 1),
+                seed(20260923, "xnack_page_fault", 3, 2)}) == 5
+    assert base == (20260923 + zlib.crc32(b"xnack_page_fault/3/1")) % (2**31 - 1)
+    assert 0 <= seed(2**31 - 2, "s", 0, 1) < 2**31 - 1

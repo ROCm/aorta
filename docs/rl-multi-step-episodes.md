@@ -1,4 +1,4 @@
-# Multi-step episodes for GRPO: design, predictions, and one paired evaluation
+# Multi-step episodes for GRPO: design, predictions, and one fixed-weight evaluation
 
 This is the design of the multi-step episode path under `examples/rl/`, the
 predictions that were written down before any training run, and one fixed-weight
@@ -13,7 +13,7 @@ memorising the answer key.
 | `examples/rl/event_reward.py` | the discrete per-step event reward an episode is scored with |
 | `examples/rl/rescore_episodes.py` | CPU reports: constant policies, a run's wire, and a replay of recorded episodes |
 | `examples/rl/train_grpo_step.py` | GRPO over episodes, in-process `transformers`, one GPU, every update checked |
-| `examples/rl/eval_episodes.py` | a fixed checkpoint against a control, paired, no optimiser step |
+| `examples/rl/eval_episodes.py` | a fixed checkpoint against a control, same seeds, no optimiser step |
 | `examples/rl/verify_checkpoint_delta.py` | the checkpoint pair on disk, on CPU: floor, control and an Adam ceiling |
 
 ## Why episodes
@@ -137,7 +137,7 @@ rate** is close to 1.0 by arithmetic, because an episode gets up to eight draws
 from a shrinking menu. Quoting only the second would overstate what training
 did.
 
-## Results: one paired, fixed-weight evaluation
+## Results: one fixed-weight evaluation
 
 **Setup.**
 
@@ -176,8 +176,9 @@ did.
   largest displacement is 0.24 of its own ceiling.
 - Evaluation: `eval_episodes.py` against the base model, 64 episodes per
   scenario per column. Weights were fixed, sampling was at the training
-  settings (t = 0.7, top_p = 0.95), and each scenario was seeded from its own
-  name.
+  settings (t = 0.7, top_p = 0.95), and each scenario was seeded once from its
+  own name, with its episodes sampled in batches (the scheme "Evaluation
+  seeding" below replaces).
 - Both columns were recorded under the previous reward. Replayed through the
   code in this change, all 896 episodes take identical steps and end on
   identical terminals, and the reward column below is their **re-score under
@@ -187,34 +188,33 @@ did.
   stop rule moves no recorded number; the change is entirely the read-once
   rule.
 
-| scenario | step-1 rate, base → trained | z (unpaired) | z (paired) | gained / lost | reward, base → trained |
-|---|---|---|---|---|---|
-| `nan_uninit_workspace` | 0.328 → 0.953 | +7.37 | +6.17 | 41 / 1 | +2.86 → +7.66 |
-| `reference_mismatch` | 0.203 → 0.672 | +5.35 | +5.00 | 33 / 3 | +1.20 → +5.80 |
-| `queue_stale_read` | 0.656 → 0.828 | +2.22 | +2.29 | 17 / 6 | +5.97 → +6.86 |
-| `scratch_exhaustion` | 0.688 → 0.781 | +1.20 | +1.28 | 14 / 8 | +3.26 → +4.66 |
-| `stream_stale_read` | 0.625 → 0.688 | +0.74 | +0.71 | 18 / 14 | +6.11 → +6.35 |
-| `xnack_page_fault` | 0.203 → **0.016** | **−3.40** | **−3.21** | 1 / 13 | +0.50 → −2.55 |
-| `cancellation_nan` (unresolvable) | – | – | – | – | −12.31 → −9.89 |
-| **pooled / mean over the six resolvable** | **0.451 → 0.656** | **+5.73** | **+6.08** | 124 / 45 | **+3.32 → +4.80** |
+| scenario | step-1 rate, base → trained | z | reward, base → trained |
+|---|---|---|---|
+| `nan_uninit_workspace` | 0.328 → 0.953 | +7.37 | +2.86 → +7.66 |
+| `reference_mismatch` | 0.203 → 0.672 | +5.35 | +1.20 → +5.80 |
+| `queue_stale_read` | 0.656 → 0.828 | +2.22 | +5.97 → +6.86 |
+| `scratch_exhaustion` | 0.688 → 0.781 | +1.20 | +3.26 → +4.66 |
+| `stream_stale_read` | 0.625 → 0.688 | +0.74 | +6.11 → +6.35 |
+| `xnack_page_fault` | 0.203 → **0.016** | **−3.40** | +0.50 → −2.55 |
+| `cancellation_nan` (unresolvable) | – | – | −12.31 → −9.89 |
+| **pooled / mean over the six resolvable** | **0.451 → 0.656** | **+5.73** | **+3.32 → +4.80** |
 
-Two statistics for the step-1 rate, because the columns are paired: episode
-*i* of a scenario starts from the same sampling seed in both. The unpaired z
-is the two-proportion test, whose variance assumes independent samples. The
-paired z is McNemar's, computed on the discordant pairs only: "gained" is an
-episode that missed on step 1 under the base model and hit under the trained
-one, "lost" the reverse. The pooled paired z sums discordant pairs within
-scenarios and never pairs across them. The two agree closely here: no
-scenario changes sign, and none crosses |z| = 2 in either direction. The
-recorded columns predate per-episode outcomes, so the paired figures were
-recomputed from each column's step-1 replies, and they reproduce every
-recorded step-1 count exactly.
+The z is the two-proportion z, which treats the two columns as independent
+samples. An earlier revision also reported a paired statistic (McNemar's z on
+per-episode outcomes). It was removed because these episodes are not truly
+paired: each scenario was seeded once and its episodes were sampled in
+batches from that one stream, so once two checkpoints' replies differ in
+length, their later episodes draw from different points of the stream and
+episode *i* is no longer the same draw in both columns. The unpaired z is the
+reported statistic. `eval_episodes.py` now seeds every episode step
+separately (see "Evaluation seeding" below), so future evaluations are paired
+by construction; the recorded columns predate that and are not reusable
+against new ones.
 
 The step-1 rates are not reward and did not change with the repair. A second
 evaluation of the same pair with another seed (20260925, n = 64) agrees:
-pooled step-1 rate 0.440 → 0.677 (unpaired z = +6.61, paired z = +7.04),
-`xnack_page_fault` 0.172 → 0.031 (unpaired z = −2.63, paired z = −2.71), and
-reward on the six resolvable scenarios +3.03 → +4.66.
+pooled step-1 rate 0.440 → 0.677 (z = +6.61), `xnack_page_fault` 0.172 →
+0.031 (z = −2.63), and reward on the six resolvable scenarios +3.03 → +4.66.
 
 On the unresolvable scenario the earned claim `terminal_unresolvable_correct`
 went from 41 to 54 of 64 episodes. `name_not_offered` fell from 70 to 17 events
@@ -222,7 +222,7 @@ across the corpus, `name_already_tried` from 18 to 14, and `malformed_reply`
 stayed at 17 → 16.
 
 **What this shows.** Training measurably changes behaviour on the scenarios it
-trained on. The pooled step-1 rate rises at z = +5.73 (paired z = +6.08), and the mean reward on
+trained on. The pooled step-1 rate rises at z = +5.73, and the mean reward on
 the six resolvable scenarios rises from +3.32 to +4.80, about one and a half
 points.
 
@@ -243,7 +243,8 @@ points.
   key.
 - **There is no held-out set.** The policy trained on all seven scenarios.
   What the evaluation controls is that the weights are fixed and the two
-  columns are paired. It does not turn the training corpus into a test set.
+  columns share settings and seeds. It does not turn the training corpus into
+  a test set.
 
 The other constants behave as P6 predicted. Seven of the ten score lower as an
 episode than as a single reply. The exceptions are the cover itself, which
@@ -254,6 +255,23 @@ reply, because single-reply scoring left a stopping reply that lists names
 without a terminal; it now classifies every stop with the same rule as the
 episode path, so listing names while stopping is giving up on both. Reproduce with `rescore_episodes.py --constants`, which needs only
 the archives.
+
+## Evaluation seeding
+
+`eval_episodes.py` now seeds every reply on its own. The seed for episode
+*i*, step *k* of a scenario is derived from (`--seed`, scenario, *i*, *k*),
+and that reply is generated alone, so it depends on its prompt and its seed
+and on nothing another episode did. Batched sampling cannot give this: a
+batch shares one random stream, and rows that finish at different lengths
+move every later draw. Evaluation therefore gives up the batching that
+training keeps.
+
+Each column records the scheme as `config.seeding`. `--reuse` refuses a
+column seeded any other way, and the comparison refuses to pair two columns
+seeded differently. The paired (McNemar) statistic is reported only when
+both columns were seeded per episode. The two recorded columns above were
+seeded per scenario, so they are not reusable against new columns, and
+their comparison reports only the unpaired z.
 
 ## What this cannot fix
 
