@@ -436,7 +436,7 @@ def test_a_fresh_run_into_a_used_out_is_refused_before_it_touches_anything(tmp_p
     assert (out / "wire.jsonl").read_text() == '{"iteration": 1}\n'
 
 
-class _StopAfterSentinel(Exception):
+class _StopAfterSentinelError(Exception):
     pass
 
 
@@ -448,10 +448,10 @@ def test_the_exclusive_sentinel_is_taken_before_anything_else(tmp_path, monkeypa
     def stop(*_a, **_k):
         seen["wire"] = (out / "wire.jsonl").exists()
         seen["listing"] = sorted(p.name for p in out.iterdir())
-        raise _StopAfterSentinel
+        raise _StopAfterSentinelError
 
     monkeypatch.setattr(trainer, "_train", stop)
-    with pytest.raises(_StopAfterSentinel):
+    with pytest.raises(_StopAfterSentinelError):
         trainer.main(["--out", str(out)])
     assert seen == {"wire": True, "listing": ["wire.jsonl"]}
 
