@@ -128,7 +128,17 @@ cia = [
     # DSPy itself supports every Python this package does. Do not put a version
     # marker on it: that made `pip install amd-aorta[cia]` succeed on 3.10 while
     # installing no agent at all.
-    "dspy-ai>=2.5",
+    #
+    # Capped below 3.4: dspy 3.4.0 deep-copies an LM call's keyword arguments,
+    # and on the openai/* route those carry the httpx-backed OpenAI client that
+    # build_lm injects so TLS trust reaches the transport. That client holds a
+    # lock, so every such call fails with "cannot pickle '_thread.RLock'
+    # object". dspy is capped as well as dspy-ai because dspy-ai only sets a
+    # floor on dspy (3.3.1 requires dspy>=3.3.1): capping dspy-ai alone still
+    # resolves dspy 3.4.0. Lift both once the injected client survives that
+    # deepcopy; tests/cia/test_tls_trust.py fails under 3.4 until it does.
+    "dspy-ai>=2.5,<3.4",
+    "dspy<3.4",
     # The agents read the shared chat profile. tomllib is stdlib from 3.11;
     # tomli keeps the same profile available on supported Python 3.10 rather
     # than silently falling back to environment-only configuration.
@@ -137,6 +147,11 @@ cia = [
     # verify against. It arrived transitively through litellm, which is not a
     # promise litellm makes.
     "certifi",
+    # CIA injects OpenAI-compatible clients so custom CA trust reaches the
+    # transport instead of LiteLLM's request body. These are direct imports,
+    # not implementation details we can rely on dspy-ai to keep installing.
+    "httpx>=0.27",
+    "openai>=1.50.0",
     # The agents read the same profile as the rest of aorta chat, which is what
     # makes configuring chat configure them -- and aorta/chat/config.py needs
     # these to parse it. They were reaching this extra two hops out, through

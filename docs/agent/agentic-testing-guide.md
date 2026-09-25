@@ -48,6 +48,7 @@ external LLM is involved.
 |---------|-----------|-------------------------|
 | Default (`--llm-backend fake`) | **No** | Deterministic `FakeLLMProposer`: heuristics on detector IDs + round-robin through registered mitigations |
 | `--llm-backend litellm` | **Yes** | LiteLLM calls your configured model; requires `pip install 'amd-aorta[agent]'` and provider API keys |
+| `--llm-backend vllm` / `openai` | **Yes** | The model `aorta chat` is configured with (`~/.config/aorta/chat.toml` or `AORTA_CHAT_*`); requires `pip install 'amd-aorta[chat-cli]'` |
 
 The CLI default is **`fake`** so tests, CI, and local smoke runs work with
 **zero API calls** and fully reproducible behavior.
@@ -105,6 +106,20 @@ Then:
 ```bash
 aorta agent mitigate --llm-backend litellm --llm-model gpt-4o-mini ...
 ```
+
+To use a model you serve yourself on vLLM or TokenSpeed, point the chat
+settings at it and select the `vllm` backend:
+
+```bash
+pip install 'amd-aorta[chat-cli]'
+export AORTA_CHAT_LLM_PROVIDER=vllm
+export AORTA_CHAT_VLLM_BASE_URL=http://localhost:8000/v1
+export AORTA_CHAT_VLLM_MODEL=Qwen/Qwen3-8B
+aorta agent mitigate --llm-backend vllm ...
+```
+
+For a Qwen3-family model, start the engine with the flags in
+[serving a Qwen3-family model](../chat/providers.md#serving-a-qwen3-family-model).
 
 ---
 
@@ -314,6 +329,7 @@ PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail 
 | `converged` | Some `{mitigation}-none` passed | Ship that mitigation to customer / gate |
 | `exhausted_candidates` | No mitigations left in allowlist/registry | Manual matrix or new sidecar mitigations |
 | `agent_stop` | Proposer set `stop` (LLM or fake) | Read `agent_report.md` hypothesis |
+| `proposal_unresolved` | The proposer named mitigations, the candidate filter dropped all of them (unregistered, already tried, outside the allowlist, or the `none` baseline), and it did not ask to stop | Check `unresolved_mitigations` in `agent_log.jsonl` against `aorta mitigations list` and `--mitigation`; do *not* read the hypothesis as the reason |
 | `approval_required` | Mitigation needs ack (`--require-approval`) | Operator approves, re-run |
 | `walltime_exhausted` | `--max-walltime-sec` hit | Re-run same ticket to resume |
 | `policy_stop` | e.g. `--max-iterations` hit | Increase budget or narrow allowlist |
@@ -364,6 +380,20 @@ Append-only JSON lines, e.g.:
 {"ts": "...", "type": "llm_step", "category": "unknown", "hypothesis": "Baseline cell passed...", "stop": true, "stop_reason": "baseline_pass"}
 {"ts": "...", "type": "search_stopped", "outcome": "baseline_pass", "stop_reason": "baseline_pass"}
 ```
+
+`llm_step` and `search_stopped` carry an extra `unresolved_mitigations` key
+**only** when the proposer named mitigations the candidate filter dropped:
+
+```json
+{"ts": "...", "type": "llm_step", "next_mitigations": [], "stop": false, "stop_reason": null, "unresolved_mitigations": ["rccl_p2p_disable"]}
+{"ts": "...", "type": "search_stopped", "outcome": "proposal_unresolved", "stop_reason": "proposal_unresolved", "unresolved_mitigations": ["rccl_p2p_disable"]}
+```
+
+The key is absent, not empty, when nothing was dropped — a run with no
+rejections writes exactly the log it wrote before the key existed. It also
+appears on a `llm_step` whose `next_mitigations` is non-empty, which is a
+*partial* rejection: the search continued on the names that survived, and
+this is the only record of the half that was discarded.
 
 ### Report (`agent_report.md`)
 

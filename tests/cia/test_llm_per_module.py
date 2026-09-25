@@ -46,7 +46,9 @@ def built(monkeypatch):
     # These tests are about which argument wins, not about where the endpoint
     # comes from -- that is tests/cia/test_shared_provider.py. Pin the resolved
     # provider so the chat settings on the developer's machine cannot decide it.
-    monkeypatch.setattr(llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "", "vllm"))
+    monkeypatch.setattr(
+        llm_mod, "chat_provider", lambda **_: ("http://pinned:1/v1", "k", "", "vllm")
+    )
     return calls
 
 
@@ -132,6 +134,21 @@ class TestTheRouterKeepsItsOwnSettings:
         router_mod.TriageRouter("/tmp")
 
         assert bound[0].kwargs["model"] == "openai/qwen3-35b"
+
+    def test_the_router_closes_its_bound_lm(self, monkeypatch):
+        router_mod, _bound = self._bind(monkeypatch)
+        closes = []
+
+        class LM:
+            def close(self):
+                closes.append(True)
+
+        monkeypatch.setattr(router_mod, "build_lm", lambda **_kwargs: LM())
+        router = router_mod.TriageRouter("/tmp")
+
+        router.close()
+
+        assert closes == [True]
 
     def test_the_router_does_not_name_a_model_of_its_own(self):
         """A vendor model in the code is the site-specific default in disguise."""

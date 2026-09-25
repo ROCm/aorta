@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import threading
+from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ import pytest
 pytest.importorskip("dspy", reason="the watch loop needs the [cia] extra")
 
 import aorta.cia.watch.poll as poll_mod
+from aorta.cia.launch.job import read_job_json
 from aorta.cia.watch.poll import autopsy_state, poll_jobs, record_autopsy_state
 
 
@@ -77,9 +79,7 @@ def alerting(monkeypatch):
         bundle.mkdir(parents=True, exist_ok=True)
         return bundle
 
-    monkeypatch.setattr(
-        "aorta.cia.watch.bundle_writer.write_bundle", write_bundle
-    )
+    monkeypatch.setattr("aorta.cia.watch.bundle_writer.write_bundle", write_bundle)
 
 
 class TestAdmissionIsActuallyBounded:
@@ -102,9 +102,7 @@ class TestAdmissionIsActuallyBounded:
                     enough_started.set()
             release.wait(timeout=20)
 
-        monkeypatch.setattr(
-            "aorta.cia.watch.trigger.trigger_autopsy", blocked
-        )
+        monkeypatch.setattr("aorta.cia.watch.trigger.trigger_autopsy", blocked)
         job_ids = [f"cia-{i:03d}" for i in range(7)]
         for job_id in job_ids:
             _write_job(tmp_path, job_id)
@@ -135,9 +133,7 @@ class TestAdmissionIsActuallyBounded:
                 if state.get("state") in {"queued", "running"}
             ]
             deferred = [
-                job_id
-                for job_id, state in states.items()
-                if state.get("state") == "deferred"
+                job_id for job_id, state in states.items() if state.get("state") == "deferred"
             ]
 
             assert len(active) == poll_mod.AUTOPSY_CAPACITY
@@ -149,9 +145,7 @@ class TestAdmissionIsActuallyBounded:
 
         assert not runner.is_alive()
 
-    def test_deferral_does_not_spend_an_attempt(
-        self, tmp_path, alerting, monkeypatch
-    ):
+    def test_deferral_does_not_spend_an_attempt(self, tmp_path, alerting, monkeypatch):
         release = threading.Event()
         started = threading.Event()
 
@@ -159,9 +153,7 @@ class TestAdmissionIsActuallyBounded:
             started.set()
             release.wait(timeout=20)
 
-        monkeypatch.setattr(
-            "aorta.cia.watch.trigger.trigger_autopsy", blocked
-        )
+        monkeypatch.setattr("aorta.cia.watch.trigger.trigger_autopsy", blocked)
         for i in range(poll_mod.AUTOPSY_CAPACITY + 1):
             _write_job(tmp_path, f"cia-{i:03d}")
 
@@ -194,9 +186,7 @@ class TestAdmissionIsActuallyBounded:
 
 
 class TestAFailedDeferralWriteIsNotAClaim:
-    def test_atomic_failure_reports_false_and_preserves_the_old_state(
-        self, tmp_path, monkeypatch
-    ):
+    def test_atomic_failure_reports_false_and_preserves_the_old_state(self, tmp_path, monkeypatch):
         assert record_autopsy_state(
             tmp_path,
             "deferred",
@@ -222,9 +212,7 @@ class TestAFailedDeferralWriteIsNotAClaim:
         assert autopsy_state(tmp_path) == before
         assert not list(tmp_path.glob(".autopsy.state.json.*.tmp"))
 
-    def test_unwritten_full_capacity_deferral_is_reassessed(
-        self, tmp_path, alerting, monkeypatch
-    ):
+    def test_unwritten_full_capacity_deferral_is_reassessed(self, tmp_path, alerting, monkeypatch):
         """No worker plus no state must leave the alert bytes uncommitted."""
         release = threading.Event()
         workers_full = threading.Event()
@@ -298,10 +286,68 @@ class TestAFailedDeferralWriteIsNotAClaim:
         assert autopsy_state(tmp_path / target)["state"] == "done"
 
 
+class TestAFailedQueuedWriteRollsBackAdmission:
+    def test_the_same_attempt_can_be_admitted_on_the_next_round(self, tmp_path, monkeypatch):
+        job_dir = _write_job(tmp_path, "cia-aaa")
+        job = read_job_json(job_dir / "job.json")
+        bundle = job_dir / "bundle"
+        bundle.mkdir()
+        real_record = poll_mod.record_autopsy_state
+        failed_once = False
+
+        def fail_first_queued_write(job_dir, state, **fields):
+            nonlocal failed_once
+            if state == "queued" and not failed_once:
+                failed_once = True
+                return False
+            return real_record(job_dir, state, **fields)
+
+        class Pool:
+            def __init__(self):
+                self.calls = []
+                self.future = Future()
+
+            def submit(self, *args):
+                self.calls.append(args)
+                return self.future
+
+        monkeypatch.setattr(
+            poll_mod,
+            "record_autopsy_state",
+            fail_first_queued_write,
+        )
+        pool = Pool()
+        capacity = threading.BoundedSemaphore(1)
+        queued = {}
+        kwargs = {
+            "pool": pool,
+            "capacity": capacity,
+            "queued": queued,
+            "bundle": bundle,
+            "job": job,
+            "jobs_root": tmp_path,
+            "job_dir": job_dir,
+            "attempt": 1,
+            "stop": None,
+        }
+
+        assert poll_mod._submit_autopsy(**kwargs) is False
+        assert pool.calls == []
+        assert queued == {}
+        assert not (job_dir / ".autopsy.claim.1").exists()
+
+        assert poll_mod._submit_autopsy(**kwargs) is True
+        assert len(pool.calls) == 1
+        assert queued[job.job_id][1] == 1
+        assert (job_dir / ".autopsy.claim.1").is_file()
+
+        pool.future.set_result(None)
+        assert capacity.acquire(blocking=False)
+        capacity.release()
+
+
 class TestThePersistedQueueRecovers:
-    def test_a_deferred_job_runs_without_new_log_bytes(
-        self, tmp_path, alerting, monkeypatch
-    ):
+    def test_a_deferred_job_runs_without_new_log_bytes(self, tmp_path, alerting, monkeypatch):
         calls: list[str] = []
         job_dir = _write_job(tmp_path, "cia-aaa")
         (job_dir / "bundle").mkdir()
@@ -331,14 +377,14 @@ class TestThePersistedQueueRecovers:
             "ts": (
                 datetime.now(timezone.utc)
                 - timedelta(seconds=poll_mod.AUTOPSY_QUEUED_STALE_AFTER_SEC + 1)
-            ).isoformat().replace("+00:00", "Z"),
+            )
+            .isoformat()
+            .replace("+00:00", "Z"),
             "attempts": 1,
         }
         job_dir = tmp_path / "cia-aaa"
         job_dir.mkdir()
-        (job_dir / "autopsy.state.json").write_text(
-            json.dumps(queued), encoding="utf-8"
-        )
+        (job_dir / "autopsy.state.json").write_text(json.dumps(queued), encoding="utf-8")
 
         assert poll_mod.autopsy_is_settled(job_dir) is False
 
@@ -348,13 +394,13 @@ class TestThePersistedQueueRecovers:
             "ts": (
                 datetime.now(timezone.utc)
                 - timedelta(seconds=poll_mod.AUTOPSY_QUEUED_STALE_AFTER_SEC + 1)
-            ).isoformat().replace("+00:00", "Z"),
+            )
+            .isoformat()
+            .replace("+00:00", "Z"),
             "attempts": 1,
         }
         job_dir = tmp_path / "cia-aaa"
         job_dir.mkdir()
-        (job_dir / "autopsy.state.json").write_text(
-            json.dumps(running), encoding="utf-8"
-        )
+        (job_dir / "autopsy.state.json").write_text(json.dumps(running), encoding="utf-8")
 
         assert poll_mod.autopsy_is_settled(job_dir) is True
