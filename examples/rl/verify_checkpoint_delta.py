@@ -55,10 +55,15 @@ Two conditions it depends on and does not check: weight decay must be zero
 (decoupled decay adds ``lr * wd * |w|`` per step) and the learning rate must be
 the one given. The trainer runs Adam with ``weight_decay=0.0``.
 
-The rounding allowance: each in-place update is rounded to the storage dtype,
-so ``steps`` roundings of at most half an ulp of the largest magnitude in the
-tensor are added to the ceiling -- negligible for fp32 at realistic learning
-rates, dominant for a bf16 tree, which is the honest answer for bf16.
+The rounding allowance is per element: each in-place update is rounded to the
+storage dtype, and a rounding moves an element by at most half an ulp of the
+value it lands on, which never exceeds ``max(|pre|, |post|) + bound`` for that
+element. So element ``i`` is allowed ``bound + steps * half_ulp * (max(|pre_i|,
+|post_i|) + bound)``. An earlier version took the largest magnitude anywhere in
+the tensor and granted it to every element, so one large element in a bf16
+tensor let a zero elsewhere move by far more than Adam can. No separate
+absolute floor is needed: near zero a rounding is below the smallest normal
+number, orders of magnitude under any ``bound`` a real learning rate gives.
 
 ⚠ ``--steps`` is the number of optimiser steps across the *whole* interval
 between the two checkpoints, which for a chained run is the sum over links and
@@ -219,6 +224,34 @@ def raw_identical(path_a: Path, info_a: dict[str, Any], base_a: int,
     return True
 
 
+def element_ceilings(a: Any, b: Any, diff: Any, bound: float, steps: int, half_ulp: float,
+                     report: int = 8, chunk: int = 1 << 22) -> dict[str, Any]:
+    """Each element's displacement against its own ceiling (see the module docstring).
+
+    ``bound + steps * half_ulp * (max(|a_i|, |b_i|) + bound)`` per element, in
+    chunks so the extra arrays cost ``chunk`` elements rather than a copy of
+    the tensor. Returns the largest displacement-to-ceiling ratio, the
+    ceiling at that element, how many elements exceed theirs, and the flat
+    indices of the first ``report`` of them.
+    """
+    fa, fb, fd = a.reshape(-1), b.reshape(-1), diff.reshape(-1)
+    best = {"ratio": 0.0, "ceiling": bound, "elements": 0, "where": []}
+    for start in range(0, fd.size, chunk):
+        end = start + chunk
+        allowed = bound + steps * half_ulp * (
+            np.maximum(np.abs(fa[start:end]), np.abs(fb[start:end])) + bound)
+        ratio = fd[start:end] / allowed
+        top = int(ratio.argmax()) if ratio.size else 0
+        if ratio.size and float(ratio[top]) > best["ratio"]:
+            best["ratio"], best["ceiling"] = float(ratio[top]), float(allowed[top])
+        over = np.flatnonzero(ratio > 1.0)
+        best["elements"] += int(over.size)
+        room = report - len(best["where"])
+        if room > 0:
+            best["where"].extend(int(start + i) for i in over[:room])
+    return best
+
+
 def tensor_map(root: Path) -> dict[str, Path]:
     """Every tensor name in a checkpoint directory, mapped to the file holding it.
 
@@ -277,6 +310,7 @@ def compare(
         "deltas": [],
         "frozen_delta": None,
         "frozen_identical": None,
+        "max_ratio": 0.0,
         "dtypes": set(),
     }
     for name in sorted(set(names_pre) & set(names_post)):
@@ -311,20 +345,20 @@ def compare(
             result["deltas"].append(top)
         else:
             result["unmoved"].append(name)
-        magnitude = float(max(np.abs(a).max(), np.abs(b).max())) if a.size else 0.0
-        ceiling = bound + steps * HALF_ULP[info_a["dtype"]] * magnitude
-        if top > ceiling:
-            cells = np.argwhere(diff > ceiling)
+        worst = element_ceilings(a, b, diff, bound, steps, HALF_ULP[info_a["dtype"]], report)
+        result["max_ratio"] = max(result["max_ratio"], worst["ratio"])
+        if worst["elements"]:
             result["over"].append({
                 "tensor": name,
                 "max_abs_delta": top,
-                "ceiling": ceiling,
+                "ceiling": worst["ceiling"],
+                "ratio": worst["ratio"],
                 "max_abs_pre": float(np.abs(a).max()),
                 "max_abs_post": float(np.abs(b).max()),
-                "elements": int(len(cells)),
+                "elements": worst["elements"],
                 "where": [
-                    [int(i) for i in cell] + [float(b[tuple(cell)])]
-                    for cell in cells[:report]
+                    [int(i) for i in np.unravel_index(flat, a.shape)] + [float(b.flat[flat])]
+                    for flat in worst["where"]
                 ],
             })
     result["deltas"].sort()
@@ -421,11 +455,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"delta min / median / max  {deltas[0]:.4e} / {deltas[len(deltas) // 2]:.4e} "
               f"/ {deltas[-1]:.4e}")
     print(f"optimiser ceiling         {bound:.4e}   ({SLACK:g} x lr {args.lr:g} x "
-          f"{args.steps} steps, plus rounding)")
-    for row in sorted(result["over"], key=lambda r: -r["max_abs_delta"]):
-        print(f"  BEYOND THE CEILING: {row['tensor']}  max abs delta "
-              f"{row['max_abs_delta']:.4g} > {row['ceiling']:.4g}, "
-              f"{row['elements']} element(s); max |w| {row['max_abs_pre']:.4g} -> "
+          f"{args.steps} steps, plus per-element rounding)")
+    print(f"max delta / own ceiling   {result['max_ratio']:.4f}")
+    for row in sorted(result["over"], key=lambda r: -r["ratio"]):
+        print(f"  BEYOND THE CEILING: {row['tensor']}  {row['elements']} element(s), worst at "
+              f"{row['ratio']:.4g} x its ceiling of {row['ceiling']:.4g}; max abs delta "
+              f"{row['max_abs_delta']:.4g}, max |w| {row['max_abs_pre']:.4g} -> "
               f"{row['max_abs_post']:.4g}")
         for cell in row["where"]:
             print(f"      [{','.join(str(i) for i in cell[:-1])}] = {cell[-1]:+.6g}")

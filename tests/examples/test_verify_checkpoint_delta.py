@@ -376,3 +376,61 @@ def test_a_bf16_tree_gets_the_bf16_rounding_allowance():
     """Each in-place update rounds to the storage dtype, so a bf16 tree can move
     an element by far more than lr per step through rounding alone."""
     assert vcd.HALF_ULP["BF16"] > 1e4 * vcd.HALF_ULP["F32"]
+
+
+# ---------------------------------------------------------------------------
+# the rounding allowance belongs to each element, not to the tensor's largest
+# ---------------------------------------------------------------------------
+
+def _big_element_pair(tmp_path, *, big_move: float, small_move: float):
+    """K_PROJ holds one large element beside zeros; each can be moved separately."""
+    before = base()
+    before[K_PROJ] = np.zeros((4, 4), dtype=np.float32)
+    before[K_PROJ][0, 0] = 1000.0
+    after = {name: array.copy() if name == FROZEN else array + 1e-5
+             for name, array in before.items()}
+    after[K_PROJ][0, 0] = 1000.0 + big_move
+    after[K_PROJ][3, 3] = small_move
+    return (write_checkpoint(tmp_path / "pre", before),
+            write_checkpoint(tmp_path / "post", after))
+
+
+def test_a_large_element_does_not_lend_its_allowance_to_a_small_one(tmp_path, capsys):
+    """The review's case, in fp32: |w| = 1000 once gave every element of the
+    tensor ~1e-3 of rounding room, so a zero could move 7x further than Adam can."""
+    bound = 4 * 1e-6 * 17
+    old_allowance = bound + 17 * vcd.HALF_ULP["F32"] * 1000.0
+    move = 7 * bound
+    assert move < old_allowance, "the old per-tensor rule would have passed this"
+    pre, post = _big_element_pair(tmp_path, big_move=1e-5, small_move=move)
+    assert run(pre, post) == vcd.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "BEYOND THE CEILING: " + K_PROJ in out and "[3,3]" in out and "[0,0]" not in out
+
+
+def test_a_large_element_keeps_its_own_rounding_allowance(tmp_path):
+    """Narrowness: the large element may move by lr-bound plus its own rounding."""
+    bound = 4 * 1e-6 * 17
+    own = 17 * vcd.HALF_ULP["F32"] * 1000.0
+    pre, post = _big_element_pair(tmp_path, big_move=bound + 0.5 * own, small_move=1e-5)
+    result = vcd.compare(pre, post, bound=bound, steps=17)
+    assert result["over"] == [] and 0.5 < result["max_ratio"] < 1.0
+    assert run(pre, post) == 0
+
+
+def test_the_per_element_ceiling_matches_the_formula():
+    # The moved zero sits in the last chunk, so every chunk has to be read.
+    a = np.array([128.0, -2.0, 0.0], dtype=np.float32)
+    b = np.array([128.0, -2.0, 1.0], dtype=np.float32)
+    worst = vcd.element_ceilings(a, b, np.abs(b - a), bound=6.8e-5, steps=17,
+                                 half_ulp=vcd.HALF_ULP["BF16"], chunk=2)
+    allowed = 6.8e-5 + 17 * 2.0**-8 * (1.0 + 6.8e-5)
+    assert worst["elements"] == 1 and worst["where"] == [2]
+    assert worst["ratio"] == pytest.approx(1.0 / allowed)
+    assert worst["ceiling"] == pytest.approx(allowed)
+
+
+def test_a_healthy_pair_reports_its_margin_under_the_ceiling(tmp_path):
+    pre, post = pair(tmp_path, nudge=0.5 * 4 * 1e-6 * 17)
+    result = vcd.compare(pre, post, bound=vcd.optimiser_bound(1e-6, 17), steps=17)
+    assert result["max_ratio"] == pytest.approx(0.5, rel=1e-2)
