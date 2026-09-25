@@ -104,6 +104,11 @@ class AgentPolicy:
             confidence=max(0.0, min(1.0, step.confidence)),
             stop=step.stop,
             stop_reason=step.stop_reason,
+            # Carried through untouched. These names never reach the registry
+            # checks above -- the proposer dropped them precisely because they
+            # do not resolve -- but the loop needs them to attribute the stop,
+            # so validation must not be the thing that loses them.
+            unresolved_mitigations=list(step.unresolved_mitigations),
         )
 
     def needs_approval(self, mitigation: str) -> bool:
