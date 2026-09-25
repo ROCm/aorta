@@ -163,6 +163,12 @@ did.
     training signal the checkpoint learned from was not.
 - The 17 iterations were accumulated across three chained runs, so the Adam
   moments restarted twice.
+- The evaluated checkpoint is the last link's `checkpoint-last`, not a
+  `checkpoint-best`. In this version `checkpoint-best` holds the weights that
+  sampled the best-scoring iteration's rollouts, saved before that
+  iteration's update, because those are the weights its reward measured. The
+  `checkpoint-best` trees the exploratory runs wrote followed the old rule,
+  the weights one update past the scored ones, and none is used here.
 - Every iteration passed the trainer's checks. The pair passes
   `verify_checkpoint_delta.py --lr 1e-6 --steps 17`: every trained tensor
   moved, the frozen control is bit-identical, and nothing moved further than

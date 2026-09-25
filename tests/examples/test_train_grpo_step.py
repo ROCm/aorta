@@ -570,3 +570,25 @@ def test_the_shipped_defaults_are_a_valid_configuration():
 def test_the_exit_codes_are_distinct_and_none_is_argparses():
     assert len({0, trainer.EXIT_FAILED, trainer.EXIT_REFUSED}) == 3
     assert 2 not in {trainer.EXIT_FAILED, trainer.EXIT_REFUSED}
+
+
+def test_checkpoint_best_is_the_weights_that_scored_not_the_weights_after_the_step(tmp_path):
+    """update_best publishes what it is handed, when handed a new best only."""
+    best = {"reward_mean": float("-inf"), "iteration": None}
+    dest = tmp_path / "checkpoint-best"
+    assert trainer.update_best(best, 1.0, 1, _FakeSaver("it1"), _FakeSaver("it1"), dest)
+    assert not trainer.update_best(best, 0.5, 2, _FakeSaver("it2"), _FakeSaver("it2"), dest)
+    assert not trainer.update_best(best, 1.0, 3, _FakeSaver("it3"), _FakeSaver("it3"), dest), \
+        "a tie keeps the earlier best"
+    assert (dest / "config.json").read_text() == "it1"
+    assert best["iteration"] == 1 and best["reward_mean"] == 1.0
+    assert "before its update" in best["weights"]
+
+
+def test_the_trainer_ranks_best_before_the_optimiser_step():
+    """The ordering is the fix: after `opt.step()` the model no longer holds
+    the weights whose rollouts produced the reward."""
+    source = Path(trainer.__file__).read_text()
+    body = source[source.index("def _train("):]
+    assert body.index("update_best(") < body.index("opt.step()")
+    assert 'publish_checkpoint(model, tok, args.out / "checkpoint-best")' not in body

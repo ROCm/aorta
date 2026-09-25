@@ -76,7 +76,10 @@ A failed check **stops the run before that iteration's checkpoint is written**,
 so ``checkpoint-last`` is always the last iteration that passed, and the exit
 status is non-zero. Each checkpoint is written beside its name and swapped in
 by rename (:func:`publish_checkpoint`), so a crash mid-save never leaves a
-partial tree under that name.
+partial tree under that name. ``checkpoint-best`` holds the weights that
+*sampled* the best-scoring iteration's rollouts -- that iteration's starting
+weights, saved before its update -- because those are the weights the reward
+measured.
 
 Advisory, recorded but not gating: ``step_descends_the_gradient``, the cosine
 between the realised delta and ``-grad`` on an audit subset of eight tensors.
@@ -527,6 +530,24 @@ def publish_checkpoint(model: Any, tok: Any, dest: Path) -> None:
         shutil.rmtree(previous)
 
 
+def update_best(best: dict[str, Any], reward_mean: float, iteration: int,
+                model: Any, tok: Any, dest: Path) -> bool:
+    """Publish ``model`` as ``checkpoint-best`` if its rollouts scored best so far.
+
+    Called after an iteration's rollouts and **before** its optimiser step,
+    so ``checkpoint-best`` holds the weights that earned the reward it is
+    ranked by: those that sampled iteration ``iteration``, i.e. the start of
+    that iteration. Saving after the step, as this once did, kept weights one
+    update past the ones measured -- never evaluated, and possibly worse.
+    """
+    if not reward_mean > best["reward_mean"]:
+        return False
+    publish_checkpoint(model, tok, dest)
+    best.update(reward_mean=reward_mean, iteration=iteration,
+                weights="as sampled at the start of this iteration, before its update")
+    return True
+
+
 def check_output_dir(out: Path) -> str | None:
     """A refusal message if ``--out`` already holds another run's artifacts.
 
@@ -835,6 +856,11 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
                 status = EXIT_FAILED
                 break
 
+            # Before the step: the reward was earned by the weights that
+            # sampled these rollouts, so those are the weights to keep.
+            update_best(best, row["reward_mean"], it, model, tok, args.out / "checkpoint-best")
+            log["best"] = dict(best)
+
             # ---- the policy-gradient step ---------------------------------
             model.config.use_cache = False
             if args.grad_checkpointing:
@@ -932,9 +958,6 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
             # Disk policy: pre, last and best only -- a checkpoint per
             # iteration costs a model's size each and adds no information.
             publish_checkpoint(model, tok, args.out / "checkpoint-last")
-            if row["reward_mean"] > best["reward_mean"]:
-                best.update(reward_mean=row["reward_mean"], iteration=it)
-                publish_checkpoint(model, tok, args.out / "checkpoint-best")
             log["best"] = dict(best)
             log["last_verified_iteration"] = it
             log["iterations"].append(row)
