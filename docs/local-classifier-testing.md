@@ -237,7 +237,9 @@ python -m aorta.cia.triage --recipe <sanitizer-recipe.yaml> --node <node>
 ```
 
 or by asking `aorta chat` to run a workload on the cluster, which reaches the
-same driver.
+same driver. For a complete, copy-pasteable walkthrough with sample workloads
+and the expected output of each, see
+[Running a CIA sample job with the classifier on top](#running-a-cia-sample-job-with-the-classifier-on-top).
 
 ### What to look for
 
@@ -282,6 +284,243 @@ A false clean is not just a delay. A healthy verdict commits Watch's file
 cursor, so a line printed once, such as a single `loss nan`, is never read
 again. That is why the NaN veto exists and why raising `clean_threshold` is the
 safe direction.
+
+## Running a CIA sample job with the classifier on top
+
+This is a start-to-finish run of the CIA pipeline (Launch, then Watch, then
+Autopsy) with the classifier switched on over it. It uses
+`python -m aorta.cia.triage`, the same driver `aorta chat` calls.
+
+### Where each part runs
+
+This decides what you install where, and it is easy to get backwards.
+
+| Part | Runs on | Needs |
+|---|---|---|
+| The workload | A compute node, through `sbatch` | Whatever the workload needs; nothing from this tier |
+| Watch (including the classifier tier and the archive) | The submit host, inside the triage process | `[cia,local-classifier]`, the weights for shadow mode, and an LLM provider |
+| Autopsy (including its classifier tier) | The submit host, inside the triage process | The same, plus `CIA_AUTOPSY_LOCAL_CLASSIFIER_*` in that process's environment |
+
+Triage calls `sbatch` and `sacct` directly, with no SSH hop, so run it on a
+Slurm submit host. The job's log and bundle go under the jobs root, which must
+be on a filesystem both the submit host and the compute node can see. The
+classifier's forward passes run on the submit host's CPU.
+
+### Prerequisites
+
+1. **An environment on the submit host.** Install ROCm torch first (see
+   [Level 2](#set-up)), then:
+
+   ```bash
+   pip install -e ".[cia,local-classifier]"
+   ```
+
+2. **An LLM provider for Watch and Autopsy.** This is independent of the
+   classifier, and the pipeline does not work without it. With the gate off,
+   Watch calls the LLM on every log delta the sanitizer regex does not answer.
+   If that call fails three times, Watch records `WATCH_ASSESSMENT_FAILED`, and
+   no shadow event or archive record is written for that delta. The agents
+   read the same settings as `aorta chat`, either from
+   `~/.config/aorta/chat.toml` (see [chat/configuration.md](chat/configuration.md))
+   or from the environment:
+
+   ```bash
+   # A local or shared vLLM endpoint
+   export AORTA_CHAT_LLM_PROVIDER=vllm
+   export AORTA_CHAT_VLLM_BASE_URL=http://<host>:8000/v1
+   export AORTA_CHAT_VLLM_MODEL=<model>
+
+   # or any OpenAI-compatible API
+   export AORTA_CHAT_LLM_PROVIDER=openai
+   export AORTA_CHAT_REMOTE_LLM_BASE_URL=<endpoint>
+   export AORTA_CHAT_REMOTE_LLM_API_KEY=<key>
+   export AORTA_CHAT_REMOTE_LLM_MODEL=<model>
+   ```
+
+   Log text Watch sends to the provider is redacted by default.
+
+3. **A separate jobs root for sample runs.** The samples below produce
+   synthetic logs. If they land in the jobs root the Level 2 corpus is built
+   from, they become training examples. Keep them apart:
+
+   ```bash
+   export CIA_JOBS_ROOT=/shared/path/cia-samples   # visible from the compute nodes
+   ```
+
+4. **Cluster settings**, as needed for your site:
+
+   | Variable | Purpose |
+   |---|---|
+   | `CIA_PARTITION` | Slurm partition, for example `interactive` |
+   | `CIA_TIME_LIMIT` | Job time limit (default `04:00:00`) |
+   | `CIA_DEMO_NODE` or `--node` | Pin to one node; leave empty to let the scheduler choose |
+   | `CIA_SBATCH_EXTRA` | Extra `#SBATCH` directives |
+   | `CIA_CONTAINER_IMAGE`, `CIA_CONTAINER_EXTRA` | Run the workload inside a container |
+
+### Turn the classifier on
+
+In the packaged `watch_config.yaml` (see [Turn it on](#turn-it-on) above):
+
+```yaml
+watch:
+  local_classifier:
+    enabled: false
+    shadow: true
+    shadow_archive_bytes: 5000000
+```
+
+In the shell that will run triage, since Autopsy runs in that process:
+
+```bash
+export CIA_AUTOPSY_LOCAL_CLASSIFIER_ENABLED=1
+# Leave CIA_AUTOPSY_LOCAL_CLASSIFIER_ESCALATION_THRESHOLD unset; see Level 4.
+```
+
+Both default to the `laya-typed-decisions` checkpoint. To use a staged
+checkpoint directory instead, set `backend:` in the YAML and
+`CIA_AUTOPSY_LOCAL_CLASSIFIER_BACKEND` to its path.
+
+### Sample 1: a healthy training log (CPU only, about 4 minutes)
+
+This is a synthetic workload that prints decreasing loss. It needs no GPU, and
+it is the best first run because every log delta it produces reaches the
+classifier: nothing in it matches the sanitizer regex. Watch polls every 60
+seconds (`poll_interval_sec`), so a four-minute job gives it about four
+deltas.
+
+```bash
+mkdir -p "$CIA_JOBS_ROOT/samples"
+cat > "$CIA_JOBS_ROOT/samples/healthy_train.py" <<'EOF'
+import time
+for step in range(1, 25):
+    print(f"step {step} loss {2.5 / step:.4f} tokens/s 1200", flush=True)
+    time.sleep(10)
+EOF
+
+python -m aorta.cia.triage --label healthy-sample \
+  --command "python3 -u $CIA_JOBS_ROOT/samples/healthy_train.py"
+```
+
+### Sample 2: a NaN partway through (CPU only, about 4 minutes)
+
+The same workload, except the loss turns into `nan` at step 12. This exercises
+the alert path: Watch should alert, assemble the bundle and start Autopsy.
+Watch's deterministic NaN scanner also stops the classifier from ever marking
+these deltas as clean.
+
+```bash
+cat > "$CIA_JOBS_ROOT/samples/nan_train.py" <<'EOF'
+import time
+for step in range(1, 25):
+    loss = "nan" if step >= 12 else f"{2.5 / step:.4f}"
+    print(f"step {step} loss {loss} tokens/s 1200", flush=True)
+    time.sleep(10)
+EOF
+
+python -m aorta.cia.triage --label nan-sample \
+  --command "python3 -u $CIA_JOBS_ROOT/samples/nan_train.py"
+```
+
+### Sample 3: a real GPU run with a sanitizer recipe
+
+This runs the committed racy ConSan repro on a gfx950 node. It tests the whole
+chain on real hardware, and Autopsy's category tier gets real sanitizer
+evidence. The sanitizers need your RocJITsu build passed into the job:
+
+```bash
+python -m aorta.cia.triage --label consan-racy --arch gfx950 \
+  --recipe recipes/sanitizers/daily-consan-racy.yaml \
+  --env ROCJITSU_BUILD=<path-to-rocjitsu-build> \
+  --env LD_PRELOAD=<rocjitsu-preload-library>
+```
+
+This sample is a weak test of Watch's classifier. The line that decides the
+run is the sanitizer's own `[sanitizer] consan: verdict=… state=…` summary,
+which Watch's regex answers before the classifier tier is consulted. The
+classifier only sees the earlier deltas, such as build and progress output.
+`recipes/sanitizers/daily-consan-clean.yaml` is the clean counterpart. For a
+real training job, pass its normal launch command with `--command`.
+
+### What triage prints
+
+Progress lines (`[triage] …`, including `── Launch ──`, `── Watch ──` and
+`── Autopsy … ──`) go to stderr. Watch's per-poll `[watch] …` lines and a final
+JSON result go to stdout. The result includes `ok`, `job_id`, `slurm_job_id`,
+`job_dir`, `watch_alerted`, `watch_tail` and an `autopsy` summary. The exit
+status is 0 when `ok` is true.
+
+Every run ends with a `report.json`. If Watch alerted, Watch produced it.
+Otherwise triage assembled the bundle and ran Autopsy itself after the job
+finished (`── Autopsy (direct) ──`).
+
+### Inspect the job directory
+
+```bash
+J=$(ls -td "$CIA_JOBS_ROOT"/cia-* | head -1)   # the newest run
+ls "$J" "$J/bundle"
+```
+
+| File | What it is |
+|---|---|
+| `job.json`, `launch.sbatch` | The job record and the batch script that was submitted |
+| `watch.log` | The workload's stdout and stderr, which is what Watch reads |
+| `events.jsonl` | Watch's verdicts (`watchdog_ok` / `watchdog_alert`), each followed by a `watchdog_shadow` line |
+| `local_classifier_clean_deltas.jsonl` | Deltas that did not alert, redacted and truncated (present when the archive is on) |
+| `bundle/manifest.yaml`, `bundle/logs/watch.stderr.log` | The evidence bundle Autopsy reads |
+| `bundle/report.json` | Autopsy's verdict |
+
+What the classifier said on each poll, next to what Watch used:
+
+```bash
+jq -c 'select(.event_type=="watchdog_shadow")
+       | {model_id, clean_probability, gated, vetoed, signal, signal_probability,
+          watch_signal, watch_healthy, clean_caveat}' "$J/events.jsonl"
+```
+
+What the archive kept:
+
+```bash
+jq -c '{healthy, signal, delta_chars, truncated}' "$J/local_classifier_clean_deltas.jsonl"
+```
+
+Autopsy's verdict and where its confidence came from:
+
+```bash
+jq '{category, confidence, confidence_source, local_classifier}' "$J/bundle/report.json"
+```
+
+### What to expect
+
+| | Sample 1 (healthy) | Sample 2 (NaN) |
+|---|---|---|
+| `watch_alerted` | `false` | `true` |
+| `events.jsonl` | `watchdog_ok` lines, each followed by `watchdog_shadow` | `watchdog_ok` for the early deltas, then `watchdog_alert` with `WATCH_NUMERIC_NAN` |
+| `gated` in shadow events | `true` whenever `clean_probability` reached `clean_threshold` | `false` on the NaN deltas; `vetoed` is `true` wherever the classifier was confident but the NaN scanner overruled it |
+| Archive | One record per poll | Records for the polls before the NaN |
+| `report.json` | From the direct Autopsy | From Watch's Autopsy |
+| `report.json` classifier fields | A `local_classifier` block with `model_id`, `bucket` (`choice:11+`), `clamped` and `caveat`, and `confidence_source.source` of `local_classifier` | The same |
+
+The categories and probabilities themselves come from the models and are not
+fixed. Treat these samples as a test of the plumbing. They show that every
+tier ran, fell back, or disclosed what it should, and they say nothing about
+whether the classifier is good. That question belongs to Level 2, on real jobs.
+
+### If a tier did not run
+
+| Symptom | Likely cause |
+|---|---|
+| No `watchdog_shadow` lines and one `[watch] the local-classifier tier failed…` line | `[local-classifier]` is not installed on the submit host, or the weights could not be loaded |
+| No `watchdog_shadow` lines and no error | `shadow` is not `true` in the YAML that was actually read (check the path from [Turn it on](#turn-it-on)) |
+| `WATCH_ASSESSMENT_FAILED` events | No LLM provider is configured, or it is unreachable |
+| No `local_classifier` block in `report.json` | `CIA_AUTOPSY_LOCAL_CLASSIFIER_ENABLED` was not set in the triage process, or the tier failed and Autopsy fell back |
+| `sbatch not found on PATH` | Triage is not running on a Slurm submit host |
+
+### From samples to real data
+
+Once the samples show every tier working, point `CIA_JOBS_ROOT` back at the
+jobs root your real runs use, and leave the archive and shadow mode on across
+real jobs. Those job directories are what
+`python -m aorta.local_classifier corpus watch` reads in Level 2.
 
 ## Level 4: each integration with a real model
 
