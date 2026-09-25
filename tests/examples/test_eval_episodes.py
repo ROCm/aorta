@@ -239,6 +239,9 @@ DIGESTS = {"a": "digest-a", "b": "digest-b"}
 BACKEND = {"torch": "2.x", "preferred_blas_library": "backend-a", "env": {}}
 #: The scorer identity of this checkout, in these tests.
 SCORER = {"sha256": "scorer-a", "files": 3}
+#: The checkpoint identity of what this run would load, in these tests.
+WEIGHTS = {"weights": {"sha256": "w-a", "files": 2, "bytes": 8},
+           "tokenizer": {"sha256": "t-a", "files": 1, "bytes": 4}}
 
 
 def column_file(tmp_path: Path, **config) -> Path:
@@ -247,6 +250,7 @@ def column_file(tmp_path: Path, **config) -> Path:
         "episodes_per_scenario": 64, "max_episode_steps": 8, "temperature": 0.7,
         "top_p": 0.95, "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923,
         "scenarios": ["a"], "corpus": dict(DIGESTS), "blas_backend": dict(BACKEND), "scorer": dict(SCORER),
+        "checkpoint": dict(WEIGHTS),
     }
     base.update(config)
     path = tmp_path / "before.json"
@@ -256,7 +260,7 @@ def column_file(tmp_path: Path, **config) -> Path:
 
 def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
     reused = eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                           DIGESTS, BACKEND, SCORER)
+                                           DIGESTS, BACKEND, SCORER, WEIGHTS)
     assert reused["config"]["init_from"] == "/ckpt/last"
 
 
@@ -268,21 +272,21 @@ def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
 def test_a_column_written_under_different_settings_is_refused(tmp_path, field, value):
     with pytest.raises(ValueError, match=field):
         eval_episodes.reusable_column(column_file(tmp_path, **{field: value}), "/ckpt/last",
-                                      _Args(), DIGESTS, BACKEND, SCORER)
+                                      _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
 
 
 def test_the_base_model_column_matches_by_model_name(tmp_path):
     args = _Args()
     assert eval_episodes.column_source(None, args) == "Qwen/Qwen3-8B"
     assert eval_episodes.reusable_column(column_file(tmp_path, init_from="Qwen/Qwen3-8B"),
-                                         "Qwen/Qwen3-8B", args, DIGESTS, BACKEND, SCORER)
+                                         "Qwen/Qwen3-8B", args, DIGESTS, BACKEND, SCORER, WEIGHTS)
 
 
 def test_a_narrowed_scenario_set_is_checked_against_the_flag(tmp_path):
     path = column_file(tmp_path, scenarios=["a", "b"])
     with pytest.raises(ValueError, match="--scenarios asked for"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS, BACKEND, SCORER)
-    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS, BACKEND, SCORER)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS, BACKEND, SCORER, WEIGHTS)
+    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS, BACKEND, SCORER, WEIGHTS)
 
 
 def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
@@ -293,7 +297,7 @@ def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
     scenarios = [SimpleNamespace(scenario_id="a", digest="digest-a"),
                  SimpleNamespace(scenario_id="b", digest="digest-b")]
     payload = eval_episodes._column_payload(_Args(), scenarios, [], [], Path("/ckpt/last"),
-                                            BACKEND, SCORER)
+                                            BACKEND, SCORER, WEIGHTS)
     assert payload["config"]["scorer"] == SCORER
     assert payload["config"]["blas_backend"] == BACKEND
     assert payload["config"]["corpus"] == DIGESTS
@@ -304,7 +308,7 @@ def test_a_column_computed_with_another_blas_backend_is_refused(tmp_path):
     other = dict(BACKEND, preferred_blas_library="backend-b")
     with pytest.raises(ValueError, match="BLAS backend"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
-                                      other, SCORER)
+                                      other, SCORER, WEIGHTS)
 
 
 def test_a_column_that_records_no_blas_backend_is_refused(tmp_path):
@@ -313,7 +317,7 @@ def test_a_column_that_records_no_blas_backend_is_refused(tmp_path):
     del doc["config"]["blas_backend"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no BLAS backend"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
 
 
 def test_a_blas_environment_variable_is_part_of_the_backend(monkeypatch):
@@ -341,20 +345,20 @@ def test_a_column_that_records_no_corpus_is_refused(tmp_path):
     del doc["config"]["corpus"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no corpus digest"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
 
 
 def test_a_column_scored_against_other_archives_is_refused(tmp_path):
     """Every setting matches; the ground truth does not."""
     with pytest.raises(ValueError, match=r"different archives for \['a'\]"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                      {"a": "another-digest", "b": "digest-b"}, BACKEND, SCORER)
+                                      {"a": "another-digest", "b": "digest-b"}, BACKEND, SCORER, WEIGHTS)
 
 
 def test_only_the_scenarios_the_column_covers_are_checked(tmp_path):
     """Narrowness: a changed archive the column never scored is not its business."""
     assert eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                         {"a": "digest-a", "b": "changed"}, BACKEND, SCORER)
+                                         {"a": "digest-a", "b": "changed"}, BACKEND, SCORER, WEIGHTS)
 
 
 class ReachedError(Exception):
@@ -367,9 +371,10 @@ def _stub_evaluate(monkeypatch):
     monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
     monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
     monkeypatch.setattr(eval_episodes, "scorer_identity", lambda: dict(SCORER))
+    monkeypatch.setattr(eval_episodes, "checkpoint_identity", lambda *_a: dict(WEIGHTS))
     calls = []
 
-    def fake(checkpoint, args, done=None, on_progress=None):
+    def fake(checkpoint, args, done=None, on_progress=None, weights=None):
         calls.append((checkpoint, done))
         raise ReachedError
 
@@ -461,7 +466,7 @@ def test_a_column_scored_by_other_code_is_refused(tmp_path):
     other = dict(SCORER, sha256="scorer-b")
     with pytest.raises(ValueError, match="scored by different code"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
-                                      BACKEND, other)
+                                      BACKEND, other, WEIGHTS)
 
 
 def test_a_column_that_records_no_scorer_is_refused(tmp_path):
@@ -470,7 +475,7 @@ def test_a_column_that_records_no_scorer_is_refused(tmp_path):
     del doc["config"]["scorer"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no scorer identity"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
 
 
 def test_columns_scored_by_different_code_are_not_compared():
@@ -545,3 +550,162 @@ def test_the_real_scorer_covers_the_reward_the_loop_and_the_prompts():
             "rl:train_grpo_step", "rl:eval_episodes",
             "aorta.agent.loop", "aorta.agent.llm", "aorta.agent.policy"} <= keys
     assert "rl:verify_checkpoint_delta" not in keys
+
+
+# ---------------------------------------------------------------------------
+# the checkpoint identity: new weights at the same path are not the same column
+# ---------------------------------------------------------------------------
+
+def _tree(root: Path, weights: bytes = b"0123") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "model.safetensors").write_bytes(weights)
+    (root / "config.json").write_text("{}")
+    return root
+
+
+def test_an_overwrite_with_the_same_size_and_mtime_changes_the_identity(tmp_path):
+    """The case a (path, size, mtime) cache would miss: `cp -p` of other weights."""
+    import os
+
+    tree = _tree(tmp_path / "ckpt")
+    before = eval_episodes.tree_identity(tree)
+    stat = (tree / "model.safetensors").stat()
+    (tree / "model.safetensors").write_bytes(b"9876")
+    os.utime(tree / "model.safetensors", ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert (tree / "model.safetensors").stat().st_size == stat.st_size
+    assert eval_episodes.tree_identity(tree) != before
+
+
+def test_an_untouched_tree_has_the_same_identity_wherever_it_is(tmp_path):
+    """Narrowness: reading is not a change, and neither is the directory's name."""
+    a = eval_episodes.tree_identity(_tree(tmp_path / "one"))
+    assert eval_episodes.tree_identity(tmp_path / "one") == a
+    assert eval_episodes.tree_identity(_tree(tmp_path / "elsewhere" / "two")) == a
+    assert a["files"] == 2 and a["bytes"] == 6
+
+
+def test_a_renamed_or_added_file_changes_the_identity(tmp_path):
+    tree = _tree(tmp_path / "ckpt")
+    before = eval_episodes.tree_identity(tree)
+    (tree / "config.json").rename(tree / "generation_config.json")
+    assert eval_episodes.tree_identity(tree) != before
+
+
+def test_the_identity_reads_every_chunk(tmp_path):
+    tree = _tree(tmp_path / "ckpt", weights=bytes(100))
+    before = eval_episodes.tree_identity(tree, chunk=7)
+    (tree / "model.safetensors").write_bytes(bytes(99) + b"\x01")
+    assert eval_episodes.tree_identity(tree, chunk=7) != before
+
+
+def test_a_column_computed_from_other_weights_is_refused(tmp_path):
+    other = {**WEIGHTS, "weights": dict(WEIGHTS["weights"], sha256="w-b")}
+    with pytest.raises(ValueError, match="different weights"):
+        eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
+                                      BACKEND, SCORER, other)
+
+
+def test_a_column_that_records_no_checkpoint_identity_is_refused(tmp_path):
+    path = column_file(tmp_path)
+    doc = json.loads(path.read_text())
+    del doc["config"]["checkpoint"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="records no checkpoint identity"):
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER,
+                                      WEIGHTS)
+
+
+def test_same_path_new_weights_is_refused_end_to_end(tmp_path, monkeypatch):
+    """The review's case, through the real identity: a finished column is reused
+    while the checkpoint is untouched, and refused once the path holds new weights."""
+    import episode_env
+
+    ckpt, model = _tree(tmp_path / "ckpt"), _tree(tmp_path / "base", weights=b"base")
+    args = _Args(model=str(model))
+    monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
+    monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
+    monkeypatch.setattr(eval_episodes, "scorer_identity", lambda: dict(SCORER))
+    monkeypatch.setattr(eval_episodes, "evaluate",
+                        lambda *a, **k: pytest.fail("evaluated a finished column"))
+    path = column_file(tmp_path, init_from=str(ckpt), model=str(model),
+                       checkpoint=eval_episodes.checkpoint_identity(ckpt, args))
+    assert eval_episodes._column(path, ckpt, "after", args)["config"]["init_from"] == str(ckpt)
+    (ckpt / "model.safetensors").write_bytes(b"4567")
+    with pytest.raises(ValueError, match="different weights"):
+        eval_episodes._column(path, ckpt, "after", args)
+
+
+def test_the_tokenizer_is_part_of_the_identity(tmp_path):
+    ckpt, model = _tree(tmp_path / "ckpt"), _tree(tmp_path / "base")
+    args = _Args(model=str(model))
+    before = eval_episodes.checkpoint_identity(ckpt, args)
+    (model / "config.json").write_text('{"changed": true}')
+    after = eval_episodes.checkpoint_identity(ckpt, args)
+    assert after["weights"] == before["weights"] and after["tokenizer"] != before["tokenizer"]
+
+
+def test_a_written_column_records_its_checkpoint_identity():
+    from types import SimpleNamespace
+
+    payload = eval_episodes._column_payload(
+        _Args(), [SimpleNamespace(scenario_id="a", digest="digest-a")], [], [],
+        Path("/ckpt/last"), BACKEND, SCORER, WEIGHTS)
+    assert payload["config"]["checkpoint"] == WEIGHTS
+
+
+# ---------------------------------------------------------------------------
+# the paired statistic, beside the unpaired one
+# ---------------------------------------------------------------------------
+
+def paired_group(scenario_id, hits):
+    g = group(scenario_id, n=len(hits), step1_hits=sum(hits))
+    g["step1_hits"] = list(hits)
+    return g
+
+
+def test_mcnemar_uses_only_the_discordant_pairs():
+    assert eval_episodes.discordant_pairs([0, 0, 1, 1], [1, 0, 1, 0]) == (1, 1)
+    assert eval_episodes.mcnemar_z(9, 1) == pytest.approx(8 / 10**0.5)
+    assert eval_episodes.mcnemar_z(0, 0) == 0.0
+    with pytest.raises(ValueError, match="cannot pair"):
+        eval_episodes.discordant_pairs([0, 1], [0])
+
+
+def test_the_paired_z_is_reported_beside_the_unpaired_one():
+    """Same marginals, different pairing: the unpaired z cannot tell these apart."""
+    before = [1] * 4 + [0] * 4
+    shifted = eval_episodes.compare(run([paired_group("a", before)]),
+                                    run([paired_group("a", [1] * 6 + [0] * 2)]))
+    crossed = eval_episodes.compare(run([paired_group("a", before)]),
+                                    run([paired_group("a", [0] * 2 + [1] * 6)]))
+    assert shifted["pooled_step1_z"] == crossed["pooled_step1_z"]
+    assert (shifted["pooled_step1_gained"], shifted["pooled_step1_lost"]) == (2, 0)
+    assert (crossed["pooled_step1_gained"], crossed["pooled_step1_lost"]) == (4, 2)
+    assert shifted["pooled_step1_paired_z"] == pytest.approx(2 / 2**0.5)
+    assert crossed["pooled_step1_paired_z"] == pytest.approx(2 / 6**0.5)
+
+
+def test_pairs_are_summed_within_scenarios_never_across_them():
+    result = eval_episodes.compare(
+        run([paired_group("a", [0, 0]), paired_group("b", [1, 1])]),
+        run([paired_group("a", [1, 1]), paired_group("b", [1, 0])]))
+    rows = {r["scenario_id"]: r for r in result["scenarios"]}
+    assert (rows["a"]["step1_gained"], rows["a"]["step1_lost"]) == (2, 0)
+    assert (rows["b"]["step1_gained"], rows["b"]["step1_lost"]) == (0, 1)
+    assert (result["pooled_step1_gained"], result["pooled_step1_lost"]) == (2, 1)
+
+
+def test_an_unresolvable_scenario_adds_no_pairs():
+    result = eval_episodes.compare(
+        run([paired_group("a", [0, 1]), {**group("u", n=2, step1_hits=None), "step1_hits": [0, 1]}]),
+        run([paired_group("a", [1, 1]), {**group("u", n=2, step1_hits=None), "step1_hits": [1, 0]}]))
+    assert (result["pooled_step1_gained"], result["pooled_step1_lost"]) == (1, 0)
+
+
+def test_a_column_without_per_episode_outcomes_has_no_paired_z(capsys):
+    """A legacy column reports the paired statistic as unavailable, not as zero."""
+    result = eval_episodes.compare(run([group("a")]), run([paired_group("a", [1] * 8)]))
+    assert result["pooled_step1_paired_z"] is None
+    assert result["scenarios"][0]["step1_paired_z"] is None
+    eval_episodes.print_comparison(result)
+    assert "paired (McNemar) z            unavailable" in capsys.readouterr().out

@@ -1029,6 +1029,10 @@ def rollout_scenario(
         "mean_cells": round(sum(e.cells_spent for e in episodes) / n, 3),
         "terminals": terminals,
         "events": events,
+        # Per episode, in episode order: whether step 1 named a resolver. What a
+        # paired comparison of two columns needs, since the counts in `events`
+        # have lost which episode was which.
+        "step1_hits": [int(s.fired("resolver_named_on_step_1")) for s in scores],
         # ⚠ Two rates, answering different questions. `step1` is the one to
         # compare across checkpoints: step 1 is the same prompt and menu for
         # every episode. `episode` is NOT comparable with it -- an episode

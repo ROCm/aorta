@@ -49,6 +49,7 @@ import logging
 import math
 import os
 import sys
+import time
 import zlib
 from pathlib import Path
 from typing import Any
@@ -185,6 +186,49 @@ def scorer_identity(here: Path | None = None, package: Path | None = None) -> di
     return {"sha256": digest.hexdigest(), "files": len(files)}
 
 
+def tree_identity(root: Path, chunk: int = 1 << 24) -> dict[str, Any]:
+    """A sha256 over every file under ``root``: relative path, then full contents.
+
+    The whole content, read once, rather than headers or a cache keyed on
+    (path, size, mtime): a header digest misses a retrain that keeps shapes
+    and dtypes, and ``cp -p`` or ``rsync -a`` carries size and mtime over to
+    different bytes. A 31 GiB tree costs minutes against an evaluation that
+    costs well over twenty, and is paid once per column.
+    """
+    digest = hashlib.sha256()
+    files = total = 0
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        with open(path, "rb") as handle:
+            while block := handle.read(chunk):
+                digest.update(block)
+                total += len(block)
+        digest.update(b"\0")
+        files += 1
+    return {"sha256": digest.hexdigest(), "files": files, "bytes": total}
+
+
+def _local_tree(name_or_path: str) -> Path:
+    """The directory ``from_pretrained(..., local_files_only=True)`` would read."""
+    if Path(name_or_path).is_dir():
+        return Path(name_or_path)
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(name_or_path, local_files_only=True))
+
+
+def checkpoint_identity(checkpoint: Path | None, args: argparse.Namespace) -> dict[str, Any]:
+    """What a column's weights and tokenizer were, by content.
+
+    ``init_from`` is only a path string; new weights written at the same path
+    keep it. Both trees are hashed because both are loaded: the weights from
+    the checkpoint, the tokenizer from ``--model``.
+    """
+    weights = tree_identity(_local_tree(column_source(checkpoint, args)))
+    tokenizer = tree_identity(_local_tree(args.model))
+    return {"weights": weights, "tokenizer": tokenizer}
+
+
 def two_proportion_z(hits_a: int, n_a: int, hits_b: int, n_b: int) -> float:
     """Pooled two-proportion z for (b - a). 0.0 when it is undefined.
 
@@ -201,6 +245,30 @@ def two_proportion_z(hits_a: int, n_a: int, hits_b: int, n_b: int) -> float:
     if var <= 0.0:
         return 0.0
     return ((hits_b / n_b) - (hits_a / n_a)) / math.sqrt(var)
+
+
+def discordant_pairs(before: list[int], after: list[int]) -> tuple[int, int]:
+    """(missed before and hit after, hit before and missed after) over paired episodes."""
+    if len(before) != len(after):
+        raise ValueError(f"cannot pair {len(before)} episodes with {len(after)}")
+    gained = sum(1 for b, a in zip(before, after, strict=True) if not b and a)
+    lost = sum(1 for b, a in zip(before, after, strict=True) if b and not a)
+    return gained, lost
+
+
+def mcnemar_z(gained: int, lost: int) -> float:
+    """McNemar's z for (after - before) on paired binary outcomes; 0.0 when undefined.
+
+    The columns are paired: episode ``i`` of a scenario starts from the same
+    sampling seed in both, so its two outcomes are not independent draws and
+    :func:`two_proportion_z`'s variance does not describe them. McNemar uses
+    only the discordant pairs and assumes nothing about their correlation --
+    only that the pairs are exchangeable across ``i``. Uncorrected normal
+    approximation, so it is on the same scale as the unpaired z.
+    """
+    if gained + lost == 0:
+        return 0.0
+    return (gained - lost) / math.sqrt(gained + lost)
 
 
 def step1_counts(group: dict[str, Any]) -> tuple[int, int]:
@@ -300,16 +368,27 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
 
     rows = []
     pooled = [0, 0, 0, 0]
+    # Paired only where both columns kept per-episode outcomes; a column that
+    # predates `step1_hits` leaves the paired statistic unavailable, not zero.
+    paired = all("step1_hits" in a[s] and "step1_hits" in b[s] for s in a)
+    discordant = [0, 0]
     for scenario in sorted(a):
         ha, na = step1_counts(a[scenario])
         hb, nb = step1_counts(b[scenario])
         pooled = [pooled[0] + ha, pooled[1] + na, pooled[2] + hb, pooled[3] + nb]
+        gained = lost = None
+        if paired and na:
+            gained, lost = discordant_pairs(a[scenario]["step1_hits"], b[scenario]["step1_hits"])
+            discordant = [discordant[0] + gained, discordant[1] + lost]
         rows.append({
             "scenario_id": scenario,
             "resolvable": na > 0,
             "step1_before": (ha / na) if na else None,
             "step1_after": (hb / nb) if nb else None,
             "step1_z": two_proportion_z(ha, na, hb, nb),
+            "step1_gained": gained,
+            "step1_lost": lost,
+            "step1_paired_z": None if gained is None else mcnemar_z(gained, lost),
             "reward_before": a[scenario]["reward_mean"],
             "reward_after": b[scenario]["reward_mean"],
             "converged_before": a[scenario]["converged_rate"],
@@ -325,6 +404,11 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         "pooled_step1_before": (pooled[0] / pooled[1]) if pooled[1] else None,
         "pooled_step1_after": (pooled[2] / pooled[3]) if pooled[3] else None,
         "pooled_step1_z": two_proportion_z(*pooled),
+        # Stratified by scenario: discordant pairs are summed across scenarios,
+        # never paired across them.
+        "pooled_step1_gained": discordant[0] if paired else None,
+        "pooled_step1_lost": discordant[1] if paired else None,
+        "pooled_step1_paired_z": mcnemar_z(*discordant) if paired else None,
         # The resolvable-only mean is quoted apart on purpose: an unresolvable
         # scenario can only score by reaching the unresolvable terminal, so a
         # corpus mean that folds it in moves for reasons unrelated to resolving.
@@ -354,6 +438,12 @@ def print_comparison(result: dict[str, Any]) -> None:
     print()
     print(f"  pooled step-1 resolver rate  {_fmt(result['pooled_step1_before'], '.3f')} -> "
           f"{_fmt(result['pooled_step1_after'], '.3f')}  z = {result['pooled_step1_z']:+.2f}")
+    if result.get("pooled_step1_paired_z") is None:
+        print("  paired (McNemar) z            unavailable: a column has no per-episode outcomes")
+    else:
+        print(f"  paired (McNemar) z            {result['pooled_step1_paired_z']:+.2f}  "
+              f"({result['pooled_step1_gained']} gained, {result['pooled_step1_lost']} lost "
+              "of the paired episodes)")
     print(f"  mean reward, all scenarios   {_fmt(result['reward_before'], '+.3f')} -> "
           f"{_fmt(result['reward_after'], '+.3f')}")
     print(f"  mean reward, resolvable only {_fmt(result['resolvable_reward_before'], '+.3f')}"
@@ -417,6 +507,7 @@ def reusable_column(
     digests: dict[str, str],
     backend: dict[str, Any],
     scorer: dict[str, Any],
+    weights: dict[str, Any],
 ) -> dict[str, Any]:
     """Load a column already on disk, or refuse it. Never silently recomputes.
 
@@ -449,6 +540,9 @@ def reusable_column(
     the prompt has changed; the column's ``groups`` then carry rewards from
     code that no longer exists, so a column scored by other code, or one that
     records none, is refused.
+
+    ``weights`` is :func:`checkpoint_identity` of what this run would load:
+    new weights written at the same path keep ``init_from`` and change this.
     """
     column = json.loads(path.read_text())
     want = _config(args, source)
@@ -461,6 +555,17 @@ def reusable_column(
         raise ValueError(
             f"{path} was produced under different settings and cannot be reused -- "
             + "; ".join(differing) + ". Point --out somewhere else."
+        )
+    recorded_weights = column["config"].get("checkpoint")
+    if recorded_weights is None:
+        raise ValueError(
+            f"{path} records no checkpoint identity, so whether it was computed from the "
+            "weights at that path now cannot be checked. Point --out somewhere else."
+        )
+    if recorded_weights != weights:
+        raise ValueError(
+            f"{path} was computed from different weights than {source} now holds "
+            f"(recorded {recorded_weights!r}, now {weights!r}). Point --out somewhere else."
         )
     recorded_scorer = column["config"].get("scorer")
     if recorded_scorer is None:
@@ -534,6 +639,7 @@ def _column_payload(
     checkpoint: Path | None,
     backend: dict[str, Any] | None = None,
     scorer: dict[str, Any] | None = None,
+    weights: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The on-disk shape of one column.
 
@@ -546,6 +652,7 @@ def _column_payload(
     config["corpus"] = {s.scenario_id: s.digest for s in scenarios}
     config["blas_backend"] = blas_backend() if backend is None else backend
     config["scorer"] = scorer_identity() if scorer is None else scorer
+    config["checkpoint"] = weights
     return {"config": config, "groups": groups, "wire": wire}
 
 
@@ -554,6 +661,7 @@ def evaluate(
     args: argparse.Namespace,
     done: dict[str, Any] | None = None,
     on_progress: Any = None,
+    weights: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One checkpoint, N episodes per scenario, no gradient anywhere.
 
@@ -572,6 +680,8 @@ def evaluate(
 
     only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
     scenarios = episode_env.load_corpus(args.corpus_root, only=only)
+    if weights is None:
+        weights = checkpoint_identity(checkpoint, args)
     carried = list((done or {}).get("groups", []))
     carried_wire = list((done or {}).get("wire", []))
     finished = {g["scenario_id"] for g in carried}
@@ -580,7 +690,8 @@ def evaluate(
         print(f"[resume] {len(finished)} scenario(s) already done: {sorted(finished)}",
               flush=True)
     if not todo:
-        return _column_payload(args, scenarios, carried, carried_wire, checkpoint)
+        return _column_payload(args, scenarios, carried, carried_wire, checkpoint,
+                               weights=weights)
 
     source = column_source(checkpoint, args)
     print(f"[load] {source} in {args.param_dtype}", flush=True)
@@ -620,8 +731,10 @@ def evaluate(
         carried.extend(groups)
         carried_wire.extend(wire)
         if on_progress is not None:
-            on_progress(_column_payload(args, scenarios, carried, carried_wire, checkpoint))
-    return _column_payload(args, scenarios, carried, carried_wire, checkpoint)
+            on_progress(_column_payload(args, scenarios, carried, carried_wire, checkpoint,
+                               weights=weights))
+    return _column_payload(args, scenarios, carried, carried_wire, checkpoint,
+                               weights=weights)
 
 
 def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Namespace) -> dict[str, Any]:
@@ -631,6 +744,11 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
     indistinguishable in the output from one that cost a GPU-hour.
     """
     source = column_source(checkpoint, args)
+    started = time.time()
+    weights = checkpoint_identity(checkpoint, args)
+    print(f"[hash] {label} weights {weights['weights']['sha256'][:12]} "
+          f"({weights['weights']['bytes'] / 2**30:.1f} GiB in {time.time() - started:.0f}s)",
+          flush=True)
     done = None
     if path.exists():
         import episode_env
@@ -638,7 +756,7 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
         only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
         done = reusable_column(
             path, source, args, episode_env.corpus_digests(args.corpus_root, only=only),
-            blas_backend(), scorer_identity(),
+            blas_backend(), scorer_identity(), weights,
         )
         covered = {g["scenario_id"] for g in done["groups"]}
         if not set(done["config"]["scenarios"]) - covered:
@@ -651,6 +769,7 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
     column = evaluate(
         checkpoint, args, done,
         on_progress=lambda c: path.write_text(json.dumps(c, indent=2)),
+        weights=weights,
     )
     path.write_text(json.dumps(column, indent=2))
     return column
