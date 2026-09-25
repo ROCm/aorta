@@ -237,6 +237,8 @@ class _Args:
 DIGESTS = {"a": "digest-a", "b": "digest-b"}
 #: The BLAS backend this process reports, in these tests.
 BACKEND = {"torch": "2.x", "preferred_blas_library": "backend-a", "env": {}}
+#: The scorer identity of this checkout, in these tests.
+SCORER = {"sha256": "scorer-a", "files": 3}
 
 
 def column_file(tmp_path: Path, **config) -> Path:
@@ -244,7 +246,7 @@ def column_file(tmp_path: Path, **config) -> Path:
         "init_from": "/ckpt/last", "model": "Qwen/Qwen3-8B", "param_dtype": "float32",
         "episodes_per_scenario": 64, "max_episode_steps": 8, "temperature": 0.7,
         "top_p": 0.95, "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923,
-        "scenarios": ["a"], "corpus": dict(DIGESTS), "blas_backend": dict(BACKEND),
+        "scenarios": ["a"], "corpus": dict(DIGESTS), "blas_backend": dict(BACKEND), "scorer": dict(SCORER),
     }
     base.update(config)
     path = tmp_path / "before.json"
@@ -254,7 +256,7 @@ def column_file(tmp_path: Path, **config) -> Path:
 
 def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
     reused = eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                           DIGESTS, BACKEND)
+                                           DIGESTS, BACKEND, SCORER)
     assert reused["config"]["init_from"] == "/ckpt/last"
 
 
@@ -266,21 +268,21 @@ def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
 def test_a_column_written_under_different_settings_is_refused(tmp_path, field, value):
     with pytest.raises(ValueError, match=field):
         eval_episodes.reusable_column(column_file(tmp_path, **{field: value}), "/ckpt/last",
-                                      _Args(), DIGESTS, BACKEND)
+                                      _Args(), DIGESTS, BACKEND, SCORER)
 
 
 def test_the_base_model_column_matches_by_model_name(tmp_path):
     args = _Args()
     assert eval_episodes.column_source(None, args) == "Qwen/Qwen3-8B"
     assert eval_episodes.reusable_column(column_file(tmp_path, init_from="Qwen/Qwen3-8B"),
-                                         "Qwen/Qwen3-8B", args, DIGESTS, BACKEND)
+                                         "Qwen/Qwen3-8B", args, DIGESTS, BACKEND, SCORER)
 
 
 def test_a_narrowed_scenario_set_is_checked_against_the_flag(tmp_path):
     path = column_file(tmp_path, scenarios=["a", "b"])
     with pytest.raises(ValueError, match="--scenarios asked for"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS, BACKEND)
-    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS, BACKEND)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS, BACKEND, SCORER)
+    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS, BACKEND, SCORER)
 
 
 def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
@@ -291,7 +293,8 @@ def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
     scenarios = [SimpleNamespace(scenario_id="a", digest="digest-a"),
                  SimpleNamespace(scenario_id="b", digest="digest-b")]
     payload = eval_episodes._column_payload(_Args(), scenarios, [], [], Path("/ckpt/last"),
-                                            BACKEND)
+                                            BACKEND, SCORER)
+    assert payload["config"]["scorer"] == SCORER
     assert payload["config"]["blas_backend"] == BACKEND
     assert payload["config"]["corpus"] == DIGESTS
     assert payload["config"]["scenarios"] == ["a", "b"]
@@ -301,7 +304,7 @@ def test_a_column_computed_with_another_blas_backend_is_refused(tmp_path):
     other = dict(BACKEND, preferred_blas_library="backend-b")
     with pytest.raises(ValueError, match="BLAS backend"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
-                                      other)
+                                      other, SCORER)
 
 
 def test_a_column_that_records_no_blas_backend_is_refused(tmp_path):
@@ -310,7 +313,7 @@ def test_a_column_that_records_no_blas_backend_is_refused(tmp_path):
     del doc["config"]["blas_backend"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no BLAS backend"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER)
 
 
 def test_a_blas_environment_variable_is_part_of_the_backend(monkeypatch):
@@ -338,20 +341,20 @@ def test_a_column_that_records_no_corpus_is_refused(tmp_path):
     del doc["config"]["corpus"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no corpus digest"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER)
 
 
 def test_a_column_scored_against_other_archives_is_refused(tmp_path):
     """Every setting matches; the ground truth does not."""
     with pytest.raises(ValueError, match=r"different archives for \['a'\]"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                      {"a": "another-digest", "b": "digest-b"}, BACKEND)
+                                      {"a": "another-digest", "b": "digest-b"}, BACKEND, SCORER)
 
 
 def test_only_the_scenarios_the_column_covers_are_checked(tmp_path):
     """Narrowness: a changed archive the column never scored is not its business."""
     assert eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                         {"a": "digest-a", "b": "changed"}, BACKEND)
+                                         {"a": "digest-a", "b": "changed"}, BACKEND, SCORER)
 
 
 class ReachedError(Exception):
@@ -363,6 +366,7 @@ def _stub_evaluate(monkeypatch):
 
     monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
     monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
+    monkeypatch.setattr(eval_episodes, "scorer_identity", lambda: dict(SCORER))
     calls = []
 
     def fake(checkpoint, args, done=None, on_progress=None):
@@ -446,3 +450,98 @@ def test_the_sampling_defaults_are_the_trainers():
     for field in ("temperature", "top_p", "max_new_tokens", "gen_batch", "max_episode_steps"):
         assert getattr(evaluator, field) == getattr(trainer, field), field
     assert evaluator.seed != trainer.seed
+
+
+# ---------------------------------------------------------------------------
+# the scorer identity: a column is reused only under the code that scored it
+# ---------------------------------------------------------------------------
+
+def test_a_column_scored_by_other_code_is_refused(tmp_path):
+    """Settings, corpus and backend all match; the reward does not."""
+    other = dict(SCORER, sha256="scorer-b")
+    with pytest.raises(ValueError, match="scored by different code"):
+        eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
+                                      BACKEND, other)
+
+
+def test_a_column_that_records_no_scorer_is_refused(tmp_path):
+    path = column_file(tmp_path)
+    doc = json.loads(path.read_text())
+    del doc["config"]["scorer"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="records no scorer identity"):
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER)
+
+
+def test_columns_scored_by_different_code_are_not_compared():
+    with pytest.raises(ValueError, match="scored by different code"):
+        eval_episodes.compare(run([group("a")], scorer={"sha256": "x"}),
+                              run([group("a")], scorer={"sha256": "y"}))
+    with pytest.raises(ValueError, match="scored by different code"):
+        eval_episodes.compare(run([group("a")]), run([group("a")], scorer={"sha256": "x"}))
+    same = eval_episodes.compare(run([group("a")], scorer={"sha256": "x"}),
+                                 run([group("a")], scorer={"sha256": "x"}))
+    assert same["scorer_verified"] is True
+    assert eval_episodes.compare(run([group("a")]), run([group("a")]))["scorer_verified"] is False
+
+
+def _scorer_tree(root: Path) -> tuple[Path, Path]:
+    """A miniature checkout: sibling modules plus an ``aorta`` package."""
+    here, package = root / "rl", root / "src" / "aorta"
+    (package / "agent").mkdir(parents=True)
+    here.mkdir()
+    (here / "episode_env.py").write_text(
+        "import event_reward\nimport aorta.deep.leaf\nfrom aorta.agent import loop\n\n"
+        "def lazy():\n    from aorta import lazily_used\n")
+    (here / "event_reward.py").write_text("POINTS = {'resolver_named': 4.0}\n")
+    (here / "not_a_scorer.py").write_text("X = 1\n")
+    (package / "__init__.py").write_text("")
+    (package / "agent" / "__init__.py").write_text("")
+    (package / "agent" / "loop.py").write_text("MAX = 8\n")
+    (package / "deep").mkdir()
+    (package / "deep" / "__init__.py").write_text("")
+    (package / "deep" / "leaf.py").write_text("W = 1\n")
+    (package / "lazily_used.py").write_text("Y = 1\n")
+    (package / "unrelated.py").write_text("Z = 1\n")
+    return here, package
+
+
+@pytest.mark.parametrize("edited", [
+    "rl/event_reward.py",           # reached through a sibling import
+    "src/aorta/agent/loop.py",      # reached through ``from aorta.agent import loop``
+    "src/aorta/lazily_used.py",     # an import inside a function
+    "src/aorta/agent/__init__.py",  # executed by importing its submodule
+    "src/aorta/deep/__init__.py",   # the same, for ``import aorta.deep.leaf``
+])
+def test_any_edit_to_code_the_scorer_imports_changes_the_identity(tmp_path, edited):
+    """The reason for a digest over a version constant: nothing has to remember
+    to bump it."""
+    here, package = _scorer_tree(tmp_path)
+    before = eval_episodes.scorer_identity(here, package)
+    target = tmp_path / edited
+    target.write_text(target.read_text() + "# edited\n")
+    assert eval_episodes.scorer_identity(here, package) != before
+
+
+@pytest.mark.parametrize("edited", ["rl/not_a_scorer.py", "src/aorta/unrelated.py"])
+def test_an_edit_to_code_the_scorer_never_imports_does_not(tmp_path, edited):
+    """Narrowness: an unrelated file does not refuse every reuse."""
+    here, package = _scorer_tree(tmp_path)
+    before = eval_episodes.scorer_identity(here, package)
+    target = tmp_path / edited
+    target.write_text(target.read_text() + "# edited\n")
+    assert eval_episodes.scorer_identity(here, package) == before
+
+
+def test_the_identity_does_not_depend_on_where_the_checkout_is(tmp_path):
+    a = eval_episodes.scorer_identity(*_scorer_tree(tmp_path / "one"))
+    b = eval_episodes.scorer_identity(*_scorer_tree(tmp_path / "elsewhere" / "two"))
+    assert a == b and a["files"] == 8
+
+
+def test_the_real_scorer_covers_the_reward_the_loop_and_the_prompts():
+    keys = set(eval_episodes.scorer_files())
+    assert {"rl:episode_env", "rl:event_reward", "rl:triage_reward", "rl:proposal_reward",
+            "rl:train_grpo_step", "rl:eval_episodes",
+            "aorta.agent.loop", "aorta.agent.llm", "aorta.agent.policy"} <= keys
+    assert "rl:verify_checkpoint_delta" not in keys

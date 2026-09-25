@@ -42,6 +42,8 @@ Usage
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import logging
 import math
@@ -108,6 +110,79 @@ def blas_backend() -> dict[str, Any]:
 
 def _blas_env() -> dict[str, str]:
     return {k: v for k, v in sorted(os.environ.items()) if "BLAS" in k.upper()}
+
+
+#: The modules a column's episodes and rewards are computed by: the episode
+#: loop and its prompts, the reward, the sampler, and this file's aggregation.
+SCORER_ENTRY_POINTS = ("episode_env", "event_reward", "train_grpo_step", "eval_episodes")
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    """Every absolute module name an ``import`` in ``tree`` could load, lazy ones included."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module)
+            # ``from pkg import name`` may import a submodule.
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return names
+
+
+def scorer_files(here: Path | None = None, package: Path | None = None) -> dict[str, Path]:
+    """The source files a column's rewards depend on, keyed by a checkout-free name.
+
+    Found by following the ``import`` statements of :data:`SCORER_ENTRY_POINTS`
+    through every sibling module and every ``aorta`` module, instead of from
+    a hand-kept list or a version constant: both of those go stale the first
+    time someone edits ``POINTS``, a terminal rule or a prompt and forgets them,
+    whereas this follows the code that actually runs. A package's
+    ``__init__.py`` counts, because importing a submodule executes it.
+    """
+    here = Path(__file__).resolve().parent if here is None else here
+    if package is None:
+        import aorta
+
+        package = Path(aorta.__file__).resolve().parent
+    found: dict[str, Path] = {}
+    pending = [f"rl:{name}" for name in SCORER_ENTRY_POINTS]
+    while pending:
+        key = pending.pop()
+        if key in found:
+            continue
+        if key.startswith("rl:"):
+            path = here / f"{key[3:]}.py"
+        else:
+            parts = key.split(".")[1:]
+            module = package.joinpath(*parts)
+            path = module / "__init__.py" if module.is_dir() else module.with_suffix(".py")
+        if not path.is_file():
+            continue
+        found[key] = path
+        if not key.startswith("rl:"):
+            pieces = key.split(".")
+            pending.extend(".".join(pieces[:i]) for i in range(1, len(pieces)))
+        for name in _imported_names(ast.parse(path.read_bytes(), filename=str(path))):
+            if name == "aorta" or name.startswith("aorta."):
+                pending.append(name)
+            elif "." not in name and (here / f"{name}.py").is_file():
+                pending.append(f"rl:{name}")
+    return found
+
+
+def scorer_identity(here: Path | None = None, package: Path | None = None) -> dict[str, Any]:
+    """A digest of every file :func:`scorer_files` finds, for ``--reuse`` and ``compare``.
+
+    Any byte change refuses reuse, a comment included. That is the safe side:
+    a false refusal costs one recomputed column, while a false match reports
+    rewards from a scorer that no longer exists as a current evaluation.
+    """
+    files = scorer_files(here, package)
+    digest = hashlib.sha256()
+    for key in sorted(files):
+        digest.update(key.encode() + b"\0" + files[key].read_bytes() + b"\0")
+    return {"sha256": digest.hexdigest(), "files": len(files)}
 
 
 def two_proportion_z(hits_a: int, n_a: int, hits_b: int, n_b: int) -> float:
@@ -214,6 +289,15 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             f"{backend_b!r}): a paired comparison needs the same backend on both sides"
         )
 
+    # And the same scorer: rewards from two versions of the reward are not on
+    # one scale. Legacy columns without the field are reported as unverified.
+    scorer_a, scorer_b = before["config"].get("scorer"), after["config"].get("scorer")
+    if (scorer_a is not None or scorer_b is not None) and scorer_a != scorer_b:
+        raise ValueError(
+            f"the two columns were scored by different code ({scorer_a!r} vs {scorer_b!r}): "
+            "a paired comparison needs the same scorer on both sides"
+        )
+
     rows = []
     pooled = [0, 0, 0, 0]
     for scenario in sorted(a):
@@ -236,6 +320,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         "after": after["config"]["init_from"],
         "corpus_verified": corpus_a is not None,
         "backend_verified": backend_a is not None,
+        "scorer_verified": scorer_a is not None,
         "scenarios": rows,
         "pooled_step1_before": (pooled[0] / pooled[1]) if pooled[1] else None,
         "pooled_step1_after": (pooled[2] / pooled[3]) if pooled[3] else None,
@@ -277,6 +362,9 @@ def print_comparison(result: dict[str, Any]) -> None:
     print("  ⚠ Not a held-out set: the policy trained on all of these scenarios. What is\n"
           "    controlled is that the weights are fixed and the two columns are paired on\n"
           "    seed, scenario, episode count and sampling parameters.")
+    if not result.get("scorer_verified"):
+        print("  ⚠ Neither column records which scorer produced it, so the two are not\n"
+              "    verified to share a reward.")
     if not result.get("backend_verified"):
         print("  ⚠ Neither column records its BLAS backend, so the two are not verified\n"
               "    to have computed with the same one.")
@@ -328,6 +416,7 @@ def reusable_column(
     args: argparse.Namespace,
     digests: dict[str, str],
     backend: dict[str, Any],
+    scorer: dict[str, Any],
 ) -> dict[str, Any]:
     """Load a column already on disk, or refuse it. Never silently recomputes.
 
@@ -354,6 +443,12 @@ def reusable_column(
     ``backend`` is :func:`blas_backend` of this process, checked the same way:
     a column computed through another BLAS backend, or one that records none,
     is refused.
+
+    ``scorer`` is :func:`scorer_identity` of this checkout. The settings, the
+    corpus and the backend can all match while the reward, a terminal rule or
+    the prompt has changed; the column's ``groups`` then carry rewards from
+    code that no longer exists, so a column scored by other code, or one that
+    records none, is refused.
     """
     column = json.loads(path.read_text())
     want = _config(args, source)
@@ -366,6 +461,17 @@ def reusable_column(
         raise ValueError(
             f"{path} was produced under different settings and cannot be reused -- "
             + "; ".join(differing) + ". Point --out somewhere else."
+        )
+    recorded_scorer = column["config"].get("scorer")
+    if recorded_scorer is None:
+        raise ValueError(
+            f"{path} records no scorer identity, so whether its rewards come from the "
+            "code this run would score with cannot be checked. Point --out somewhere else."
+        )
+    if recorded_scorer != scorer:
+        raise ValueError(
+            f"{path} was scored by different code (scorer {recorded_scorer!r}, this "
+            f"checkout {scorer!r}). Point --out somewhere else."
         )
     recorded_backend = column["config"].get("blas_backend")
     if recorded_backend is None:
@@ -427,6 +533,7 @@ def _column_payload(
     wire: list[dict[str, Any]],
     checkpoint: Path | None,
     backend: dict[str, Any] | None = None,
+    scorer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The on-disk shape of one column.
 
@@ -438,6 +545,7 @@ def _column_payload(
     config["scenarios"] = [s.scenario_id for s in scenarios]
     config["corpus"] = {s.scenario_id: s.digest for s in scenarios}
     config["blas_backend"] = blas_backend() if backend is None else backend
+    config["scorer"] = scorer_identity() if scorer is None else scorer
     return {"config": config, "groups": groups, "wire": wire}
 
 
@@ -530,7 +638,7 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
         only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
         done = reusable_column(
             path, source, args, episode_env.corpus_digests(args.corpus_root, only=only),
-            blas_backend(),
+            blas_backend(), scorer_identity(),
         )
         covered = {g["scenario_id"] for g in done["groups"]}
         if not set(done["config"]["scenarios"]) - covered:
