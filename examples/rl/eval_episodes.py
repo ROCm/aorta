@@ -595,6 +595,17 @@ def reusable_column(
             f"{path} records no corpus digest, so which archives it was scored against "
             "cannot be checked. Point --out somewhere else."
         )
+    if not args.scenarios:
+        # No --scenarios means "the whole corpus", and the corpus is what
+        # `digests` lists now. A column scored before a scenario was added or
+        # removed would otherwise read as complete against its own stale list.
+        recorded_set = set(column["config"].get("scenarios", []))
+        gained, lost = sorted(set(digests) - recorded_set), sorted(recorded_set - set(digests))
+        if gained or lost:
+            raise ValueError(
+                f"{path} was scored against a different corpus: the corpus now adds "
+                f"{gained} and no longer has {lost}. Point --out somewhere else."
+            )
     stale = sorted(
         sid for sid in column["config"].get("scenarios", [])
         if recorded.get(sid) is None or recorded.get(sid) != digests.get(sid)
@@ -612,6 +623,22 @@ def reusable_column(
                 f"but --scenarios asked for {wanted}"
             )
     return column
+
+
+def write_atomically(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` so a crash mid-write never leaves it partial.
+
+    The partial column on disk is what ``--reuse`` recovers from; truncating it
+    in place and dying before the write finishes would lose every scenario it
+    held. Written beside it, flushed, then renamed over it: ``os.replace`` is
+    atomic on one filesystem.
+    """
+    temporary = path.with_name(path.name + ".partial")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def scenario_seed(base: int, scenario_id: str) -> int:
@@ -768,10 +795,10 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
         print(f"[eval] {label} column", flush=True)
     column = evaluate(
         checkpoint, args, done,
-        on_progress=lambda c: path.write_text(json.dumps(c, indent=2)),
+        on_progress=lambda c: write_atomically(path, json.dumps(c, indent=2)),
         weights=weights,
     )
-    path.write_text(json.dumps(column, indent=2))
+    write_atomically(path, json.dumps(column, indent=2))
     return column
 
 

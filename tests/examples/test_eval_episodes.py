@@ -10,6 +10,7 @@ with or without torch.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import zlib
 from pathlib import Path
@@ -233,8 +234,10 @@ class _Args:
         self.__dict__.update(kw)
 
 
-#: What the corpus on disk digests to, in these tests.
-DIGESTS = {"a": "digest-a", "b": "digest-b"}
+#: What the corpus on disk digests to, in these tests: one scenario, "a".
+DIGESTS = {"a": "digest-a"}
+#: A two-scenario corpus, for the tests that need one.
+TWO = {"a": "digest-a", "b": "digest-b"}
 #: The BLAS backend this process reports, in these tests.
 BACKEND = {"torch": "2.x", "preferred_blas_library": "backend-a", "env": {}}
 #: The scorer identity of this checkout, in these tests.
@@ -283,10 +286,10 @@ def test_the_base_model_column_matches_by_model_name(tmp_path):
 
 
 def test_a_narrowed_scenario_set_is_checked_against_the_flag(tmp_path):
-    path = column_file(tmp_path, scenarios=["a", "b"])
+    path = column_file(tmp_path, scenarios=["a", "b"], corpus=dict(TWO))
     with pytest.raises(ValueError, match="--scenarios asked for"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), DIGESTS, BACKEND, SCORER, WEIGHTS)
-    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), DIGESTS, BACKEND, SCORER, WEIGHTS)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), TWO, BACKEND, SCORER, WEIGHTS)
+    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), TWO, BACKEND, SCORER, WEIGHTS)
 
 
 def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
@@ -300,7 +303,7 @@ def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
                                             BACKEND, SCORER, WEIGHTS)
     assert payload["config"]["scorer"] == SCORER
     assert payload["config"]["blas_backend"] == BACKEND
-    assert payload["config"]["corpus"] == DIGESTS
+    assert payload["config"]["corpus"] == {"a": "digest-a", "b": "digest-b"}
     assert payload["config"]["scenarios"] == ["a", "b"]
 
 
@@ -352,12 +355,12 @@ def test_a_column_scored_against_other_archives_is_refused(tmp_path):
     """Every setting matches; the ground truth does not."""
     with pytest.raises(ValueError, match=r"different archives for \['a'\]"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                      {"a": "another-digest", "b": "digest-b"}, BACKEND, SCORER, WEIGHTS)
+                                      {"a": "another-digest"}, BACKEND, SCORER, WEIGHTS)
 
 
 def test_only_the_scenarios_the_column_covers_are_checked(tmp_path):
     """Narrowness: a changed archive the column never scored is not its business."""
-    assert eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
+    assert eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(scenarios="a"),
                                          {"a": "digest-a", "b": "changed"}, BACKEND, SCORER, WEIGHTS)
 
 
@@ -391,8 +394,11 @@ def test_a_finished_column_is_reused_without_evaluating(tmp_path, capsys, monkey
 
 
 def test_a_partial_column_is_resumed_rather_than_reused(tmp_path, capsys, monkeypatch):
+    import episode_env
+
     calls = _stub_evaluate(monkeypatch)
-    path = column_file(tmp_path, scenarios=["a", "b"])
+    monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(TWO))
+    path = column_file(tmp_path, scenarios=["a", "b"], corpus=dict(TWO))
     with pytest.raises(ReachedError):
         eval_episodes._column(path, Path("/ckpt/last"), "trained", _Args())
     assert calls[0][1]["groups"][0]["scenario_id"] == "a", "the done part is carried in"
@@ -709,3 +715,58 @@ def test_a_column_without_per_episode_outcomes_has_no_paired_z(capsys):
     assert result["scenarios"][0]["step1_paired_z"] is None
     eval_episodes.print_comparison(result)
     assert "paired (McNemar) z            unavailable" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# the whole-corpus column, and the progress file
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("corpus, fragment", [
+    ({"a": "digest-a", "b": "digest-b"}, "adds ['b'] and no longer has []"),
+    ({}, "adds [] and no longer has ['a']"),
+])
+def test_a_whole_corpus_column_is_refused_once_the_corpus_gains_or_loses_a_scenario(
+    tmp_path, corpus, fragment
+):
+    """Without --scenarios the column stands for the whole corpus; after the
+    corpus changes it would otherwise read as complete against its own list."""
+    with pytest.raises(ValueError, match=re.escape(fragment)):
+        eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), corpus,
+                                      BACKEND, SCORER, WEIGHTS)
+
+
+def test_a_whole_corpus_column_over_the_same_corpus_is_reused(tmp_path):
+    """Narrowness: same scenario set, same digests."""
+    path = column_file(tmp_path, scenarios=["a", "b"], corpus={"a": "digest-a", "b": "digest-b"})
+    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(),
+                                         {"b": "digest-b", "a": "digest-a"}, BACKEND, SCORER, WEIGHTS)
+
+
+def test_the_progress_file_is_replaced_atomically(tmp_path, monkeypatch):
+    """A write that dies midway leaves the previous column readable."""
+    import os
+
+    path = tmp_path / "after.json"
+    eval_episodes.write_atomically(path, json.dumps({"groups": [1]}))
+    real_fsync = os.fsync
+
+    def die(fd):
+        real_fsync(fd)
+        raise OSError("preempted")
+
+    monkeypatch.setattr(os, "fsync", die)
+    with pytest.raises(OSError):
+        eval_episodes.write_atomically(path, json.dumps({"groups": [1, 2]}))
+    assert json.loads(path.read_text()) == {"groups": [1]}
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    eval_episodes.write_atomically(path, json.dumps({"groups": [1, 2]}))
+    assert json.loads(path.read_text()) == {"groups": [1, 2]}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["after.json"]
+
+
+def test_the_column_writes_go_through_the_atomic_writer():
+    """Both the progress callback and the final write: either one truncating in
+    place is the defect."""
+    source = Path(eval_episodes.__file__).read_text()
+    body = source[source.index("def _column("):source.index("def build_parser(")]
+    assert body.count("write_atomically(path,") == 2 and "path.write_text" not in body
