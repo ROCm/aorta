@@ -172,7 +172,8 @@ did.
 - Every iteration passed the trainer's checks. The pair passes
   `verify_checkpoint_delta.py --lr 1e-6 --steps 17`: every trained tensor
   moved, the frozen control is bit-identical, and nothing moved further than
-  the Adam ceiling.
+  the Adam ceiling. Re-checked under the per-element rounding allowance, the
+  largest displacement is 0.24 of its own ceiling.
 - Evaluation: `eval_episodes.py` against the base model, 64 episodes per
   scenario per column. Weights were fixed, sampling was at the training
   settings (t = 0.7, top_p = 0.95), and each scenario was seeded from its own
