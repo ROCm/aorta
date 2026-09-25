@@ -12,6 +12,7 @@ import yaml
 
 from aorta.agent.llm import _BASELINE_CELL, AgentStep, LLMProposer, StopReason, make_proposer
 from aorta.agent.policy import AgentPolicy, PolicyViolation
+from aorta.agent.prompt_profiles import DEFAULT_PROMPT_PROFILE
 from aorta.agent.report import write_agent_report
 from aorta.agent.state import (
     AgentState,
@@ -51,6 +52,9 @@ class AgentConfig:
     recipe_path: Path | None = None
     dry_run: bool = False
     run_bundle: bool = False
+    # Which messages a real backend is sent; see aorta.agent.prompt_profiles.
+    # Last, so positional callers of this exported dataclass keep their mapping.
+    prompt_profile: str = DEFAULT_PROMPT_PROFILE
 
 
 @dataclass
@@ -371,7 +375,11 @@ def run_agent_loop(
     # ticket; fall back to the slug only for the no-ticket case.
     state = wake(run_dir, ticket=raw_ticket or ticket_slug)
     if proposer is None:
-        proposer = make_proposer(config.llm_backend, model=config.llm_model)
+        proposer = make_proposer(
+            config.llm_backend,
+            model=config.llm_model,
+            prompt_profile=config.prompt_profile,
+        )
 
     candidates = _list_candidate_mitigations(config, recipe_template)
     mitigation_axis: list[str] = [_BASELINE_MITIGATION]
@@ -399,17 +407,18 @@ def run_agent_loop(
         )
 
     start_time = time.monotonic()
-    append_log_event(
-        run_dir,
-        "session_start",
-        {
-            "ticket": raw_ticket,
-            "ticket_slug": ticket_slug,
-            "argv": list(config.subprocess_argv),
-            "symptom": config.symptom,
-            "llm_backend": config.llm_backend,
-        },
-    )
+    session: dict[str, Any] = {
+        "ticket": raw_ticket,
+        "ticket_slug": ticket_slug,
+        "argv": list(config.subprocess_argv),
+        "symptom": config.symptom,
+        "llm_backend": config.llm_backend,
+    }
+    # Recorded only when it is not the default, so a default run's log is the
+    # one written before profiles existed.
+    if config.prompt_profile != DEFAULT_PROMPT_PROFILE:
+        session["prompt_profile"] = config.prompt_profile
+    append_log_event(run_dir, "session_start", session)
 
     outcome = "in_progress"
     recommended = "Review agent_report.md and probe cell artifacts."

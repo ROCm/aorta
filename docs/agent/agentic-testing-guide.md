@@ -164,6 +164,7 @@ Useful flags:
 | `--mitigation NAME` | Restrict search (repeatable) |
 | `--mitigations-file sidecar.json` | Extra registered mitigations |
 | `--llm-backend litellm` | Enable real LLM proposer |
+| `--prompt-profile rl-episode` | Send the prompt an RL-trained checkpoint learned on ([prompt profiles](#prompt-profiles)) |
 | `--dry-run` | Plan cells without executing |
 | `--bundle` | Run `aorta bundle` after loop (needs recipe redaction) |
 | `-v` / `-vv` | Progress logging |
@@ -318,6 +319,85 @@ PYTHONPATH=src aorta agent mitigate --output /tmp/agent_out --ticket smoke-fail 
   the specific trials whose result is missing, incomplete, or corrupt —
   not just when `trial_0` is absent.
 - Search continues from the last untried mitigation — no duplicate work.
+
+---
+
+## Prompt profiles
+
+`--prompt-profile` chooses the messages a real backend is sent. The loop, the
+reply parser and `AgentPolicy` are the same under every profile.
+
+| Profile | What the model is sent | Use it with |
+|---------|------------------------|-------------|
+| `default` | The agent's own prompt: symptom, cell summaries, remaining candidates, already-tried list, and a gloss for each category | Any general-purpose model. Unchanged, and the default. |
+| `rl-episode` | The prompt the probe policy is post-trained on in the RL episode environment ([#525](https://github.com/ROCm/aorta/pull/525)), byte for byte, with thinking disabled | **Only** a checkpoint trained on that prompt |
+
+**Why it exists.** A post-trained checkpoint's gain is tied to the words it
+learned on. Measured through `aorta agent mitigate --llm-backend vllm` on seven
+archived failure scenarios (six fixable), 8 runs each at the agent's
+temperature, counting first replies that name a mitigation which fixes the
+failure:
+
+| Model | `default` | `rl-episode` |
+|-------|-----------|--------------|
+| Qwen3-8B, base | 18 of 48 | 17 of 48 |
+| Qwen3-8B, RL-trained (17 iterations) | 17 of 48 | **40 of 48** (5 of 6 scenarios) |
+
+The RL-trained checkpoint was trained on all seven of these scenarios, so this
+table shows that the product path reproduces what the checkpoint learned under
+its training prompt. It is not evidence that the checkpoint generalises to
+failures it was not trained on.
+
+**Do not use it with a general model.** It does not help the base model above,
+and in 6 of the base model's 48 runs the search ended early because it answered
+with a category the loop does not accept. In an earlier sampled measurement,
+Qwen3.8-27B named a fix on 49% of first replies under this prompt with thinking
+off, against 61% under `default` with thinking allowed.
+
+**Serving.** Serve the checkpoint with its Qwen3 reasoning parser, so the same
+engine also answers `default` correctly. On TokenSpeed, also choose a sampling
+backend that honours temperature (on AMD GPUs the default, `greedy`, ignores
+it). `rl-episode` never sends JSON mode on either backend. Only `default` on
+`--llm-backend litellm` does, so `xgrammar` matters only if the same engine
+also serves that combination:
+
+```bash
+vllm serve /path/to/checkpoint --served-model-name aorta-probe \
+  --dtype bfloat16 --reasoning-parser qwen3
+
+tokenspeed serve /path/to/checkpoint --served-model-name aorta-probe \
+  --dtype bfloat16 --reasoning-parser qwen3 \
+  --sampling-backend triton --grammar-backend xgrammar
+```
+
+Then point the agent at it through the chat provider settings:
+
+```bash
+export AORTA_CHAT_LLM_PROVIDER=vllm
+export AORTA_CHAT_VLLM_BASE_URL=http://localhost:8000/v1
+export AORTA_CHAT_VLLM_MODEL=aorta-probe
+aorta agent mitigate --llm-backend vllm --prompt-profile rl-episode \
+  --output ./agent_results --ticket T1 -- ./my_repro.sh
+```
+
+What `rl-episode` changes besides the text:
+
+- **Thinking is disabled per request** (`chat_template_kwargs:
+  {"enable_thinking": false}`), because the policy was trained without a
+  reasoning block. vLLM and TokenSpeed read this field; other servers may not.
+- **`--symptom` is not sent.** The policy never saw one. What was already
+  tried is visible to it as the cells that ran, and tried names drop out of the
+  candidate list.
+- **No JSON mode** on the `[agent]`-only LiteLLM path: training decoded
+  without a grammar.
+- **`--llm-backend fake` refuses it**, since the fake proposer sends no prompt.
+- The trained reply also carries `verdict` and `detectors`; the loop ignores
+  them.
+
+The `rl-episode` text lives in `aorta/agent/prompt_profiles.py` and is pinned
+by digest in `tests/agent/test_prompt_profiles.py`. Editing it detaches every
+checkpoint trained on it: replies still parse, but they get worse. Change it
+only together with a checkpoint trained on the new text.
 
 ---
 
