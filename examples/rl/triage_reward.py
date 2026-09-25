@@ -75,6 +75,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -256,6 +257,121 @@ def label_run(doc: dict[str, Any], source: str | None = None) -> Label:
     )
 
 
+def label_trials(docs: list[dict[str, Any]], source: str | None = None) -> Label:
+    """Label one probe *cell* -- a directory of ``trial_*/result.json`` -- as one run.
+
+    A cell is the unit an archived matrix answers for: its trials are repeats
+    of one configuration, so a scorer asking "what did this cell say" wants one
+    label, not one per trial.
+
+    Each trial goes through :func:`label_run` first, and the cell's detector
+    lists are the **union of the per-trial lists, side by side** -- failures
+    with failures, errors with errors -- rather than one union re-split through
+    ``partition_detectors``. The re-split is the tempting shorter version and
+    it is wrong here for the reason ``label_run`` documents: a ``meta:`` ID on
+    the error side is the producer's judgement, which the resolver does not
+    own, and routing the union back through the resolver would move it onto
+    the failure side and score a trial that never ran as a reproduction.
+
+    The verdict is then ``verdict_from_detectors`` over those two lists, which
+    gives exactly the documented **fail > error > pass** precedence across
+    trials: one reproducing trial makes the cell a reproduction, and a cell
+    whose only signals are infra noise stays ``error``.
+
+    ``stale`` is True when any trial is stale, or when the trials' own stored
+    verdicts, aggregated by the same precedence, disagree with the recomputed
+    one. A trial whose stored value is not a verdict at all is carried through
+    by :func:`label_run` as text; aggregating it by precedence would silently
+    drop it, so it makes the cell stale and is named as the cell's stored value.
+
+    An empty ``docs`` raises. A cell with no readable trial has made no
+    observation, and a label for it would be ``pass`` -- absence of evidence
+    reading as the favourable outcome, which is the one thing a ground-truth
+    label must not do.
+    """
+    if not docs:
+        raise ValueError(f"{source or 'cell'}: no trial results to label")
+    labels: list[Label] = []
+    for index, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            raise ValueError(
+                f"{source or 'cell'} trial {index}: result.json must be a "
+                f"mapping, got {type(doc).__name__}"
+            )
+        labels.append(label_run(doc))
+
+    failures: list[str] = []
+    errors: list[str] = []
+    for label in labels:
+        failures.extend(d for d in label.failure_detectors if d not in failures)
+        errors.extend(d for d in label.error_detectors if d not in errors)
+    verdict = verdict_from_detectors(failures, errors)
+
+    stored: str | None = None
+    stale = any(label.stale for label in labels)
+    recorded = [label.stored_verdict for label in labels]
+    if recorded and all(value is not None for value in recorded):
+        invalid = [v for v in recorded if v not in VALID_VERDICTS]
+        if invalid:
+            stored, stale = str(invalid[0]), True
+        else:
+            stored = (
+                "fail" if "fail" in recorded
+                else "error" if "error" in recorded
+                else "pass"
+            )
+            stale = stale or stored != verdict
+    return Label(
+        verdict=verdict,
+        failure_detectors=failures,
+        error_detectors=errors,
+        stored_verdict=stored,
+        stale=stale,
+        source=source,
+    )
+
+
+def find_probe_cells(root: Path) -> list[Path]:
+    """Every probe cell directory under a results tree, sorted.
+
+    A cell is a directory holding one or more ``trial_<N>/result.json``, the
+    layout ``SubprocessWorkload`` writes and the one
+    ``aorta.agent.state.read_trial_results`` walks. A ``result.json`` that is
+    not under a ``trial_*`` parent is ignored rather than guessed at: it is not
+    the artifact this reads, and inventing a cell around it would put an
+    unlabelled run into a ground truth.
+    """
+    cells: set[Path] = set()
+    for path in root.rglob("result.json"):
+        if path.parent.name.startswith("trial_"):
+            cells.add(path.parent.parent)
+    return sorted(cells)
+
+
+def set_f1(predicted: Iterable[str], actual: Iterable[str]) -> float:
+    """F1 of one set of names against another, with the empty cases settled.
+
+    Extracted from :func:`score_answer` so that a second scorer grading a set
+    against a set -- the discrete-event reward's detector attribution -- uses
+    this arithmetic rather than its own. Two hand-written F1s that disagree
+    about the empty cases would be two different terms wearing one name.
+
+    Both empty is 1.0, one empty is 0.0; see :func:`score_answer` for why.
+    """
+    predicted_set = {str(name) for name in predicted}
+    actual_set = {str(name) for name in actual}
+    if not actual_set and not predicted_set:
+        return 1.0
+    if not actual_set or not predicted_set:
+        return 0.0
+    overlap = len(predicted_set & actual_set)
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(predicted_set)
+    recall = overlap / len(actual_set)
+    return 2 * precision * recall / (precision + recall)
+
+
 def score_answer(answer: Answer, label: Label) -> Score:
     """Reward one answer against the ground truth.
 
@@ -267,21 +383,7 @@ def score_answer(answer: Answer, label: Label) -> Score:
     """
     score = Score()
     score.verdict_correct = answer.verdict == label.verdict
-
-    predicted, actual = set(answer.detectors), label.cited_detectors
-    if not actual and not predicted:
-        score.attribution_f1 = 1.0
-    elif not actual or not predicted:
-        score.attribution_f1 = 0.0
-    else:
-        overlap = len(predicted & actual)
-        if overlap == 0:
-            score.attribution_f1 = 0.0
-        else:
-            precision = overlap / len(predicted)
-            recall = overlap / len(actual)
-            score.attribution_f1 = 2 * precision * recall / (precision + recall)
-
+    score.attribution_f1 = set_f1(answer.detectors, label.cited_detectors)
     score.reward = (
         VERDICT_WEIGHT * (1.0 if score.verdict_correct else 0.0)
         + ATTRIBUTION_WEIGHT * score.attribution_f1
