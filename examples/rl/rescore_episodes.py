@@ -344,6 +344,7 @@ def replay(
     moves: Counter[tuple[str, str]] = Counter()
     per_scenario: dict[str, dict[str, Any]] = {}
     mismatched_steps = 0
+    inconsistent = 0
     max_reward_diff = 0.0
     for (_it, scenario_id, _ep), group in sorted(_episodes(rows).items()):
         scenario = by_id[scenario_id]
@@ -362,13 +363,20 @@ def replay(
 
         total = env.score(episode).total
         recorded = float(group[0]["reward"])
+        # Every row carries a copy of the episode's reward and terminal, and
+        # each copy is compared: checking only row 0 would read a record
+        # whose later rows were edited or truncated as reproducing exactly.
         # A non-finite reward on either side is a mismatch, not a match:
         # `abs(nan - x)` is NaN, and `max(0.0, nan)` keeps 0.0, so a damaged
         # record would otherwise read as reproducing exactly.
-        difference = abs(total - recorded)
-        max_reward_diff = max(
-            max_reward_diff, difference if math.isfinite(difference) else math.inf
-        )
+        for row in group:
+            difference = abs(total - float(row["reward"]))
+            max_reward_diff = max(
+                max_reward_diff, difference if math.isfinite(difference) else math.inf
+            )
+        copies = {(str(row.get("reward")), row.get("terminal"), row.get("episode_steps"))
+                  for row in group}
+        inconsistent += int(len(copies) > 1)
         was, now = group[0].get("terminal", "?"), episode.terminal
         moves[(was, now)] += 1
         bucket = per_scenario.setdefault(
@@ -387,6 +395,7 @@ def replay(
     return {
         "episodes": sum(b["episodes"] for b in per_scenario.values()),
         "mismatched_steps": mismatched_steps,
+        "inconsistent_records": inconsistent,
         "terminals_moved": sum(n for (a, b), n in moves.items() if a != b),
         "max_reward_diff": max_reward_diff,
         "moves": {f"{a} -> {b}": n for (a, b), n in sorted(moves.items())},
@@ -447,6 +456,9 @@ def print_replay(result: dict[str, Any]) -> None:
     if result["mismatched_steps"]:
         print(f"  ⚠ {result['mismatched_steps']} episode(s) replayed a different number "
               "of steps -- the comparison is NOT like for like")
+    if result.get("inconsistent_records"):
+        print(f"  ⚠ {result['inconsistent_records']} episode(s) whose rows disagree with "
+              "each other on the reward, terminal or step count: the record is damaged")
     for move, n in result["moves"].items():
         was, now = move.split(" -> ")
         print(f"  {'   ' if was == now else ' * '}{move:<50} {n:>4}")
@@ -513,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
             # reproduce, and the terminal is what the next reader acts on.
             replayed = result["replay"]
             if (replayed["mismatched_steps"] or replayed["terminals_moved"]
-                    or replayed["max_reward_diff"] > 1e-9):
+                    or replayed["inconsistent_records"] or replayed["max_reward_diff"] > 1e-9):
                 status = 1
         else:
             result["wire"] = summarise(rows, scenarios)

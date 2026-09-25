@@ -236,3 +236,44 @@ def test_the_hard_coded_cover_names_are_registered_mitigations():
     registered = set(env.registered_mitigations())
     assert set(rescore.COVER) <= registered
     assert set(rescore.LEARNED_REFLEX) <= registered
+
+
+def test_a_later_rows_copy_of_the_reward_is_checked_too(scenario):
+    """Row 0 intact, row 1 edited: the record is not a reproduction."""
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    assert any(r["step"] == 2 for r in rows)
+    for row in rows:
+        if row["step"] == 2:
+            row["reward"] += 0.5
+    result = rescore.replay(rows, [scenario], AgentPolicy())
+    assert result["max_reward_diff"] == pytest.approx(0.5)
+    assert result["inconsistent_records"] == 2
+
+
+@pytest.mark.parametrize("field, value", [("terminal", "other"), ("episode_steps", 9)])
+def test_rows_that_disagree_on_the_terminal_or_length_are_a_damaged_record(
+    tmp_path, scenario, monkeypatch, field, value
+):
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    for row in rows:
+        if row["step"] == 2:
+            row[field] = value
+    assert rescore.replay(rows, [scenario], AgentPolicy())["inconsistent_records"] == 2
+    wire = tmp_path / "wire.jsonl"
+    wire.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(rescore.env, "load_corpus", lambda *_a, **_k: [scenario])
+    assert rescore.main(["--wire", str(wire), "--replay"]) == 1
+
+
+def test_a_consistent_record_has_no_inconsistent_rows(scenario):
+    """Narrowness: an untouched multi-step record is consistent."""
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    assert rescore.replay(rows, [scenario], AgentPolicy())["inconsistent_records"] == 0
+
+
+def test_a_non_finite_later_copy_is_a_mismatch(scenario):
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    for row in rows:
+        if row["step"] == 2:
+            row["reward"] = float("nan")
+    assert rescore.replay(rows, [scenario], AgentPolicy())["max_reward_diff"] == float("inf")
