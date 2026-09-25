@@ -243,6 +243,9 @@ BACKEND = {"torch": "2.x", "preferred_blas_library": "backend-a", "env": {}}
 #: The scorer identity of this checkout, in these tests.
 SCORER = {"sha256": "scorer-a", "files": 3}
 #: The checkpoint identity of what this run would load, in these tests.
+#: The package versions this run would generate with, in these tests.
+RUNTIME = {"python": "3.x", "transformers": "4.x", "tokenizers": "0.x",
+           "safetensors": "0.x", "huggingface_hub": "0.x"}
 WEIGHTS = {"weights": {"sha256": "w-a", "files": 2, "bytes": 8},
            "tokenizer": {"sha256": "t-a", "files": 1, "bytes": 4}}
 
@@ -253,7 +256,7 @@ def column_file(tmp_path: Path, **config) -> Path:
         "episodes_per_scenario": 64, "max_episode_steps": 8, "temperature": 0.7,
         "top_p": 0.95, "max_new_tokens": 320, "gen_batch": 4, "seed": 20260923,
         "scenarios": ["a"], "corpus": dict(DIGESTS), "blas_backend": dict(BACKEND), "scorer": dict(SCORER),
-        "checkpoint": dict(WEIGHTS),
+        "checkpoint": dict(WEIGHTS), "runtime": dict(RUNTIME),
     }
     base.update(config)
     path = tmp_path / "before.json"
@@ -263,7 +266,7 @@ def column_file(tmp_path: Path, **config) -> Path:
 
 def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
     reused = eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                           DIGESTS, BACKEND, SCORER, WEIGHTS)
+                                           DIGESTS, BACKEND, SCORER, WEIGHTS, RUNTIME)
     assert reused["config"]["init_from"] == "/ckpt/last"
 
 
@@ -275,21 +278,21 @@ def test_a_column_written_under_the_same_settings_is_reused(tmp_path):
 def test_a_column_written_under_different_settings_is_refused(tmp_path, field, value):
     with pytest.raises(ValueError, match=field):
         eval_episodes.reusable_column(column_file(tmp_path, **{field: value}), "/ckpt/last",
-                                      _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
+                                      _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_the_base_model_column_matches_by_model_name(tmp_path):
     args = _Args()
     assert eval_episodes.column_source(None, args) == "Qwen/Qwen3-8B"
     assert eval_episodes.reusable_column(column_file(tmp_path, init_from="Qwen/Qwen3-8B"),
-                                         "Qwen/Qwen3-8B", args, DIGESTS, BACKEND, SCORER, WEIGHTS)
+                                         "Qwen/Qwen3-8B", args, DIGESTS, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_a_narrowed_scenario_set_is_checked_against_the_flag(tmp_path):
     path = column_file(tmp_path, scenarios=["a", "b"], corpus=dict(TWO))
     with pytest.raises(ValueError, match="--scenarios asked for"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), TWO, BACKEND, SCORER, WEIGHTS)
-    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), TWO, BACKEND, SCORER, WEIGHTS)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="a"), TWO, BACKEND, SCORER, WEIGHTS, RUNTIME)
+    assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(scenarios="b, a"), TWO, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_a_written_column_records_the_digest_of_every_scenario_it_asked_for():
@@ -311,7 +314,7 @@ def test_a_column_computed_with_another_blas_backend_is_refused(tmp_path):
     other = dict(BACKEND, preferred_blas_library="backend-b")
     with pytest.raises(ValueError, match="BLAS backend"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
-                                      other, SCORER, WEIGHTS)
+                                      other, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_a_column_that_records_no_blas_backend_is_refused(tmp_path):
@@ -320,7 +323,7 @@ def test_a_column_that_records_no_blas_backend_is_refused(tmp_path):
     del doc["config"]["blas_backend"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no BLAS backend"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_a_blas_environment_variable_is_part_of_the_backend(monkeypatch):
@@ -348,20 +351,20 @@ def test_a_column_that_records_no_corpus_is_refused(tmp_path):
     del doc["config"]["corpus"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no corpus digest"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_a_column_scored_against_other_archives_is_refused(tmp_path):
     """Every setting matches; the ground truth does not."""
     with pytest.raises(ValueError, match=r"different archives for \['a'\]"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(),
-                                      {"a": "another-digest"}, BACKEND, SCORER, WEIGHTS)
+                                      {"a": "another-digest"}, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_only_the_scenarios_the_column_covers_are_checked(tmp_path):
     """Narrowness: a changed archive the column never scored is not its business."""
     assert eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(scenarios="a"),
-                                         {"a": "digest-a", "b": "changed"}, BACKEND, SCORER, WEIGHTS)
+                                         {"a": "digest-a", "b": "changed"}, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 class ReachedError(Exception):
@@ -375,6 +378,7 @@ def _stub_evaluate(monkeypatch):
     monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
     monkeypatch.setattr(eval_episodes, "scorer_identity", lambda: dict(SCORER))
     monkeypatch.setattr(eval_episodes, "checkpoint_identity", lambda *_a: dict(WEIGHTS))
+    monkeypatch.setattr(eval_episodes, "runtime_versions", lambda: dict(RUNTIME))
     calls = []
 
     def fake(checkpoint, args, done=None, on_progress=None, weights=None):
@@ -482,7 +486,7 @@ def test_a_column_scored_by_other_code_is_refused(tmp_path):
     other = dict(SCORER, sha256="scorer-b")
     with pytest.raises(ValueError, match="scored by different code"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
-                                      BACKEND, other, WEIGHTS)
+                                      BACKEND, other, WEIGHTS, RUNTIME)
 
 
 def test_a_column_that_records_no_scorer_is_refused(tmp_path):
@@ -491,7 +495,7 @@ def test_a_column_that_records_no_scorer_is_refused(tmp_path):
     del doc["config"]["scorer"]
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no scorer identity"):
-        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS)
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_columns_scored_by_different_code_are_not_compared():
@@ -618,7 +622,7 @@ def test_a_column_computed_from_other_weights_is_refused(tmp_path):
     other = {**WEIGHTS, "weights": dict(WEIGHTS["weights"], sha256="w-b")}
     with pytest.raises(ValueError, match="different weights"):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
-                                      BACKEND, SCORER, other)
+                                      BACKEND, SCORER, other, RUNTIME)
 
 
 def test_a_column_that_records_no_checkpoint_identity_is_refused(tmp_path):
@@ -628,7 +632,7 @@ def test_a_column_that_records_no_checkpoint_identity_is_refused(tmp_path):
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="records no checkpoint identity"):
         eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER,
-                                      WEIGHTS)
+                                      WEIGHTS, RUNTIME)
 
 
 def test_same_path_new_weights_is_refused_end_to_end(tmp_path, monkeypatch):
@@ -641,6 +645,7 @@ def test_same_path_new_weights_is_refused_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
     monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
     monkeypatch.setattr(eval_episodes, "scorer_identity", lambda: dict(SCORER))
+    monkeypatch.setattr(eval_episodes, "runtime_versions", lambda: dict(RUNTIME))
     monkeypatch.setattr(eval_episodes, "evaluate",
                         lambda *a, **k: pytest.fail("evaluated a finished column"))
     path = column_file(tmp_path, init_from=str(ckpt), model=str(model),
@@ -742,14 +747,14 @@ def test_a_whole_corpus_column_is_refused_once_the_corpus_gains_or_loses_a_scena
     corpus changes it would otherwise read as complete against its own list."""
     with pytest.raises(ValueError, match=re.escape(fragment)):
         eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), corpus,
-                                      BACKEND, SCORER, WEIGHTS)
+                                      BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_a_whole_corpus_column_over_the_same_corpus_is_reused(tmp_path):
     """Narrowness: same scenario set, same digests."""
     path = column_file(tmp_path, scenarios=["a", "b"], corpus={"a": "digest-a", "b": "digest-b"})
     assert eval_episodes.reusable_column(path, "/ckpt/last", _Args(),
-                                         {"b": "digest-b", "a": "digest-a"}, BACKEND, SCORER, WEIGHTS)
+                                         {"b": "digest-b", "a": "digest-a"}, BACKEND, SCORER, WEIGHTS, RUNTIME)
 
 
 def test_the_progress_file_is_replaced_atomically(tmp_path, monkeypatch):
@@ -780,3 +785,58 @@ def test_the_column_writes_go_through_the_atomic_writer():
     source = Path(eval_episodes.__file__).read_text()
     body = source[source.index("def _column("):source.index("def build_parser(")]
     assert body.count("write_atomically(path,") == 2 and "path.write_text" not in body
+
+
+# ---------------------------------------------------------------------------
+# the generation stack is part of what a column is
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("package", ["transformers", "tokenizers", "safetensors"])
+def test_a_column_generated_with_another_package_version_is_refused(tmp_path, package):
+    other = dict(RUNTIME, **{package: "9.9"})
+    with pytest.raises(ValueError, match="generated with other packages"):
+        eval_episodes.reusable_column(column_file(tmp_path), "/ckpt/last", _Args(), DIGESTS,
+                                      BACKEND, SCORER, WEIGHTS, other)
+
+
+def test_a_column_that_records_no_package_versions_is_refused(tmp_path):
+    path = column_file(tmp_path)
+    doc = json.loads(path.read_text())
+    del doc["config"]["runtime"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="records no package versions"):
+        eval_episodes.reusable_column(path, "/ckpt/last", _Args(), DIGESTS, BACKEND, SCORER,
+                                      WEIGHTS, RUNTIME)
+
+
+def test_columns_generated_with_different_stacks_are_not_compared():
+    with pytest.raises(ValueError, match="different packages"):
+        eval_episodes.compare(run([group("a")], runtime={"transformers": "4.1"}),
+                              run([group("a")], runtime={"transformers": "4.2"}))
+    with pytest.raises(ValueError, match="different packages"):
+        eval_episodes.compare(run([group("a")]), run([group("a")], runtime={"transformers": "4.2"}))
+    assert eval_episodes.compare(run([group("a")], runtime={"transformers": "4.1"}),
+                                 run([group("a")], runtime={"transformers": "4.1"}))
+
+
+def test_the_recorded_versions_are_the_installed_ones_and_absence_is_explicit(monkeypatch):
+    from importlib import metadata
+
+    versions = eval_episodes.runtime_versions()
+    assert set(versions) == {"python", *eval_episodes.RUNTIME_PACKAGES}
+    for name in eval_episodes.RUNTIME_PACKAGES:
+        try:
+            assert versions[name] == metadata.version(name)
+        except metadata.PackageNotFoundError:
+            assert versions[name] is None
+    monkeypatch.setattr(eval_episodes, "RUNTIME_PACKAGES", ("no-such-package-xyz",))
+    assert eval_episodes.runtime_versions()["no-such-package-xyz"] is None
+
+
+def test_a_written_column_records_its_package_versions():
+    from types import SimpleNamespace
+
+    payload = eval_episodes._column_payload(
+        _Args(), [SimpleNamespace(scenario_id="a", digest="digest-a")], [], [],
+        Path("/ckpt/last"), BACKEND, SCORER, WEIGHTS, RUNTIME)
+    assert payload["config"]["runtime"] == RUNTIME

@@ -109,6 +109,32 @@ def blas_backend() -> dict[str, Any]:
             "env": _blas_env()}
 
 
+#: The packages outside this checkout that decide what a column's replies are:
+#: ``transformers`` implements ``generate``, the chat template and model
+#: loading; ``tokenizers`` encodes and decodes; ``safetensors`` reads the
+#: weights. torch is recorded by :func:`blas_backend`.
+RUNTIME_PACKAGES = ("transformers", "tokenizers", "safetensors", "huggingface_hub")
+
+
+def runtime_versions() -> dict[str, str | None]:
+    """The installed version of each :data:`RUNTIME_PACKAGES` entry, ``None`` if absent.
+
+    Read from package metadata rather than by importing, so recording it costs
+    nothing and works where the package cannot import. An absent package is
+    recorded as ``None`` rather than left out, so absence never reads as a match
+    against a column that had it.
+    """
+    from importlib import metadata
+
+    found: dict[str, str | None] = {"python": sys.version.split()[0]}
+    for name in RUNTIME_PACKAGES:
+        try:
+            found[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            found[name] = None
+    return found
+
+
 def _blas_env() -> dict[str, str]:
     return {k: v for k, v in sorted(os.environ.items()) if "BLAS" in k.upper()}
 
@@ -357,6 +383,15 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             f"{backend_b!r}): a paired comparison needs the same backend on both sides"
         )
 
+    # And the same generation stack: another transformers or tokenizers can
+    # sample or decode differently from the same weights and seed.
+    runtime_a, runtime_b = before["config"].get("runtime"), after["config"].get("runtime")
+    if (runtime_a is not None or runtime_b is not None) and runtime_a != runtime_b:
+        raise ValueError(
+            f"the two columns were generated with different packages ({runtime_a!r} vs "
+            f"{runtime_b!r}): a paired comparison needs the same stack on both sides"
+        )
+
     # And the same scorer: rewards from two versions of the reward are not on
     # one scale. Legacy columns without the field are reported as unverified.
     scorer_a, scorer_b = before["config"].get("scorer"), after["config"].get("scorer")
@@ -508,6 +543,7 @@ def reusable_column(
     backend: dict[str, Any],
     scorer: dict[str, Any],
     weights: dict[str, Any],
+    runtime: dict[str, Any],
 ) -> dict[str, Any]:
     """Load a column already on disk, or refuse it. Never silently recomputes.
 
@@ -555,6 +591,17 @@ def reusable_column(
         raise ValueError(
             f"{path} was produced under different settings and cannot be reused -- "
             + "; ".join(differing) + ". Point --out somewhere else."
+        )
+    recorded_runtime = column["config"].get("runtime")
+    if recorded_runtime is None:
+        raise ValueError(
+            f"{path} records no package versions, so whether it was generated with the "
+            "stack this run would use cannot be checked. Point --out somewhere else."
+        )
+    if recorded_runtime != runtime:
+        raise ValueError(
+            f"{path} was generated with other packages ({recorded_runtime!r}; this run "
+            f"has {runtime!r}). Point --out somewhere else."
         )
     recorded_weights = column["config"].get("checkpoint")
     if recorded_weights is None:
@@ -667,6 +714,7 @@ def _column_payload(
     backend: dict[str, Any] | None = None,
     scorer: dict[str, Any] | None = None,
     weights: dict[str, Any] | None = None,
+    runtime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The on-disk shape of one column.
 
@@ -680,6 +728,7 @@ def _column_payload(
     config["blas_backend"] = blas_backend() if backend is None else backend
     config["scorer"] = scorer_identity() if scorer is None else scorer
     config["checkpoint"] = weights
+    config["runtime"] = runtime_versions() if runtime is None else runtime
     return {"config": config, "groups": groups, "wire": wire}
 
 
@@ -783,7 +832,7 @@ def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Name
         only = [s.strip() for s in args.scenarios.split(",") if s.strip()]
         done = reusable_column(
             path, source, args, episode_env.corpus_digests(args.corpus_root, only=only),
-            blas_backend(), scorer_identity(), weights,
+            blas_backend(), scorer_identity(), weights, runtime_versions(),
         )
         covered = {g["scenario_id"] for g in done["groups"]}
         if not set(done["config"]["scenarios"]) - covered:
