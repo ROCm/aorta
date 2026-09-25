@@ -776,6 +776,74 @@ class TestAVerdictPrintedBeforeItsIdStillLands:
             {"job_id": "cia-a1", "category": None, "confidence": None}
         ]
 
+    def test_a_job_nested_inside_a_job_gets_its_own_row(self):
+        """A job's object can carry other jobs, and each is one entry.
+
+        The walk used to stop at the first object with a valid id, so a sweep
+        reporting ``children`` returned only the parent -- and because the JSON
+        read had claimed the output, the line reader never ran to find the
+        child either. Parent first, because that is document order.
+        """
+        output = json.dumps(
+            {
+                "job_id": "cia-parent",
+                "category": "gpu_race",
+                "confidence": 0.82,
+                "children": [
+                    {"job_id": "cia-child", "category": "numeric_instability",
+                     "confidence": 0.41},
+                ],
+            },
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-parent", "category": "gpu_race", "confidence": 0.82},
+            {"job_id": "cia-child", "category": "numeric_instability",
+             "confidence": 0.41},
+        ]
+
+    def test_a_nested_job_without_a_verdict_does_not_take_its_parents(self):
+        """Descending into a job is not merging with it.
+
+        The narrowness half of the test above: the child is read for its own
+        keys only, so one that states no verdict records none rather than the
+        verdict of the job it sits under.
+        """
+        output = json.dumps(
+            {"job_id": "cia-parent", "category": "gpu_race", "confidence": 0.82,
+             "children": [{"job_id": "cia-child"}]},
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-parent", "category": "gpu_race", "confidence": 0.82},
+            {"job_id": "cia-child", "category": None, "confidence": None},
+        ]
+
+    def test_a_repeated_jobs_nested_jobs_are_read_too(self):
+        """The fill branch descends as well as the first-row branch.
+
+        A later row for an id already seen fills its empty halves; the jobs it
+        carries are still jobs, and belong in the result whichever mention of
+        the parent they hang off.
+        """
+        output = json.dumps(
+            {
+                "results": [
+                    {"job_id": "cia-a1", "status": "running"},
+                    {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82,
+                     "children": [{"job_id": "cia-b2", "confidence": 0.41}]},
+                ]
+            },
+            sort_keys=True,
+        )
+
+        assert decision_log._cia_results(output) == [
+            {"job_id": "cia-a1", "category": "gpu_race", "confidence": 0.82},
+            {"job_id": "cia-b2", "category": None, "confidence": 0.41},
+        ]
+
     def test_a_job_named_twice_in_json_keeps_the_verdict_of_its_later_row(self):
         """The JSON twin of ``test_one_job_named_twice_is_recorded_once``.
 

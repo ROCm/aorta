@@ -289,7 +289,10 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
     ``category`` and ``confidence``. Nesting is walked because a tool wrapping
     results in ``{"results": [...]}`` is the ordinary shape, but an inner
     object's keys never leak outward: the walk descends past a container and an
-    object with an id is taken whole rather than merged with its parent's.
+    object with an id is taken whole rather than merged with its parent's. It
+    also descends *into* an object with an id, after taking it, so a job nested
+    under another job -- ``{"job_id": ..., "children": [{"job_id": ...}]}`` --
+    gets its own row in document order, parent first.
 
     Validated to the same vocabulary the patterns accept, rather than taken on
     trust -- ``{"job_id": 3}`` or ``{"confidence": "high"}`` is not a verdict
@@ -388,9 +391,17 @@ def _cia_results_from_json(output: str) -> list[dict[str, Any]] | None:
             for half, value in verdict.items():
                 if known[half] is None:
                     known[half] = value
-            return
-        rows[raw_id] = row = {"job_id": raw_id, **verdict}
-        results.append(row)
+        else:
+            rows[raw_id] = row = {"job_id": raw_id, **verdict}
+            results.append(row)
+        # Then descend, because a job's own object can carry other jobs -- a
+        # sweep with ``children``, a retry chain -- and stopping here dropped
+        # every one of them while still claiming the output, so the line reader
+        # never ran either. Descending cannot leak this object's verdict into
+        # them: each nested object is read only for its own keys, by the same
+        # rules as a top-level one.
+        for value in node.values():
+            walk(value)
 
     walk(doc)
     return results or None
