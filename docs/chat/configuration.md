@@ -272,10 +272,10 @@ regenerated.
 
 | Setting | Shipped as | Why |
 | --- | --- | --- |
-| `allow_origins` | `["http://localhost:8000", "http://127.0.0.1:8000"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
+| `allow_origins` | `["http://localhost:8080", "http://127.0.0.1:8080"]` | Chainlit's default is `["*"]`. The tools behind this UI submit cluster jobs, compile pasted HIP and — with `enable_shell_tool` — run commands, so a wildcard means any page a developer has open can talk to a local instance and start work on a GPU node. |
 | `mask_user_env` | `true` | Chainlit's default renders API keys in the UI as plain text. The keys this server holds reach a model provider and a Slurm cluster. |
 
-**Serving anywhere other than `localhost:8000` means editing `allow_origins`.**
+**Serving anywhere other than `localhost:8080` means editing `allow_origins`.**
 Those two are `aorta chat ui`'s own defaults, and they have to stay in step with
 it: Chainlit reads `allow_origins` from the file and has no environment
 override, so a port listed here that the command never serves on refuses the
