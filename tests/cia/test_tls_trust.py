@@ -424,6 +424,38 @@ class TestCustomCAReachesTheTransport:
         assert bodies and "ssl_verify" not in bodies[0]
         assert _ca_env() == before
 
+    def test_cia_sends_qwen_without_thinking(
+        self,
+        no_ca_env,
+        private_ca_server,
+        monkeypatch,
+    ):
+        api_base, ca_cert, bodies = private_ca_server
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_cert))
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        monkeypatch.setattr(llm_mod, "chat_provider", lambda **_kwargs: None)
+        monkeypatch.setattr(llm_mod, "_legacy_env", lambda: None)
+
+        lm = llm_mod.build_cia_lm(
+            api_base=api_base,
+            api_key="cia-qwen-key",
+            max_tokens=8,
+        )
+        lm.num_retries = 0
+        try:
+            result = lm.forward(
+                messages=[{"role": "user", "content": "hello"}],
+            )
+        finally:
+            lm.close()
+
+        assert result.choices[0].message.content == "private-ca-ok"
+        assert len(bodies) == 1
+        assert bodies[0]["model"] == llm_mod.CIA_MODEL
+        assert bodies[0]["chat_template_kwargs"] == {
+            "enable_thinking": False,
+        }
+
     def test_system_mode_uses_openssl_default_trust_not_certifi(
         self,
         no_ca_env,

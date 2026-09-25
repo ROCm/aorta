@@ -8,7 +8,7 @@ import dspy
 
 from aorta.agent.llm import AUTOPSY_CATEGORIES
 from aorta.cia.autopsy.adapters.base import resolve_in_bundle as _resolve_in_bundle
-from aorta.cia.llm import build_lm
+from aorta.cia.llm import build_cia_lm
 
 # ---------------------------------------------------------------------------
 # Tools — the rule-based adapters become callable tools for the LLM
@@ -208,7 +208,7 @@ class TriageRouter(dspy.Module):
     #: rationale a reader acts on, which is the longest reasoning in the
     #: pipeline; it runs once per failure where Watch polls throughout. The
     #: ReAct trajectory below has to fit its tool calls *and* its answer inside
-    #: this, and a reasoning model bills its reasoning against it too.
+    #: this. Qwen's separate thinking trace is disabled by ``build_cia_lm``.
     #:
     #: A budget is all this module pins. It used to name a model as well, which
     #: made the choice of model a property of the code rather than of the
@@ -234,7 +234,7 @@ class TriageRouter(dspy.Module):
         )
         # Bound to this module rather than configured globally: whichever agent
         # reached DSPy first would otherwise decide what Autopsy reasons with.
-        self.lm = build_lm(max_tokens=self.MAX_TOKENS)
+        self.lm = build_cia_lm(max_tokens=self.MAX_TOKENS)
         self.react.set_lm(self.lm)
 
     def forward(self, evidence: list[dict[str, Any]], job_context: str) -> dspy.Prediction:

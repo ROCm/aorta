@@ -230,6 +230,14 @@ These only apply where the `cia` extra is installed and the chat server can
 reach a Slurm cluster. Without it the diagnostic tools are not registered and
 none of this is read.
 
+CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
+and API key selected by the chat provider, but not its model setting, so that
+endpoint must serve the Qwen model under that exact ID. CIA sends
+`chat_template_kwargs.enable_thinking = false` on every model request; Qwen
+answers directly instead of producing its default reasoning trace first.
+Ordinary `aorta chat` turns continue to use the configured `vllm_model` or
+`remote_llm_model`.
+
 Each of these names something the chat tools and the agents both need to agree
 on, so a single setting answers to two environment variables: the chat prefix,
 and the name the agents use on their own. Setting either configures both halves
