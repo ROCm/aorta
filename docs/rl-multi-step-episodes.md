@@ -180,21 +180,34 @@ did.
   stop rule moves no recorded number; the change is entirely the read-once
   rule.
 
-| scenario | step-1 rate, base → trained | z | reward, base → trained |
-|---|---|---|---|
-| `nan_uninit_workspace` | 0.328 → 0.953 | +7.37 | +2.86 → +7.66 |
-| `reference_mismatch` | 0.203 → 0.672 | +5.35 | +1.20 → +5.80 |
-| `queue_stale_read` | 0.656 → 0.828 | +2.22 | +5.97 → +6.86 |
-| `scratch_exhaustion` | 0.688 → 0.781 | +1.20 | +3.26 → +4.66 |
-| `stream_stale_read` | 0.625 → 0.688 | +0.74 | +6.11 → +6.35 |
-| `xnack_page_fault` | 0.203 → **0.016** | **−3.40** | +0.50 → −2.55 |
-| `cancellation_nan` (unresolvable) | – | – | −12.31 → −9.89 |
-| **pooled / mean over the six resolvable** | **0.451 → 0.656** | **+5.73** | **+3.32 → +4.80** |
+| scenario | step-1 rate, base → trained | z (unpaired) | z (paired) | gained / lost | reward, base → trained |
+|---|---|---|---|---|---|
+| `nan_uninit_workspace` | 0.328 → 0.953 | +7.37 | +6.17 | 41 / 1 | +2.86 → +7.66 |
+| `reference_mismatch` | 0.203 → 0.672 | +5.35 | +5.00 | 33 / 3 | +1.20 → +5.80 |
+| `queue_stale_read` | 0.656 → 0.828 | +2.22 | +2.29 | 17 / 6 | +5.97 → +6.86 |
+| `scratch_exhaustion` | 0.688 → 0.781 | +1.20 | +1.28 | 14 / 8 | +3.26 → +4.66 |
+| `stream_stale_read` | 0.625 → 0.688 | +0.74 | +0.71 | 18 / 14 | +6.11 → +6.35 |
+| `xnack_page_fault` | 0.203 → **0.016** | **−3.40** | **−3.21** | 1 / 13 | +0.50 → −2.55 |
+| `cancellation_nan` (unresolvable) | – | – | – | – | −12.31 → −9.89 |
+| **pooled / mean over the six resolvable** | **0.451 → 0.656** | **+5.73** | **+6.08** | 124 / 45 | **+3.32 → +4.80** |
+
+Two statistics for the step-1 rate, because the columns are paired: episode
+*i* of a scenario starts from the same sampling seed in both. The unpaired z
+is the two-proportion test, whose variance assumes independent samples. The
+paired z is McNemar's, computed on the discordant pairs only: "gained" is an
+episode that missed on step 1 under the base model and hit under the trained
+one, "lost" the reverse. The pooled paired z sums discordant pairs within
+scenarios and never pairs across them. The two agree closely here: no
+scenario changes sign, and none crosses |z| = 2 in either direction. The
+recorded columns predate per-episode outcomes, so the paired figures were
+recomputed from each column's step-1 replies, and they reproduce every
+recorded step-1 count exactly.
 
 The step-1 rates are not reward and did not change with the repair. A second
 evaluation of the same pair with another seed (20260925, n = 64) agrees:
-pooled step-1 rate 0.440 → 0.677 (z = +6.61), `xnack_page_fault` 0.172 →
-0.031 (z = −2.63), and reward on the six resolvable scenarios +3.03 → +4.66.
+pooled step-1 rate 0.440 → 0.677 (unpaired z = +6.61, paired z = +7.04),
+`xnack_page_fault` 0.172 → 0.031 (unpaired z = −2.63, paired z = −2.71), and
+reward on the six resolvable scenarios +3.03 → +4.66.
 
 On the unresolvable scenario the earned claim `terminal_unresolvable_correct`
 went from 41 to 54 of 64 episodes. `name_not_offered` fell from 70 to 17 events
@@ -202,7 +215,7 @@ across the corpus, `name_already_tried` from 18 to 14, and `malformed_reply`
 stayed at 17 → 16.
 
 **What this shows.** Training measurably changes behaviour on the scenarios it
-trained on. The pooled step-1 rate rises at z = +5.73, and the mean reward on
+trained on. The pooled step-1 rate rises at z = +5.73 (paired z = +6.08), and the mean reward on
 the six resolvable scenarios rises from +3.32 to +4.80, about one and a half
 points.
 
