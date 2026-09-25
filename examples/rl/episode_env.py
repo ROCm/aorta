@@ -473,6 +473,22 @@ def load_scenario(
             f"disagree ({split[:4]}); a replayed archive can only stand in for "
             f"a re-run when every cell has one answer"
         )
+    # The policy is shown the verdicts the archive *stored* (through
+    # `_read_cell_summaries`), while the grid and the terminal classifier use
+    # the recomputed ones. A trial whose stored verdict is missing or differs
+    # would show the policy one answer and score it against another.
+    disagreeing = sorted(
+        f"{cell.name} (stored {label.stored_verdict!r}, recomputed {label.verdict!r})"
+        for cell, docs in trials.items()
+        for label in (label_run(doc) for doc in docs)
+        if label.stored_verdict != label.verdict
+    )
+    if disagreeing:
+        raise ValueError(
+            f"{scenario_id}: {len(disagreeing)} trial(s) in {root} store a verdict that "
+            f"is not the one their detectors give ({disagreeing[:4]}); the policy would "
+            f"be shown one verdict and scored against another"
+        )
     if not grid.resolution.baseline_failed:
         raise ValueError(
             f"{scenario_id}: the {BASELINE_CELL} cell in {root} did not fail, "

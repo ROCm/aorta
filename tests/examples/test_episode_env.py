@@ -518,6 +518,38 @@ def test_an_unreadable_trial_is_refused_and_named(tmp_path, damage, named):
         make_scenario(archive)
 
 
+def _restore(archive, cell, **fields):
+    for path in (archive / cell).glob("trial_*/result.json"):
+        path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
+
+
+def test_a_trial_storing_pass_while_its_detectors_fail_is_refused(tmp_path):
+    """The review's case: every baseline trial stores `pass` beside a fired
+    failure detector. The recomputed labels agree with each other on `fail`,
+    so only a comparison with the stored verdict can see it."""
+    archive = build_archive(tmp_path, resolver=CHARLIE)
+    _restore(archive, "none-none", verdict="pass")
+    with pytest.raises(ValueError, match=r"store a verdict.*none-none \(stored 'pass', recomputed 'fail'\)"):
+        make_scenario(archive)
+
+
+def test_a_trial_storing_no_verdict_is_refused(tmp_path):
+    """What the policy would be shown is the stored verdict; there is none."""
+    archive = build_archive(tmp_path, resolver=CHARLIE)
+    path = archive / f"{ALPHA}-none" / "trial_0" / "result.json"
+    doc = json.loads(path.read_text())
+    del doc["verdict"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match=rf"{ALPHA}-none \(stored None, recomputed 'fail'\)"):
+        make_scenario(archive)
+
+
+def test_stored_and_recomputed_verdicts_that_agree_are_accepted(tmp_path):
+    """Narrowness: a resolving cell that stores `pass` and fires nothing is fine."""
+    archive = build_archive(tmp_path, resolver=CHARLIE)
+    assert CHARLIE in make_scenario(archive).resolvers
+
+
 def test_an_unreadable_baseline_trial_is_refused(tmp_path):
     archive = build_archive(tmp_path, resolver=None)
     write_cell(archive, "none-none", ["fail", "fail"], ["tier1:exit_nonzero"])
