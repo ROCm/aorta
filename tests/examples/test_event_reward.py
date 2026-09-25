@@ -694,6 +694,40 @@ def test_a_completion_that_exhausted_the_menu_earns_the_award(unresolvable_grid)
     assert score.terminal == "unresolvable_correct"
 
 
+@pytest.mark.parametrize("names", [[RESOLVER], [REFUTED, "invented"], [RESOLVER, REFUTED]])
+def test_a_stopping_reply_that_lists_names_gives_up_on_both_paths(tmp_path, grid, names):
+    """The review's inconsistency: `stop: true` proposes nothing, and the
+    episode path ends such a reply as giving up, so one reply must too."""
+    single = score_completion(_raw(next_mitigations=names, stop=True), grid, _context())
+    assert single.terminal == "gave_up" and single.fired("terminal_gave_up")
+    episode = episode_from_log(
+        _write_log(tmp_path / "STOP", [_llm_step(names, stop=True), _stopped()]), grid, OFFERED)
+    assert episode.terminal == single.terminal
+
+
+def test_a_stopping_reply_that_lists_names_is_not_the_unresolvable_claim(
+    tmp_path, unresolvable_grid,
+):
+    """Only a stop that lists nothing claims "nothing resolves this"; one that
+    lists names gives up, on the episode path and now on the single-reply one."""
+    listed = score_completion(_raw(next_mitigations=[REFUTED], stop=True), unresolvable_grid,
+                              _context(), cells_already_spent=2)
+    empty = score_completion(_raw(stop=True), unresolvable_grid, _context(),
+                             cells_already_spent=2)
+    assert listed.terminal == "gave_up" and empty.terminal == "unresolvable_unearned"
+    episode = episode_from_log(
+        _write_log(tmp_path / "STOP", [_llm_step([REFUTED], stop=True), _stopped()]),
+        unresolvable_grid, OFFERED)
+    assert episode.terminal == listed.terminal
+
+
+def test_an_empty_stop_and_a_non_stop_reply_are_unchanged(grid):
+    """Narrowness: only a stopping reply with names moved."""
+    assert score_completion(_raw(stop=True), grid, _context()).terminal == "gave_up"
+    assert score_completion(_raw(next_mitigations=[RESOLVER]), grid,
+                            _context()).terminal == "unobserved"
+
+
 def test_a_single_completion_leaves_the_terminal_unobserved_and_says_so(grid):
     score = score_completion(_raw(next_mitigations=[REFUTED]), grid, _context())
     assert score.terminal == "unobserved"

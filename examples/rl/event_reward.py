@@ -1045,8 +1045,12 @@ def score_completion(
     observed terminal, so the terminal is classified from the reply's own
     claim rather than from a run that never happened: a reply that stops while
     proposing nothing is making the terminal claim itself, and the matrix can
-    adjudicate it. Any other reply leaves the terminal ``unobserved``, withheld
-    and flagged rather than scored zero.
+    adjudicate it. Every stopping reply is classified by :func:`classify_stop`,
+    the rule the episode path uses, so one reply and a one-step episode cannot
+    disagree: a stop that lists names proposes nothing (see
+    :func:`step_events`) and gives up, and only a stop that lists nothing is the
+    claim "nothing resolves this". Any other reply leaves the terminal
+    ``unobserved``, withheld and flagged rather than scored zero.
 
     ``cells_added`` is the caller's, so this module holds no second opinion
     about what an action costs.
@@ -1056,15 +1060,20 @@ def score_completion(
     score.events.extend(events)
 
     terminal, why = "unobserved", "a single reply does not observe how a run ended"
-    if parsed is not None and parsed.stop and not parsed.next_mitigations:
+    if parsed is not None and parsed.stop:
         if grid is None:
             terminal, why = "other", "no matrix: the stop claim cannot be adjudicated"
-        elif grid.resolution.baseline_failed and not grid.resolution.resolvers:
-            terminal, why = _classify_unresolvable_claim(
-                context.offered_mitigations, context.tried_mitigations
-            )
         else:
-            terminal, why = "gave_up", "stopped with no mitigations while a resolver exists"
+            # A stopping reply runs none of its names, so it cannot have named
+            # a resolver that was tried.
+            terminal, why = classify_stop(
+                stop_reason="agent_requested",
+                proposed_nothing=not parsed.next_mitigations,
+                unresolvable=grid.resolution.baseline_failed and not grid.resolution.resolvers,
+                resolver_named=False,
+                offered=context.offered_mitigations,
+                tried=context.tried_mitigations,
+            )
     score.terminal, score.cells = terminal, cells_already_spent + cells_added
 
     terminal_events, withheld = _terminal_events(terminal, why, points)

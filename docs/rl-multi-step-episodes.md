@@ -245,9 +245,14 @@ points.
   What the evaluation controls is that the weights are fixed and the two
   columns are paired. It does not turn the training corpus into a test set.
 
-The other constants behave as P6 predicted. Eight of the ten score lower as an
-episode than as a single reply. The exceptions are the cover itself, and the
-bare unresolvability claim, which is unchanged. Reproduce with `rescore_episodes.py --constants`, which needs only
+The other constants behave as P6 predicted. Seven of the ten score lower as an
+episode than as a single reply. The exceptions are the cover itself, which
+scores higher, and the two constants that stop on their first reply, which
+score the same both ways: the bare unresolvability claim, and
+`always_exhaust_and_stop` (−3.20). The second used to score −0.20 as a single
+reply, because single-reply scoring left a stopping reply that lists names
+without a terminal; it now classifies every stop with the same rule as the
+episode path, so listing names while stopping is giving up on both. Reproduce with `rescore_episodes.py --constants`, which needs only
 the archives.
 
 ## What this cannot fix
