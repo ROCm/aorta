@@ -55,6 +55,11 @@ import episode_env as env  # noqa: E402
 
 from aorta.agent.policy import AgentPolicy  # noqa: E402
 
+#: ``--replay`` refused: the record was scored against different archives, so
+#: a replay would report an archive change as a rule change. Distinct from 1,
+#: which means the rule did move something.
+EXIT_CORPUS_CHANGED = 3
+
 #: Step events that a single reply cannot fire, or that a log-derived episode
 #: cannot show. Reported as a block so a zero is visible next to a non-zero
 #: rather than absent from a table.
@@ -198,6 +203,36 @@ def read_wire(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{path}: a .json input must be an eval column with a 'wire' list")
         return [{"iteration": 0, **row} for row in doc["wire"]]
     return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def recorded_corpus(path: Path) -> dict[str, str] | None:
+    """The per-scenario archive digests a record was scored against, if it says.
+
+    An eval column carries them as ``config.corpus``; a trainer run as
+    ``corpus`` in the ``train-log.json`` beside its wire. ``None`` means the
+    record predates the field, which is not the same as agreeing.
+    """
+    if path.suffix == ".json":
+        corpus = json.loads(path.read_text(encoding="utf-8")).get("config", {}).get("corpus")
+    else:
+        log = path.with_name("train-log.json")
+        corpus = json.loads(log.read_text(encoding="utf-8")).get("corpus") if log.is_file() else None
+    return corpus if isinstance(corpus, dict) else None
+
+
+def corpus_mismatch(
+    recorded: dict[str, str], rows: list[dict[str, Any]], scenarios: list[env.Scenario]
+) -> list[str]:
+    """Scenarios the record names whose archive is not the one it was scored against.
+
+    Same scenario ID, different contents: a replay would then report what the
+    archive changed as if the rule had, so this is checked before replaying.
+    A scenario the record names but did not digest counts as a mismatch too.
+    """
+    current = {s.scenario_id: s.digest for s in scenarios}
+    named = {r["scenario_id"] for r in rows}
+    return sorted(sid for sid in named if recorded.get(sid) is None
+                  or recorded.get(sid) != current.get(sid))
 
 
 def _episodes(rows: list[dict[str, Any]]) -> dict[tuple[int, str, int], list[dict[str, Any]]]:
@@ -456,7 +491,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.wire:
         rows = read_wire(args.wire)
         if args.replay:
+            recorded = recorded_corpus(args.wire)
+            if recorded is None:
+                print("  ⚠ the record carries no corpus digests, so the archives it was "
+                      "scored against cannot be checked: a difference below may be the "
+                      "archive rather than the rule", file=sys.stderr)
+            else:
+                stale = corpus_mismatch(recorded, rows, scenarios)
+                if stale:
+                    print(f"[refused] the corpus differs from the one the record was scored "
+                          f"against for {stale}: a replay would report the archive change "
+                          "as a rule change", file=sys.stderr)
+                    return EXIT_CORPUS_CHANGED
             result["replay"] = replay(rows, scenarios, policy)
+            result["replay"]["corpus_verified"] = recorded is not None
             print_replay(result["replay"])
             # Non-zero when the record does not reproduce, so a script can
             # tell "the rule moved something" from "nothing moved".

@@ -127,6 +127,74 @@ def test_a_moved_terminal_alone_is_a_non_zero_exit(tmp_path, scenario, monkeypat
     assert rescore.main(["--wire", str(wire), "--replay"]) == 1
 
 
+def _column(tmp_path, rows, corpus):
+    column = tmp_path / "after.json"
+    config = {} if corpus is None else {"corpus": corpus}
+    column.write_text(json.dumps({"config": config, "groups": [], "wire": rows}))
+    return column
+
+
+def test_a_replay_against_changed_archives_is_refused_not_reported_as_a_rule_change(
+    tmp_path, scenario, monkeypatch, capsys
+):
+    """Same scenario ID, different contents: the exit code must not say "the rule moved"."""
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    column = _column(tmp_path, rows, {scenario.scenario_id: "another-digest"})
+    monkeypatch.setattr(rescore.env, "load_corpus", lambda *_a, **_k: [scenario])
+    monkeypatch.setattr(rescore, "replay", lambda *a: pytest.fail("replayed a stale record"))
+    assert rescore.main(["--wire", str(column), "--replay"]) == rescore.EXIT_CORPUS_CHANGED
+    assert rescore.EXIT_CORPUS_CHANGED not in (0, 1, 2)
+    assert f"for ['{scenario.scenario_id}']" in capsys.readouterr().err
+
+
+def test_a_replay_against_the_recorded_archives_runs(tmp_path, scenario, monkeypatch):
+    """Narrowness: matching digests replay as before, and say they were checked."""
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    column = _column(tmp_path, rows, {scenario.scenario_id: scenario.digest})
+    monkeypatch.setattr(rescore.env, "load_corpus", lambda *_a, **_k: [scenario])
+    out = tmp_path / "result.json"
+    assert rescore.main(["--wire", str(column), "--replay", "--json", str(out)]) == 0
+    assert json.loads(out.read_text())["replay"]["corpus_verified"] is True
+
+
+def test_a_trainer_wire_is_checked_against_its_train_log(tmp_path, scenario, monkeypatch):
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    wire = tmp_path / "wire.jsonl"
+    wire.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(rescore.env, "load_corpus", lambda *_a, **_k: [scenario])
+    log = tmp_path / "train-log.json"
+    log.write_text(json.dumps({"corpus": {scenario.scenario_id: "another-digest"}}))
+    assert rescore.main(["--wire", str(wire), "--replay"]) == rescore.EXIT_CORPUS_CHANGED
+    log.write_text(json.dumps({"corpus": {scenario.scenario_id: scenario.digest}}))
+    assert rescore.main(["--wire", str(wire), "--replay"]) == 0
+
+
+def test_a_record_without_digests_replays_but_says_it_is_unverified(
+    tmp_path, scenario, monkeypatch, capsys
+):
+    rows = recorded(scenario, [reply([ALPHA]), reply([CHARLIE])])
+    column = _column(tmp_path, rows, None)
+    monkeypatch.setattr(rescore.env, "load_corpus", lambda *_a, **_k: [scenario])
+    out = tmp_path / "result.json"
+    assert rescore.main(["--wire", str(column), "--replay", "--json", str(out)]) == 0
+    assert "carries no corpus digests" in capsys.readouterr().err
+    assert json.loads(out.read_text())["replay"]["corpus_verified"] is False
+
+
+def test_only_the_scenarios_the_record_names_are_checked(scenario):
+    rows = recorded(scenario, [reply([CHARLIE])])
+    sid = scenario.scenario_id
+    assert rescore.corpus_mismatch({sid: scenario.digest, "other": "x"}, rows, [scenario]) == []
+    assert rescore.corpus_mismatch({"other": "x"}, rows, [scenario]) == [sid]
+
+
+def test_the_trainer_records_what_a_replay_checks():
+    """The other half: a train-log has to carry the digests or every replay of
+    it is unverified."""
+    source = (Path(__file__).resolve().parents[2] / "examples" / "rl" / "train_grpo_step.py")
+    assert '"corpus": {s.scenario_id: s.digest for s in scenarios}' in source.read_text()
+
+
 def test_an_eval_column_is_read_as_a_wire(tmp_path, scenario):
     rows = recorded(scenario, [reply([CHARLIE])])
     column = tmp_path / "after.json"

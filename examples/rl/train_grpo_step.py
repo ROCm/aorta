@@ -709,6 +709,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - one linear train
         "iteration_offset": args.iteration_offset,
         "init_from": str(args.init_from) if args.init_from else None,
         "scenarios": [s.scenario_id for s in scenarios],
+        # What the run was scored against, so a later --replay can refuse a
+        # corpus whose archives changed under the same scenario IDs.
+        "corpus": {s.scenario_id: s.digest for s in scenarios},
         "trained_tensors": len(trained),
         "frozen_tensors": sorted(frozen),
         "iterations": [],
