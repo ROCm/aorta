@@ -1,11 +1,15 @@
 # RL post-training seams
 
 Demonstrations of the interfaces an RL post-training effort would need from
-aorta. **Nothing here trains anything**, nothing here is wired into CI, and
-nothing here is a workload. Each file exists to show that one seam is real and
-to make its cost and its limits concrete.
+aorta. Nothing here is wired into CI as a job and nothing here is a workload.
+Each file exists to show that one seam is real and to make its cost and its
+limits concrete. The one trainer, `train_grpo_step.py`, is a deliberately small
+GRPO loop that exists to exercise the multi-step episode path end to end; it is
+not the framework decision.
 
 Background and the plan these support: [`docs/tokenspeed-rl-post-training.md`](../../docs/tokenspeed-rl-post-training.md).
+The multi-step episode path, its predictions and one paired evaluation:
+[`docs/rl-multi-step-episodes.md`](../../docs/rl-multi-step-episodes.md).
 
 | | What it demonstrates | Needs |
 |---|---|---|
@@ -15,6 +19,12 @@ Background and the plan these support: [`docs/tokenspeed-rl-post-training.md`](.
 | [`probe_weight_transfer.py`](probe_weight_transfer.py) | Whether an RL iteration costs a weight update or a cold restart: drives TokenSpeed's weight-sync control plane and times it | a running `tokenspeed serve` |
 | [`nccl_weight_peer.py`](nccl_weight_peer.py) | The trainer half of the `nccl` weight-transfer protocol: joins the engine's group and broadcasts tensors | two GPUs, the TokenSpeed image |
 | [`nccl_roundtrip_check.py`](nccl_roundtrip_check.py) | Whether a weight update *actually changes the weights*: perturb, then restore, comparing greedy completions | the above plus a running engine |
+| [`event_reward.py`](event_reward.py) | A discrete per-step event reward for a probe episode, every event decidable from the reply, the log and an archived matrix | nothing — no GPU, no container |
+| [`episode_env.py`](episode_env.py) | Multi-step probe episodes run offline against archived matrices, through the agent loop's own decision functions | the archived matrices (`--corpus-root`) |
+| [`rescore_episodes.py`](rescore_episodes.py) | Constant policies against the corpus, a run's wire reduced, and a replay of recorded episodes | the archived matrices |
+| [`train_grpo_step.py`](train_grpo_step.py) | GRPO over episodes with in-process `transformers`, every weight update checked before a checkpoint is written | one GPU (two with `--kl-beta`), `transformers` |
+| [`eval_episodes.py`](eval_episodes.py) | A fixed checkpoint against a control, paired per scenario, no optimiser step | one GPU, `transformers` |
+| [`verify_checkpoint_delta.py`](verify_checkpoint_delta.py) | A checkpoint pair on disk: every trained tensor moved, the control did not, nothing past Adam's ceiling | `numpy` only |
 
 ## `probe_weight_transfer.py`
 
