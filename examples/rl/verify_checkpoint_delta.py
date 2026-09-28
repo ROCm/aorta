@@ -43,7 +43,7 @@ sqrt(1-b2^t) / (1-b1^t)``. At the default betas (0.9, 0.999) ``c(1) = 1`` --
 the first step moves every element by exactly ``lr`` whatever the gradient,
 which is the normalisation Adam exists for -- and ``c`` grows slowly towards
 its limit of about 7.3. The displacement over ``N`` steps is at most
-``lr * sum_{t<=N} c(t)``, and :func:`adam_step_ceiling` computes that sum:
+``lr * sum_{t<=N} c(t)``, and ``adam_bound.adam_step_ceiling`` computes that sum:
 it stays under ``4 * N`` for every ``N`` up to 862 at the default betas. So
 ``4 x lr x steps`` is a sound ceiling for runs of that length, and this script
 **refuses** a ``--steps`` / ``--betas`` combination where it is not, rather
@@ -109,12 +109,13 @@ from typing import Any
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from adam_bound import SLACK, optimiser_bound  # noqa: E402
+
 FROZEN = "model.embed_tokens.weight"
 EXIT_FAILED = 1
 EXIT_INCOMPLETE = 3
-
-#: The multiple of ``lr * steps`` the ceiling allows.
-SLACK = 4.0
 
 # numpy has no bfloat16, so BF16 is read as raw u16 and widened by placing the
 # bits in the high half of an f32 -- exact, because bf16 *is* the high half of
@@ -126,50 +127,6 @@ DTYPES = {"F32": np.float32, "F64": np.float64, "BF16": np.uint16, "F16": np.flo
 #: 2^-p for a p-bit significand (implicit bit included): F32 24, F64 53, BF16 8,
 #: F16 11.
 HALF_ULP = {"F32": 2.0**-24, "F64": 2.0**-53, "BF16": 2.0**-8, "F16": 2.0**-11}
-
-
-def adam_step_ceiling(steps: int, beta1: float = 0.9, beta2: float = 0.999) -> float:
-    """``sum_{t<=steps} c(t)``: Adam's worst-case displacement in units of ``lr``.
-
-    See the module docstring for the derivation. Returned in units of ``lr`` so
-    it can be compared directly with ``SLACK * steps``.
-    """
-    if steps < 1:
-        raise ValueError("steps must be >= 1")
-    ratio = beta1 * beta1 / beta2
-    scale = (1.0 - beta1) / math.sqrt(1.0 - beta2)
-    total = 0.0
-    geometric = 0.0
-    for t in range(1, steps + 1):
-        geometric += ratio ** (t - 1)
-        total += (
-            scale * math.sqrt(geometric) * math.sqrt(1.0 - beta2**t) / (1.0 - beta1**t)
-        )
-    return total
-
-
-def optimiser_bound(lr: float, steps: int, beta1: float = 0.9, beta2: float = 0.999) -> float:
-    """``SLACK * lr * steps``, refused where it would not bound Adam.
-
-    Raises ``ValueError`` when the worst-case Adam displacement over ``steps``
-    exceeds the ceiling, because a ceiling below what the optimiser can
-    legitimately do would report healthy tensors as damaged.
-    """
-    if not (math.isfinite(lr) and lr > 0):
-        raise ValueError("lr must be a finite number > 0")
-    if not (math.isfinite(beta1) and 0.0 <= beta1 < 1.0):
-        raise ValueError("beta1 must be finite and in [0, 1)")
-    if not (math.isfinite(beta2) and 0.0 < beta2 < 1.0):
-        # The bound divides by beta2: it needs a positive second-moment decay.
-        raise ValueError("beta2 must be finite and in (0, 1)")
-    worst = adam_step_ceiling(steps, beta1, beta2)
-    if worst > SLACK * steps:
-        raise ValueError(
-            f"{SLACK:g} x lr x steps is not a sound ceiling for {steps} Adam steps at "
-            f"betas ({beta1}, {beta2}): the worst case is {worst / steps:.3f} x lr per "
-            f"step. Verify shorter intervals, or chained links separately."
-        )
-    return SLACK * lr * steps
 
 
 def read_header(path: Path) -> tuple[dict[str, Any], int]:

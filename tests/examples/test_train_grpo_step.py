@@ -424,6 +424,9 @@ def test_episode_rollouts_templates_each_prompt_and_delegates_to_the_env(tmp_pat
     (["--betas=-0.1,0.999"], "--betas"),
     (["--betas", "0.9,0"], "--betas"),
     (["--betas", "0.9,1"], "--betas"),
+    (["--betas", "0.9,1e-9"], "cannot bound"),
+    (["--iterations", "863"], "cannot bound"),
+    (["--betas", "0.9,1e-9", "--iterations", "100"], "cannot bound"),
 ])
 def test_a_configuration_that_cannot_produce_a_checked_update_is_refused(
     tmp_path, capsys, flags, fragment
@@ -582,7 +585,8 @@ def test_a_positive_clip_is_a_valid_configuration():
     ["--budget-sec", "60"],
     ["--gen-batch", "1"], ["--max-episode-steps", "1"], ["--max-new-tokens", "1"],
     ["--log-episodes", "0"], ["--iteration-offset", "0"],
-    ["--betas", "0,0.999"], ["--betas", "0.9,1e-9"], ["--betas", " 0.8 , 0.99 "],
+    ["--betas", "0,0.999"], ["--betas", "0.9,1e-9", "--iterations", "1"],
+    ["--betas", " 0.8 , 0.99 "], ["--iterations", "862"],
 ])
 def test_the_edges_of_each_range_are_accepted(flags):
     """Narrowness: 0 and 1 are both meaningful parse-fraction floors."""
@@ -599,27 +603,29 @@ def test_betas_parse_to_the_pair_adam_is_given():
     assert trainer.parse_betas(" 0.8 , 0.99 ") == (0.8, 0.99)
 
 
-@pytest.mark.parametrize("betas", [
-    (0.0, 0.999), (0.9, 0.999), (0.5, 0.5), (0.9, 1e-9),
-    (1.0, 0.999), (-0.1, 0.999), (0.9, 0.0), (0.9, 1.0),
-    (math.nan, 0.999), (0.9, math.nan), (math.inf, 0.999), (0.9, -math.inf),
+@pytest.mark.parametrize("betas, iterations", [
+    ((0.9, 0.999), 10), ((0.9, 0.999), 862), ((0.9, 0.999), 863),
+    ((0.0, 0.999), 10), ((0.5, 0.5), 10),
+    ((0.9, 1e-9), 1), ((0.9, 1e-9), 10), ((0.9, 1e-9), 100),
+    ((1.0, 0.999), 10), ((-0.1, 0.999), 10), ((0.9, 0.0), 10), ((0.9, 1.0), 10),
+    ((math.nan, 0.999), 10), ((0.9, math.nan), 10), ((math.inf, 0.999), 10),
+    ((0.9, -math.inf), 10),
 ])
-def test_the_trainer_accepts_exactly_the_betas_the_verifier_can_bound(betas):
-    """A run whose update verify_checkpoint_delta.py refuses to bound is not worth starting,
-    and one it could bound is not refused. One step keeps the verifier's own
-    step-count refusal out of it."""
+def test_the_trainer_starts_exactly_the_runs_the_verifier_can_bound(betas, iterations):
+    """A run whose update verify_checkpoint_delta.py refuses to bound is not worth
+    starting, and one it could bound is not refused. Through ``validate_args`` with
+    the run's own step count, because that is what the verifier's ceiling depends on."""
     pytest.importorskip("numpy")
     import verify_checkpoint_delta
 
-    def accepts(check):
-        try:
-            check()
-        except ValueError:
-            return False
-        return True
-
-    verifiable = accepts(lambda: verify_checkpoint_delta.optimiser_bound(1e-6, 1, *betas))
-    assert accepts(lambda: trainer.parse_betas(",".join(map(repr, betas)))) == verifiable
+    args = trainer.build_parser().parse_args(
+        ["--out", "x", f"--betas={','.join(map(repr, betas))}", "--iterations", str(iterations)])
+    try:
+        verify_checkpoint_delta.optimiser_bound(args.lr, iterations, *betas)
+        verifiable = True
+    except ValueError:
+        verifiable = False
+    assert (trainer.validate_args(args) is None) == verifiable
 
 
 def test_the_train_log_is_replaced_atomically():

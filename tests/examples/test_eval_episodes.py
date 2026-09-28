@@ -248,6 +248,8 @@ RUNTIME = {"python": "3.x", "transformers": "4.x", "tokenizers": "0.x",
            "safetensors": "0.x", "huggingface_hub": "0.x"}
 WEIGHTS = {"weights": {"sha256": "w-a", "files": 2, "bytes": 8},
            "tokenizer": {"sha256": "t-a", "files": 1, "bytes": 4}}
+#: The base model's, for the control column a run without ``--before`` scores.
+BASE_WEIGHTS = {**WEIGHTS, "weights": dict(WEIGHTS["weights"], sha256="w-base")}
 
 
 def column_file(tmp_path: Path, **config) -> Path:
@@ -377,7 +379,8 @@ def _stub_evaluate(monkeypatch):
     monkeypatch.setattr(episode_env, "corpus_digests", lambda *a, **k: dict(DIGESTS))
     monkeypatch.setattr(eval_episodes, "blas_backend", lambda: dict(BACKEND))
     monkeypatch.setattr(eval_episodes, "scorer_identity", lambda: dict(SCORER))
-    monkeypatch.setattr(eval_episodes, "checkpoint_identity", lambda *_a: dict(WEIGHTS))
+    monkeypatch.setattr(eval_episodes, "checkpoint_identity",
+                        lambda checkpoint, *_a: dict(BASE_WEIGHTS if checkpoint is None else WEIGHTS))
     monkeypatch.setattr(eval_episodes, "runtime_versions", lambda: dict(RUNTIME))
     calls = []
 
@@ -436,6 +439,46 @@ def test_comparing_a_checkpoint_with_itself_is_refused_before_any_work(
     assert code == eval_episodes.EXIT_REFUSED
     assert "comparing a checkpoint with itself" in capsys.readouterr().err
     assert calls == [] and not (tmp_path / "out").exists()
+
+
+def test_two_copies_of_one_checkpoint_are_refused_before_any_rollout(tmp_path, capsys,
+                                                                     monkeypatch):
+    """Two paths, one tree: the path check cannot see it, the digests can."""
+    calls = _stub_evaluate(monkeypatch)
+    code = eval_episodes.main(["--before", str(tmp_path / "ckpt"),
+                               "--after", str(tmp_path / "copy-of-ckpt"),
+                               "--out", str(tmp_path / "out")])
+    assert code == eval_episodes.EXIT_REFUSED
+    assert "the same weights (sha256 w-a)" in capsys.readouterr().err
+    assert calls == [] and not (tmp_path / "out").exists()
+
+
+def test_both_trees_are_hashed_once_and_before_either_rollout(tmp_path, monkeypatch):
+    calls = _stub_evaluate(monkeypatch)
+    order = []
+
+    def identity(checkpoint, *_a):
+        order.append(("hash", checkpoint))
+        return dict(BASE_WEIGHTS if checkpoint is None else WEIGHTS)
+
+    monkeypatch.setattr(eval_episodes, "checkpoint_identity", identity)
+    with pytest.raises(ReachedError):
+        eval_episodes.main(["--after", str(tmp_path / "ckpt"), "--out", str(tmp_path / "out")])
+    assert order == [("hash", None), ("hash", tmp_path / "ckpt")]
+    assert len(calls) == 1, "the first rollout came after both hashes"
+
+
+def test_two_checkpoints_with_different_weights_reach_the_evaluation(tmp_path, monkeypatch):
+    """Narrowness: distinct digests at two paths are the comparison this is for."""
+    calls = _stub_evaluate(monkeypatch)
+    monkeypatch.setattr(
+        eval_episodes, "checkpoint_identity",
+        lambda checkpoint, *_a: {**WEIGHTS, "weights": dict(WEIGHTS["weights"],
+                                                            sha256=f"w-{checkpoint.name}")})
+    with pytest.raises(ReachedError):
+        eval_episodes.main(["--before", str(tmp_path / "one"), "--after", str(tmp_path / "two"),
+                            "--out", str(tmp_path / "out")])
+    assert calls[0][0] == tmp_path / "one"
 
 
 def test_the_base_model_control_is_not_caught_by_that_refusal(tmp_path, monkeypatch):
@@ -720,6 +763,21 @@ def test_a_written_column_records_its_checkpoint_identity():
         _Args(), [SimpleNamespace(scenario_id="a", digest="digest-a")], [], [],
         Path("/ckpt/last"), BACKEND, SCORER, WEIGHTS)
     assert payload["config"]["checkpoint"] == WEIGHTS
+
+
+def test_two_columns_computed_from_the_same_weights_are_not_compared():
+    """What ``--reuse`` of two copies would hand ``compare``: different paths,
+    one digest."""
+    with pytest.raises(ValueError, match="same weights"):
+        eval_episodes.compare(run([group("a")], init_from="one", checkpoint=dict(WEIGHTS)),
+                              run([group("a")], init_from="two", checkpoint=dict(WEIGHTS)))
+
+
+def test_columns_from_different_weights_or_without_a_digest_still_compare():
+    """Narrowness: only a recorded, identical digest is refused."""
+    assert eval_episodes.compare(run([group("a")], checkpoint=dict(BASE_WEIGHTS)),
+                                 run([group("a")], checkpoint=dict(WEIGHTS)))
+    assert eval_episodes.compare(run([group("a")]), run([group("a")]))
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ things moved.
 from __future__ import annotations
 
 import json
+import math
 import struct
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "examples" / "rl"))
 
+import adam_bound  # noqa: E402
 import verify_checkpoint_delta as vcd  # noqa: E402
 
 FROZEN = vcd.FROZEN
@@ -91,7 +93,7 @@ def run(pre: Path, post: Path, *extra: str) -> int:
 
 
 def test_the_first_adam_step_moves_by_at_most_lr():
-    assert vcd.adam_step_ceiling(1) == pytest.approx(1.0)
+    assert adam_bound.adam_step_ceiling(1) == pytest.approx(1.0)
 
 
 def test_the_worst_case_ceiling_matches_a_simulated_adversarial_run():
@@ -109,7 +111,27 @@ def test_the_worst_case_ceiling_matches_a_simulated_adversarial_run():
                 v = b2 * v + (1 - b2) * g * g
             step = (m / (1 - b1**t)) / ((v / (1 - b2**t)) ** 0.5)
             worst += step
-        assert worst == pytest.approx(vcd.adam_step_ceiling(steps), rel=1e-9)
+        assert worst == pytest.approx(adam_bound.adam_step_ceiling(steps), rel=1e-9)
+
+
+def test_a_worst_case_past_the_float_range_is_a_refusal_not_a_crash(tmp_path, capsys):
+    """``b1^2 / b2 > 1`` grows the worst case geometrically; at (0.9, 1e-9) it
+    leaves the float range at step 36, where ``ratio ** t`` raises."""
+    assert adam_bound.adam_step_ceiling(100, 0.9, 1e-9) == math.inf
+    with pytest.raises(ValueError, match="not a sound ceiling"):
+        vcd.optimiser_bound(1e-6, 100, 0.9, 1e-9)
+    pre, post = pair(tmp_path, nudge=1e-5)
+    code = vcd.main([str(pre), str(post), "--lr", "1e-6", "--steps", "100",
+                     "--betas", "0.9,1e-9"])
+    assert code == vcd.EXIT_INCOMPLETE
+    assert "not a sound ceiling" in capsys.readouterr().err
+
+
+def test_a_worst_case_inside_the_float_range_is_unchanged():
+    """Narrowness: the overflow guard returns early only where the sum overflows."""
+    assert math.isfinite(adam_bound.adam_step_ceiling(35, 0.9, 1e-9))
+    assert adam_bound.adam_step_ceiling(862) <= 4 * 862
+    assert adam_bound.adam_step_ceiling(863) > 4 * 863
 
 
 def test_four_lr_per_step_is_sound_for_realistic_runs_and_refused_beyond():

@@ -135,6 +135,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import episode_env  # noqa: E402
+from adam_bound import optimiser_bound  # noqa: E402
 from episode_env import Sample  # noqa: E402
 from eval_episodes import write_atomically  # noqa: E402
 
@@ -599,8 +600,9 @@ def check_output_dir(out: Path) -> str | None:
 def parse_betas(text: str) -> tuple[float, float]:
     """``--betas`` as Adam's ``(beta1, beta2)``; ``ValueError`` if it is not a valid pair.
 
-    The ranges are the ones ``verify_checkpoint_delta.py`` accepts, so a run
-    whose update that script cannot bound is refused before it starts.
+    The ranges are the ones ``verify_checkpoint_delta.py`` accepts. Whether it
+    can bound a whole run depends on the step count too, which
+    :func:`validate_args` checks with the same ``adam_bound.optimiser_bound``.
     """
     try:
         beta1, beta2 = (float(x) for x in text.split(","))
@@ -634,9 +636,16 @@ def validate_args(args: argparse.Namespace) -> str | None:
     if not (math.isfinite(args.adam_eps) and args.adam_eps > 0):
         return "--adam-eps must be finite and > 0"
     try:
-        parse_betas(args.betas)
+        betas = parse_betas(args.betas)
     except ValueError as exc:
         return str(exc)
+    # The verifier's ceiling holds only up to a step count that depends on the
+    # betas: 862 at the defaults.
+    try:
+        optimiser_bound(args.lr, args.iterations, *betas)
+    except ValueError as exc:
+        return (f"--iterations {args.iterations} at --betas {args.betas} is a run "
+                f"verify_checkpoint_delta.py cannot bound: {exc}")
     if not (math.isfinite(args.min_parse_frac) and 0.0 <= args.min_parse_frac <= 1.0):
         # NaN would make `parse_fraction < min_parse_frac` always false and
         # silently disable the collapse stop.

@@ -255,6 +255,11 @@ def checkpoint_identity(checkpoint: Path | None, args: argparse.Namespace) -> di
     return {"weights": weights, "tokenizer": tokenizer}
 
 
+def weights_digest(column: dict[str, Any]) -> str | None:
+    """The weights sha256 a column records, or ``None`` for one that predates it."""
+    return ((column["config"].get("checkpoint") or {}).get("weights") or {}).get("sha256")
+
+
 def two_proportion_z(hits_a: int, n_a: int, hits_b: int, n_b: int) -> float:
     """Pooled two-proportion z for (b - a). 0.0 when it is undefined.
 
@@ -399,6 +404,15 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"the two columns were scored by different code ({scorer_a!r} vs {scorer_b!r}): "
             "a paired comparison needs the same scorer on both sides"
+        )
+
+    # And *different* weights: copies of one checkpoint at two paths pass every
+    # check above, and the table would report sampling noise as training.
+    weights_a, weights_b = weights_digest(before), weights_digest(after)
+    if weights_a is not None and weights_a == weights_b:
+        raise ValueError(
+            f"the two columns were computed from the same weights (sha256 {weights_a[:12]}): "
+            "comparing a checkpoint with a copy of itself measures sampling noise, not training"
         )
 
     rows = []
@@ -844,18 +858,27 @@ def evaluate(
                                weights=weights)
 
 
-def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Namespace) -> dict[str, Any]:
-    """Reuse the column at ``path`` if it is there and matches, else compute it.
-
-    Says which it did, every time: a reused column is otherwise
-    indistinguishable in the output from one that cost a GPU-hour.
-    """
-    source = column_source(checkpoint, args)
+def _identity(checkpoint: Path | None, label: str, args: argparse.Namespace) -> dict[str, Any]:
+    """:func:`checkpoint_identity`, with how long it took: a 31 GiB tree takes minutes."""
     started = time.time()
     weights = checkpoint_identity(checkpoint, args)
     print(f"[hash] {label} weights {weights['weights']['sha256'][:12]} "
           f"({weights['weights']['bytes'] / 2**30:.1f} GiB in {time.time() - started:.0f}s)",
           flush=True)
+    return weights
+
+
+def _column(path: Path, checkpoint: Path | None, label: str, args: argparse.Namespace,
+            weights: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Reuse the column at ``path`` if it is there and matches, else compute it.
+
+    Says which it did, every time: a reused column is otherwise
+    indistinguishable in the output from one that cost a GPU-hour. ``weights``
+    is the checkpoint's identity if the caller already hashed it.
+    """
+    source = column_source(checkpoint, args)
+    if weights is None:
+        weights = _identity(checkpoint, label, args)
     done = None
     if path.exists():
         import episode_env
@@ -958,10 +981,21 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_REFUSED
 
+    # Both trees before either column, so two copies of one checkpoint at
+    # different paths are refused before any GPU time or disk write.
+    before_weights = _identity(args.before, "control", args)
+    after_weights = _identity(args.after, "trained", args)
+    digest = before_weights["weights"]["sha256"]
+    if digest == after_weights["weights"]["sha256"]:
+        print(f"--before ({column_source(args.before, args)}) and --after ({args.after}) hold "
+              f"the same weights (sha256 {digest[:12]}); comparing a checkpoint with a copy of "
+              "itself measures sampling noise, not training.", file=sys.stderr)
+        return EXIT_REFUSED
+
     logging.getLogger("aorta.agent.llm").setLevel(logging.ERROR)
     args.out.mkdir(parents=True, exist_ok=True)
-    before = _column(args.out / "before.json", args.before, "control", args)
-    after = _column(args.out / "after.json", args.after, "trained", args)
+    before = _column(args.out / "before.json", args.before, "control", args, before_weights)
+    after = _column(args.out / "after.json", args.after, "trained", args, after_weights)
 
     result = compare(before, after)
     (args.out / "comparison.json").write_text(json.dumps(result, indent=2))
