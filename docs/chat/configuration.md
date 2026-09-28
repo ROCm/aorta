@@ -230,14 +230,6 @@ These only apply where the `cia` extra is installed and the chat server can
 reach a Slurm cluster. Without it the diagnostic tools are not registered and
 none of this is read.
 
-CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
-and API key selected by the chat provider, but not its model setting, so that
-endpoint must serve the Qwen model under that exact ID. CIA sends
-`chat_template_kwargs.enable_thinking = false` on every model request; Qwen
-answers directly instead of producing its default reasoning trace first.
-Ordinary `aorta chat` turns continue to use the configured `vllm_model` or
-`remote_llm_model`.
-
 Each of these names something the chat tools and the agents both need to agree
 on, so a single setting answers to two environment variables: the chat prefix,
 and the name the agents use on their own. Setting either configures both halves
@@ -255,6 +247,14 @@ while the profile pointed another is the failure the shared name prevents.
 | `rocjitsu_preload` | — | *(empty)* | Preloaded into the sanitized process. ConSan's hook is dlopened into one that has already loaded the host libstdc++, so without a newer one the tool library fails to load and the run reports a guardrail it never exercised. |
 | `triage_timeout` | — | `1800` | Seconds before one triage stops being waited for. The agents have their own internal timeouts; this is the backstop that keeps a wedged cluster job from hanging a chat turn. The abandoned run is asked to stop rather than left going. |
 | `waitcheck_timeout` | — | `300` | Seconds for one static assembly analysis, which needs no GPU and no queue. |
+
+CIA Launch, Watch, and Autopsy use `Qwen/Qwen3.8-27B`. They reuse the endpoint
+and API key selected by the chat provider, but not its model setting, so that
+endpoint must serve the Qwen model under that exact ID. CIA sends
+`chat_template_kwargs.enable_thinking = false` on every model request; Qwen
+answers directly instead of producing its default reasoning trace first.
+Ordinary `aorta chat` turns continue to use the configured `vllm_model` or
+`remote_llm_model`.
 
 The scheduler knobs the agents read directly — `CIA_PARTITION`, `CIA_TIME_LIMIT`,
 `CIA_SSH_USER`, `CIA_SSH_HOST`, `CIA_SEARCH_ROOTS`, `CIA_CONTAINER_IMAGE`,
