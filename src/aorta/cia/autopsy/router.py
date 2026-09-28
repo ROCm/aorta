@@ -210,10 +210,9 @@ class TriageRouter(dspy.Module):
     #: ReAct trajectory below has to fit its tool calls *and* its answer inside
     #: this. Qwen's separate thinking trace is disabled by ``build_cia_lm``.
     #:
-    #: A budget is all this module pins. It used to name a model as well, which
-    #: made the choice of model a property of the code rather than of the
-    #: deployment. The operator configures one through the environment and the
-    #: agents follow it.
+    #: A budget is all this module pins; the model is ``CIA_MODEL`` via
+    #: ``build_cia_lm``. The chat profile's model still selects ordinary
+    #: ``aorta chat`` turns only.
     MAX_TOKENS = 8192
 
     def __init__(self, bundle_root: Path | str):
