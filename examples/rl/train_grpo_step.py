@@ -75,11 +75,11 @@ Every iteration, before a checkpoint is written:
 A failed check **stops the run before that iteration's checkpoint is written**,
 so ``checkpoint-last`` is always the last iteration that passed, and the exit
 status is non-zero. Each checkpoint is written beside its name and swapped in
-by rename (:func:`publish_checkpoint`), so a crash mid-save never leaves a
-partial tree under that name. ``checkpoint-best`` holds the weights that
-*sampled* the best-scoring iteration's rollouts -- that iteration's starting
-weights, saved before its update -- because those are the weights the reward
-measured.
+by rename (:func:`publish_checkpoint`), and ``train-log.json`` is replaced the
+same way, so a crash mid-save never leaves a partial tree or log under that
+name. ``checkpoint-best`` holds the weights that *sampled* the best-scoring
+iteration's rollouts -- that iteration's starting weights, saved before its
+update -- because those are the weights the reward measured.
 
 Advisory, recorded but not gating: ``step_descends_the_gradient``, the cosine
 between the realised delta and ``-grad`` on an audit subset of eight tensors.
@@ -136,6 +136,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import episode_env  # noqa: E402
 from episode_env import Sample  # noqa: E402
+from eval_episodes import write_atomically  # noqa: E402
 
 ADV_EPS = 1e-4  # the GRPO normaliser's epsilon
 DDOF = 1
@@ -523,8 +524,8 @@ def update_checks(
 
 #: What a run writes into ``--out``. Any of them already there means the
 #: directory belongs to another run.
-RUN_ARTIFACTS = ("wire.jsonl", "train-log.json", "checkpoint-pre", "checkpoint-last",
-                 "checkpoint-best", "episodes",
+RUN_ARTIFACTS = ("wire.jsonl", "train-log.json", "train-log.json.partial",
+                 "checkpoint-pre", "checkpoint-last", "checkpoint-best", "episodes",
                  "checkpoint-last.partial", "checkpoint-last.previous",
                  "checkpoint-best.partial", "checkpoint-best.previous")
 
@@ -595,6 +596,23 @@ def check_output_dir(out: Path) -> str | None:
     return None
 
 
+def parse_betas(text: str) -> tuple[float, float]:
+    """``--betas`` as Adam's ``(beta1, beta2)``; ``ValueError`` if it is not a valid pair.
+
+    The ranges are the ones ``verify_checkpoint_delta.py`` accepts, so a run
+    whose update that script cannot bound is refused before it starts.
+    """
+    try:
+        beta1, beta2 = (float(x) for x in text.split(","))
+    except ValueError:
+        raise ValueError(f"--betas must be two comma-separated numbers, got {text!r}") from None
+    if not (math.isfinite(beta1) and 0.0 <= beta1 < 1.0):
+        raise ValueError(f"--betas: beta1 must be finite and in [0, 1), got {beta1!r}")
+    if not (math.isfinite(beta2) and 0.0 < beta2 < 1.0):
+        raise ValueError(f"--betas: beta2 must be finite and in (0, 1), got {beta2!r}")
+    return beta1, beta2
+
+
 def validate_args(args: argparse.Namespace) -> str | None:
     """A refusal message for a configuration that cannot produce a checked update."""
     if args.iterations < 1:
@@ -615,6 +633,10 @@ def validate_args(args: argparse.Namespace) -> str | None:
         return "--lr must be finite and > 0"
     if not (math.isfinite(args.adam_eps) and args.adam_eps > 0):
         return "--adam-eps must be finite and > 0"
+    try:
+        parse_betas(args.betas)
+    except ValueError as exc:
+        return str(exc)
     if not (math.isfinite(args.min_parse_frac) and 0.0 <= args.min_parse_frac <= 1.0):
         # NaN would make `parse_fraction < min_parse_frac` always false and
         # silently disable the collapse stop.
@@ -805,7 +827,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
     if args.grad_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()
-    betas = tuple(float(x) for x in args.betas.split(","))
+    betas = parse_betas(args.betas)
     opt = torch.optim.Adam(list(trained.values()), lr=args.lr, betas=betas,
                            eps=args.adam_eps, weight_decay=0.0)
 
@@ -839,7 +861,7 @@ def _train(args: argparse.Namespace, wire: Any) -> int:  # noqa: C901 - one line
 
     def write_log() -> None:
         log["elapsed_sec"] = round(time.time() - started, 1)
-        (args.out / "train-log.json").write_text(json.dumps(log, indent=2), encoding="utf-8")
+        write_atomically(args.out / "train-log.json", json.dumps(log, indent=2))
 
     try:
         for it in range(args.iteration_offset + 1, args.iteration_offset + args.iterations + 1):

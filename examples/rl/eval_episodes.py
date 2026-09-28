@@ -939,6 +939,14 @@ def main(argv: list[str] | None = None) -> int:
         if value < 1:
             print(f"{flag} must be >= 1", file=sys.stderr)
             return EXIT_REFUSED
+    # The trainer's own sampling checks, so a column is never sampled at
+    # settings a training run would have refused.
+    if not 0.0 < args.top_p <= 1.0:
+        print("--top-p must be in (0, 1]", file=sys.stderr)
+        return EXIT_REFUSED
+    if not (math.isfinite(args.temperature) and args.temperature > 0):
+        print("--temperature must be finite and > 0", file=sys.stderr)
+        return EXIT_REFUSED
 
     existing = [p for p in (args.out / "before.json", args.out / "after.json") if p.exists()]
     if existing and not args.reuse:

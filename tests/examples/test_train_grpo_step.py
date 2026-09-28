@@ -413,6 +413,17 @@ def test_episode_rollouts_templates_each_prompt_and_delegates_to_the_env(tmp_pat
     (["--iteration-offset", "-1"], "--iteration-offset"),
     (["--iterations", "-3"], "--iterations"),
     (["--group", "0"], "--group"),
+    (["--betas", "0.9"], "--betas"),
+    (["--betas", "0.9,0.999,0.5"], "--betas"),
+    (["--betas", "a,b"], "--betas"),
+    (["--betas", ""], "--betas"),
+    (["--betas", "nan,0.999"], "--betas"),
+    (["--betas", "0.9,nan"], "--betas"),
+    (["--betas", "inf,0.999"], "--betas"),
+    (["--betas", "1,0.999"], "--betas"),
+    (["--betas=-0.1,0.999"], "--betas"),
+    (["--betas", "0.9,0"], "--betas"),
+    (["--betas", "0.9,1"], "--betas"),
 ])
 def test_a_configuration_that_cannot_produce_a_checked_update_is_refused(
     tmp_path, capsys, flags, fragment
@@ -427,6 +438,11 @@ def test_a_configuration_that_cannot_produce_a_checked_update_is_refused(
 def test_an_out_dir_holding_another_runs_artifact_is_refused(tmp_path, artifact):
     (tmp_path / artifact).mkdir()
     assert artifact in trainer.check_output_dir(tmp_path)
+
+
+def test_a_left_over_partial_train_log_is_another_runs_artifact(tmp_path):
+    (tmp_path / "train-log.json.partial").write_text("{")
+    assert "train-log.json.partial" in trainer.check_output_dir(tmp_path)
 
 
 def test_an_empty_or_unrelated_out_dir_is_accepted(tmp_path):
@@ -566,6 +582,7 @@ def test_a_positive_clip_is_a_valid_configuration():
     ["--budget-sec", "60"],
     ["--gen-batch", "1"], ["--max-episode-steps", "1"], ["--max-new-tokens", "1"],
     ["--log-episodes", "0"], ["--iteration-offset", "0"],
+    ["--betas", "0,0.999"], ["--betas", "0.9,1e-9"], ["--betas", " 0.8 , 0.99 "],
 ])
 def test_the_edges_of_each_range_are_accepted(flags):
     """Narrowness: 0 and 1 are both meaningful parse-fraction floors."""
@@ -575,6 +592,46 @@ def test_the_edges_of_each_range_are_accepted(flags):
 def test_the_shipped_defaults_are_a_valid_configuration():
     """Narrowness for the refusals above."""
     assert trainer.validate_args(trainer.build_parser().parse_args(["--out", "x"])) is None
+
+
+def test_betas_parse_to_the_pair_adam_is_given():
+    assert trainer.parse_betas("0.9,0.999") == (0.9, 0.999)
+    assert trainer.parse_betas(" 0.8 , 0.99 ") == (0.8, 0.99)
+
+
+@pytest.mark.parametrize("betas", [
+    (0.0, 0.999), (0.9, 0.999), (0.5, 0.5), (0.9, 1e-9),
+    (1.0, 0.999), (-0.1, 0.999), (0.9, 0.0), (0.9, 1.0),
+    (math.nan, 0.999), (0.9, math.nan), (math.inf, 0.999), (0.9, -math.inf),
+])
+def test_the_trainer_accepts_exactly_the_betas_the_verifier_can_bound(betas):
+    """A run whose update verify_checkpoint_delta.py refuses to bound is not worth starting,
+    and one it could bound is not refused. One step keeps the verifier's own
+    step-count refusal out of it."""
+    pytest.importorskip("numpy")
+    import verify_checkpoint_delta
+
+    def accepts(check):
+        try:
+            check()
+        except ValueError:
+            return False
+        return True
+
+    verifiable = accepts(lambda: verify_checkpoint_delta.optimiser_bound(1e-6, 1, *betas))
+    assert accepts(lambda: trainer.parse_betas(",".join(map(repr, betas)))) == verifiable
+
+
+def test_the_train_log_is_replaced_atomically():
+    """Truncating it in place and dying mid-write loses the last complete log:
+    the corpus digests and every iteration's checks."""
+    import eval_episodes
+
+    assert trainer.write_atomically is eval_episodes.write_atomically
+    source = Path(trainer.__file__).read_text()
+    body = source[source.index("def _train("):source.index('if __name__ == "__main__":')]
+    assert body.count('write_atomically(args.out / "train-log.json",') == 1
+    assert "write_text" not in body
 
 
 def test_the_exit_codes_are_distinct_and_none_is_argparses():

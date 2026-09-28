@@ -464,6 +464,54 @@ def test_a_non_positive_sampling_size_is_refused_before_any_work(tmp_path, monke
     assert calls == [] and f"{flag} must be >= 1" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flag, value", [
+    ("--temperature", "0"), ("--temperature", "-0.5"), ("--temperature", "nan"),
+    ("--temperature", "inf"), ("--top-p", "0"), ("--top-p", "1.5"), ("--top-p", "nan"),
+    ("--top-p", "-0.5"),
+])
+def test_an_invalid_sampling_float_is_refused_before_any_work(tmp_path, monkeypatch, capsys,
+                                                               flag, value):
+    calls = _stub_evaluate(monkeypatch)
+    hashed = []
+    monkeypatch.setattr(eval_episodes, "checkpoint_identity", lambda *a: hashed.append(a))
+    assert eval_episodes.main(["--after", str(tmp_path / "c"), "--out", str(tmp_path / "o"),
+                               flag, value]) == eval_episodes.EXIT_REFUSED
+    assert calls == [] and hashed == [] and not (tmp_path / "o").exists()
+    assert flag in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flags", [["--top-p", "1"], ["--top-p", "1e-6"],
+                                   ["--temperature", "1e-6"], ["--temperature", "2"]])
+def test_the_edges_of_the_sampling_ranges_reach_the_evaluation(tmp_path, monkeypatch, flags):
+    """Narrowness for the refusal above."""
+    calls = _stub_evaluate(monkeypatch)
+    with pytest.raises(ReachedError):
+        eval_episodes.main(["--after", str(tmp_path / "c"), "--out", str(tmp_path / "o"),
+                            *flags])
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("flag, value", [
+    ("--temperature", v) for v in ("0", "-0.5", "nan", "inf", "1e-6", "0.7", "2")
+] + [
+    ("--top-p", v) for v in ("0", "-0.5", "nan", "1.5", "1e-6", "0.95", "1")
+])
+def test_eval_refuses_exactly_the_sampling_floats_the_trainer_refuses(tmp_path, monkeypatch,
+                                                                     flag, value):
+    pytest.importorskip("torch")
+    import train_grpo_step
+
+    _stub_evaluate(monkeypatch)
+    trainer_refuses = train_grpo_step.validate_args(
+        train_grpo_step.build_parser().parse_args(["--out", "x", flag, value])) is not None
+    try:
+        code = eval_episodes.main(["--after", str(tmp_path / "c"), "--out", str(tmp_path / "o"),
+                                   flag, value])
+    except ReachedError:
+        code = None
+    assert (code == eval_episodes.EXIT_REFUSED) == trainer_refuses
+
+
 def test_the_sampling_defaults_are_the_trainers():
     """A comparison at different sampling settings than training measures two
     things at once; the constants here are only defaults if they match."""
