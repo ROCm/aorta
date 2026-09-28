@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-28T13:02:40.812226+00:00",
+  "generated_at": "2026-09-28T15:06:40.275210+00:00",
   "build": {
     "amd_aorta_version": "0.3.1rc20260928",
     "torch": "2.13.0+rocm7.14.0",
     "hip": "7.14.60850",
     "rocm": "7.14.0",
     "upstream_run_id": null,
-    "head_sha": "f32e64cf324fdae8fb6f49d3135888c4646b5104",
+    "head_sha": "e45a9ae778dfbb0796da23ad516befc1939f7266",
     "wheel_file": null,
     "lane": "canary",
     "base_image": "rocm/pytorch:latest@sha256:a3867e22ca44c458b1feda92026c6dc289e7e447093cf55914d1fd56ef6d7372"
