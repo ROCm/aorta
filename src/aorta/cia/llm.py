@@ -582,10 +582,14 @@ def configure_dspy(
 ) -> None:
     """Set the process-wide default LM.
 
-    Defaults come from the environment so callers need no hard-coded secrets:
-      LITELLM_API_BASE  — proxy URL  (default: http://localhost:4000)
-      LITELLM_API_KEY   — master key (default: "dummy")
-      LITELLM_MODEL     — legacy model name (CIA defaults to Qwen/Qwen3.8-27B)
+    Model selection follows :func:`build_lm`:
+      1. the explicit *model* argument;
+      2. the shared chat profile's model (or the legacy compatibility variables);
+      3. :data:`DEFAULT_MODEL` as the final fallback.
+
+    This function does not itself pin Qwen. :func:`ensure_configured` supplies
+    the Qwen non-thinking defaults for Launch and Watch, while
+    :func:`build_cia_lm` supplies them for Autopsy.
     """
     global _configured
 
